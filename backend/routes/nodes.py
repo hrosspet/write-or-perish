@@ -137,28 +137,49 @@ def get_children(node_id):
 @nodes_bp.route("/<int:node_id>/llm", methods=["POST"])
 @login_required
 def request_llm_response(node_id):
+    # Get the currently highlighted (parent) node.
     parent_node = Node.query.get_or_404(node_id)
     
-    # Build the prompt by traversing up the parent chain.
-    prompt_texts = []
+    # Build a list (chain) of nodes from the top‐level node to the current node.
+    node_chain = []
     current = parent_node
     while current:
-        prompt_texts.append(current.content)
+        # Insert at the beginning so that the final list is ordered from oldest (top-level) to newest.
+        node_chain.insert(0, current)
         current = current.parent
-    prompt = "\n".join(reversed(prompt_texts))
+
+    # Get the current model name from your environment (this indicates the special LLM username).
+    model_name = os.environ.get("LLM_NAME")
     
-    # Initialize the OpenAI client using the API key from config.
+    # Build the messages array per the new format. Each node becomes one message.
+    # When the node author equals model_name, we use role "assistant". Otherwise, role "user".
+    messages = []
+    for node in node_chain:
+        author = node.user.username if node.user else "Unknown"
+        if author == model_name:
+            role = "assistant"
+            message_text = node.content
+        else:
+            role = "user"
+            message_text = f"author {author}: {node.content}"
+        messages.append({
+            "role": role,
+            "content": [
+                {
+                    "type": "text",
+                    "text": message_text
+                }
+            ]
+        })
+
+    # Initialize the OpenAI client with your API key.
     api_key = current_app.config.get("OPENAI_API_KEY")
     client = OpenAI(api_key=api_key)
     
-    model_name = os.environ.get("LLM_NAME")
     try:
         response = client.chat.completions.create(
             model=model_name,
-            messages=[
-                {"role": "system", "content": "You are an assistant."},
-                {"role": "user", "content": prompt}
-            ],
+            messages=messages,
             response_format={"type": "text"},
             temperature=1,
             max_completion_tokens=10000,
@@ -178,16 +199,15 @@ def request_llm_response(node_id):
 
     total_tokens = response.usage.total_tokens if response.usage else None
 
-    # Try to find an existing user by that username.
+    # Look up (or create) the special LLM user if it does not already exist.
     from backend.models import User
     llm_user = User.query.filter_by(username=model_name).first()
     if not llm_user:
-        # Create a special user record for the LLM
         llm_user = User(twitter_id="llm", username=model_name)
         db.session.add(llm_user)
         db.session.commit()
 
-    # Save the LLM response as a new child node with the special LLM user.
+    # Save the LLM-generated response as a new child node.
     llm_node = Node(
         user_id=llm_user.id,
         parent_id=parent_node.id,
@@ -201,7 +221,7 @@ def request_llm_response(node_id):
     except Exception as e:
         db.session.rollback()
         current_app.logger.error("DB error saving LLM response: %s", e)
-        return jsonify({"error": "DB error saving LLM response"}), 500
+        return jsonify({"error": "DB error saving LLM response", "details": str(e)}), 500
 
     return jsonify({
         "message": "LLM response created",
