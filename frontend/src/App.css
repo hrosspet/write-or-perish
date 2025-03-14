@@ -1,5 +1,8 @@
 .App {
-  text-align: center;
+  text-align: left;
+  /* Dark background for your main app container */
+  background-color: #121212;
+  color: #e0e0e0;
 }
 
 .App-logo {
@@ -7,25 +10,26 @@
   pointer-events: none;
 }
 
+.App-header {
+  background-color: #1f1f1f;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: left;
+  justify-content: left;
+  font-size: calc(10px + 2vmin);
+  color: #e0e0e0;
+}
+
+.App-link {
+  /* A bright accent color works in a dark theme */
+  color: #61dafb;
+}
+
 @media (prefers-reduced-motion: no-preference) {
   .App-logo {
     animation: App-logo-spin infinite 20s linear;
   }
-}
-
-.App-header {
-  background-color: #282c34;
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  font-size: calc(10px + 2vmin);
-  color: white;
-}
-
-.App-link {
-  color: #61dafb;
 }
 
 @keyframes App-logo-spin {

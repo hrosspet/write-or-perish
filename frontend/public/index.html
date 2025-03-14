@@ -2,6 +2,67 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <!-- (other meta tags) -->
+    <style>
+      html, body, #root {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        width: 100%;
+        background-color: #121212 !important;  /* dark background */
+        color: #e0e0e0 !important;             /* light text */
+      }
+
+      a:link {
+        color: #61dafb;   /* Unvisited */
+      }
+
+      a:visited {
+        color: #a29bfe;   /* Visited: noticeably different from unvisited */
+      }
+
+      a:hover, a:focus {
+        color: #26c6da;   /* Hovered */
+      }
+
+      a:active {
+        color: #84d3ff;
+      }
+
+      /* Dark styling for buttons, inputs, and textareas */
+      input, textarea {
+        background-color: #1e1e1e;
+        color: #e0e0e0;
+        border: 1px solid #333;
+        font-family: inherit;
+        font-size: 1.1rem;  /* Increase text size in inputs and textareas */
+        outline: none;
+      }
+      button {
+        background-color: #1e1e1e;
+        color: #e0e0e0;
+        border: 1px solid #333;
+        font-family: inherit;
+        cursor: pointer;
+        padding: 10px 20px;
+        border-radius: 4px;
+        transition: background-color 0.3s, color 0.3s;
+      }
+
+      /* Change button appearance on hover/active */
+      button:hover {
+        background-color: #333;
+      }
+      button:active {
+        background-color: #444;
+      }
+
+      /* Code blocks */
+      code {
+        font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New', monospace;
+      }
+    </style>
+    <meta charset="utf-8" />
     <link rel="icon" href="%PUBLIC_URL%/favicon.ico" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#000000" />

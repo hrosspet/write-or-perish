@@ -5,10 +5,11 @@ import Dashboard from "./components/Dashboard";
 import Feed from "./components/Feed";
 import NodeDetail from "./components/NodeDetail";
 import NavBar from "./components/NavBar";
+import "./App.css"; // Make sure this is imported
 
 function App() {
   return (
-    <div>
+    <div className="App">
       <NavBar />
       <Routes>
         <Route path="/" element={<LandingPage />} />
