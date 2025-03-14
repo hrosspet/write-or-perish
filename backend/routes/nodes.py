@@ -43,7 +43,8 @@ def create_node():
         "node_type": node.node_type,
         "parent_id": node.parent_id,
         "linked_node_id": node.linked_node_id,
-        "created_at": node.created_at.isoformat()
+        "created_at": node.created_at.isoformat(),
+        "username": current_user.username
     }), 201
 
 # Update (edit) a node. (The node’s prior content is saved in NodeVersion.)
@@ -208,7 +209,8 @@ def request_llm_response(node_id):
             "id": llm_node.id,
             "content": llm_node.content,
             "token_count": llm_node.token_count,
-            "created_at": llm_node.created_at.isoformat()
+            "created_at": llm_node.created_at.isoformat(),
+            "username": model_name
         }
     }), 201
 
@@ -247,7 +249,8 @@ def add_linked_node(node_id):
             "content": new_node.content,
             "node_type": new_node.node_type,
             "linked_node_id": new_node.linked_node_id,
-            "created_at": new_node.created_at.isoformat()
+            "created_at": new_node.created_at.isoformat(),
+            "username": current_user.username
         }
     }), 201
 
