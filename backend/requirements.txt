@@ -3,7 +3,8 @@ Flask-SQLAlchemy==2.5.1
 Flask-Migrate==2.7.0
 Flask-Login==0.6.2
 Flask-Dance==5.0.0
+flask-cors
 psycopg2-binary==2.9.3
 python-dotenv==1.0.0
-openai==0.27.0
+openai
 Werkzeug==2.0.3

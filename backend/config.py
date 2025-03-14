@@ -13,3 +13,5 @@ class Config:
     
     # OpenAI API key
     OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+
+    FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")

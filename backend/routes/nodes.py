@@ -3,9 +3,11 @@ from flask_login import login_required, current_user
 from backend.models import Node, NodeVersion
 from backend.extensions import db
 from datetime import datetime
-import openai
+from openai import OpenAI
 
 nodes_bp = Blueprint("nodes_bp", __name__)
+
+
 
 # Create a new node (a “text bubble”)
 @nodes_bp.route("/", methods=["POST"])
@@ -115,6 +117,7 @@ def get_children(node_id):
 @login_required
 def request_llm_response(node_id):
     parent_node = Node.query.get_or_404(node_id)
+    
     # Build the prompt by traversing up the parent chain.
     prompt_texts = []
     current = parent_node
@@ -122,23 +125,40 @@ def request_llm_response(node_id):
         prompt_texts.append(current.content)
         current = current.parent
     prompt = "\n".join(reversed(prompt_texts))
-    # Call the OpenAI API – adjust the model name as needed.
-    openai.api_key = current_app.config.get("OPENAI_API_KEY")
+    
+    # Initialize the OpenAI client using the API key from config.
+    api_key = current_app.config.get("OPENAI_API_KEY")
+    client = OpenAI(api_key=api_key)
+    
     try:
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model="gpt-4.5-preview",
             messages=[
                 {"role": "system", "content": "You are an assistant."},
                 {"role": "user", "content": prompt}
-            ]
+            ],
+            response_format={"type": "text"},
+            temperature=1,
+            max_completion_tokens=10000,
+            top_p=1,
+            frequency_penalty=0,
+            presence_penalty=0,
         )
     except Exception as e:
+        current_app.logger.error("OpenAI API error: %s", e)
         return jsonify({"error": "OpenAI API error", "details": str(e)}), 500
-    # Extract the LLM’s response and token usage.
-    llm_text = response.choices[0].message["content"]
-    usage = response.get("usage", {})
-    total_tokens = usage.get("total_tokens", None)
-    # Save the LLM response as a new node.
+
+    # Using dot notation to extract the completion text.
+    try:
+        llm_text = response.choices[0].message.content
+    except Exception as e:
+        current_app.logger.error("Error extracting LLM text: %s", e)
+        return jsonify({"error": "Error parsing LLM response"}), 500
+
+    # Extract usage details if available.
+    total_tokens = response.usage.total_tokens if response.usage else None
+
+    # Save the LLM response as a new child node.
     llm_node = Node(
         user_id=current_user.id,
         parent_id=parent_node.id,
@@ -151,7 +171,9 @@ def request_llm_response(node_id):
         db.session.commit()
     except Exception as e:
         db.session.rollback()
+        current_app.logger.error("DB error saving LLM response: %s", e)
         return jsonify({"error": "DB error saving LLM response"}), 500
+
     return jsonify({
         "message": "LLM response created",
         "node": {

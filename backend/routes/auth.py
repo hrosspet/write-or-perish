@@ -1,4 +1,4 @@
-from flask import Blueprint, redirect, url_for, flash
+from flask import Blueprint, redirect, url_for, flash, current_app
 from flask_login import login_user, logout_user, login_required, current_user
 from backend.models import User
 from backend.extensions import db
@@ -8,10 +8,10 @@ auth_bp = Blueprint("auth_bp", __name__)
 
 @auth_bp.route("/login")
 def login():
-    # When a user hits the “login” endpoint, redirect for OAuth if needed.
     if not twitter.authorized:
+        # If not authorized, start the OAuth flow.
         return redirect(url_for("twitter.login"))
-    # Use Twitter’s API to fetch basic account info.
+    # Fetch Twitter info
     resp = twitter.get("account/verify_credentials.json")
     if not resp.ok:
         flash("Failed to fetch user info from Twitter.", "error")
@@ -19,16 +19,17 @@ def login():
     tw_info = resp.json()
     twitter_id = str(tw_info["id"])
     username = tw_info["screen_name"]
-    # Look up or create the user in our DB.
     user = User.query.filter_by(twitter_id=twitter_id).first()
     if not user:
         user = User(twitter_id=twitter_id, username=username)
         db.session.add(user)
         db.session.commit()
-        # (You can add an onboarding step here if desired.)
     login_user(user)
     flash("Logged in successfully!", "success")
-    return redirect(url_for("dashboard_bp.get_dashboard"))
+    # Instead of redirecting using url_for() to the backend dashboard,
+    # redirect using the FRONTEND_URL from your config.
+    frontend_dashboard = f"{current_app.config.get('FRONTEND_URL')}/dashboard"
+    return redirect(frontend_dashboard)
 
 @auth_bp.route("/logout")
 @login_required
