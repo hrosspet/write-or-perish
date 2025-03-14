@@ -62,6 +62,48 @@ def get_dashboard():
     }
     return jsonify(dashboard), 200
 
+
+# Public view of any user’s dashboard; no private stats provided.
+@dashboard_bp.route("/<string:username>", methods=["GET"])
+@login_required
+def get_public_dashboard(username):
+    # Lookup the user by their (unique) handle (username).
+    user = User.query.filter_by(username=username).first_or_404()
+    
+    # Get top-level nodes for the user.
+    nodes = Node.query.filter_by(user_id=user.id, parent_id=None)\
+                      .order_by(Node.created_at.desc()).all()
+    nodes_list = []
+    for node in nodes:
+        preview = node.content[:200] + ("..." if len(node.content) > 200 else "")
+        nodes_list.append({
+            "id": node.id,
+            "preview": preview,
+            "node_type": node.node_type,
+            "child_count": len(node.children),
+            "created_at": node.created_at.isoformat()
+        })
+
+    # Calculate token stats just as in the private dashboard.
+    stats = {
+        "daily_tokens": get_daily_tokens(user),
+        "total_tokens": get_total_tokens(user),
+        "global_tokens": get_global_tokens(),
+        "target_daily_tokens": 1000000  # the 1M tokens/day target
+    }
+    
+    dashboard = {
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "description": user.description
+        },
+        "stats": stats,
+        "nodes": nodes_list
+    }
+    return jsonify(dashboard), 200
+
+
 # New endpoint to update the user’s display handle and description.
 @dashboard_bp.route("/user", methods=["PUT"])
 @login_required

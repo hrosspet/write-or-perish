@@ -4,9 +4,13 @@ from backend.models import Node, NodeVersion
 from backend.extensions import db
 from datetime import datetime
 from openai import OpenAI
+import os
 
 nodes_bp = Blueprint("nodes_bp", __name__)
 
+
+def make_preview(text, length=200):
+    return text[:length] + ("..." if len(text) > length else "")
 
 
 # Create a new node (a “text bubble”)
@@ -75,36 +79,37 @@ def update_node(node_id):
 def get_node(node_id):
     node = Node.query.get_or_404(node_id)
 
-    def make_preview(text, length=200):
-        return text[:length] + ("..." if len(text) > length else "")
-
-    # Immediate children as previews.
-    children = Node.query.filter_by(parent_id=node_id).all()
-    children_list = [{
-        "id": child.id,
-        "preview": make_preview(child.content),
-        "child_count": len(child.children),
-        "node_type": child.node_type,
-    } for child in children]
-
-    # Build ancestors recursively (from the direct parent upward)
+    # Build ancestors recursively (including username and child_count)
     ancestors = []
     current = node.parent
     while current:
-        ancestors.insert(0, {  # insert at beginning so that the root is first
+        ancestors.insert(0, {  # so that the root is first
             "id": current.id,
+            "username": current.user.username if current.user else "Unknown",
             "preview": make_preview(current.content),
             "node_type": current.node_type,
+            "child_count": len(current.children),
             "created_at": current.created_at.isoformat()
         })
         current = current.parent
 
+    # Immediate children as previews (including username)
+    children = Node.query.filter_by(parent_id=node_id).all()
+    children_list = [{
+        "id": child.id,
+        "username": child.user.username if child.user else "Unknown",
+        "preview": make_preview(child.content),
+        "child_count": len(child.children),
+        "node_type": child.node_type,
+        "created_at": child.created_at.isoformat()
+    } for child in children]
+
     response = {
         "id": node.id,
-        "content": node.content,  # full text since this is the highlighted node
+        "content": node.content,  # full text of the highlighted node
         "node_type": node.node_type,
         "child_count": len(node.children),
-        "ancestors": ancestors,  # added ancestors field
+        "ancestors": ancestors,
         "children": children_list,
         "created_at": node.created_at.isoformat(),
         "updated_at": node.updated_at.isoformat()
@@ -145,9 +150,10 @@ def request_llm_response(node_id):
     api_key = current_app.config.get("OPENAI_API_KEY")
     client = OpenAI(api_key=api_key)
     
+    model_name = os.environ.get("LLM_NAME")
     try:
         response = client.chat.completions.create(
-            model="gpt-4.5-preview",
+            model=model_name,
             messages=[
                 {"role": "system", "content": "You are an assistant."},
                 {"role": "user", "content": prompt}
@@ -163,19 +169,26 @@ def request_llm_response(node_id):
         current_app.logger.error("OpenAI API error: %s", e)
         return jsonify({"error": "OpenAI API error", "details": str(e)}), 500
 
-    # Using dot notation to extract the completion text.
     try:
         llm_text = response.choices[0].message.content
     except Exception as e:
         current_app.logger.error("Error extracting LLM text: %s", e)
         return jsonify({"error": "Error parsing LLM response"}), 500
 
-    # Extract usage details if available.
     total_tokens = response.usage.total_tokens if response.usage else None
 
-    # Save the LLM response as a new child node.
+    # Try to find an existing user by that username.
+    from backend.models import User
+    llm_user = User.query.filter_by(username=model_name).first()
+    if not llm_user:
+        # Create a special user record for the LLM
+        llm_user = User(twitter_id="llm", username=model_name)
+        db.session.add(llm_user)
+        db.session.commit()
+
+    # Save the LLM response as a new child node with the special LLM user.
     llm_node = Node(
-        user_id=current_user.id,
+        user_id=llm_user.id,
         parent_id=parent_node.id,
         node_type="llm",
         content=llm_text,
@@ -198,6 +211,7 @@ def request_llm_response(node_id):
             "created_at": llm_node.created_at.isoformat()
         }
     }), 201
+
 
 # Create a linked node – allowing the user to reference another node either as a link alone or with additional text.
 @nodes_bp.route("/<int:node_id>/link", methods=["POST"])
@@ -236,3 +250,23 @@ def add_linked_node(node_id):
             "created_at": new_node.created_at.isoformat()
         }
     }), 201
+
+
+@nodes_bp.route("/<int:node_id>", methods=["DELETE"])
+@login_required
+def delete_node(node_id):
+    node = Node.query.get_or_404(node_id)
+    # Only allow deletion if the current user is the creator 
+    if node.user_id != current_user.id:
+        return jsonify({"error": "Not authorized"}), 403
+
+    # Update all children: set their parent_id to None
+    # (This “orphans” the children so they become top‑level nodes.)
+    try:
+        Node.query.filter_by(parent_id=node.id).update({"parent_id": None})
+        db.session.delete(node)
+        db.session.commit()
+        return jsonify({"message": "Node deleted successfully"}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Error deleting node", "details": str(e)}), 500

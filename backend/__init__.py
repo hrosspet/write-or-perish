@@ -1,4 +1,5 @@
-from flask import Flask
+from flask import Flask, request, jsonify, redirect, url_for
+from flask import current_app  # already imported in your file
 from dotenv import load_dotenv
 import os
 
@@ -24,6 +25,15 @@ def create_app():
     migrate = Migrate(app, db)
     login_manager = LoginManager(app)
     login_manager.login_view = "auth_bp.login"
+
+    # Custom unauthorized handler for API endpoints
+    @login_manager.unauthorized_handler
+    def unauthorized():
+        # If the request is aimed at an API endpoint, return JSON 401.
+        if request.path.startswith("/api"):
+            return jsonify({"error": "Unauthorized"}), 401
+        # Otherwise, use the normal redirection.
+        return redirect(url_for("auth_bp.login"))
 
     @login_manager.user_loader
     def load_user(user_id):

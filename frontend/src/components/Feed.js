@@ -6,22 +6,26 @@ function Feed() {
   const [feedNodes, setFeedNodes] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  
+  const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
-  // Note: The backend must provide an endpoint for global feed data (e.g., GET /api/feed).
   useEffect(() => {
     api
       .get("/feed")
       .then((response) => {
-        // Assume response.data.nodes is an array of top nodes
         setFeedNodes(response.data.nodes);
         setLoading(false);
       })
       .catch((err) => {
         console.error(err);
-        setError("Error loading feed.");
-        setLoading(false);
+        if (err.response && err.response.status === 401) {
+          window.location.href = `${backendUrl}/auth/login`;
+        } else {
+          setError("Error loading feed.");
+          setLoading(false);
+        }
       });
-  }, []);
+  }, [backendUrl]);
 
   if (loading) return <div>Loading feed...</div>;
   if (error) return <div>{error}</div>;
@@ -34,8 +38,10 @@ function Feed() {
           <li key={node.id} style={{ margin: "10px 0" }}>
             <Link to={`/node/${node.id}`}>
               <div>
-                <p>{node.preview}</p>
-                <small>Child Count: {node.child_count}</small>
+                <p>{node.username}: {node.preview}</p>
+                <small>
+                  {new Date(node.created_at).toLocaleString()} | children: {node.child_count}
+                </small>
               </div>
             </Link>
           </li>

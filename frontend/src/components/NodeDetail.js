@@ -12,23 +12,28 @@ function NodeDetail() {
   const [editing, setEditing] = useState(false);
   const [editedContent, setEditedContent] = useState("");
   const [showChildForm, setShowChildForm] = useState(false);
-  const [childFormType, setChildFormType] = useState("text"); // "text" or "llm"
+  const [childFormType, setChildFormType] = useState("text");
+
+  const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
   useEffect(() => {
     api
       .get(`/nodes/${id}`)
       .then((response) => {
         setNode(response.data);
-        // The response now includes children and an "ancestors" array.
         setChildren(response.data.children || []);
         setLoading(false);
       })
       .catch((err) => {
         console.error(err);
-        setError("Error fetching node details.");
-        setLoading(false);
+        if (err.response && err.response.status === 401) {
+          window.location.href = `${backendUrl}/auth/login`;
+        } else {
+          setError("Error fetching node details.");
+          setLoading(false);
+        }
       });
-  }, [id]);
+  }, [id, backendUrl]);
 
   const handleEdit = () => {
     setEditing(true);
@@ -49,15 +54,15 @@ function NodeDetail() {
       });
   };
 
-  // “LLM Response” will immediately post to the LLM endpoint
   const requestLLMResponse = () => {
     api
       .post(`/nodes/${id}/llm`)
       .then((response) => {
         const newChild = {
           id: response.data.node.id,
+          username: response.data.node.username || "Unknown",
           preview: response.data.node.content.substring(0, 200),
-          child_count: 0,
+          child_count: response.data.node.token_count ? response.data.node.token_count : 0,
         };
         setChildren([...children, newChild]);
       })
@@ -75,21 +80,24 @@ function NodeDetail() {
     <div style={{ padding: "20px" }}>
       <h2>Node Detail</h2>
 
-      {/* Ancestors */}
+      {/* Ancestors with similar preview style */}
       {node.ancestors && node.ancestors.length > 0 && (
         <div>
           <h3>Ancestors</h3>
           <ul>
             {node.ancestors.map((ancestor) => (
-              <li key={ancestor.id}>
-                <a href={`/node/${ancestor.id}`}>{ancestor.preview}</a>
+              <li key={ancestor.id} style={{ margin: "5px 0" }}>
+                <a href={`/node/${ancestor.id}`}>
+                  {ancestor.username}: {ancestor.preview} | children: {ancestor.child_count}
+                </a>
               </li>
             ))}
           </ul>
+          <hr />
         </div>
       )}
 
-      {/* Highlighted node content (editable) */}
+      {/* Highlighted Node Content */}
       {editing ? (
         <form onSubmit={handleEditSubmit}>
           <textarea
@@ -111,17 +119,22 @@ function NodeDetail() {
       )}
 
       <hr />
+      
+      {/* Children preview in the same style */}
       <h3>Child Nodes</h3>
       {children.length === 0 && <p>No child nodes.</p>}
       <ul>
         {children.map((child) => (
-          <li key={child.id}>
-            <a href={`/node/${child.id}`}>{child.preview}</a>
+          <li key={child.id} style={{ margin: "5px 0" }}>
+            <a href={`/node/${child.id}`}>
+              {child.username}: {child.preview} | children: {child.child_count}
+            </a>
           </li>
         ))}
       </ul>
 
       <hr />
+
       <h3>Add Child Node</h3>
       <button
         onClick={() => {
@@ -139,8 +152,9 @@ function NodeDetail() {
           onSuccess={(data) => {
             const newChild = {
               id: data.id,
+              username: data.username || "Unknown",
               preview: data.content.substring(0, 200),
-              child_count: 0,
+              child_count: data.child_count || 0,
             };
             setChildren([...children, newChild]);
             setShowChildForm(false);

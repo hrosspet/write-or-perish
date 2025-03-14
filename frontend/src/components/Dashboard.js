@@ -1,45 +1,50 @@
 import React, { useState, useEffect } from "react";
-import { Link } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import api from "../api";
 import NodeForm from "./NodeForm";
 
 function Dashboard() {
+  const { username } = useParams(); // if present, we are viewing someone else's dashboard
   const [dashboardData, setDashboardData] = useState(null);
   const [showNewNodeForm, setShowNewNodeForm] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   
-  // Fields for editing the user profile
+  // For profile editing—only allowed for your own dashboard.
   const [editingProfile, setEditingProfile] = useState(false);
   const [editUsername, setEditUsername] = useState("");
   const [editDescription, setEditDescription] = useState("");
 
-  // Fetch dashboard info on mount
+  const backendUrl = process.env.REACT_APP_BACKEND_URL;
+  
+  // Choose endpoint: if a username is provided, call the public route; otherwise, use your own dashboard route.
+  const endpoint = username ? `/dashboard/${username}` : "/dashboard";
+
   useEffect(() => {
-    api
-      .get("/dashboard")
+    api.get(endpoint)
       .then((response) => {
         setDashboardData(response.data);
         setLoading(false);
       })
       .catch((err) => {
         console.error(err);
-        setError("Error fetching dashboard data. Are you logged in?");
-        setLoading(false);
+        if (err.response && err.response.status === 401) {
+          window.location.href = `${backendUrl}/auth/login`;
+        } else {
+          setError("Error fetching dashboard data. Are you logged in?");
+          setLoading(false);
+        }
       });
-  }, []);
+  }, [endpoint, backendUrl]);
 
   const handleNewNode = () => {
     setShowNewNodeForm(!showNewNodeForm);
   };
 
-  // Handle profile update submission.
   const handleProfileSubmit = (e) => {
     e.preventDefault();
-    api
-      .put("/dashboard/user", { username: editUsername, description: editDescription })
+    api.put("/dashboard/user", { username: editUsername, description: editDescription })
       .then((response) => {
-        // Update the dashboard data with the new user info.
         setDashboardData({
           ...dashboardData,
           user: response.data.user
@@ -55,70 +60,81 @@ function Dashboard() {
   if (loading) return <div>Loading dashboard...</div>;
   if (error) return <div>{error}</div>;
 
+  // Destructure available data. Note: In a public dashboard, no stats are returned.
   const { user, stats, nodes } = dashboardData;
 
   return (
     <div style={{ padding: "20px" }}>
-      <h1>Dashboard</h1>
+      <h1>{user.username}</h1>
+      
+      {/* Only allow profile editing on your own dashboard */}
+      {!username && (
+        <>
+          {editingProfile ? (
+            <form onSubmit={handleProfileSubmit}>
+              <div>
+                <label>
+                  Handle:
+                  <input
+                    type="text"
+                    value={editUsername}
+                    onChange={(e) => setEditUsername(e.target.value)}
+                  />
+                </label>
+              </div>
+              <div>
+                <label>
+                  Description:
+                  <input
+                    type="text"
+                    maxLength={128}
+                    value={editDescription}
+                    onChange={(e) => setEditDescription(e.target.value)}
+                  />
+                </label>
+              </div>
+              <button type="submit">Save Profile</button>
+              <button type="button" onClick={() => setEditingProfile(false)}>
+                Cancel
+              </button>
+            </form>
+          ) : (
+            <div>
+              <p>{user.description || "No description provided."}</p>
+              <button
+                onClick={() => {
+                  setEditingProfile(true);
+                  setEditUsername(user.username);
+                  setEditDescription(user.description);
+                }}
+              >
+                Edit Profile
+              </button>
+            </div>
+          )}
+        </>
+      )}
 
-      {/* User Profile Section */}
-      {editingProfile ? (
-        <form onSubmit={handleProfileSubmit}>
-          <div>
-            <label>
-              Handle:
-              <input
-                type="text"
-                value={editUsername}
-                onChange={(e) => setEditUsername(e.target.value)}
-              />
-            </label>
-          </div>
-          <div>
-            <label>
-              Description:
-              <input
-                type="text"
-                maxLength={128}
-                value={editDescription}
-                onChange={(e) => setEditDescription(e.target.value)}
-              />
-            </label>
-          </div>
-          <button type="submit">Save Profile</button>
-          <button type="button" onClick={() => setEditingProfile(false)}>
-            Cancel
-          </button>
-        </form>
-      ) : (
+      {/* Only your own dashboard shows token stats */}
+      {stats && (
         <div>
-          <h2>Welcome, {user.username}</h2>
-          <p>Description: {user.description || "No description provided."}</p>
-          <button
-            onClick={() => {
-              setEditingProfile(true);
-              setEditUsername(user.username);
-              setEditDescription(user.description);
-            }}
-          >
-            Edit Profile
-          </button>
+          <h3>{user.username}'s stats</h3>
+          <ul>
+            <li>Daily tokens: {stats.daily_tokens}</li>
+            <li>Total tokens: {stats.total_tokens}</li>
+            <li>Global tokens: {stats.global_tokens}</li>
+            <li>Daily target tokens: {stats.target_daily_tokens}</li>
+          </ul>
         </div>
       )}
 
-      <h3>Your Token Stats</h3>
-      <ul>
-        <li>Daily tokens: {stats.daily_tokens}</li>
-        <li>Total tokens: {stats.total_tokens}</li>
-        <li>Global tokens: {stats.global_tokens}</li>
-        <li>Daily target tokens: {stats.target_daily_tokens}</li>
-      </ul>
-
-      <h3>Your Top-Level Entries</h3>
-      <button onClick={handleNewNode}>
-        {showNewNodeForm ? "Cancel" : "Write New Entry"}
-      </button>
-      {showNewNodeForm && (
+      <h3>Top-Level Entries</h3>
+      {!username && (
+        <button onClick={handleNewNode}>
+          {showNewNodeForm ? "Cancel" : "Write New Entry"}
+        </button>
+      )}
+      {!username && showNewNodeForm && (
         <NodeForm parentId={null} onSuccess={() => window.location.reload()} />
       )}
       <ul>
@@ -128,10 +144,8 @@ function Dashboard() {
               <div>
                 <p>{node.preview}</p>
                 <small>
-                  Created at: {new Date(node.created_at).toLocaleString()}
+                  {new Date(node.created_at).toLocaleString()} | children: {node.child_count}
                 </small>
-                <br />
-                <small>Child Count: {node.child_count}</small>
               </div>
             </Link>
           </li>

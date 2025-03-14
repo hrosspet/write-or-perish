@@ -9,11 +9,7 @@ function NavBar() {
       <Link to="/">Home</Link> {" | "}
       <Link to="/dashboard">Dashboard</Link> {" | "}
       <Link to="/feed">Feed</Link> {" | "}
-      {/* 
-          The login button simply sends the user to the Flask
-          OAuth endpoint. (Logout would be similar.)
-      */}
-      <a href={`${backendUrl}/auth/login`}>Login with Twitter</a>
+      <a href={`${backendUrl}/auth/logout`}>Logout</a>
     </nav>
   );
 }

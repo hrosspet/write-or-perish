@@ -13,6 +13,7 @@ function App() {
       <Routes>
         <Route path="/" element={<LandingPage />} />
         <Route path="/dashboard" element={<Dashboard />} />
+        <Route path="/dashboard/:username" element={<Dashboard />} />
         <Route path="/feed" element={<Feed />} />
         <Route path="/node/:id" element={<NodeDetail />} />
         <Route path="*" element={<Navigate to="/" replace />} />

@@ -3,6 +3,7 @@ from flask_login import login_user, logout_user, login_required, current_user
 from backend.models import User
 from backend.extensions import db
 from flask_dance.contrib.twitter import twitter
+from flask import session
 
 auth_bp = Blueprint("auth_bp", __name__)
 
@@ -35,5 +36,7 @@ def login():
 @login_required
 def logout():
     logout_user()
+    session.clear()
     flash("Logged out successfully", "success")
-    return redirect(url_for("index"))
+    frontend_url = current_app.config.get("FRONTEND_URL")
+    return redirect(frontend_url)
