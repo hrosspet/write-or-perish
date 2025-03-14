@@ -74,10 +74,11 @@ def update_node(node_id):
 @login_required
 def get_node(node_id):
     node = Node.query.get_or_404(node_id)
-    # For non-highlighted nodes elsewhere, you might return just a preview (e.g. first 200 characters).
+
     def make_preview(text, length=200):
         return text[:length] + ("..." if len(text) > length else "")
-    # Get immediate children (previews only)
+
+    # Immediate children as previews.
     children = Node.query.filter_by(parent_id=node_id).all()
     children_list = [{
         "id": child.id,
@@ -85,11 +86,25 @@ def get_node(node_id):
         "child_count": len(child.children),
         "node_type": child.node_type,
     } for child in children]
+
+    # Build ancestors recursively (from the direct parent upward)
+    ancestors = []
+    current = node.parent
+    while current:
+        ancestors.insert(0, {  # insert at beginning so that the root is first
+            "id": current.id,
+            "preview": make_preview(current.content),
+            "node_type": current.node_type,
+            "created_at": current.created_at.isoformat()
+        })
+        current = current.parent
+
     response = {
         "id": node.id,
-        "content": node.content,  # full text because it’s highlighted.
+        "content": node.content,  # full text since this is the highlighted node
         "node_type": node.node_type,
         "child_count": len(node.children),
+        "ancestors": ancestors,  # added ancestors field
         "children": children_list,
         "created_at": node.created_at.isoformat(),
         "updated_at": node.updated_at.isoformat()

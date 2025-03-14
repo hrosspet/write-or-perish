@@ -8,6 +8,11 @@ function Dashboard() {
   const [showNewNodeForm, setShowNewNodeForm] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  
+  // Fields for editing the user profile
+  const [editingProfile, setEditingProfile] = useState(false);
+  const [editUsername, setEditUsername] = useState("");
+  const [editDescription, setEditDescription] = useState("");
 
   // Fetch dashboard info on mount
   useEffect(() => {
@@ -28,6 +33,25 @@ function Dashboard() {
     setShowNewNodeForm(!showNewNodeForm);
   };
 
+  // Handle profile update submission.
+  const handleProfileSubmit = (e) => {
+    e.preventDefault();
+    api
+      .put("/dashboard/user", { username: editUsername, description: editDescription })
+      .then((response) => {
+        // Update the dashboard data with the new user info.
+        setDashboardData({
+          ...dashboardData,
+          user: response.data.user
+        });
+        setEditingProfile(false);
+      })
+      .catch((err) => {
+        console.error(err);
+        setError("Error updating profile.");
+      });
+  };
+
   if (loading) return <div>Loading dashboard...</div>;
   if (error) return <div>{error}</div>;
 
@@ -36,8 +60,52 @@ function Dashboard() {
   return (
     <div style={{ padding: "20px" }}>
       <h1>Dashboard</h1>
-      <h2>Welcome, {user.username}</h2>
-      <p>Description: {user.description || "No description provided."}</p>
+
+      {/* User Profile Section */}
+      {editingProfile ? (
+        <form onSubmit={handleProfileSubmit}>
+          <div>
+            <label>
+              Handle:
+              <input
+                type="text"
+                value={editUsername}
+                onChange={(e) => setEditUsername(e.target.value)}
+              />
+            </label>
+          </div>
+          <div>
+            <label>
+              Description:
+              <input
+                type="text"
+                maxLength={128}
+                value={editDescription}
+                onChange={(e) => setEditDescription(e.target.value)}
+              />
+            </label>
+          </div>
+          <button type="submit">Save Profile</button>
+          <button type="button" onClick={() => setEditingProfile(false)}>
+            Cancel
+          </button>
+        </form>
+      ) : (
+        <div>
+          <h2>Welcome, {user.username}</h2>
+          <p>Description: {user.description || "No description provided."}</p>
+          <button
+            onClick={() => {
+              setEditingProfile(true);
+              setEditUsername(user.username);
+              setEditDescription(user.description);
+            }}
+          >
+            Edit Profile
+          </button>
+        </div>
+      )}
+
       <h3>Your Token Stats</h3>
       <ul>
         <li>Daily tokens: {stats.daily_tokens}</li>
@@ -45,7 +113,8 @@ function Dashboard() {
         <li>Global tokens: {stats.global_tokens}</li>
         <li>Daily target tokens: {stats.target_daily_tokens}</li>
       </ul>
-      <h3>Your Entries</h3>
+
+      <h3>Your Top-Level Entries</h3>
       <button onClick={handleNewNode}>
         {showNewNodeForm ? "Cancel" : "Write New Entry"}
       </button>

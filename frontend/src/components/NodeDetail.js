@@ -19,7 +19,7 @@ function NodeDetail() {
       .get(`/nodes/${id}`)
       .then((response) => {
         setNode(response.data);
-        // The response includes immediate children (previews) in response.data.children
+        // The response now includes children and an "ancestors" array.
         setChildren(response.data.children || []);
         setLoading(false);
       })
@@ -54,7 +54,6 @@ function NodeDetail() {
     api
       .post(`/nodes/${id}/llm`)
       .then((response) => {
-        // Append the new LLM node to the children list.
         const newChild = {
           id: response.data.node.id,
           preview: response.data.node.content.substring(0, 200),
@@ -75,6 +74,22 @@ function NodeDetail() {
   return (
     <div style={{ padding: "20px" }}>
       <h2>Node Detail</h2>
+
+      {/* Ancestors */}
+      {node.ancestors && node.ancestors.length > 0 && (
+        <div>
+          <h3>Ancestors</h3>
+          <ul>
+            {node.ancestors.map((ancestor) => (
+              <li key={ancestor.id}>
+                <a href={`/node/${ancestor.id}`}>{ancestor.preview}</a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Highlighted node content (editable) */}
       {editing ? (
         <form onSubmit={handleEditSubmit}>
           <textarea
