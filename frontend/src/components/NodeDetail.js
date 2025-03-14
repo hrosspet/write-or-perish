@@ -54,23 +54,25 @@ function NodeDetail() {
       });
   };
 
-  const requestLLMResponse = () => {
-    api
-      .post(`/nodes/${id}/llm`)
-      .then((response) => {
-        const newChild = {
-          id: response.data.node.id,
-          username: response.data.node.username || "Unknown",
-          preview: response.data.node.content.substring(0, 200),
-          child_count: response.data.node.token_count ? response.data.node.token_count : 0,
-        };
-        setChildren([...children, newChild]);
-      })
-      .catch((err) => {
-        console.error(err);
-        setError("Error requesting LLM response.");
-      });
+  // New delete handler
+  const handleDelete = () => {
+    if (window.confirm("Are you sure you want to delete this node? This will remove the node and set all its children to have no parent.")) {
+      api.delete(`/nodes/${id}`)
+        .then((response) => {
+          // After deletion, redirect the user (for example, back to the dashboard)
+          window.location.href = "/dashboard";
+        })
+        .catch((err) => {
+          console.error(err);
+          setError("Error deleting node.");
+        });
+    }
   };
+
+  // Optionally, if your GET /nodes/:id endpoint includes the node's user_id,
+  // you can conditionally render edit/delete controls only if the current user is the owner.
+  // For now, we'll assume that only user-authored nodes (node.node_type === "user") are editable/deletable.
+  const canEditOrDelete = node && node.node_type === "user";
 
   if (loading) return <div>Loading node...</div>;
   if (error) return <div>{error}</div>;
@@ -80,7 +82,7 @@ function NodeDetail() {
     <div style={{ padding: "20px" }}>
       <h2>Node Detail</h2>
 
-      {/* Ancestors with similar preview style */}
+      {/* Ancestors */}
       {node.ancestors && node.ancestors.length > 0 && (
         <div>
           <h3>Ancestors</h3>
@@ -114,13 +116,18 @@ function NodeDetail() {
       ) : (
         <div>
           <p>{node.content}</p>
-          <button onClick={handleEdit}>Edit</button>
+          {canEditOrDelete && (
+            <>
+              <button onClick={handleEdit}>Edit</button>
+              <button onClick={handleDelete}>Delete</button>
+            </>
+          )}
         </div>
       )}
 
       <hr />
-      
-      {/* Children preview in the same style */}
+
+      {/* Children preview */}
       <h3>Child Nodes</h3>
       {children.length === 0 && <p>No child nodes.</p>}
       <ul>
@@ -145,7 +152,23 @@ function NodeDetail() {
         Add Text
       </button>
       {"  "}
-      <button onClick={requestLLMResponse}>LLM Response</button>
+      <button onClick={() => {
+         // trigger LLM response
+         api.post(`/nodes/${id}/llm`)
+            .then((response) => {
+              const newChild = {
+                id: response.data.node.id,
+                username: response.data.node.username || "Unknown",
+                preview: response.data.node.content.substring(0, 200),
+                child_count: 0,
+              };
+              setChildren([...children, newChild]);
+            })
+            .catch((err) => {
+              console.error(err);
+              setError("Error requesting LLM response.");
+            });
+      }}>LLM Response</button>
       {showChildForm && childFormType === "text" && (
         <NodeForm
           parentId={node.id}
