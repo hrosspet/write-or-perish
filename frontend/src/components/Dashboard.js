@@ -7,7 +7,6 @@ import DashboardContent from "./DashboardContent";  // Import the new component
 function Dashboard() {
   const { username } = useParams(); // if present, we are viewing someone else's dashboard
   const [dashboardData, setDashboardData] = useState(null);
-  const [showNewNodeForm, setShowNewNodeForm] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   
@@ -37,10 +36,6 @@ function Dashboard() {
         }
       });
   }, [endpoint, backendUrl]);
-
-  const handleNewNode = () => {
-    setShowNewNodeForm(!showNewNodeForm);
-  };
 
   const handleProfileSubmit = (e) => {
     e.preventDefault();
@@ -119,14 +114,6 @@ function Dashboard() {
       {dashboardData.stats && <DashboardContent dashboardData={dashboardData} />}
 
       <h3>Top-Level Entries</h3>
-      {!username && (
-        <button onClick={handleNewNode}>
-          {showNewNodeForm ? "Cancel" : "Write New Entry"}
-        </button>
-      )}
-      {!username && showNewNodeForm && (
-        <NodeForm parentId={null} onSuccess={() => window.location.reload()} />
-      )}
       <ul>
         {nodes.map((node) => (
           <li key={node.id} style={{ margin: "10px 0" }}>

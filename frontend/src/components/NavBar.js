@@ -3,28 +3,50 @@ import { Link } from "react-router-dom";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
-function NavBar() {
+function NavBar({ onNewEntryClick }) {
   return (
     <nav
       style={{
         padding: "10px",
-        /* Use a dark background and a darker border */
         backgroundColor: "#1f1f1f",
-        borderBottom: "1px solid #333"
+        borderBottom: "1px solid #333",
+        display: "flex",
+        alignItems: "center"
       }}
     >
-      <Link style={{ color: "#e0e0e0", textDecoration: "none" }} to="/">
+      <Link
+        to="/"
+        style={{ color: "#e0e0e0", textDecoration: "none", marginRight: "10px" }}
+      >
         Home
       </Link>{" "}
-      {" | "}
-      <Link style={{ color: "#e0e0e0", textDecoration: "none" }} to="/dashboard">
+
+      <Link
+        to="/dashboard"
+        style={{ color: "#e0e0e0", textDecoration: "none", marginRight: "10px" }}
+      >
         Dashboard
       </Link>{" "}
-      {" | "}
-      <Link style={{ color: "#e0e0e0", textDecoration: "none" }} to="/feed">
+
+      <Link
+        to="/feed"
+        style={{ color: "#e0e0e0", textDecoration: "none", marginRight: "10px" }}
+      >
         Feed
       </Link>{" "}
-      {" | "}
+      
+      {/* "Write New Entry" as a normal link that triggers the modal */}
+      <Link
+        to="#"
+        onClick={(e) => {
+          e.preventDefault(); // Prevent the link from actually navigating
+          onNewEntryClick();
+        }}
+        style={{ color: "#e0e0e0", textDecoration: "none", marginRight: "10px" }}
+      >
+        Write
+      </Link>{" "}
+
       <a
         style={{ color: "#e0e0e0", textDecoration: "none" }}
         href={`${backendUrl}/auth/logout`}
