@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { Link, useParams } from "react-router-dom";
 import api from "../api";
 import NodeForm from "./NodeForm";
+import DashboardContent from "./DashboardContent";  // Import the new component
 
 function Dashboard() {
   const { username } = useParams(); // if present, we are viewing someone else's dashboard
@@ -14,10 +15,10 @@ function Dashboard() {
   const [editingProfile, setEditingProfile] = useState(false);
   const [editUsername, setEditUsername] = useState("");
   const [editDescription, setEditDescription] = useState("");
-
-  const backendUrl = process.env.REACT_APP_BACKEND_URL;
   
-  // Choose endpoint: if a username is provided, call the public route; otherwise, use your own dashboard route.
+  const backendUrl = process.env.REACT_APP_BACKEND_URL;
+
+  // Decide which endpoint to call
   const endpoint = username ? `/dashboard/${username}` : "/dashboard";
 
   useEffect(() => {
@@ -60,7 +61,6 @@ function Dashboard() {
   if (loading) return <div>Loading dashboard...</div>;
   if (error) return <div>{error}</div>;
 
-  // Destructure available data. Note: In a public dashboard, no stats are returned.
   const { user, stats, nodes } = dashboardData;
 
   return (
@@ -116,17 +116,7 @@ function Dashboard() {
       )}
 
       {/* Only your own dashboard shows token stats */}
-      {stats && (
-        <div>
-          <h3>{user.username}'s stats</h3>
-          <ul>
-            <li>Daily tokens: {stats.daily_tokens}</li>
-            <li>Total tokens: {stats.total_tokens}</li>
-            <li>Global tokens: {stats.global_tokens}</li>
-            <li>Daily target tokens: {stats.target_daily_tokens}</li>
-          </ul>
-        </div>
-      )}
+      {dashboardData.stats && <DashboardContent dashboardData={dashboardData} />}
 
       <h3>Top-Level Entries</h3>
       {!username && (
