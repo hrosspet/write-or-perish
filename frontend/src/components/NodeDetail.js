@@ -1,24 +1,28 @@
 import React, { useState, useEffect } from "react";
-import { useParams, useNavigate } from "react-router-dom"; // added useNavigate
+import { useParams, useNavigate } from "react-router-dom";
+import { useUser } from "../contexts/UserContext";
 import api from "../api";
 import NodeForm from "./NodeForm";
 
 function NodeDetail() {
   const { id } = useParams();
-  const navigate = useNavigate(); // initialize navigate
+  const navigate = useNavigate();
+  const { user: currentUser } = useUser();
+
   const [node, setNode] = useState(null);
   const [children, setChildren] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [editing, setEditing] = useState(false);
-  const [editedContent, setEditedContent] = useState("");
-  const [showChildForm, setShowChildForm] = useState(false);
-  const [childFormType, setChildFormType] = useState("text");
+
+  // State to control overlay modals.
+  const [showChildFormOverlay, setShowChildFormOverlay] = useState(false);
+  const [showEditOverlay, setShowEditOverlay] = useState(false);
 
   const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
   useEffect(() => {
-    api.get(`/nodes/${id}`)
+    api
+      .get(`/nodes/${id}`)
       .then((response) => {
         setNode(response.data);
         setChildren(response.data.children || []);
@@ -26,7 +30,7 @@ function NodeDetail() {
       })
       .catch((err) => {
         console.error(err);
-        if (err.response && err.response.status === 401) {
+        if (err.response?.status === 401) {
           window.location.href = `${backendUrl}/auth/login`;
         } else {
           setError("Error fetching node details.");
@@ -35,34 +39,20 @@ function NodeDetail() {
       });
   }, [id, backendUrl]);
 
-  const handleEdit = () => {
-    setEditing(true);
-    setEditedContent(node.content);
-  };
-
-  const handleEditSubmit = (e) => {
-    e.preventDefault();
-    api.put(`/nodes/${id}`, { content: editedContent })
-      .then((response) => {
-        setNode(response.data.node);
-        setEditing(false);
-      })
-      .catch((err) => {
-        console.error(err);
-        setError("Error updating node.");
-      });
-  };
+  // Determine whether the current user is the owner.
+  const isOwner =
+    node && node.user && currentUser && node.user.id === currentUser.id;
 
   const handleDelete = () => {
     if (
       window.confirm(
-        "Are you sure you want to delete this node? This will remove the node and set all its children to have no parent."
+        "Are you sure you want to delete this node? This will remove the node and orphan all its children."
       )
     ) {
-      api.delete(`/nodes/${id}`)
-        .then((response) => {
-          // After deletion, redirect to the dashboard.
-          window.location.href = "/dashboard";
+      api
+        .delete(`/nodes/${id}`)
+        .then(() => {
+          navigate("/dashboard");
         })
         .catch((err) => {
           console.error(err);
@@ -71,18 +61,67 @@ function NodeDetail() {
     }
   };
 
-  // Only user-authored nodes are editable/deletable.
-  const canEditOrDelete = node && node.node_type === "user";
+  const handleLLMResponse = () => {
+    api
+      .post(`/nodes/${id}/llm`)
+      .then((response) => {
+        navigate(`/node/${response.data.node.id}`);
+      })
+      .catch((err) => {
+        console.error(err);
+        setError("Error requesting LLM response.");
+      });
+  };
+
+  // Add a keydown event listener for the ESC key
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape") {
+        if (showChildFormOverlay) setShowChildFormOverlay(false);
+        if (showEditOverlay) setShowEditOverlay(false);
+      }
+    };
+
+    // Only add the listener if an overlay is open.
+    if (showChildFormOverlay || showEditOverlay) {
+      window.addEventListener("keydown", handleKeyDown);
+    }
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [showChildFormOverlay, showEditOverlay]);
 
   if (loading) return <div>Loading node...</div>;
   if (error) return <div>{error}</div>;
   if (!node) return <div>No node found.</div>;
 
+  // Inline modal styles (you can extract these to a separate component if desired)
+  const modalOverlayStyle = {
+    position: "fixed",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: "rgba(0,0,0,0.8)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 1000,
+  };
+  const modalContentStyle = {
+    background: "#1e1e1e",
+    padding: "20px",
+    borderRadius: "8px",
+    width: "400px",
+    position: "relative",
+  };
+
   return (
     <div style={{ padding: "20px" }}>
       <h2>Node Detail</h2>
 
-      {/* Ancestors display (if any) */}
+      {/* Display ancestors if available */}
       {node.ancestors && node.ancestors.length > 0 && (
         <div>
           <h3>Ancestors</h3>
@@ -90,7 +129,8 @@ function NodeDetail() {
             {node.ancestors.map((ancestor) => (
               <li key={ancestor.id} style={{ margin: "5px 0" }}>
                 <a href={`/node/${ancestor.id}`}>
-                  {ancestor.username}: {ancestor.preview} | children: {ancestor.child_count}
+                  {ancestor.username}: {ancestor.preview} | children:{" "}
+                  {ancestor.child_count}
                 </a>
               </li>
             ))}
@@ -100,34 +140,103 @@ function NodeDetail() {
       )}
 
       {/* Highlighted Node Content */}
-      {editing ? (
-        <form onSubmit={handleEditSubmit}>
-          <textarea
-            value={editedContent}
-            onChange={(e) => setEditedContent(e.target.value)}
-            rows={4}
-            style={{ width: "100%" }}
-          />
-          <button type="submit">Save</button>
-          <button type="button" onClick={() => setEditing(false)}>
-            Cancel
-          </button>
-        </form>
-      ) : (
-        <div>
-          <p>{node.content}</p>
-          {canEditOrDelete && (
-            <>
-              <button onClick={handleEdit}>Edit</button>
-              <button onClick={handleDelete}>Delete</button>
-            </>
-          )}
+      <div style={{ marginTop: "20px" }}>
+        <p>{node.content}</p>
+      </div>
+
+      {/* Action Buttons placed with the highlighted node */}
+      <div style={{ marginTop: "20px" }}>
+        <button onClick={() => setShowChildFormOverlay(true)}>Add Text</button>{" "}
+        <button onClick={handleLLMResponse}>LLM Response</button>{" "}
+        {isOwner && (
+          <>
+            <button onClick={() => setShowEditOverlay(true)}>Edit</button>{" "}
+            <button onClick={handleDelete}>Delete</button>
+          </>
+        )}
+      </div>
+
+      {/* Overlay modal for "Add Text" */}
+      {showChildFormOverlay && (
+        <div
+          style={modalOverlayStyle}
+          onClick={() => setShowChildFormOverlay(false)}
+        >
+          <div
+            style={modalContentStyle}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div
+              style={{
+                position: "absolute",
+                top: "10px",
+                right: "10px",
+                fontSize: "24px",
+                fontWeight: "bold",
+                color: "#e0e0e0",
+                cursor: "pointer",
+              }}
+              onClick={() => setShowChildFormOverlay(false)}
+            >
+              &times;
+            </div>
+            <h2 style={{ color: "#e0e0e0", marginBottom: "20px" }}>
+              Add Child Node
+            </h2>
+            <NodeForm
+              parentId={node.id}
+              onSuccess={(data) => {
+                navigate(`/node/${data.id}`);
+                setShowChildFormOverlay(false);
+              }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Overlay modal for editing */}
+      {showEditOverlay && (
+        <div
+          style={modalOverlayStyle}
+          onClick={() => setShowEditOverlay(false)}
+        >
+          <div
+            style={modalContentStyle}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div
+              style={{
+                position: "absolute",
+                top: "10px",
+                right: "10px",
+                fontSize: "24px",
+                fontWeight: "bold",
+                color: "#e0e0e0",
+                cursor: "pointer",
+              }}
+              onClick={() => setShowEditOverlay(false)}
+            >
+              &times;
+            </div>
+            <h2 style={{ color: "#e0e0e0", marginBottom: "20px" }}>
+              Edit Node
+            </h2>
+            <NodeForm
+              editMode={true}
+              nodeId={node.id}
+              initialContent={node.content}
+              onSuccess={(data) => {
+                setNode(data.node ? data.node : { ...node, content: data.content });
+                setShowEditOverlay(false);
+              }}
+            />
+          </div>
         </div>
       )}
 
       <hr />
 
-      {/* Child Nodes Preview */}
+      {/* Child Nodes List */}
       <h3>Child Nodes</h3>
       {children.length === 0 && <p>No child nodes.</p>}
       <ul>
@@ -139,44 +248,6 @@ function NodeDetail() {
           </li>
         ))}
       </ul>
-
-      <hr />
-
-      {/* Child Node Creation */}
-      <h3>Add Child Node</h3>
-      <button
-        onClick={() => {
-          setChildFormType("text");
-          setShowChildForm(!showChildForm);
-        }}
-      >
-        Add Text
-      </button>{" "}
-      <button
-        onClick={() => {
-          // Trigger LLM response and shift focus to that node.
-          api.post(`/nodes/${id}/llm`)
-            .then((response) => {
-              // Redirect focus to the new LLM child node.
-              navigate(`/node/${response.data.node.id}`);
-            })
-            .catch((err) => {
-              console.error(err);
-              setError("Error requesting LLM response.");
-            });
-        }}
-      >
-        LLM Response
-      </button>
-      {showChildForm && childFormType === "text" && (
-        <NodeForm
-          parentId={node.id}
-          onSuccess={(data) => {
-            // Instead of simply updating children, navigate to the new node.
-            navigate(`/node/${data.id}`);
-          }}
-        />
-      )}
     </div>
   );
 }

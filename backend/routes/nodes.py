@@ -104,7 +104,7 @@ def get_node(node_id):
         "node_type": child.node_type,
         "created_at": child.created_at.isoformat()
     } for child in children]
-
+    print("I'm here")
     response = {
         "id": node.id,
         "content": node.content,  # full text of the highlighted node
@@ -113,7 +113,11 @@ def get_node(node_id):
         "ancestors": ancestors,
         "children": children_list,
         "created_at": node.created_at.isoformat(),
-        "updated_at": node.updated_at.isoformat()
+        "updated_at": node.updated_at.isoformat(),
+        "user": {
+            "id": node.user.id,
+            "username": node.user.username,
+        },
     }
     return jsonify(response), 200
 
