@@ -4,20 +4,99 @@ import { useUser } from "../contexts/UserContext";
 import api from "../api";
 import NodeForm from "./NodeForm";
 
+// Bubble component – shows a node preview or (if highlighted) full text.
+function Bubble({ node, isHighlighted = false, onClick }) {
+  // Use node.content if provided; if not, use node.preview or an empty string.
+  const text = node.content || node.preview || "";
+  // Format the datetime (assuming node.created_at is an ISO string).
+  const datetime = node.created_at ? new Date(node.created_at).toLocaleString() : "";
+  // Determine the number of children.
+  // Use node.child_count if provided; otherwise fall back to node.children.length.
+  const childrenCount =
+    node.child_count !== undefined
+      ? node.child_count
+      : node.children
+      ? node.children.length
+      : 0;
+
+  const style = {
+    padding: "10px",
+    margin: "5px 0",
+    background: isHighlighted ? "#2e2e2e" : "#1e1e1e",
+    border: isHighlighted ? "2px solid #61dafb" : "1px solid #333",
+    cursor: "pointer",
+    whiteSpace: "pre-wrap",
+  };
+
+  return (
+    <div style={style} onClick={() => onClick(node.id)}>
+      <div>
+        {isHighlighted
+          ? text
+          : text.length > 80
+          ? text.substring(0, 80) + "..."
+          : text}
+      </div>
+      <div style={{ fontSize: "0.7em", color: "#aba9a9", marginTop: "5px", marginLeft: "5px" }}>
+        {datetime} | {childrenCount} {childrenCount === 1 ? "child" : "children"}
+      </div>
+    </div>
+  );
+}
+
+// Recursive component to render the entire descendants tree.
+// Each level is indented (via marginLeft) and shows a left border edge.
+function RenderChildTree({ nodes, onBubbleClick }) {
+  return (
+    <div>
+      {nodes.map((child, index) => {
+        // Only apply indenting if there is more than one node in this array.
+        const shouldIndent = nodes.length > 1;
+        const containerStyle = shouldIndent
+          ? {
+              marginLeft: "20px",
+              paddingLeft: "10px",
+              borderLeft: "2px solid #61dafb",
+            }
+          : { marginLeft: "0px" };
+
+        return (
+          <div key={child.id}>
+            <div style={containerStyle}>
+              <Bubble node={child} onClick={onBubbleClick} />
+              {child.children &&
+                child.children.length > 0 && (
+                  <RenderChildTree
+                    nodes={child.children}
+                    onBubbleClick={onBubbleClick}
+                  />
+                )}
+            </div>
+            {index < nodes.length - 1 && (
+              <hr
+                style={{
+                  borderColor: "#333",
+                  marginLeft: shouldIndent ? "20px" : "0px",
+                }}
+              />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+
 function NodeDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { user: currentUser } = useUser();
-
   const [node, setNode] = useState(null);
-  const [children, setChildren] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-
-  // State to control overlay modals.
   const [showChildFormOverlay, setShowChildFormOverlay] = useState(false);
   const [showEditOverlay, setShowEditOverlay] = useState(false);
-
   const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
   useEffect(() => {
@@ -25,7 +104,6 @@ function NodeDetail() {
       .get(`/nodes/${id}`)
       .then((response) => {
         setNode(response.data);
-        setChildren(response.data.children || []);
         setLoading(false);
       })
       .catch((err) => {
@@ -39,10 +117,19 @@ function NodeDetail() {
       });
   }, [id, backendUrl]);
 
-  // Determine whether the current user is the owner.
-  const isOwner =
-    node && node.user && currentUser && node.user.id === currentUser.id;
+  if (loading) return <div>Loading node...</div>;
+  if (error) return <div>{error}</div>;
+  if (!node) return <div>No node found.</div>;
 
+  // Helper to navigate when a bubble is clicked.
+  const handleBubbleClick = (nodeId) => {
+    navigate(`/node/${nodeId}`);
+  };
+
+  // Only show edit & delete if the current user is the owner.
+  const isOwner = node.user && currentUser && node.user.id === currentUser.id;
+
+  // Action handlers for buttons.
   const handleDelete = () => {
     if (
       window.confirm(
@@ -73,97 +160,82 @@ function NodeDetail() {
       });
   };
 
-  // Add a keydown event listener for the ESC key
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if (e.key === "Escape") {
-        if (showChildFormOverlay) setShowChildFormOverlay(false);
-        if (showEditOverlay) setShowEditOverlay(false);
-      }
-    };
+  // Render ancestors as a vertical list.
+  const ancestorsSection = (
+    <div style={{ display: "flex", flexDirection: "column", marginBottom: "10px" }}>
+      {node.ancestors && node.ancestors.map((ancestor) => (
+      <Bubble key={ancestor.id} node={ancestor} onClick={handleBubbleClick} />
+    ))}
+    </div>
+  );
 
-    // Only add the listener if an overlay is open.
-    if (showChildFormOverlay || showEditOverlay) {
-      window.addEventListener("keydown", handleKeyDown);
-    }
+  // Highlighted node section – full text with action buttons directly beneath.
+  const highlightedNodeSection = (
+    <div>
+      <hr style={{ borderColor: "#333" }} />
+      <div
+        style={{
+          padding: "10px",
+          margin: "10px 0",
+          backgroundColor: "#2e2e2e",
+          border: "2px solid #61dafb",
+          borderLeft: "4px solid #61dafb",
+          whiteSpace: "pre-wrap",
+        }}
+      >
+        {node.content}
+      </div>
+      <div style={{ marginBottom: "10px" }}>
+        <button onClick={() => setShowChildFormOverlay(true)}>Add Text</button>{" "}
+        <button onClick={handleLLMResponse}>LLM Response</button>{" "}
+        {isOwner && <button onClick={() => setShowEditOverlay(true)}>Edit</button>}{" "}
+        {isOwner && <button onClick={handleDelete}>Delete</button>}
+      </div>
+      <hr style={{ borderColor: "#333" }} />
+    </div>
+  );
 
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [showChildFormOverlay, showEditOverlay]);
-
-  if (loading) return <div>Loading node...</div>;
-  if (error) return <div>{error}</div>;
-  if (!node) return <div>No node found.</div>;
-
-  // Inline modal styles (you can extract these to a separate component if desired)
-  const modalOverlayStyle = {
-    position: "fixed",
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: "rgba(0,0,0,0.8)",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    zIndex: 1000,
-  };
-  const modalContentStyle = {
-    background: "#1e1e1e",
-    padding: "20px",
-    borderRadius: "8px",
-    width: "400px",
-    position: "relative",
-  };
+  // Render the full descendant tree recursively.
+  const childrenSection = (
+    <div>
+      {node.children && node.children.length > 0 && (
+      <RenderChildTree nodes={node.children} onBubbleClick={handleBubbleClick} />
+    )}
+    </div>
+  );
 
   return (
     <div style={{ padding: "20px" }}>
-      <h2>Node Detail</h2>
+      <h2>Thread</h2>
+      {ancestorsSection}
+      {highlightedNodeSection}
+      {childrenSection}
 
-      {/* Display ancestors if available */}
-      {node.ancestors && node.ancestors.length > 0 && (
-        <div>
-          <h3>Ancestors</h3>
-          <ul>
-            {node.ancestors.map((ancestor) => (
-              <li key={ancestor.id} style={{ margin: "5px 0" }}>
-                <a href={`/node/${ancestor.id}`}>
-                  {ancestor.username}: {ancestor.preview} | children:{" "}
-                  {ancestor.child_count}
-                </a>
-              </li>
-            ))}
-          </ul>
-          <hr />
-        </div>
-      )}
-
-      {/* Highlighted Node Content */}
-      <div style={{ marginTop: "20px" }}>
-        <p>{node.content}</p>
-      </div>
-
-      {/* Action Buttons placed with the highlighted node */}
-      <div style={{ marginTop: "20px" }}>
-        <button onClick={() => setShowChildFormOverlay(true)}>Add Text</button>{" "}
-        <button onClick={handleLLMResponse}>LLM Response</button>{" "}
-        {isOwner && (
-          <>
-            <button onClick={() => setShowEditOverlay(true)}>Edit</button>{" "}
-            <button onClick={handleDelete}>Delete</button>
-          </>
-        )}
-      </div>
-
-      {/* Overlay modal for "Add Text" */}
+      {/* Modal overlay for "Add Text" */}
       {showChildFormOverlay && (
         <div
-          style={modalOverlayStyle}
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: "rgba(0,0,0,0.8)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1000,
+          }}
           onClick={() => setShowChildFormOverlay(false)}
         >
           <div
-            style={modalContentStyle}
+            style={{
+              background: "#1e1e1e",
+              padding: "20px",
+              borderRadius: "8px",
+              width: "400px",
+              position: "relative",
+            }}
             onClick={(e) => e.stopPropagation()}
           >
             <div
@@ -172,17 +244,13 @@ function NodeDetail() {
                 top: "10px",
                 right: "10px",
                 fontSize: "24px",
-                fontWeight: "bold",
-                color: "#e0e0e0",
                 cursor: "pointer",
               }}
               onClick={() => setShowChildFormOverlay(false)}
             >
               &times;
             </div>
-            <h2 style={{ color: "#e0e0e0", marginBottom: "20px" }}>
-              Add Child Node
-            </h2>
+            <h2 style={{ marginBottom: "20px" }}>Add Child Node</h2>
             <NodeForm
               parentId={node.id}
               onSuccess={(data) => {
@@ -194,14 +262,31 @@ function NodeDetail() {
         </div>
       )}
 
-      {/* Overlay modal for editing */}
+      {/* Modal overlay for "Edit Node" */}
       {showEditOverlay && (
         <div
-          style={modalOverlayStyle}
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: "rgba(0,0,0,0.8)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1000,
+          }}
           onClick={() => setShowEditOverlay(false)}
         >
           <div
-            style={modalContentStyle}
+            style={{
+              background: "#1e1e1e",
+              padding: "20px",
+              borderRadius: "8px",
+              width: "400px",
+              position: "relative",
+            }}
             onClick={(e) => e.stopPropagation()}
           >
             <div
@@ -210,17 +295,13 @@ function NodeDetail() {
                 top: "10px",
                 right: "10px",
                 fontSize: "24px",
-                fontWeight: "bold",
-                color: "#e0e0e0",
                 cursor: "pointer",
               }}
               onClick={() => setShowEditOverlay(false)}
             >
               &times;
             </div>
-            <h2 style={{ color: "#e0e0e0", marginBottom: "20px" }}>
-              Edit Node
-            </h2>
+            <h2 style={{ marginBottom: "20px" }}>Edit Node</h2>
             <NodeForm
               editMode={true}
               nodeId={node.id}
@@ -233,21 +314,6 @@ function NodeDetail() {
           </div>
         </div>
       )}
-
-      <hr />
-
-      {/* Child Nodes List */}
-      <h3>Child Nodes</h3>
-      {children.length === 0 && <p>No child nodes.</p>}
-      <ul>
-        {children.map((child) => (
-          <li key={child.id} style={{ margin: "5px 0" }}>
-            <a href={`/node/${child.id}`}>
-              {child.username}: {child.preview} | children: {child.child_count}
-            </a>
-          </li>
-        ))}
-      </ul>
     </div>
   );
 }

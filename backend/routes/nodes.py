@@ -13,6 +13,39 @@ def make_preview(text, length=200):
     return text[:length] + ("..." if len(text) > length else "")
 
 
+def compute_descendant_counts(node):
+    """
+    Recursively computes the total number of descendants (children,
+    grandchildren, etc.) for 'node' and stores it in node._descendant_count.
+    Returns the computed count.
+    """
+    total = 0
+    if node.children:
+        for child in node.children:
+            # For each child, compute its descendant count first, then add 1 (for the child itself)
+            child_descendants = compute_descendant_counts(child)
+            total += 1 + child_descendants
+    node._descendant_count = total  # cache the value on the instance
+    return total
+
+
+def serialize_node_recursive(n):
+    # Sort the children using the cached _descendant_count
+    sorted_children = sorted(n.children, key=lambda child: child._descendant_count, reverse=True)
+    return {
+        "id": n.id,
+        "content": n.content,
+        "node_type": n.node_type,
+        "child_count": len(n.children),
+        "created_at": n.created_at.isoformat(),
+        "updated_at": n.updated_at.isoformat(),
+        "username": n.user.username if n.user else "Unknown",
+        # You might also want to pass the descendant count along for display.
+        "descendant_count": n._descendant_count,
+        "children": [serialize_node_recursive(child) for child in sorted_children]
+    }
+
+
 # Create a new node (a “text bubble”)
 @nodes_bp.route("/", methods=["POST"])
 @login_required
@@ -80,11 +113,14 @@ def update_node(node_id):
 def get_node(node_id):
     node = Node.query.get_or_404(node_id)
 
-    # Build ancestors recursively (including username and child_count)
+    # Compute descendant counts once for the entire subtree.
+    compute_descendant_counts(node)
+
+    # Build ancestors as before.
     ancestors = []
     current = node.parent
     while current:
-        ancestors.insert(0, {  # so that the root is first
+        ancestors.insert(0, {
             "id": current.id,
             "username": current.user.username if current.user else "Unknown",
             "preview": make_preview(current.content),
@@ -94,24 +130,15 @@ def get_node(node_id):
         })
         current = current.parent
 
-    # Immediate children as previews (including username)
-    children = Node.query.filter_by(parent_id=node_id).all()
-    children_list = [{
-        "id": child.id,
-        "username": child.user.username if child.user else "Unknown",
-        "preview": make_preview(child.content),
-        "child_count": len(child.children),
-        "node_type": child.node_type,
-        "created_at": child.created_at.isoformat()
-    } for child in children]
-    print("I'm here")
-    response = {
+    # Serialize the current node (its children are now sorted descending by descendant count).
+    node_data = {
         "id": node.id,
-        "content": node.content,  # full text of the highlighted node
+        "content": node.content,
         "node_type": node.node_type,
         "child_count": len(node.children),
         "ancestors": ancestors,
-        "children": children_list,
+        "children": [serialize_node_recursive(child) for child in sorted(node.children,
+                      key=lambda child: child._descendant_count, reverse=True)],
         "created_at": node.created_at.isoformat(),
         "updated_at": node.updated_at.isoformat(),
         "user": {
@@ -119,7 +146,7 @@ def get_node(node_id):
             "username": node.user.username,
         },
     }
-    return jsonify(response), 200
+    return jsonify(node_data), 200
 
 # Retrieve children of a node (as previews).
 @nodes_bp.route("/<int:node_id>/children", methods=["GET"])
