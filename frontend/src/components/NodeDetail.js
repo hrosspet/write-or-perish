@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
+import ReactMarkdown from "react-markdown";
 import { useUser } from "../contexts/UserContext";
 import api from "../api";
 import NodeForm from "./NodeForm";
+
 
 // Bubble component – shows a node preview or (if highlighted) full text.
 function Bubble({ node, isHighlighted = false, onClick }) {
@@ -180,10 +182,9 @@ function NodeDetail() {
           backgroundColor: "#2e2e2e",
           border: "2px solid #61dafb",
           borderLeft: "4px solid #61dafb",
-          whiteSpace: "pre-wrap",
         }}
       >
-        {node.content}
+        <ReactMarkdown>{node.content}</ReactMarkdown>
       </div>
       <div style={{ marginBottom: "10px" }}>
         <button onClick={() => setShowChildFormOverlay(true)}>Add Text</button>{" "}
