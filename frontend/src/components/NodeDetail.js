@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useNavigate } from "react-router-dom"; // added useNavigate
 import api from "../api";
 import NodeForm from "./NodeForm";
 
 function NodeDetail() {
   const { id } = useParams();
+  const navigate = useNavigate(); // initialize navigate
   const [node, setNode] = useState(null);
   const [children, setChildren] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -17,8 +18,7 @@ function NodeDetail() {
   const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
   useEffect(() => {
-    api
-      .get(`/nodes/${id}`)
+    api.get(`/nodes/${id}`)
       .then((response) => {
         setNode(response.data);
         setChildren(response.data.children || []);
@@ -42,8 +42,7 @@ function NodeDetail() {
 
   const handleEditSubmit = (e) => {
     e.preventDefault();
-    api
-      .put(`/nodes/${id}`, { content: editedContent })
+    api.put(`/nodes/${id}`, { content: editedContent })
       .then((response) => {
         setNode(response.data.node);
         setEditing(false);
@@ -54,12 +53,15 @@ function NodeDetail() {
       });
   };
 
-  // New delete handler
   const handleDelete = () => {
-    if (window.confirm("Are you sure you want to delete this node? This will remove the node and set all its children to have no parent.")) {
+    if (
+      window.confirm(
+        "Are you sure you want to delete this node? This will remove the node and set all its children to have no parent."
+      )
+    ) {
       api.delete(`/nodes/${id}`)
         .then((response) => {
-          // After deletion, redirect the user (for example, back to the dashboard)
+          // After deletion, redirect to the dashboard.
           window.location.href = "/dashboard";
         })
         .catch((err) => {
@@ -69,9 +71,7 @@ function NodeDetail() {
     }
   };
 
-  // Optionally, if your GET /nodes/:id endpoint includes the node's user_id,
-  // you can conditionally render edit/delete controls only if the current user is the owner.
-  // For now, we'll assume that only user-authored nodes (node.node_type === "user") are editable/deletable.
+  // Only user-authored nodes are editable/deletable.
   const canEditOrDelete = node && node.node_type === "user";
 
   if (loading) return <div>Loading node...</div>;
@@ -82,7 +82,7 @@ function NodeDetail() {
     <div style={{ padding: "20px" }}>
       <h2>Node Detail</h2>
 
-      {/* Ancestors */}
+      {/* Ancestors display (if any) */}
       {node.ancestors && node.ancestors.length > 0 && (
         <div>
           <h3>Ancestors</h3>
@@ -127,7 +127,7 @@ function NodeDetail() {
 
       <hr />
 
-      {/* Children preview */}
+      {/* Child Nodes Preview */}
       <h3>Child Nodes</h3>
       {children.length === 0 && <p>No child nodes.</p>}
       <ul>
@@ -142,6 +142,7 @@ function NodeDetail() {
 
       <hr />
 
+      {/* Child Node Creation */}
       <h3>Add Child Node</h3>
       <button
         onClick={() => {
@@ -150,37 +151,29 @@ function NodeDetail() {
         }}
       >
         Add Text
-      </button>
-      {"  "}
-      <button onClick={() => {
-         // trigger LLM response
-         api.post(`/nodes/${id}/llm`)
+      </button>{" "}
+      <button
+        onClick={() => {
+          // Trigger LLM response and shift focus to that node.
+          api.post(`/nodes/${id}/llm`)
             .then((response) => {
-              const newChild = {
-                id: response.data.node.id,
-                username: response.data.node.username || "Unknown",
-                preview: response.data.node.content.substring(0, 200),
-                child_count: 0,
-              };
-              setChildren([...children, newChild]);
+              // Redirect focus to the new LLM child node.
+              navigate(`/node/${response.data.node.id}`);
             })
             .catch((err) => {
               console.error(err);
               setError("Error requesting LLM response.");
             });
-      }}>LLM Response</button>
+        }}
+      >
+        LLM Response
+      </button>
       {showChildForm && childFormType === "text" && (
         <NodeForm
           parentId={node.id}
           onSuccess={(data) => {
-            const newChild = {
-              id: data.id,
-              username: data.username || "Unknown",
-              preview: data.content.substring(0, 200),
-              child_count: data.child_count || 0,
-            };
-            setChildren([...children, newChild]);
-            setShowChildForm(false);
+            // Instead of simply updating children, navigate to the new node.
+            navigate(`/node/${data.id}`);
           }}
         />
       )}
