@@ -1,23 +1,23 @@
 import React, { useState, useEffect } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import api from "../api";
-import NodeForm from "./NodeForm";
-import DashboardContent from "./DashboardContent";  // Import the new component
+import DashboardContent from "./DashboardContent";
 
 function Dashboard() {
-  const { username } = useParams(); // if present, we are viewing someone else's dashboard
+  const { username } = useParams(); // if present, we're viewing someone else's dashboard
   const [dashboardData, setDashboardData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  
+
   // For profile editing—only allowed for your own dashboard.
   const [editingProfile, setEditingProfile] = useState(false);
   const [editUsername, setEditUsername] = useState("");
   const [editDescription, setEditDescription] = useState("");
-  
+
+  const navigate = useNavigate();
   const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
-  // Decide which endpoint to call
+  // Decide which endpoint to call based on the URL.
   const endpoint = username ? `/dashboard/${username}` : "/dashboard";
 
   useEffect(() => {
@@ -110,24 +110,35 @@ function Dashboard() {
         </>
       )}
 
-      {/* Only your own dashboard shows token stats */}
+      {/* Display the chart with totals */}
       {dashboardData.stats && <DashboardContent dashboardData={dashboardData} />}
 
-      <h3>Top-Level Entries</h3>
-      <ul>
+      {/* Graphical (bubble-style) view of top-level entries */}
+      <h3 style={{ color: "#e0e0e0", marginTop: "40px" }}>Top-Level Entries</h3>
+      <div style={{ display: "flex", flexDirection: "column", gap: "20px", marginLeft: "20px" }}>
         {nodes.map((node) => (
-          <li key={node.id} style={{ margin: "10px 0" }}>
-            <Link to={`/node/${node.id}`}>
-              <div>
-                <p>{node.preview}</p>
-                <small>
-                  {new Date(node.created_at).toLocaleString()} | children: {node.child_count}
-                </small>
-              </div>
-            </Link>
-          </li>
+          <div
+            key={node.id}
+            onClick={() => navigate(`/node/${node.id}`)}
+            style={{
+              padding: "15px",
+              background: "#1e1e1e",
+              border: "2px solid #61dafb",
+              borderRadius: "8px",
+              width: "50%", // Limit the width to 50% of the container.
+              cursor: "pointer",
+              boxShadow: "2px 2px 6px rgba(0,0,0,0.5)"
+            }}
+          >
+            <div style={{ marginBottom: "8px" }}>
+              {node.preview}
+            </div>
+            <div style={{ fontSize: "0.8em", color: "#aba9a9" }}>
+              {new Date(node.created_at).toLocaleString()} | children: {node.child_count}
+            </div>
+          </div>
         ))}
-      </ul>
+      </div>
     </div>
   );
 }

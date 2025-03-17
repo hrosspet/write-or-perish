@@ -8,19 +8,13 @@ import NodeForm from "./NodeForm";
 
 // Bubble component – shows a node preview or (if highlighted) full text.
 function Bubble({ node, isHighlighted = false, onClick }) {
-  // Use node.content if provided; if not, use node.preview or an empty string.
   const text = node.content || node.preview || "";
-  // Format the datetime (assuming node.created_at is an ISO string).
   const datetime = node.created_at ? new Date(node.created_at).toLocaleString() : "";
-  // Determine the number of children.
-  // Use node.child_count if provided; otherwise fall back to node.children.length.
-  const childrenCount =
-    node.child_count !== undefined
-      ? node.child_count
-      : node.children
-      ? node.children.length
-      : 0;
+  const childrenCount = node.child_count !== undefined
+    ? node.child_count
+    : (node.children ? node.children.length : 0);
 
+  // Update the style here:
   const style = {
     padding: "10px",
     margin: "5px 0",
@@ -28,16 +22,16 @@ function Bubble({ node, isHighlighted = false, onClick }) {
     border: isHighlighted ? "2px solid #61dafb" : "1px solid #333",
     cursor: "pointer",
     whiteSpace: "pre-wrap",
+    
+    // New properties:
+    width: "50%",         // Half of the container width
+    marginLeft: "20px"      // Shifted little bit from left border
   };
 
   return (
     <div style={style} onClick={() => onClick(node.id)}>
       <div>
-        {isHighlighted
-          ? text
-          : text.length > 80
-          ? text.substring(0, 80) + "..."
-          : text}
+        {text.length > 300 ? text.substring(0, 300) + "..." : text}
       </div>
       <div style={{ fontSize: "0.7em", color: "#aba9a9", marginTop: "5px", marginLeft: "5px" }}>
         {datetime} | {childrenCount} {childrenCount === 1 ? "child" : "children"}
@@ -182,6 +176,8 @@ function NodeDetail() {
           backgroundColor: "#2e2e2e",
           border: "2px solid #61dafb",
           borderLeft: "4px solid #61dafb",
+          width: "50%",       // Limit highlighted node to 50% if desired
+          marginLeft: "20px"  // And shift it a little from the left
         }}
       >
         <ReactMarkdown>{node.content}</ReactMarkdown>
