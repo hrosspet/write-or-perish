@@ -15,3 +15,8 @@ class Config:
     OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
     FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+
+    # Production Security Settings
+    SESSION_COOKIE_SECURE = True
+    SESSION_COOKIE_HTTPONLY = True
+    REMEMBER_COOKIE_SECURE = True

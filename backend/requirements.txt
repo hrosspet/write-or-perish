@@ -8,3 +8,4 @@ psycopg2-binary==2.9.3
 python-dotenv==1.0.0
 openai
 Werkzeug==2.0.3
+gunicorn==23.0.0
