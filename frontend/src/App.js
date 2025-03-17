@@ -66,7 +66,7 @@ function App() {
               background: '#1e1e1e',
               padding: '20px',
               borderRadius: '8px',
-              width: '400px'
+              width: '800px'
             }}
           >
             {/* Cross icon to cancel */}

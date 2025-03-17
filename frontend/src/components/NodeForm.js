@@ -44,7 +44,7 @@ const NodeForm = forwardRef(
         <textarea
           value={content}
           onChange={(e) => setContent(e.target.value)}
-          rows={4}
+          rows={20}
           style={{ width: "100%" }}
           placeholder="Write your thoughts here..."
         />
