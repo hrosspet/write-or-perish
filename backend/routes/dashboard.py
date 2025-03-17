@@ -6,30 +6,24 @@ from datetime import date
 
 dashboard_bp = Blueprint("dashboard_bp", __name__)
 
-# Helper: tokens from LLM responses for the current day.
 def get_daily_tokens(user):
     today = date.today()
-    tokens = db.session.query(db.func.sum(Node.token_count)).filter(
+    tokens = db.session.query(db.func.sum(Node.distributed_tokens)).filter(
         Node.user_id == user.id,
-        Node.node_type == 'llm',
         db.func.date(Node.created_at) == today
     ).scalar()
     return tokens or 0
 
-# Helper: total tokens for the user.
 def get_total_tokens(user):
-    tokens = db.session.query(db.func.sum(Node.token_count)).filter(
-        Node.user_id == user.id,
-        Node.node_type == 'llm'
+    tokens = db.session.query(db.func.sum(Node.distributed_tokens)).filter(
+        Node.user_id == user.id
     ).scalar()
     return tokens or 0
 
-# Global token count (across all users)
 def get_global_tokens():
-    tokens = db.session.query(db.func.sum(Node.token_count)).filter(
-        Node.node_type == 'llm'
-    ).scalar()
+    tokens = db.session.query(db.func.sum(Node.distributed_tokens)).scalar()
     return tokens or 0
+
 
 # Dashboard endpoint: only return top-level nodes (nodes with no parent)
 @dashboard_bp.route("/", methods=["GET"])

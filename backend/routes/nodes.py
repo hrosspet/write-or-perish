@@ -46,6 +46,11 @@ def serialize_node_recursive(n):
     }
 
 
+def approximate_token_count(text):
+    return max(1, len(text.split()))
+
+
+
 # Create a new node (a “text bubble”)
 @nodes_bp.route("/", methods=["POST"])
 @login_required
@@ -168,25 +173,20 @@ def get_children(node_id):
 @nodes_bp.route("/<int:node_id>/llm", methods=["POST"])
 @login_required
 def request_llm_response(node_id):
-    # Get the currently highlighted (parent) node.
     parent_node = Node.query.get_or_404(node_id)
-    
-    # Build a list (chain) of nodes from the top‐level node to the current node.
+
+    # Build the chain of nodes (from top‐level to current)
     node_chain = []
     current = parent_node
     while current:
-        # Insert at the beginning so that the final list is ordered from oldest (top-level) to newest.
         node_chain.insert(0, current)
         current = current.parent
 
-    # Get the current model name from your environment (this indicates the special LLM username).
     model_name = os.environ.get("LLM_NAME")
-    
-    # Build the messages array per the new format. Each node becomes one message.
-    # When the node author equals model_name, we use role "assistant". Otherwise, role "user".
     messages = []
     for node in node_chain:
         author = node.user.username if node.user else "Unknown"
+        # For the LLM user, use the "assistant" role; otherwise, "user."
         if author == model_name:
             role = "assistant"
             message_text = node.content
@@ -203,8 +203,8 @@ def request_llm_response(node_id):
             ]
         })
 
-    # Initialize the OpenAI client with your API key.
     api_key = current_app.config.get("OPENAI_API_KEY")
+    # (Initialize your OpenAI client as before)
     client = OpenAI(api_key=api_key)
     
     try:
@@ -228,9 +228,10 @@ def request_llm_response(node_id):
         current_app.logger.error("Error extracting LLM text: %s", e)
         return jsonify({"error": "Error parsing LLM response"}), 500
 
-    total_tokens = response.usage.total_tokens if response.usage else None
+    # Extract the total token count from the response.
+    total_tokens = response.usage.total_tokens if response.usage else 0
 
-    # Look up (or create) the special LLM user if it does not already exist.
+    # Look up (or create) the special LLM user.
     from backend.models import User
     llm_user = User.query.filter_by(username=model_name).first()
     if not llm_user:
@@ -238,13 +239,27 @@ def request_llm_response(node_id):
         db.session.add(llm_user)
         db.session.commit()
 
-    # Save the LLM-generated response as a new child node.
+    # ---------- Redistribute tokens to the contributing (non-LLM) nodes ----------
+    # Filter node_chain: only include nodes where the user is NOT the LLM user.
+    contributing_nodes = [n for n in node_chain if n.user.username != model_name]
+    if contributing_nodes and total_tokens:
+        total_weight = sum(approximate_token_count(n.content) for n in contributing_nodes)
+        for n in contributing_nodes:
+            weight = approximate_token_count(n.content)
+            # Calculate share proportionally (round if desired)
+            share = int(round(total_tokens * (weight / total_weight))) if total_weight > 0 else 0
+            # Add the share to distributed_tokens for that node.
+            n.distributed_tokens += share
+            db.session.add(n)
+    # -----------------------------------------------------------------------------
+    
+    # Create the LLM node with token_count set to 0 so no tokens are credited to the LLM user.
     llm_node = Node(
         user_id=llm_user.id,
         parent_id=parent_node.id,
         node_type="llm",
         content=llm_text,
-        token_count=total_tokens
+        token_count=0  # No direct tokens assigned here.
     )
     db.session.add(llm_node)
     try:
