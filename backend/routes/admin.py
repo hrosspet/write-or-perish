@@ -6,7 +6,7 @@ from backend.extensions import db
 
 admin_bp = Blueprint("admin_bp", __name__)
 
-# Decorator to check that the current user is the admin (username: "hrosspet")
+# Decorator to check that the current user is the admin (placeholder check by username)
 def admin_required(func):
     @wraps(func)
     def decorated_function(*args, **kwargs):
@@ -50,8 +50,42 @@ def update_user_email(user_id):
     data = request.get_json()
     email = data.get("email")
     if email is None:
-        return jsonify({"error": "Email is required"}), 400
+        return jsonify({"error": "Email is required."}), 400
     user = User.query.get_or_404(user_id)
     user.email = email
     db.session.commit()
     return jsonify({"message": "Email updated", "email": user.email}), 200
+
+# New endpoint: Whitelist a user by handle.
+@admin_bp.route("/whitelist", methods=["POST"])
+@login_required
+@admin_required
+def whitelist_user():
+    data = request.get_json() or {}
+    handle = data.get("handle", "").strip()
+    if not handle:
+        return jsonify({"error": "Handle is required."}), 400
+
+    # Check if a user with that handle already exists.
+    if User.query.filter_by(username=handle).first():
+        return jsonify({"error": "User with that handle already exists."}), 400
+
+    # Create a new user with the handle
+    user = User(twitter_id=handle, username=handle, approved=True)
+    db.session.add(user)
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "DB error", "details": str(e)}), 500
+    return jsonify({
+        "message": "User whitelisted successfully.",
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "twitter_id": user.twitter_id,
+            "approved": user.approved,
+            "accepted_terms_at": user.accepted_terms_at,  # Will be null.
+            "email": user.email
+        }
+    }), 201

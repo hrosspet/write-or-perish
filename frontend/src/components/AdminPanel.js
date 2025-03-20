@@ -4,6 +4,8 @@ import api from "../api";
 function AdminPanel() {
   const [users, setUsers] = useState([]);
   const [error, setError] = useState("");
+  const [newHandle, setNewHandle] = useState("");
+  const [newHandleError, setNewHandleError] = useState("");
 
   const fetchUsers = async () => {
     try {
@@ -19,21 +21,19 @@ function AdminPanel() {
     fetchUsers();
   }, []);
 
-  // Toggle a user's approved status.
   const toggleApproved = async (userId) => {
     try {
       await api.post(`/admin/users/${userId}/toggle`);
-      fetchUsers(); // refresh list after toggling
+      fetchUsers();
     } catch (err) {
       console.error(err);
       setError("Error toggling user status.");
     }
   };
 
-  // Allow updating the user's email.
   const updateEmail = async (userId, currentEmail) => {
     const newEmail = prompt("Enter new email:", currentEmail || "");
-    if (newEmail === null) return; // canceled
+    if (newEmail === null) return; // cancelled
     try {
       await api.put(`/admin/users/${userId}/update_email`, { email: newEmail });
       fetchUsers();
@@ -43,9 +43,40 @@ function AdminPanel() {
     }
   };
 
+  const handleWhitelistUser = async () => {
+    if (!newHandle.trim()) {
+      setNewHandleError("Handle is required.");
+      return;
+    }
+    try {
+      await api.post("/admin/whitelist", { handle: newHandle });
+      setNewHandle("");
+      setNewHandleError("");
+      fetchUsers();
+    } catch (err) {
+      console.error(err);
+      setNewHandleError(err.response?.data?.error || "Error whitelisting user.");
+    }
+  };
+
   return (
     <div style={{ padding: "20px" }}>
       <h1>Admin Panel</h1>
+
+      {/* Whitelist New User Section */}
+      <div style={{ marginBottom: "20px", padding: "10px", border: "1px solid #333" }}>
+        <h2>Whitelist a New User</h2>
+        <input
+          type="text"
+          value={newHandle}
+          onChange={(e) => setNewHandle(e.target.value)}
+          placeholder="Enter user handle"
+          style={{ padding: "8px", marginRight: "10px" }}
+        />
+        <button onClick={handleWhitelistUser}>Whitelist User</button>
+        {newHandleError && <div style={{ color: "red" }}>{newHandleError}</div>}
+      </div>
+
       {error && <div style={{ color: "red" }}>{error}</div>}
       <table style={{ width: "100%", borderCollapse: "collapse", color: "#e0e0e0" }}>
         <thead>
