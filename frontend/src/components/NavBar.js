@@ -1,9 +1,11 @@
 import React from "react";
 import { Link } from "react-router-dom";
+import { useUser } from "../contexts/UserContext";  // Import the user context
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
 function NavBar({ onNewEntryClick }) {
+  const { user } = useUser();
   return (
     <nav
       style={{
@@ -14,39 +16,33 @@ function NavBar({ onNewEntryClick }) {
         alignItems: "center"
       }}
     >
-      <Link
-        to="/"
-        style={{ color: "#e0e0e0", textDecoration: "none", marginRight: "10px" }}
-      >
+      <Link to="/" style={{ color: "#e0e0e0", textDecoration: "none", marginRight: "10px" }}>
         Home
-      </Link>{" "}
-
-      <Link
-        to="/dashboard"
-        style={{ color: "#e0e0e0", textDecoration: "none", marginRight: "10px" }}
-      >
+      </Link>
+      <Link to="/dashboard" style={{ color: "#e0e0e0", textDecoration: "none", marginRight: "10px" }}>
         Dashboard
-      </Link>{" "}
-
-      <Link
-        to="/feed"
-        style={{ color: "#e0e0e0", textDecoration: "none", marginRight: "10px" }}
-      >
+      </Link>
+      <Link to="/feed" style={{ color: "#e0e0e0", textDecoration: "none", marginRight: "10px" }}>
         Feed
-      </Link>{" "}
-      
-      {/* "Write New Entry" as a normal link that triggers the modal */}
+      </Link>
       <Link
         to="#"
         onClick={(e) => {
-          e.preventDefault(); // Prevent the link from actually navigating
+          e.preventDefault(); // Prevent navigation
           onNewEntryClick();
         }}
         style={{ color: "#e0e0e0", textDecoration: "none", marginRight: "10px" }}
       >
         Write
-      </Link>{" "}
-
+      </Link>
+      {user && user.username === "hrosspet" && (
+        <Link
+          to="/admin"
+          style={{ color: "#e0e0e0", textDecoration: "none", marginRight: "10px" }}
+        >
+          Admin
+        </Link>
+      )}
       <a
         style={{ color: "#e0e0e0", textDecoration: "none" }}
         href={`${backendUrl}/auth/logout`}

@@ -7,20 +7,34 @@ import NodeDetail from "./components/NodeDetail";
 import NavBar from "./components/NavBar";
 import NodeForm from "./components/NodeForm";
 import TermsModal from "./components/TermsModal";
+import AdminPanel from "./components/AdminPanel";
+import AlphaModal from "./components/AlphaModal";
 import { useUser } from "./contexts/UserContext";
 
 function App() {
   const [showNewEntry, setShowNewEntry] = useState(false);
   const nodeFormRef = useRef(null);
-  const { user, setUser } = useUser();
   const [showTerms, setShowTerms] = useState(false);
+  const [showAlpha, setShowAlpha] = useState(false);
+  const { user, setUser } = useUser();
 
   // When the user info is loaded, check if they have accepted the terms.
   useEffect(() => {
-    if (user && !user.accepted_terms_at) {
-      setShowTerms(true);
-    } else {
-      setShowTerms(false);
+    if (user) {
+      // Show terms modal if not accepted.
+      if (!user.accepted_terms_at) {
+        setShowTerms(true);
+      } else {
+        setShowTerms(false);
+      }
+      // Also, if they have accepted terms but are not approved (and haven’t provided an email),
+      // show the waiting-list modal.
+      // if (user.accepted_terms_at && user.approved === false && !user.email) {
+      if (user.accepted_terms_at && !user.approved) {
+        setShowAlpha(true);
+      } else {
+        setShowAlpha(false);
+      }
     }
   }, [user]);
 
@@ -107,10 +121,17 @@ function App() {
       {showTerms && (
         <TermsModal
           onAccepted={(acceptedTimestamp) => {
-            // Update the global user state.
             setUser({ ...user, accepted_terms_at: acceptedTimestamp });
             setShowTerms(false);
           }}
+        />
+      )}
+
+      {showAlpha && (
+        <AlphaModal
+        user={user}
+          onClose={() => setShowAlpha(false)}
+          onUpdate={(updatedUser) => setUser(updatedUser)}
         />
       )}
 
@@ -120,6 +141,7 @@ function App() {
         <Route path="/dashboard/:username" element={<Dashboard />} />
         <Route path="/feed" element={<Feed />} />
         <Route path="/node/:id" element={<NodeDetail />} />
+        <Route path="/admin" element={<AdminPanel />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </div>

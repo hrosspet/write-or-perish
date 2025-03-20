@@ -45,7 +45,8 @@ def get_dashboard():
             "id": current_user.id,
             "username": current_user.username,
             "description": current_user.description,
-            "accepted_terms_at": current_user.accepted_terms_at.isoformat() if current_user.accepted_terms_at else None
+            "accepted_terms_at": current_user.accepted_terms_at.isoformat() if current_user.accepted_terms_at else None,
+            "approved": current_user.approved
         },
         "stats": {
             "daily_tokens": get_daily_tokens(current_user),
@@ -106,6 +107,7 @@ def update_user():
     data = request.get_json()
     new_username = data.get("username")
     new_description = data.get("description")
+    new_email = data.get("email")
 
     if new_description and len(new_description) > 128:
         return jsonify({"error": "Description exceeds maximum length of 128 characters."}), 400
@@ -114,6 +116,8 @@ def update_user():
         current_user.username = new_username
     if new_description is not None:
         current_user.description = new_description
+    if new_email is not None:
+        current_user.email = new_email
 
     try:
         db.session.commit()
@@ -122,7 +126,10 @@ def update_user():
             "user": {
                 "id": current_user.id,
                 "username": current_user.username,
-                "description": current_user.description
+                "description": current_user.description,
+                "email": current_user.email,
+                "approved": current_user.approved,
+                "accepted_terms_at": current_user.accepted_terms_at.isoformat() if current_user.accepted_terms_at else None
             }
         }), 200
     except Exception as e:

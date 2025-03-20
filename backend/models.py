@@ -10,6 +10,9 @@ class User(db.Model, UserMixin):
     description = db.Column(db.String(128), nullable=True, default="")
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     accepted_terms_at = db.Column(db.DateTime, nullable=True)
+    # NEW: Approval status for our alpha (whitelisting) and optional email.
+    approved = db.Column(db.Boolean, default=False, nullable=False)
+    email = db.Column(db.String(128), nullable=True)
     
     # Relationship to text nodes
     nodes = db.relationship("Node", backref="user", lazy=True)
