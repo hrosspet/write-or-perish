@@ -189,7 +189,7 @@ Make sure to configure a process manager using **systemd** or **Supervisor** to 
 server {
     server {
        listen 80;
-       server_name 35.224.144.192;
+       server_name writeorperish.org www.writeorperish.org;
        root /home/hrosspet/write-or-perish/frontend/build;
        index index.html index.htm;
 
