@@ -187,24 +187,33 @@ Make sure to configure a process manager using **systemd** or **Supervisor** to 
 
    ```nginx
 server {
-   listen 80;
-   server_name 35.224.144.192;
-   root /home/hrosspet/write-or-perish/frontend/build;
-   index index.html index.htm;
+    server {
+       listen 80;
+       server_name 35.224.144.192;
+       root /home/hrosspet/write-or-perish/frontend/build;
+       index index.html index.htm;
 
-   location / {
-       try_files $uri $uri/ /index.html;
-   }
+       location / {
+           try_files $uri $uri/ /index.html;
+       }
 
-   location /api/ {
-       proxy_pass http://127.0.0.1:8000/;
-       proxy_set_header Host $host;
-       proxy_set_header X-Real-IP $remote_addr;
-       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-       proxy_set_header X-Forwarded-Proto $scheme;
-   }
+       # Proxy backend authentication endpoints to gunicorn.
+       location /auth/ {
+           proxy_pass http://127.0.0.1:8000;
+           proxy_set_header Host $host;
+           proxy_set_header X-Real-IP $remote_addr;
+           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+           proxy_set_header X-Forwarded-Proto $scheme;
+       }
 
-
+       location /api/ {
+           proxy_pass http://127.0.0.1:8000;
+           proxy_set_header Host $host;
+           proxy_set_header X-Real-IP $remote_addr;
+           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+           proxy_set_header X-Forwarded-Proto $scheme;
+       }
+    }
 }
    ```
 
