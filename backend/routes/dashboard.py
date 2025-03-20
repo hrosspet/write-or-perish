@@ -44,7 +44,8 @@ def get_dashboard():
         "user": {
             "id": current_user.id,
             "username": current_user.username,
-            "description": current_user.description
+            "description": current_user.description,
+            "accepted_terms_at": current_user.accepted_terms_at.isoformat() if current_user.accepted_terms_at else None
         },
         "stats": {
             "daily_tokens": get_daily_tokens(current_user),

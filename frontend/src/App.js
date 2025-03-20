@@ -6,26 +6,34 @@ import Feed from "./components/Feed";
 import NodeDetail from "./components/NodeDetail";
 import NavBar from "./components/NavBar";
 import NodeForm from "./components/NodeForm";
+import TermsModal from "./components/TermsModal";
+import { useUser } from "./contexts/UserContext";
 
 function App() {
   const [showNewEntry, setShowNewEntry] = useState(false);
   const nodeFormRef = useRef(null);
+  const { user, setUser } = useUser();
+  const [showTerms, setShowTerms] = useState(false);
 
-  // Function to handle closing the modal.
+  // When the user info is loaded, check if they have accepted the terms.
+  useEffect(() => {
+    if (user && !user.accepted_terms_at) {
+      setShowTerms(true);
+    } else {
+      setShowTerms(false);
+    }
+  }, [user]);
+
   const handleCloseModal = () => {
-    // If NodeForm is dirty (contains text), ask for confirmation.
     if (nodeFormRef.current && nodeFormRef.current.isDirty()) {
-      const confirmed = window.confirm(
-        "You have unsaved changes. Are you sure you want to close?"
-      );
+      const confirmed = window.confirm("You have unsaved changes. Are you sure you want to close?");
       if (!confirmed) {
-        return; // Do nothing if not confirmed.
+        return;
       }
     }
     setShowNewEntry(false);
   };
 
-  // Escape key handler to close modal with confirmation.
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.key === "Escape") {
@@ -42,13 +50,10 @@ function App() {
 
   return (
     <div>
-      {/* Pass onNewEntryClick to NavBar */}
       <NavBar onNewEntryClick={() => setShowNewEntry(true)} />
-      
-      {/* Global New Entry Modal */}
       {showNewEntry && (
         <div
-          onClick={handleCloseModal}  // Clicking outside triggers close with confirmation.
+          onClick={handleCloseModal}
           style={{
             position: 'fixed',
             top: 0, left: 0, right: 0, bottom: 0,
@@ -60,7 +65,7 @@ function App() {
           }}
         >
           <div
-            onClick={(e) => e.stopPropagation()}  // Prevent clicks inside the modal from closing it.
+            onClick={(e) => e.stopPropagation()}
             style={{
               position: 'relative',
               background: '#1e1e1e',
@@ -69,8 +74,7 @@ function App() {
               width: '800px'
             }}
           >
-            {/* Cross icon to cancel */}
-            <div 
+            <div
               style={{
                 position: 'absolute',
                 top: '10px',
@@ -87,7 +91,6 @@ function App() {
             <h2 style={{ color: '#e0e0e0', marginBottom: '20px' }}>
               Write New Entry
             </h2>
-            {/* Render NodeForm normally so its internal Submit button is visible */}
             <NodeForm
               ref={nodeFormRef}
               parentId={null}
@@ -99,7 +102,18 @@ function App() {
           </div>
         </div>
       )}
-      
+
+      {/* Render the Terms Modal if the user hasn’t accepted the terms yet */}
+      {showTerms && (
+        <TermsModal
+          onAccepted={(acceptedTimestamp) => {
+            // Update the global user state.
+            setUser({ ...user, accepted_terms_at: acceptedTimestamp });
+            setShowTerms(false);
+          }}
+        />
+      )}
+
       <Routes>
         <Route path="/" element={<LandingPage />} />
         <Route path="/dashboard" element={<Dashboard />} />

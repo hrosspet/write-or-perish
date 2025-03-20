@@ -9,6 +9,7 @@ class User(db.Model, UserMixin):
     # A short description that the user may set (max 128 characters)
     description = db.Column(db.String(128), nullable=True, default="")
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    accepted_terms_at = db.Column(db.DateTime, nullable=True)
     
     # Relationship to text nodes
     nodes = db.relationship("Node", backref="user", lazy=True)
