@@ -38,7 +38,8 @@ def get_dashboard():
             "preview": preview,
             "node_type": node.node_type,
             "child_count": len(node.children),
-            "created_at": node.created_at.isoformat()
+            "created_at": node.created_at.isoformat(),
+            "username": node.user.username
         })
     dashboard = {
         "user": {

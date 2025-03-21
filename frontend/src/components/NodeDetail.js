@@ -4,41 +4,7 @@ import ReactMarkdown from "react-markdown";
 import { useUser } from "../contexts/UserContext";
 import api from "../api";
 import NodeForm from "./NodeForm";
-
-
-// Bubble component – shows a node preview or (if highlighted) full text.
-function Bubble({ node, isHighlighted = false, onClick }) {
-  const text = node.content || node.preview || "";
-  const datetime = node.created_at ? new Date(node.created_at).toLocaleString() : "";
-  const childrenCount = node.child_count !== undefined
-    ? node.child_count
-    : (node.children ? node.children.length : 0);
-
-  // Update the style here:
-  const style = {
-    padding: "10px",
-    margin: "5px 0",
-    background: isHighlighted ? "#2e2e2e" : "#1e1e1e",
-    border: isHighlighted ? "2px solid #61dafb" : "1px solid #333",
-    cursor: "pointer",
-    whiteSpace: "pre-wrap",
-    
-    // New properties:
-    width: "50%",         // Half of the container width
-    marginLeft: "20px"      // Shifted little bit from left border
-  };
-
-  return (
-    <div style={style} onClick={() => onClick(node.id)}>
-      <div>
-        {text.length > 300 ? text.substring(0, 300) + "..." : text}
-      </div>
-      <div style={{ fontSize: "0.7em", color: "#aba9a9", marginTop: "5px", marginLeft: "5px" }}>
-        {datetime} | {childrenCount} {childrenCount === 1 ? "child" : "children"}
-      </div>
-    </div>
-  );
-}
+import Bubble from "./Bubble";  // Reusable bubble component
 
 // Recursive component to render the entire descendants tree.
 // Each level is indented (via marginLeft) and shows a left border edge.
@@ -52,27 +18,28 @@ function RenderChildTree({ nodes, onBubbleClick }) {
           ? {
               marginLeft: "20px",
               paddingLeft: "10px",
-              borderLeft: "2px solid #61dafb",
+              borderLeft: "2px solid #61dafb"
             }
           : { marginLeft: "0px" };
 
         return (
           <div key={child.id}>
             <div style={containerStyle}>
-              <Bubble node={child} onClick={onBubbleClick} />
+              <Bubble
+                node={child}
+                onClick={onBubbleClick}
+                leftAlign={true}  // Ensure bubbles in the tree are left aligned
+              />
               {child.children &&
                 child.children.length > 0 && (
-                  <RenderChildTree
-                    nodes={child.children}
-                    onBubbleClick={onBubbleClick}
-                  />
+                  <RenderChildTree nodes={child.children} onBubbleClick={onBubbleClick} />
                 )}
             </div>
             {index < nodes.length - 1 && (
               <hr
                 style={{
                   borderColor: "#333",
-                  marginLeft: shouldIndent ? "20px" : "0px",
+                  marginLeft: shouldIndent ? "20px" : "0px"
                 }}
               />
             )}
@@ -82,7 +49,6 @@ function RenderChildTree({ nodes, onBubbleClick }) {
     </div>
   );
 }
-
 
 function NodeDetail() {
   const { id } = useParams();
@@ -159,9 +125,15 @@ function NodeDetail() {
   // Render ancestors as a vertical list.
   const ancestorsSection = (
     <div style={{ display: "flex", flexDirection: "column", marginBottom: "10px" }}>
-      {node.ancestors && node.ancestors.map((ancestor) => (
-      <Bubble key={ancestor.id} node={ancestor} onClick={handleBubbleClick} />
-    ))}
+      {node.ancestors &&
+        node.ancestors.map((ancestor) => (
+          <Bubble
+            key={ancestor.id}
+            node={ancestor}
+            onClick={handleBubbleClick}
+            leftAlign={true}
+          />
+        ))}
     </div>
   );
 
@@ -196,8 +168,8 @@ function NodeDetail() {
   const childrenSection = (
     <div>
       {node.children && node.children.length > 0 && (
-      <RenderChildTree nodes={node.children} onBubbleClick={handleBubbleClick} />
-    )}
+        <RenderChildTree nodes={node.children} onBubbleClick={handleBubbleClick} />
+      )}
     </div>
   );
 
@@ -230,7 +202,7 @@ function NodeDetail() {
               background: "#1e1e1e",
               padding: "20px",
               borderRadius: "8px",
-              width: "400px",
+              width: "1000px",
               position: "relative",
             }}
             onClick={(e) => e.stopPropagation()}
@@ -247,7 +219,7 @@ function NodeDetail() {
             >
               &times;
             </div>
-            <h2 style={{ marginBottom: "20px" }}>Add Child Node</h2>
+            <h2 style={{ marginBottom: "20px" }}>Add Text</h2>
             <NodeForm
               parentId={node.id}
               onSuccess={(data) => {
@@ -259,7 +231,7 @@ function NodeDetail() {
         </div>
       )}
 
-      {/* Modal overlay for "Edit Node" */}
+      {/* Modal overlay for "Edit Text" */}
       {showEditOverlay && (
         <div
           style={{
@@ -281,7 +253,7 @@ function NodeDetail() {
               background: "#1e1e1e",
               padding: "20px",
               borderRadius: "8px",
-              width: "400px",
+              width: "1000px",
               position: "relative",
             }}
             onClick={(e) => e.stopPropagation()}
@@ -298,7 +270,7 @@ function NodeDetail() {
             >
               &times;
             </div>
-            <h2 style={{ marginBottom: "20px" }}>Edit Node</h2>
+            <h2 style={{ marginBottom: "20px" }}>Edit Text</h2>
             <NodeForm
               editMode={true}
               nodeId={node.id}

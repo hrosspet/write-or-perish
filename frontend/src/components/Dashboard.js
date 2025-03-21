@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import api from "../api";
 import DashboardContent from "./DashboardContent";
+import Bubble from "./Bubble";
 
 function Dashboard() {
   const { username } = useParams(); // if present, we're viewing someone else's dashboard
@@ -114,29 +115,25 @@ function Dashboard() {
       {dashboardData.stats && <DashboardContent dashboardData={dashboardData} />}
 
       {/* Graphical (bubble-style) view of top-level entries */}
-      <h3 style={{ color: "#e0e0e0", marginTop: "40px" }}>Top-Level Entries</h3>
-      <div style={{ display: "flex", flexDirection: "column", gap: "20px", marginLeft: "20px" }}>
+      <h3 style={{ color: "#e0e0e0", marginTop: "40px", textAlign: "left"}}>
+        Top-Level Entries
+      </h3>
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          maxWidth: "1000px",
+          alignItems: "flex-start" // Aligns children to the left.
+        }}
+      >
         {nodes.map((node) => (
-          <div
+          <Bubble
             key={node.id}
+            node={node}
+            isHighlighted={true}
+            leftAlign={true}  // Ensures the bubble is left aligned.
             onClick={() => navigate(`/node/${node.id}`)}
-            style={{
-              padding: "15px",
-              background: "#1e1e1e",
-              border: "2px solid #61dafb",
-              borderRadius: "8px",
-              width: "50%", // Limit the width to 50% of the container.
-              cursor: "pointer",
-              boxShadow: "2px 2px 6px rgba(0,0,0,0.5)"
-            }}
-          >
-            <div style={{ marginBottom: "8px" }}>
-              {node.preview}
-            </div>
-            <div style={{ fontSize: "0.8em", color: "#aba9a9" }}>
-              {new Date(node.created_at).toLocaleString()} | children: {node.child_count}
-            </div>
-          </div>
+          />
         ))}
       </div>
     </div>
