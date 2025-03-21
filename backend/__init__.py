@@ -61,7 +61,8 @@ def create_app():
         # Allow GET requests to /api/dashboard to fetch current user info.
         # Allow PUT requests to /api/dashboard/user to update the profile (and email).
         if (request.method == "GET" and request.path.startswith("/api/dashboard")) or \
-           (request.method == "PUT" and request.path.startswith("/api/dashboard/user")):
+           (request.method == "PUT" and request.path.startswith("/api/dashboard/user")) or \
+           request.path.startswith("/api/terms"):
             return
 
         # For API calls, check if the request expects JSON.

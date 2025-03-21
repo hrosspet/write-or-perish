@@ -46,7 +46,8 @@ def get_dashboard():
             "username": current_user.username,
             "description": current_user.description,
             "accepted_terms_at": current_user.accepted_terms_at.isoformat() if current_user.accepted_terms_at else None,
-            "approved": current_user.approved
+            "approved": current_user.approved,
+            "email": current_user.email
         },
         "stats": {
             "daily_tokens": get_daily_tokens(current_user),
@@ -129,7 +130,8 @@ def update_user():
                 "description": current_user.description,
                 "email": current_user.email,
                 "approved": current_user.approved,
-                "accepted_terms_at": current_user.accepted_terms_at.isoformat() if current_user.accepted_terms_at else None
+                "accepted_terms_at": current_user.accepted_terms_at.isoformat() if current_user.accepted_terms_at else None,
+                "email": current_user.email
             }
         }), 200
     except Exception as e:

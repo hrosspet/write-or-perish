@@ -1,11 +1,11 @@
 import React, { useState } from 'react';
 import api from "../api";
 
-function AlphaModal({ user, onClose, onUpdate }) {
+function AlphaModal({ user, onUpdate }) {
   const [email, setEmail] = useState(user.email || "");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
@@ -13,15 +13,14 @@ function AlphaModal({ user, onClose, onUpdate }) {
       // Update the user's email via the same update endpoint.
       const response = await api.put("/dashboard/user", { email });
       setLoading(false);
-      onUpdate(response.data.user);
-      onClose();
+      onUpdate(response.data.user);  // Update the user info in context.
     } catch (err) {
       console.error(err);
       setError("Error updating email. Please try again.");
       setLoading(false);
     }
   };
-  
+
   const modalStyle = {
     position: "fixed",
     top: 0, left: 0, right: 0, bottom: 0,
@@ -31,7 +30,7 @@ function AlphaModal({ user, onClose, onUpdate }) {
     justifyContent:"center",
     zIndex: 2000
   };
-  
+
   const contentStyle = {
     backgroundColor: "#1e1e1e",
     padding: "20px",
@@ -39,8 +38,8 @@ function AlphaModal({ user, onClose, onUpdate }) {
     width: "400px",
     color: "#e0e0e0"
   };
-  
-  // If the user already submitted an email, show a thank-you message.
+
+  // If the user already provided an email, show the thank-you message
   if (user.email && user.email.trim() !== "") {
     return (
       <div style={modalStyle}>
@@ -50,13 +49,12 @@ function AlphaModal({ user, onClose, onUpdate }) {
             Thank you for providing your email. You've been added to our waiting list.
             We will contact you at <strong>{user.email}</strong> once your account is approved.
           </p>
-          <button onClick={onClose}>Close</button>
         </div>
       </div>
     );
   }
-  
-  // Otherwise, show the email submission form.
+
+  // Otherwise, prompt for the email.
   return (
     <div style={modalStyle}>
       <div style={contentStyle}>
@@ -87,5 +85,5 @@ function AlphaModal({ user, onClose, onUpdate }) {
     </div>
   );
 }
-  
+
 export default AlphaModal;
