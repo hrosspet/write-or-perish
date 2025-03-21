@@ -143,12 +143,14 @@ function NodeDetail() {
       <hr style={{ borderColor: "#333" }} />
       <div
         style={{
+          boxSizing: "border-box",
           padding: "10px",
           margin: "10px 0",
           backgroundColor: "#2e2e2e",
           border: "2px solid #61dafb",
-          borderLeft: "4px solid #61dafb",
-          width: "50%",       // Limit highlighted node to 50% if desired
+          borderLeft: "2px solid #61dafb",
+          width: "95%",       // Limit highlighted node to 50% if desired
+          maxWidth: "1500px",
           marginLeft: "20px"  // And shift it a little from the left
         }}
       >
