@@ -22,9 +22,18 @@ def login():
     username = tw_info["screen_name"]
     user = User.query.filter_by(twitter_id=twitter_id).first()
     if not user:
-        user = User(twitter_id=twitter_id, username=username)
-        db.session.add(user)
-        db.session.commit()
+        # check whether user created just with handle (eg via whitelist)
+        user = User.query.filter_by(username=username).first()
+        if user:
+            # set correct twitter id
+            user.twitter_id = twitter_id
+            db.session.commit()
+        else:
+            # create new user
+            user = User(twitter_id=twitter_id, username=username)
+            db.session.add(user)
+            db.session.commit()
+
     login_user(user)
     flash("Logged in successfully!", "success")
     # Instead of redirecting using url_for() to the backend dashboard,
