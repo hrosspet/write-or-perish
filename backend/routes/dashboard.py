@@ -1,6 +1,6 @@
 from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
-from backend.models import Node
+from backend.models import Node, User
 from backend.extensions import db
 from datetime import date
 
