@@ -151,10 +151,55 @@ function NodeDetail() {
           borderLeft: "2px solid #61dafb",
           width: "95%",       // Limit highlighted node to 50% if desired
           maxWidth: "1500px",
-          marginLeft: "20px"  // And shift it a little from the left
+          marginLeft: "20px",  // And shift it a little from the left
         }}
       >
-        <ReactMarkdown>{node.content}</ReactMarkdown>
+        <ReactMarkdown
+         components={{
+          p: ({ node, ...props }) => (
+           <p
+            style={{
+             whiteSpace: "pre-wrap",
+             overflowWrap: "break-word"
+           }}
+            {...props}
+           />
+          ),
+          code: ({ node, inline, className, children, ...props }) =>
+           inline ? (
+            <code
+             style={{
+             whiteSpace: "pre-wrap",
+             overflowWrap: "break-word"
+            }}
+             {...props}
+            >
+             {children}
+            </code>
+           ) : (
+            <pre
+             style={{
+             whiteSpace: "pre-wrap",
+             overflowWrap: "break-word"
+            }}
+             {...props}
+            >
+             <code>{children}</code>
+            </pre>
+           ),
+          li: ({ node, ...props }) => (
+           <li
+            style={{
+             whiteSpace: "pre-wrap",
+             overflowWrap: "break-word"
+            }}
+            {...props}
+           />
+          )
+         }}
+        >
+         {node.content}
+        </ReactMarkdown>
       </div>
       <div style={{ marginBottom: "10px" }}>
         <button onClick={() => setShowChildFormOverlay(true)}>Add Text</button>{" "}
