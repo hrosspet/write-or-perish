@@ -23,63 +23,84 @@ ChartJS.register(
   Legend
 );
 
-const StatsChart = () => {
+const StatsChart = ({ username }) => {
   const [chartData, setChartData] = useState(null);
+  const [totals, setTotals] = useState({ personal_total: 0, global_total: 0 });
 
   useEffect(() => {
-    // Fetch statistics from the backend
-    api.get('/stats')
+    // Use the /stats endpoint (with username if provided)
+    const endpoint = username ? `/stats/${username}` : '/stats';
+    api.get(endpoint)
       .then(response => {
-        // Example response structure:
-        // response.data.personal: [ { date: "2023-10-09", tokens: 150 }, ... ]
-        // response.data.global:   [ { date: "2023-10-09", tokens: 4567 }, ... ]
+        // Response from backend has:
+        //   { personal: [{ date:"YYYY-MM-DD", tokens: ...}, ...],
+        //     global:   [{ date:"YYYY-MM-DD", tokens: ...}, ...],
+        //     personal_total: <number>,
+        //     global_total:   <number> }
         const personal = response.data.personal;
         const global = response.data.global;
+        const personal_total = response.data.personal_total;
+        const global_total = response.data.global_total;
+
+        // Build lookup maps for quick access
+        const personalMap = {};
+        personal.forEach(item => {
+          personalMap[item.date] = item.tokens;
+        });
+        const globalMap = {};
+        global.forEach(item => {
+          globalMap[item.date] = item.tokens;
+        });
+
+        // Build the union of dates as the x-axis.
+        const dateSet = new Set([...personal.map(p => p.date), ...global.map(g => g.date)]);
+        let combinedDates = Array.from(dateSet);
+        // Dates are in ISO format so alphabetic sort works (earlier dates will come first)
+        combinedDates.sort();
         
-        // Assuming both arrays use the same dates, otherwise build a union of dates
-        const dates = personal.map(item => item.date);
-        const personalTokens = personal.map(item => item.tokens);
-        const globalTokens = global.map(item => item.tokens);
-        
+        // For each combined date, pull tokens from the personal and global lookup maps (or default to 0)
+        const personalTokens = combinedDates.map(date => personalMap[date] || 0);
+        const globalTokens = combinedDates.map(date => globalMap[date] || 0);
+
         setChartData({
-          labels: dates,
+          labels: combinedDates,
           datasets: [
             {
               label: 'Personal Daily Tokens',
               data: personalTokens,
-              borderColor: 'rgba(97, 218, 251, 1)', // Blue color
+              borderColor: 'rgba(97, 218, 251, 1)',
               backgroundColor: 'rgba(97, 218, 251, 0.2)',
               pointRadius: 5,
-              // Highlight today's point (assumed to be at the end) with a different color
               pointBackgroundColor: (context) => {
                 const index = context.dataIndex;
-                return (index === dates.length - 1) ? '#ffcc00' : 'rgba(97, 218, 251, 1)';
+                return (index === combinedDates.length - 1) ? '#ffcc00' : 'rgba(97, 218, 251, 1)';
               },
             },
             {
               label: 'Global Daily Tokens',
               data: globalTokens,
-              borderColor: 'rgba(162, 155, 254, 1)', // Purple color
+              borderColor: 'rgba(162, 155, 254, 1)',
               backgroundColor: 'rgba(162, 155, 254, 0.2)',
               pointRadius: 5,
               pointBackgroundColor: (context) => {
                 const index = context.dataIndex;
-                return (index === dates.length - 1) ? '#ffcc00' : 'rgba(162, 155, 254, 1)';
+                return (index === combinedDates.length - 1) ? '#ffcc00' : 'rgba(162, 155, 254, 1)';
               },
             },
           ],
         });
+        setTotals({ personal_total, global_total });
       })
       .catch(error => {
         console.error("Error fetching stats:", error);
       });
-  }, []);
+  }, [username]);
 
   if (!chartData) {
     return <div style={{ color: "#e0e0e0" }}>Loading Chart...</div>;
   }
 
-  // Chart options including dark-mode adjustments for labels and grid lines.
+  // Chart options, including color settings for dark mode.
   const options = {
     responsive: true,
     plugins: {
@@ -107,8 +128,21 @@ const StatsChart = () => {
   };
 
   return (
-    <div>
+    <div style={{ position: 'relative', width: '600px', height: '400px' }}>
       <Line data={chartData} options={options} />
+      <div
+          style={{
+            position: 'absolute',
+            bottom: '300px',
+            right: '250px',
+            backgroundColor: 'rgba(0, 0, 0, 0.55)',
+            borderRadius: '4px',
+            color: '#e0e0e0',
+            fontSize: '0.9em'
+          }}
+        >
+          Total: {totals.personal_total} / {totals.global_total}
+      </div>
     </div>
   );
 };

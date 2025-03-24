@@ -112,7 +112,7 @@ function Dashboard() {
       )}
 
       {/* Display the chart with totals */}
-      {dashboardData.stats && <DashboardContent dashboardData={dashboardData} />}
+      {dashboardData.stats && <DashboardContent dashboardData={dashboardData} username={username} />}
 
       {/* Graphical (bubble-style) view of top-level entries */}
       <h3 style={{ color: "#e0e0e0", marginTop: "40px", textAlign: "left"}}>
