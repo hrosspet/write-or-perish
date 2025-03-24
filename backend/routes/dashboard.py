@@ -79,7 +79,8 @@ def get_public_dashboard(username):
             "preview": preview,
             "node_type": node.node_type,
             "child_count": len(node.children),
-            "created_at": node.created_at.isoformat()
+            "created_at": node.created_at.isoformat(),
+            "username": node.user.username
         })
 
     # Calculate token stats just as in the private dashboard.

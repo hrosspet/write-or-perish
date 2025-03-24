@@ -1,22 +1,16 @@
 import React from 'react';
-import { FaRegCommentDots } from 'react-icons/fa';
+import { Link } from 'react-router-dom';
+import NodeFooter from './NodeFooter';
 
 const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => {
   // Use full content if available; otherwise use preview.
   const text = node.content || node.preview || "";
-  // Format date.
-  const datetime = node.created_at ? new Date(node.created_at).toLocaleString() : "";
-  // Get children count.
-  const childrenCount =
-    typeof node.child_count !== "undefined"
-      ? node.child_count
-      : node.children
-      ? node.children.length
-      : 0;
-  // Get username (author's handle)
-  const username = node.username;
 
-  // If leftAlign is true then avoid centering the bubble.
+  // Compute children count – use node.child_count if available, else fallback to node.children.length.
+  const childrenCount = typeof node.child_count !== "undefined"
+    ? node.child_count
+    : (node.children ? node.children.length : 0);
+
   const bubbleStyle = {
     padding: "15px",
     margin: leftAlign ? "10px 0" : "10px auto",
@@ -26,18 +20,7 @@ const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => 
     cursor: "pointer",
     whiteSpace: "pre-wrap",
     maxWidth: "1000px",
-    width: "calc(100% - 20px)" // Responsive width on smaller screens.
-  };
-
-  // The footer displays the username, datetime,
-  // and (only when childrenCount > 0) the message icon plus count.
-  const footerStyle = {
-    fontSize: "0.8em",
-    color: "#aba9a9",
-    marginTop: "8px",
-    display: "flex",
-    alignItems: "center",
-    gap: "5px"
+    width: "calc(100% - 20px)"
   };
 
   return (
@@ -45,17 +28,13 @@ const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => 
       <div>
         {text.length > 250 ? text.substring(0, 250) + "..." : text}
       </div>
-      <div style={footerStyle}>
-        <span>{username}</span>
-        <span>|</span>
-        <span>{datetime}</span>
-        {childrenCount > 0 && (
-          <>
-            <span>|</span>
-            <FaRegCommentDots />
-            <span>{childrenCount}</span>
-          </>
-        )}
+      {/* Stop propagation in footer so clicks on the Link (author handle) don’t trigger the bubble’s onClick */}
+      <div onClick={(e) => e.stopPropagation()}>
+        <NodeFooter
+          username={node.username}
+          createdAt={node.created_at}
+          childrenCount={childrenCount}
+        />
       </div>
     </div>
   );
