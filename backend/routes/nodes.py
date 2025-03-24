@@ -105,12 +105,9 @@ def update_node(node_id):
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": "DB error updating node"}), 500
-    return jsonify({"message": "Node updated", "node": {
-        "id": node.id,
-        "content": node.content,
-        "node_type": node.node_type,
-        "updated_at": node.updated_at.isoformat()
-    }}), 200
+
+    node = get_node(node.id)[0].get_json()  # to find all ancestors and children... / [0] is the actual node (wrapped in Response), [1] is the response code
+    return jsonify({"message": "Node updated", "node": node}), 200
 
 # Retrieve a node with its full content (the highlighted node) plus previews of its children.
 @nodes_bp.route("/<int:node_id>", methods=["GET"])

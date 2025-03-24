@@ -38,6 +38,7 @@ class Node(db.Model):
                                lazy=True, foreign_keys=[parent_id])
     linked_children = db.relationship("Node", backref=db.backref("linked_parent", remote_side=[id]),
                                       lazy=True, foreign_keys=[linked_node_id])
+
 class NodeVersion(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     # Which node this version belongs to
