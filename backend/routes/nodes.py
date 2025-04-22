@@ -537,26 +537,64 @@ def generate_tts(node_id):
     # Prevent overly long content
     if len(text) > 10000:
         return jsonify({"error": "Content too long for TTS"}), 413
-    # Generate TTS via OpenAI Python SDK (streaming)
+    # Generate TTS via OpenAI Python SDK (streaming), chunking for text >4096 chars
     client = OpenAI(api_key=api_key)
     from pathlib import Path
+    from pydub import AudioSegment
+
+    # Prepare storage directory
     target_dir = AUDIO_STORAGE_ROOT / f"user/{node.user_id}/node/{node.id}"
     target_dir.mkdir(parents=True, exist_ok=True)
-    # Save TTS output as MP3
-    target_path = Path(target_dir) / "tts.mp3"
+    final_path = Path(target_dir) / "tts.mp3"
+
+    # Split text into word-boundary chunks <= 4096 chars
+    def chunk_text(s, max_len=4096):
+        parts = []
+        while len(s) > max_len:
+            idx = s.rfind(' ', 0, max_len)
+            if idx <= 0:
+                idx = max_len
+            parts.append(s[:idx])
+            s = s[idx:].lstrip()
+        if s:
+            parts.append(s)
+        return parts
+
+    chunks = chunk_text(text)
     try:
-        with client.audio.speech.with_streaming_response.create(
-            model="gpt-4o-mini-tts",
-            input=text,
-            voice="alloy"
-        ) as response:
-            response.stream_to_file(target_path)
+        if len(chunks) == 1:
+            # Single chunk: direct streaming to MP3
+            with client.audio.speech.with_streaming_response.create(
+                model="gpt-4o-mini-tts",
+                input=chunks[0],
+                voice="alloy"
+            ) as resp:
+                resp.stream_to_file(final_path)
+        else:
+            # Multiple chunks: generate parts on disk and concatenate via pydub
+            audio_parts = []
+            for i, chunk in enumerate(chunks):
+                part_path = Path(target_dir) / f"tts_part{i}.mp3"
+                with client.audio.speech.with_streaming_response.create(
+                    model="gpt-4o-mini-tts",
+                    input=chunk,
+                    voice="alloy"
+                ) as resp:
+                    resp.stream_to_file(part_path)
+                # Load into AudioSegment from file path
+                segment = AudioSegment.from_file(str(part_path), format="mp3")
+                audio_parts.append(segment)
+                # Cleanup part file
+                part_path.unlink()
+            # Concatenate all segments and export to final_path
+            combined = sum(audio_parts)
+            combined.export(final_path, format="mp3")
     except Exception as e:
         current_app.logger.error("TTS generation failed for node %s: %s", node_id, e)
         return jsonify({"error": "TTS generation failed", "details": str(e)}), 500
 
     # Update node record with new TTS URL
-    rel_path = target_path.relative_to(AUDIO_STORAGE_ROOT)
+    rel_path = final_path.relative_to(AUDIO_STORAGE_ROOT)
     url = f"/media/{rel_path.as_posix()}"
     node.audio_tts_url = url
     # MP3 audio
