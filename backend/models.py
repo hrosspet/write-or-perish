@@ -17,6 +17,15 @@ class User(db.Model, UserMixin):
     # Relationship to text nodes
     nodes = db.relationship("Node", backref="user", lazy=True)
 
+    # --- Voice‑Mode fields ---
+    # Whether the user is an administrator.  Voice‑mode features are currently limited
+    # to admins only.  (The column is kept optional for backward‑compatibility with
+    # databases created before this change.)
+    is_admin = db.Column(db.Boolean, default=False, nullable=False)
+
+    # Subscription plan ("free", "pro", etc.).  Used for future gating of Voice‑mode.
+    plan = db.Column(db.String(16), nullable=False, default="free")
+
     def get_id(self):
         return str(self.id)
 
@@ -30,6 +39,23 @@ class Node(db.Model):
     token_count = db.Column(db.Integer, nullable=True)
     # NEW: distributed_tokens will hold the portion of an LLM response allocated to this node’s author.
     distributed_tokens = db.Column(db.Integer, nullable=False, default=0)
+
+    # -------------------------- Voice‑Mode columns ---------------------------
+    # If the user recorded audio while creating this node, the file is stored
+    # locally (or on S3) and the URL/path is saved here.  Null when no original
+    # recording exists.
+    audio_original_url = db.Column(db.String, nullable=True)
+
+    # When a TTS version of the node is generated (only if the user did not
+    # record original audio), the resulting file URL/path is stored here.
+    audio_tts_url = db.Column(db.String, nullable=True)
+
+    # Duration (in seconds) of the original recording or generated TTS.  Filled
+    # asynchronously; may be null initially.
+    audio_duration_sec = db.Column(db.Float, nullable=True)
+
+    # MIME type of the stored audio (e.g. "audio/webm;codecs=opus").
+    audio_mime_type = db.Column(db.String, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     

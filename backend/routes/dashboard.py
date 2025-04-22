@@ -41,6 +41,8 @@ def get_dashboard():
             "created_at": node.created_at.isoformat(),
             "username": node.user.username
         })
+    # Determine if Voice Mode is enabled for this user (admin or paid plan)
+    voice_mode_enabled = bool(current_user.is_admin or getattr(current_user, 'plan', 'free') != 'free')
     dashboard = {
         "user": {
             "id": current_user.id,
@@ -48,7 +50,10 @@ def get_dashboard():
             "description": current_user.description,
             "accepted_terms_at": current_user.accepted_terms_at.isoformat() if current_user.accepted_terms_at else None,
             "approved": current_user.approved,
-            "email": current_user.email
+            "email": current_user.email,
+            "is_admin": current_user.is_admin,
+            "plan": current_user.plan,
+            "voice_mode_enabled": voice_mode_enabled
         },
         "stats": {
             "daily_tokens": get_daily_tokens(current_user),
@@ -124,6 +129,8 @@ def update_user():
 
     try:
         db.session.commit()
+        # Include voice mode feature flag and user plan in the response
+        voice_mode_enabled = bool(current_user.is_admin or getattr(current_user, 'plan', 'free') != 'free')
         return jsonify({
             "message": "Profile updated successfully.",
             "user": {
@@ -133,7 +140,9 @@ def update_user():
                 "email": current_user.email,
                 "approved": current_user.approved,
                 "accepted_terms_at": current_user.accepted_terms_at.isoformat() if current_user.accepted_terms_at else None,
-                "email": current_user.email
+                "is_admin": current_user.is_admin,
+                "plan": current_user.plan,
+                "voice_mode_enabled": voice_mode_enabled
             }
         }), 200
     except Exception as e:

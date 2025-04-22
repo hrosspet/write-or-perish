@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import NodeFooter from "./NodeFooter";
+import SpeakerIcon from "./SpeakerIcon";
 import { useUser } from "../contexts/UserContext";
 import api from "../api";
 import NodeForm from "./NodeForm";
@@ -167,11 +168,13 @@ function NodeDetail() {
           createdAt={node.created_at}
           childrenCount={highlightedChildrenCount}
         />
-        <div style={{ marginTop: "8px" }}>
-          <button onClick={() => setShowChildFormOverlay(true)}>Add Text</button>{" "}
-          <button onClick={handleLLMResponse}>LLM Response</button>{" "}
-          {isOwner && <button onClick={() => setShowEditOverlay(true)}>Edit</button>}{" "}
+        <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <button onClick={() => setShowChildFormOverlay(true)}>Add Text</button>
+          <button onClick={handleLLMResponse}>LLM Response</button>
+          {isOwner && <button onClick={() => setShowEditOverlay(true)}>Edit</button>}
           {isOwner && <button onClick={handleDelete}>Delete</button>}
+          {/* Speaker icon for audio playback */}
+          <SpeakerIcon nodeId={node.id} />
         </div>
       </div>
       <hr style={{ borderColor: "#333" }} />
