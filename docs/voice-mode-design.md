@@ -140,4 +140,25 @@ Triggered only when `audio_original_url` IS NULL and first playback is request
 
 ---
 
+## 9  Implementation Summary
+
+**User‑Facing Features**
+- Mic controls in the “Add Text / Write Text” modal (record, stop, playback, re‑record)
+- Automatic transcription on audio upload (via OpenAI `gpt-4o-transcribe`)
+- Speaker icon on each node to play original recording or generated TTS
+- Support for texts of any length: split at word boundaries (≤ 4096 chars), then concatenate
+- On‑demand TTS powered by `gpt-4o-mini-tts`, output as a single MP3
+
+**Backend Features**
+- `/api/nodes` POST accepts multipart audio or JSON text; audio uploads are stored and transcribed
+- `/api/nodes/:id/audio` GET returns `{ original_url, tts_url }` or 404
+- `/api/nodes/:id/tts` POST streams TTS in chunks, merges with Python (`pydub`), caches MP3
+- All voice endpoints protected by `@voice_mode_required` (admin‑only in MVP)
+
+**Access Control & Deployment**
+- Feature gated by `User.is_admin` (no external flags needed for MVP)
+- Ready for admin‑only pilot; requires `OPENAI_API_KEY`, `ffmpeg`, and `pydub` installed
+
+---
+
 Prepared on branch **voice‑mode** – v0.2
