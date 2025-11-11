@@ -35,6 +35,8 @@ class Node(db.Model):
     parent_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True)
     linked_node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True)
     node_type = db.Column(db.String(16), nullable=False, default="user")
+    # Model used to generate this node (only populated for node_type='llm')
+    llm_model = db.Column(db.String(64), nullable=True)
     content = db.Column(db.Text, nullable=False)
     token_count = db.Column(db.Integer, nullable=True)
     # NEW: distributed_tokens will hold the portion of an LLM response allocated to this node’s author.

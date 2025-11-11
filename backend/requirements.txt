@@ -7,6 +7,7 @@ flask-cors
 psycopg2-binary==2.9.3
 python-dotenv==1.0.0
 openai
+anthropic==0.72.0
 pydub>=0.25.1
 Werkzeug==2.0.3
 gunicorn==23.0.0

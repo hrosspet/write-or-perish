@@ -327,11 +327,67 @@ def get_children(node_id):
     } for child in children]
     return jsonify({"children": children_list}), 200
 
-# Request an LLM response based on the thread (the ancestors’ texts are joined as a prompt).
+# Get the suggested model for a new LLM response based on the thread's context
+@nodes_bp.route("/<int:node_id>/suggested-model", methods=["GET"])
+@login_required
+def get_suggested_model(node_id):
+    """
+    Return the suggested model for a new LLM response based on the thread's context.
+
+    Logic:
+    1. Walk up the thread ancestry from the given node
+    2. Find the most recent node with node_type='llm' AND llm_model IS NOT NULL
+    3. If found AND the model is in the supported models list, return that model
+    4. If the model is "gpt-4.5-preview" (legacy), return default instead
+    5. If no predecessor found, return system default
+    """
+    node = Node.query.get_or_404(node_id)
+
+    # Walk up the ancestry to find the most recent LLM node
+    current = node
+    while current:
+        if current.node_type == "llm" and current.llm_model:
+            # Check if the model is supported (not legacy)
+            if current.llm_model in current_app.config["SUPPORTED_MODELS"]:
+                return jsonify({
+                    "suggested_model": current.llm_model,
+                    "source": "predecessor"
+                }), 200
+            # If it's the legacy model, fall through to default
+            elif current.llm_model == "gpt-4.5-preview":
+                break
+        current = current.parent
+
+    # No predecessor found or legacy model - return default
+    default_model = current_app.config.get("DEFAULT_LLM_MODEL", "gpt-5")
+    return jsonify({
+        "suggested_model": default_model,
+        "source": "default"
+    }), 200
+
+# Request an LLM response based on the thread (the ancestors' texts are joined as a prompt).
 @nodes_bp.route("/<int:node_id>/llm", methods=["POST"])
 @login_required
 def request_llm_response(node_id):
+    from backend.llm_providers import LLMProvider
+    from backend.models import User
+
     parent_node = Node.query.get_or_404(node_id)
+
+    # Get and validate the model from request body
+    data = request.get_json() or {}
+    model_id = data.get("model")
+
+    if not model_id:
+        # Fall back to default model for backward compatibility
+        model_id = current_app.config.get("DEFAULT_LLM_MODEL", "gpt-5")
+
+    # Validate model is supported
+    if model_id not in current_app.config["SUPPORTED_MODELS"]:
+        return jsonify({
+            "error": f"Unsupported model: {model_id}",
+            "supported_models": list(current_app.config["SUPPORTED_MODELS"].keys())
+        }), 400
 
     # Build the chain of nodes (from top‐level to current)
     node_chain = []
@@ -340,17 +396,20 @@ def request_llm_response(node_id):
         node_chain.insert(0, current)
         current = current.parent
 
-    model_name = os.environ.get("LLM_NAME")
+    # Build messages array for LLM API
     messages = []
     for node in node_chain:
         author = node.user.username if node.user else "Unknown"
-        # For the LLM user, use the "assistant" role; otherwise, "user."
-        if author == model_name:
+        # Determine if this node was created by an LLM (check if it matches any model ID or llm_model)
+        is_llm_node = node.node_type == "llm" or (node.llm_model is not None)
+
+        if is_llm_node:
             role = "assistant"
             message_text = node.content
         else:
             role = "user"
             message_text = f"author {author}: {node.content}"
+
         messages.append({
             "role": role,
             "content": [
@@ -361,45 +420,34 @@ def request_llm_response(node_id):
             ]
         })
 
-    api_key = current_app.config.get("OPENAI_API_KEY")
-    # (Initialize your OpenAI client as before)
-    client = OpenAI(api_key=api_key)
-    
+    # Prepare API keys
+    api_keys = {
+        "openai": current_app.config.get("OPENAI_API_KEY"),
+        "anthropic": current_app.config.get("ANTHROPIC_API_KEY")
+    }
+
+    # Call the LLM provider abstraction
     try:
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=messages,
-            response_format={"type": "text"},
-            temperature=1,
-            max_completion_tokens=10000,
-            top_p=1,
-            frequency_penalty=0,
-            presence_penalty=0,
-        )
+        response = LLMProvider.get_completion(model_id, messages, api_keys)
+        llm_text = response["content"]
+        total_tokens = response["total_tokens"]
+    except ValueError as e:
+        current_app.logger.error("LLM Provider error: %s", e)
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
-        current_app.logger.error("OpenAI API error: %s", e)
-        return jsonify({"error": "OpenAI API error", "details": str(e)}), 500
+        current_app.logger.error("LLM API error: %s", e)
+        return jsonify({"error": "LLM API error", "details": str(e)}), 500
 
-    try:
-        llm_text = response.choices[0].message.content
-    except Exception as e:
-        current_app.logger.error("Error extracting LLM text: %s", e)
-        return jsonify({"error": "Error parsing LLM response"}), 500
-
-    # Extract the total token count from the response.
-    total_tokens = response.usage.total_tokens if response.usage else 0
-
-    # Look up (or create) the special LLM user.
-    from backend.models import User
-    llm_user = User.query.filter_by(username=model_name).first()
+    # Look up (or create) the special LLM user with the model ID as username
+    llm_user = User.query.filter_by(username=model_id).first()
     if not llm_user:
-        llm_user = User(twitter_id="llm", username=model_name)
+        llm_user = User(twitter_id=f"llm-{model_id}", username=model_id)
         db.session.add(llm_user)
         db.session.commit()
 
     # ---------- Redistribute tokens to the contributing (non-LLM) nodes ----------
-    # Filter node_chain: only include nodes where the user is NOT the LLM user.
-    contributing_nodes = [n for n in node_chain if n.user.username != model_name]
+    # Filter node_chain: only include nodes where node_type != 'llm'
+    contributing_nodes = [n for n in node_chain if n.node_type != "llm"]
     if contributing_nodes and total_tokens:
         total_weight = sum(approximate_token_count(n.content) for n in contributing_nodes)
         for n in contributing_nodes:
@@ -410,12 +458,13 @@ def request_llm_response(node_id):
             n.distributed_tokens += share
             db.session.add(n)
     # -----------------------------------------------------------------------------
-    
-    # Create the LLM node with token_count set to 0 so no tokens are credited to the LLM user.
+
+    # Create the LLM node with token_count set to 0 and llm_model set
     llm_node = Node(
         user_id=llm_user.id,
         parent_id=parent_node.id,
         node_type="llm",
+        llm_model=model_id,  # Store the model used
         content=llm_text,
         token_count=0  # No direct tokens assigned here.
     )
@@ -434,7 +483,7 @@ def request_llm_response(node_id):
             "content": llm_node.content,
             "token_count": llm_node.token_count,
             "created_at": llm_node.created_at.isoformat(),
-            "username": model_name
+            "username": model_id
         }
     }), 201
 
