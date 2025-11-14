@@ -172,13 +172,13 @@ function NodeDetail() {
         />
         <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px' }}>
           <button onClick={() => setShowChildFormOverlay(true)}>Add Text</button>
+          <button onClick={handleLLMResponse}>LLM Response</button>
           {/* Model selector dropdown */}
           <ModelSelector
             nodeId={node.id}
             selectedModel={selectedModel}
             onModelChange={setSelectedModel}
           />
-          <button onClick={handleLLMResponse}>LLM Response</button>
           {isOwner && <button onClick={() => setShowEditOverlay(true)}>Edit</button>}
           {isOwner && <button onClick={handleDelete}>Delete</button>}
           {/* Speaker icon for audio playback */}
