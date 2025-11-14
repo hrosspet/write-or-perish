@@ -64,7 +64,7 @@ fi
 
 # Update Nginx configuration if changed
 NGINX_CONFIG_SOURCE="$PROJECT_DIR/configs/nginx.txt"
-NGINX_CONFIG_TARGET="/etc/nginx/sites-available/writeorperish"
+NGINX_CONFIG_TARGET="/etc/nginx/sites-available/write-or-perish"
 
 if [ -f "$NGINX_CONFIG_SOURCE" ]; then
     log "Checking if Nginx configuration needs updating..."
