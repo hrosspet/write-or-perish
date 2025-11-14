@@ -6,7 +6,7 @@
 set -e  # Exit on any error
 
 PROJECT_DIR="/home/hrosspet/write-or-perish"
-VENV_DIR="$PROJECT_DIR/venv"
+CONDA_ENV="write-or-perish"
 BACKEND_DIR="$PROJECT_DIR/backend"
 LOG_FILE="$PROJECT_DIR/deployment.log"
 
@@ -34,15 +34,19 @@ log "====== Starting deployment ======"
 # Navigate to project directory
 cd "$PROJECT_DIR" || error "Failed to navigate to project directory"
 
-# Check if virtual environment exists, create if not
-if [ ! -d "$VENV_DIR" ]; then
-    warn "Virtual environment not found, creating one..."
-    python3 -m venv "$VENV_DIR" || error "Failed to create virtual environment"
+# Initialize conda
+log "Initializing conda..."
+source ~/miniconda3/etc/profile.d/conda.sh || error "Failed to initialize conda"
+
+# Check if conda environment exists
+if ! conda env list | grep -q "^$CONDA_ENV "; then
+    warn "Conda environment '$CONDA_ENV' not found, creating one..."
+    conda create -n "$CONDA_ENV" python=3.9 -y || error "Failed to create conda environment"
 fi
 
-# Activate virtual environment
-log "Activating virtual environment..."
-source "$VENV_DIR/bin/activate" || error "Failed to activate virtual environment"
+# Activate conda environment
+log "Activating conda environment: $CONDA_ENV..."
+conda activate "$CONDA_ENV" || error "Failed to activate conda environment"
 
 # Install/update Python dependencies
 log "Installing Python dependencies..."
