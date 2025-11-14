@@ -1,0 +1,80 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:  # Allows manual triggering from GitHub UI
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Create deployment package
+        run: |
+          cd frontend/build
+          tar -czf ../../frontend-build.tar.gz .
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to VM
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_USER: ${{ secrets.VM_USER }}
+          PROJECT_PATH: /home/hrosspet/write-or-perish
+        run: |
+          # Upload frontend build
+          scp -i ~/.ssh/deploy_key frontend-build.tar.gz $VM_USER@$VM_HOST:$PROJECT_PATH/
+
+          # Execute deployment script on VM
+          ssh -i ~/.ssh/deploy_key $VM_USER@$VM_HOST << 'ENDSSH'
+            cd /home/hrosspet/write-or-perish
+
+            # Pull latest backend code
+            git pull origin main
+
+            # Replace frontend build
+            rm -rf frontend/build
+            mkdir -p frontend/build
+            tar -xzf frontend-build.tar.gz -C frontend/build
+            rm frontend-build.tar.gz
+
+            # Execute deployment script
+            bash deploy.sh
+          ENDSSH
+
+      - name: Cleanup
+        if: always()
+        run: rm -f ~/.ssh/deploy_key frontend-build.tar.gz
+
+      - name: Deployment notification
+        if: success()
+        run: echo "✅ Deployment completed successfully!"
+
+      - name: Deployment failed
+        if: failure()
+        run: echo "❌ Deployment failed. Check logs for details."

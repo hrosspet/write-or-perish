@@ -1,5 +1,4 @@
 import React from 'react';
-import { Link } from 'react-router-dom';
 import NodeFooter from './NodeFooter';
 
 const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => {
