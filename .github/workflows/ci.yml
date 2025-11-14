@@ -56,7 +56,11 @@ jobs:
 
       - name: Install frontend dependencies
         working-directory: frontend
-        run: npm ci
+        run: |
+          npm ci --legacy-peer-deps --verbose
+          echo "Verifying react-router-dom installation:"
+          ls -la node_modules/react-router-dom || echo "react-router-dom not found!"
+          npm list react-router-dom || true
 
       - name: Lint frontend
         working-directory: frontend
@@ -65,6 +69,8 @@ jobs:
       - name: Run frontend tests
         working-directory: frontend
         run: npm test -- --watchAll=false --passWithNoTests
+        env:
+          CI: true
 
       - name: Build frontend
         working-directory: frontend
