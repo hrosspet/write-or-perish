@@ -43,7 +43,7 @@ AUDIO_STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 # Allowed extensions and max size (in bytes) – 100 MB.
-ALLOWED_EXTENSIONS = {"webm", "wav", "m4a"}
+ALLOWED_EXTENSIONS = {"webm", "wav", "m4a", "mp3", "mp4", "mpeg", "mpga", "ogg", "oga", "flac", "aac"}
 MAX_AUDIO_BYTES = 100 * 1024 * 1024  # 100 MB
 
 
