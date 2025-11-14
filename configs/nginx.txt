@@ -1,0 +1,61 @@
+server {
+   server_name writeorperish.org www.writeorperish.org;
+   root /home/hrosspet/write-or-perish/frontend/build;
+   index index.html index.htm;
+
+   # serve actual mp3 files out of your flask data dir
+   location /media/ {
+     alias /home/hrosspet/write-or-perish/data/audio/;
+     access_log    off;
+     add_header    Cache‑Control "max‑age=86400, public";
+     # (nginx will auto‑detect .mp3 → audio/mpeg via the global mime.types)
+   }
+
+   location / {
+       try_files $uri $uri/ /index.html;
+   }
+
+   # Proxy backend authentication endpoints to gunicorn.
+   location /auth/ {
+       proxy_pass http://127.0.0.1:8000;
+       proxy_set_header Host $host;
+       proxy_set_header X-Real-IP $remote_addr;
+       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+       proxy_set_header X-Forwarded-Proto $scheme;
+   }
+
+   location /api/ {
+       proxy_pass http://127.0.0.1:8000;
+       proxy_set_header Host $host;
+       proxy_set_header X-Real-IP $remote_addr;
+       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+       proxy_set_header X-Forwarded-Proto $scheme;
+   }
+
+    listen 443 ssl; # managed by Certbot
+    ssl_certificate /etc/letsencrypt/live/writeorperish.org/fullchain.pem; # managed by Certbot
+    ssl_certificate_key /etc/letsencrypt/live/writeorperish.org/privkey.pem; # managed by Certbot
+    include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
+
+
+}
+server {
+    if ($host = www.writeorperish.org) {
+        return 301 https://$host$request_uri;
+    } # managed by Certbot
+
+
+    if ($host = writeorperish.org) {
+        return 301 https://$host$request_uri;
+    } # managed by Certbot
+
+
+   listen 80;
+   server_name writeorperish.org www.writeorperish.org;
+    return 404; # managed by Certbot
+
+
+
+
+}

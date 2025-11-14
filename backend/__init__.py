@@ -102,4 +102,10 @@ def create_app():
     from backend.routes.admin import admin_bp
     app.register_blueprint(admin_bp, url_prefix="/api/admin")
 
+    # --------------------------------------------------------------------
+    # Voice‑mode media blueprint – serves audio files in dev & tests.
+    # --------------------------------------------------------------------
+    from backend.routes.media import media_bp
+    app.register_blueprint(media_bp, url_prefix="/media")
+
     return app

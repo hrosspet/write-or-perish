@@ -47,7 +47,7 @@ function NavBar({ onNewEntryClick }) {
         Write
       </Link>
 
-      {user && user.username === "hrosspet" && (
+      {user && user.is_admin && (
         <Link
           to="/admin"
           style={{ color: "#e0e0e0", textDecoration: "none", marginRight: "10px" }}

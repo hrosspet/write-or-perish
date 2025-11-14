@@ -6,6 +6,14 @@ html, body, #root {
   background-color: #121212 !important;  /* dark background */
   color: #e0e0e0 !important;             /* light text */
 }
+/* Spinner animation for loading icons */
+.spin {
+  animation: spin 1s linear infinite;
+}
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
 
 a:link {
   color: #61dafb;   /* Unvisited */

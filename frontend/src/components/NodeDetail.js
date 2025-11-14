@@ -2,6 +2,8 @@ import React, { useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import NodeFooter from "./NodeFooter";
+import SpeakerIcon from "./SpeakerIcon";
+import ModelSelector from "./ModelSelector";
 import { useUser } from "../contexts/UserContext";
 import api from "../api";
 import NodeForm from "./NodeForm";
@@ -43,6 +45,7 @@ function NodeDetail() {
   const [error, setError] = useState("");
   const [showChildFormOverlay, setShowChildFormOverlay] = useState(false);
   const [showEditOverlay, setShowEditOverlay] = useState(false);
+  const [selectedModel, setSelectedModel] = useState("gpt-5");
   const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
   useEffect(() => {
@@ -91,7 +94,7 @@ function NodeDetail() {
   // Define handleLLMResponse: send request and navigate to the new node on success.
   const handleLLMResponse = () => {
     api
-      .post(`/nodes/${id}/llm`)
+      .post(`/nodes/${id}/llm`, { model: selectedModel })
       .then((response) => {
         navigate(`/node/${response.data.node.id}`);
       })
@@ -167,11 +170,19 @@ function NodeDetail() {
           createdAt={node.created_at}
           childrenCount={highlightedChildrenCount}
         />
-        <div style={{ marginTop: "8px" }}>
-          <button onClick={() => setShowChildFormOverlay(true)}>Add Text</button>{" "}
-          <button onClick={handleLLMResponse}>LLM Response</button>{" "}
-          {isOwner && <button onClick={() => setShowEditOverlay(true)}>Edit</button>}{" "}
+        <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <button onClick={() => setShowChildFormOverlay(true)}>Add Text</button>
+          {/* Model selector dropdown */}
+          <ModelSelector
+            nodeId={node.id}
+            selectedModel={selectedModel}
+            onModelChange={setSelectedModel}
+          />
+          <button onClick={handleLLMResponse}>LLM Response</button>
+          {isOwner && <button onClick={() => setShowEditOverlay(true)}>Edit</button>}
           {isOwner && <button onClick={handleDelete}>Delete</button>}
+          {/* Speaker icon for audio playback */}
+          <SpeakerIcon nodeId={node.id} />
         </div>
       </div>
       <hr style={{ borderColor: "#333" }} />
