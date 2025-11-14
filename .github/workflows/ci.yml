@@ -2,11 +2,11 @@ name: Continuous Integration
 
 on:
   push:
-    branches-ignore:
-      - main  # Main branch uses deploy workflow instead
+    branches:
+      - '**'  # Run on all branches
   pull_request:
     branches:
-      - main
+      - '**'  # Run on PRs to all branches
 
 jobs:
   test-backend:
