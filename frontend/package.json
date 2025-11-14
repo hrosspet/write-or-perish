@@ -42,5 +42,10 @@
       "last 1 firefox version",
       "last 1 safari version"
     ]
+  },
+  "jest": {
+    "transformIgnorePatterns": [
+      "node_modules/(?!(axios|react-markdown|unist-.*|mdast-.*|remark-.*|micromark.*|decode-named-character-reference|character-entities|property-information|hast-util-.*|space-separated-tokens|comma-separated-tokens|vfile|vfile-message|bail|is-plain-obj|trough|unified|devlop)/)"
+    ]
   }
 }
