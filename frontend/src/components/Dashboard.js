@@ -57,7 +57,7 @@ function Dashboard() {
   if (loading) return <div>Loading dashboard...</div>;
   if (error) return <div>{error}</div>;
 
-  const { user, stats, nodes } = dashboardData;
+  const { user, nodes } = dashboardData;
 
   return (
     <div style={{ padding: "20px" }}>
