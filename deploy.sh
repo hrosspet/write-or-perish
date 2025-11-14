@@ -62,6 +62,39 @@ else
     warn "No migrations directory found, skipping migrations"
 fi
 
+# Update Nginx configuration if changed
+NGINX_CONFIG_SOURCE="$PROJECT_DIR/configs/nginx.txt"
+NGINX_CONFIG_TARGET="/etc/nginx/sites-available/writeorperish"
+
+if [ -f "$NGINX_CONFIG_SOURCE" ]; then
+    log "Checking if Nginx configuration needs updating..."
+
+    # Check if config file has changed
+    if ! sudo diff -q "$NGINX_CONFIG_SOURCE" "$NGINX_CONFIG_TARGET" >/dev/null 2>&1; then
+        log "Nginx configuration has changed, updating..."
+
+        # Backup current config
+        sudo cp "$NGINX_CONFIG_TARGET" "$NGINX_CONFIG_TARGET.backup.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
+
+        # Copy new config
+        sudo cp "$NGINX_CONFIG_SOURCE" "$NGINX_CONFIG_TARGET" || error "Failed to copy Nginx config"
+
+        # Test configuration
+        log "Testing Nginx configuration..."
+        if sudo nginx -t 2>&1 | tee -a "$LOG_FILE"; then
+            log "Nginx configuration test passed"
+        else
+            error "Nginx configuration test failed! Rolling back..."
+            sudo cp "$NGINX_CONFIG_TARGET.backup."* "$NGINX_CONFIG_TARGET" 2>/dev/null || true
+            exit 1
+        fi
+    else
+        log "Nginx configuration unchanged, skipping update"
+    fi
+else
+    warn "Nginx config source not found at $NGINX_CONFIG_SOURCE"
+fi
+
 # Restart Gunicorn service
 log "Restarting Gunicorn service..."
 sudo systemctl restart write-or-perish || error "Failed to restart Gunicorn service"
