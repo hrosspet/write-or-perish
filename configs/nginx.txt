@@ -3,6 +3,9 @@ server {
    root /home/hrosspet/write-or-perish/frontend/build;
    index index.html index.htm;
 
+   # Allow large file uploads (100MB) - server-wide setting
+   client_max_body_size 100M;
+
    # serve actual mp3 files out of your flask data dir
    location /media/ {
      alias /home/hrosspet/write-or-perish/data/audio/;
