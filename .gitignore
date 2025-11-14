@@ -36,3 +36,9 @@ Thumbs.db
 *.zip
 prompt.txt
 data/
+
+# Deployment files
+deployment.log
+gunicorn.pid
+frontend-build.tar.gz
+logs/
