@@ -11,10 +11,14 @@ from flask_login import LoginManager, current_user
 from backend.models import User
 from backend.oauth import init_twitter_blueprint
 from flask_cors import CORS
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
+
+    # Fix for running behind nginx reverse proxy - handles X-Forwarded-* headers
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
     # Configure CORS to allow credentials from your frontend
     CORS(app, supports_credentials=True, origins=[app.config.get("FRONTEND_URL")])
