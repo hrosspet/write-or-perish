@@ -58,31 +58,18 @@ else
     warn "No migrations directory found, skipping migrations"
 fi
 
-# Stop existing Gunicorn process
-log "Stopping existing Gunicorn process..."
-pkill -f "gunicorn.*backend.app:app" || warn "No existing Gunicorn process found"
+# Restart Gunicorn service
+log "Restarting Gunicorn service..."
+sudo systemctl restart write-or-perish || error "Failed to restart Gunicorn service"
 
-# Wait for process to stop
-sleep 2
-
-# Start Gunicorn
-log "Starting Gunicorn..."
-cd "$PROJECT_DIR"
-gunicorn -w 4 -b 127.0.0.1:8000 backend.app:app \
-    --daemon \
-    --timeout 900 \
-    --access-logfile "$PROJECT_DIR/logs/gunicorn-access.log" \
-    --error-logfile "$PROJECT_DIR/logs/gunicorn-error.log" \
-    --pid "$PROJECT_DIR/gunicorn.pid" || error "Failed to start Gunicorn"
-
-# Wait for Gunicorn to start
+# Wait for service to start
 sleep 3
 
-# Check if Gunicorn is running
-if pgrep -f "gunicorn.*backend.app:app" > /dev/null; then
-    log "Gunicorn started successfully (PID: $(cat gunicorn.pid))"
+# Check if service is running
+if sudo systemctl is-active --quiet write-or-perish; then
+    log "Gunicorn service restarted successfully"
 else
-    error "Gunicorn failed to start"
+    error "Gunicorn service failed to start"
 fi
 
 # Reload Nginx
