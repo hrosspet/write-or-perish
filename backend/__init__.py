@@ -2,7 +2,11 @@ from flask import Flask, request, jsonify, redirect, url_for, current_app
 from dotenv import load_dotenv
 import os
 
-load_dotenv()
+# Load environment variables - check for .env.production first, then fall back to .env
+if os.path.exists('.env.production'):
+    load_dotenv('.env.production')
+else:
+    load_dotenv()
 
 from backend.config import Config
 from backend.extensions import db
