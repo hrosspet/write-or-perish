@@ -3,10 +3,24 @@ from dotenv import load_dotenv
 import os
 
 # Load environment variables - check for .env.production first, then fall back to .env
-if os.path.exists('.env.production'):
-    load_dotenv('.env.production')
+# Use absolute path based on the project root (parent of backend/)
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+env_production_path = os.path.join(project_root, '.env.production')
+env_path = os.path.join(project_root, '.env')
+
+if os.path.exists(env_production_path):
+    print(f"[DEBUG] Loading environment from: {env_production_path}")
+    load_dotenv(env_production_path)
+elif os.path.exists(env_path):
+    print(f"[DEBUG] Loading environment from: {env_path}")
+    load_dotenv(env_path)
 else:
+    print(f"[DEBUG] No .env files found. Checked: {env_production_path} and {env_path}")
     load_dotenv()
+
+# Debug: Check if critical env vars are loaded
+print(f"[DEBUG] TWITTER_API_KEY loaded: {'Yes' if os.environ.get('TWITTER_API_KEY') else 'No'}")
+print(f"[DEBUG] FRONTEND_URL: {os.environ.get('FRONTEND_URL', 'NOT SET')}")
 
 from backend.config import Config
 from backend.extensions import db
