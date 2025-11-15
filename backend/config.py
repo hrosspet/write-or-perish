@@ -47,4 +47,6 @@ class Config:
     # Production Security Settings
     SESSION_COOKIE_SECURE = True
     SESSION_COOKIE_HTTPONLY = True
+    SESSION_COOKIE_SAMESITE = "Lax"  # Critical for session cookies to work
     REMEMBER_COOKIE_SECURE = True
+    REMEMBER_COOKIE_SAMESITE = "Lax"
