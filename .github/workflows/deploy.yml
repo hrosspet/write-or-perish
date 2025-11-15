@@ -27,6 +27,9 @@ jobs:
 
       - name: Build frontend
         working-directory: frontend
+        env:
+          REACT_APP_BACKEND_URL: https://writeorperish.org
+          REACT_APP_API_URL: https://writeorperish.org/api
         run: npm run build
 
       - name: Create deployment package

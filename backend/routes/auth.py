@@ -4,7 +4,9 @@ from backend.models import User
 from backend.extensions import db
 from flask_dance.contrib.twitter import twitter
 from flask import session
+import logging
 
+logger = logging.getLogger(__name__)
 auth_bp = Blueprint("auth_bp", __name__)
 
 @auth_bp.route("/login")
@@ -12,11 +14,14 @@ def login():
     if not twitter.authorized:
         # If not authorized, start the OAuth flow.
         return redirect(url_for("twitter.login"))
+
     # Fetch Twitter info
     resp = twitter.get("account/verify_credentials.json")
     if not resp.ok:
+        logger.error(f"Failed to fetch Twitter credentials. Status: {resp.status_code}")
         flash("Failed to fetch user info from Twitter.", "error")
-        return redirect(url_for("index"))
+        # Redirect to frontend instead of non-existent 'index' route
+        return redirect(current_app.config.get('FRONTEND_URL', '/'))
     tw_info = resp.json()
     twitter_id = str(tw_info["id"])
     username = tw_info["screen_name"]
