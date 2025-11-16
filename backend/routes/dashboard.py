@@ -1,6 +1,6 @@
 from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
-from backend.models import Node, User
+from backend.models import Node, User, UserProfile
 from backend.extensions import db
 from datetime import date
 
@@ -23,6 +23,19 @@ def get_total_tokens(user):
 def get_global_tokens():
     tokens = db.session.query(db.func.sum(Node.distributed_tokens)).scalar()
     return tokens or 0
+
+def get_latest_profile(user):
+    """Get the most recent profile for a user, or None if no profile exists."""
+    profile = UserProfile.query.filter_by(user_id=user.id).order_by(UserProfile.created_at.desc()).first()
+    if profile:
+        return {
+            "id": profile.id,
+            "content": profile.content,
+            "generated_by": profile.generated_by,
+            "tokens_used": profile.tokens_used,
+            "created_at": profile.created_at.isoformat()
+        }
+    return None
 
 
 # Dashboard endpoint: only return top-level nodes (nodes with no parent)
@@ -61,7 +74,8 @@ def get_dashboard():
             "global_tokens": get_global_tokens(),
             "target_daily_tokens": 1000000  # the 1M tokens/day collective goal
         },
-        "nodes": nodes_list
+        "nodes": nodes_list,
+        "latest_profile": get_latest_profile(current_user)
     }
     return jsonify(dashboard), 200
 
@@ -103,7 +117,8 @@ def get_public_dashboard(username):
             "description": user.description
         },
         "stats": stats,
-        "nodes": nodes_list
+        "nodes": nodes_list,
+        "latest_profile": get_latest_profile(user)
     }
     return jsonify(dashboard), 200
 

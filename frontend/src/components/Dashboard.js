@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import api from "../api";
 import DashboardContent from "./DashboardContent";
 import Bubble from "./Bubble";
+import ModelSelector from "./ModelSelector";
 
 function Dashboard() {
   const { username } = useParams(); // if present, we're viewing someone else's dashboard
@@ -14,6 +15,12 @@ function Dashboard() {
   const [editingProfile, setEditingProfile] = useState(false);
   const [editUsername, setEditUsername] = useState("");
   const [editDescription, setEditDescription] = useState("");
+
+  // For AI profile generation
+  const [selectedModel, setSelectedModel] = useState("gpt-5");
+  const [generatingProfile, setGeneratingProfile] = useState(false);
+  const [showProfileConfirmation, setShowProfileConfirmation] = useState(false);
+  const [estimatedTokens, setEstimatedTokens] = useState(0);
 
   const navigate = useNavigate();
   const backendUrl = process.env.REACT_APP_BACKEND_URL;
@@ -95,6 +102,53 @@ function Dashboard() {
       });
   };
 
+  const handleGenerateProfile = () => {
+    // First, estimate the tokens
+    setGeneratingProfile(true);
+    api.post("/export/estimate_profile_tokens", { model: selectedModel })
+      .then((response) => {
+        setEstimatedTokens(response.data.estimated_tokens);
+        setShowProfileConfirmation(true);
+        setGeneratingProfile(false);
+      })
+      .catch((err) => {
+        console.error("Error estimating tokens:", err);
+        setError(err.response?.data?.error || "Error estimating tokens. Please try again.");
+        setGeneratingProfile(false);
+      });
+  };
+
+  const handleConfirmProfileGeneration = () => {
+    setShowProfileConfirmation(false);
+    setGeneratingProfile(true);
+
+    api.post("/export/generate_profile", { model: selectedModel })
+      .then((response) => {
+        // Update the dashboard data with the new profile
+        setDashboardData({
+          ...dashboardData,
+          latest_profile: {
+            id: response.data.profile_id,
+            content: response.data.profile,
+            generated_by: response.data.model_used,
+            tokens_used: response.data.tokens_used,
+            created_at: response.data.created_at
+          }
+        });
+        setGeneratingProfile(false);
+        setError(""); // Clear any previous errors
+      })
+      .catch((err) => {
+        console.error("Error generating profile:", err);
+        setError(err.response?.data?.error || "Error generating profile. Please try again.");
+        setGeneratingProfile(false);
+      });
+  };
+
+  const handleCancelProfileGeneration = () => {
+    setShowProfileConfirmation(false);
+  };
+
   if (loading) return <div>Loading dashboard...</div>;
   if (error) return <div>{error}</div>;
 
@@ -138,7 +192,7 @@ function Dashboard() {
           ) : (
             <div>
               <p>{user.description || "No description provided."}</p>
-              <div style={{ display: "flex", gap: "10px" }}>
+              <div style={{ display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" }}>
                 <button
                   onClick={() => {
                     setEditingProfile(true);
@@ -161,7 +215,100 @@ function Dashboard() {
                 >
                   Export Data
                 </button>
+                <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                  <ModelSelector
+                    nodeId={null}
+                    selectedModel={selectedModel}
+                    onModelChange={setSelectedModel}
+                  />
+                  <button
+                    onClick={handleGenerateProfile}
+                    disabled={generatingProfile}
+                    style={{
+                      backgroundColor: "#2a5a7a",
+                      color: "white",
+                      border: "none",
+                      padding: "8px 16px",
+                      cursor: generatingProfile ? "not-allowed" : "pointer",
+                      borderRadius: "4px",
+                      opacity: generatingProfile ? 0.6 : 1
+                    }}
+                  >
+                    {generatingProfile ? "Generating..." : "Generate Profile"}
+                  </button>
+                </div>
               </div>
+
+              {/* Token confirmation dialog */}
+              {showProfileConfirmation && (
+                <div style={{
+                  marginTop: "20px",
+                  padding: "15px",
+                  backgroundColor: "#2a2a2a",
+                  borderRadius: "4px",
+                  border: "1px solid #444"
+                }}>
+                  <h3>Confirm Profile Generation</h3>
+                  <p>
+                    This will use approximately <strong>{estimatedTokens.toLocaleString()}</strong> tokens
+                    to analyze all your writing and generate a profile using <strong>{selectedModel}</strong>.
+                  </p>
+                  <p>Do you want to proceed?</p>
+                  <div style={{ display: "flex", gap: "10px", marginTop: "10px" }}>
+                    <button
+                      onClick={handleConfirmProfileGeneration}
+                      style={{
+                        backgroundColor: "#2a5a7a",
+                        color: "white",
+                        border: "none",
+                        padding: "8px 16px",
+                        cursor: "pointer",
+                        borderRadius: "4px"
+                      }}
+                    >
+                      Yes, Generate Profile
+                    </button>
+                    <button
+                      onClick={handleCancelProfileGeneration}
+                      style={{
+                        backgroundColor: "#444",
+                        color: "white",
+                        border: "none",
+                        padding: "8px 16px",
+                        cursor: "pointer",
+                        borderRadius: "4px"
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Display latest profile if it exists */}
+              {dashboardData.latest_profile && (
+                <div style={{
+                  marginTop: "30px",
+                  padding: "20px",
+                  backgroundColor: "#1a1a1a",
+                  borderRadius: "8px",
+                  border: "1px solid #333"
+                }}>
+                  <h3 style={{ color: "#e0e0e0", marginTop: 0 }}>AI-Generated Profile</h3>
+                  <p style={{ fontSize: "0.9em", color: "#888", marginBottom: "15px" }}>
+                    Generated by {dashboardData.latest_profile.generated_by} on{" "}
+                    {new Date(dashboardData.latest_profile.created_at).toLocaleString()}
+                    {" "}({dashboardData.latest_profile.tokens_used.toLocaleString()} tokens)
+                  </p>
+                  <div style={{
+                    whiteSpace: "pre-wrap",
+                    lineHeight: "1.6",
+                    color: "#d0d0d0"
+                  }}>
+                    {dashboardData.latest_profile.content}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </>
