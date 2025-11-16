@@ -1,8 +1,9 @@
-from flask import Blueprint, jsonify, Response
+from flask import Blueprint, jsonify, Response, request, current_app
 from flask_login import login_required, current_user
-from backend.models import Node, NodeVersion
+from backend.models import Node, NodeVersion, UserProfile
 from backend.extensions import db
 from datetime import datetime
+import os
 
 export_bp = Blueprint("export_bp", __name__)
 
@@ -106,37 +107,30 @@ def format_node_tree(node, prefix="", index_path="1", is_last=True, processed_no
 
     return result
 
-@export_bp.route("/export/threads", methods=["GET"])
-@login_required
-def export_threads():
+def build_user_export_content(user):
     """
-    Export all threads originated by the current user in a human-readable text format.
+    Core export logic: Build a human-readable text export of all threads for a given user.
 
-    This includes:
-    - All top-level nodes created by the user
-    - All descendants of those nodes (including AI replies)
-    - Properly formatted with hierarchical structure showing branches
+    Args:
+        user: User object to export threads for
+
+    Returns:
+        str: Formatted export content, or None if no threads found
     """
     # Get all top-level nodes (threads) created by the user
     top_level_nodes = Node.query.filter_by(
-        user_id=current_user.id,
+        user_id=user.id,
         parent_id=None
     ).order_by(Node.created_at).all()
 
     if not top_level_nodes:
-        return Response(
-            "No threads found to export.",
-            mimetype="text/plain",
-            headers={
-                "Content-Disposition": f'attachment; filename="write-or-perish-export-{datetime.utcnow().strftime("%Y%m%d-%H%M%S")}.txt"'
-            }
-        )
+        return None
 
     # Build the export content
     export_lines = []
     export_lines.append("=" * 80)
     export_lines.append("Write or Perish - Thread Export")
-    export_lines.append(f"User: {current_user.username}")
+    export_lines.append(f"User: {user.username}")
     export_lines.append(f"Export Date: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
     export_lines.append(f"Total Threads: {len(top_level_nodes)}")
     export_lines.append("=" * 80)
@@ -167,7 +161,30 @@ def export_threads():
     export_lines.append("End of Export")
     export_lines.append("=" * 80)
 
-    export_content = "\n".join(export_lines)
+    return "\n".join(export_lines)
+
+@export_bp.route("/export/threads", methods=["GET"])
+@login_required
+def export_threads():
+    """
+    Export all threads originated by the current user in a human-readable text format.
+
+    This includes:
+    - All top-level nodes created by the user
+    - All descendants of those nodes (including AI replies)
+    - Properly formatted with hierarchical structure showing branches
+    """
+    # Use the core export logic
+    export_content = build_user_export_content(current_user)
+
+    if not export_content:
+        return Response(
+            "No threads found to export.",
+            mimetype="text/plain",
+            headers={
+                "Content-Disposition": f'attachment; filename="write-or-perish-export-{datetime.utcnow().strftime("%Y%m%d-%H%M%S")}.txt"'
+            }
+        )
 
     # Return as downloadable text file
     filename = f"write-or-perish-export-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.txt"
@@ -178,6 +195,202 @@ def export_threads():
             "Content-Disposition": f'attachment; filename="{filename}"'
         }
     )
+
+def approximate_token_count(text):
+    """
+    Approximate token count for a text string.
+    Uses a simple heuristic: ~4 characters per token.
+    """
+    return len(text) // 4
+
+@export_bp.route("/estimate_profile_tokens", methods=["POST"])
+@login_required
+def estimate_profile_tokens():
+    """
+    Estimate the number of tokens that would be used for profile generation.
+    Returns the estimate without actually calling the LLM.
+
+    Request body:
+        {
+            "model": "gpt-5" | "claude-sonnet-4.5" | etc.
+        }
+
+    Returns:
+        {
+            "estimated_tokens": 12345,
+            "model": "gpt-5",
+            "has_content": true
+        }
+    """
+    # Get and validate the model from request body
+    data = request.get_json() or {}
+    model_id = data.get("model")
+
+    if not model_id:
+        model_id = current_app.config.get("DEFAULT_LLM_MODEL", "gpt-5")
+
+    # Validate model is supported
+    if model_id not in current_app.config["SUPPORTED_MODELS"]:
+        return jsonify({
+            "error": f"Unsupported model: {model_id}",
+            "supported_models": list(current_app.config["SUPPORTED_MODELS"].keys())
+        }), 400
+
+    # Use the core export logic to get user's writing
+    user_export = build_user_export_content(current_user)
+
+    if not user_export:
+        return jsonify({
+            "estimated_tokens": 0,
+            "model": model_id,
+            "has_content": False,
+            "error": "No writing found to analyze."
+        }), 200
+
+    # Load the prompt template
+    prompt_template_path = os.path.join(
+        current_app.root_path,
+        "prompts",
+        "profile_generation.txt"
+    )
+
+    try:
+        with open(prompt_template_path, "r", encoding="utf-8") as f:
+            prompt_template = f.read()
+    except FileNotFoundError:
+        current_app.logger.error(f"Prompt template not found at {prompt_template_path}")
+        return jsonify({
+            "error": "Profile generation prompt template not found"
+        }), 500
+
+    # Replace the placeholder with actual user export
+    final_prompt = prompt_template.replace("{user_export}", user_export)
+
+    # Estimate tokens
+    estimated_tokens = approximate_token_count(final_prompt)
+
+    return jsonify({
+        "estimated_tokens": estimated_tokens,
+        "model": model_id,
+        "has_content": True
+    }), 200
+
+@export_bp.route("/generate_profile", methods=["POST"])
+@login_required
+def generate_profile():
+    """
+    Generate a comprehensive user profile using an LLM to analyze all of the user's writing.
+    Uses the same export logic as /export/threads via build_user_export_content().
+
+    Request body:
+        {
+            "model": "gpt-5" | "claude-sonnet-4.5" | etc.
+        }
+
+    Returns:
+        {
+            "profile": "The generated profile text...",
+            "model_used": "gpt-5",
+            "tokens_used": 12345
+        }
+    """
+    from backend.llm_providers import LLMProvider
+
+    # Get and validate the model from request body
+    data = request.get_json() or {}
+    model_id = data.get("model")
+
+    if not model_id:
+        model_id = current_app.config.get("DEFAULT_LLM_MODEL", "gpt-5")
+
+    # Validate model is supported
+    if model_id not in current_app.config["SUPPORTED_MODELS"]:
+        return jsonify({
+            "error": f"Unsupported model: {model_id}",
+            "supported_models": list(current_app.config["SUPPORTED_MODELS"].keys())
+        }), 400
+
+    # Use the core export logic to get user's writing
+    user_export = build_user_export_content(current_user)
+
+    if not user_export:
+        return jsonify({
+            "error": "No writing found to analyze. Please create some threads first."
+        }), 400
+
+    # Load the prompt template
+    prompt_template_path = os.path.join(
+        current_app.root_path,
+        "prompts",
+        "profile_generation.txt"
+    )
+
+    try:
+        with open(prompt_template_path, "r", encoding="utf-8") as f:
+            prompt_template = f.read()
+    except FileNotFoundError:
+        current_app.logger.error(f"Prompt template not found at {prompt_template_path}")
+        return jsonify({
+            "error": "Profile generation prompt template not found"
+        }), 500
+
+    # Replace the placeholder with actual user export
+    final_prompt = prompt_template.replace("{user_export}", user_export)
+
+    # Build messages for LLM
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": final_prompt
+                }
+            ]
+        }
+    ]
+
+    # Prepare API keys
+    api_keys = {
+        "openai": current_app.config.get("OPENAI_API_KEY"),
+        "anthropic": current_app.config.get("ANTHROPIC_API_KEY")
+    }
+
+    # Call the LLM
+    try:
+        response = LLMProvider.get_completion(model_id, messages, api_keys)
+        profile_text = response["content"]
+        total_tokens = response["total_tokens"]
+    except ValueError as e:
+        current_app.logger.error("LLM Provider error: %s", e)
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        current_app.logger.error("LLM API error: %s", e)
+        return jsonify({"error": "LLM API error", "details": str(e)}), 500
+
+    # Save the profile to the database
+    new_profile = UserProfile(
+        user_id=current_user.id,
+        content=profile_text,
+        generated_by=model_id,
+        tokens_used=total_tokens
+    )
+    db.session.add(new_profile)
+
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error("DB error saving profile: %s", e)
+        return jsonify({"error": "Error saving profile to database", "details": str(e)}), 500
+
+    return jsonify({
+        "profile": profile_text,
+        "model_used": model_id,
+        "tokens_used": total_tokens,
+        "profile_id": new_profile.id,
+        "created_at": new_profile.created_at.isoformat()
+    }), 200
 
 # Delete all of the current user's data from our app.
 @export_bp.route("/delete_my_data", methods=["DELETE"])

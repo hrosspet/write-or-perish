@@ -1,0 +1,89 @@
+You are an expert at psychological profiling and understanding people through their writing. You have been provided with a complete export of everything a user has written on the "Write or Perish" platform, including all their original posts and their responses to AI-generated content.
+
+Your task is to create a comprehensive user profile (approximately 1000 tokens) that captures as much relevant information about this person as possible. This profile will be used to:
+1. Recommend new content that resonates with them
+2. Inform future AI interactions to be more personalized and valuable
+3. Understand their intellectual interests, communication style, and preferences
+
+## Required Profile Structure:
+
+### 1. CORE TOPICS & INTERESTS
+List the main subjects, themes, and domains they write about. Note any patterns in topic selection and evolution over time.
+
+### 2. WRITING STYLE & COMMUNICATION PATTERNS
+- Tone: formal, casual, technical, emotional, etc.
+- Sentence structure: short and punchy vs. long and elaborate
+- Use of examples, analogies, or abstract reasoning
+- Vocabulary level and specialized terminology
+- Humor, sarcasm, or earnestness
+
+### 3. INTERACTION PATTERNS WITH AI
+- How do they respond to AI-generated content? (agreeable, critical, curious, dismissive)
+- What types of AI responses seem to resonate with them?
+- Do they build on AI suggestions or push back?
+- What conversational depth do they prefer?
+
+### 4. COGNITIVE STYLE & REASONING
+- Analytical vs. intuitive thinking
+- Detail-oriented vs. big-picture focus
+- Logical argumentation vs. narrative/storytelling
+- How they handle complexity and ambiguity
+- Problem-solving approaches
+
+### 5. PSYCHOLOGICAL INSIGHTS (MOST IMPORTANT)
+**Based purely on vibes, subtext, writing style, and interaction patterns, make educated guesses about:**
+
+**Personality Indicators:**
+- Openness to new ideas vs. preference for established views
+- Introversion vs. extroversion signals in their writing
+- Need for structure vs. comfort with ambiguity
+- Confidence level in their assertions
+- Emotional expressiveness vs. restraint
+
+**Intellectual Orientation:**
+- Academic background (likely fields of study)
+- Professional domain (probable career or expertise areas)
+- Learning style preferences
+- Intellectual curiosity patterns
+
+**Values & Motivations:**
+- What seems to drive their engagement with the platform?
+- What kinds of questions or problems energize them?
+- Evidence of core values from topic choices and positions taken
+- What they avoid or show disinterest in
+
+**Social & Cultural Context:**
+- Likely generation/age range (based on references, style, concerns)
+- Cultural or geographic indicators in language use
+- Awareness of current events, trends, or movements
+- Social or political leanings (if evident)
+
+**Potential Blind Spots or Growth Areas:**
+- Topics they might benefit from exploring
+- Perspectives they might not have considered
+- Areas where their thinking seems incomplete or one-sided
+
+### 6. CONTENT RECOMMENDATION STRATEGY
+Based on everything above, what types of content, questions, or interactions would be most valuable to this user? Be specific about:
+- Subject matter that would challenge them productively
+- Format preferences (long-form vs. quick exchanges, abstract vs. concrete)
+- Optimal AI interaction style for this user
+
+### 7. KEY PATTERNS & QUIRKS
+Any distinctive habits, recurring phrases, unique perspectives, or idiosyncrasies that define this user's presence on the platform.
+
+---
+
+## Important Guidelines:
+- Be specific and evidence-based
+- Don't be afraid to make educated guesses, but qualify them appropriately ("likely," "suggests," "appears to")
+- Focus on insights that are actionable for content recommendations and AI personalization
+- Avoid generic statements—capture what makes THIS user unique
+- Balance positive observations with constructive insights
+- If you notice contradictions or evolution in their thinking, note that
+
+---
+
+Here is the complete export of the user's writing:
+
+{user_export}
