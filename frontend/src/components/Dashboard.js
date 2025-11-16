@@ -54,6 +54,47 @@ function Dashboard() {
       });
   };
 
+  const handleExportData = () => {
+    // Call the export API endpoint
+    api.get("/export/threads", {
+      responseType: "blob", // Important for file download
+    })
+      .then((response) => {
+        // Create a blob from the response
+        const blob = new Blob([response.data], { type: "text/plain" });
+
+        // Create a temporary download link
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+
+        // Extract filename from Content-Disposition header if available
+        const contentDisposition = response.headers["content-disposition"];
+        let filename = `write-or-perish-export-${new Date().toISOString().slice(0, 19).replace(/:/g, "-")}.txt`;
+
+        if (contentDisposition) {
+          const filenameMatch = contentDisposition.match(/filename="?(.+)"?/);
+          if (filenameMatch && filenameMatch[1]) {
+            filename = filenameMatch[1];
+          }
+        }
+
+        link.download = filename;
+
+        // Trigger the download
+        document.body.appendChild(link);
+        link.click();
+
+        // Clean up
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(url);
+      })
+      .catch((err) => {
+        console.error("Error exporting data:", err);
+        setError("Error exporting data. Please try again.");
+      });
+  };
+
   if (loading) return <div>Loading dashboard...</div>;
   if (error) return <div>{error}</div>;
 
@@ -97,15 +138,30 @@ function Dashboard() {
           ) : (
             <div>
               <p>{user.description || "No description provided."}</p>
-              <button
-                onClick={() => {
-                  setEditingProfile(true);
-                  setEditUsername(user.username);
-                  setEditDescription(user.description);
-                }}
-              >
-                Edit Profile
-              </button>
+              <div style={{ display: "flex", gap: "10px" }}>
+                <button
+                  onClick={() => {
+                    setEditingProfile(true);
+                    setEditUsername(user.username);
+                    setEditDescription(user.description);
+                  }}
+                >
+                  Edit Profile
+                </button>
+                <button
+                  onClick={handleExportData}
+                  style={{
+                    backgroundColor: "#2a5f2a",
+                    color: "white",
+                    border: "none",
+                    padding: "8px 16px",
+                    cursor: "pointer",
+                    borderRadius: "4px"
+                  }}
+                >
+                  Export Data
+                </button>
+              </div>
             </div>
           )}
         </>
