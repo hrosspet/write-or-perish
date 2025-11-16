@@ -261,9 +261,9 @@ def estimate_profile_tokens():
         }), 400
 
     # Calculate max tokens for export
-    # Context window: 272k tokens
-    # Reserve 1.5k for prompt template, 10k for response, 2k buffer
-    MAX_EXPORT_TOKENS = 260000
+    # Context window: 272k input tokens (separate 128k output)
+    # Reserve 1.5k for prompt template, 2k safety buffer
+    MAX_EXPORT_TOKENS = 268500
 
     # Use the core export logic to get user's writing (with token limit)
     user_export = build_user_export_content(current_user, max_tokens=MAX_EXPORT_TOKENS)
@@ -340,9 +340,9 @@ def generate_profile():
         }), 400
 
     # Calculate max tokens for export
-    # Context window: 272k tokens
-    # Reserve 1.5k for prompt template, 10k for response, 2k buffer
-    MAX_EXPORT_TOKENS = 260000
+    # Context window: 272k input tokens (separate 128k output)
+    # Reserve 1.5k for prompt template, 2k safety buffer
+    MAX_EXPORT_TOKENS = 268500
 
     # Use the core export logic to get user's writing (with token limit)
     user_export = build_user_export_content(current_user, max_tokens=MAX_EXPORT_TOKENS)
