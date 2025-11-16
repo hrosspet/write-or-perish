@@ -203,7 +203,7 @@ def approximate_token_count(text):
     """
     return len(text) // 4
 
-@export_bp.route("/estimate_profile_tokens", methods=["POST"])
+@export_bp.route("/export/estimate_profile_tokens", methods=["POST"])
 @login_required
 def estimate_profile_tokens():
     """
@@ -275,7 +275,7 @@ def estimate_profile_tokens():
         "has_content": True
     }), 200
 
-@export_bp.route("/generate_profile", methods=["POST"])
+@export_bp.route("/export/generate_profile", methods=["POST"])
 @login_required
 def generate_profile():
     """
