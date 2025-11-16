@@ -76,10 +76,8 @@ def format_node_tree(node, prefix="", index_path="1", is_last=True, processed_no
 
     # Build the node text
     indent = "  " * (len(index_path.split('.')) - 1)
-    separator = "─" * 79
 
     result = f"{indent}[{index_path}] {node_type_display} ({author}) - {timestamp}\n"
-    result += f"{indent}{separator}\n"
 
     # Add the content with proper indentation
     content_lines = node.content.split('\n')
@@ -128,26 +126,17 @@ def build_user_export_content(user):
 
     # Build the export content
     export_lines = []
-    export_lines.append("=" * 80)
     export_lines.append("Write or Perish - Thread Export")
     export_lines.append(f"User: {user.username}")
     export_lines.append(f"Export Date: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
     export_lines.append(f"Total Threads: {len(top_level_nodes)}")
-    export_lines.append("=" * 80)
     export_lines.append("")
 
     # Process each thread
     for thread_num, node in enumerate(top_level_nodes, 1):
-        # Thread header
-        preview = node.content[:60].replace('\n', ' ')
-        if len(node.content) > 60:
-            preview += "..."
-
         export_lines.append("")
-        export_lines.append("=" * 80)
-        export_lines.append(f"THREAD {thread_num}: \"{preview}\"")
+        export_lines.append(f"THREAD {thread_num}")
         export_lines.append(f"Started: {node.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-        export_lines.append("=" * 80)
         export_lines.append("")
 
         # Format the entire thread tree
@@ -157,9 +146,7 @@ def build_user_export_content(user):
         export_lines.append("")
 
     # Add footer
-    export_lines.append("=" * 80)
     export_lines.append("End of Export")
-    export_lines.append("=" * 80)
 
     return "\n".join(export_lines)
 
