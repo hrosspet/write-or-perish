@@ -105,21 +105,55 @@ def format_node_tree(node, prefix="", index_path="1", is_last=True, processed_no
 
     return result
 
-def build_user_export_content(user):
+def build_user_export_content(user, max_tokens=None):
     """
     Core export logic: Build a human-readable text export of all threads for a given user.
 
     Args:
         user: User object to export threads for
+        max_tokens: Optional maximum token count. If provided, only includes most recent
+                   threads that fit within this limit.
 
     Returns:
         str: Formatted export content, or None if no threads found
     """
-    # Get all top-level nodes (threads) created by the user
-    top_level_nodes = Node.query.filter_by(
+    # Get all top-level nodes (threads) created by the user, ordered by most recent first
+    all_top_level_nodes = Node.query.filter_by(
         user_id=user.id,
         parent_id=None
-    ).order_by(Node.created_at).all()
+    ).order_by(Node.created_at.desc()).all()
+
+    if not all_top_level_nodes:
+        return None
+
+    # If max_tokens is specified, select only the most recent threads that fit
+    top_level_nodes = []
+    if max_tokens:
+        accumulated_tokens = 0
+        # Reserve tokens for header and footer
+        header_footer_tokens = 50
+        accumulated_tokens += header_footer_tokens
+
+        for node in all_top_level_nodes:
+            # Format the thread to estimate its token count
+            thread_text = format_node_tree(node, index_path=str(len(top_level_nodes) + 1))
+            thread_tokens = approximate_token_count(thread_text)
+
+            # Add overhead for thread header (approx 20 tokens)
+            thread_tokens += 20
+
+            if accumulated_tokens + thread_tokens <= max_tokens:
+                top_level_nodes.append(node)
+                accumulated_tokens += thread_tokens
+            else:
+                # Stop adding threads - we've hit the limit
+                break
+
+        # Reverse to get chronological order (oldest to newest among selected)
+        top_level_nodes.reverse()
+    else:
+        # No limit - use all threads in chronological order
+        top_level_nodes = list(reversed(all_top_level_nodes))
 
     if not top_level_nodes:
         return None
@@ -129,7 +163,10 @@ def build_user_export_content(user):
     export_lines.append("Write or Perish - Thread Export")
     export_lines.append(f"User: {user.username}")
     export_lines.append(f"Export Date: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
-    export_lines.append(f"Total Threads: {len(top_level_nodes)}")
+    export_lines.append(f"Total Threads: {len(all_top_level_nodes)}")
+    if max_tokens and len(top_level_nodes) < len(all_top_level_nodes):
+        export_lines.append(f"Included Threads (most recent): {len(top_level_nodes)}")
+        export_lines.append(f"(Limited to ~{max_tokens:,} tokens)")
     export_lines.append("")
 
     # Process each thread
@@ -223,8 +260,13 @@ def estimate_profile_tokens():
             "supported_models": list(current_app.config["SUPPORTED_MODELS"].keys())
         }), 400
 
-    # Use the core export logic to get user's writing
-    user_export = build_user_export_content(current_user)
+    # Calculate max tokens for export
+    # Context window: 272k tokens
+    # Reserve 1.5k for prompt template, 10k for response, 2k buffer
+    MAX_EXPORT_TOKENS = 260000
+
+    # Use the core export logic to get user's writing (with token limit)
+    user_export = build_user_export_content(current_user, max_tokens=MAX_EXPORT_TOKENS)
 
     if not user_export:
         return jsonify({
@@ -297,8 +339,13 @@ def generate_profile():
             "supported_models": list(current_app.config["SUPPORTED_MODELS"].keys())
         }), 400
 
-    # Use the core export logic to get user's writing
-    user_export = build_user_export_content(current_user)
+    # Calculate max tokens for export
+    # Context window: 272k tokens
+    # Reserve 1.5k for prompt template, 10k for response, 2k buffer
+    MAX_EXPORT_TOKENS = 260000
+
+    # Use the core export logic to get user's writing (with token limit)
+    user_export = build_user_export_content(current_user, max_tokens=MAX_EXPORT_TOKENS)
 
     if not user_export:
         return jsonify({
