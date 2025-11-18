@@ -772,7 +772,8 @@ def get_llm_status(node_id):
 
     # Get task status from Celery if still processing
     task_info = None
-    if node.llm_task_id and node.llm_task_status == 'processing':
+    created_node = None
+    if node.llm_task_id:
         from backend.celery_app import celery
         task = celery.AsyncResult(node.llm_task_id)
 
@@ -781,13 +782,29 @@ def get_llm_status(node_id):
         elif task.state == 'SUCCESS':
             node.llm_task_status = 'completed'
             db.session.commit()
+            # Get the created node ID from task result
+            if task.result and 'llm_node_id' in task.result:
+                llm_node = Node.query.get(task.result['llm_node_id'])
+                if llm_node:
+                    created_node = {
+                        "id": llm_node.id,
+                        "content": llm_node.content,
+                        "node_type": llm_node.node_type,
+                        "llm_model": llm_node.llm_model,
+                        "created_at": llm_node.created_at.isoformat()
+                    }
 
-    return jsonify({
+    response_data = {
         "node_id": node.id,
         "status": node.llm_task_status,
         "progress": node.llm_task_progress or 0,
         "task_info": task_info
-    })
+    }
+
+    if created_node:
+        response_data["node"] = created_node
+
+    return jsonify(response_data)
 
 
 @nodes_bp.route("/<int:node_id>/tts-status", methods=["GET"])
@@ -802,7 +819,7 @@ def get_tts_status(node_id):
 
     # Get task status from Celery if still processing
     task_info = None
-    if node.tts_task_id and node.tts_task_status == 'processing':
+    if node.tts_task_id:
         from backend.celery_app import celery
         task = celery.AsyncResult(node.tts_task_id)
 
@@ -812,13 +829,21 @@ def get_tts_status(node_id):
             node.tts_task_status = 'completed'
             db.session.commit()
 
-    return jsonify({
+    response_data = {
         "node_id": node.id,
         "status": node.tts_task_status,
         "progress": node.tts_task_progress or 0,
-        "tts_url": node.audio_tts_url,
         "task_info": task_info
-    })
+    }
+
+    # Include node data when completed
+    if node.tts_task_status == 'completed':
+        response_data["node"] = {
+            "id": node.id,
+            "audio_tts_url": node.audio_tts_url
+        }
+
+    return jsonify(response_data)
 
 
 # ---------------------------------------------------------------------------
