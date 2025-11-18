@@ -583,6 +583,7 @@ def request_llm_response(node_id):
     # Set initial task status
     parent_node.llm_task_status = 'pending'
     parent_node.llm_task_progress = 0
+    parent_node.llm_task_error = None  # Clear any previous errors
     db.session.commit()
 
     # Enqueue task
@@ -798,6 +799,7 @@ def get_llm_status(node_id):
         "node_id": node.id,
         "status": node.llm_task_status,
         "progress": node.llm_task_progress or 0,
+        "error": node.llm_task_error,
         "task_info": task_info
     }
 

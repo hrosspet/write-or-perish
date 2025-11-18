@@ -72,6 +72,7 @@ class Node(db.Model):
     llm_task_id = db.Column(db.String(255), nullable=True)
     llm_task_status = db.Column(db.String(20), nullable=True)  # pending, processing, completed, failed
     llm_task_progress = db.Column(db.Integer, default=0)
+    llm_task_error = db.Column(db.Text, nullable=True)
 
     # TTS generation task tracking
     tts_task_id = db.Column(db.String(255), nullable=True)

@@ -32,6 +32,9 @@ class LLMCompletionTask(Task):
                 node = Node.query.get(node_id)
                 if node:
                     node.llm_task_status = 'failed'
+                    # Store error message if not already set
+                    if not node.llm_task_error:
+                        node.llm_task_error = str(exc)
                     db.session.commit()
                     logger.error(f"LLM completion failed for node {node_id}: {exc}")
 
@@ -112,6 +115,21 @@ def generate_llm_response(self, parent_node_id: int, model_id: str, user_id: int
                 "anthropic": flask_app.config.get("ANTHROPIC_API_KEY")
             }
 
+            # Check if required API key is configured
+            model_config = flask_app.config["SUPPORTED_MODELS"][model_id]
+            provider = model_config["provider"]
+
+            if provider == "anthropic" and not api_keys["anthropic"]:
+                raise ValueError(
+                    "Anthropic API key is not configured. "
+                    "Please set the ANTHROPIC_API_KEY environment variable in your .flaskenv file."
+                )
+            elif provider == "openai" and not api_keys["openai"]:
+                raise ValueError(
+                    "OpenAI API key is not configured. "
+                    "Please set the OPENAI_API_KEY environment variable in your .flaskenv file."
+                )
+
             response = LLMProvider.get_completion(model_id, messages, api_keys)
             llm_text = response["content"]
             total_tokens = response["total_tokens"]
@@ -174,7 +192,9 @@ def generate_llm_response(self, parent_node_id: int, model_id: str, user_id: int
             }
 
         except Exception as e:
-            logger.error(f"LLM completion error for node {parent_node_id}: {e}", exc_info=True)
+            error_message = str(e)
+            logger.error(f"LLM completion error for node {parent_node_id}: {error_message}", exc_info=True)
             parent_node.llm_task_status = 'failed'
+            parent_node.llm_task_error = error_message
             db.session.commit()
             raise
