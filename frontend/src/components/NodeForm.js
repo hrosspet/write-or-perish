@@ -1,5 +1,6 @@
-import React, { useState, forwardRef, useImperativeHandle } from "react";
+import React, { useState, forwardRef, useImperativeHandle, useEffect } from "react";
 import { useMediaRecorder } from "../hooks/useMediaRecorder";
+import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 import MicButton from "./MicButton";
 import api from "../api";
 
@@ -11,6 +12,8 @@ const NodeForm = forwardRef(
     const [content, setContent] = useState(initialContent || "");
     const [error, setError] = useState("");
     const [loading, setLoading] = useState(false);
+    const [uploadedNodeId, setUploadedNodeId] = useState(null);
+
     // Audio recording state
     const {
       status: recStatus,
@@ -24,6 +27,31 @@ const NodeForm = forwardRef(
     // Audio file upload state
     const [uploadedFile, setUploadedFile] = useState(null);
     const fileInputRef = React.useRef(null);
+
+    // Transcription polling
+    const {
+      status: transcriptionStatus,
+      progress: transcriptionProgress,
+      data: transcriptionData,
+      error: transcriptionError,
+      startPolling: startTranscriptionPolling
+    } = useAsyncTaskPolling(
+      uploadedNodeId ? `/nodes/${uploadedNodeId}/transcription-status` : null,
+      { enabled: false }
+    );
+
+    // Handle transcription completion
+    useEffect(() => {
+      if (transcriptionStatus === 'completed' && transcriptionData) {
+        setLoading(false);
+        onSuccess(transcriptionData);
+        setUploadedNodeId(null);
+      } else if (transcriptionStatus === 'failed') {
+        setLoading(false);
+        setError(transcriptionError || 'Transcription failed');
+        setUploadedNodeId(null);
+      }
+    }, [transcriptionStatus, transcriptionData, transcriptionError, onSuccess]);
 
     const handleFileSelect = (event) => {
       const file = event.target.files[0];
@@ -85,16 +113,24 @@ const NodeForm = forwardRef(
           response = await api.post("/nodes/", formData, {
             headers: { 'Content-Type': 'multipart/form-data' }
           });
+
+          // Start polling for transcription status
+          const nodeId = response.data.id;
+          setUploadedNodeId(nodeId);
+          startTranscriptionPolling();
+          // Keep loading state active while transcription is in progress
+          return;
         } else {
           // Create a new text node
           response = await api.post("/nodes/", { content, parent_id: parentId });
         }
         onSuccess(response.data);
+        setLoading(false);
       } catch (err) {
         console.error("Error in NodeForm:", err);
         setError("Error submitting form.");
+        setLoading(false);
       }
-      setLoading(false);
     };
 
     useImperativeHandle(ref, () => ({
@@ -143,10 +179,42 @@ const NodeForm = forwardRef(
           </div>
         )}
 
+        {/* Transcription status */}
+        {loading && transcriptionStatus && (
+          <div style={{ marginTop: '12px', padding: '12px', backgroundColor: '#f5f5f5', borderRadius: '8px' }}>
+            <div style={{ marginBottom: '8px', fontWeight: 'bold' }}>
+              {transcriptionStatus === 'pending' && '⏳ Waiting to transcribe...'}
+              {transcriptionStatus === 'processing' && '🎙️ Transcribing audio...'}
+              {transcriptionStatus === 'completed' && '✅ Complete!'}
+              {transcriptionStatus === 'failed' && '❌ Transcription failed'}
+            </div>
+            {transcriptionProgress > 0 && (
+              <div style={{ width: '100%', backgroundColor: '#e0e0e0', borderRadius: '4px', overflow: 'hidden', height: '24px' }}>
+                <div
+                  style={{
+                    width: `${transcriptionProgress}%`,
+                    height: '100%',
+                    backgroundColor: '#4CAF50',
+                    transition: 'width 0.3s ease',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: 'white',
+                    fontSize: '12px',
+                    fontWeight: 'bold'
+                  }}
+                >
+                  {transcriptionProgress}%
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {!hideSubmit && (
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '8px' }}>
             <button type="submit" disabled={loading}>
-              {loading ? "Submitting..." : "Submit"}
+              {loading && transcriptionStatus ? "Transcribing..." : loading ? "Submitting..." : "Submit"}
             </button>
             {!editMode && (
               <>

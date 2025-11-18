@@ -577,103 +577,29 @@ def request_llm_response(node_id):
             "supported_models": list(current_app.config["SUPPORTED_MODELS"].keys())
         }), 400
 
-    # Build the chain of nodes (from top‐level to current)
-    node_chain = []
-    current = parent_node
-    while current:
-        node_chain.insert(0, current)
-        current = current.parent
+    # Enqueue async LLM completion task
+    from backend.tasks.llm_completion import generate_llm_response
 
-    # Build messages array for LLM API
-    messages = []
-    for node in node_chain:
-        author = node.user.username if node.user else "Unknown"
-        # Determine if this node was created by an LLM (check if it matches any model ID or llm_model)
-        is_llm_node = node.node_type == "llm" or (node.llm_model is not None)
+    # Set initial task status
+    parent_node.llm_task_status = 'pending'
+    parent_node.llm_task_progress = 0
+    db.session.commit()
 
-        if is_llm_node:
-            role = "assistant"
-            message_text = node.content
-        else:
-            role = "user"
-            message_text = f"author {author}: {node.content}"
+    # Enqueue task
+    task = generate_llm_response.delay(parent_node.id, model_id, current_user.id)
 
-        messages.append({
-            "role": role,
-            "content": [
-                {
-                    "type": "text",
-                    "text": message_text
-                }
-            ]
-        })
+    # Store task ID
+    parent_node.llm_task_id = task.id
+    db.session.commit()
 
-    # Prepare API keys
-    api_keys = {
-        "openai": current_app.config.get("OPENAI_API_KEY"),
-        "anthropic": current_app.config.get("ANTHROPIC_API_KEY")
-    }
-
-    # Call the LLM provider abstraction
-    try:
-        response = LLMProvider.get_completion(model_id, messages, api_keys)
-        llm_text = response["content"]
-        total_tokens = response["total_tokens"]
-    except ValueError as e:
-        current_app.logger.error("LLM Provider error: %s", e)
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        current_app.logger.error("LLM API error: %s", e)
-        return jsonify({"error": "LLM API error", "details": str(e)}), 500
-
-    # Look up (or create) the special LLM user with the model ID as username
-    llm_user = User.query.filter_by(username=model_id).first()
-    if not llm_user:
-        llm_user = User(twitter_id=f"llm-{model_id}", username=model_id)
-        db.session.add(llm_user)
-        db.session.commit()
-
-    # ---------- Redistribute tokens to the contributing (non-LLM) nodes ----------
-    # Filter node_chain: only include nodes where node_type != 'llm'
-    contributing_nodes = [n for n in node_chain if n.node_type != "llm"]
-    if contributing_nodes and total_tokens:
-        total_weight = sum(approximate_token_count(n.content) for n in contributing_nodes)
-        for n in contributing_nodes:
-            weight = approximate_token_count(n.content)
-            # Calculate share proportionally (round if desired)
-            share = int(round(total_tokens * (weight / total_weight))) if total_weight > 0 else 0
-            # Add the share to distributed_tokens for that node.
-            n.distributed_tokens += share
-            db.session.add(n)
-    # -----------------------------------------------------------------------------
-
-    # Create the LLM node with token_count set to 0 and llm_model set
-    llm_node = Node(
-        user_id=llm_user.id,
-        parent_id=parent_node.id,
-        node_type="llm",
-        llm_model=model_id,  # Store the model used
-        content=llm_text,
-        token_count=0  # No direct tokens assigned here.
-    )
-    db.session.add(llm_node)
-    try:
-        db.session.commit()
-    except Exception as e:
-        db.session.rollback()
-        current_app.logger.error("DB error saving LLM response: %s", e)
-        return jsonify({"error": "DB error saving LLM response", "details": str(e)}), 500
+    current_app.logger.info(f"Enqueued LLM completion task {task.id} for node {parent_node.id}")
 
     return jsonify({
-        "message": "LLM response created",
-        "node": {
-            "id": llm_node.id,
-            "content": llm_node.content,
-            "token_count": llm_node.token_count,
-            "created_at": llm_node.created_at.isoformat(),
-            "username": model_id
-        }
-    }), 201
+        "message": "LLM response generation started",
+        "task_id": task.id,
+        "status": "pending",
+        "parent_node_id": parent_node.id
+    }), 202
 
 
 # Create a linked node – allowing the user to reference another node either as a link alone or with additional text.
@@ -764,82 +690,34 @@ def generate_tts(node_id):
     if len(node.content or "") > 10000:
         return jsonify({"error": "Content too long for TTS"}), 413
 
-    # ------------------------------------------------------------------
-    # Real TTS generation via OpenAI gpt-4o-mini-tts
-    # ------------------------------------------------------------------
+    # Check if OpenAI API key is configured
     api_key = current_app.config.get("OPENAI_API_KEY")
     if not api_key:
         return jsonify({"error": "TTS not configured (missing API key)"}), 500
-    text = node.content or ""
-    # Prevent overly long content
-    if len(text) > 10000:
-        return jsonify({"error": "Content too long for TTS"}), 413
-    # Generate TTS via OpenAI Python SDK (streaming), chunking for text >4096 chars
-    client = OpenAI(api_key=api_key)
-    from pathlib import Path
-    from pydub import AudioSegment
 
-    # Prepare storage directory
-    target_dir = AUDIO_STORAGE_ROOT / f"user/{node.user_id}/node/{node.id}"
-    target_dir.mkdir(parents=True, exist_ok=True)
-    final_path = Path(target_dir) / "tts.mp3"
+    # Enqueue async TTS generation task
+    from backend.tasks.tts import generate_tts_audio
 
-    # Split text into word-boundary chunks <= 4096 chars
-    def chunk_text(s, max_len=4096):
-        parts = []
-        while len(s) > max_len:
-            idx = s.rfind(' ', 0, max_len)
-            if idx <= 0:
-                idx = max_len
-            parts.append(s[:idx])
-            s = s[idx:].lstrip()
-        if s:
-            parts.append(s)
-        return parts
-
-    chunks = chunk_text(text)
-    try:
-        if len(chunks) == 1:
-            # Single chunk: direct streaming to MP3
-            with client.audio.speech.with_streaming_response.create(
-                model="gpt-4o-mini-tts",
-                input=chunks[0],
-                voice="alloy"
-            ) as resp:
-                resp.stream_to_file(final_path)
-        else:
-            # Multiple chunks: generate parts on disk and concatenate via pydub
-            audio_parts = []
-            for i, chunk in enumerate(chunks):
-                part_path = Path(target_dir) / f"tts_part{i}.mp3"
-                with client.audio.speech.with_streaming_response.create(
-                    model="gpt-4o-mini-tts",
-                    input=chunk,
-                    voice="alloy"
-                ) as resp:
-                    resp.stream_to_file(part_path)
-                # Load into AudioSegment from file path
-                segment = AudioSegment.from_file(str(part_path), format="mp3")
-                audio_parts.append(segment)
-                # Cleanup part file
-                part_path.unlink()
-            # Concatenate all segments and export to final_path
-            combined = sum(audio_parts)
-            combined.export(final_path, format="mp3")
-    except Exception as e:
-        current_app.logger.error("TTS generation failed for node %s: %s", node_id, e)
-        return jsonify({"error": "TTS generation failed", "details": str(e)}), 500
-
-    # Update node record with new TTS URL
-    rel_path = final_path.relative_to(AUDIO_STORAGE_ROOT)
-    url = f"/media/{rel_path.as_posix()}"
-    node.audio_tts_url = url
-    # MP3 audio
-    node.audio_mime_type = "audio/mpeg"
-    db.session.add(node)
+    # Set initial task status
+    node.tts_task_status = 'pending'
+    node.tts_task_progress = 0
     db.session.commit()
-    # Return the new TTS URL
-    return jsonify({"message": "TTS generated", "tts_url": url}), 200
+
+    # Enqueue task
+    task = generate_tts_audio.delay(node.id, str(AUDIO_STORAGE_ROOT))
+
+    # Store task ID
+    node.tts_task_id = task.id
+    db.session.commit()
+
+    current_app.logger.info(f"Enqueued TTS generation task {task.id} for node {node.id}")
+
+    return jsonify({
+        "message": "TTS generation started",
+        "task_id": task.id,
+        "status": "pending",
+        "node_id": node.id
+    }), 202
 
 
 # ---------------------------------------------------------------------------

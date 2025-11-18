@@ -339,91 +339,61 @@ def generate_profile():
             "supported_models": list(current_app.config["SUPPORTED_MODELS"].keys())
         }), 400
 
-    # Calculate max tokens for export
-    # Context window: 272k input tokens (separate 128k output)
-    # Reserve 1.5k for prompt template, 2k safety buffer
-    MAX_EXPORT_TOKENS = 268500
-
-    # Use the core export logic to get user's writing (with token limit)
-    user_export = build_user_export_content(current_user, max_tokens=MAX_EXPORT_TOKENS)
-
-    if not user_export:
+    # Quick check if user has any writing to analyze
+    user_export_check = build_user_export_content(current_user, max_tokens=1000)
+    if not user_export_check:
         return jsonify({
             "error": "No writing found to analyze. Please create some threads first."
         }), 400
 
-    # Load the prompt template
-    prompt_template_path = os.path.join(
-        current_app.root_path,
-        "prompts",
-        "profile_generation.txt"
-    )
+    # Enqueue async profile generation task
+    from backend.tasks.exports import generate_user_profile
 
-    try:
-        with open(prompt_template_path, "r", encoding="utf-8") as f:
-            prompt_template = f.read()
-    except FileNotFoundError:
-        current_app.logger.error(f"Prompt template not found at {prompt_template_path}")
-        return jsonify({
-            "error": "Profile generation prompt template not found"
-        }), 500
+    task = generate_user_profile.delay(current_user.id, model_id)
 
-    # Replace the placeholder with actual user export
-    final_prompt = prompt_template.replace("{user_export}", user_export)
-
-    # Build messages for LLM
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": final_prompt
-                }
-            ]
-        }
-    ]
-
-    # Prepare API keys
-    api_keys = {
-        "openai": current_app.config.get("OPENAI_API_KEY"),
-        "anthropic": current_app.config.get("ANTHROPIC_API_KEY")
-    }
-
-    # Call the LLM
-    try:
-        response = LLMProvider.get_completion(model_id, messages, api_keys)
-        profile_text = response["content"]
-        total_tokens = response["total_tokens"]
-    except ValueError as e:
-        current_app.logger.error("LLM Provider error: %s", e)
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        current_app.logger.error("LLM API error: %s", e)
-        return jsonify({"error": "LLM API error", "details": str(e)}), 500
-
-    # Save the profile to the database
-    new_profile = UserProfile(
-        user_id=current_user.id,
-        content=profile_text,
-        generated_by=model_id,
-        tokens_used=total_tokens
-    )
-    db.session.add(new_profile)
-
-    try:
-        db.session.commit()
-    except Exception as e:
-        db.session.rollback()
-        current_app.logger.error("DB error saving profile: %s", e)
-        return jsonify({"error": "Error saving profile to database", "details": str(e)}), 500
+    current_app.logger.info(f"Enqueued profile generation task {task.id} for user {current_user.id}")
 
     return jsonify({
-        "profile": profile_text,
-        "model_used": model_id,
-        "tokens_used": total_tokens,
-        "profile_id": new_profile.id,
-        "created_at": new_profile.created_at.isoformat()
+        "message": "Profile generation started",
+        "task_id": task.id,
+        "status": "pending"
+    }), 202
+
+
+@export_bp.route("/export/profile-status/<task_id>", methods=["GET"])
+@login_required
+def get_profile_status(task_id):
+    """Get the status of a profile generation task."""
+    from backend.celery_app import celery
+    from backend.models import UserProfile
+
+    task = celery.AsyncResult(task_id)
+
+    # Get task state and info
+    state = task.state
+    info = task.info if task.info else {}
+
+    # If task completed, fetch the profile from database
+    profile_data = None
+    if state == 'SUCCESS' and task.result:
+        profile_id = task.result.get('profile_id')
+        if profile_id:
+            profile = UserProfile.query.get(profile_id)
+            if profile and profile.user_id == current_user.id:
+                profile_data = {
+                    "id": profile.id,
+                    "content": profile.content,
+                    "generated_by": profile.generated_by,
+                    "tokens_used": profile.tokens_used,
+                    "created_at": profile.created_at.isoformat()
+                }
+
+    return jsonify({
+        "task_id": task_id,
+        "status": state.lower(),
+        "progress": info.get('progress', 0),
+        "message": info.get('status', ''),
+        "profile": profile_data
     }), 200
 
 # Delete all of the current user's data from our app.
