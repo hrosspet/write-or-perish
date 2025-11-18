@@ -40,6 +40,13 @@ const NodeForm = forwardRef(
       { enabled: false }
     );
 
+    // Auto-start polling when uploadedNodeId is set
+    useEffect(() => {
+      if (uploadedNodeId) {
+        startTranscriptionPolling();
+      }
+    }, [uploadedNodeId, startTranscriptionPolling]);
+
     // Handle transcription completion
     useEffect(() => {
       if (transcriptionStatus === 'completed' && transcriptionData) {
@@ -114,11 +121,11 @@ const NodeForm = forwardRef(
             headers: { 'Content-Type': 'multipart/form-data' }
           });
 
-          // Start polling for transcription status
+          // Set the node ID to trigger polling via useEffect
           const nodeId = response.data.id;
           setUploadedNodeId(nodeId);
-          startTranscriptionPolling();
           // Keep loading state active while transcription is in progress
+          // Polling will start automatically via useEffect
           return;
         } else {
           // Create a new text node
