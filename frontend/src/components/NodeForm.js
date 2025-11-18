@@ -3,6 +3,7 @@ import { useMediaRecorder } from "../hooks/useMediaRecorder";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 import MicButton from "./MicButton";
 import api from "../api";
+import { uploadFileInChunks } from "../utils/chunkedUpload";
 
 const NodeForm = forwardRef(
   (
@@ -13,6 +14,8 @@ const NodeForm = forwardRef(
     const [error, setError] = useState("");
     const [loading, setLoading] = useState(false);
     const [uploadedNodeId, setUploadedNodeId] = useState(null);
+    const [uploadProgress, setUploadProgress] = useState(0);
+    const [isUploading, setIsUploading] = useState(false);
 
     // Audio recording state
     const {
@@ -102,24 +105,50 @@ const NodeForm = forwardRef(
         return;
       }
       setLoading(true);
+      setError("");
       try {
         let response;
         if (editMode && nodeId) {
           // Update (edit) existing node (text only)
           response = await api.put(`/nodes/${nodeId}`, { content });
         } else if (mediaBlob || uploadedFile) {
-          // Create a new audio node via multipart/form-data
-          const formData = new FormData();
-          // Append audio file (either recorded or uploaded)
-          if (uploadedFile) {
-            formData.append('audio_file', uploadedFile);
+          // Determine which file to upload
+          const fileToUpload = uploadedFile || new File([mediaBlob], 'recording.webm', { type: mediaBlob.type });
+
+          // Check file size - use chunked upload for files larger than 10MB
+          const useChunkedUpload = fileToUpload.size > 10 * 1024 * 1024;
+
+          if (useChunkedUpload) {
+            // Use chunked upload for large files
+            setIsUploading(true);
+            setUploadProgress(0);
+
+            try {
+              response = await uploadFileInChunks(
+                fileToUpload,
+                { parent_id: parentId, node_type: 'user' },
+                (progress) => {
+                  setUploadProgress(progress);
+                }
+              );
+
+              setIsUploading(false);
+              setUploadProgress(100);
+            } catch (uploadErr) {
+              setIsUploading(false);
+              setUploadProgress(0);
+              throw uploadErr;
+            }
           } else {
-            formData.append('audio_file', new File([mediaBlob], 'recording.webm', { type: mediaBlob.type }));
+            // Use traditional upload for small files (< 10MB)
+            const formData = new FormData();
+            formData.append('audio_file', fileToUpload);
+            if (parentId) formData.append('parent_id', parentId);
+
+            response = await api.post("/nodes/", formData, {
+              headers: { 'Content-Type': 'multipart/form-data' }
+            });
           }
-          if (parentId) formData.append('parent_id', parentId);
-          response = await api.post("/nodes/", formData, {
-            headers: { 'Content-Type': 'multipart/form-data' }
-          });
 
           // Set the node ID to trigger polling via useEffect
           const nodeId = response.data.id;
@@ -135,8 +164,10 @@ const NodeForm = forwardRef(
         setLoading(false);
       } catch (err) {
         console.error("Error in NodeForm:", err);
-        setError("Error submitting form.");
+        setError(err.response?.data?.error || err.message || "Error submitting form.");
         setLoading(false);
+        setIsUploading(false);
+        setUploadProgress(0);
       }
     };
 
@@ -186,8 +217,35 @@ const NodeForm = forwardRef(
           </div>
         )}
 
+        {/* Upload progress */}
+        {isUploading && (
+          <div style={{ marginTop: '12px', padding: '12px', backgroundColor: '#e3f2fd', borderRadius: '8px' }}>
+            <div style={{ marginBottom: '8px', fontWeight: 'bold' }}>
+              📤 Uploading audio file...
+            </div>
+            <div style={{ width: '100%', backgroundColor: '#bbdefb', borderRadius: '4px', overflow: 'hidden', height: '24px' }}>
+              <div
+                style={{
+                  width: `${uploadProgress}%`,
+                  height: '100%',
+                  backgroundColor: '#2196F3',
+                  transition: 'width 0.3s ease',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  color: 'white',
+                  fontSize: '12px',
+                  fontWeight: 'bold'
+                }}
+              >
+                {uploadProgress}%
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Transcription status */}
-        {loading && transcriptionStatus && (
+        {loading && transcriptionStatus && !isUploading && (
           <div style={{ marginTop: '12px', padding: '12px', backgroundColor: '#f5f5f5', borderRadius: '8px' }}>
             <div style={{ marginBottom: '8px', fontWeight: 'bold' }}>
               {transcriptionStatus === 'pending' && '⏳ Waiting to transcribe...'}
@@ -221,7 +279,7 @@ const NodeForm = forwardRef(
         {!hideSubmit && (
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '8px' }}>
             <button type="submit" disabled={loading}>
-              {loading && transcriptionStatus ? "Transcribing..." : loading ? "Submitting..." : "Submit"}
+              {isUploading ? `Uploading... ${uploadProgress}%` : loading && transcriptionStatus ? "Transcribing..." : loading ? "Submitting..." : "Submit"}
             </button>
             {!editMode && (
               <>

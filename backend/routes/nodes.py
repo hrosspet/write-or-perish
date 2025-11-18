@@ -849,6 +849,302 @@ def get_tts_status(node_id):
 
 
 # ---------------------------------------------------------------------------
+# Chunked upload endpoints
+# ---------------------------------------------------------------------------
+
+
+@nodes_bp.route("/upload/init", methods=["POST"])
+@login_required
+def init_chunked_upload():
+    """Initialize a chunked upload session.
+
+    Creates a placeholder node and prepares for chunk reception.
+
+    Request body:
+    {
+        "filename": "recording.m4a",
+        "filesize": 190000000,
+        "total_chunks": 38,
+        "upload_id": "unique-id",
+        "parent_id": 123,  // optional
+        "node_type": "user"  // optional
+    }
+
+    Returns: { "node_id": 456, "upload_id": "unique-id" }
+    """
+    data = request.get_json() or {}
+
+    filename = data.get("filename")
+    filesize = data.get("filesize")
+    total_chunks = data.get("total_chunks")
+    upload_id = data.get("upload_id")
+    parent_id = data.get("parent_id")
+    node_type = data.get("node_type", "user")
+
+    # Validate required fields
+    if not all([filename, filesize, total_chunks, upload_id]):
+        return jsonify({"error": "Missing required fields"}), 400
+
+    # Validate file type
+    if not _allowed_file(filename):
+        return jsonify({"error": "Unsupported file type"}), 415
+
+    # Validate file size
+    if filesize > MAX_AUDIO_BYTES:
+        return jsonify({"error": "File too large"}), 413
+
+    # Create placeholder node
+    placeholder_text = "[Voice note – upload in progress]"
+    node = Node(
+        user_id=current_user.id,
+        parent_id=parent_id,
+        node_type=node_type,
+        content=placeholder_text,
+        transcription_status='pending'
+    )
+    db.session.add(node)
+    db.session.commit()
+
+    # Create directory for chunk storage
+    chunk_dir = AUDIO_STORAGE_ROOT / f"chunks/{current_user.id}/{upload_id}"
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+
+    # Store upload metadata
+    metadata = {
+        "node_id": node.id,
+        "filename": filename,
+        "filesize": filesize,
+        "total_chunks": total_chunks,
+        "uploaded_chunks": []
+    }
+
+    import json
+    metadata_path = chunk_dir / "metadata.json"
+    with open(metadata_path, "w") as f:
+        json.dump(metadata, f)
+
+    current_app.logger.info(
+        f"Initialized chunked upload {upload_id} for node {node.id}: "
+        f"{filename} ({filesize / (1024 * 1024):.1f} MB, {total_chunks} chunks)"
+    )
+
+    return jsonify({
+        "node_id": node.id,
+        "upload_id": upload_id
+    }), 201
+
+
+@nodes_bp.route("/upload/chunk", methods=["POST"])
+@login_required
+def upload_chunk():
+    """Receive and store a single chunk.
+
+    Expects multipart/form-data with:
+    - chunk: file blob
+    - chunk_index: integer
+    - upload_id: string
+    - node_id: integer
+    """
+    if "chunk" not in request.files:
+        return jsonify({"error": "Missing chunk file"}), 400
+
+    chunk_file = request.files["chunk"]
+    chunk_index = request.form.get("chunk_index")
+    upload_id = request.form.get("upload_id")
+    node_id = request.form.get("node_id")
+
+    if not all([chunk_index is not None, upload_id, node_id]):
+        return jsonify({"error": "Missing required fields"}), 400
+
+    try:
+        chunk_index = int(chunk_index)
+        node_id = int(node_id)
+    except ValueError:
+        return jsonify({"error": "Invalid chunk_index or node_id"}), 400
+
+    # Verify node ownership
+    node = Node.query.get_or_404(node_id)
+    if node.user_id != current_user.id:
+        return jsonify({"error": "Unauthorized"}), 403
+
+    # Save chunk
+    chunk_dir = AUDIO_STORAGE_ROOT / f"chunks/{current_user.id}/{upload_id}"
+    if not chunk_dir.exists():
+        return jsonify({"error": "Upload session not found"}), 404
+
+    chunk_path = chunk_dir / f"chunk_{chunk_index:04d}"
+    chunk_file.save(chunk_path)
+
+    # Update metadata
+    import json
+    metadata_path = chunk_dir / "metadata.json"
+    with open(metadata_path, "r") as f:
+        metadata = json.load(f)
+
+    if chunk_index not in metadata["uploaded_chunks"]:
+        metadata["uploaded_chunks"].append(chunk_index)
+        metadata["uploaded_chunks"].sort()
+
+    with open(metadata_path, "w") as f:
+        json.dump(metadata, f)
+
+    current_app.logger.debug(
+        f"Received chunk {chunk_index} for upload {upload_id} "
+        f"({len(metadata['uploaded_chunks'])}/{metadata['total_chunks']})"
+    )
+
+    return jsonify({
+        "message": "Chunk received",
+        "chunk_index": chunk_index,
+        "uploaded_chunks": len(metadata["uploaded_chunks"]),
+        "total_chunks": metadata["total_chunks"]
+    }), 200
+
+
+@nodes_bp.route("/upload/finalize", methods=["POST"])
+@login_required
+def finalize_chunked_upload():
+    """Finalize a chunked upload by reassembling chunks into final file.
+
+    Request body:
+    {
+        "upload_id": "unique-id",
+        "node_id": 456
+    }
+
+    Returns: node info (same as create_node endpoint)
+    """
+    data = request.get_json() or {}
+    upload_id = data.get("upload_id")
+    node_id = data.get("node_id")
+
+    if not all([upload_id, node_id]):
+        return jsonify({"error": "Missing required fields"}), 400
+
+    try:
+        node_id = int(node_id)
+    except ValueError:
+        return jsonify({"error": "Invalid node_id"}), 400
+
+    # Verify node ownership
+    node = Node.query.get_or_404(node_id)
+    if node.user_id != current_user.id:
+        return jsonify({"error": "Unauthorized"}), 403
+
+    # Load metadata
+    chunk_dir = AUDIO_STORAGE_ROOT / f"chunks/{current_user.id}/{upload_id}"
+    if not chunk_dir.exists():
+        return jsonify({"error": "Upload session not found"}), 404
+
+    import json
+    metadata_path = chunk_dir / "metadata.json"
+    with open(metadata_path, "r") as f:
+        metadata = json.load(f)
+
+    # Verify all chunks received
+    expected_chunks = list(range(metadata["total_chunks"]))
+    if metadata["uploaded_chunks"] != expected_chunks:
+        missing = set(expected_chunks) - set(metadata["uploaded_chunks"])
+        return jsonify({
+            "error": "Incomplete upload",
+            "missing_chunks": list(missing)
+        }), 400
+
+    # Reassemble chunks
+    filename = metadata["filename"]
+    ext = filename.rsplit(".", 1)[-1] if "." in filename else "webm"
+
+    target_dir = AUDIO_STORAGE_ROOT / f"user/{current_user.id}/node/{node.id}"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = target_dir / f"original.{ext}"
+
+    current_app.logger.info(f"Reassembling {metadata['total_chunks']} chunks for upload {upload_id}")
+
+    # Combine chunks into final file
+    with open(target_path, "wb") as outfile:
+        for chunk_index in range(metadata["total_chunks"]):
+            chunk_path = chunk_dir / f"chunk_{chunk_index:04d}"
+            with open(chunk_path, "rb") as infile:
+                outfile.write(infile.read())
+
+    # Verify file size
+    final_size = target_path.stat().st_size
+    if final_size != metadata["filesize"]:
+        current_app.logger.error(
+            f"File size mismatch for upload {upload_id}: "
+            f"expected {metadata['filesize']}, got {final_size}"
+        )
+        # Don't fail - continue with transcription
+
+    # Update node with audio info
+    rel_path = target_path.relative_to(AUDIO_STORAGE_ROOT)
+    node.audio_original_url = f"/media/{rel_path.as_posix()}"
+    node.audio_mime_type = f"audio/{ext}"
+    node.content = "[Voice note – transcription pending]"
+    db.session.commit()
+
+    # Clean up chunks
+    import shutil
+    try:
+        shutil.rmtree(chunk_dir)
+        current_app.logger.info(f"Cleaned up chunks for upload {upload_id}")
+    except Exception as e:
+        current_app.logger.warning(f"Failed to clean up chunks: {e}")
+
+    # Enqueue transcription task
+    api_key = current_app.config.get("OPENAI_API_KEY")
+    if api_key:
+        from backend.tasks.transcription import transcribe_audio
+
+        task = transcribe_audio.delay(node.id, str(target_path))
+        node.transcription_task_id = task.id
+        db.session.commit()
+
+        current_app.logger.info(f"Enqueued transcription task {task.id} for node {node.id}")
+
+    return jsonify({
+        "id": node.id,
+        "audio_original_url": node.audio_original_url,
+        "content": node.content,
+        "node_type": node.node_type,
+        "created_at": node.created_at.isoformat(),
+        "transcription_status": node.transcription_status,
+        "transcription_task_id": node.transcription_task_id
+    }), 200
+
+
+@nodes_bp.route("/upload/cleanup", methods=["POST"])
+@login_required
+def cleanup_chunked_upload():
+    """Clean up a failed/cancelled chunked upload.
+
+    Request body:
+    {
+        "upload_id": "unique-id"
+    }
+    """
+    data = request.get_json() or {}
+    upload_id = data.get("upload_id")
+
+    if not upload_id:
+        return jsonify({"error": "Missing upload_id"}), 400
+
+    chunk_dir = AUDIO_STORAGE_ROOT / f"chunks/{current_user.id}/{upload_id}"
+
+    if chunk_dir.exists():
+        import shutil
+        try:
+            shutil.rmtree(chunk_dir)
+            current_app.logger.info(f"Cleaned up failed upload {upload_id}")
+            return jsonify({"message": "Cleanup successful"}), 200
+        except Exception as e:
+            current_app.logger.error(f"Cleanup failed for upload {upload_id}: {e}")
+            return jsonify({"error": "Cleanup failed"}), 500
+
+    return jsonify({"message": "Nothing to clean up"}), 200
+
+
+# ---------------------------------------------------------------------------
 # Media serving endpoint (simple/dev only – not for production)
 # ---------------------------------------------------------------------------
 
