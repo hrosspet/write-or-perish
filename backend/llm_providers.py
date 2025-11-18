@@ -115,9 +115,12 @@ class LLMProvider:
         # System parameter must be a list of content blocks
         system_param = [{"type": "text", "text": system_text}] if system_text else []
 
+        # Claude Opus 3 has a lower max_tokens limit than newer models
+        max_tokens = 4096 if "claude-3-opus" in model else 10000
+
         response = client.messages.create(
             model=model,
-            max_tokens=10000,
+            max_tokens=max_tokens,
             system=system_param,
             messages=anthropic_messages
         )
