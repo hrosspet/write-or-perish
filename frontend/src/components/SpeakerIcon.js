@@ -3,6 +3,7 @@ import { useEffect } from 'react';
 import { FaVolumeUp, FaSpinner } from 'react-icons/fa';
 import api from '../api';
 import { useUser } from '../contexts/UserContext';
+import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
 
 /**
  * SpeakerIcon component fetches and plays audio for a node.
@@ -13,7 +14,20 @@ const SpeakerIcon = ({ nodeId }) => {
   const [loading, setLoading] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [audioSrc, setAudioSrc] = useState(null);
+  const [ttsTaskActive, setTtsTaskActive] = useState(false);
   const audioRef = useRef(null);
+
+  // TTS generation polling
+  const {
+    status: ttsStatus,
+    progress: ttsProgress,
+    data: ttsData,
+    error: ttsError,
+    startPolling: startTtsPolling
+  } = useAsyncTaskPolling(
+    ttsTaskActive ? `/nodes/${nodeId}/tts-status` : null,
+    { enabled: false }
+  );
 
   // Reset audio state when the node changes
   useEffect(() => {
@@ -24,7 +38,35 @@ const SpeakerIcon = ({ nodeId }) => {
     setAudioSrc(null);
     setPlaying(false);
     setLoading(false);
+    setTtsTaskActive(false);
   }, [nodeId]);
+
+  // Handle TTS completion
+  useEffect(() => {
+    if (ttsStatus === 'completed' && ttsData) {
+      const ttsUrl = ttsData.node?.audio_tts_url;
+      if (ttsUrl) {
+        // Build absolute URL
+        const srcUrl = ttsUrl.startsWith('http')
+          ? ttsUrl
+          : `${process.env.REACT_APP_BACKEND_URL}${ttsUrl}`;
+        setAudioSrc(srcUrl);
+        // Create and play audio
+        const audio = new Audio(srcUrl);
+        audioRef.current = audio;
+        audio.onended = () => setPlaying(false);
+        audio.onpause = () => setPlaying(false);
+        audio.onplay = () => setPlaying(true);
+        audio.play().catch(err => console.error('Error playing audio:', err));
+      }
+      setTtsTaskActive(false);
+      setLoading(false);
+    } else if (ttsStatus === 'failed') {
+      console.error('TTS generation failed:', ttsError);
+      setTtsTaskActive(false);
+      setLoading(false);
+    }
+  }, [ttsStatus, ttsData, ttsError]);
 
   // Show only if voice mode enabled for current user
   if (!user || !user.voice_mode_enabled) {
@@ -32,11 +74,11 @@ const SpeakerIcon = ({ nodeId }) => {
   }
 
   const handleClick = async () => {
-    if (loading) return;
-    setLoading(true);
+    if (loading || ttsTaskActive) return;
+
     try {
-      let srcUrl;
       if (!audioSrc) {
+        setLoading(true);
         // Attempt to fetch existing audio URLs
         let original_url = null;
         let tts_url = null;
@@ -53,11 +95,16 @@ const SpeakerIcon = ({ nodeId }) => {
         // If no original or TTS, trigger TTS generation
         let urlPath = original_url || tts_url;
         if (!urlPath) {
+          // Start async TTS generation
           const ttsRes = await api.post(`/nodes/${nodeId}/tts`);
-          urlPath = ttsRes.data.tts_url;
+          // Response now contains: { task_id, status: "pending", node_id }
+          setTtsTaskActive(true);
+          startTtsPolling();
+          // Keep loading state active, polling will handle completion
+          return;
         }
         // Build absolute URL
-        srcUrl = urlPath.startsWith('http')
+        const srcUrl = urlPath.startsWith('http')
           ? urlPath
           : `${process.env.REACT_APP_BACKEND_URL}${urlPath}`;
         setAudioSrc(srcUrl);
@@ -68,6 +115,7 @@ const SpeakerIcon = ({ nodeId }) => {
         audio.onpause = () => setPlaying(false);
         audio.onplay = () => setPlaying(true);
         await audio.play();
+        setLoading(false);
       } else {
         // Toggle playback on existing audio
         const audio = audioRef.current;
@@ -79,8 +127,8 @@ const SpeakerIcon = ({ nodeId }) => {
       }
     } catch (err) {
       console.error('Error playing audio:', err);
-    } finally {
       setLoading(false);
+      setTtsTaskActive(false);
     }
   };
 
