@@ -30,5 +30,9 @@ celery.conf.update(
     result_expires=86400,  # Keep results for 24 hours
 )
 
-# Auto-discover tasks
-celery.autodiscover_tasks(['backend.tasks'])
+# Import tasks to register them with Celery
+# This must be done after celery app is created
+from backend.tasks import transcription  # noqa: F401
+from backend.tasks import llm_completion  # noqa: F401
+from backend.tasks import tts  # noqa: F401
+from backend.tasks import exports  # noqa: F401
