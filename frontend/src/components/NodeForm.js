@@ -124,7 +124,7 @@ const NodeForm = forwardRef(
             setUploadProgress(0);
 
             try {
-              response = await uploadFileInChunks(
+              const uploadResult = await uploadFileInChunks(
                 fileToUpload,
                 { parent_id: parentId, node_type: 'user' },
                 (progress) => {
@@ -134,6 +134,13 @@ const NodeForm = forwardRef(
 
               setIsUploading(false);
               setUploadProgress(100);
+
+              // uploadFileInChunks returns data directly (not axios response)
+              const nodeId = uploadResult.id;
+              setUploadedNodeId(nodeId);
+              // Keep loading state active while transcription is in progress
+              // Polling will start automatically via useEffect
+              return;
             } catch (uploadErr) {
               setIsUploading(false);
               setUploadProgress(0);
@@ -148,14 +155,14 @@ const NodeForm = forwardRef(
             response = await api.post("/nodes/", formData, {
               headers: { 'Content-Type': 'multipart/form-data' }
             });
-          }
 
-          // Set the node ID to trigger polling via useEffect
-          const nodeId = response.data.id;
-          setUploadedNodeId(nodeId);
-          // Keep loading state active while transcription is in progress
-          // Polling will start automatically via useEffect
-          return;
+            // Set the node ID to trigger polling via useEffect
+            const nodeId = response.data.id;
+            setUploadedNodeId(nodeId);
+            // Keep loading state active while transcription is in progress
+            // Polling will start automatically via useEffect
+            return;
+          }
         } else {
           // Create a new text node
           response = await api.post("/nodes/", { content, parent_id: parentId });
