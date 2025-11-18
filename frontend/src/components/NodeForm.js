@@ -217,69 +217,18 @@ const NodeForm = forwardRef(
           </div>
         )}
 
-        {/* Upload progress */}
-        {isUploading && (
-          <div style={{ marginTop: '12px', padding: '12px', backgroundColor: '#e3f2fd', borderRadius: '8px' }}>
-            <div style={{ marginBottom: '8px', fontWeight: 'bold' }}>
-              📤 Uploading audio file...
-            </div>
-            <div style={{ width: '100%', backgroundColor: '#bbdefb', borderRadius: '4px', overflow: 'hidden', height: '24px' }}>
-              <div
-                style={{
-                  width: `${uploadProgress}%`,
-                  height: '100%',
-                  backgroundColor: '#2196F3',
-                  transition: 'width 0.3s ease',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  color: 'white',
-                  fontSize: '12px',
-                  fontWeight: 'bold'
-                }}
-              >
-                {uploadProgress}%
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Transcription status */}
-        {loading && transcriptionStatus && !isUploading && (
-          <div style={{ marginTop: '12px', padding: '12px', backgroundColor: '#f5f5f5', borderRadius: '8px' }}>
-            <div style={{ marginBottom: '8px', fontWeight: 'bold' }}>
-              {transcriptionStatus === 'pending' && '⏳ Waiting to transcribe...'}
-              {transcriptionStatus === 'processing' && '🎙️ Transcribing audio...'}
-              {transcriptionStatus === 'completed' && '✅ Complete!'}
-              {transcriptionStatus === 'failed' && '❌ Transcription failed'}
-            </div>
-            {transcriptionProgress > 0 && (
-              <div style={{ width: '100%', backgroundColor: '#e0e0e0', borderRadius: '4px', overflow: 'hidden', height: '24px' }}>
-                <div
-                  style={{
-                    width: `${transcriptionProgress}%`,
-                    height: '100%',
-                    backgroundColor: '#4CAF50',
-                    transition: 'width 0.3s ease',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    color: 'white',
-                    fontSize: '12px',
-                    fontWeight: 'bold'
-                  }}
-                >
-                  {transcriptionProgress}%
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
         {!hideSubmit && (
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '8px' }}>
             <button type="submit" disabled={loading}>
-              {isUploading ? `Uploading... ${uploadProgress}%` : loading && transcriptionStatus ? "Transcribing..." : loading ? "Submitting..." : "Submit"}
+              {isUploading
+                ? `Uploading... ${uploadProgress}%`
+                : loading && transcriptionStatus === 'processing' && transcriptionProgress > 0
+                ? `Transcribing... ${transcriptionProgress}%`
+                : loading && transcriptionStatus === 'pending'
+                ? "Waiting to transcribe..."
+                : loading
+                ? "Submitting..."
+                : "Submit"}
             </button>
             {!editMode && (
               <>

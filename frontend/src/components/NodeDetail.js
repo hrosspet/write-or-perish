@@ -204,7 +204,13 @@ function NodeDetail() {
         <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px' }}>
           <button onClick={() => setShowChildFormOverlay(true)}>Add Text</button>
           <button onClick={handleLLMResponse} disabled={!!llmTaskNodeId}>
-            {llmTaskNodeId ? "Generating..." : "LLM Response"}
+            {llmTaskNodeId && llmStatus === 'processing' && llmProgress > 0
+              ? `Generating... ${llmProgress}%`
+              : llmTaskNodeId && llmStatus === 'pending'
+              ? "Waiting for AI..."
+              : llmTaskNodeId
+              ? "Generating..."
+              : "LLM Response"}
           </button>
           {/* Model selector dropdown */}
           <ModelSelector
@@ -217,37 +223,6 @@ function NodeDetail() {
           {/* Speaker icon for audio playback */}
           <SpeakerIcon nodeId={node.id} />
         </div>
-        {/* LLM generation status */}
-        {llmTaskNodeId && llmStatus && (
-          <div style={{ marginTop: '12px', padding: '12px', backgroundColor: '#f5f5f5', borderRadius: '8px' }}>
-            <div style={{ marginBottom: '8px', fontWeight: 'bold', color: '#333' }}>
-              {llmStatus === 'pending' && '⏳ Waiting for AI response...'}
-              {llmStatus === 'processing' && '🤖 Generating AI response...'}
-              {llmStatus === 'completed' && '✅ Complete!'}
-              {llmStatus === 'failed' && '❌ Generation failed'}
-            </div>
-            {llmProgress > 0 && (
-              <div style={{ width: '100%', backgroundColor: '#e0e0e0', borderRadius: '4px', overflow: 'hidden', height: '24px' }}>
-                <div
-                  style={{
-                    width: `${llmProgress}%`,
-                    height: '100%',
-                    backgroundColor: '#4CAF50',
-                    transition: 'width 0.3s ease',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    color: 'white',
-                    fontSize: '12px',
-                    fontWeight: 'bold'
-                  }}
-                >
-                  {llmProgress}%
-                </div>
-              </div>
-            )}
-          </div>
-        )}
       </div>
       <hr style={{ borderColor: "#333" }} />
     </div>
