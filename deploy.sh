@@ -62,6 +62,61 @@ else
     warn "No migrations directory found, skipping migrations"
 fi
 
+# Check and install Redis if needed
+log "Checking Redis installation..."
+if ! command -v redis-server &> /dev/null; then
+    log "Redis not found, installing..."
+    sudo apt-get update -qq
+    sudo apt-get install -y redis-server || error "Failed to install Redis"
+
+    # Enable and start Redis
+    sudo systemctl enable redis-server
+    sudo systemctl start redis-server
+    log "Redis installed and started"
+else
+    log "Redis already installed"
+
+    # Ensure Redis is running
+    if ! sudo systemctl is-active --quiet redis-server; then
+        log "Starting Redis service..."
+        sudo systemctl start redis-server || warn "Failed to start Redis"
+    fi
+fi
+
+# Verify Redis is working
+if redis-cli ping &> /dev/null; then
+    log "Redis is responding to ping"
+else
+    warn "Redis may not be working correctly"
+fi
+
+# Install/update Celery worker service
+log "Installing Celery worker service..."
+CELERY_SERVICE_SOURCE="$PROJECT_DIR/write-or-perish-celery.service"
+CELERY_SERVICE_TARGET="/etc/systemd/system/write-or-perish-celery.service"
+
+if [ -f "$CELERY_SERVICE_SOURCE" ]; then
+    # Check if service file has changed
+    if ! sudo diff -q "$CELERY_SERVICE_SOURCE" "$CELERY_SERVICE_TARGET" >/dev/null 2>&1; then
+        log "Celery service file has changed, updating..."
+
+        # Copy new service file
+        sudo cp "$CELERY_SERVICE_SOURCE" "$CELERY_SERVICE_TARGET" || error "Failed to copy Celery service file"
+
+        # Reload systemd daemon
+        sudo systemctl daemon-reload || error "Failed to reload systemd daemon"
+
+        log "Celery service file updated"
+    else
+        log "Celery service file unchanged"
+    fi
+
+    # Enable Celery service
+    sudo systemctl enable write-or-perish-celery || warn "Failed to enable Celery service"
+else
+    error "Celery service file not found at $CELERY_SERVICE_SOURCE"
+fi
+
 # Update Nginx configuration if changed
 NGINX_CONFIG_SOURCE="$PROJECT_DIR/configs/nginx.txt"
 NGINX_CONFIG_TARGET="/etc/nginx/sites-available/write-or-perish"
@@ -95,6 +150,20 @@ else
     warn "Nginx config source not found at $NGINX_CONFIG_SOURCE"
 fi
 
+# Restart Celery worker service
+log "Restarting Celery worker service..."
+sudo systemctl restart write-or-perish-celery || error "Failed to restart Celery service"
+
+# Wait for Celery to start
+sleep 3
+
+# Check if Celery service is running
+if sudo systemctl is-active --quiet write-or-perish-celery; then
+    log "Celery worker service restarted successfully"
+else
+    error "Celery worker service failed to start"
+fi
+
 # Restart Gunicorn service
 log "Restarting Gunicorn service..."
 sudo systemctl restart write-or-perish || error "Failed to restart Gunicorn service"
@@ -116,4 +185,11 @@ sudo systemctl reload nginx || warn "Failed to reload Nginx (may need manual int
 log "====== Deployment completed successfully ======"
 log "Frontend: /home/hrosspet/write-or-perish/frontend/build"
 log "Backend: Gunicorn running on 127.0.0.1:8000"
+log "Celery: Worker running with 2 concurrent processes"
+log "Redis: Running on 127.0.0.1:6379"
+log ""
+log "Service status:"
+sudo systemctl is-active write-or-perish && log "  ✓ Gunicorn (write-or-perish)" || warn "  ✗ Gunicorn not running"
+sudo systemctl is-active write-or-perish-celery && log "  ✓ Celery (write-or-perish-celery)" || warn "  ✗ Celery not running"
+sudo systemctl is-active redis-server && log "  ✓ Redis (redis-server)" || warn "  ✗ Redis not running"
 log ""
