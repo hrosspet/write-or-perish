@@ -9,6 +9,8 @@ import os
 from functools import wraps
 from werkzeug.utils import secure_filename
 import pathlib
+from pydub import AudioSegment
+import tempfile
 
 # ---------------------------------------------------------------------------
 # Voice‑Mode helpers
@@ -41,6 +43,10 @@ def voice_mode_required(f):
 AUDIO_STORAGE_ROOT = pathlib.Path(os.environ.get("AUDIO_STORAGE_PATH", "data/audio")).resolve()
 AUDIO_STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
 
+# OpenAI API limits for audio transcription
+OPENAI_MAX_AUDIO_BYTES = 25 * 1024 * 1024  # 25 MB
+OPENAI_MAX_DURATION_SEC = 1500  # 25 minutes
+CHUNK_DURATION_SEC = 20 * 60  # 20 minutes per chunk (leaves buffer below 25 min limit)
 
 # Allowed extensions and max size (in bytes) – 100 MB.
 ALLOWED_EXTENSIONS = {"webm", "wav", "m4a", "mp3", "mp4", "mpeg", "mpga", "ogg", "oga", "flac", "aac"}
@@ -68,6 +74,197 @@ def _save_audio_file(file_storage, user_id: int, node_id: int, variant: str) -> 
     # We use the relative path from AUDIO_STORAGE_ROOT for portability.
     rel_path = target_path.relative_to(AUDIO_STORAGE_ROOT)
     return f"/media/{rel_path.as_posix()}"
+
+
+def _compress_audio_if_needed(file_path: pathlib.Path) -> pathlib.Path:
+    """
+    Compress audio file to MP3 if it's in an uncompressed format (WAV, FLAC)
+    or if it exceeds OpenAI's size limit.
+    Returns the path to the compressed file, or the original file if no compression needed.
+    """
+    file_size = file_path.stat().st_size
+    ext = file_path.suffix.lower()
+
+    # Check if file is uncompressed or too large
+    needs_compression = ext in {".wav", ".flac"} or file_size > OPENAI_MAX_AUDIO_BYTES
+
+    if not needs_compression:
+        return file_path
+
+    try:
+        current_app.logger.info(f"Compressing audio file {file_path.name} (size: {file_size / 1024 / 1024:.1f} MB)")
+
+        # Load audio file
+        audio = AudioSegment.from_file(str(file_path))
+
+        # Create compressed version
+        compressed_path = file_path.with_suffix('.mp3')
+
+        # Export as MP3 with reasonable quality (128kbps is good for speech)
+        audio.export(
+            str(compressed_path),
+            format="mp3",
+            bitrate="128k",
+            parameters=["-q:a", "2"]  # VBR quality setting
+        )
+
+        compressed_size = compressed_path.stat().st_size
+        current_app.logger.info(
+            f"Compressed {file_path.name}: {file_size / 1024 / 1024:.1f} MB -> "
+            f"{compressed_size / 1024 / 1024:.1f} MB"
+        )
+
+        return compressed_path
+
+    except Exception as e:
+        current_app.logger.error(f"Audio compression failed: {e}")
+        return file_path  # Return original if compression fails
+
+
+def _get_audio_duration(file_path: pathlib.Path) -> float:
+    """Get the duration of an audio file in seconds."""
+    try:
+        audio = AudioSegment.from_file(str(file_path))
+        return len(audio) / 1000.0  # pydub returns milliseconds
+    except Exception as e:
+        current_app.logger.error(f"Failed to get audio duration: {e}")
+        return 0.0
+
+
+def _chunk_audio(file_path: pathlib.Path, chunk_duration_sec: int = CHUNK_DURATION_SEC) -> list:
+    """
+    Split audio file into chunks of specified duration.
+    Returns list of temporary file paths for each chunk.
+    """
+    try:
+        audio = AudioSegment.from_file(str(file_path))
+        chunk_duration_ms = chunk_duration_sec * 1000
+        chunks = []
+
+        for i, start_ms in enumerate(range(0, len(audio), chunk_duration_ms)):
+            chunk = audio[start_ms:start_ms + chunk_duration_ms]
+
+            # Create temporary file for chunk
+            temp_file = tempfile.NamedTemporaryFile(
+                delete=False,
+                suffix='.mp3',
+                prefix=f'chunk_{i}_'
+            )
+            chunk.export(temp_file.name, format="mp3", bitrate="128k")
+            chunks.append(temp_file.name)
+
+            current_app.logger.info(
+                f"Created chunk {i + 1}: {start_ms / 1000:.0f}s - {(start_ms + len(chunk)) / 1000:.0f}s"
+            )
+
+        return chunks
+
+    except Exception as e:
+        current_app.logger.error(f"Audio chunking failed: {e}")
+        return []
+
+
+def _transcribe_audio_file(client: OpenAI, file_path: pathlib.Path) -> str:
+    """
+    Transcribe an audio file using OpenAI API.
+    Handles large files by compressing and/or chunking as needed.
+    Returns the transcript text.
+    """
+    # Step 1: Compress if needed
+    processed_path = _compress_audio_if_needed(file_path)
+
+    # Step 2: Check file size and duration
+    file_size = processed_path.stat().st_size
+    duration_sec = _get_audio_duration(processed_path)
+
+    current_app.logger.info(
+        f"Transcribing audio: {file_size / 1024 / 1024:.1f} MB, {duration_sec:.0f} seconds"
+    )
+
+    # Step 3: Determine if chunking is needed
+    needs_chunking = (
+        file_size > OPENAI_MAX_AUDIO_BYTES or
+        duration_sec > OPENAI_MAX_DURATION_SEC
+    )
+
+    try:
+        if not needs_chunking:
+            # Simple case: transcribe whole file
+            with open(processed_path, "rb") as audio_file:
+                resp = client.audio.transcriptions.create(
+                    model="gpt-4o-transcribe",
+                    file=audio_file,
+                    response_format="text"
+                )
+
+                # Extract transcript text
+                if hasattr(resp, "text"):
+                    return resp.text
+                elif isinstance(resp, dict):
+                    return resp.get("text") or resp.get("transcript") or ""
+                else:
+                    return str(resp)
+
+        else:
+            # Complex case: chunk and transcribe
+            current_app.logger.info(
+                f"File exceeds OpenAI limits (size: {file_size / 1024 / 1024:.1f} MB, "
+                f"duration: {duration_sec:.0f}s), using chunked transcription"
+            )
+
+            chunk_paths = _chunk_audio(processed_path)
+
+            if not chunk_paths:
+                raise Exception("Failed to create audio chunks")
+
+            transcripts = []
+
+            try:
+                for i, chunk_path in enumerate(chunk_paths):
+                    current_app.logger.info(f"Transcribing chunk {i + 1}/{len(chunk_paths)}")
+
+                    with open(chunk_path, "rb") as audio_file:
+                        resp = client.audio.transcriptions.create(
+                            model="gpt-4o-transcribe",
+                            file=audio_file,
+                            response_format="text"
+                        )
+
+                        # Extract transcript text
+                        if hasattr(resp, "text"):
+                            chunk_text = resp.text
+                        elif isinstance(resp, dict):
+                            chunk_text = resp.get("text") or resp.get("transcript") or ""
+                        else:
+                            chunk_text = str(resp)
+
+                        transcripts.append(chunk_text)
+
+                # Combine transcripts
+                full_transcript = "\n\n".join(transcripts)
+                current_app.logger.info(
+                    f"Chunked transcription complete: {len(chunk_paths)} chunks, "
+                    f"{len(full_transcript)} characters"
+                )
+
+                return full_transcript
+
+            finally:
+                # Clean up temporary chunk files
+                for chunk_path in chunk_paths:
+                    try:
+                        os.unlink(chunk_path)
+                    except Exception as e:
+                        current_app.logger.warning(f"Failed to delete chunk file {chunk_path}: {e}")
+
+    finally:
+        # Clean up compressed file if it's different from original
+        if processed_path != file_path:
+            try:
+                os.unlink(processed_path)
+            except Exception as e:
+                current_app.logger.warning(f"Failed to delete compressed file {processed_path}: {e}")
+
 
 nodes_bp = Blueprint("nodes_bp", __name__)
 
@@ -183,27 +380,20 @@ def create_node():
             rel_path = node.audio_original_url.replace("/media/", "")
             local_path = AUDIO_STORAGE_ROOT / rel_path
             try:
-                with open(local_path, "rb") as audio_file:
-                    # Transcribe audio to text
-                    resp = client.audio.transcriptions.create(
-                        model="gpt-4o-transcribe",
-                        file=audio_file,
-                        response_format="text"
-                    )
-                # Extract transcript text
-                transcript = None
-                if hasattr(resp, "text"):
-                    transcript = resp.text
-                elif isinstance(resp, dict):
-                    transcript = resp.get("text") or resp.get("transcript")
-                else:
-                    transcript = str(resp)
+                # Use new helper function that handles compression and chunking
+                transcript = _transcribe_audio_file(client, local_path)
+
                 # Update node content with transcript
-                node.content = transcript or node.content
-                db.session.add(node)
-                db.session.commit()
+                if transcript:
+                    node.content = transcript
+                    db.session.add(node)
+                    db.session.commit()
+                    current_app.logger.info(f"Transcription successful for node {node.id}")
+                else:
+                    current_app.logger.warning(f"Empty transcript returned for node {node.id}")
+
             except Exception as e:
-                current_app.logger.error("Transcription error for node %s: %s", node.id, e)
+                current_app.logger.error("Transcription error for node %s: %s", node.id, e, exc_info=True)
 
         return jsonify({
             "id": node.id,
