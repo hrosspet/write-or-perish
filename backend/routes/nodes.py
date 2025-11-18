@@ -45,8 +45,8 @@ AUDIO_STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
 
 # OpenAI API limits for audio transcription
 OPENAI_MAX_AUDIO_BYTES = 25 * 1024 * 1024  # 25 MB
-OPENAI_MAX_DURATION_SEC = 1500  # 25 minutes
-CHUNK_DURATION_SEC = 20 * 60  # 20 minutes per chunk (leaves buffer below 25 min limit)
+OPENAI_MAX_DURATION_SEC = 1400  # ~23 minutes (OpenAI's actual limit)
+CHUNK_DURATION_SEC = 20 * 60  # 20 minutes per chunk (leaves buffer below limit)
 
 # Allowed extensions and max size (in bytes) – 100 MB.
 ALLOWED_EXTENSIONS = {"webm", "wav", "m4a", "mp3", "mp4", "mpeg", "mpga", "ogg", "oga", "flac", "aac"}

@@ -10,7 +10,7 @@ from flask import current_app
 
 # OpenAI API limits
 OPENAI_MAX_AUDIO_BYTES = 25 * 1024 * 1024  # 25 MB
-OPENAI_MAX_DURATION_SEC = 1500  # 25 minutes
+OPENAI_MAX_DURATION_SEC = 1400  # ~23 minutes (OpenAI's actual limit)
 CHUNK_DURATION_SEC = 20 * 60  # 20 minutes per chunk
 
 
