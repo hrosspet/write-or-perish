@@ -108,7 +108,7 @@ def transcribe_audio(self, node_id: int, audio_file_path: str):
 
                 with open(processed_path, "rb") as audio_file:
                     resp = client.audio.transcriptions.create(
-                        model="whisper-1",
+                        model="gpt-4o-transcribe",
                         file=audio_file,
                         response_format="text"
                     )
@@ -157,7 +157,7 @@ def transcribe_audio(self, node_id: int, audio_file_path: str):
 
                         with open(chunk_path, "rb") as audio_file:
                             resp = client.audio.transcriptions.create(
-                                model="whisper-1",
+                                model="gpt-4o-transcribe",
                                 file=audio_file,
                                 response_format="text"
                             )
