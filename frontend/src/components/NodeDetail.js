@@ -5,6 +5,7 @@ import NodeFooter from "./NodeFooter";
 import SpeakerIcon from "./SpeakerIcon";
 import ModelSelector from "./ModelSelector";
 import { useUser } from "../contexts/UserContext";
+import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 import api from "../api";
 import NodeForm from "./NodeForm";
 import Bubble from "./Bubble";
@@ -46,7 +47,20 @@ function NodeDetail() {
   const [showChildFormOverlay, setShowChildFormOverlay] = useState(false);
   const [showEditOverlay, setShowEditOverlay] = useState(false);
   const [selectedModel, setSelectedModel] = useState("gpt-5");
+  const [llmTaskNodeId, setLlmTaskNodeId] = useState(null);
   const backendUrl = process.env.REACT_APP_BACKEND_URL;
+
+  // LLM completion polling
+  const {
+    status: llmStatus,
+    progress: llmProgress,
+    data: llmData,
+    error: llmError,
+    startPolling: startLlmPolling
+  } = useAsyncTaskPolling(
+    llmTaskNodeId ? `/nodes/${llmTaskNodeId}/llm-status` : null,
+    { enabled: false }
+  );
 
   useEffect(() => {
     api
@@ -65,6 +79,20 @@ function NodeDetail() {
         }
       });
   }, [id, backendUrl]);
+
+  // Handle LLM completion
+  useEffect(() => {
+    if (llmStatus === 'completed' && llmData) {
+      const newNodeId = llmData.node?.id;
+      if (newNodeId) {
+        navigate(`/node/${newNodeId}`);
+      }
+      setLlmTaskNodeId(null);
+    } else if (llmStatus === 'failed') {
+      setError(llmError || 'LLM response generation failed');
+      setLlmTaskNodeId(null);
+    }
+  }, [llmStatus, llmData, llmError, navigate]);
 
   if (loading) return <div>Loading node...</div>;
   if (error) return <div>{error}</div>;
@@ -91,12 +119,16 @@ function NodeDetail() {
     }
   };
 
-  // Define handleLLMResponse: send request and navigate to the new node on success.
+  // Define handleLLMResponse: send request and start polling for completion
   const handleLLMResponse = () => {
+    setError(""); // Clear previous errors
     api
       .post(`/nodes/${id}/llm`, { model: selectedModel })
       .then((response) => {
-        navigate(`/node/${response.data.node.id}`);
+        // Response now contains: { task_id, status: "pending", parent_node_id }
+        const parentNodeId = response.data.parent_node_id || id;
+        setLlmTaskNodeId(parentNodeId);
+        startLlmPolling();
       })
       .catch((err) => {
         console.error(err);
@@ -172,7 +204,9 @@ function NodeDetail() {
         />
         <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px' }}>
           <button onClick={() => setShowChildFormOverlay(true)}>Add Text</button>
-          <button onClick={handleLLMResponse}>LLM Response</button>
+          <button onClick={handleLLMResponse} disabled={!!llmTaskNodeId}>
+            {llmTaskNodeId ? "Generating..." : "LLM Response"}
+          </button>
           {/* Model selector dropdown */}
           <ModelSelector
             nodeId={node.id}
@@ -184,6 +218,37 @@ function NodeDetail() {
           {/* Speaker icon for audio playback */}
           <SpeakerIcon nodeId={node.id} />
         </div>
+        {/* LLM generation status */}
+        {llmTaskNodeId && llmStatus && (
+          <div style={{ marginTop: '12px', padding: '12px', backgroundColor: '#f5f5f5', borderRadius: '8px' }}>
+            <div style={{ marginBottom: '8px', fontWeight: 'bold', color: '#333' }}>
+              {llmStatus === 'pending' && '⏳ Waiting for AI response...'}
+              {llmStatus === 'processing' && '🤖 Generating AI response...'}
+              {llmStatus === 'completed' && '✅ Complete!'}
+              {llmStatus === 'failed' && '❌ Generation failed'}
+            </div>
+            {llmProgress > 0 && (
+              <div style={{ width: '100%', backgroundColor: '#e0e0e0', borderRadius: '4px', overflow: 'hidden', height: '24px' }}>
+                <div
+                  style={{
+                    width: `${llmProgress}%`,
+                    height: '100%',
+                    backgroundColor: '#4CAF50',
+                    transition: 'width 0.3s ease',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: 'white',
+                    fontSize: '12px',
+                    fontWeight: 'bold'
+                  }}
+                >
+                  {llmProgress}%
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
       <hr style={{ borderColor: "#333" }} />
     </div>
