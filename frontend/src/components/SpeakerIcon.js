@@ -17,15 +17,14 @@ const SpeakerIcon = ({ nodeId }) => {
   const [ttsTaskActive, setTtsTaskActive] = useState(false);
   const audioRef = useRef(null);
 
-  // TTS generation polling
+  // TTS generation polling - enabled automatically when ttsTaskActive is true
   const {
     status: ttsStatus,
     data: ttsData,
-    error: ttsError,
-    startPolling: startTtsPolling
+    error: ttsError
   } = useAsyncTaskPolling(
     ttsTaskActive ? `/nodes/${nodeId}/tts-status` : null,
-    { enabled: false }
+    { enabled: ttsTaskActive }  // Auto-start when ttsTaskActive is true
   );
 
   // Reset audio state when the node changes
@@ -98,7 +97,7 @@ const SpeakerIcon = ({ nodeId }) => {
           await api.post(`/nodes/${nodeId}/tts`);
           // Response now contains: { task_id, status: "pending", node_id }
           setTtsTaskActive(true);
-          startTtsPolling();
+          // Polling will start automatically via useAsyncTaskPolling enabled option
           // Keep loading state active, polling will handle completion
           return;
         }

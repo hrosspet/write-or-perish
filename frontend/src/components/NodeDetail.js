@@ -50,16 +50,15 @@ function NodeDetail() {
   const [llmTaskNodeId, setLlmTaskNodeId] = useState(null);
   const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
-  // LLM completion polling
+  // LLM completion polling - enabled automatically when llmTaskNodeId is set
   const {
     status: llmStatus,
     progress: llmProgress,
     data: llmData,
-    error: llmError,
-    startPolling: startLlmPolling
+    error: llmError
   } = useAsyncTaskPolling(
     llmTaskNodeId ? `/nodes/${llmTaskNodeId}/llm-status` : null,
-    { enabled: false }
+    { enabled: !!llmTaskNodeId }  // Auto-start when llmTaskNodeId is set
   );
 
   useEffect(() => {
@@ -79,13 +78,6 @@ function NodeDetail() {
         }
       });
   }, [id, backendUrl]);
-
-  // Start polling when llmTaskNodeId is set
-  useEffect(() => {
-    if (llmTaskNodeId) {
-      startLlmPolling();
-    }
-  }, [llmTaskNodeId, startLlmPolling]);
 
   // Handle LLM completion
   useEffect(() => {
