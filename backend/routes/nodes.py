@@ -739,15 +739,20 @@ def get_transcription_status(node_id):
     # Get task status from Celery if still processing
     task_info = None
     if node.transcription_task_id and node.transcription_status == 'processing':
-        from backend.celery_app import celery
-        task = celery.AsyncResult(node.transcription_task_id)
+        try:
+            from backend.celery_app import celery
+            task = celery.AsyncResult(node.transcription_task_id)
 
-        if task.state == 'PROGRESS':
-            task_info = task.info  # Contains progress and status message
-        elif task.state == 'SUCCESS':
-            # Task completed but DB not updated yet
-            node.transcription_status = 'completed'
-            db.session.commit()
+            if task.state == 'PROGRESS':
+                task_info = task.info  # Contains progress and status message
+            elif task.state == 'SUCCESS':
+                # Task completed but DB not updated yet
+                node.transcription_status = 'completed'
+                db.session.commit()
+        except Exception as e:
+            # If Celery check fails, log and continue with DB status
+            current_app.logger.warning(f"Failed to check Celery task status: {e}")
+            # Don't fail the request - just return DB status without real-time info
 
     return jsonify({
         "node_id": node.id,
@@ -775,25 +780,30 @@ def get_llm_status(node_id):
     task_info = None
     created_node = None
     if node.llm_task_id:
-        from backend.celery_app import celery
-        task = celery.AsyncResult(node.llm_task_id)
+        try:
+            from backend.celery_app import celery
+            task = celery.AsyncResult(node.llm_task_id)
 
-        if task.state == 'PROGRESS':
-            task_info = task.info
-        elif task.state == 'SUCCESS':
-            node.llm_task_status = 'completed'
-            db.session.commit()
-            # Get the created node ID from task result
-            if task.result and 'llm_node_id' in task.result:
-                llm_node = Node.query.get(task.result['llm_node_id'])
-                if llm_node:
-                    created_node = {
-                        "id": llm_node.id,
-                        "content": llm_node.content,
-                        "node_type": llm_node.node_type,
-                        "llm_model": llm_node.llm_model,
-                        "created_at": llm_node.created_at.isoformat()
-                    }
+            if task.state == 'PROGRESS':
+                task_info = task.info
+            elif task.state == 'SUCCESS':
+                node.llm_task_status = 'completed'
+                db.session.commit()
+                # Get the created node ID from task result
+                if task.result and 'llm_node_id' in task.result:
+                    llm_node = Node.query.get(task.result['llm_node_id'])
+                    if llm_node:
+                        created_node = {
+                            "id": llm_node.id,
+                            "content": llm_node.content,
+                            "node_type": llm_node.node_type,
+                            "llm_model": llm_node.llm_model,
+                            "created_at": llm_node.created_at.isoformat()
+                        }
+        except Exception as e:
+            # If Celery check fails, log and continue with DB status
+            current_app.logger.warning(f"Failed to check Celery task status: {e}")
+            # Don't fail the request - just return DB status without real-time info
 
     response_data = {
         "node_id": node.id,
@@ -822,14 +832,19 @@ def get_tts_status(node_id):
     # Get task status from Celery if still processing
     task_info = None
     if node.tts_task_id:
-        from backend.celery_app import celery
-        task = celery.AsyncResult(node.tts_task_id)
+        try:
+            from backend.celery_app import celery
+            task = celery.AsyncResult(node.tts_task_id)
 
-        if task.state == 'PROGRESS':
-            task_info = task.info
-        elif task.state == 'SUCCESS':
-            node.tts_task_status = 'completed'
-            db.session.commit()
+            if task.state == 'PROGRESS':
+                task_info = task.info
+            elif task.state == 'SUCCESS':
+                node.tts_task_status = 'completed'
+                db.session.commit()
+        except Exception as e:
+            # If Celery check fails, log and continue with DB status
+            current_app.logger.warning(f"Failed to check Celery task status: {e}")
+            # Don't fail the request - just return DB status without real-time info
 
     response_data = {
         "node_id": node.id,
