@@ -80,6 +80,13 @@ function NodeDetail() {
       });
   }, [id, backendUrl]);
 
+  // Start polling when llmTaskNodeId is set
+  useEffect(() => {
+    if (llmTaskNodeId) {
+      startLlmPolling();
+    }
+  }, [llmTaskNodeId, startLlmPolling]);
+
   // Handle LLM completion
   useEffect(() => {
     if (llmStatus === 'completed' && llmData) {
@@ -119,7 +126,7 @@ function NodeDetail() {
     }
   };
 
-  // Define handleLLMResponse: send request and start polling for completion
+  // Define handleLLMResponse: send request and set task ID (polling starts via useEffect)
   const handleLLMResponse = () => {
     setError(""); // Clear previous errors
     api
@@ -128,7 +135,7 @@ function NodeDetail() {
         // Response now contains: { task_id, status: "pending", parent_node_id }
         const parentNodeId = response.data.parent_node_id || id;
         setLlmTaskNodeId(parentNodeId);
-        startLlmPolling();
+        // Polling will start automatically via useEffect
       })
       .catch((err) => {
         console.error(err);

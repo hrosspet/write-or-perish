@@ -39,6 +39,10 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
   }, []);
 
   const poll = useCallback(async () => {
+    if (!endpoint) {
+      console.error('Cannot poll: endpoint is null or undefined');
+      return;
+    }
     try {
       const response = await api.get(endpoint);
       const result = response.data;
@@ -63,6 +67,10 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
 
   const startPolling = useCallback(() => {
     if (isPolling) return;
+    if (!endpoint) {
+      console.error('Cannot start polling: endpoint is null or undefined');
+      return;
+    }
 
     setIsPolling(true);
     setError(null);
@@ -78,7 +86,7 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
       stopPolling();
       setError('Polling timeout - task took too long');
     }, maxDuration);
-  }, [isPolling, poll, interval, maxDuration, stopPolling]);
+  }, [isPolling, endpoint, poll, interval, maxDuration, stopPolling]);
 
   // Auto-start polling if enabled
   useEffect(() => {
