@@ -3,8 +3,8 @@ server {
    root /home/hrosspet/write-or-perish/frontend/build;
    index index.html index.htm;
 
-   # Allow large file uploads (100MB) - server-wide setting
-   client_max_body_size 100M;
+   # Allow large file uploads (200MB) - server-wide setting
+   client_max_body_size 200M;
 
    # serve actual mp3 files out of your flask data dir
    location /media/ {
@@ -39,8 +39,8 @@ server {
        proxy_send_timeout 60s;
        proxy_read_timeout 60s;
 
-       # Allow large audio file uploads (100MB)
-       client_max_body_size 100M;
+       # Allow large audio file uploads (200MB)
+       client_max_body_size 200M;
    }
 
     listen 443 ssl; # managed by Certbot

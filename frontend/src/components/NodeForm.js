@@ -64,10 +64,10 @@ const NodeForm = forwardRef(
       const file = event.target.files[0];
       if (!file) return;
 
-      // Validate file size (100 MB)
-      const maxSize = 100 * 1024 * 1024;
+      // Validate file size (200 MB)
+      const maxSize = 200 * 1024 * 1024;
       if (file.size > maxSize) {
-        setError("File size must be under 100 MB");
+        setError("File size must be under 200 MB");
         return;
       }
 

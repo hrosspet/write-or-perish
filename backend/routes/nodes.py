@@ -48,9 +48,9 @@ OPENAI_MAX_AUDIO_BYTES = 25 * 1024 * 1024  # 25 MB
 OPENAI_MAX_DURATION_SEC = 1400  # ~23 minutes (OpenAI's actual limit)
 CHUNK_DURATION_SEC = 20 * 60  # 20 minutes per chunk (leaves buffer below limit)
 
-# Allowed extensions and max size (in bytes) – 100 MB.
+# Allowed extensions and max size (in bytes) - 200 MB.
 ALLOWED_EXTENSIONS = {"webm", "wav", "m4a", "mp3", "mp4", "mpeg", "mpga", "ogg", "oga", "flac", "aac"}
-MAX_AUDIO_BYTES = 100 * 1024 * 1024  # 100 MB
+MAX_AUDIO_BYTES = 200 * 1024 * 1024  # 200 MB
 
 
 def _allowed_file(filename: str) -> bool:
