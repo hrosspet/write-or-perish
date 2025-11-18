@@ -58,6 +58,26 @@ class Node(db.Model):
 
     # MIME type of the stored audio (e.g. "audio/webm;codecs=opus").
     audio_mime_type = db.Column(db.String, nullable=True)
+
+    # -------------------------- Async Task Tracking columns ---------------------------
+    # Transcription task tracking
+    transcription_status = db.Column(db.String(20), nullable=True)  # pending, processing, completed, failed
+    transcription_task_id = db.Column(db.String(255), nullable=True)
+    transcription_error = db.Column(db.Text, nullable=True)
+    transcription_progress = db.Column(db.Integer, default=0)  # 0-100%
+    transcription_started_at = db.Column(db.DateTime, nullable=True)
+    transcription_completed_at = db.Column(db.DateTime, nullable=True)
+
+    # LLM completion task tracking
+    llm_task_id = db.Column(db.String(255), nullable=True)
+    llm_task_status = db.Column(db.String(20), nullable=True)  # pending, processing, completed, failed
+    llm_task_progress = db.Column(db.Integer, default=0)
+
+    # TTS generation task tracking
+    tts_task_id = db.Column(db.String(255), nullable=True)
+    tts_task_status = db.Column(db.String(20), nullable=True)  # pending, processing, completed, failed
+    tts_task_progress = db.Column(db.Integer, default=0)
+
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
