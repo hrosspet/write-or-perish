@@ -25,6 +25,11 @@ class Config:
             "api_model": "gpt-5",
             "display_name": "GPT-5"
         },
+        "gpt-5.1": {
+            "provider": "openai",
+            "api_model": "gpt-5.1",
+            "display_name": "GPT-5.1"
+        },
         "claude-sonnet-4.5": {
             "provider": "anthropic",
             "api_model": "claude-sonnet-4-5-20250929",
