@@ -44,7 +44,10 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
       return;
     }
     try {
-      const response = await api.get(endpoint);
+      // Use shorter timeout for status polling (10 seconds instead of 60)
+      const response = await api.get(endpoint, {
+        timeout: 10000
+      });
       const result = response.data;
 
       setStatus(result.status);
@@ -60,8 +63,8 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
       }
     } catch (err) {
       console.error('Polling error:', err);
-      // Don't stop polling on error, just log it
-      // The task might still be processing
+      // Don't stop polling on error, just log it and retry on next interval
+      // The task might still be processing or there might be a temporary network issue
     }
   }, [endpoint, stopPolling]);
 
