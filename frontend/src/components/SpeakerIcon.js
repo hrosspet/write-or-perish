@@ -20,7 +20,6 @@ const SpeakerIcon = ({ nodeId }) => {
   // TTS generation polling
   const {
     status: ttsStatus,
-    progress: ttsProgress,
     data: ttsData,
     error: ttsError,
     startPolling: startTtsPolling
@@ -96,7 +95,7 @@ const SpeakerIcon = ({ nodeId }) => {
         let urlPath = original_url || tts_url;
         if (!urlPath) {
           // Start async TTS generation
-          const ttsRes = await api.post(`/nodes/${nodeId}/tts`);
+          await api.post(`/nodes/${nodeId}/tts`);
           // Response now contains: { task_id, status: "pending", node_id }
           setTtsTaskActive(true);
           startTtsPolling();
