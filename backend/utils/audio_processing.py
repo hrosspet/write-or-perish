@@ -16,7 +16,9 @@ CHUNK_DURATION_SEC = 20 * 60  # 20 minutes per chunk
 
 def compress_audio_if_needed(file_path: pathlib.Path, logger=None) -> pathlib.Path:
     """
-    Compress audio file to MP3 if it's uncompressed or exceeds size limit.
+    Compress audio file to MP3 if it's uncompressed (WAV/FLAC).
+    Never re-compress already compressed formats (MP3, M4A, WebM, etc.) as this causes quality loss.
+    For large compressed files, skip compression and let chunking handle them.
     Returns path to compressed file, or original if no compression needed.
     """
     if logger is None:
@@ -25,13 +27,15 @@ def compress_audio_if_needed(file_path: pathlib.Path, logger=None) -> pathlib.Pa
     file_size = file_path.stat().st_size
     ext = file_path.suffix.lower()
 
-    needs_compression = ext in {".wav", ".flac"} or file_size > OPENAI_MAX_AUDIO_BYTES
+    # Only compress uncompressed formats - never re-compress lossy formats
+    needs_compression = ext in {".wav", ".flac"}
 
     if not needs_compression:
+        logger.info(f"Skipping compression for {file_path.name} ({ext}, {file_size / 1024 / 1024:.1f} MB) - already compressed or will be chunked")
         return file_path
 
     try:
-        logger.info(f"Compressing audio file {file_path.name} (size: {file_size / 1024 / 1024:.1f} MB)")
+        logger.info(f"Compressing uncompressed audio file {file_path.name} (size: {file_size / 1024 / 1024:.1f} MB)")
 
         audio = AudioSegment.from_file(str(file_path))
         compressed_path = file_path.with_suffix('.mp3')
