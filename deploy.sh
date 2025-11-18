@@ -53,10 +53,46 @@ log "Installing Python dependencies..."
 pip install -q --upgrade pip
 pip install -q -r "$BACKEND_DIR/requirements.txt" || error "Failed to install dependencies"
 
+# Ensure git remote uses SSH (not HTTPS) for authentication
+log "Checking git remote configuration..."
+CURRENT_REMOTE=$(git remote get-url origin)
+if [[ "$CURRENT_REMOTE" == https://* ]]; then
+    log "Converting git remote from HTTPS to SSH..."
+    SSH_REMOTE=$(echo "$CURRENT_REMOTE" | sed -E 's|https://github.com/|git@github.com:|')
+    git remote set-url origin "$SSH_REMOTE"
+    log "Git remote updated to: $SSH_REMOTE"
+fi
+
 # Run database migrations
 log "Running database migrations..."
 export FLASK_APP="$BACKEND_DIR/app.py"
 if [ -d "migrations" ]; then
+    # Auto-generate migrations if models changed
+    log "Checking for model changes..."
+    MIGRATION_OUTPUT=$(flask db migrate -m "auto-generated migration from deployment" 2>&1)
+    echo "$MIGRATION_OUTPUT"
+
+    if echo "$MIGRATION_OUTPUT" | grep -q "Generating"; then
+        log "New migration generated, committing to git..."
+        git add migrations/versions/*.py
+        if git commit -m "Auto-generated migration from deployment [skip ci]"; then
+            log "Migration committed, pushing to repository..."
+            git push origin main || warn "Failed to push migration file (will be available locally)"
+        else
+            log "No changes to commit"
+        fi
+    else
+        log "No model changes detected"
+    fi
+
+    # Check for multiple migration heads
+    log "Checking for migration conflicts..."
+    HEADS_COUNT=$(flask db heads 2>/dev/null | grep -c "^[a-f0-9]" || echo "0")
+    if [ "$HEADS_COUNT" -gt 1 ]; then
+        error "Multiple migration heads detected! Please merge them manually before deploying."
+    fi
+
+    # Apply migrations
     flask db upgrade || warn "Database migration failed or no migrations to apply"
 else
     warn "No migrations directory found, skipping migrations"
