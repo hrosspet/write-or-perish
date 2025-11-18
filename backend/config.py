@@ -44,6 +44,10 @@ class Config:
 
     FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 
+    # Celery configuration for async task queue
+    CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', 'redis://localhost:6379/0')
+    CELERY_RESULT_BACKEND = os.environ.get('CELERY_RESULT_BACKEND', 'redis://localhost:6379/0')
+
     # Production Security Settings
     SESSION_COOKIE_SECURE = True
     SESSION_COOKIE_HTTPONLY = True

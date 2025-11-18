@@ -361,6 +361,7 @@ def create_node():
             parent_id=parent_id,
             node_type=node_type,
             content=placeholder_text,
+            transcription_status='pending'  # Set initial status
         )
         db.session.add(node)
         db.session.commit()  # Need node.id for the file path.
@@ -372,28 +373,23 @@ def create_node():
         db.session.add(node)
         db.session.commit()
 
-        # -- Speech-to-text transcription via OpenAI
+        # -- Enqueue async transcription task
         api_key = current_app.config.get("OPENAI_API_KEY")
         if api_key:
-            client = OpenAI(api_key=api_key, timeout=900.0)  # 15 minute timeout for long transcriptions
+            from backend.tasks.transcription import transcribe_audio
+
             # Derive local file path from the stored URL
             rel_path = node.audio_original_url.replace("/media/", "")
-            local_path = AUDIO_STORAGE_ROOT / rel_path
-            try:
-                # Use new helper function that handles compression and chunking
-                transcript = _transcribe_audio_file(client, local_path)
+            local_path = str(AUDIO_STORAGE_ROOT / rel_path)
 
-                # Update node content with transcript
-                if transcript:
-                    node.content = transcript
-                    db.session.add(node)
-                    db.session.commit()
-                    current_app.logger.info(f"Transcription successful for node {node.id}")
-                else:
-                    current_app.logger.warning(f"Empty transcript returned for node {node.id}")
+            # Enqueue task
+            task = transcribe_audio.delay(node.id, local_path)
 
-            except Exception as e:
-                current_app.logger.error("Transcription error for node %s: %s", node.id, e, exc_info=True)
+            # Store task ID
+            node.transcription_task_id = task.id
+            db.session.commit()
+
+            current_app.logger.info(f"Enqueued transcription task {task.id} for node {node.id}")
 
         return jsonify({
             "id": node.id,
@@ -401,6 +397,8 @@ def create_node():
             "content": node.content,
             "node_type": node.node_type,
             "created_at": node.created_at.isoformat(),
+            "transcription_status": node.transcription_status,
+            "transcription_task_id": node.transcription_task_id
         }), 201
 
     # ------------------------------------------------------------------
@@ -842,6 +840,107 @@ def generate_tts(node_id):
     db.session.commit()
     # Return the new TTS URL
     return jsonify({"message": "TTS generated", "tts_url": url}), 200
+
+
+# ---------------------------------------------------------------------------
+# Async task status endpoints
+# ---------------------------------------------------------------------------
+
+
+@nodes_bp.route("/<int:node_id>/transcription-status", methods=["GET"])
+@login_required
+def get_transcription_status(node_id):
+    """Get the current transcription status for a node."""
+    node = Node.query.get_or_404(node_id)
+
+    # Check ownership
+    if node.user_id != current_user.id and not getattr(current_user, "is_admin", False):
+        return jsonify({"error": "Unauthorized"}), 403
+
+    # Get task status from Celery if still processing
+    task_info = None
+    if node.transcription_task_id and node.transcription_status == 'processing':
+        from backend.celery_app import celery
+        task = celery.AsyncResult(node.transcription_task_id)
+
+        if task.state == 'PROGRESS':
+            task_info = task.info  # Contains progress and status message
+        elif task.state == 'SUCCESS':
+            # Task completed but DB not updated yet
+            node.transcription_status = 'completed'
+            db.session.commit()
+
+    return jsonify({
+        "node_id": node.id,
+        "status": node.transcription_status,
+        "progress": node.transcription_progress or 0,
+        "error": node.transcription_error,
+        "started_at": node.transcription_started_at.isoformat() if node.transcription_started_at else None,
+        "completed_at": node.transcription_completed_at.isoformat() if node.transcription_completed_at else None,
+        "content": node.content if node.transcription_status == 'completed' else None,
+        "task_info": task_info  # Real-time progress from Celery
+    })
+
+
+@nodes_bp.route("/<int:node_id>/llm-status", methods=["GET"])
+@login_required
+def get_llm_status(node_id):
+    """Get the current LLM completion status for a node."""
+    node = Node.query.get_or_404(node_id)
+
+    # Check ownership
+    if node.user_id != current_user.id and not getattr(current_user, "is_admin", False):
+        return jsonify({"error": "Unauthorized"}), 403
+
+    # Get task status from Celery if still processing
+    task_info = None
+    if node.llm_task_id and node.llm_task_status == 'processing':
+        from backend.celery_app import celery
+        task = celery.AsyncResult(node.llm_task_id)
+
+        if task.state == 'PROGRESS':
+            task_info = task.info
+        elif task.state == 'SUCCESS':
+            node.llm_task_status = 'completed'
+            db.session.commit()
+
+    return jsonify({
+        "node_id": node.id,
+        "status": node.llm_task_status,
+        "progress": node.llm_task_progress or 0,
+        "task_info": task_info
+    })
+
+
+@nodes_bp.route("/<int:node_id>/tts-status", methods=["GET"])
+@login_required
+def get_tts_status(node_id):
+    """Get the current TTS generation status for a node."""
+    node = Node.query.get_or_404(node_id)
+
+    # Check ownership
+    if node.user_id != current_user.id and not getattr(current_user, "is_admin", False):
+        return jsonify({"error": "Unauthorized"}), 403
+
+    # Get task status from Celery if still processing
+    task_info = None
+    if node.tts_task_id and node.tts_task_status == 'processing':
+        from backend.celery_app import celery
+        task = celery.AsyncResult(node.tts_task_id)
+
+        if task.state == 'PROGRESS':
+            task_info = task.info
+        elif task.state == 'SUCCESS':
+            node.tts_task_status = 'completed'
+            db.session.commit()
+
+    return jsonify({
+        "node_id": node.id,
+        "status": node.tts_task_status,
+        "progress": node.tts_task_progress or 0,
+        "tts_url": node.audio_tts_url,
+        "task_info": task_info
+    })
 
 
 # ---------------------------------------------------------------------------

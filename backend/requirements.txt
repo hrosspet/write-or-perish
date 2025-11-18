@@ -11,3 +11,5 @@ anthropic==0.72.0
 pydub>=0.25.1
 Werkzeug==2.0.3
 gunicorn==23.0.0
+celery==5.3.4
+redis==5.0.1
