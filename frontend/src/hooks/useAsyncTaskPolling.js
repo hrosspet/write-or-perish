@@ -90,13 +90,56 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
 
   // Auto-start polling if enabled
   useEffect(() => {
-    if (enabled && !isPolling) {
-      startPolling();
+    // Always stop any existing polling when effect runs
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
     }
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
+    }
+    setIsPolling(false);
+
+    // Start new polling if enabled and endpoint is set
+    if (enabled && endpoint) {
+      setIsPolling(true);
+      setError(null);
+
+      // Poll immediately
+      poll();
+
+      // Set up interval
+      intervalRef.current = setInterval(poll, interval);
+
+      // Set up timeout to stop polling after max duration
+      timeoutRef.current = setTimeout(() => {
+        if (intervalRef.current) {
+          clearInterval(intervalRef.current);
+          intervalRef.current = null;
+        }
+        if (timeoutRef.current) {
+          clearTimeout(timeoutRef.current);
+          timeoutRef.current = null;
+        }
+        setIsPolling(false);
+        setError('Polling timeout - task took too long');
+      }, maxDuration);
+    }
+
+    // Cleanup on unmount or when dependencies change
     return () => {
-      stopPolling();
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
+      setIsPolling(false);
     };
-  }, [enabled, isPolling, startPolling, stopPolling]);
+  }, [enabled, endpoint, poll, interval, maxDuration]);
 
   return {
     status,
