@@ -112,10 +112,13 @@ class LLMProvider:
                 })
 
         # Make API call
+        # System parameter must be a list of content blocks
+        system_param = [{"type": "text", "text": system_text}] if system_text else []
+
         response = client.messages.create(
             model=model,
             max_tokens=10000,
-            system=system_text if system_text else None,
+            system=system_param,
             messages=anthropic_messages
         )
 
