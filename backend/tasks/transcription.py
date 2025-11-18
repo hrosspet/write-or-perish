@@ -82,21 +82,23 @@ def transcribe_audio(self, node_id: int, audio_file_path: str):
 
             processed_path = compress_audio_if_needed(file_path, logger)
 
-            # Step 2: Check size and duration (20% progress)
+            # Step 2: Check size (20% progress)
             self.update_state(state='PROGRESS', meta={'progress': 20, 'status': 'Analyzing audio'})
             node.transcription_progress = 20
             db.session.commit()
 
             file_size = processed_path.stat().st_size
-            duration_sec = get_audio_duration(processed_path, logger)
 
-            logger.info(f"Transcribing audio: {file_size / 1024 / 1024:.1f} MB, {duration_sec:.0f} seconds")
-
-            # Step 3: Determine if chunking is needed
-            needs_chunking = (
-                file_size > OPENAI_MAX_AUDIO_BYTES or
-                duration_sec > OPENAI_MAX_DURATION_SEC
-            )
+            # For large files, skip expensive duration check - we know they need chunking
+            # This avoids loading 190MB+ files into memory just to check duration
+            if file_size > OPENAI_MAX_AUDIO_BYTES:
+                needs_chunking = True
+                duration_sec = 0  # Unknown, but doesn't matter - file size already requires chunking
+                logger.info(f"Large audio file: {file_size / 1024 / 1024:.1f} MB - will use chunked transcription")
+            else:
+                duration_sec = get_audio_duration(processed_path, logger)
+                logger.info(f"Transcribing audio: {file_size / 1024 / 1024:.1f} MB, {duration_sec:.0f} seconds")
+                needs_chunking = duration_sec > OPENAI_MAX_DURATION_SEC
 
             transcript = None
 
