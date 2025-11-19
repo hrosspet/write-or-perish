@@ -25,6 +25,13 @@ function Dashboard() {
   const [estimatedTokens, setEstimatedTokens] = useState(0);
   const [profileTaskId, setProfileTaskId] = useState(null);
 
+  // For data import
+  const [showImportDialog, setShowImportDialog] = useState(false);
+  const [importFiles, setImportFiles] = useState(null);
+  const [importType, setImportType] = useState("separate_nodes");
+  const [dateOrdering, setDateOrdering] = useState("modified");
+  const [importing, setImporting] = useState(false);
+
   const navigate = useNavigate();
   const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
@@ -182,6 +189,58 @@ function Dashboard() {
     setShowProfileConfirmation(false);
   };
 
+  const handleImportFile = (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append("zip_file", file);
+
+    setImporting(true);
+    api.post("/import/analyze", formData, {
+      headers: { "Content-Type": "multipart/form-data" }
+    })
+      .then((response) => {
+        setImportFiles(response.data);
+        setShowImportDialog(true);
+        setImporting(false);
+      })
+      .catch((err) => {
+        console.error("Error analyzing import file:", err);
+        setError(err.response?.data?.error || "Error analyzing import file. Please try again.");
+        setImporting(false);
+      });
+  };
+
+  const handleConfirmImport = () => {
+    if (!importFiles) return;
+
+    setImporting(true);
+    api.post("/import/confirm", {
+      files: importFiles.files,
+      import_type: importType,
+      date_ordering: dateOrdering
+    })
+      .then((response) => {
+        setShowImportDialog(false);
+        setImportFiles(null);
+        setImporting(false);
+        setError("");
+        // Refresh dashboard to show new nodes
+        window.location.reload();
+      })
+      .catch((err) => {
+        console.error("Error importing data:", err);
+        setError(err.response?.data?.error || "Error importing data. Please try again.");
+        setImporting(false);
+      });
+  };
+
+  const handleCancelImport = () => {
+    setShowImportDialog(false);
+    setImportFiles(null);
+  };
+
 
   if (loading) return <div>Loading dashboard...</div>;
   if (error) return <div>{error}</div>;
@@ -209,6 +268,26 @@ function Dashboard() {
             >
               Export Data
             </button>
+            <label
+              style={{
+                backgroundColor: "#2a5f2a",
+                color: "white",
+                border: "none",
+                padding: "8px 16px",
+                cursor: importing ? "not-allowed" : "pointer",
+                borderRadius: "4px",
+                opacity: importing ? 0.6 : 1
+              }}
+            >
+              {importing ? "Analyzing..." : "Import Data"}
+              <input
+                type="file"
+                accept=".zip"
+                onChange={handleImportFile}
+                disabled={importing}
+                style={{ display: "none" }}
+              />
+            </label>
             <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
               <ModelSelector
                 nodeId={null}
@@ -271,6 +350,111 @@ function Dashboard() {
                     padding: "8px 16px",
                     cursor: "pointer",
                     borderRadius: "4px"
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Import confirmation dialog */}
+          {showImportDialog && importFiles && (
+            <div style={{
+              marginTop: "20px",
+              padding: "15px",
+              backgroundColor: "#2a2a2a",
+              borderRadius: "4px",
+              border: "1px solid #444"
+            }}>
+              <h3>Confirm Import</h3>
+              <p>
+                Found <strong>{importFiles.total_files}</strong> .md file{importFiles.total_files !== 1 ? 's' : ''}
+                ({importFiles.total_size.toLocaleString()} bytes)
+              </p>
+              <p>
+                Estimated tokens: <strong>{importFiles.total_tokens.toLocaleString()}</strong>
+              </p>
+
+              <div style={{ marginTop: "15px", marginBottom: "15px" }}>
+                <label style={{ display: "block", marginBottom: "10px", fontWeight: "bold" }}>
+                  Import Type:
+                </label>
+                <label style={{ display: "block", marginBottom: "8px", cursor: "pointer" }}>
+                  <input
+                    type="radio"
+                    value="separate_nodes"
+                    checked={importType === "separate_nodes"}
+                    onChange={(e) => setImportType(e.target.value)}
+                    style={{ marginRight: "8px" }}
+                  />
+                  Import as separate top-level nodes (one thread per file)
+                </label>
+                <label style={{ display: "block", cursor: "pointer" }}>
+                  <input
+                    type="radio"
+                    value="single_thread"
+                    checked={importType === "single_thread"}
+                    onChange={(e) => setImportType(e.target.value)}
+                    style={{ marginRight: "8px" }}
+                  />
+                  Import as a single thread (all files connected sequentially)
+                </label>
+              </div>
+
+              <div style={{ marginTop: "15px", marginBottom: "15px" }}>
+                <label style={{ display: "block", marginBottom: "10px", fontWeight: "bold" }}>
+                  Date Ordering:
+                </label>
+                <label style={{ display: "block", marginBottom: "8px", cursor: "pointer" }}>
+                  <input
+                    type="radio"
+                    value="modified"
+                    checked={dateOrdering === "modified"}
+                    onChange={(e) => setDateOrdering(e.target.value)}
+                    style={{ marginRight: "8px" }}
+                  />
+                  Order by modification date
+                </label>
+                <label style={{ display: "block", cursor: "pointer" }}>
+                  <input
+                    type="radio"
+                    value="created"
+                    checked={dateOrdering === "created"}
+                    onChange={(e) => setDateOrdering(e.target.value)}
+                    style={{ marginRight: "8px" }}
+                  />
+                  Order by creation date
+                </label>
+              </div>
+
+              <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
+                <button
+                  onClick={handleConfirmImport}
+                  disabled={importing}
+                  style={{
+                    backgroundColor: "#2a5a7a",
+                    color: "white",
+                    border: "none",
+                    padding: "8px 16px",
+                    cursor: importing ? "not-allowed" : "pointer",
+                    borderRadius: "4px",
+                    opacity: importing ? 0.6 : 1
+                  }}
+                >
+                  {importing ? "Importing..." : "Confirm Import"}
+                </button>
+                <button
+                  onClick={handleCancelImport}
+                  disabled={importing}
+                  style={{
+                    backgroundColor: "#444",
+                    color: "white",
+                    border: "none",
+                    padding: "8px 16px",
+                    cursor: importing ? "not-allowed" : "pointer",
+                    borderRadius: "4px",
+                    opacity: importing ? 0.6 : 1
                   }}
                 >
                   Cancel
