@@ -91,8 +91,8 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str):
                 raise ValueError("OPENAI_API_KEY not configured")
 
             text = node.content or ""
-            if len(text) > 10000:
-                raise ValueError("Content too long for TTS (max 10,000 characters)")
+            if not text:
+                raise ValueError("No content to generate TTS for")
 
             # Step 1: Initialize client and prepare storage (20% progress)
             self.update_state(state='PROGRESS', meta={'progress': 20, 'status': 'Preparing'})
@@ -236,8 +236,8 @@ def generate_tts_audio_for_profile(self, profile_id: int, audio_storage_root: st
                 raise ValueError("OPENAI_API_KEY not configured")
 
             text = profile.content or ""
-            if len(text) > 10000:
-                raise ValueError("Content too long for TTS (max 10,000 characters)")
+            if not text:
+                raise ValueError("No content to generate TTS for")
 
             self.update_state(state='PROGRESS', meta={'progress': 20, 'status': 'Preparing'})
             profile.tts_task_progress = 20

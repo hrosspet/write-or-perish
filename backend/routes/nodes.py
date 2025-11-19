@@ -687,10 +687,6 @@ def generate_tts(node_id):
     if node.audio_tts_url:
         return jsonify({"message": "TTS already available", "tts_url": node.audio_tts_url}), 200
 
-    # Simple safeguard: limit generation length.
-    if len(node.content or "") > 10000:
-        return jsonify({"error": "Content too long for TTS"}), 413
-
     # Check if OpenAI API key is configured
     api_key = current_app.config.get("OPENAI_API_KEY")
     if not api_key:

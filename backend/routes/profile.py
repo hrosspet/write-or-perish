@@ -40,9 +40,6 @@ def generate_tts(profile_id):
     if profile.audio_tts_url:
         return jsonify({"message": "TTS already available", "tts_url": profile.audio_tts_url}), 200
 
-    if len(profile.content) > 10000:
-        return jsonify({"error": "Content too long for TTS"}), 413
-
     if not current_app.config.get("OPENAI_API_KEY"):
         return jsonify({"error": "TTS not configured (missing API key)"}), 500
 
