@@ -122,7 +122,7 @@ function Dashboard() {
   };
 
   const handleConfirmProfileGeneration = () => {
-    setShowProfileConfirmation(.
+    setShowProfileConfirmation(false);
     setGeneratingProfile(true);
 
     api.post("/export/generate_profile", { model: selectedModel })
