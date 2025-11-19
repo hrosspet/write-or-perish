@@ -1,8 +1,9 @@
-import React, { useState, useRef } from 'react';
+import React, { useState } from 'react';
 import { useEffect } from 'react';
 import { FaVolumeUp, FaSpinner } from 'react-icons/fa';
 import api from '../api';
 import { useUser } from '../contexts/UserContext';
+import { useAudio } from '../contexts/AudioContext';
 import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
 
 /**
@@ -11,11 +12,10 @@ import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
  */
 const SpeakerIcon = ({ nodeId, profileId }) => {
   const { user } = useUser();
+  const { loadAudio, currentAudio, isPlaying } = useAudio();
   const [loading, setLoading] = useState(false);
-  const [playing, setPlaying] = useState(false);
   const [audioSrc, setAudioSrc] = useState(null);
   const [ttsTaskActive, setTtsTaskActive] = useState(false);
-  const audioRef = useRef(null);
 
   const isNode = nodeId != null;
   const id = isNode ? nodeId : profileId;
@@ -33,12 +33,7 @@ const SpeakerIcon = ({ nodeId, profileId }) => {
 
   // Reset audio state when the node/profile changes
   useEffect(() => {
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current = null;
-    }
     setAudioSrc(null);
-    setPlaying(false);
     setLoading(false);
     setTtsTaskActive(false);
   }, [nodeId, profileId]);
@@ -53,13 +48,9 @@ const SpeakerIcon = ({ nodeId, profileId }) => {
           ? ttsUrl
           : `${process.env.REACT_APP_BACKEND_URL}${ttsUrl}`;
         setAudioSrc(srcUrl);
-        // Create and play audio
-        const audio = new Audio(srcUrl);
-        audioRef.current = audio;
-        audio.onended = () => setPlaying(false);
-        audio.onpause = () => setPlaying(false);
-        audio.onplay = () => setPlaying(true);
-        audio.play().catch(err => console.error('Error playing audio:', err));
+        // Load audio into global player
+        const title = isNode ? `Node ${id}` : `Profile ${id}`;
+        loadAudio({ url: srcUrl, title, id, type: isNode ? 'node' : 'profile' });
       }
       setTtsTaskActive(false);
       setLoading(false);
@@ -68,7 +59,7 @@ const SpeakerIcon = ({ nodeId, profileId }) => {
       setTtsTaskActive(false);
       setLoading(false);
     }
-  }, [ttsStatus, ttsData, ttsError, isNode]);
+  }, [ttsStatus, ttsData, ttsError, isNode, id, loadAudio]);
 
   // Show only if voice mode enabled for current user
   if (!user || !user.voice_mode_enabled) {
@@ -92,7 +83,7 @@ const SpeakerIcon = ({ nodeId, profileId }) => {
             throw getErr;
           }
         }
-        
+
         let urlPath = tts_url;
         if (!urlPath) {
           // Start async TTS generation
@@ -105,21 +96,15 @@ const SpeakerIcon = ({ nodeId, profileId }) => {
           ? urlPath
           : `${process.env.REACT_APP_BACKEND_URL}${urlPath}`;
         setAudioSrc(srcUrl);
-        
-        const audio = new Audio(srcUrl);
-        audioRef.current = audio;
-        audio.onended = () => setPlaying(false);
-        audio.onpause = () => setPlaying(false);
-        audio.onplay = () => setPlaying(true);
-        await audio.play();
+
+        // Load audio into global player
+        const title = isNode ? `Node ${id}` : `Profile ${id}`;
+        await loadAudio({ url: srcUrl, title, id, type: isNode ? 'node' : 'profile' });
         setLoading(false);
       } else {
-        const audio = audioRef.current;
-        if (playing) {
-          audio.pause();
-        } else {
-          await audio.play();
-        }
+        // Audio already loaded - trigger play in global player
+        const title = isNode ? `Node ${id}` : `Profile ${id}`;
+        await loadAudio({ url: audioSrc, title, id, type: isNode ? 'node' : 'profile' });
       }
     } catch (err) {
       console.error('Error playing audio:', err);
@@ -128,10 +113,16 @@ const SpeakerIcon = ({ nodeId, profileId }) => {
     }
   };
 
+  // Check if this is the currently playing audio
+  const isCurrentlyPlaying = currentAudio &&
+    currentAudio.id === id &&
+    currentAudio.type === (isNode ? 'node' : 'profile') &&
+    isPlaying;
+
   return (
     <button onClick={handleClick} title={loading ? 'Loading audio...' : 'Play audio'}
         style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, marginLeft: '8px' }}>
-      {loading ? <FaSpinner className="spin" /> : <FaVolumeUp color={playing ? '#61dafb' : 'inherit'} />}
+      {loading ? <FaSpinner className="spin" /> : <FaVolumeUp color={isCurrentlyPlaying ? '#61dafb' : 'inherit'} />}
     </button>
   );
 };
