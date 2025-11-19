@@ -112,3 +112,42 @@ def get_tts_status(profile_id):
         response_data['profile']['audio_tts_url'] = profile.audio_tts_url
 
     return jsonify(response_data)
+
+
+@profile_bp.route("/<int:profile_id>", methods=["PUT"])
+@login_required
+def update_profile(profile_id):
+    """Update the content of a user profile."""
+    from flask import request
+
+    profile = UserProfile.query.get_or_404(profile_id)
+
+    if profile.user_id != current_user.id:
+        return jsonify({"error": "Unauthorized"}), 403
+
+    data = request.get_json()
+    new_content = data.get("content")
+
+    if new_content is None:
+        return jsonify({"error": "Content is required"}), 400
+
+    if not new_content.strip():
+        return jsonify({"error": "Content cannot be empty"}), 400
+
+    profile.content = new_content
+
+    try:
+        db.session.commit()
+        return jsonify({
+            "message": "Profile updated successfully",
+            "profile": {
+                "id": profile.id,
+                "content": profile.content,
+                "generated_by": profile.generated_by,
+                "tokens_used": profile.tokens_used,
+                "created_at": profile.created_at.isoformat()
+            }
+        }), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Failed to update profile", "details": str(e)}), 500
