@@ -69,8 +69,10 @@ const SpeakerIcon = ({ nodeId, profileId, content }) => {
           ? ttsUrl
           : `${process.env.REACT_APP_BACKEND_URL}${ttsUrl}`;
         setAudioSrc(srcUrl);
-        // Load audio into global player
-        loadAudio({ url: srcUrl, title: fullTitle, id, type: isNode ? 'node' : 'profile' });
+        // Add a small delay to ensure file is available on server before loading
+        setTimeout(() => {
+          loadAudio({ url: srcUrl, title: fullTitle, id, type: isNode ? 'node' : 'profile' });
+        }, 500);
       }
       setTtsTaskActive(false);
       setLoading(false);
@@ -95,13 +97,16 @@ const SpeakerIcon = ({ nodeId, profileId, content }) => {
         // Attempt to fetch existing audio URLs
         let tts_url = null;
         try {
-          const res = await api.get(`${baseUrl}/audio`);
-          tts_url = res.data.tts_url;
-        } catch (getErr) {
-          // 404 means no audio yet; other errors rethrow
-          if (!(getErr.response && getErr.response.status === 404)) {
-            throw getErr;
+          const res = await api.get(`${baseUrl}/audio`, {
+            validateStatus: (status) => status === 200 || status === 404
+          });
+          if (res.status === 200) {
+            tts_url = res.data.tts_url;
           }
+          // If status is 404, tts_url remains null (no audio exists yet)
+        } catch (getErr) {
+          // Handle any other errors
+          console.error('Error checking for audio:', getErr);
         }
 
         let urlPath = tts_url;
