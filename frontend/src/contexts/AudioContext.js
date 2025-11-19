@@ -157,7 +157,16 @@ export const AudioProvider = ({ children }) => {
 
     setPlaybackRate(newRate);
     if (audioRef.current) {
+      const wasPlaying = !audioRef.current.paused;
+      const currentTimeStamp = audioRef.current.currentTime;
+
       audioRef.current.playbackRate = newRate;
+
+      // Ensure audio continues playing if it was playing before
+      if (wasPlaying && audioRef.current.paused) {
+        audioRef.current.currentTime = currentTimeStamp;
+        audioRef.current.play().catch(err => console.error('Error resuming playback:', err));
+      }
     }
   }, [playbackRate]);
 
