@@ -1,7 +1,8 @@
 from flask import jsonify, current_app
 from flask_login import login_required, current_user
 from backend.models import UserProfile
-from backend.extensions import db, celery
+from backend.extensions import db
+from backend.celery_app import celery
 from pathlib import Path
 
 from flask import Blueprint
