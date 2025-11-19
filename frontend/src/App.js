@@ -9,7 +9,6 @@ import NodeForm from "./components/NodeForm";
 import TermsModal from "./components/TermsModal";
 import AdminPanel from "./components/AdminPanel";
 import AlphaModal from "./components/AlphaModal";
-import GlobalAudioPlayer from "./components/GlobalAudioPlayer";
 import { useUser } from "./contexts/UserContext";
 import { AudioProvider } from "./contexts/AudioContext";
 
@@ -66,8 +65,7 @@ function App() {
 
   return (
     <AudioProvider>
-      <GlobalAudioPlayer />
-      <div style={{ paddingTop: '0px' }}>
+      <div>
         <NavBar onNewEntryClick={() => setShowNewEntry(true)} />
         {showNewEntry && (
         <div

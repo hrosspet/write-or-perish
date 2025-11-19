@@ -1,5 +1,5 @@
 import React from 'react';
-import { FaPlay, FaPause, FaStop, FaStepBackward, FaStepForward } from 'react-icons/fa';
+import { FaPlay, FaPause, FaStop, FaUndo, FaRedo } from 'react-icons/fa';
 import { useAudio } from '../contexts/AudioContext';
 
 const GlobalAudioPlayer = () => {
@@ -39,25 +39,17 @@ const GlobalAudioPlayer = () => {
 
   return (
     <div style={{
-      position: 'fixed',
-      top: 0,
-      left: 0,
-      right: 0,
-      backgroundColor: '#2a2a2a',
-      borderBottom: '1px solid #444',
-      padding: '8px 16px',
       display: 'flex',
       alignItems: 'center',
       gap: '12px',
-      zIndex: 999,
-      boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
+      marginLeft: 'auto',
     }}>
       {/* Title */}
       <div style={{
         color: '#e0e0e0',
-        fontSize: '14px',
-        fontWeight: '500',
-        minWidth: '150px',
+        fontSize: '13px',
+        fontWeight: '400',
+        maxWidth: '200px',
         overflow: 'hidden',
         textOverflow: 'ellipsis',
         whiteSpace: 'nowrap',
@@ -67,24 +59,6 @@ const GlobalAudioPlayer = () => {
 
       {/* Controls */}
       <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-        <button
-          onClick={skipBackward}
-          disabled={loading}
-          title="Skip back 10 seconds"
-          style={{
-            background: 'none',
-            border: 'none',
-            color: loading ? '#666' : '#e0e0e0',
-            cursor: loading ? 'not-allowed' : 'pointer',
-            fontSize: '16px',
-            padding: '4px',
-            display: 'flex',
-            alignItems: 'center',
-          }}
-        >
-          <FaStepBackward />
-        </button>
-
         {isPlaying ? (
           <button
             onClick={pause}
@@ -95,7 +69,7 @@ const GlobalAudioPlayer = () => {
               border: 'none',
               color: loading ? '#666' : '#61dafb',
               cursor: loading ? 'not-allowed' : 'pointer',
-              fontSize: '18px',
+              fontSize: '16px',
               padding: '4px',
               display: 'flex',
               alignItems: 'center',
@@ -113,7 +87,7 @@ const GlobalAudioPlayer = () => {
               border: 'none',
               color: loading ? '#666' : '#61dafb',
               cursor: loading ? 'not-allowed' : 'pointer',
-              fontSize: '18px',
+              fontSize: '16px',
               padding: '4px',
               display: 'flex',
               alignItems: 'center',
@@ -132,13 +106,31 @@ const GlobalAudioPlayer = () => {
             border: 'none',
             color: loading ? '#666' : '#e0e0e0',
             cursor: loading ? 'not-allowed' : 'pointer',
-            fontSize: '16px',
+            fontSize: '14px',
             padding: '4px',
             display: 'flex',
             alignItems: 'center',
           }}
         >
           <FaStop />
+        </button>
+
+        <button
+          onClick={skipBackward}
+          disabled={loading}
+          title="Skip back 10 seconds"
+          style={{
+            background: 'none',
+            border: 'none',
+            color: loading ? '#666' : '#e0e0e0',
+            cursor: loading ? 'not-allowed' : 'pointer',
+            fontSize: '14px',
+            padding: '4px',
+            display: 'flex',
+            alignItems: 'center',
+          }}
+        >
+          <FaUndo />
         </button>
 
         <button
@@ -150,21 +142,21 @@ const GlobalAudioPlayer = () => {
             border: 'none',
             color: loading ? '#666' : '#e0e0e0',
             cursor: loading ? 'not-allowed' : 'pointer',
-            fontSize: '16px',
+            fontSize: '14px',
             padding: '4px',
             display: 'flex',
             alignItems: 'center',
           }}
         >
-          <FaStepForward />
+          <FaRedo />
         </button>
       </div>
 
       {/* Time display */}
       <div style={{
         color: '#b0b0b0',
-        fontSize: '12px',
-        minWidth: '80px',
+        fontSize: '11px',
+        minWidth: '70px',
       }}>
         {formatTime(currentTime)} / {formatTime(duration)}
       </div>
@@ -173,8 +165,8 @@ const GlobalAudioPlayer = () => {
       <div
         onClick={handleSeek}
         style={{
-          flex: 1,
-          height: '6px',
+          width: '150px',
+          height: '5px',
           backgroundColor: '#444',
           borderRadius: '3px',
           cursor: 'pointer',

@@ -7,10 +7,26 @@ import { useAudio } from '../contexts/AudioContext';
 import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
 
 /**
+ * Extracts the first markdown header from content
+ */
+const extractMarkdownHeader = (content) => {
+  if (!content) return null;
+  const lines = content.split('\n');
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('#')) {
+      // Remove all # characters and trim
+      return trimmed.replace(/^#+\s*/, '').trim();
+    }
+  }
+  return null;
+};
+
+/**
  * SpeakerIcon component fetches and plays audio for a node or profile.
  * Shows loading spinner, play/pause state.
  */
-const SpeakerIcon = ({ nodeId, profileId }) => {
+const SpeakerIcon = ({ nodeId, profileId, content }) => {
   const { user } = useUser();
   const { loadAudio, currentAudio, isPlaying } = useAudio();
   const [loading, setLoading] = useState(false);
@@ -20,6 +36,11 @@ const SpeakerIcon = ({ nodeId, profileId }) => {
   const isNode = nodeId != null;
   const id = isNode ? nodeId : profileId;
   const baseUrl = isNode ? `/nodes/${id}` : `/profile/${id}`;
+
+  // Extract header from content if available
+  const header = extractMarkdownHeader(content);
+  const baseTitle = isNode ? `Node ${id}` : `Profile ${id}`;
+  const fullTitle = header ? `${baseTitle}: ${header}` : baseTitle;
 
   // TTS generation polling - enabled automatically when ttsTaskActive is true
   const {
@@ -49,8 +70,7 @@ const SpeakerIcon = ({ nodeId, profileId }) => {
           : `${process.env.REACT_APP_BACKEND_URL}${ttsUrl}`;
         setAudioSrc(srcUrl);
         // Load audio into global player
-        const title = isNode ? `Node ${id}` : `Profile ${id}`;
-        loadAudio({ url: srcUrl, title, id, type: isNode ? 'node' : 'profile' });
+        loadAudio({ url: srcUrl, title: fullTitle, id, type: isNode ? 'node' : 'profile' });
       }
       setTtsTaskActive(false);
       setLoading(false);
@@ -98,13 +118,11 @@ const SpeakerIcon = ({ nodeId, profileId }) => {
         setAudioSrc(srcUrl);
 
         // Load audio into global player
-        const title = isNode ? `Node ${id}` : `Profile ${id}`;
-        await loadAudio({ url: srcUrl, title, id, type: isNode ? 'node' : 'profile' });
+        await loadAudio({ url: srcUrl, title: fullTitle, id, type: isNode ? 'node' : 'profile' });
         setLoading(false);
       } else {
         // Audio already loaded - trigger play in global player
-        const title = isNode ? `Node ${id}` : `Profile ${id}`;
-        await loadAudio({ url: audioSrc, title, id, type: isNode ? 'node' : 'profile' });
+        await loadAudio({ url: audioSrc, title: fullTitle, id, type: isNode ? 'node' : 'profile' });
       }
     } catch (err) {
       console.error('Error playing audio:', err);

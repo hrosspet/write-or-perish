@@ -1,6 +1,7 @@
 import React from "react";
 import { Link } from "react-router-dom";
-import { useUser } from "../contexts/UserContext";  // Import the user context
+import { useUser } from "../contexts/UserContext";
+import GlobalAudioPlayer from "./GlobalAudioPlayer";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
@@ -59,11 +60,13 @@ function NavBar({ onNewEntryClick }) {
       {user && (
         <a
           href={`${backendUrl}/auth/logout`}
-          style={{ color: "#e0e0e0", textDecoration: "none" }}
+          style={{ color: "#e0e0e0", textDecoration: "none", marginRight: "10px" }}
         >
           Logout
         </a>
       )}
+
+      <GlobalAudioPlayer />
     </nav>
   );
 }

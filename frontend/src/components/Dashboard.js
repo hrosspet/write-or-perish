@@ -394,7 +394,7 @@ function Dashboard() {
                 >
                   {dashboardData.latest_profile.content}
                 </ReactMarkdown>
-                <SpeakerIcon profileId={dashboardData.latest_profile.id} />
+                <SpeakerIcon profileId={dashboardData.latest_profile.id} content={dashboardData.latest_profile.content} />
               </div>
             ) : (
               <p style={{ color: "#888", fontStyle: "italic" }}>
