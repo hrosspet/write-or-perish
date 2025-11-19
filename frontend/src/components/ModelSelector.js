@@ -12,21 +12,23 @@ const ModelSelector = ({ nodeId, selectedModel, onModelChange }) => {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Fetch suggested model on mount
     const fetchSuggestedModel = async () => {
       try {
         const response = await api.get(`/nodes/${nodeId}/suggested-model`);
         onModelChange(response.data.suggested_model);
       } catch (error) {
         console.error('Error fetching suggested model:', error);
-        // Fallback to default
-        onModelChange('gpt-5');
+        onModelChange('gpt-5'); // Fallback to default
       } finally {
         setLoading(false);
       }
     };
 
-    fetchSuggestedModel();
+    if (nodeId) {
+      fetchSuggestedModel();
+    } else {
+      setLoading(false); // No node, so not loading
+    }
   }, [nodeId, onModelChange]);
 
   // Available models for the dropdown
