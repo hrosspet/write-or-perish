@@ -54,7 +54,8 @@ const NodeForm = forwardRef(
     useEffect(() => {
       if (transcriptionStatus === 'completed' && transcriptionData) {
         setLoading(false);
-        onSuccess(transcriptionData);
+        const normalizedData = { ...transcriptionData, id: transcriptionData.node_id };
+        onSuccess(normalizedData);
         setUploadedNodeId(null);
       } else if (transcriptionStatus === 'failed') {
         setLoading(false);
