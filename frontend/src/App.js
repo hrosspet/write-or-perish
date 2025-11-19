@@ -9,7 +9,9 @@ import NodeForm from "./components/NodeForm";
 import TermsModal from "./components/TermsModal";
 import AdminPanel from "./components/AdminPanel";
 import AlphaModal from "./components/AlphaModal";
+import GlobalAudioPlayer from "./components/GlobalAudioPlayer";
 import { useUser } from "./contexts/UserContext";
+import { AudioProvider } from "./contexts/AudioContext";
 
 function App() {
   const [showNewEntry, setShowNewEntry] = useState(false);
@@ -63,9 +65,11 @@ function App() {
   }, [showNewEntry]);
 
   return (
-    <div>
-      <NavBar onNewEntryClick={() => setShowNewEntry(true)} />
-      {showNewEntry && (
+    <AudioProvider>
+      <GlobalAudioPlayer />
+      <div style={{ paddingTop: '0px' }}>
+        <NavBar onNewEntryClick={() => setShowNewEntry(true)} />
+        {showNewEntry && (
         <div
           onClick={handleCloseModal}
           style={{
@@ -135,16 +139,17 @@ function App() {
         />
       )}
 
-      <Routes>
-        <Route path="/" element={<LandingPage />} />
-        <Route path="/dashboard" element={<Dashboard />} />
-        <Route path="/dashboard/:username" element={<Dashboard />} />
-        <Route path="/feed" element={<Feed />} />
-        <Route path="/node/:id" element={<NodeDetail />} />
-        <Route path="/admin" element={<AdminPanel />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </div>
+        <Routes>
+          <Route path="/" element={<LandingPage />} />
+          <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="/dashboard/:username" element={<Dashboard />} />
+          <Route path="/feed" element={<Feed />} />
+          <Route path="/node/:id" element={<NodeDetail />} />
+          <Route path="/admin" element={<AdminPanel />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </div>
+    </AudioProvider>
   );
 }
 
