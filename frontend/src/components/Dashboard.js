@@ -4,7 +4,8 @@ import api from "../api";
 import DashboardContent from "./DashboardContent";
 import Bubble from "./Bubble";
 import ModelSelector from "./ModelSelector";
-import useAsyncTaskPolling from "../hooks/useAsyncTaskPolling";
+import SpeakerIcon from "./SpeakerIcon";
+import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 
 function Dashboard() {
   const { username } = useParams(); // if present, we're viewing someone else's dashboard
@@ -319,6 +320,7 @@ function Dashboard() {
                     color: "#d0d0d0"
                   }}>
                     {dashboardData.latest_profile.content}
+                    <SpeakerIcon profileId={dashboardData.latest_profile.id} />
                   </div>
                 </div>
               )}
