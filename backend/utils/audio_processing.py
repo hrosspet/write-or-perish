@@ -5,6 +5,7 @@ Extracted from routes/nodes.py to be shared between API and Celery tasks.
 import os
 import pathlib
 import tempfile
+import ffmpeg
 from pydub import AudioSegment
 from flask import current_app
 
@@ -66,45 +67,71 @@ def get_audio_duration(file_path: pathlib.Path, logger=None) -> float:
         logger = current_app.logger
 
     try:
-        audio = AudioSegment.from_file(str(file_path))
-        return len(audio) / 1000.0
-    except Exception as e:
-        logger.error(f"Failed to get audio duration: {e}")
-        return 0.0
+        # Use ffprobe to get duration - much faster than pydub for large files
+        probe = ffmpeg.probe(str(file_path))
+        return float(probe['format']['duration'])
+    except (ffmpeg.Error, KeyError, TypeError) as e:
+        logger.error(f"Failed to get audio duration with ffprobe: {e}")
+        # Fallback to pydub for safety
+        try:
+            audio = AudioSegment.from_file(str(file_path))
+            return len(audio) / 1000.0
+        except Exception as e_pydub:
+            logger.error(f"Pydub fallback also failed: {e_pydub}")
+            return 0.0
 
 
 def chunk_audio(file_path: pathlib.Path, chunk_duration_sec: int = CHUNK_DURATION_SEC, logger=None) -> list:
     """
-    Split audio file into chunks.
+    Split audio file into chunks using ffmpeg-python.
+    This is memory-efficient and does not load the whole file.
     Returns list of temporary file paths.
     """
     if logger is None:
         logger = current_app.logger
 
     try:
-        audio = AudioSegment.from_file(str(file_path))
-        chunk_duration_ms = chunk_duration_sec * 1000
-        chunks = []
+        # Get total duration to calculate number of chunks
+        total_duration = get_audio_duration(file_path, logger)
+        if total_duration == 0:
+            raise ValueError("Could not determine audio duration.")
 
-        for i, start_ms in enumerate(range(0, len(audio), chunk_duration_ms)):
-            chunk = audio[start_ms:start_ms + chunk_duration_ms]
+        chunk_paths = []
+        num_chunks = int(total_duration // chunk_duration_sec) + 1
 
+        for i in range(num_chunks):
+            start_time = i * chunk_duration_sec
+            
+            # Create a temporary file for the chunk
             temp_file = tempfile.NamedTemporaryFile(
                 delete=False,
                 suffix='.mp3',
                 prefix=f'chunk_{i}_'
             )
-            chunk.export(temp_file.name, format="mp3", bitrate="128k")
-            chunks.append(temp_file.name)
+            temp_file.close()  # Close the file so ffmpeg can write to it
+            
+            try:
+                (
+                    ffmpeg
+                    .input(str(file_path), ss=start_time, t=chunk_duration_sec)
+                    .output(temp_file.name, acodec='libmp3lame', audio_bitrate='128k', format='mp3', q='2')
+                    .overwrite_output()
+                    .run(capture_stdout=True, capture_stderr=True, quiet=True)
+                )
+                chunk_paths.append(temp_file.name)
+                logger.info(f"Created chunk {i + 1}/{num_chunks} at {temp_file.name}")
 
-            logger.info(
-                f"Created chunk {i + 1}: {start_ms / 1000:.0f}s - {(start_ms + len(chunk)) / 1000:.0f}s"
-            )
+            except ffmpeg.Error as e:
+                logger.error(f"FFmpeg error on chunk {i+1}: {e.stderr.decode('utf-8') if e.stderr else 'Unknown error'}")
+                # Clean up failed chunk file
+                if os.path.exists(temp_file.name):
+                    os.unlink(temp_file.name)
+                raise  # Re-raise the exception to fail the task
 
-        return chunks
+        return chunk_paths
 
     except Exception as e:
-        logger.error(f"Audio chunking failed: {e}")
+        logger.error(f"Audio chunking failed: {e}", exc_info=True)
         return []
 
 
