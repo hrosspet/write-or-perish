@@ -6,7 +6,7 @@ from pathlib import Path
 
 from flask import Blueprint
 
-profile_bp = Blueprint("profile", __name__, url_prefix="/profile")
+profile_bp = Blueprint("profile", __name__)
 
 AUDIO_STORAGE_ROOT = "data/audio"
 
@@ -40,7 +40,7 @@ def generate_tts(profile_id):
     if profile.audio_tts_url:
         return jsonify({"message": "TTS already available", "tts_url": profile.audio_tts_url}), 200
 
-    if len(profile.content) > 4096:
+    if len(profile.content) > 10000:
         return jsonify({"error": "Content too long for TTS"}), 413
 
     if not current_app.config.get("OPENAI_API_KEY"):
