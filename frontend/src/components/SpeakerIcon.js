@@ -79,7 +79,7 @@ const SpeakerIcon = ({ nodeId, profileId, content }) => {
       setTtsTaskActive(false);
       setLoading(false);
     }
-  }, [ttsStatus, ttsData, ttsError, isNode, id, loadAudio]);
+  }, [ttsStatus, ttsData, ttsError, isNode, id, loadAudio, fullTitle]);
 
   // Show only if voice mode enabled for current user
   if (!user || !user.voice_mode_enabled) {
