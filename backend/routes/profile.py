@@ -20,12 +20,23 @@ def get_audio(profile_id):
     if profile.user_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
 
-    if not profile.audio_tts_url:
-        return jsonify({"error": "No audio found for this profile"}), 404
+    # If audio exists, return it
+    if profile.audio_tts_url:
+        return jsonify({
+            "tts_url": profile.audio_tts_url,
+        })
 
-    return jsonify({
-        "tts_url": profile.audio_tts_url,
-    })
+    # Check if TTS generation is in progress
+    if profile.tts_task_status in ['pending', 'processing']:
+        return jsonify({
+            "status": "generating",
+            "message": "TTS generation in progress",
+            "progress": profile.tts_task_progress or 0,
+            "task_id": profile.tts_task_id
+        }), 202  # 202 Accepted - request accepted but not yet completed
+
+    # No audio and no generation in progress
+    return jsonify({"error": "No audio found for this profile"}), 404
 
 
 @profile_bp.route("/<int:profile_id>/tts", methods=["POST"])

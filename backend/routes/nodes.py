@@ -654,15 +654,29 @@ def get_audio_urls(node_id):
     """Return JSON with URLs for original or TTS audio associated with a node.
 
     Response: 200 OK – `{ original_url: str|null, tts_url: str|null }`
-              404     – when neither audio exists.
+              202 Accepted – when TTS generation is in progress
+              404     – when neither audio exists and no generation in progress.
     """
     node = Node.query.get_or_404(node_id)
-    if not node.audio_original_url and not node.audio_tts_url:
-        return jsonify({"error": "No audio available for this node"}), 404
-    return jsonify({
-        "original_url": node.audio_original_url,
-        "tts_url": node.audio_tts_url,
-    }), 200
+
+    # If any audio exists, return it
+    if node.audio_original_url or node.audio_tts_url:
+        return jsonify({
+            "original_url": node.audio_original_url,
+            "tts_url": node.audio_tts_url,
+        }), 200
+
+    # Check if TTS generation is in progress
+    if node.tts_task_status in ['pending', 'processing']:
+        return jsonify({
+            "status": "generating",
+            "message": "TTS generation in progress",
+            "progress": node.tts_task_progress or 0,
+            "task_id": node.tts_task_id
+        }), 202  # 202 Accepted - request accepted but not yet completed
+
+    # No audio and no generation in progress
+    return jsonify({"error": "No audio available for this node"}), 404
 
 
 @nodes_bp.route("/<int:node_id>/tts", methods=["POST"])
