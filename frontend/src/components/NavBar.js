@@ -23,11 +23,16 @@ function NavBar({ onNewEntryClick }) {
   return (
     <nav
       style={{
+        position: "fixed",
+        top: 0,
+        left: 0,
+        right: 0,
         padding: "10px",
         backgroundColor: "#1f1f1f",
         borderBottom: "1px solid #333",
         display: "flex",
-        alignItems: "center"
+        alignItems: "center",
+        zIndex: 1000
       }}
     >
       <Link to="/" style={{ color: "#e0e0e0", textDecoration: "none", marginRight: "10px" }}>

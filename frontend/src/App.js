@@ -67,6 +67,7 @@ function App() {
     <AudioProvider>
       <div>
         <NavBar onNewEntryClick={() => setShowNewEntry(true)} />
+        <div style={{ paddingTop: "60px" }}>
         {showNewEntry && (
         <div
           onClick={handleCloseModal}
@@ -146,6 +147,7 @@ function App() {
           <Route path="/admin" element={<AdminPanel />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
+        </div>
       </div>
     </AudioProvider>
   );
