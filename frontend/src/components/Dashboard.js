@@ -276,7 +276,11 @@ function Dashboard() {
                 padding: "8px 16px",
                 cursor: importing ? "not-allowed" : "pointer",
                 borderRadius: "4px",
-                opacity: importing ? 0.6 : 1
+                opacity: importing ? 0.6 : 1,
+                fontSize: "inherit",
+                fontFamily: "inherit",
+                fontWeight: "inherit",
+                lineHeight: "inherit"
               }}
             >
               {importing ? "Analyzing..." : "Import Data"}
