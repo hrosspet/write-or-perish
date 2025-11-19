@@ -383,7 +383,7 @@ def create_node():
             local_path = str(AUDIO_STORAGE_ROOT / rel_path)
 
             # Enqueue task
-            task = transcribe_audio.delay(node.id, local_path)
+            task = transcribe_audio.delay(node.id, local_path, file.filename)
 
             # Store task ID
             node.transcription_task_id = task.id
@@ -1111,7 +1111,7 @@ def finalize_chunked_upload():
     if api_key:
         from backend.tasks.transcription import transcribe_audio
 
-        task = transcribe_audio.delay(node.id, str(target_path))
+        task = transcribe_audio.delay(node.id, str(target_path), metadata["filename"])
         node.transcription_task_id = task.id
         db.session.commit()
 

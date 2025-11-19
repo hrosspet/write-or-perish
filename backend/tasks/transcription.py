@@ -40,13 +40,14 @@ class TranscriptionTask(Task):
 
 
 @celery.task(base=TranscriptionTask, bind=True)
-def transcribe_audio(self, node_id: int, audio_file_path: str):
+def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = None):
     """
     Asynchronously transcribe an audio file.
 
     Args:
         node_id: Database ID of the node
         audio_file_path: Absolute path to the audio file
+        filename: Original filename of the audio file
     """
     logger.info(f"Starting transcription task for node {node_id}")
 
@@ -194,7 +195,13 @@ def transcribe_audio(self, node_id: int, audio_file_path: str):
             # Step 4: Update node with transcript (100% progress)
             self.update_state(state='PROGRESS', meta={'progress': 100, 'status': 'Complete'})
 
-            node.content = transcript or node.content
+            if filename:
+                header, _ = os.path.splitext(filename)
+                final_content = f"# {header}\n\n{transcript}"
+            else:
+                final_content = transcript
+
+            node.content = final_content or node.content
             node.transcription_status = 'completed'
             node.transcription_progress = 100
             node.transcription_completed_at = datetime.utcnow()
