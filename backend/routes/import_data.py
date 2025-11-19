@@ -193,8 +193,12 @@ def confirm_import():
                 filename = file_data.get('filename_without_ext', 'Untitled')
                 content = file_data.get('content', '')
 
-                # Add filename as markdown headline
-                node_content = f"# {filename}\n\n{content}"
+                # Add filename as markdown headline only if content doesn't have H1
+                stripped_content = content.lstrip()
+                if not stripped_content.startswith('# '):
+                    node_content = f"# {filename}\n\n{content}"
+                else:
+                    node_content = content
 
                 # Create node
                 node = Node(
@@ -219,8 +223,12 @@ def confirm_import():
                 filename = file_data.get('filename_without_ext', 'Untitled')
                 content = file_data.get('content', '')
 
-                # Add filename as markdown headline
-                node_content = f"# {filename}\n\n{content}"
+                # Add filename as markdown headline only if content doesn't have H1
+                stripped_content = content.lstrip()
+                if not stripped_content.startswith('# '):
+                    node_content = f"# {filename}\n\n{content}"
+                else:
+                    node_content = content
 
                 # Create top-level node (parent_id=None)
                 node = Node(
