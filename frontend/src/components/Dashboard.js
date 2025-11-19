@@ -5,7 +5,7 @@ import DashboardContent from "./DashboardContent";
 import Bubble from "./Bubble";
 import ModelSelector from "./ModelSelector";
 import SpeakerIcon from "./SpeakerIcon";
-import useAsyncTaskPolling from "../hooks/useAsyncTaskPolling";
+import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 
 function Dashboard() {
   const { username } = useParams(); // if present, we're viewing someone else's dashboard
