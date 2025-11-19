@@ -4,6 +4,7 @@ import api from "../api";
 import DashboardContent from "./DashboardContent";
 import Bubble from "./Bubble";
 import ModelSelector from "./ModelSelector";
+import SpeakerIcon from "./SpeakerIcon";
 import useAsyncTaskPolling from "../hooks/useAsyncTaskPolling";
 
 function Dashboard() {
@@ -121,7 +122,7 @@ function Dashboard() {
   };
 
   const handleConfirmProfileGeneration = () => {
-    setShowProfileConfirmation(false);
+    setShowProfileConfirmation(.
     setGeneratingProfile(true);
 
     api.post("/export/generate_profile", { model: selectedModel })
@@ -319,6 +320,7 @@ function Dashboard() {
                     color: "#d0d0d0"
                   }}>
                     {dashboardData.latest_profile.content}
+                    <SpeakerIcon profileId={dashboardData.latest_profile.id} />
                   </div>
                 </div>
               )}

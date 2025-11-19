@@ -9,7 +9,7 @@ from pydub import AudioSegment
 import os
 
 from backend.celery_app import celery, flask_app
-from backend.models import Node
+from backend.models import Node, UserProfile
 from backend.extensions import db
 from backend.utils.audio_processing import chunk_text
 
@@ -17,7 +17,7 @@ logger = get_task_logger(__name__)
 
 
 class TTSTask(Task):
-    """Custom task class with error handling."""
+    """Custom task class with error handling for Nodes."""
 
     def on_failure(self, exc, task_id, args, kwargs, einfo):
         """Called when task fails."""
@@ -29,6 +29,21 @@ class TTSTask(Task):
                     node.tts_task_status = 'failed'
                     db.session.commit()
                     logger.error(f"TTS generation failed for node {node_id}: {exc}")
+
+
+class ProfileTTSTask(Task):
+    """Custom task class with error handling for UserProfiles."""
+
+    def on_failure(self, exc, task_id, args, kwargs, einfo):
+        """Called when task fails."""
+        profile_id = args[0] if args else None
+        if profile_id:
+            with flask_app.app_context():
+                profile = UserProfile.query.get(profile_id)
+                if profile:
+                    profile.tts_task_status = 'failed'
+                    db.session.commit()
+                    logger.error(f"TTS generation failed for profile {profile_id}: {exc}")
 
 
 @celery.task(base=TTSTask, bind=True)
@@ -180,5 +195,139 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str):
         except Exception as e:
             logger.error(f"TTS generation error for node {node_id}: {e}", exc_info=True)
             node.tts_task_status = 'failed'
+            db.session.commit()
+            raise
+
+
+@celery.task(base=ProfileTTSTask, bind=True)
+def generate_tts_audio_for_profile(self, profile_id: int, audio_storage_root: str):
+    """
+    Asynchronously generate TTS audio for a user profile.
+
+    Args:
+        profile_id: Database ID of the user profile
+        audio_storage_root: Root directory for audio storage
+    """
+    logger.info(f"Starting TTS generation task for profile {profile_id}")
+
+    with flask_app.app_context():
+        profile = UserProfile.query.get(profile_id)
+        if not profile:
+            raise ValueError(f"UserProfile {profile_id} not found")
+
+        profile.tts_task_status = 'processing'
+        profile.tts_task_progress = 10
+        db.session.commit()
+
+        try:
+            if profile.audio_tts_url:
+                logger.info(f"TTS already available for profile {profile_id}")
+                profile.tts_task_status = 'completed'
+                profile.tts_task_progress = 100
+                db.session.commit()
+                return {
+                    'profile_id': profile_id,
+                    'status': 'completed',
+                    'tts_url': profile.audio_tts_url
+                }
+
+            api_key = flask_app.config.get("OPENAI_API_KEY")
+            if not api_key:
+                raise ValueError("OPENAI_API_KEY not configured")
+
+            text = profile.content or ""
+            if len(text) > 10000:
+                raise ValueError("Content too long for TTS (max 10,000 characters)")
+
+            self.update_state(state='PROGRESS', meta={'progress': 20, 'status': 'Preparing'})
+            profile.tts_task_progress = 20
+            db.session.commit()
+
+            client = OpenAI(api_key=api_key)
+            AUDIO_STORAGE_ROOT = Path(audio_storage_root)
+            target_dir = AUDIO_STORAGE_ROOT / f"user/{profile.user_id}/profile/{profile.id}"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            final_path = target_dir / "tts.mp3"
+
+            self.update_state(state='PROGRESS', meta={'progress': 30, 'status': 'Processing text'})
+            profile.tts_task_progress = 30
+            db.session.commit()
+
+            chunks = chunk_text(text, max_chars=4096)
+            logger.info(f"Text split into {len(chunks)} chunks for TTS for profile {profile_id}")
+
+            if len(chunks) == 1:
+                self.update_state(state='PROGRESS', meta={'progress': 40, 'status': 'Generating audio'})
+                profile.tts_task_progress = 40
+                db.session.commit()
+
+                with client.audio.speech.with_streaming_response.create(
+                    model="gpt-4o-mini-tts",
+                    input=chunks[0],
+                    voice="alloy"
+                ) as resp:
+                    resp.stream_to_file(final_path)
+            else:
+                audio_parts = []
+                chunk_progress_step = 50 / len(chunks)
+
+                for i, chunk in enumerate(chunks):
+                    progress = 40 + int((i + 1) * chunk_progress_step)
+                    self.update_state(
+                        state='PROGRESS',
+                        meta={
+                            'progress': progress,
+                            'status': f'Generating audio chunk {i+1}/{len(chunks)}'
+                        }
+                    )
+                    profile.tts_task_progress = progress
+                    db.session.commit()
+
+                    part_path = target_dir / f"tts_part{i}.mp3"
+
+                    with client.audio.speech.with_streaming_response.create(
+                        model="gpt-4o-mini-tts",
+                        input=chunk,
+                        voice="alloy"
+                    ) as resp:
+                        resp.stream_to_file(part_path)
+
+                    segment = AudioSegment.from_file(str(part_path), format="mp3")
+                    audio_parts.append(segment)
+
+                    try:
+                        part_path.unlink()
+                    except Exception as e:
+                        logger.warning(f"Failed to delete part file: {e}")
+
+                self.update_state(state='PROGRESS', meta={'progress': 90, 'status': 'Combining audio'})
+                profile.tts_task_progress = 90
+                db.session.commit()
+
+                combined = sum(audio_parts)
+                combined.export(final_path, format="mp3")
+
+            self.update_state(state='PROGRESS', meta={'progress': 95, 'status': 'Finalizing'})
+            profile.tts_task_progress = 95
+            db.session.commit()
+
+            rel_path = final_path.relative_to(AUDIO_STORAGE_ROOT)
+            url = f"/media/{rel_path.as_posix()}"
+            profile.audio_tts_url = url
+            profile.tts_task_status = 'completed'
+            profile.tts_task_progress = 100
+            db.session.commit()
+
+            logger.info(f"TTS generation successful for profile {profile_id}")
+
+            return {
+                'profile_id': profile_id,
+                'status': 'completed',
+                'tts_url': url
+            }
+
+        except Exception as e:
+            logger.error(f"TTS generation error for profile {profile_id}: {e}", exc_info=True)
+            profile.tts_task_status = 'failed'
             db.session.commit()
             raise

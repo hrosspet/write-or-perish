@@ -6,10 +6,10 @@ import { useUser } from '../contexts/UserContext';
 import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
 
 /**
- * SpeakerIcon component fetches and plays audio for a node.
+ * SpeakerIcon component fetches and plays audio for a node or profile.
  * Shows loading spinner, play/pause state.
  */
-const SpeakerIcon = ({ nodeId }) => {
+const SpeakerIcon = ({ nodeId, profileId }) => {
   const { user } = useUser();
   const [loading, setLoading] = useState(false);
   const [playing, setPlaying] = useState(false);
@@ -17,17 +17,21 @@ const SpeakerIcon = ({ nodeId }) => {
   const [ttsTaskActive, setTtsTaskActive] = useState(false);
   const audioRef = useRef(null);
 
+  const isNode = nodeId != null;
+  const id = isNode ? nodeId : profileId;
+  const baseUrl = isNode ? `/nodes/${id}` : `/profile/${id}`;
+
   // TTS generation polling - enabled automatically when ttsTaskActive is true
   const {
     status: ttsStatus,
     data: ttsData,
     error: ttsError
   } = useAsyncTaskPolling(
-    ttsTaskActive ? `/nodes/${nodeId}/tts-status` : null,
+    ttsTaskActive ? `${baseUrl}/tts-status` : null,
     { enabled: ttsTaskActive }  // Auto-start when ttsTaskActive is true
   );
 
-  // Reset audio state when the node changes
+  // Reset audio state when the node/profile changes
   useEffect(() => {
     if (audioRef.current) {
       audioRef.current.pause();
@@ -37,12 +41,12 @@ const SpeakerIcon = ({ nodeId }) => {
     setPlaying(false);
     setLoading(false);
     setTtsTaskActive(false);
-  }, [nodeId]);
+  }, [nodeId, profileId]);
 
   // Handle TTS completion
   useEffect(() => {
     if (ttsStatus === 'completed' && ttsData) {
-      const ttsUrl = ttsData.node?.audio_tts_url;
+      const ttsUrl = isNode ? ttsData.node?.audio_tts_url : ttsData.profile?.audio_tts_url;
       if (ttsUrl) {
         // Build absolute URL
         const srcUrl = ttsUrl.startsWith('http')
@@ -64,7 +68,7 @@ const SpeakerIcon = ({ nodeId }) => {
       setTtsTaskActive(false);
       setLoading(false);
     }
-  }, [ttsStatus, ttsData, ttsError]);
+  }, [ttsStatus, ttsData, ttsError, isNode]);
 
   // Show only if voice mode enabled for current user
   if (!user || !user.voice_mode_enabled) {
@@ -78,11 +82,9 @@ const SpeakerIcon = ({ nodeId }) => {
       if (!audioSrc) {
         setLoading(true);
         // Attempt to fetch existing audio URLs
-        let original_url = null;
         let tts_url = null;
         try {
-          const res = await api.get(`/nodes/${nodeId}/audio`);
-          original_url = res.data.original_url;
+          const res = await api.get(`${baseUrl}/audio`);
           tts_url = res.data.tts_url;
         } catch (getErr) {
           // 404 means no audio yet; other errors rethrow
@@ -90,23 +92,20 @@ const SpeakerIcon = ({ nodeId }) => {
             throw getErr;
           }
         }
-        // If no original or TTS, trigger TTS generation
-        let urlPath = original_url || tts_url;
+        
+        let urlPath = tts_url;
         if (!urlPath) {
           // Start async TTS generation
-          await api.post(`/nodes/${nodeId}/tts`);
-          // Response now contains: { task_id, status: "pending", node_id }
+          await api.post(`${baseUrl}/tts`);
           setTtsTaskActive(true);
-          // Polling will start automatically via useAsyncTaskPolling enabled option
-          // Keep loading state active, polling will handle completion
           return;
         }
-        // Build absolute URL
+
         const srcUrl = urlPath.startsWith('http')
           ? urlPath
           : `${process.env.REACT_APP_BACKEND_URL}${urlPath}`;
         setAudioSrc(srcUrl);
-        // Create and play audio
+        
         const audio = new Audio(srcUrl);
         audioRef.current = audio;
         audio.onended = () => setPlaying(false);
@@ -115,7 +114,6 @@ const SpeakerIcon = ({ nodeId }) => {
         await audio.play();
         setLoading(false);
       } else {
-        // Toggle playback on existing audio
         const audio = audioRef.current;
         if (playing) {
           audio.pause();
