@@ -9,12 +9,14 @@ const GlobalAudioPlayer = () => {
     currentTime,
     duration,
     loading,
+    playbackRate,
     play,
     pause,
     stop,
     skipBackward,
     skipForward,
     seek,
+    changePlaybackRate,
   } = useAudio();
 
   // Don't show the player if there's no audio loaded
@@ -149,6 +151,28 @@ const GlobalAudioPlayer = () => {
           }}
         >
           <FaRedo />
+        </button>
+
+        <button
+          onClick={changePlaybackRate}
+          disabled={loading}
+          title="Change playback speed"
+          style={{
+            background: 'none',
+            border: '1px solid #666',
+            borderRadius: '4px',
+            color: loading ? '#666' : '#e0e0e0',
+            cursor: loading ? 'not-allowed' : 'pointer',
+            fontSize: '11px',
+            padding: '2px 6px',
+            display: 'flex',
+            alignItems: 'center',
+            fontWeight: '500',
+            minWidth: '38px',
+            justifyContent: 'center',
+          }}
+        >
+          {playbackRate}x
         </button>
       </div>
 

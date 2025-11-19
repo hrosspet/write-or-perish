@@ -16,6 +16,7 @@ export const AudioProvider = ({ children }) => {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1);
   const audioRef = useRef(null);
   const intervalRef = useRef(null);
 
@@ -51,6 +52,9 @@ export const AudioProvider = ({ children }) => {
     // Create new audio element
     const audio = new Audio(audioData.url);
     audioRef.current = audio;
+
+    // Set playback rate
+    audio.playbackRate = playbackRate;
 
     // Set up event listeners
     audio.onloadedmetadata = () => {
@@ -92,7 +96,7 @@ export const AudioProvider = ({ children }) => {
       console.error('Error playing audio:', err);
       setLoading(false);
     }
-  }, [startTimeTracking, stopTimeTracking]);
+  }, [startTimeTracking, stopTimeTracking, playbackRate]);
 
   const play = useCallback(async () => {
     if (audioRef.current && !isPlaying) {
@@ -145,12 +149,25 @@ export const AudioProvider = ({ children }) => {
     }
   }, []);
 
+  const changePlaybackRate = useCallback(() => {
+    const rates = [1, 1.25, 1.5, 2];
+    const currentIndex = rates.indexOf(playbackRate);
+    const nextIndex = (currentIndex + 1) % rates.length;
+    const newRate = rates[nextIndex];
+
+    setPlaybackRate(newRate);
+    if (audioRef.current) {
+      audioRef.current.playbackRate = newRate;
+    }
+  }, [playbackRate]);
+
   const value = {
     currentAudio,
     isPlaying,
     currentTime,
     duration,
     loading,
+    playbackRate,
     loadAudio,
     play,
     pause,
@@ -158,6 +175,7 @@ export const AudioProvider = ({ children }) => {
     skipForward,
     skipBackward,
     seek,
+    changePlaybackRate,
   };
 
   return <AudioContext.Provider value={value}>{children}</AudioContext.Provider>;
