@@ -16,12 +16,7 @@ function Dashboard() {
 
   // For profile editing—only allowed for your own dashboard.
   const [editingProfile, setEditingProfile] = useState(false);
-  const [editUsername, setEditUsername] = useState("");
-  const [editDescription, setEditDescription] = useState("");
-
-  // For AI-generated profile editing
-  const [editingAIProfile, setEditingAIProfile] = useState(false);
-  const [editAIProfileContent, setEditAIProfileContent] = useState("");
+  const [editProfileContent, setEditProfileContent] = useState("");
 
   // For AI profile generation
   const [selectedModel, setSelectedModel] = useState("gpt-5");
@@ -55,18 +50,37 @@ function Dashboard() {
 
   const handleProfileSubmit = (e) => {
     e.preventDefault();
-    api.put("/dashboard/user", { username: editUsername, description: editDescription })
-      .then((response) => {
-        setDashboardData({
-          ...dashboardData,
-          user: response.data.user
+    const profileId = dashboardData.latest_profile?.id;
+
+    if (profileId) {
+      // Update existing profile
+      api.put(`/profile/${profileId}`, { content: editProfileContent })
+        .then((response) => {
+          setDashboardData({
+            ...dashboardData,
+            latest_profile: response.data.profile
+          });
+          setEditingProfile(false);
+        })
+        .catch((err) => {
+          console.error(err);
+          setError(err.response?.data?.error || "Error updating profile.");
         });
-        setEditingProfile(false);
-      })
-      .catch((err) => {
-        console.error(err);
-        setError("Error updating profile.");
-      });
+    } else {
+      // Create new profile (user-generated)
+      api.post("/export/create_profile", { content: editProfileContent })
+        .then((response) => {
+          setDashboardData({
+            ...dashboardData,
+            latest_profile: response.data.profile
+          });
+          setEditingProfile(false);
+        })
+        .catch((err) => {
+          console.error(err);
+          setError(err.response?.data?.error || "Error creating profile.");
+        });
+    }
   };
 
   const handleExportData = () => {
@@ -168,22 +182,6 @@ function Dashboard() {
     setShowProfileConfirmation(false);
   };
 
-  const handleAIProfileSubmit = (e) => {
-    e.preventDefault();
-    const profileId = dashboardData.latest_profile.id;
-    api.put(`/profile/${profileId}`, { content: editAIProfileContent })
-      .then((response) => {
-        setDashboardData({
-          ...dashboardData,
-          latest_profile: response.data.profile
-        });
-        setEditingAIProfile(false);
-      })
-      .catch((err) => {
-        console.error(err);
-        setError(err.response?.data?.error || "Error updating AI profile.");
-      });
-  };
 
   if (loading) return <div>Loading dashboard...</div>;
   if (error) return <div>{error}</div>;
@@ -194,54 +192,67 @@ function Dashboard() {
     <div style={{ padding: "20px" }}>
       <h1>{user.username}</h1>
       
-      {/* Only allow profile editing on your own dashboard */}
+      {/* Only allow profile actions on your own dashboard */}
       {!username && (
         <>
-          {editingProfile ? (
-            <form onSubmit={handleProfileSubmit}>
-              <div>
-                <label>
-                  Handle:
-                  <input
-                    type="text"
-                    value={editUsername}
-                    onChange={(e) => setEditUsername(e.target.value)}
-                  />
-                </label>
-              </div>
-              <div>
-                <label>
-                  Description:
-                  <input
-                    type="text"
-                    maxLength={128}
-                    value={editDescription}
-                    onChange={(e) => setEditDescription(e.target.value)}
-                  />
-                </label>
-              </div>
-              <button type="submit">Save Profile</button>
-              <button type="button" onClick={() => setEditingProfile(false)}>
-                Cancel
+          <div style={{ display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap", marginBottom: "20px" }}>
+            <button
+              onClick={handleExportData}
+              style={{
+                backgroundColor: "#2a5f2a",
+                color: "white",
+                border: "none",
+                padding: "8px 16px",
+                cursor: "pointer",
+                borderRadius: "4px"
+              }}
+            >
+              Export Data
+            </button>
+            <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+              <ModelSelector
+                nodeId={null}
+                selectedModel={selectedModel}
+                onModelChange={setSelectedModel}
+              />
+              <button
+                onClick={handleGenerateProfile}
+                disabled={generatingProfile}
+                style={{
+                  backgroundColor: "#2a5a7a",
+                  color: "white",
+                  border: "none",
+                  padding: "8px 16px",
+                  cursor: generatingProfile ? "not-allowed" : "pointer",
+                  borderRadius: "4px",
+                  opacity: generatingProfile ? 0.6 : 1
+                }}
+              >
+                {generatingProfile ? "Generating..." : "Generate Profile"}
               </button>
-            </form>
-          ) : (
-            <div>
-              <p>{user.description || "No description provided."}</p>
-              <div style={{ display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" }}>
+            </div>
+          </div>
+
+          {/* Token confirmation dialog */}
+          {showProfileConfirmation && (
+            <div style={{
+              marginTop: "20px",
+              padding: "15px",
+              backgroundColor: "#2a2a2a",
+              borderRadius: "4px",
+              border: "1px solid #444"
+            }}>
+              <h3>Confirm Profile Generation</h3>
+              <p>
+                This will use approximately <strong>{estimatedTokens.toLocaleString()}</strong> tokens
+                to analyze all your writing and generate a profile using <strong>{selectedModel}</strong>.
+              </p>
+              <p>Do you want to proceed?</p>
+              <div style={{ display: "flex", gap: "10px", marginTop: "10px" }}>
                 <button
-                  onClick={() => {
-                    setEditingProfile(true);
-                    setEditUsername(user.username);
-                    setEditDescription(user.description);
-                  }}
-                >
-                  Edit Profile
-                </button>
-                <button
-                  onClick={handleExportData}
+                  onClick={handleConfirmProfileGeneration}
                   style={{
-                    backgroundColor: "#2a5f2a",
+                    backgroundColor: "#2a5a7a",
                     color: "white",
                     border: "none",
                     padding: "8px 16px",
@@ -249,196 +260,148 @@ function Dashboard() {
                     borderRadius: "4px"
                   }}
                 >
-                  Export Data
+                  Yes, Generate Profile
                 </button>
-                <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-                  <ModelSelector
-                    nodeId={null}
-                    selectedModel={selectedModel}
-                    onModelChange={setSelectedModel}
-                  />
+                <button
+                  onClick={handleCancelProfileGeneration}
+                  style={{
+                    backgroundColor: "#444",
+                    color: "white",
+                    border: "none",
+                    padding: "8px 16px",
+                    cursor: "pointer",
+                    borderRadius: "4px"
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Display unified profile */}
+          <div style={{
+            marginTop: "30px",
+            padding: "20px",
+            backgroundColor: "#1a1a1a",
+            borderRadius: "8px",
+            border: "1px solid #333"
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "15px" }}>
+              <h3 style={{ color: "#e0e0e0", margin: 0 }}>Profile</h3>
+              {!editingProfile && (
+                <button
+                  onClick={() => {
+                    setEditingProfile(true);
+                    setEditProfileContent(dashboardData.latest_profile?.content || "");
+                  }}
+                  style={{
+                    backgroundColor: "#2a5a7a",
+                    color: "white",
+                    border: "none",
+                    padding: "6px 12px",
+                    cursor: "pointer",
+                    borderRadius: "4px",
+                    fontSize: "0.9em"
+                  }}
+                >
+                  Edit Profile
+                </button>
+              )}
+            </div>
+            {dashboardData.latest_profile && (
+              <p style={{ fontSize: "0.9em", color: "#888", marginBottom: "15px" }}>
+                {dashboardData.latest_profile.generated_by === "user" ? "Edited" : "Generated"} by {dashboardData.latest_profile.generated_by} on{" "}
+                {new Date(dashboardData.latest_profile.created_at).toLocaleString()}
+                {dashboardData.latest_profile.tokens_used > 0 && (
+                  <> ({dashboardData.latest_profile.tokens_used?.toLocaleString()} tokens)</>
+                )}
+              </p>
+            )}
+            {editingProfile ? (
+              <form onSubmit={handleProfileSubmit}>
+                <textarea
+                  value={editProfileContent}
+                  onChange={(e) => setEditProfileContent(e.target.value)}
+                  rows={20}
+                  style={{
+                    width: "100%",
+                    backgroundColor: "#2a2a2a",
+                    color: "#d0d0d0",
+                    border: "1px solid #444",
+                    borderRadius: "4px",
+                    padding: "10px",
+                    fontFamily: "inherit",
+                    fontSize: "inherit",
+                    lineHeight: "1.6"
+                  }}
+                  placeholder="Write your profile here..."
+                />
+                <div style={{ display: "flex", gap: "10px", marginTop: "10px" }}>
                   <button
-                    onClick={handleGenerateProfile}
-                    disabled={generatingProfile}
+                    type="submit"
                     style={{
                       backgroundColor: "#2a5a7a",
                       color: "white",
                       border: "none",
                       padding: "8px 16px",
-                      cursor: generatingProfile ? "not-allowed" : "pointer",
-                      borderRadius: "4px",
-                      opacity: generatingProfile ? 0.6 : 1
+                      cursor: "pointer",
+                      borderRadius: "4px"
                     }}
                   >
-                    {generatingProfile ? "Generating..." : "Generate Profile"}
+                    Save
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditingProfile(false)}
+                    style={{
+                      backgroundColor: "#444",
+                      color: "white",
+                      border: "none",
+                      padding: "8px 16px",
+                      cursor: "pointer",
+                      borderRadius: "4px"
+                    }}
+                  >
+                    Cancel
                   </button>
                 </div>
+              </form>
+            ) : dashboardData.latest_profile ? (
+              <div style={{
+                lineHeight: "1.6",
+                color: "#d0d0d0"
+              }}>
+                <ReactMarkdown
+                  components={{
+                    p: ({ node, ...props }) => (
+                      <p style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }} {...props} />
+                    ),
+                    code: ({ node, inline, className, children, ...props }) =>
+                      inline ? (
+                        <code style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }} {...props}>
+                          {children}
+                        </code>
+                      ) : (
+                        <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }} {...props}>
+                          <code>{children}</code>
+                        </pre>
+                      ),
+                    li: ({ node, ...props }) => (
+                      <li style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }} {...props} />
+                    )
+                  }}
+                >
+                  {dashboardData.latest_profile.content}
+                </ReactMarkdown>
+                <SpeakerIcon profileId={dashboardData.latest_profile.id} />
               </div>
-
-              {/* Token confirmation dialog */}
-              {showProfileConfirmation && (
-                <div style={{
-                  marginTop: "20px",
-                  padding: "15px",
-                  backgroundColor: "#2a2a2a",
-                  borderRadius: "4px",
-                  border: "1px solid #444"
-                }}>
-                  <h3>Confirm Profile Generation</h3>
-                  <p>
-                    This will use approximately <strong>{estimatedTokens.toLocaleString()}</strong> tokens
-                    to analyze all your writing and generate a profile using <strong>{selectedModel}</strong>.
-                  </p>
-                  <p>Do you want to proceed?</p>
-                  <div style={{ display: "flex", gap: "10px", marginTop: "10px" }}>
-                    <button
-                      onClick={handleConfirmProfileGeneration}
-                      style={{
-                        backgroundColor: "#2a5a7a",
-                        color: "white",
-                        border: "none",
-                        padding: "8px 16px",
-                        cursor: "pointer",
-                        borderRadius: "4px"
-                      }}
-                    >
-                      Yes, Generate Profile
-                    </button>
-                    <button
-                      onClick={handleCancelProfileGeneration}
-                      style={{
-                        backgroundColor: "#444",
-                        color: "white",
-                        border: "none",
-                        padding: "8px 16px",
-                        cursor: "pointer",
-                        borderRadius: "4px"
-                      }}
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* Display latest profile if it exists */}
-              {dashboardData.latest_profile && (
-                <div style={{
-                  marginTop: "30px",
-                  padding: "20px",
-                  backgroundColor: "#1a1a1a",
-                  borderRadius: "8px",
-                  border: "1px solid #333"
-                }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "15px" }}>
-                    <h3 style={{ color: "#e0e0e0", margin: 0 }}>AI-Generated Profile</h3>
-                    {!editingAIProfile && (
-                      <button
-                        onClick={() => {
-                          setEditingAIProfile(true);
-                          setEditAIProfileContent(dashboardData.latest_profile.content);
-                        }}
-                        style={{
-                          backgroundColor: "#2a5a7a",
-                          color: "white",
-                          border: "none",
-                          padding: "6px 12px",
-                          cursor: "pointer",
-                          borderRadius: "4px",
-                          fontSize: "0.9em"
-                        }}
-                      >
-                        Edit Profile
-                      </button>
-                    )}
-                  </div>
-                  <p style={{ fontSize: "0.9em", color: "#888", marginBottom: "15px" }}>
-                    Generated by {dashboardData.latest_profile.generated_by} on{" "}
-                    {new Date(dashboardData.latest_profile.created_at).toLocaleString()}
-                    {" "}({dashboardData.latest_profile.tokens_used?.toLocaleString()} tokens)
-                  </p>
-                  {editingAIProfile ? (
-                    <form onSubmit={handleAIProfileSubmit}>
-                      <textarea
-                        value={editAIProfileContent}
-                        onChange={(e) => setEditAIProfileContent(e.target.value)}
-                        rows={20}
-                        style={{
-                          width: "100%",
-                          backgroundColor: "#2a2a2a",
-                          color: "#d0d0d0",
-                          border: "1px solid #444",
-                          borderRadius: "4px",
-                          padding: "10px",
-                          fontFamily: "inherit",
-                          fontSize: "inherit",
-                          lineHeight: "1.6"
-                        }}
-                      />
-                      <div style={{ display: "flex", gap: "10px", marginTop: "10px" }}>
-                        <button
-                          type="submit"
-                          style={{
-                            backgroundColor: "#2a5a7a",
-                            color: "white",
-                            border: "none",
-                            padding: "8px 16px",
-                            cursor: "pointer",
-                            borderRadius: "4px"
-                          }}
-                        >
-                          Save
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setEditingAIProfile(false)}
-                          style={{
-                            backgroundColor: "#444",
-                            color: "white",
-                            border: "none",
-                            padding: "8px 16px",
-                            cursor: "pointer",
-                            borderRadius: "4px"
-                          }}
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </form>
-                  ) : (
-                    <div style={{
-                      lineHeight: "1.6",
-                      color: "#d0d0d0"
-                    }}>
-                      <ReactMarkdown
-                        components={{
-                          p: ({ node, ...props }) => (
-                            <p style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }} {...props} />
-                          ),
-                          code: ({ node, inline, className, children, ...props }) =>
-                            inline ? (
-                              <code style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }} {...props}>
-                                {children}
-                              </code>
-                            ) : (
-                              <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }} {...props}>
-                                <code>{children}</code>
-                              </pre>
-                            ),
-                          li: ({ node, ...props }) => (
-                            <li style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }} {...props} />
-                          )
-                        }}
-                      >
-                        {dashboardData.latest_profile.content}
-                      </ReactMarkdown>
-                      <SpeakerIcon profileId={dashboardData.latest_profile.id} />
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
+            ) : (
+              <p style={{ color: "#888", fontStyle: "italic" }}>
+                No profile yet. Click "Edit Profile" to create one or use "Generate Profile" to have AI create one for you.
+              </p>
+            )}
+          </div>
         </>
       )}
 

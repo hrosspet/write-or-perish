@@ -396,6 +396,59 @@ def get_profile_status(task_id):
         "profile": profile_data
     }), 200
 
+
+@export_bp.route("/export/create_profile", methods=["POST"])
+@login_required
+def create_profile():
+    """
+    Create a new user-generated profile.
+
+    Request body:
+        {
+            "content": "User's profile content..."
+        }
+
+    Returns:
+        {
+            "message": "Profile created successfully",
+            "profile": { ... }
+        }
+    """
+    data = request.get_json()
+    content = data.get("content")
+
+    if not content:
+        return jsonify({"error": "Content is required"}), 400
+
+    if not content.strip():
+        return jsonify({"error": "Content cannot be empty"}), 400
+
+    # Create new profile with generated_by="user"
+    profile = UserProfile(
+        user_id=current_user.id,
+        content=content,
+        generated_by="user",
+        tokens_used=0
+    )
+
+    try:
+        db.session.add(profile)
+        db.session.commit()
+
+        return jsonify({
+            "message": "Profile created successfully",
+            "profile": {
+                "id": profile.id,
+                "content": profile.content,
+                "generated_by": profile.generated_by,
+                "tokens_used": profile.tokens_used,
+                "created_at": profile.created_at.isoformat()
+            }
+        }), 201
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Failed to create profile", "details": str(e)}), 500
+
 # Delete all of the current user's data from our app.
 @export_bp.route("/delete_my_data", methods=["DELETE"])
 @login_required
