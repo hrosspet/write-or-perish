@@ -26,50 +26,53 @@ class LLMCompletionTask(Task):
 
     def on_failure(self, exc, task_id, args, kwargs, einfo):
         """Called when task fails."""
-        node_id = args[0] if args else None
-        if node_id:
+        # In the new scheme, the llm_node_id is the second argument
+        llm_node_id = args[1] if len(args) > 1 else None
+        if llm_node_id:
             with flask_app.app_context():
-                node = Node.query.get(node_id)
+                node = Node.query.get(llm_node_id)
                 if node:
                     node.llm_task_status = 'failed'
                     # Store error message if not already set
                     if not node.llm_task_error:
                         node.llm_task_error = str(exc)
                     db.session.commit()
-                    logger.error(f"LLM completion failed for node {node_id}: {exc}")
+                    logger.error(f"LLM completion failed for node {llm_node_id}: {exc}")
 
 
 @celery.task(base=LLMCompletionTask, bind=True)
-def generate_llm_response(self, parent_node_id: int, model_id: str, user_id: int):
+def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id: str, user_id: int):
     """
-    Asynchronously generate an LLM response.
+    Asynchronously generate an LLM response and update a placeholder node.
 
     Args:
-        parent_node_id: ID of the parent node to respond to
-        model_id: Model identifier (e.g., "gpt-5", "claude-sonnet-4.5")
-        user_id: ID of the user requesting the completion (for auth/logging)
+        parent_node_id: ID of the parent node to respond to.
+        llm_node_id: ID of the placeholder 'llm' node to update.
+        model_id: Model identifier (e.g., "gpt-5", "claude-sonnet-4.5").
+        user_id: ID of the user requesting the completion.
     """
-    logger.info(f"Starting LLM completion task for node {parent_node_id} with model {model_id}")
+    logger.info(f"Starting LLM completion task for parent {parent_node_id}, updating node {llm_node_id}")
 
     with flask_app.app_context():
-        # Get parent node from database
         parent_node = Node.query.get(parent_node_id)
-        if not parent_node:
-            raise ValueError(f"Node {parent_node_id} not found")
+        llm_node = Node.query.get(llm_node_id)
 
-        # Update status to processing
-        parent_node.llm_task_status = 'processing'
-        parent_node.llm_task_progress = 10
+        if not parent_node:
+            raise ValueError(f"Parent node {parent_node_id} not found")
+        if not llm_node:
+            raise ValueError(f"LLM node {llm_node_id} not found")
+
+        # Update status on the new llm_node
+        llm_node.llm_task_status = 'processing'
+        llm_node.llm_task_progress = 10
         db.session.commit()
 
         try:
-            # Validate model is supported
-            if model_id not in flask_app.config["SUPPORTED_MODELS"]:
-                raise ValueError(f"Unsupported model: {model_id}")
+            # ... (The rest of the logic remains largely the same, but updates llm_node)
 
-            # Step 1: Build the chain of nodes (20% progress)
+            # Step 1: Build the chain of nodes for context
             self.update_state(state='PROGRESS', meta={'progress': 20, 'status': 'Building context'})
-            parent_node.llm_task_progress = 20
+            llm_node.llm_task_progress = 20
             db.session.commit()
 
             node_chain = []
@@ -78,9 +81,9 @@ def generate_llm_response(self, parent_node_id: int, model_id: str, user_id: int
                 node_chain.insert(0, current)
                 current = current.parent
 
-            # Step 2: Build messages array (30% progress)
+            # Step 2: Build messages array
             self.update_state(state='PROGRESS', meta={'progress': 30, 'status': 'Preparing messages'})
-            parent_node.llm_task_progress = 30
+            llm_node.llm_task_progress = 30
             db.session.commit()
 
             messages = []
@@ -94,62 +97,37 @@ def generate_llm_response(self, parent_node_id: int, model_id: str, user_id: int
                 else:
                     role = "user"
                     message_text = f"author {author}: {node.content}"
-
+                
                 messages.append({
                     "role": role,
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": message_text
-                        }
-                    ]
+                    "content": [{"type": "text", "text": message_text}]
                 })
 
-            # Step 3: Call LLM API (40% -> 80% progress)
+            # Step 3: Call LLM API
             self.update_state(state='PROGRESS', meta={'progress': 40, 'status': 'Generating response'})
-            parent_node.llm_task_progress = 40
+            llm_node.llm_task_progress = 40
             db.session.commit()
 
             api_keys = {
                 "openai": flask_app.config.get("OPENAI_API_KEY"),
                 "anthropic": flask_app.config.get("ANTHROPIC_API_KEY")
             }
-
-            # Check if required API key is configured
             model_config = flask_app.config["SUPPORTED_MODELS"][model_id]
             provider = model_config["provider"]
-
             if provider == "anthropic" and not api_keys["anthropic"]:
-                raise ValueError(
-                    "Anthropic API key is not configured. "
-                    "Please set the ANTHROPIC_API_KEY environment variable in your .flaskenv file."
-                )
+                raise ValueError("Anthropic API key is not configured.")
             elif provider == "openai" and not api_keys["openai"]:
-                raise ValueError(
-                    "OpenAI API key is not configured. "
-                    "Please set the OPENAI_API_KEY environment variable in your .flaskenv file."
-                )
-
+                raise ValueError("OpenAI API key is not configured.")
+            
             response = LLMProvider.get_completion(model_id, messages, api_keys)
             llm_text = response["content"]
             total_tokens = response["total_tokens"]
 
-            logger.info(f"LLM response generated: {len(llm_text)} characters, {total_tokens} tokens")
+            logger.info(f"LLM response generated: {len(llm_text)} chars, {total_tokens} tokens")
 
-            # Step 4: Create LLM user if needed (85% progress)
-            self.update_state(state='PROGRESS', meta={'progress': 85, 'status': 'Saving response'})
-            parent_node.llm_task_progress = 85
-            db.session.commit()
-
-            llm_user = User.query.filter_by(username=model_id).first()
-            if not llm_user:
-                llm_user = User(twitter_id=f"llm-{model_id}", username=model_id)
-                db.session.add(llm_user)
-                db.session.commit()
-
-            # Step 5: Redistribute tokens (90% progress)
+            # Step 4: Redistribute tokens
             self.update_state(state='PROGRESS', meta={'progress': 90, 'status': 'Redistributing tokens'})
-            parent_node.llm_task_progress = 90
+            llm_node.llm_task_progress = 90
             db.session.commit()
 
             contributing_nodes = [n for n in node_chain if n.node_type != "llm"]
@@ -161,28 +139,14 @@ def generate_llm_response(self, parent_node_id: int, model_id: str, user_id: int
                     n.distributed_tokens += share
                     db.session.add(n)
 
-            # Step 6: Create LLM response node (95% progress)
+            # Step 5: Update the placeholder LLM node with the response
             self.update_state(state='PROGRESS', meta={'progress': 95, 'status': 'Finalizing'})
-            parent_node.llm_task_progress = 95
+            llm_node.content = llm_text
+            llm_node.llm_task_status = 'completed'
+            llm_node.llm_task_progress = 100
             db.session.commit()
 
-            llm_node = Node(
-                user_id=llm_user.id,
-                parent_id=parent_node.id,
-                node_type="llm",
-                llm_model=model_id,
-                content=llm_text,
-                token_count=0,
-                distributed_tokens=0
-            )
-            db.session.add(llm_node)
-
-            # Mark parent as completed
-            parent_node.llm_task_status = 'completed'
-            parent_node.llm_task_progress = 100
-            db.session.commit()
-
-            logger.info(f"LLM completion successful for node {parent_node_id}, created node {llm_node.id}")
+            logger.info(f"LLM completion successful, updated node {llm_node.id}")
 
             return {
                 'parent_node_id': parent_node_id,
@@ -193,8 +157,8 @@ def generate_llm_response(self, parent_node_id: int, model_id: str, user_id: int
 
         except Exception as e:
             error_message = str(e)
-            logger.error(f"LLM completion error for node {parent_node_id}: {error_message}", exc_info=True)
-            parent_node.llm_task_status = 'failed'
-            parent_node.llm_task_error = error_message
+            logger.error(f"LLM completion error for node {llm_node_id}: {error_message}", exc_info=True)
+            llm_node.llm_task_status = 'failed'
+            llm_node.llm_task_error = error_message
             db.session.commit()
             raise

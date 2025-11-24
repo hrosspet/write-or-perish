@@ -118,16 +118,20 @@ function NodeDetail() {
     }
   };
 
-  // Define handleLLMResponse: send request and set task ID (polling starts via useEffect)
   const handleLLMResponse = () => {
     setError(""); // Clear previous errors
     api
       .post(`/nodes/${id}/llm`, { model: selectedModel })
       .then((response) => {
-        // Response now contains: { task_id, status: "pending", parent_node_id }
-        const parentNodeId = response.data.parent_node_id || id;
-        setLlmTaskNodeId(parentNodeId);
-        // Polling will start automatically via useEffect
+        // The backend now creates a placeholder and returns its ID.
+        // We use this ID for polling.
+        const newNodeId = response.data.node_id;
+        if (newNodeId) {
+          setLlmTaskNodeId(newNodeId);
+        } else {
+          // Fallback or error for safety, though the backend should always return it
+          setError("Failed to get a task ID for the new LLM node.");
+        }
       })
       .catch((err) => {
         console.error(err);
