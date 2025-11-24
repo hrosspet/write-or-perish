@@ -41,9 +41,67 @@ These technical capabilities are production-ready and form the foundation:
 
 ---
 
+## Critical Infrastructure Gaps (Priority: BLOCKING)
+
+**These are architectural changes that must be addressed before or alongside feature development.**
+
+### Privacy & Encryption Infrastructure
+
+**Node visibility levels and access control** - Add privacy_level column (private/private_ai/training/circles/public) with API enforcement to control who can read each node
+
+**End-to-end encryption for private nodes** - Encrypt node content, audio URLs, and versions using user-specific keys (AES-256) before storing in database
+
+**Key management system** - Securely generate, store, and rotate encryption keys per user with key derivation from password and separate recovery keys
+
+**Password recovery without data loss** - Recovery key system (download during signup) or trusted device recovery to restore access to encrypted content without password
+
+**Encrypted search metadata** - Store unencrypted embeddings/metadata for search while keeping content encrypted, or implement searchable encryption scheme
+
+**Data migration for existing public nodes** - Migrate all existing unencrypted nodes to new privacy system with default visibility settings and backwards compatibility
+
+### Authentication & Authorization
+
+**API token system (JWT)** - Replace session-only auth with JWT tokens for mobile apps, external integrations, and API access with refresh token rotation
+
+**Fine-grained permission system** - Authorization layer checking "can user X access node Y?" based on visibility level, circles membership, and sharing rules
+
+**OAuth integration framework** - Reusable OAuth client for Twitter, LinkedIn, Substack, GitHub with token storage and refresh handling
+
+### Data Infrastructure
+
+**Cloud file storage with S3/R2** - Migrate from local file storage to cloud object storage for audio files with encryption at rest and CDN integration
+
+**File encryption at rest** - Encrypt all audio files in S3 with user-specific keys, decrypt on-demand for authorized users only
+
+**Email sending infrastructure** - SMTP service (SendGrid/AWS SES) for password recovery, notifications, and digests with template management
+
+**Real-time communication with WebSockets** - WebSocket server for live notifications (matches, shares, messages) without polling, using Socket.IO or similar
+
+### Compliance & Safety
+
+**Audit logging system** - Track all data access (who read which node when) for compliance and security investigation with tamper-proof logs
+
+**GDPR compliance enhancements** - Expand export/delete to include audit logs, encryption keys, and third-party data with clear consent management UI
+
+**Content moderation pipeline** - Automated + manual moderation for public shares and marketplace using OpenAI Moderation API and admin review queue
+
+**User reporting and blocking** - Allow users to report abusive content/users and block connections with admin dashboard for review
+
+**Spam detection and rate limiting** - ML-based spam detection for shares and intentions with progressive penalties (warnings → temp ban → permanent ban)
+
+### Mobile & Offline Support
+
+**Mobile-optimized API design** - RESTful API with pagination, partial responses, and efficient payloads for mobile bandwidth constraints
+
+**Offline-first data sync** - Conflict resolution for offline writes using operational transforms or CRDTs when user reconnects
+
+**Mobile push notifications** - Push notification infrastructure (FCM/APNS) for match alerts and share responses on mobile devices
+
+---
+
 ## Development Infrastructure (Priority: URGENT)
 
-**These must be built first to enable fast, safe iteration on new features.**
+**These must be built to enable fast, safe iteration on new features.**
 
 ### Testing Infrastructure
 
@@ -197,7 +255,44 @@ These technical capabilities are production-ready and form the foundation:
 
 Based on current project state, dependencies, and strategic value, here's the recommended build sequence:
 
-### Phase 0: Foundation (Weeks 1-3) 🏗️
+### Phase -1: Privacy & Encryption Infrastructure (Weeks 1-4) 🔒
+
+**Priority: BLOCKING - Must be done first before building sharing/marketplace features**
+
+**Why first:** Currently all nodes are public. Features 3 (Upload) and 4 (Intention Market) require granular privacy controls. Retrofitting encryption after building on public-only architecture would require rebuilding everything. This is a one-time breaking change that must happen now.
+
+1. **Node privacy level schema migration** - Add privacy_level column (private/private_ai/training/circles/public) and is_encrypted boolean to Node model
+2. **Encryption key management system** - Generate per-user AES-256 keys derived from password + salt, store encrypted with master key in separate KeyStore table
+3. **Client-side encryption library** - JavaScript library to encrypt/decrypt node content in browser before sending to server (for private nodes only)
+4. **Server-side encryption fallback** - Python library to encrypt nodes server-side for private_ai/training levels using user's stored key
+5. **Recovery key generation and download** - Generate recovery key during signup, force user to download, use for account recovery without password
+6. **Fine-grained permission system** - Authorization decorator checking visibility + circles membership before returning nodes from API
+7. **Encrypted search metadata strategy** - Store embeddings unencrypted but node content encrypted, or use searchable encryption (Paillier) for fully private search
+8. **Data migration script for existing nodes** - Set all existing nodes to privacy_level='public', add encryption columns, notify users of new privacy options
+9. **Email infrastructure for password recovery** - SendGrid/AWS SES integration with reset token generation and secure reset flow
+10. **API endpoints for privacy management** - Update node creation/edit to include privacy_level, bulk privacy change, recovery key re-download
+11. **Frontend privacy UI** - Privacy selector on node creation/edit, visual indicators of privacy level, onboarding flow explaining privacy options
+12. **Tests for encryption and authorization** - Unit tests for encryption/decryption, permission checks, recovery key flow
+
+**Deliverable:** All nodes can be set to 5 privacy levels with encryption for private content, password recovery system, and fine-grained access control
+
+**Why this is blocking:** Features 3 and 4 require sharing to specific audiences (circles, public). Without privacy controls, users won't trust the platform. Encryption prevents future data breaches from exposing private journals.
+
+**Migration Strategy:**
+- **Existing nodes:** Default all current nodes to `privacy_level='training'` (accessible to AI for training, maintains current public AI training value proposition)
+- **New nodes after this phase:** Default to `privacy_level='private'` with encryption (fully private, no AI access)
+- **User control:** Users can change any node's privacy level at any time:
+  - `private` - Fully encrypted, no AI access, only user can read
+  - `private_ai` - Encrypted, accessible to AI for responses (not training)
+  - `training` - Encrypted, accessible to AI for training data (original vision)
+  - `circles` - Shared with specific user-defined groups
+  - `public` - Publicly visible to all users
+- **Opt-in model:** Users must explicitly opt-in to AI training or public sharing (GDPR-friendly)
+- During transition, support both encrypted and unencrypted nodes for backwards compatibility
+
+---
+
+### Phase 0: Foundation (Weeks 5-7) 🏗️
 
 **Priority: Enable fast, safe development of new features**
 
@@ -219,16 +314,16 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 ---
 
-### Phase 1: Download Foundation (Weeks 4-6) 📥
+### Phase 1: Download Foundation (Weeks 8-10) 📥
 
 **Priority: Enable semantic search and RAG before building on top**
 
-9. **Vector database with pgvector extension** - Install pgvector, add migration for embedding column
-10. **Automatic embedding generation pipeline** - Celery task to embed nodes on create/edit
-11. **Global embedding service** - Centralized embedding API with cost tracking
-12. **Semantic search API** - Endpoint for cosine similarity search over nodes
-13. **RAG (Retrieval Augmented Generation) system** - Chat with archive using top-K retrieval
-14. **Test coverage for embedding and search** - Comprehensive tests with mocked OpenAI API
+13. **Vector database with pgvector extension** - Install pgvector, add migration for embedding column
+14. **Automatic embedding generation pipeline** - Celery task to embed nodes on create/edit (respects privacy: only embeds training/public nodes)
+15. **Global embedding service** - Centralized embedding API with cost tracking
+16. **Privacy-aware semantic search API** - Endpoint for cosine similarity search that filters by user's access permissions
+17. **RAG (Retrieval Augmented Generation) system** - Chat with archive using top-K retrieval (only searches nodes user has access to)
+18. **Test coverage for embedding and search** - Comprehensive tests with mocked OpenAI API and permission checks
 
 **Deliverable:** Can search your journal semantically and chat with your archive
 
@@ -236,17 +331,17 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 ---
 
-### Phase 2: Download Complete (Weeks 7-9) 📚
+### Phase 2: Download Complete (Weeks 11-13) 📚
 
 **Priority: Complete MemeOS integration for full "consume" feature**
 
-15. **MemeOS API client or shared database layer** - Integration layer for querying bookmarks
-16. **Context-aware recommendation engine** - Analyze writing context + profile to rank bookmarks
-17. **Theme extraction service** - LLM-based topic extraction from current writing
-18. **Spaced repetition integration** - Factor in review schedules for ranking
-19. **Frontend: Recommendation sidebar widget** - UI component showing relevant bookmarks
-20. **Caching layer with Redis** - Cache bookmark recommendations to reduce API calls
-21. **Tests for recommendation logic** - Unit tests for ranking algorithm
+19. **MemeOS API client or shared database layer** - Integration layer for querying bookmarks
+20. **Context-aware recommendation engine** - Analyze writing context + profile to rank bookmarks
+21. **Theme extraction service** - LLM-based topic extraction from current writing
+22. **Spaced repetition integration** - Factor in review schedules for ranking
+23. **Frontend: Recommendation sidebar widget** - UI component showing relevant bookmarks
+24. **Caching layer with Redis** - Cache bookmark recommendations to reduce API calls
+25. **Tests for recommendation logic** - Unit tests for ranking algorithm
 
 **Deliverable:** MemeOS bookmarks surface in sidebar while you write
 
@@ -254,16 +349,17 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 ---
 
-### Phase 3: Development Velocity Upgrades (Weeks 10-11) 🚀
+### Phase 3: Development Velocity Upgrades (Weeks 14-15) 🚀
 
 **Priority: Invest in speed before building complex features 3 and 4**
 
-22. **API documentation with Swagger/OpenAPI** - Auto-generated API docs
-23. **Component storybook for frontend** - Isolated component development
-24. **Feature flags system** - Toggle features on/off without deployment
-25. **Database query performance monitoring** - Identify and fix slow queries
-26. **Performance monitoring and profiling** - Track endpoint latency and bottlenecks
-27. **End-to-end testing with Playwright** - Critical flow testing (login → create → LLM)
+26. **API documentation with Swagger/OpenAPI** - Auto-generated API docs
+27. **Component storybook for frontend** - Isolated component development
+28. **Feature flags system** - Toggle features on/off without deployment
+29. **Database query performance monitoring** - Identify and fix slow queries
+30. **Performance monitoring and profiling** - Track endpoint latency and bottlenecks
+31. **End-to-end testing with Playwright** - Critical flow testing (login → create → LLM)
+32. **JWT authentication system** - Add token-based auth alongside session auth for future mobile/API access
 
 **Deliverable:** Faster development workflow, better debugging, gradual rollout capability
 
@@ -271,36 +367,41 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 ---
 
-### Phase 4: Upload Foundation (Weeks 12-15) 📤
+### Phase 4: Upload Foundation (Weeks 16-19) 📤
 
 **Priority: Build sharing infrastructure without external platform complexity**
 
-28. **Content analysis pipeline** - LLM-based shareability scoring and insight extraction
-29. **Privacy analysis system** - Detect sensitive information and flag risks
-30. **Share approval workflow** - State machine for suggested/approved/published status
-31. **Content transformation engine** - Convert journal entries to polished shares
-32. **Tiered audience management** - Define circles (inner/professional/public)
-33. **User preference learning system** - Track accept/reject to personalize suggestions
-34. **Frontend: Share suggestion UI** - Preview, edit, approve/reject interface
-35. **Tests for analysis and transformation** - Mock LLM responses, test scoring logic
+33. **Circles data model and management** - Create Circle model with membership, privacy-aware share targeting
+34. **Content analysis pipeline** - LLM-based shareability scoring and insight extraction (only analyzes training/public nodes unless user opts in)
+35. **Privacy analysis system** - Detect sensitive information and flag risks before sharing
+36. **Share approval workflow** - State machine for suggested/approved/published status with audit trail
+37. **Content transformation engine** - Convert journal entries to polished shares while preserving attribution to encrypted source
+38. **User preference learning system** - Track accept/reject patterns to personalize suggestions
+39. **Audit logging for shares** - Log who shared what to whom and when for compliance
+40. **Frontend: Circles management UI** - Create/edit circles, add/remove members
+41. **Frontend: Share suggestion UI** - Preview, edit, approve/reject with clear privacy indicators
+42. **Tests for analysis and transformation** - Mock LLM responses, test scoring logic, verify privacy enforcement
 
 **Deliverable:** Get share suggestions, preview transformations, manage circles (sharing within app only, no external platforms yet)
+
+**Note:** Shares respect privacy levels. Only training/public nodes can be suggested for sharing unless user explicitly opts in.
 
 **Why now:** Proves core sharing value without external API complexity. Users can share to other Write or Perish users.
 
 ---
 
-### Phase 5: Upload External Platforms (Weeks 16-18) 🌐
+### Phase 5: Upload External Platforms (Weeks 20-22) 🌐
 
 **Priority: Add external publishing capabilities**
 
-36. **Multi-channel publishing adapters** - OAuth and API clients for Twitter, LinkedIn, Substack
-37. **OAuth credential management** - Secure storage and refresh token handling
-38. **Draft generation for external platforms** - Format content for each platform
-39. **Rate limiting per user and per endpoint** - Prevent API quota exhaustion
-40. **Multi-entry synthesis** - Combine related entries into long-form essays
-41. **Frontend: External platform connection UI** - OAuth flow, channel selection
-42. **Circuit breaker for external APIs** - Handle third-party API failures gracefully
+43. **OAuth integration framework** - Reusable OAuth client for multiple platforms with secure token storage
+44. **Multi-channel publishing adapters** - API clients for Twitter, LinkedIn, Substack, GitHub Gists
+45. **Draft generation for external platforms** - Format content for each platform's requirements and character limits
+46. **Rate limiting per channel** - Prevent API quota exhaustion with per-platform rate limits
+47. **Multi-entry synthesis** - Combine related entries into long-form essays using LLM
+48. **Cloud file storage migration (S3/R2)** - Move audio files from local storage to cloud with encryption at rest
+49. **Frontend: External platform connection UI** - OAuth flow, channel selection, publish preview
+50. **Circuit breaker for external APIs** - Handle third-party API failures gracefully with retry logic
 
 **Deliverable:** Publish shares to Twitter, LinkedIn, Substack with one click
 
@@ -308,18 +409,20 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 ---
 
-### Phase 6: Intention Market Foundation (Weeks 19-22) 🤝
+### Phase 6: Intention Market Foundation (Weeks 23-26) 🤝
 
 **Priority: Build marketplace infrastructure and matching algorithm**
 
-43. **Intention data model with structured metadata** - DB schema for needs/offerings/opportunities
-44. **Semantic matching algorithm** - Embed intentions and calculate compatibility scores
-45. **Reputation scoring engine** - Track completion rates and feedback
-46. **Intention expiration and renewal system** - Auto-expire stale posts, prompt renewals
-47. **Market discovery API with filtering** - Browse/search by type, topic, recency
-48. **Frontend: Intention posting UI** - Form to create intentions with metadata
-49. **Frontend: Browse market UI** - Filterable list of active intentions
-50. **Tests for matching algorithm** - Unit tests for score calculation with mock embeddings
+51. **Intention data model with structured metadata** - DB schema for needs/offerings/opportunities with privacy controls
+52. **Semantic matching algorithm** - Embed intentions and calculate compatibility scores using existing embedding service
+53. **Reputation scoring engine** - Track completion rates, responsiveness, feedback with privacy-preserving aggregation
+54. **Intention expiration and renewal system** - Auto-expire stale posts, prompt renewals based on activity
+55. **Market discovery API with filtering** - Browse/search by type, topic, recency with permission checks
+56. **Content moderation for marketplace** - OpenAI Moderation API + admin review queue for flagged intentions
+57. **User blocking and reporting** - Allow users to block/report abusive users or spam
+58. **Frontend: Intention posting UI** - Form to create intentions with metadata and privacy settings
+59. **Frontend: Browse market UI** - Filterable list of active intentions with moderation indicators
+60. **Tests for matching algorithm** - Unit tests for score calculation with mock embeddings and permission checks
 
 **Deliverable:** Can post intentions, browse market, see match scores
 
@@ -327,18 +430,19 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 ---
 
-### Phase 7: Intention Market Complete (Weeks 23-25) 💬
+### Phase 7: Intention Market Complete (Weeks 27-29) 💬
 
 **Priority: Add connection features and notifications**
 
-51. **Real-time match notification system** - Detect and notify complementary intentions
-52. **Connection management infrastructure** - Accept/decline matches, private messaging
-53. **Feedback and outcome tracking** - Post-collaboration ratings
-54. **Group matchmaking logic** - Suggest forming groups for similar intentions
-55. **Unified notification framework** - Consolidate all notifications with digest options
-56. **Frontend: Match notification UI** - See matches, view profiles, connect
-57. **Frontend: Connection thread UI** - Private messaging between matched users
-58. **Tests for notification delivery** - Ensure matches are detected correctly
+61. **WebSocket infrastructure for real-time updates** - Socket.IO server for live match notifications and messages
+62. **Real-time match notification system** - Detect complementary intentions and push notifications via WebSocket
+63. **Connection management infrastructure** - Accept/decline matches, private messaging with encryption
+64. **Feedback and outcome tracking** - Post-collaboration ratings with privacy protections
+65. **Group matchmaking logic** - Suggest forming groups for similar intentions (3+ users)
+66. **Unified notification framework** - Consolidate all notifications (shares, matches, messages) with digest options
+67. **Frontend: Match notification UI** - See matches, view profiles, connect with privacy-safe previews
+68. **Frontend: Connection thread UI** - Private messaging between matched users with encryption indicators
+69. **Tests for notification delivery** - Ensure matches are detected correctly and permissions enforced
 
 **Deliverable:** Full matchmaking with notifications, connections, and messaging
 
@@ -346,17 +450,18 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 ---
 
-### Phase 8: Cross-Feature Integration (Weeks 26-28) 🔄
+### Phase 8: Cross-Feature Integration (Weeks 30-32) 🔄
 
 **Priority: Connect all four features into unified flywheel**
 
-59. **Webhook system for inter-feature communication** - Event bus for feature triggers
-60. **Cost tracking and quota management** - Per-user LLM usage tracking and tier enforcement
-61. **Analytics and insight dashboard** - Track flywheel metrics (journal→download→upload→market cycle)
-62. **Privacy and consent management** - Centralized opt-ins for all features
-63. **Background job prioritization** - Optimize Celery queue for user-triggered vs batch
-64. **Frontend: Unified dashboard** - Show activity across all four features
-65. **End-to-end flywheel tests** - Test complete cycle from journaling to connection
+70. **Webhook system for inter-feature communication** - Event bus triggering actions across features (journal→recommend→share→match)
+71. **Cost tracking and quota management** - Per-user LLM usage tracking per feature with tier enforcement
+72. **Analytics and insight dashboard** - Track flywheel metrics (journal→download→upload→market→journal cycle time)
+73. **Privacy consent management UI** - Centralized dashboard for all privacy settings across features
+74. **Background job prioritization** - Optimize Celery queues with priority levels (urgent/normal/low)
+75. **Spam detection across features** - ML-based spam detection for shares, intentions, messages
+76. **Frontend: Unified dashboard** - Show activity across all four features with privacy indicators
+77. **End-to-end flywheel tests** - Test complete cycle from journaling to connection with permission checks
 
 **Deliverable:** Seamless integration where features amplify each other
 
@@ -364,26 +469,34 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 ---
 
-### Phase 9: Production Hardening (Weeks 29-30) 🛡️
+### Phase 9: Production Hardening (Weeks 33-34) 🛡️
 
 **Priority: Make system bulletproof before scaling**
 
-66. **Input validation and sanitization library** - Centralized validation for security
-67. **CSRF protection for state-changing endpoints** - Prevent cross-site attacks
-68. **Content Security Policy (CSP) headers** - Mitigate XSS attacks
-69. **Database migration testing** - Ensure migrations don't lose data
-70. **Load testing and capacity planning** - Determine system limits
-71. **Comprehensive end-to-end test suite** - Cover all critical user journeys
+78. **Input validation and sanitization library** - Centralized validation for all user inputs (XSS, SQL injection, command injection prevention)
+79. **CSRF protection for state-changing endpoints** - Prevent cross-site attacks on POST/PUT/DELETE
+80. **Content Security Policy (CSP) headers** - Mitigate XSS attacks by restricting script sources
+81. **Database migration testing automation** - Ensure migrations run cleanly forward/backward without data loss
+82. **Load testing and capacity planning** - Stress test with realistic user loads to find bottlenecks
+83. **Penetration testing on encryption** - Verify encryption implementation is secure (hire external auditor)
+84. **Comprehensive end-to-end test suite** - Cover all critical user journeys including privacy edge cases
 
-**Deliverable:** Production-ready system that can scale
+**Deliverable:** Production-ready system that can scale securely
 
 **Why last:** Critical for launch but requires complete system to test properly
 
-**Note:** Security scanning (Bandit, Safety) already runs in CI. This phase focuses on additional hardening.
+**Note:** Security scanning (Bandit, Safety) already runs in CI. This phase focuses on additional hardening and external audit.
 
 ---
 
 ## Success Metrics Per Phase
+
+### Phase -1 (Privacy & Encryption)
+- **Encryption adoption:** 100% of new nodes encrypted by default
+- **Zero data breaches:** No unencrypted private data exposed
+- **Recovery success rate:** 95%+ of password resets preserve data access
+- **Permission enforcement:** 0 unauthorized node access incidents
+- **User understanding:** 80%+ of users understand privacy levels
 
 ### Phase 0 (Foundation)
 - **Test coverage:** 60%+ backend, 50%+ frontend
@@ -425,32 +538,37 @@ Based on current project state, dependencies, and strategic value, here's the re
 ## Cost Projections
 
 ### Development Costs (Time Investment)
+- **Phase -1 (Privacy & Encryption):** 4 weeks - BLOCKING change, must be done first
 - **Phase 0 (Foundation):** 3 weeks - one-time investment, pays dividends forever
 - **Phase 1-2 (Download):** 6 weeks - immediate personal value
 - **Phase 3 (Dev Velocity):** 2 weeks - 2-3x speedup on subsequent phases
-- **Phase 4-5 (Upload):** 7 weeks - high complexity due to external APIs
-- **Phase 6-7 (Market):** 7 weeks - high complexity due to matching logic
+- **Phase 4-5 (Upload):** 7 weeks - high complexity due to external APIs and privacy
+- **Phase 6-7 (Market):** 7 weeks - high complexity due to matching logic and moderation
 - **Phase 8 (Integration):** 3 weeks - straightforward once features exist
-- **Phase 9 (Hardening):** 2 weeks - essential for production
-- **Total:** ~30 weeks (7.5 months) for complete system
+- **Phase 9 (Hardening):** 2 weeks - essential for production, includes external security audit
+- **Total:** ~34 weeks (8.5 months) for complete system
 
 ### Infrastructure Costs (Monthly, at scale)
 
 **At 100 users:**
 - **Compute:** $50 (DigitalOcean/AWS)
 - **Database:** $25 (PostgreSQL + Redis)
+- **Storage (S3):** $10 (encrypted audio files)
 - **LLM APIs:** $200 (embeddings, RAG, analysis, transformation)
 - **External APIs:** $50 (Twitter, LinkedIn, etc.)
+- **Email (SendGrid):** $15 (password resets, notifications)
 - **Monitoring:** $25 (Sentry, logging)
-- **Total:** ~$350/month = $3.50/user
+- **Total:** ~$375/month = $3.75/user
 
 **At 1,000 users:**
 - **Compute:** $200
 - **Database:** $100
+- **Storage (S3):** $50 (encrypted audio with CDN)
 - **LLM APIs:** $1,500 (benefits from caching and optimization)
 - **External APIs:** $300
+- **Email (SendGrid):** $50
 - **Monitoring:** $100
-- **Total:** ~$2,200/month = $2.20/user (economies of scale)
+- **Total:** ~$2,300/month = $2.30/user (economies of scale)
 
 **Revenue Model:** $10-25/month subscription → profitable at 100+ users
 
@@ -492,34 +610,50 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 ### Technical Decisions Needed
 
-1. **MemeOS Integration Method:** Shared database or API? (Affects Phase 2 timeline)
-2. **Vector Database Choice:** Start with pgvector or go straight to Pinecone? (Cost vs simplicity tradeoff)
-3. **Notification Delivery:** Email, in-app, push, or all three? (Affects infrastructure complexity)
-4. **Testing Philosophy:** Unit tests only or also integration/E2E? (Affects Phase 0 scope)
-5. **Deployment Strategy:** Monolith or microservices? (Affects Phase 9 architecture)
+1. **Encryption Strategy:** Client-side encryption (more secure, harder UX) vs server-side encryption (easier UX, requires more trust)? (Affects Phase -1 implementation)
+2. **Key Recovery Method:** Recovery key download vs trusted device recovery vs security questions? (Affects Phase -1 UX)
+3. **MemeOS Integration Method:** Shared database or API? (Affects Phase 2 timeline)
+4. **Vector Database Choice:** Start with pgvector or go straight to Pinecone? (Cost vs simplicity tradeoff)
+5. **Searchable Encryption:** Store embeddings unencrypted or implement fully encrypted search? (Privacy vs functionality tradeoff)
+6. **Notification Delivery:** Email, in-app, WebSocket push, mobile push, or all? (Affects Phase 7 infrastructure complexity)
+7. **Testing Philosophy:** Unit tests only or also integration/E2E? (Affects Phase 0 scope)
+8. **Deployment Strategy:** Monolith or microservices? (Affects Phase 9 architecture)
 
 ### Product Decisions Needed
 
-6. **Feature Launch Order:** Should we launch features to users incrementally or wait for all four? (Affects beta strategy)
-7. **Monetization Timing:** Free tier for all features or paywall some? (Affects user growth vs revenue)
-8. **Network Effects:** Can Feature 4 work with 100 users or need 1,000+? (Affects cold start strategy)
+9. **Privacy Level Marketing:** How to communicate 5 privacy levels without confusing users? (Affects onboarding UX)
+10. **Default Privacy Evolution:** When to switch from training→private as default for new nodes? (Affects user trust timeline)
+11. **Feature Launch Order:** Should we launch features to users incrementally or wait for all four? (Affects beta strategy)
+12. **Monetization Timing:** Free tier for all features or paywall some? (Affects user growth vs revenue)
+13. **Network Effects:** Can Feature 4 work with 100 users or need 1,000+? (Affects cold start strategy)
 
 ---
 
 ## Conclusion
 
-This roadmap prioritizes **foundation first** (testing, monitoring), then **personal value** (Feature 2: Download), then **sharing** (Feature 3: Upload), then **community** (Feature 4: Intention Market).
+This roadmap prioritizes **privacy & encryption first** (Phase -1), then **foundation** (testing, monitoring), then **personal value** (Feature 2: Download), then **sharing** (Feature 3: Upload), then **community** (Feature 4: Intention Market).
 
-**Key Insight:** Building development infrastructure (Phase 0) and taking a velocity pause (Phase 3) will make Phases 4-9 significantly faster and safer. Without tests and monitoring, complex features become impossible to ship with confidence.
+**Critical Insight:** Privacy infrastructure (Phase -1) is BLOCKING. Retrofitting encryption after building Features 3-4 would require rebuilding everything. This one-time architectural change must happen first.
 
-**Total Timeline:** ~7.5 months for complete four-feature ecosystem
+**Key Infrastructure Gaps Identified:**
+1. **Privacy & Encryption** - 5-level privacy system with encryption, key management, recovery
+2. **Authentication & Authorization** - Fine-grained permissions, JWT tokens, OAuth framework
+3. **Data Infrastructure** - Cloud storage (S3), email service, WebSockets for real-time
+4. **Compliance & Safety** - Audit logging, GDPR enhancements, content moderation, spam detection
+5. **Mobile & Offline** - Mobile-optimized APIs, offline sync, push notifications
 
-**First Milestone:** After Phase 1-2 (9 weeks), you'll have immediately valuable RAG + MemeOS integration for personal use
+**Total Timeline:** ~34 weeks (8.5 months) for complete four-feature ecosystem
+
+**First Milestone:** After Phase -1 + 0 (7 weeks), you'll have encryption + tests foundation
+**Second Milestone:** After Phase 1-2 (13 weeks total), you'll have RAG + MemeOS integration for personal use
 
 **Next Steps:**
-1. Review and validate this roadmap
-2. Set up Phase 0 (testing infrastructure)
-3. Install pgvector and start Phase 1
-4. Iterate based on learnings at each phase
+1. **URGENT:** Review Phase -1 encryption strategy and make technical decisions (#1, #2, #5)
+2. Decide on migration timeline for existing users
+3. Begin Phase -1: Privacy & Encryption Infrastructure
+4. Set up Phase 0: Testing infrastructure alongside encryption work
+5. Iterate based on learnings at each phase
 
-This is ambitious but achievable. Each phase delivers value, and the foundation work ensures sustainable velocity throughout.
+This is ambitious but achievable. Each phase delivers value, and the foundation work (especially privacy) ensures sustainable velocity and user trust throughout.
+
+**The biggest change:** Adding 4 weeks for encryption infrastructure + extending Feature 3-4 timelines to account for privacy complexity = +4 weeks total (7.5→8.5 months)
