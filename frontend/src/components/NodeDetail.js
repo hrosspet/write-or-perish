@@ -62,6 +62,8 @@ function NodeDetail() {
   );
 
   useEffect(() => {
+    setLoading(true);
+    setError("");
     api
       .get(`/nodes/${id}`)
       .then((response) => {
