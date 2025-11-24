@@ -49,15 +49,13 @@ These technical capabilities are production-ready and form the foundation:
 
 **Node visibility levels and access control** - Add privacy_level column (private/private_ai/training/circles/public) with API enforcement to control who can read each node
 
-**End-to-end encryption for private nodes** - Encrypt node content, audio URLs, and versions using user-specific keys (AES-256) before storing in database
+**Application-level encryption with GCP KMS** - Encrypt all node content at rest using Cloud KMS, transparently decrypt on authorized access
 
-**Key management system** - Securely generate, store, and rotate encryption keys per user with key derivation from password and separate recovery keys
+**Embedding isolation architecture** - Generate embeddings server-side from plaintext, store with user_id in pgvector, always filter queries by user_id + visibility
 
-**Password recovery without data loss** - Recovery key system (download during signup) or trusted device recovery to restore access to encrypted content without password
+**User promise and transparency** - Clear communication: "Journals encrypted at rest. Semantic indexes power search/AI for your account only, never exposed publicly unless you choose"
 
-**Encrypted search metadata** - Store unencrypted embeddings/metadata for search while keeping content encrypted, or implement searchable encryption scheme
-
-**Data migration for existing public nodes** - Migrate all existing unencrypted nodes to new privacy system with default visibility settings and backwards compatibility
+**Data migration for existing nodes** - Encrypt all existing nodes using KMS, default to privacy_level='training', seamless backward compatibility
 
 ### Authentication & Authorization
 
@@ -255,28 +253,34 @@ These technical capabilities are production-ready and form the foundation:
 
 Based on current project state, dependencies, and strategic value, here's the recommended build sequence:
 
-### Phase -1: Privacy & Encryption Infrastructure (Weeks 1-4) 🔒
+### Phase -1: Privacy & Encryption Infrastructure (Weeks 1-3) 🔒
 
 **Priority: BLOCKING - Must be done first before building sharing/marketplace features**
 
-**Why first:** Currently all nodes are public. Features 3 (Upload) and 4 (Intention Market) require granular privacy controls. Retrofitting encryption after building on public-only architecture would require rebuilding everything. This is a one-time breaking change that must happen now.
+**Why first:** Currently all nodes are public. Features 3 (Upload) and 4 (Intention Market) require granular privacy controls. Retrofitting privacy after building on public-only architecture would require rebuilding everything. This is a one-time breaking change that must happen now.
 
-1. **Node privacy level schema migration** - Add privacy_level column (private/private_ai/training/circles/public) and is_encrypted boolean to Node model
-2. **Encryption key management system** - Generate per-user AES-256 keys derived from password + salt, store encrypted with master key in separate KeyStore table
-3. **Client-side encryption library** - JavaScript library to encrypt/decrypt node content in browser before sending to server (for private nodes only)
-4. **Server-side encryption fallback** - Python library to encrypt nodes server-side for private_ai/training levels using user's stored key
-5. **Recovery key generation and download** - Generate recovery key during signup, force user to download, use for account recovery without password
-6. **Fine-grained permission system** - Authorization decorator checking visibility + circles membership before returning nodes from API
-7. **Encrypted search metadata strategy** - Store embeddings unencrypted but node content encrypted, or use searchable encryption (Paillier) for fully private search
-8. **Data migration script for existing nodes** - Set all existing nodes to privacy_level='public', add encryption columns, notify users of new privacy options
-9. **Email infrastructure for password recovery** - SendGrid/AWS SES integration with reset token generation and secure reset flow
-10. **API endpoints for privacy management** - Update node creation/edit to include privacy_level, bulk privacy change, recovery key re-download
-11. **Frontend privacy UI** - Privacy selector on node creation/edit, visual indicators of privacy level, onboarding flow explaining privacy options
-12. **Tests for encryption and authorization** - Unit tests for encryption/decryption, permission checks, recovery key flow
+**Encryption Strategy:** Application-level encryption using GCP KMS (pragmatic approach)
+- Journals encrypted at rest in DB using GCP KMS
+- Embeddings generated server-side from plaintext, stored in private vector index
+- Strict user_id isolation for all queries
+- No per-user key management complexity
 
-**Deliverable:** All nodes can be set to 5 privacy levels with encryption for private content, password recovery system, and fine-grained access control
+1. **Node privacy level schema migration** - Add privacy_level column (private/private_ai/training/circles/public) to Node model
+2. **GCP KMS integration** - Set up Cloud KMS with key ring and crypto key for application-level encryption/decryption
+3. **Application-level encryption service** - Python service to encrypt/decrypt node content using GCP KMS before DB storage
+4. **Automatic encryption on save** - Hook into node creation/update to transparently encrypt content field before PostgreSQL insert
+5. **Automatic decryption on read** - Hook into node retrieval to transparently decrypt content field after PostgreSQL query
+6. **Fine-grained permission system** - Authorization decorator checking visibility + circles membership + user_id before returning nodes from API
+7. **Embedding generation with user isolation** - Store embeddings in pgvector with user_id, always filter queries by user_id + visibility level
+8. **Data migration script for existing nodes** - Set all existing nodes to privacy_level='training', encrypt existing content using KMS, notify users
+9. **Email infrastructure for account management** - SendGrid/AWS SES integration for notifications and future password reset
+10. **API endpoints for privacy management** - Update node creation/edit to include privacy_level, bulk privacy change endpoint
+11. **Frontend privacy UI** - Privacy selector on node creation/edit, visual indicators of privacy level, onboarding flow with clear promises
+12. **Tests for encryption and authorization** - Unit tests for KMS encrypt/decrypt, permission checks, user_id isolation in queries
 
-**Why this is blocking:** Features 3 and 4 require sharing to specific audiences (circles, public). Without privacy controls, users won't trust the platform. Encryption prevents future data breaches from exposing private journals.
+**Deliverable:** All nodes encrypted at rest with GCP KMS, 5 privacy levels, strict user_id isolation for embeddings, fine-grained access control
+
+**Why this is blocking:** Features 3 and 4 require sharing to specific audiences (circles, public). Without privacy controls, users won't trust the platform. Application-level encryption with KMS provides security without per-user key management complexity.
 
 **Migration Strategy:**
 - **Existing nodes:** Default all current nodes to `privacy_level='training'` (accessible to AI for training, maintains current public AI training value proposition)
@@ -292,7 +296,7 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 ---
 
-### Phase 0: Foundation (Weeks 5-7) 🏗️
+### Phase 0: Foundation (Weeks 4-6) 🏗️
 
 **Priority: Enable fast, safe development of new features**
 
@@ -314,7 +318,7 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 ---
 
-### Phase 1: Download Foundation (Weeks 8-10) 📥
+### Phase 1: Download Foundation (Weeks 7-9) 📥
 
 **Priority: Enable semantic search and RAG before building on top**
 
@@ -331,7 +335,7 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 ---
 
-### Phase 2: Download Complete (Weeks 11-13) 📚
+### Phase 2: Download Complete (Weeks 10-12) 📚
 
 **Priority: Complete MemeOS integration for full "consume" feature**
 
@@ -349,7 +353,7 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 ---
 
-### Phase 3: Development Velocity Upgrades (Weeks 14-15) 🚀
+### Phase 3: Development Velocity Upgrades (Weeks 13-14) 🚀
 
 **Priority: Invest in speed before building complex features 3 and 4**
 
@@ -367,7 +371,7 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 ---
 
-### Phase 4: Upload Foundation (Weeks 16-19) 📤
+### Phase 4: Upload Foundation (Weeks 15-18) 📤
 
 **Priority: Build sharing infrastructure without external platform complexity**
 
@@ -390,7 +394,7 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 ---
 
-### Phase 5: Upload External Platforms (Weeks 20-22) 🌐
+### Phase 5: Upload External Platforms (Weeks 19-21) 🌐
 
 **Priority: Add external publishing capabilities**
 
@@ -409,7 +413,7 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 ---
 
-### Phase 6: Intention Market Foundation (Weeks 23-26) 🤝
+### Phase 6: Intention Market Foundation (Weeks 22-25) 🤝
 
 **Priority: Build marketplace infrastructure and matching algorithm**
 
@@ -430,7 +434,7 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 ---
 
-### Phase 7: Intention Market Complete (Weeks 27-29) 💬
+### Phase 7: Intention Market Complete (Weeks 26-28) 💬
 
 **Priority: Add connection features and notifications**
 
@@ -450,7 +454,7 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 ---
 
-### Phase 8: Cross-Feature Integration (Weeks 30-32) 🔄
+### Phase 8: Cross-Feature Integration (Weeks 29-31) 🔄
 
 **Priority: Connect all four features into unified flywheel**
 
@@ -469,7 +473,7 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 ---
 
-### Phase 9: Production Hardening (Weeks 33-34) 🛡️
+### Phase 9: Production Hardening (Weeks 32-33) 🛡️
 
 **Priority: Make system bulletproof before scaling**
 
@@ -492,11 +496,11 @@ Based on current project state, dependencies, and strategic value, here's the re
 ## Success Metrics Per Phase
 
 ### Phase -1 (Privacy & Encryption)
-- **Encryption adoption:** 100% of new nodes encrypted by default
-- **Zero data breaches:** No unencrypted private data exposed
-- **Recovery success rate:** 95%+ of password resets preserve data access
+- **Encryption coverage:** 100% of all nodes encrypted at rest with KMS
+- **Zero data breaches:** No unauthorized access to encrypted content
+- **Embedding isolation:** 100% of queries filtered by user_id
 - **Permission enforcement:** 0 unauthorized node access incidents
-- **User understanding:** 80%+ of users understand privacy levels
+- **User understanding:** 80%+ of users understand privacy levels and promises
 
 ### Phase 0 (Foundation)
 - **Test coverage:** 60%+ backend, 50%+ frontend
@@ -538,7 +542,7 @@ Based on current project state, dependencies, and strategic value, here's the re
 ## Cost Projections
 
 ### Development Costs (Time Investment)
-- **Phase -1 (Privacy & Encryption):** 4 weeks - BLOCKING change, must be done first
+- **Phase -1 (Privacy & Encryption):** 3 weeks - BLOCKING change, must be done first (reduced from 4 weeks with KMS approach)
 - **Phase 0 (Foundation):** 3 weeks - one-time investment, pays dividends forever
 - **Phase 1-2 (Download):** 6 weeks - immediate personal value
 - **Phase 3 (Dev Velocity):** 2 weeks - 2-3x speedup on subsequent phases
@@ -546,7 +550,7 @@ Based on current project state, dependencies, and strategic value, here's the re
 - **Phase 6-7 (Market):** 7 weeks - high complexity due to matching logic and moderation
 - **Phase 8 (Integration):** 3 weeks - straightforward once features exist
 - **Phase 9 (Hardening):** 2 weeks - essential for production, includes external security audit
-- **Total:** ~34 weeks (8.5 months) for complete system
+- **Total:** ~33 weeks (8.25 months) for complete system
 
 ### Infrastructure Costs (Monthly, at scale)
 
@@ -554,21 +558,23 @@ Based on current project state, dependencies, and strategic value, here's the re
 - **Compute:** $50 (DigitalOcean/AWS)
 - **Database:** $25 (PostgreSQL + Redis)
 - **Storage (S3):** $10 (encrypted audio files)
+- **GCP KMS:** $5 (encryption/decryption operations)
 - **LLM APIs:** $200 (embeddings, RAG, analysis, transformation)
 - **External APIs:** $50 (Twitter, LinkedIn, etc.)
-- **Email (SendGrid):** $15 (password resets, notifications)
+- **Email (SendGrid):** $15 (notifications)
 - **Monitoring:** $25 (Sentry, logging)
-- **Total:** ~$375/month = $3.75/user
+- **Total:** ~$380/month = $3.80/user
 
 **At 1,000 users:**
 - **Compute:** $200
 - **Database:** $100
 - **Storage (S3):** $50 (encrypted audio with CDN)
+- **GCP KMS:** $20 (scales with operations)
 - **LLM APIs:** $1,500 (benefits from caching and optimization)
 - **External APIs:** $300
 - **Email (SendGrid):** $50
 - **Monitoring:** $100
-- **Total:** ~$2,300/month = $2.30/user (economies of scale)
+- **Total:** ~$2,320/month = $2.32/user (economies of scale)
 
 **Revenue Model:** $10-25/month subscription → profitable at 100+ users
 
@@ -610,11 +616,10 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 ### Technical Decisions Needed
 
-1. **Encryption Strategy:** Client-side encryption (more secure, harder UX) vs server-side encryption (easier UX, requires more trust)? (Affects Phase -1 implementation)
-2. **Key Recovery Method:** Recovery key download vs trusted device recovery vs security questions? (Affects Phase -1 UX)
+1. **✅ DECIDED: Encryption Strategy:** Application-level encryption with GCP KMS (pragmatic, no per-user key complexity)
+2. **✅ DECIDED: Embedding Strategy:** Store embeddings unencrypted with strict user_id isolation (pragmatic, enables search/AI)
 3. **MemeOS Integration Method:** Shared database or API? (Affects Phase 2 timeline)
 4. **Vector Database Choice:** Start with pgvector or go straight to Pinecone? (Cost vs simplicity tradeoff)
-5. **Searchable Encryption:** Store embeddings unencrypted or implement fully encrypted search? (Privacy vs functionality tradeoff)
 6. **Notification Delivery:** Email, in-app, WebSocket push, mobile push, or all? (Affects Phase 7 infrastructure complexity)
 7. **Testing Philosophy:** Unit tests only or also integration/E2E? (Affects Phase 0 scope)
 8. **Deployment Strategy:** Monolith or microservices? (Affects Phase 9 architecture)
@@ -642,18 +647,19 @@ This roadmap prioritizes **privacy & encryption first** (Phase -1), then **found
 4. **Compliance & Safety** - Audit logging, GDPR enhancements, content moderation, spam detection
 5. **Mobile & Offline** - Mobile-optimized APIs, offline sync, push notifications
 
-**Total Timeline:** ~34 weeks (8.5 months) for complete four-feature ecosystem
+**Total Timeline:** ~33 weeks (8.25 months) for complete four-feature ecosystem
 
-**First Milestone:** After Phase -1 + 0 (7 weeks), you'll have encryption + tests foundation
-**Second Milestone:** After Phase 1-2 (13 weeks total), you'll have RAG + MemeOS integration for personal use
+**First Milestone:** After Phase -1 + 0 (6 weeks), you'll have KMS encryption + tests foundation
+**Second Milestone:** After Phase 1-2 (12 weeks total), you'll have RAG + MemeOS integration for personal use
 
 **Next Steps:**
-1. **URGENT:** Review Phase -1 encryption strategy and make technical decisions (#1, #2, #5)
-2. Decide on migration timeline for existing users
-3. Begin Phase -1: Privacy & Encryption Infrastructure
-4. Set up Phase 0: Testing infrastructure alongside encryption work
-5. Iterate based on learnings at each phase
+1. **IMMEDIATE:** Set up GCP KMS (key ring + crypto key)
+2. Begin Phase -1: Privacy & Encryption Infrastructure (3 weeks)
+3. Migrate existing nodes to encrypted storage (set all to privacy_level='training')
+4. Update user-facing docs with clear privacy promise
+5. Set up Phase 0: Testing infrastructure alongside encryption work
+6. Iterate based on learnings at each phase
 
 This is ambitious but achievable. Each phase delivers value, and the foundation work (especially privacy) ensures sustainable velocity and user trust throughout.
 
-**The biggest change:** Adding 4 weeks for encryption infrastructure + extending Feature 3-4 timelines to account for privacy complexity = +4 weeks total (7.5→8.5 months)
+**The KMS approach:** Simpler than per-user encryption (no password recovery complexity, no client-side crypto), still provides strong security with transparent encryption/decryption. Embeddings stored unencrypted but strictly isolated by user_id enables full search/AI functionality.
