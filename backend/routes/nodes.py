@@ -580,26 +580,43 @@ def request_llm_response(node_id):
     # Enqueue async LLM completion task
     from backend.tasks.llm_completion import generate_llm_response
 
-    # Set initial task status
-    parent_node.llm_task_status = 'pending'
-    parent_node.llm_task_progress = 0
-    parent_node.llm_task_error = None  # Clear any previous errors
+    # Create a placeholder LLM node before starting the async task.
+    # This allows us to return the new node's ID to the frontend immediately,
+    # which can then poll the status of this new node.
+
+    # 1. Get or create the user for the LLM
+    llm_user = User.query.filter_by(username=model_id).first()
+    if not llm_user:
+        llm_user = User(twitter_id=f"llm-{model_id}", username=model_id)
+        db.session.add(llm_user)
+        db.session.commit()
+
+    # 2. Create the placeholder node
+    llm_node = Node(
+        user_id=llm_user.id,
+        parent_id=parent_node.id,
+        node_type="llm",
+        llm_model=model_id,
+        content="[LLM response generation pending...]",
+        llm_task_status='pending'
+    )
+    db.session.add(llm_node)
     db.session.commit()
 
-    # Enqueue task
-    task = generate_llm_response.delay(parent_node.id, model_id, current_user.id)
+    # 3. Enqueue the task, passing both parent and new node IDs
+    task = generate_llm_response.delay(parent_node.id, llm_node.id, model_id, current_user.id)
 
-    # Store task ID
-    parent_node.llm_task_id = task.id
+    # 4. Store task ID on the new node
+    llm_node.llm_task_id = task.id
     db.session.commit()
 
-    current_app.logger.info(f"Enqueued LLM completion task {task.id} for node {parent_node.id}")
+    current_app.logger.info(f"Enqueued LLM completion task {task.id} for parent node {parent_node.id}, new node {llm_node.id}")
 
     return jsonify({
         "message": "LLM response generation started",
         "task_id": task.id,
         "status": "pending",
-        "parent_node_id": parent_node.id
+        "node_id": llm_node.id  # Return the ID of the new node
     }), 202
 
 
