@@ -3,12 +3,7 @@ import { Routes, Route, Navigate } from 'react-router-dom';
 import LandingPage from "./components/LandingPage";
 import Dashboard from "./components/Dashboard";
 import Feed from "./components/Feed";
-import NodeDetail from "./components/NodeDetail";
-import NavBar from "./components/NavBar";
-import NodeForm from "./components/NodeForm";
-import TermsModal from "./components/TermsModal";
-import AdminPanel from "./components/AdminPanel";
-import AlphaModal from "./components/AlphaModal";
+import NodeDetailWrapper from "./components/NodeDetailWrapper";
 import { useUser } from "./contexts/UserContext";
 import { AudioProvider } from "./contexts/AudioContext";
 
@@ -143,7 +138,7 @@ function App() {
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/dashboard/:username" element={<Dashboard />} />
           <Route path="/feed" element={<Feed />} />
-          <Route path="/node/:id" element={<NodeDetail />} />
+          <Route path="/node/:id" element={<NodeDetailWrapper />} />
           <Route path="/admin" element={<AdminPanel />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
