@@ -259,23 +259,7 @@ def estimate_profile_tokens():
             "supported_models": list(current_app.config["SUPPORTED_MODELS"].keys())
         }), 400
 
-    # Calculate max tokens for export
-    # Context window: 272k input tokens (separate 128k output)
-    # Reserve 1.5k for prompt template, 2k safety buffer
-    MAX_EXPORT_TOKENS = 268500
-
-    # Use the core export logic to get user's writing (with token limit)
-    user_export = build_user_export_content(current_user, max_tokens=MAX_EXPORT_TOKENS)
-
-    if not user_export:
-        return jsonify({
-            "estimated_tokens": 0,
-            "model": model_id,
-            "has_content": False,
-            "error": "No writing found to analyze."
-        }), 200
-
-    # Load the prompt template
+    # Load the prompt template to calculate its token overhead
     prompt_template_path = os.path.join(
         current_app.root_path,
         "prompts",
@@ -290,6 +274,23 @@ def estimate_profile_tokens():
         return jsonify({
             "error": "Profile generation prompt template not found"
         }), 500
+
+    # Calculate max tokens for export based on model's context window
+    model_context_window = current_app.config["MODEL_CONTEXT_WINDOWS"].get(model_id, 200000)
+    prompt_tokens = approximate_token_count(prompt_template)
+    buffer_tokens = current_app.config.get("PROFILE_CONTEXT_BUFFER", 2000)
+    MAX_EXPORT_TOKENS = model_context_window - prompt_tokens - buffer_tokens
+
+    # Use the core export logic to get user's writing (with token limit)
+    user_export = build_user_export_content(current_user, max_tokens=MAX_EXPORT_TOKENS)
+
+    if not user_export:
+        return jsonify({
+            "estimated_tokens": 0,
+            "model": model_id,
+            "has_content": False,
+            "error": "No writing found to analyze."
+        }), 200
 
     # Replace the placeholder with actual user export
     final_prompt = prompt_template.replace("{user_export}", user_export)

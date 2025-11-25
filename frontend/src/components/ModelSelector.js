@@ -18,7 +18,7 @@ const ModelSelector = ({ nodeId, selectedModel, onModelChange }) => {
         onModelChange(response.data.suggested_model);
       } catch (error) {
         console.error('Error fetching suggested model:', error);
-        onModelChange('gpt-5'); // Fallback to default
+        onModelChange('claude-opus-4.5'); // Fallback to default
       } finally {
         setLoading(false);
       }
@@ -43,7 +43,7 @@ const ModelSelector = ({ nodeId, selectedModel, onModelChange }) => {
   return (
     <select
       className="model-selector-dropdown"
-      value={selectedModel || 'gpt-5'}
+      value={selectedModel || 'claude-opus-4.5'}
       onChange={(e) => onModelChange(e.target.value)}
       disabled={loading}
       style={{

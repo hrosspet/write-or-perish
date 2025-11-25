@@ -16,7 +16,19 @@ class Config:
     ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
     # Default model (for backward compatibility and fallback)
-    DEFAULT_LLM_MODEL = os.environ.get("LLM_NAME", "gpt-5")
+    DEFAULT_LLM_MODEL = os.environ.get("LLM_NAME", "claude-opus-4.5")
+
+    # Model context window limits (input tokens)
+    MODEL_CONTEXT_WINDOWS = {
+        "gpt-5": 128000,
+        "gpt-5.1": 272000,
+        "claude-sonnet-4.5": 1000000,
+        "claude-opus-4.5": 200000,
+        "claude-opus-3": 200000,
+    }
+
+    # Buffer for token estimation error (~1%)
+    PROFILE_CONTEXT_BUFFER = 2000
 
     # Supported models configuration
     SUPPORTED_MODELS = {

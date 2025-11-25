@@ -52,21 +52,8 @@ def generate_user_profile(self, user_id: int, model_id: str):
             if model_id not in flask_app.config["SUPPORTED_MODELS"]:
                 raise ValueError(f"Unsupported model: {model_id}")
 
-            # Step 1: Build user export (10% -> 40% progress)
+            # Step 1: Load prompt template and calculate token budget
             self.update_state(state='PROGRESS', meta={'progress': 10, 'status': 'Gathering writing samples'})
-
-            # Calculate max tokens for export
-            MAX_EXPORT_TOKENS = 268500
-
-            user_export = build_user_export_content(user, max_tokens=MAX_EXPORT_TOKENS)
-
-            if not user_export:
-                raise ValueError("No writing found to analyze")
-
-            logger.info(f"User export built for user {user_id}, length: {len(user_export)} characters")
-
-            # Step 2: Load prompt template (45% progress)
-            self.update_state(state='PROGRESS', meta={'progress': 45, 'status': 'Preparing prompt'})
 
             prompt_template_path = os.path.join(
                 flask_app.root_path,
@@ -79,6 +66,23 @@ def generate_user_profile(self, user_id: int, model_id: str):
                     prompt_template = f.read()
             except FileNotFoundError:
                 raise FileNotFoundError(f"Prompt template not found at {prompt_template_path}")
+
+            # Calculate max tokens for export based on model's context window
+            model_context_window = flask_app.config["MODEL_CONTEXT_WINDOWS"].get(model_id, 200000)
+            # Estimate prompt tokens: ~4 characters per token
+            prompt_tokens = len(prompt_template) // 4
+            buffer_tokens = flask_app.config.get("PROFILE_CONTEXT_BUFFER", 2000)
+            MAX_EXPORT_TOKENS = model_context_window - prompt_tokens - buffer_tokens
+
+            user_export = build_user_export_content(user, max_tokens=MAX_EXPORT_TOKENS)
+
+            if not user_export:
+                raise ValueError("No writing found to analyze")
+
+            logger.info(f"User export built for user {user_id}, length: {len(user_export)} characters")
+
+            # Step 2: Build final prompt (45% progress)
+            self.update_state(state='PROGRESS', meta={'progress': 45, 'status': 'Preparing prompt'})
 
             # Replace placeholder with user export
             final_prompt = prompt_template.replace("{user_export}", user_export)
