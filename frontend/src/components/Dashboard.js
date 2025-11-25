@@ -173,27 +173,32 @@ function Dashboard() {
   };
 
   // Polling for profile generation status
-  useAsyncTaskPolling({
-    taskId: profileTaskId,
-    endpoint: `/export/profile-status/${profileTaskId}`,
-    onSuccess: (data) => {
-      if (data.profile) {
-        setDashboardData({
-          ...dashboardData,
-          latest_profile: data.profile,
-        });
-      }
+  const {
+    status: profileStatus,
+    progress: profileProgress,
+    data: profileData,
+    error: profileError
+  } = useAsyncTaskPolling(
+    profileTaskId ? `/export/profile-status/${profileTaskId}` : null,
+    { enabled: !!profileTaskId }
+  );
+
+  // Handle profile generation completion
+  useEffect(() => {
+    if (profileStatus === 'completed' && profileData?.profile) {
+      setDashboardData(prev => ({
+        ...prev,
+        latest_profile: profileData.profile,
+      }));
       setGeneratingProfile(false);
       setProfileTaskId(null);
-      setError(""); // Clear any previous errors
-    },
-    onError: (error) => {
-      console.error("Error during profile generation polling:", error);
-      setError(error.message || "An error occurred during profile generation.");
+      setError("");
+    } else if (profileStatus === 'failed') {
+      setError(profileError || "An error occurred during profile generation.");
       setGeneratingProfile(false);
       setProfileTaskId(null);
-    },
-  });
+    }
+  }, [profileStatus, profileData, profileError]);
 
   const handleCancelProfileGeneration = () => {
     setShowProfileConfirmation(false);
@@ -310,18 +315,26 @@ function Dashboard() {
               />
               <button
                 onClick={handleGenerateProfile}
-                disabled={generatingProfile}
+                disabled={generatingProfile || !!profileTaskId}
                 style={{
                   backgroundColor: "#2a5a7a",
                   color: "white",
                   border: "none",
                   padding: "8px 16px",
-                  cursor: generatingProfile ? "not-allowed" : "pointer",
+                  cursor: (generatingProfile || profileTaskId) ? "not-allowed" : "pointer",
                   borderRadius: "4px",
-                  opacity: generatingProfile ? 0.6 : 1
+                  opacity: (generatingProfile || profileTaskId) ? 0.6 : 1
                 }}
               >
-                {generatingProfile ? "Generating..." : "Generate Profile"}
+                {profileTaskId && profileStatus === 'progress' && profileProgress > 0
+                  ? `Generating... ${profileProgress}%`
+                  : profileTaskId && profileStatus === 'pending'
+                  ? "Starting..."
+                  : profileTaskId
+                  ? `Generating... ${profileProgress}%`
+                  : generatingProfile
+                  ? "Estimating..."
+                  : "Generate Profile"}
               </button>
             </div>
           </div>
