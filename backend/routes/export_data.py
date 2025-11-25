@@ -340,8 +340,8 @@ def generate_profile():
         }), 400
 
     # Quick check if user has any writing to analyze
-    user_export_check = build_user_export_content(current_user, max_tokens=1000)
-    if not user_export_check:
+    has_threads = Node.query.filter_by(user_id=current_user.id, parent_id=None).first() is not None
+    if not has_threads:
         return jsonify({
             "error": "No writing found to analyze. Please create some threads first."
         }), 400
