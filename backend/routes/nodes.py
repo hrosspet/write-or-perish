@@ -496,6 +496,8 @@ def get_node(node_id):
             "id": node.user.id,
             "username": node.user.username,
         },
+        # Include parent user ID for LLM nodes (so frontend can check delete permission)
+        "parent_user_id": node.parent.user_id if node.parent else None,
     }
     return jsonify(node_data), 200
 
@@ -1211,8 +1213,16 @@ def serve_audio_file(filename):
 @login_required
 def delete_node(node_id):
     node = Node.query.get_or_404(node_id)
-    # Only allow deletion if the current user is the creator 
-    if node.user_id != current_user.id:
+    # Allow deletion if:
+    # 1. Current user is the node creator, OR
+    # 2. For LLM nodes: current user is the parent node's creator (they requested the response)
+    is_owner = node.user_id == current_user.id
+    is_llm_requester = (
+        node.node_type == "llm" and
+        node.parent and
+        node.parent.user_id == current_user.id
+    )
+    if not is_owner and not is_llm_requester:
         return jsonify({"error": "Not authorized"}), 403
 
     # Update all children: set their parent_id to None

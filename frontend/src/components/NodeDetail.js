@@ -103,7 +103,12 @@ function NodeDetail() {
     navigate(`/node/${nodeId}`);
   };
 
-  const isOwner = node.user && currentUser && node.user.id === currentUser.id;
+  // For user-typed nodes: owner must match current user
+  // For LLM nodes: parent node's owner must match current user (they requested the response)
+  const isOwner = node.user && currentUser && (
+    node.user.id === currentUser.id ||
+    (node.node_type === "llm" && node.parent_user_id === currentUser.id)
+  );
 
   // Define handleDelete: confirm deletion and delete via API.
   const handleDelete = () => {
