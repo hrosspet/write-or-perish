@@ -35,10 +35,10 @@ class Config:
             "api_model": "claude-sonnet-4-5-20250929",
             "display_name": "Claude 4.5 Sonnet"
         },
-        "claude-opus-4.1": {
+        "claude-opus-4.5": {
             "provider": "anthropic",
-            "api_model": "claude-opus-4-1-20250514",
-            "display_name": "Claude 4.1 Opus"
+            "api_model": "claude-opus-4-5-20251101",
+            "display_name": "Claude 4.5 Opus"
         },
         "claude-opus-3": {
             "provider": "anthropic",
