@@ -371,12 +371,18 @@ def get_profile_status(task_id):
 
     # Get task state and info
     state = task.state
-    info = task.info if task.info else {}
+
+    # task.info can be a dict (for PROGRESS state) or an exception (for FAILURE)
+    # or None/other for PENDING states
+    info = {}
+    if isinstance(task.info, dict):
+        info = task.info
 
     # If task completed, fetch the profile from database
     profile_data = None
     if state == 'SUCCESS' and task.result:
-        profile_id = task.result.get('profile_id')
+        result = task.result if isinstance(task.result, dict) else {}
+        profile_id = result.get('profile_id')
         if profile_id:
             profile = UserProfile.query.get(profile_id)
             if profile and profile.user_id == current_user.id:
@@ -388,9 +394,20 @@ def get_profile_status(task_id):
                     "created_at": profile.created_at.isoformat()
                 }
 
+    # Map Celery states to frontend-expected statuses
+    status_map = {
+        'PENDING': 'pending',
+        'STARTED': 'processing',
+        'PROGRESS': 'progress',
+        'SUCCESS': 'completed',
+        'FAILURE': 'failed',
+        'REVOKED': 'failed',
+    }
+    frontend_status = status_map.get(state, state.lower())
+
     return jsonify({
         "task_id": task_id,
-        "status": state.lower(),
+        "status": frontend_status,
         "progress": info.get('progress', 0),
         "message": info.get('status', ''),
         "profile": profile_data
