@@ -517,6 +517,18 @@ def get_children(node_id):
     } for child in children]
     return jsonify({"children": children_list}), 200
 
+# Get the default model from server config
+@nodes_bp.route("/default-model", methods=["GET"])
+@login_required
+def get_default_model():
+    """Return the default LLM model from server config."""
+    default_model = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.5")
+    return jsonify({
+        "suggested_model": default_model,
+        "source": "default"
+    }), 200
+
+
 # Get the suggested model for a new LLM response based on the thread's context
 @nodes_bp.route("/<int:node_id>/suggested-model", methods=["GET"])
 @login_required
@@ -549,7 +561,7 @@ def get_suggested_model(node_id):
         current = current.parent
 
     # No predecessor found or legacy model - return default
-    default_model = current_app.config.get("DEFAULT_LLM_MODEL", "gpt-5")
+    default_model = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.5")
     return jsonify({
         "suggested_model": default_model,
         "source": "default"
@@ -570,7 +582,7 @@ def request_llm_response(node_id):
 
     if not model_id:
         # Fall back to default model for backward compatibility
-        model_id = current_app.config.get("DEFAULT_LLM_MODEL", "gpt-5")
+        model_id = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.5")
 
     # Validate model is supported
     if model_id not in current_app.config["SUPPORTED_MODELS"]:

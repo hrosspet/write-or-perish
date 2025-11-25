@@ -19,7 +19,7 @@ function Dashboard() {
   const [editProfileContent, setEditProfileContent] = useState("");
 
   // For AI profile generation
-  const [selectedModel, setSelectedModel] = useState("gpt-5");
+  const [selectedModel, setSelectedModel] = useState(null);
   const [generatingProfile, setGeneratingProfile] = useState(false);
   const [showProfileConfirmation, setShowProfileConfirmation] = useState(false);
   const [estimatedTokens, setEstimatedTokens] = useState(0);
@@ -52,6 +52,16 @@ function Dashboard() {
           setError("Error fetching dashboard data. Are you logged in?");
           setLoading(false);
         }
+      });
+
+    // Fetch default model for profile generation
+    api.get("/nodes/default-model")
+      .then((response) => {
+        setSelectedModel(response.data.suggested_model);
+      })
+      .catch((err) => {
+        console.error("Error fetching default model:", err);
+        setSelectedModel("claude-opus-4.5"); // Fallback
       });
   }, [endpoint, backendUrl]);
 

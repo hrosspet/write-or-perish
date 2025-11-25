@@ -250,7 +250,7 @@ def estimate_profile_tokens():
     model_id = data.get("model")
 
     if not model_id:
-        model_id = current_app.config.get("DEFAULT_LLM_MODEL", "gpt-5")
+        model_id = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.5")
 
     # Validate model is supported
     if model_id not in current_app.config["SUPPORTED_MODELS"]:
@@ -330,7 +330,7 @@ def generate_profile():
     model_id = data.get("model")
 
     if not model_id:
-        model_id = current_app.config.get("DEFAULT_LLM_MODEL", "gpt-5")
+        model_id = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.5")
 
     # Validate model is supported
     if model_id not in current_app.config["SUPPORTED_MODELS"]:
