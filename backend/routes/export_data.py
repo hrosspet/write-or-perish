@@ -44,15 +44,14 @@ def export_data():
         })
     return jsonify(user_data), 200
 
-def format_node_tree(node, prefix="", index_path="1", is_last=True, processed_nodes=None):
+def format_node_tree(node, index_path="1", processed_nodes=None):
     """
-    Recursively format a node and its descendants into a human-readable tree structure.
+    Recursively format a node and its descendants into a human-readable tree structure
+    using Markdown headers. Uses depth-first traversal for maximum readability.
 
     Args:
         node: The Node object to format
-        prefix: The indentation prefix for the current node
         index_path: The hierarchical index (e.g., "1.1.2")
-        is_last: Whether this is the last child of its parent
         processed_nodes: Set of node IDs already processed (to avoid infinite loops)
 
     Returns:
@@ -66,7 +65,13 @@ def format_node_tree(node, prefix="", index_path="1", is_last=True, processed_no
         return ""
     processed_nodes.add(node.id)
 
-    # Format the node header
+    # Calculate depth from index_path (e.g., "1.2.3" -> depth 3)
+    depth = len(index_path.split('.'))
+
+    # Format the node header using Markdown headers (max 6 levels, then stay at 6)
+    header_level = min(depth + 1, 6)  # +1 because thread title uses #
+    header_prefix = "#" * header_level
+
     author = node.user.username if node.user else "Unknown"
     node_type_display = "AI" if node.node_type == "llm" else "User"
     if node.node_type == "llm" and node.llm_model:
@@ -74,32 +79,23 @@ def format_node_tree(node, prefix="", index_path="1", is_last=True, processed_no
 
     timestamp = node.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    # Build the node text
-    indent = "  " * (len(index_path.split('.')) - 1)
+    # Build the node text - no content indentation for token efficiency
+    result = f"{header_prefix} [{index_path}] {node_type_display} ({author}) - {timestamp}\n"
+    result += node.content
+    result += "\n\n"
 
-    result = f"{indent}[{index_path}] {node_type_display} ({author}) - {timestamp}\n"
-
-    # Add the content with proper indentation
-    content_lines = node.content.split('\n')
-    for line in content_lines:
-        result += f"{indent}{line}\n"
-    result += "\n"
-
-    # Process children
+    # Process children (depth-first traversal)
     children = sorted(node.children, key=lambda c: c.created_at)
     for i, child in enumerate(children):
-        is_last_child = (i == len(children) - 1)
         child_index = f"{index_path}.{i+1}"
 
         # Mark branches (when there are multiple children)
         if len(children) > 1 and i > 0:
-            result += f"{indent}  *** BRANCH ***\n\n"
+            result += "---\n**BRANCH**\n---\n\n"
 
         result += format_node_tree(
             child,
-            prefix=prefix,
             index_path=child_index,
-            is_last=is_last_child,
             processed_nodes=processed_nodes
         )
 
@@ -158,32 +154,35 @@ def build_user_export_content(user, max_tokens=None):
     if not top_level_nodes:
         return None
 
-    # Build the export content
+    # Build the export content using Markdown format
     export_lines = []
-    export_lines.append("Write or Perish - Thread Export")
-    export_lines.append(f"User: {user.username}")
-    export_lines.append(f"Export Date: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
-    export_lines.append(f"Total Threads: {len(all_top_level_nodes)}")
+    export_lines.append("# Write or Perish - Thread Export")
+    export_lines.append("")
+    export_lines.append(f"**User:** {user.username}")
+    export_lines.append(f"**Export Date:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    export_lines.append(f"**Total Threads:** {len(all_top_level_nodes)}")
     if max_tokens and len(top_level_nodes) < len(all_top_level_nodes):
-        export_lines.append(f"Included Threads (most recent): {len(top_level_nodes)}")
-        export_lines.append(f"(Limited to ~{max_tokens:,} tokens)")
+        export_lines.append(f"**Included Threads (most recent):** {len(top_level_nodes)}")
+        export_lines.append(f"*(Limited to ~{max_tokens:,} tokens)*")
+    export_lines.append("")
+    export_lines.append("---")
     export_lines.append("")
 
     # Process each thread
     for thread_num, node in enumerate(top_level_nodes, 1):
-        export_lines.append("")
-        export_lines.append(f"THREAD {thread_num}")
-        export_lines.append(f"Started: {node.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        export_lines.append(f"# Thread {thread_num}")
+        export_lines.append(f"**Started:** {node.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
         export_lines.append("")
 
-        # Format the entire thread tree
+        # Format the entire thread tree (depth-first traversal)
         thread_text = format_node_tree(node, index_path=str(thread_num))
         export_lines.append(thread_text)
 
+        export_lines.append("---")
         export_lines.append("")
 
     # Add footer
-    export_lines.append("End of Export")
+    export_lines.append("*End of Export*")
 
     return "\n".join(export_lines)
 
