@@ -71,7 +71,8 @@ def generate_user_profile(self, user_id: int, model_id: str):
             model_context_window = flask_app.config["MODEL_CONTEXT_WINDOWS"].get(model_id, 200000)
             # Estimate prompt tokens: ~4 characters per token
             prompt_tokens = len(prompt_template) // 4
-            buffer_tokens = flask_app.config.get("PROFILE_CONTEXT_BUFFER", 2000)
+            buffer_percent = flask_app.config.get("PROFILE_CONTEXT_BUFFER_PERCENT", 0.07)
+            buffer_tokens = int(model_context_window * buffer_percent)
             MAX_EXPORT_TOKENS = model_context_window - prompt_tokens - buffer_tokens
 
             user_export = build_user_export_content(user, max_tokens=MAX_EXPORT_TOKENS)

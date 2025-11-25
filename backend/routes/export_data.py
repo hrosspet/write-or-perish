@@ -278,7 +278,8 @@ def estimate_profile_tokens():
     # Calculate max tokens for export based on model's context window
     model_context_window = current_app.config["MODEL_CONTEXT_WINDOWS"].get(model_id, 200000)
     prompt_tokens = approximate_token_count(prompt_template)
-    buffer_tokens = current_app.config.get("PROFILE_CONTEXT_BUFFER", 2000)
+    buffer_percent = current_app.config.get("PROFILE_CONTEXT_BUFFER_PERCENT", 0.07)
+    buffer_tokens = int(model_context_window * buffer_percent)
     MAX_EXPORT_TOKENS = model_context_window - prompt_tokens - buffer_tokens
 
     # Use the core export logic to get user's writing (with token limit)
@@ -375,8 +376,16 @@ def get_profile_status(task_id):
     # task.info can be a dict (for PROGRESS state) or an exception (for FAILURE)
     # or None/other for PENDING states
     info = {}
+    error_message = None
     if isinstance(task.info, dict):
         info = task.info
+    elif isinstance(task.info, Exception):
+        error_message = str(task.info)
+
+    # For failed tasks, try to get the traceback
+    if state == 'FAILURE':
+        error_message = error_message or str(task.info) if task.info else "Unknown error"
+        current_app.logger.error(f"Profile generation task {task_id} failed: {error_message}")
 
     # If task completed, fetch the profile from database
     profile_data = None
@@ -410,6 +419,7 @@ def get_profile_status(task_id):
         "status": frontend_status,
         "progress": info.get('progress', 0),
         "message": info.get('status', ''),
+        "error": error_message,
         "profile": profile_data
     }), 200
 

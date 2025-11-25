@@ -27,8 +27,8 @@ class Config:
         "claude-opus-3": 200000,
     }
 
-    # Buffer for token estimation error (~1%)
-    PROFILE_CONTEXT_BUFFER = 2000
+    # Buffer for token estimation error (percentage of context window)
+    PROFILE_CONTEXT_BUFFER_PERCENT = 0.07  # 7%
 
     # Supported models configuration
     SUPPORTED_MODELS = {
