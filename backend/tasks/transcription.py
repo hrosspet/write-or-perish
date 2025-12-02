@@ -197,7 +197,12 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
 
             if filename:
                 header, _ = os.path.splitext(filename)
-                final_content = f"# {header}\n\n{transcript}"
+                # For recordings made via the app, use date/time instead of "recording"
+                if header == "recording":
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    final_content = f"# {timestamp} Voice note\n\n{transcript}"
+                else:
+                    final_content = f"# {header}\n\n{transcript}"
             else:
                 final_content = transcript
 
