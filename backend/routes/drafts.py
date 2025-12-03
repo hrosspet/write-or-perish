@@ -45,8 +45,8 @@ def get_draft():
         "content": draft.content,
         "node_id": draft.node_id,
         "parent_id": draft.parent_id,
-        "created_at": draft.created_at.isoformat(),
-        "updated_at": draft.updated_at.isoformat()
+        "created_at": draft.created_at.isoformat() + "Z",
+        "updated_at": draft.updated_at.isoformat() + "Z"
     }), 200
 
 
@@ -116,8 +116,8 @@ def save_draft():
         "content": draft.content,
         "node_id": draft.node_id,
         "parent_id": draft.parent_id,
-        "created_at": draft.created_at.isoformat(),
-        "updated_at": draft.updated_at.isoformat()
+        "created_at": draft.created_at.isoformat() + "Z",
+        "updated_at": draft.updated_at.isoformat() + "Z"
     }), 200
 
 
