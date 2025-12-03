@@ -40,12 +40,7 @@ function App() {
   }, [user]);
 
   const handleCloseModal = () => {
-    if (nodeFormRef.current && nodeFormRef.current.isDirty()) {
-      const confirmed = window.confirm("You have unsaved changes. Are you sure you want to close?");
-      if (!confirmed) {
-        return;
-      }
-    }
+    // No confirmation needed for new entries since they're auto-saved as drafts
     setShowNewEntry(false);
   };
 
