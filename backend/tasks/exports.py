@@ -14,10 +14,10 @@ logger = get_task_logger(__name__)
 
 
 # Import from export_data module
-def build_user_export_content(user, max_tokens=None):
+def build_user_export_content(user, max_tokens=None, filter_ai_usage=False):
     """Import the actual implementation from export_data routes."""
     from backend.routes.export_data import build_user_export_content as _build
-    return _build(user, max_tokens)
+    return _build(user, max_tokens, filter_ai_usage)
 
 
 class ProfileGenerationTask(Task):
@@ -75,7 +75,8 @@ def generate_user_profile(self, user_id: int, model_id: str):
             buffer_tokens = int(model_context_window * buffer_percent)
             MAX_EXPORT_TOKENS = model_context_window - prompt_tokens - buffer_tokens
 
-            user_export = build_user_export_content(user, max_tokens=MAX_EXPORT_TOKENS)
+            # Filter by AI usage to only include nodes where ai_usage is 'chat' or 'train'
+            user_export = build_user_export_content(user, max_tokens=MAX_EXPORT_TOKENS, filter_ai_usage=True)
 
             if not user_export:
                 raise ValueError("No writing found to analyze")

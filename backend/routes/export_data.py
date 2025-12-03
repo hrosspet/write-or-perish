@@ -44,7 +44,7 @@ def export_data():
         })
     return jsonify(user_data), 200
 
-def format_node_tree(node, index_path="1", processed_nodes=None):
+def format_node_tree(node, index_path="1", processed_nodes=None, filter_ai_usage=False):
     """
     Recursively format a node and its descendants into a human-readable tree structure
     using Markdown headers. Uses depth-first traversal for maximum readability.
@@ -53,6 +53,7 @@ def format_node_tree(node, index_path="1", processed_nodes=None):
         node: The Node object to format
         index_path: The hierarchical index (e.g., "1.1.2")
         processed_nodes: Set of node IDs already processed (to avoid infinite loops)
+        filter_ai_usage: If True, only include child nodes where ai_usage is 'chat' or 'train'
 
     Returns:
         str: Formatted text representation of the node tree
@@ -85,7 +86,15 @@ def format_node_tree(node, index_path="1", processed_nodes=None):
     result += "\n\n"
 
     # Process children (depth-first traversal)
-    children = sorted(node.children, key=lambda c: c.created_at)
+    # Filter children by AI usage if requested (for AI profile generation)
+    if filter_ai_usage:
+        children = sorted(
+            [c for c in node.children if c.ai_usage in ['chat', 'train']],
+            key=lambda c: c.created_at
+        )
+    else:
+        children = sorted(node.children, key=lambda c: c.created_at)
+
     for i, child in enumerate(children):
         child_index = f"{index_path}.{i+1}"
 
@@ -96,12 +105,13 @@ def format_node_tree(node, index_path="1", processed_nodes=None):
         result += format_node_tree(
             child,
             index_path=child_index,
-            processed_nodes=processed_nodes
+            processed_nodes=processed_nodes,
+            filter_ai_usage=filter_ai_usage
         )
 
     return result
 
-def build_user_export_content(user, max_tokens=None):
+def build_user_export_content(user, max_tokens=None, filter_ai_usage=False):
     """
     Core export logic: Build a human-readable text export of all threads for a given user.
 
@@ -109,15 +119,23 @@ def build_user_export_content(user, max_tokens=None):
         user: User object to export threads for
         max_tokens: Optional maximum token count. If provided, only includes most recent
                    threads that fit within this limit.
+        filter_ai_usage: If True, only include nodes where ai_usage is 'chat' or 'train'.
+                        Use True for AI profile generation, False for user data export.
 
     Returns:
         str: Formatted export content, or None if no threads found
     """
     # Get all top-level nodes (threads) created by the user, ordered by most recent first
-    all_top_level_nodes = Node.query.filter_by(
+    query = Node.query.filter_by(
         user_id=user.id,
         parent_id=None
-    ).order_by(Node.created_at.desc()).all()
+    )
+
+    # Only filter by AI usage if requested (for AI profile generation)
+    if filter_ai_usage:
+        query = query.filter(Node.ai_usage.in_(['chat', 'train']))
+
+    all_top_level_nodes = query.order_by(Node.created_at.desc()).all()
 
     if not all_top_level_nodes:
         return None
@@ -132,7 +150,7 @@ def build_user_export_content(user, max_tokens=None):
 
         for node in all_top_level_nodes:
             # Format the thread to estimate its token count
-            thread_text = format_node_tree(node, index_path=str(len(top_level_nodes) + 1))
+            thread_text = format_node_tree(node, index_path=str(len(top_level_nodes) + 1), filter_ai_usage=filter_ai_usage)
             thread_tokens = approximate_token_count(thread_text)
 
             # Add overhead for thread header (approx 20 tokens)
@@ -175,7 +193,7 @@ def build_user_export_content(user, max_tokens=None):
         export_lines.append("")
 
         # Format the entire thread tree (depth-first traversal)
-        thread_text = format_node_tree(node, index_path=str(thread_num))
+        thread_text = format_node_tree(node, index_path=str(thread_num), filter_ai_usage=filter_ai_usage)
         export_lines.append(thread_text)
 
         export_lines.append("---")
@@ -283,7 +301,8 @@ def estimate_profile_tokens():
     MAX_EXPORT_TOKENS = model_context_window - prompt_tokens - buffer_tokens
 
     # Use the core export logic to get user's writing (with token limit)
-    user_export = build_user_export_content(current_user, max_tokens=MAX_EXPORT_TOKENS)
+    # Filter by AI usage to only include nodes where ai_usage is 'chat' or 'train'
+    user_export = build_user_export_content(current_user, max_tokens=MAX_EXPORT_TOKENS, filter_ai_usage=True)
 
     if not user_export:
         return jsonify({

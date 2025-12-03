@@ -214,21 +214,26 @@ function NodeDetail() {
         />
         <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px' }}>
           <button onClick={() => setShowChildFormOverlay(true)}>Add Text</button>
-          <button onClick={handleLLMResponse} disabled={!!llmTaskNodeId}>
-            {llmTaskNodeId && llmStatus === 'processing' && llmProgress > 0
-              ? `Generating... ${llmProgress}%`
-              : llmTaskNodeId && llmStatus === 'pending'
-              ? "Waiting for AI..."
-              : llmTaskNodeId
-              ? "Generating..."
-              : "LLM Response"}
-          </button>
-          {/* Model selector dropdown */}
-          <ModelSelector
-            nodeId={node.id}
-            selectedModel={selectedModel}
-            onModelChange={setSelectedModel}
-          />
+          {/* Only show LLM Response button and model selector if AI usage allows it */}
+          {node.ai_usage !== 'none' && (
+            <>
+              <button onClick={handleLLMResponse} disabled={!!llmTaskNodeId}>
+                {llmTaskNodeId && llmStatus === 'processing' && llmProgress > 0
+                  ? `Generating... ${llmProgress}%`
+                  : llmTaskNodeId && llmStatus === 'pending'
+                  ? "Waiting for AI..."
+                  : llmTaskNodeId
+                  ? "Generating..."
+                  : "LLM Response"}
+              </button>
+              {/* Model selector dropdown */}
+              <ModelSelector
+                nodeId={node.id}
+                selectedModel={selectedModel}
+                onModelChange={setSelectedModel}
+              />
+            </>
+          )}
           {isOwner && <button onClick={() => setShowEditOverlay(true)}>Edit</button>}
           {isOwner && <button onClick={handleDelete}>Delete</button>}
           {/* Speaker icon for audio playback */}
