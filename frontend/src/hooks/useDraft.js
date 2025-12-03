@@ -90,14 +90,7 @@ export function useDraft(options = {}) {
       // Parse server timestamp as UTC (append Z if missing)
       const timestamp = response.data.updated_at;
       const utcTimestamp = timestamp.endsWith('Z') ? timestamp : timestamp + 'Z';
-      const parsedDate = new Date(utcTimestamp);
-      console.log('[DEBUG] Save response:', {
-        timestamp_raw: timestamp,
-        timestamp_withZ: utcTimestamp,
-        parsed: parsedDate.toISOString(),
-        now: new Date().toISOString()
-      });
-      setLastSaved(parsedDate);
+      setLastSaved(new Date(utcTimestamp));
       pendingContentRef.current = null;
     } catch (err) {
       console.error('Error saving draft:', err);
