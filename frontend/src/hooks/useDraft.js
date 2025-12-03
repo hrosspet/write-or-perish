@@ -86,7 +86,10 @@ export function useDraft(options = {}) {
         node_id: nodeId,
         parent_id: parentId
       });
-      setDraft(response.data);
+      // Only update draft state on initial load, not on every save
+      // This prevents unnecessary re-renders that cause cursor jumping
+      // setDraft(response.data);
+
       // Parse server timestamp as UTC (append Z if missing)
       const timestamp = response.data.updated_at;
       const utcTimestamp = timestamp.endsWith('Z') ? timestamp : timestamp + 'Z';
