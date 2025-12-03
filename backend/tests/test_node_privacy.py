@@ -2,11 +2,11 @@
 
 import pytest
 import sys
-import os
 from unittest.mock import MagicMock
 
-# Import directly to avoid full backend initialization
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+# Mock flask_login before any backend imports
+sys.modules['flask_login'] = MagicMock()
+
 from backend.utils.privacy import PrivacyLevel, AIUsage
 
 

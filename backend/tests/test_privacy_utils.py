@@ -2,21 +2,13 @@
 
 import pytest
 import sys
-import os
 from unittest.mock import MagicMock, patch
-from importlib.util import spec_from_file_location, module_from_spec
 
-# Import the privacy module directly without triggering backend __init__
-privacy_file = os.path.join(os.path.dirname(__file__), '..', 'utils', 'privacy.py')
-spec = spec_from_file_location("privacy", privacy_file)
-privacy = module_from_spec(spec)
-sys.modules['backend.utils.privacy'] = privacy
+# Mock flask_login before any backend imports
+mock_flask_login = MagicMock()
+sys.modules['flask_login'] = mock_flask_login
 
-# Mock flask_login before executing the module
-sys.modules['flask_login'] = MagicMock()
-spec.loader.exec_module(privacy)
-
-# Now we can import from it
+# Now we can safely import from backend
 from backend.utils.privacy import (
     PrivacyLevel,
     AIUsage,
