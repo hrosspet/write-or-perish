@@ -84,7 +84,8 @@ export function useDraft(options = {}) {
         parent_id: parentId
       });
       setDraft(response.data);
-      setLastSaved(new Date());
+      // Use server's timestamp for consistency
+      setLastSaved(new Date(response.data.updated_at));
       pendingContentRef.current = null;
     } catch (err) {
       console.error('Error saving draft:', err);
