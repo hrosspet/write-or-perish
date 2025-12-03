@@ -47,7 +47,7 @@ These technical capabilities are production-ready and form the foundation:
 
 ### Privacy & Encryption Infrastructure
 
-**Node visibility levels and access control** - Add privacy_level column (private/private_ai/training/circles/public) with API enforcement to control who can read each node
+✅ **Node visibility levels and access control** - COMPLETED: Added privacy_level column (private/circles/public) and ai_usage column (none/chat/train) with API enforcement to control who can read each node
 
 **Application-level encryption with GCP KMS** - Encrypt all node content at rest using Cloud KMS, transparently decrypt on authorized access
 
@@ -61,7 +61,7 @@ These technical capabilities are production-ready and form the foundation:
 
 **API token system (JWT)** - Replace session-only auth with JWT tokens for mobile apps, external integrations, and API access with refresh token rotation
 
-**Fine-grained permission system** - Authorization layer checking "can user X access node Y?" based on visibility level, circles membership, and sharing rules
+✅ **Fine-grained permission system** - COMPLETED: Authorization layer with `can_user_access_node()`, `can_ai_use_node_for_chat()`, and `can_ai_use_node_for_training()` functions
 
 **OAuth integration framework** - Reusable OAuth client for Twitter, LinkedIn, Substack, GitHub with token storage and refresh handling
 
@@ -282,13 +282,19 @@ Based on current project state, dependencies, and strategic value, here's the re
 10. ✅ **Frontend integration**:
     - NodeForm: Privacy selector for text nodes, voice recordings, and file uploads
     - Dashboard: Privacy selector for user profile editing
+    - NodeDetail: Conditionally hide LLM Response button when ai_usage='none' (#38)
 11. ✅ **Tests** - Comprehensive unit tests for privacy validation, authorization, and AI usage checks (backend/tests/)
+12. ✅ **Profile generation filtering** - Only include nodes with ai_usage='chat' or 'train' in AI-generated profiles, while user data exports include all nodes (#37)
+
+### Remaining Tasks (Still Blocking):
+
+- ⚠️ **Separate API keys for chat vs train** - Use different OpenAI/Anthropic API keys based on node ai_usage setting to ensure proper separation of training data (#39)
 
 ### NOT Implemented (Future Work):
 
 - **GCP KMS encryption** - Content not yet encrypted at rest (can be added later without breaking changes)
 - **Email infrastructure** - Not yet implemented (SendGrid/AWS SES)
-- **Circles implementation** - Privacy level exists but circles functionality not yet built
+- **Circles implementation** - Privacy level exists but circles functionality not yet built (moved to Phase 4)
 
 **Deliverable:** Two-column privacy system for Nodes and UserProfiles with authorization enforcement and comprehensive tests
 
@@ -390,7 +396,9 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 **Priority: Build sharing infrastructure without external platform complexity**
 
-33. **Circles data model and management** - Create Circle model with membership, privacy-aware share targeting
+**Note:** This phase includes Circles implementation, which was deferred from Phase -1 as it's not blocking for basic privacy functionality.
+
+33. **Circles data model and management** - Create Circle model with membership, privacy-aware share targeting (implements the 'circles' privacy level from Phase -1)
 34. **Content analysis pipeline** - LLM-based shareability scoring and insight extraction (only analyzes training/public nodes unless user opts in)
 35. **Privacy analysis system** - Detect sensitive information and flag risks before sharing
 36. **Share approval workflow** - State machine for suggested/approved/published status with audit trail
