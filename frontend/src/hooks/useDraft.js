@@ -84,6 +84,13 @@ export function useDraft(options = {}) {
         parent_id: parentId
       });
       setDraft(response.data);
+      // Debug: log timestamps
+      console.log('Draft save response:', {
+        updated_at_raw: response.data.updated_at,
+        updated_at_parsed: new Date(response.data.updated_at),
+        now: new Date(),
+        diff_ms: new Date() - new Date(response.data.updated_at)
+      });
       // Use server's timestamp for consistency
       setLastSaved(new Date(response.data.updated_at));
       pendingContentRef.current = null;
