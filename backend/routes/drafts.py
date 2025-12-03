@@ -111,13 +111,19 @@ def save_draft():
 
     db.session.commit()
 
+    # Refresh to get the updated timestamp from database
+    db.session.refresh(draft)
+
+    updated_at_str = draft.updated_at.isoformat() + "Z"
+    print(f"[DEBUG] Returning updated_at: {updated_at_str}")
+
     return jsonify({
         "id": draft.id,
         "content": draft.content,
         "node_id": draft.node_id,
         "parent_id": draft.parent_id,
         "created_at": draft.created_at.isoformat() + "Z",
-        "updated_at": draft.updated_at.isoformat() + "Z"
+        "updated_at": updated_at_str
     }), 200
 
 

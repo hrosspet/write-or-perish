@@ -44,7 +44,10 @@ export function useDraft(options = {}) {
         const params = buildParams();
         const response = await api.get(`/drafts/?${params}`);
         setDraft(response.data);
-        setLastSaved(new Date(response.data.updated_at));
+        // Parse server timestamp as UTC (append Z if missing)
+        const timestamp = response.data.updated_at;
+        const utcTimestamp = timestamp.endsWith('Z') ? timestamp : timestamp + 'Z';
+        setLastSaved(new Date(utcTimestamp));
         setLoadError(null);
       } catch (err) {
         if (err.response?.status === 404) {
@@ -84,15 +87,17 @@ export function useDraft(options = {}) {
         parent_id: parentId
       });
       setDraft(response.data);
-      // Debug: log timestamps
-      console.log('Draft save response:', {
-        updated_at_raw: response.data.updated_at,
-        updated_at_parsed: new Date(response.data.updated_at),
-        now: new Date(),
-        diff_ms: new Date() - new Date(response.data.updated_at)
+      // Parse server timestamp as UTC (append Z if missing)
+      const timestamp = response.data.updated_at;
+      const utcTimestamp = timestamp.endsWith('Z') ? timestamp : timestamp + 'Z';
+      const parsedDate = new Date(utcTimestamp);
+      console.log('[DEBUG] Save response:', {
+        timestamp_raw: timestamp,
+        timestamp_withZ: utcTimestamp,
+        parsed: parsedDate.toISOString(),
+        now: new Date().toISOString()
       });
-      // Use server's timestamp for consistency
-      setLastSaved(new Date(response.data.updated_at));
+      setLastSaved(parsedDate);
       pendingContentRef.current = null;
     } catch (err) {
       console.error('Error saving draft:', err);
