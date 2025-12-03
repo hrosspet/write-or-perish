@@ -55,10 +55,15 @@ jobs:
 
           # Execute deployment script on VM
           ssh -i ~/.ssh/deploy_key $VM_USER@$VM_HOST << 'ENDSSH'
+            set -e  # Exit immediately if any command fails
             cd /home/hrosspet/write-or-perish
 
             # Pull latest backend code
-            git pull origin main
+            echo "Pulling latest code from main branch..."
+            git pull origin main || {
+              echo "ERROR: git pull failed. Check for untracked files or merge conflicts."
+              exit 1
+            }
 
             # Replace frontend build
             rm -rf frontend/build
