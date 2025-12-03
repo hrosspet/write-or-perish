@@ -344,6 +344,8 @@ function NodeDetail() {
               editMode={true}
               nodeId={node.id}
               initialContent={node.content}
+              initialPrivacyLevel={node.privacy_level}
+              initialAiUsage={node.ai_usage}
               onSuccess={(data) => {
                 setNode(data.node ? data.node : { ...node, content: data.content });
                 setShowEditOverlay(false);

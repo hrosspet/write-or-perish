@@ -9,7 +9,7 @@ import { uploadFileInChunks } from "../utils/chunkedUpload";
 
 const NodeForm = forwardRef(
   (
-    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId },
+    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage },
     ref
   ) => {
     const [content, setContent] = useState(initialContent || "");
@@ -20,9 +20,9 @@ const NodeForm = forwardRef(
     const [isUploading, setIsUploading] = useState(false);
     const [hasDraft, setHasDraft] = useState(false);
 
-    // Privacy settings state
-    const [privacyLevel, setPrivacyLevel] = useState("private");
-    const [aiUsage, setAiUsage] = useState("none");
+    // Privacy settings state - use initial values if provided (edit mode), otherwise defaults
+    const [privacyLevel, setPrivacyLevel] = useState(initialPrivacyLevel || "private");
+    const [aiUsage, setAiUsage] = useState(initialAiUsage || "none");
 
     // Draft auto-save hook
     const {
