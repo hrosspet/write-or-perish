@@ -99,6 +99,31 @@ class NodeVersion(db.Model):
     # Optional backreference, if you need to access versions from a Node instance:
     node = db.relationship("Node", backref="versions")
 
+class Draft(db.Model):
+    """
+    Temporary storage for auto-saved drafts.
+    Drafts are private - only visible to the user who created them.
+    Deleted when the user saves or discards their work.
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    # The user who owns this draft
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    # If editing an existing node, store its ID; null for new node drafts
+    node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True)
+    # Parent node ID for new node creation drafts
+    parent_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True)
+    # The draft content
+    content = db.Column(db.Text, nullable=False, default="")
+    # Timestamps
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    user = db.relationship("User", backref="drafts")
+    node = db.relationship("Node", foreign_keys=[node_id])
+    parent = db.relationship("Node", foreign_keys=[parent_id])
+
+
 class UserProfile(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     # Which user this profile belongs to

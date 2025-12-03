@@ -1,6 +1,7 @@
-import React, { useState, forwardRef, useImperativeHandle, useEffect } from "react";
+import React, { useState, forwardRef, useImperativeHandle, useEffect, useCallback } from "react";
 import { useMediaRecorder } from "../hooks/useMediaRecorder";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
+import { useDraft } from "../hooks/useDraft";
 import MicButton from "./MicButton";
 import api from "../api";
 import { uploadFileInChunks } from "../utils/chunkedUpload";
@@ -16,6 +17,20 @@ const NodeForm = forwardRef(
     const [uploadedNodeId, setUploadedNodeId] = useState(null);
     const [uploadProgress, setUploadProgress] = useState(0);
     const [isUploading, setIsUploading] = useState(false);
+    const [showDraftRecovery, setShowDraftRecovery] = useState(false);
+
+    // Draft auto-save hook
+    const {
+      draft,
+      isLoaded: isDraftLoaded,
+      saveDraft,
+      deleteDraft,
+      lastSaved,
+      isSaving: isDraftSaving
+    } = useDraft({
+      nodeId: editMode ? nodeId : null,
+      parentId: editMode ? null : parentId
+    });
 
     // Audio recording state
     const {
@@ -43,6 +58,30 @@ const NodeForm = forwardRef(
       { enabled: false }
     );
 
+    // Show draft recovery dialog when a draft is loaded
+    useEffect(() => {
+      if (isDraftLoaded && draft && draft.content) {
+        // Only show recovery if draft content differs from initial content
+        const draftDiffersFromInitial = draft.content !== (initialContent || "");
+        if (draftDiffersFromInitial) {
+          setShowDraftRecovery(true);
+        }
+      }
+    }, [isDraftLoaded, draft, initialContent]);
+
+    // Handle draft recovery
+    const handleRecoverDraft = useCallback(() => {
+      if (draft && draft.content) {
+        setContent(draft.content);
+      }
+      setShowDraftRecovery(false);
+    }, [draft]);
+
+    const handleDiscardDraft = useCallback(() => {
+      deleteDraft();
+      setShowDraftRecovery(false);
+    }, [deleteDraft]);
+
     // Auto-start polling when uploadedNodeId is set
     useEffect(() => {
       if (uploadedNodeId) {
@@ -54,6 +93,8 @@ const NodeForm = forwardRef(
     useEffect(() => {
       if (transcriptionStatus === 'completed' && transcriptionData) {
         setLoading(false);
+        // Delete draft after successful transcription
+        deleteDraft();
         const normalizedData = { ...transcriptionData, id: transcriptionData.node_id };
         onSuccess(normalizedData);
         setUploadedNodeId(null);
@@ -62,7 +103,7 @@ const NodeForm = forwardRef(
         setError(transcriptionError || 'Transcription failed');
         setUploadedNodeId(null);
       }
-    }, [transcriptionStatus, transcriptionData, transcriptionError, onSuccess]);
+    }, [transcriptionStatus, transcriptionData, transcriptionError, onSuccess, deleteDraft]);
 
     const handleFileSelect = (event) => {
       const file = event.target.files[0];
@@ -168,6 +209,8 @@ const NodeForm = forwardRef(
           // Create a new text node
           response = await api.post("/nodes/", { content, parent_id: parentId });
         }
+        // Delete draft after successful save
+        deleteDraft();
         onSuccess(response.data);
         setLoading(false);
       } catch (err) {
@@ -184,13 +227,78 @@ const NodeForm = forwardRef(
       isDirty: () => content.trim().length > 0 || mediaBlob || uploadedFile,
     }));
 
+    // Format time ago for last saved indicator
+    const formatTimeAgo = (date) => {
+      if (!date) return '';
+      const seconds = Math.floor((new Date() - date) / 1000);
+      if (seconds < 60) return 'just now';
+      const minutes = Math.floor(seconds / 60);
+      if (minutes < 60) return `${minutes}m ago`;
+      const hours = Math.floor(minutes / 60);
+      return `${hours}h ago`;
+    };
+
     return (
       <form onSubmit={handleSubmit}>
+        {/* Draft recovery dialog */}
+        {showDraftRecovery && (
+          <div style={{
+            padding: '12px',
+            marginBottom: '12px',
+            backgroundColor: '#fff3cd',
+            border: '1px solid #ffc107',
+            borderRadius: '4px'
+          }}>
+            <div style={{ marginBottom: '8px', fontWeight: 'bold' }}>
+              Unsaved draft found
+            </div>
+            <div style={{ marginBottom: '8px', fontSize: '0.9em', color: '#666' }}>
+              You have an unsaved draft from {draft?.updated_at ? new Date(draft.updated_at).toLocaleString() : 'earlier'}.
+              Would you like to recover it?
+            </div>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button
+                type="button"
+                onClick={handleRecoverDraft}
+                style={{
+                  padding: '6px 12px',
+                  backgroundColor: '#28a745',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: 'pointer'
+                }}
+              >
+                Recover Draft
+              </button>
+              <button
+                type="button"
+                onClick={handleDiscardDraft}
+                style={{
+                  padding: '6px 12px',
+                  backgroundColor: '#dc3545',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: 'pointer'
+                }}
+              >
+                Discard
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Text entry */}
         <textarea
           value={content}
           onChange={(e) => {
-            setContent(e.target.value);
+            const newContent = e.target.value;
+            setContent(newContent);
+            // Auto-save draft when user types
+            if (newContent.trim()) {
+              saveDraft(newContent);
+            }
             // Discard recording or uploaded file if user types
             if (!editMode) {
               if (recStatus !== 'idle') {
@@ -207,6 +315,28 @@ const NodeForm = forwardRef(
           disabled={!editMode && (recStatus === 'recording' || uploadedFile)}
         />
         {error && <div style={{ color: "red" }}>{error}</div>}
+
+        {/* Auto-save status indicator */}
+        {content.trim() && (
+          <div style={{
+            marginTop: '4px',
+            fontSize: '0.85em',
+            color: '#666',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '4px'
+          }}>
+            {isDraftSaving ? (
+              <>
+                <span style={{ color: '#ffc107' }}>Saving...</span>
+              </>
+            ) : lastSaved ? (
+              <>
+                <span style={{ color: '#28a745' }}>Draft saved {formatTimeAgo(lastSaved)}</span>
+              </>
+            ) : null}
+          </div>
+        )}
 
         {/* Display uploaded file info */}
         {uploadedFile && (

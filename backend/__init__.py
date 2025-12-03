@@ -124,6 +124,9 @@ def create_app():
     from backend.routes.profile import profile_bp
     app.register_blueprint(profile_bp, url_prefix="/api/profile")
 
+    from backend.routes.drafts import drafts_bp
+    app.register_blueprint(drafts_bp, url_prefix="/api/drafts")
+
     # --------------------------------------------------------------------
     # Voice‑mode media blueprint – serves audio files in dev & tests.
     # --------------------------------------------------------------------
