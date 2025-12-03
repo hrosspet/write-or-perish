@@ -6,6 +6,14 @@ from pathlib import Path
 
 from flask import Blueprint
 
+# Privacy utilities
+from backend.utils.privacy import (
+    validate_privacy_level,
+    validate_ai_usage,
+    PrivacyLevel,
+    AIUsage
+)
+
 profile_bp = Blueprint("profile", __name__)
 
 AUDIO_STORAGE_ROOT = "data/audio"
@@ -136,6 +144,19 @@ def update_profile(profile_id):
 
     profile.content = new_content
 
+    # Handle privacy settings updates (optional)
+    if "privacy_level" in data:
+        privacy_level = data["privacy_level"]
+        if not validate_privacy_level(privacy_level):
+            return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
+        profile.privacy_level = privacy_level
+
+    if "ai_usage" in data:
+        ai_usage = data["ai_usage"]
+        if not validate_ai_usage(ai_usage):
+            return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
+        profile.ai_usage = ai_usage
+
     try:
         db.session.commit()
         return jsonify({
@@ -145,7 +166,9 @@ def update_profile(profile_id):
                 "content": profile.content,
                 "generated_by": profile.generated_by,
                 "tokens_used": profile.tokens_used,
-                "created_at": profile.created_at.isoformat()
+                "created_at": profile.created_at.isoformat(),
+                "privacy_level": profile.privacy_level,
+                "ai_usage": profile.ai_usage
             }
         }), 200
     except Exception as e:

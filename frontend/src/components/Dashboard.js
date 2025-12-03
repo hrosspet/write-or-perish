@@ -6,6 +6,7 @@ import DashboardContent from "./DashboardContent";
 import Bubble from "./Bubble";
 import ModelSelector from "./ModelSelector";
 import SpeakerIcon from "./SpeakerIcon";
+import PrivacySelector from "./PrivacySelector";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 
 function Dashboard() {
@@ -17,6 +18,8 @@ function Dashboard() {
   // For profile editing—only allowed for your own dashboard.
   const [editingProfile, setEditingProfile] = useState(false);
   const [editProfileContent, setEditProfileContent] = useState("");
+  const [profilePrivacyLevel, setProfilePrivacyLevel] = useState("private");
+  const [profileAiUsage, setProfileAiUsage] = useState("chat");
 
   // For AI profile generation
   const [selectedModel, setSelectedModel] = useState(null);
@@ -71,7 +74,11 @@ function Dashboard() {
 
     if (profileId) {
       // Update existing profile
-      api.put(`/profile/${profileId}`, { content: editProfileContent })
+      api.put(`/profile/${profileId}`, {
+        content: editProfileContent,
+        privacy_level: profilePrivacyLevel,
+        ai_usage: profileAiUsage
+      })
         .then((response) => {
           setDashboardData({
             ...dashboardData,
@@ -85,7 +92,11 @@ function Dashboard() {
         });
     } else {
       // Create new profile (user-generated)
-      api.post("/export/create_profile", { content: editProfileContent })
+      api.post("/export/create_profile", {
+        content: editProfileContent,
+        privacy_level: profilePrivacyLevel,
+        ai_usage: profileAiUsage
+      })
         .then((response) => {
           setDashboardData({
             ...dashboardData,
@@ -505,6 +516,8 @@ function Dashboard() {
                   onClick={() => {
                     setEditingProfile(true);
                     setEditProfileContent(dashboardData.latest_profile?.content || "");
+                    setProfilePrivacyLevel(dashboardData.latest_profile?.privacy_level || "private");
+                    setProfileAiUsage(dashboardData.latest_profile?.ai_usage || "chat");
                   }}
                   style={{
                     backgroundColor: "#2a5a7a",
@@ -547,6 +560,12 @@ function Dashboard() {
                     lineHeight: "1.6"
                   }}
                   placeholder="Write your profile here..."
+                />
+                <PrivacySelector
+                  privacyLevel={profilePrivacyLevel}
+                  aiUsage={profileAiUsage}
+                  onPrivacyChange={setProfilePrivacyLevel}
+                  onAIUsageChange={setProfileAiUsage}
                 />
                 <div style={{ display: "flex", gap: "10px", marginTop: "10px" }}>
                   <button

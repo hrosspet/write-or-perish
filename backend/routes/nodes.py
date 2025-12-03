@@ -11,6 +11,15 @@ from werkzeug.utils import secure_filename
 import pathlib
 from pydub import AudioSegment
 import tempfile
+# Privacy utilities
+from backend.utils.privacy import (
+    validate_privacy_level,
+    validate_ai_usage,
+    get_default_privacy_settings,
+    can_user_access_node,
+    PrivacyLevel,
+    AIUsage
+)
 
 # ---------------------------------------------------------------------------
 # Voice‑Mode helpers
@@ -353,6 +362,16 @@ def create_node():
         parent_id = request.form.get("parent_id")
         node_type = request.form.get("node_type", "user")
 
+        # Get privacy settings from form data (with defaults)
+        privacy_level = request.form.get("privacy_level", PrivacyLevel.PRIVATE)
+        ai_usage = request.form.get("ai_usage", AIUsage.NONE)
+
+        # Validate privacy settings
+        if not validate_privacy_level(privacy_level):
+            return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
+        if not validate_ai_usage(ai_usage):
+            return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
+
         # Placeholder content until transcription is ready.
         placeholder_text = "[Voice note – transcription pending]"
 
@@ -361,7 +380,9 @@ def create_node():
             parent_id=parent_id,
             node_type=node_type,
             content=placeholder_text,
-            transcription_status='pending'  # Set initial status
+            transcription_status='pending',  # Set initial status
+            privacy_level=privacy_level,
+            ai_usage=ai_usage
         )
         db.session.add(node)
         db.session.commit()  # Need node.id for the file path.
@@ -411,12 +432,25 @@ def create_node():
     parent_id = data.get("parent_id")  # May be None for a root node.
     node_type = data.get("node_type", "user")  # default is "user"
     linked_node_id = data.get("linked_node_id")  # For linked nodes
+
+    # Get privacy settings from request data (with defaults)
+    privacy_level = data.get("privacy_level", PrivacyLevel.PRIVATE)
+    ai_usage = data.get("ai_usage", AIUsage.NONE)
+
+    # Validate privacy settings
+    if not validate_privacy_level(privacy_level):
+        return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
+    if not validate_ai_usage(ai_usage):
+        return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
+
     node = Node(
         user_id=current_user.id,
         parent_id=parent_id,
         node_type=node_type,
         content=content,
         linked_node_id=linked_node_id,
+        privacy_level=privacy_level,
+        ai_usage=ai_usage
     )
     db.session.add(node)
     try:
@@ -432,9 +466,11 @@ def create_node():
         "linked_node_id": node.linked_node_id,
         "created_at": node.created_at.isoformat(),
         "username": current_user.username,
+        "privacy_level": node.privacy_level,
+        "ai_usage": node.ai_usage
     }), 201
 
-# Update (edit) a node. (The node’s prior content is saved in NodeVersion.)
+# Update (edit) a node. (The node's prior content is saved in NodeVersion.)
 @nodes_bp.route("/<int:node_id>", methods=["PUT"])
 @login_required
 def update_node(node_id):
@@ -445,6 +481,20 @@ def update_node(node_id):
     new_content = data.get("content")
     if new_content is None:
         return jsonify({"error": "Content required for update"}), 400
+
+    # Handle privacy settings updates (optional)
+    if "privacy_level" in data:
+        privacy_level = data["privacy_level"]
+        if not validate_privacy_level(privacy_level):
+            return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
+        node.privacy_level = privacy_level
+
+    if "ai_usage" in data:
+        ai_usage = data["ai_usage"]
+        if not validate_ai_usage(ai_usage):
+            return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
+        node.ai_usage = ai_usage
+
     # Save the current version before update.
     version = NodeVersion(node_id=node.id, content=node.content)
     db.session.add(version)
@@ -463,6 +513,10 @@ def update_node(node_id):
 @login_required
 def get_node(node_id):
     node = Node.query.get_or_404(node_id)
+
+    # Check if user has permission to access this node
+    if not can_user_access_node(node, current_user.id):
+        return jsonify({"error": "Not authorized to access this node"}), 403
 
     # Compute descendant counts once for the entire subtree.
     compute_descendant_counts(node)
@@ -498,6 +552,9 @@ def get_node(node_id):
         },
         # Include parent user ID for LLM nodes (so frontend can check delete permission)
         "parent_user_id": node.parent.user_id if node.parent else None,
+        # Privacy settings
+        "privacy_level": node.privacy_level,
+        "ai_usage": node.ai_usage
     }
     return jsonify(node_data), 200
 
@@ -937,6 +994,10 @@ def init_chunked_upload():
     parent_id = data.get("parent_id")
     node_type = data.get("node_type", "user")
 
+    # Get privacy settings (with defaults)
+    privacy_level = data.get("privacy_level", PrivacyLevel.PRIVATE)
+    ai_usage = data.get("ai_usage", AIUsage.NONE)
+
     # Validate required fields
     if not all([filename, filesize, total_chunks, upload_id]):
         return jsonify({"error": "Missing required fields"}), 400
@@ -949,6 +1010,12 @@ def init_chunked_upload():
     if filesize > MAX_AUDIO_BYTES:
         return jsonify({"error": "File too large"}), 413
 
+    # Validate privacy settings
+    if not validate_privacy_level(privacy_level):
+        return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
+    if not validate_ai_usage(ai_usage):
+        return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
+
     # Create placeholder node
     placeholder_text = "[Voice note – upload in progress]"
     node = Node(
@@ -956,7 +1023,9 @@ def init_chunked_upload():
         parent_id=parent_id,
         node_type=node_type,
         content=placeholder_text,
-        transcription_status='pending'
+        transcription_status='pending',
+        privacy_level=privacy_level,
+        ai_usage=ai_usage
     )
     db.session.add(node)
     db.session.commit()

@@ -39,8 +39,20 @@ class Node(db.Model):
     llm_model = db.Column(db.String(64), nullable=True)
     content = db.Column(db.Text, nullable=False)
     token_count = db.Column(db.Integer, nullable=True)
-    # NEW: distributed_tokens will hold the portion of an LLM response allocated to this node’s author.
+    # NEW: distributed_tokens will hold the portion of an LLM response allocated to this node's author.
     distributed_tokens = db.Column(db.Integer, nullable=False, default=0)
+
+    # Privacy level: controls who can access this node
+    # - private: Only the owner can read (default for new nodes)
+    # - circles: Shared with specific user-defined groups (future feature)
+    # - public: Visible to all users
+    privacy_level = db.Column(db.String(16), nullable=False, default="private")
+
+    # AI usage permission: controls how AI can use this node's content
+    # - none: No AI usage allowed
+    # - chat: AI can use for generating responses (not for training)
+    # - train: AI can use for training data
+    ai_usage = db.Column(db.String(16), nullable=False, default="none")
 
     # -------------------------- Voice‑Mode columns ---------------------------
     # If the user recorded audio while creating this node, the file is stored
@@ -135,6 +147,14 @@ class UserProfile(db.Model):
     # Number of tokens used to generate this profile (0 if user-written)
     tokens_used = db.Column(db.Integer, nullable=False, default=0)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    # Privacy level: controls who can access this profile
+    # Default for profiles is 'private' (only owner can see)
+    privacy_level = db.Column(db.String(16), nullable=False, default="private")
+
+    # AI usage permission: controls how AI can use this profile's content
+    # Default for profiles is 'chat' (AI can use for responses)
+    ai_usage = db.Column(db.String(16), nullable=False, default="chat")
 
     # --- Voice‑Mode fields ---
     audio_tts_url = db.Column(db.String, nullable=True)
