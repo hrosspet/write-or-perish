@@ -253,46 +253,61 @@ These technical capabilities are production-ready and form the foundation:
 
 Based on current project state, dependencies, and strategic value, here's the recommended build sequence:
 
-### Phase -1: Privacy & Encryption Infrastructure (Weeks 1-3) 🔒
+### Phase -1: Privacy & Encryption Infrastructure (Weeks 1-3) 🔒 ✅ **COMPLETED**
 
 **Priority: BLOCKING - Must be done first before building sharing/marketplace features**
 
+**Status: COMPLETED** - Two-column privacy system implemented for both Nodes and UserProfiles
+
 **Why first:** Currently all nodes are public. Features 3 (Upload) and 4 (Intention Market) require granular privacy controls. Retrofitting privacy after building on public-only architecture would require rebuilding everything. This is a one-time breaking change that must happen now.
 
-**Encryption Strategy:** Application-level encryption using GCP KMS (pragmatic approach)
-- Journals encrypted at rest in DB using GCP KMS
-- Embeddings generated server-side from plaintext, stored in private vector index
-- Strict user_id isolation for all queries
-- No per-user key management complexity
+**Implementation Decision:** Two-column approach (more flexible than original 5-level design)
+- Column 1: `privacy_level` - Who can access (private/circles/public)
+- Column 2: `ai_usage` - How AI can use content (none/chat/train)
+- This provides clearer separation of concerns and more flexibility
 
-1. **Node privacy level schema migration** - Add privacy_level column (private/private_ai/training/circles/public) to Node model
-2. **GCP KMS integration** - Set up Cloud KMS with key ring and crypto key for application-level encryption/decryption
-3. **Application-level encryption service** - Python service to encrypt/decrypt node content using GCP KMS before DB storage
-4. **Automatic encryption on save** - Hook into node creation/update to transparently encrypt content field before PostgreSQL insert
-5. **Automatic decryption on read** - Hook into node retrieval to transparently decrypt content field after PostgreSQL query
-6. **Fine-grained permission system** - Authorization decorator checking visibility + circles membership + user_id before returning nodes from API
-7. **Embedding generation with user isolation** - Store embeddings in pgvector with user_id, always filter queries by user_id + visibility level
-8. **Data migration script for existing nodes** - Set all existing nodes to privacy_level='training', encrypt existing content using KMS, notify users
-9. **Email infrastructure for account management** - SendGrid/AWS SES integration for notifications and future password reset
-10. **API endpoints for privacy management** - Update node creation/edit to include privacy_level, bulk privacy change endpoint
-11. **Frontend privacy UI** - Privacy selector on node creation/edit, visual indicators of privacy level, onboarding flow with clear promises
-12. **Tests for encryption and authorization** - Unit tests for KMS encrypt/decrypt, permission checks, user_id isolation in queries
+### Completed Items:
 
-**Deliverable:** All nodes encrypted at rest with GCP KMS, 5 privacy levels, strict user_id isolation for embeddings, fine-grained access control
+1. ✅ **Node privacy schema** - Added `privacy_level` and `ai_usage` columns to Node model
+2. ✅ **UserProfile privacy schema** - Added `privacy_level` and `ai_usage` columns to UserProfile model
+3. ✅ **Privacy utilities module** - Created enums, validation functions, and authorization checks (backend/utils/privacy.py)
+4. ✅ **Fine-grained permission system** - `can_user_access_node()` checks privacy level and ownership
+5. ✅ **AI usage permissions** - `can_ai_use_node_for_chat()` and `can_ai_use_node_for_training()` functions
+6. ✅ **API endpoints for privacy** - Updated all Node and UserProfile creation/edit endpoints to accept and validate privacy settings
+7. ✅ **Authorization enforcement** - GET /nodes/<id> enforces privacy with authorization check
+8. ✅ **Data migration scripts**:
+   - `backend/scripts/migrate_privacy_settings.py` - Migrates existing nodes to privacy='private', ai_usage='train'
+   - `backend/scripts/migrate_profile_privacy_settings.py` - Migrates existing profiles to privacy='private', ai_usage='chat'
+9. ✅ **Frontend privacy UI** - Created PrivacySelector component with clear labels and descriptions
+10. ✅ **Frontend integration**:
+    - NodeForm: Privacy selector for text nodes, voice recordings, and file uploads
+    - Dashboard: Privacy selector for user profile editing
+11. ✅ **Tests** - Comprehensive unit tests for privacy validation, authorization, and AI usage checks (backend/tests/)
 
-**Why this is blocking:** Features 3 and 4 require sharing to specific audiences (circles, public). Without privacy controls, users won't trust the platform. Application-level encryption with KMS provides security without per-user key management complexity.
+### NOT Implemented (Future Work):
 
-**Migration Strategy:**
-- **Existing nodes:** Default all current nodes to `privacy_level='training'` (accessible to AI for training, maintains current public AI training value proposition)
-- **New nodes after this phase:** Default to `privacy_level='private'` with encryption (fully private, no AI access)
-- **User control:** Users can change any node's privacy level at any time:
-  - `private` - Fully encrypted, no AI access, only user can read
-  - `private_ai` - Encrypted, accessible to AI for responses (not training)
-  - `training` - Encrypted, accessible to AI for training data (original vision)
-  - `circles` - Shared with specific user-defined groups
-  - `public` - Publicly visible to all users
-- **Opt-in model:** Users must explicitly opt-in to AI training or public sharing (GDPR-friendly)
-- During transition, support both encrypted and unencrypted nodes for backwards compatibility
+- **GCP KMS encryption** - Content not yet encrypted at rest (can be added later without breaking changes)
+- **Email infrastructure** - Not yet implemented (SendGrid/AWS SES)
+- **Circles implementation** - Privacy level exists but circles functionality not yet built
+
+**Deliverable:** Two-column privacy system for Nodes and UserProfiles with authorization enforcement and comprehensive tests
+
+**Migration Strategy Implemented:**
+- **Existing nodes:** Default to `privacy_level='private'` + `ai_usage='train'` (maintains training data value proposition)
+- **Existing profiles:** Default to `privacy_level='private'` + `ai_usage='chat'` (AI can understand user for responses)
+- **New nodes:** Default to `privacy_level='private'` + `ai_usage='none'` (fully private)
+- **New profiles:** Default to `privacy_level='private'` + `ai_usage='chat'` (useful for AI responses)
+- **User control:** Users can change privacy settings at any time via UI
+
+**Privacy Level Options:**
+- 🔒 **private** - Only owner can see
+- 👥 **circles** - Shared with specific groups (coming soon)
+- 🌐 **public** - Anyone can see
+
+**AI Usage Options:**
+- 🚫 **none** - No AI access
+- 💬 **chat** - AI can use for responses (not training)
+- 🎓 **train** - AI can use for training data
 
 ---
 

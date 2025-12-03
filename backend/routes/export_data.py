@@ -450,12 +450,25 @@ def create_profile():
     if not content.strip():
         return jsonify({"error": "Content cannot be empty"}), 400
 
+    # Get privacy settings (with defaults for profiles: private + chat)
+    from backend.utils.privacy import validate_privacy_level, validate_ai_usage, PrivacyLevel, AIUsage
+    privacy_level = data.get("privacy_level", PrivacyLevel.PRIVATE)
+    ai_usage = data.get("ai_usage", AIUsage.CHAT)
+
+    # Validate privacy settings
+    if not validate_privacy_level(privacy_level):
+        return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
+    if not validate_ai_usage(ai_usage):
+        return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
+
     # Create new profile with generated_by="user"
     profile = UserProfile(
         user_id=current_user.id,
         content=content,
         generated_by="user",
-        tokens_used=0
+        tokens_used=0,
+        privacy_level=privacy_level,
+        ai_usage=ai_usage
     )
 
     try:
@@ -469,7 +482,9 @@ def create_profile():
                 "content": profile.content,
                 "generated_by": profile.generated_by,
                 "tokens_used": profile.tokens_used,
-                "created_at": profile.created_at.isoformat()
+                "created_at": profile.created_at.isoformat(),
+                "privacy_level": profile.privacy_level,
+                "ai_usage": profile.ai_usage
             }
         }), 201
     except Exception as e:

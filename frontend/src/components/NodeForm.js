@@ -3,6 +3,7 @@ import { useMediaRecorder } from "../hooks/useMediaRecorder";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 import { useDraft } from "../hooks/useDraft";
 import MicButton from "./MicButton";
+import PrivacySelector from "./PrivacySelector";
 import api from "../api";
 import { uploadFileInChunks } from "../utils/chunkedUpload";
 
@@ -18,6 +19,10 @@ const NodeForm = forwardRef(
     const [uploadProgress, setUploadProgress] = useState(0);
     const [isUploading, setIsUploading] = useState(false);
     const [hasDraft, setHasDraft] = useState(false);
+
+    // Privacy settings state
+    const [privacyLevel, setPrivacyLevel] = useState("private");
+    const [aiUsage, setAiUsage] = useState("none");
 
     // Draft auto-save hook
     const {
@@ -146,7 +151,11 @@ const NodeForm = forwardRef(
         let response;
         if (editMode && nodeId) {
           // Update (edit) existing node (text only)
-          response = await api.put(`/nodes/${nodeId}`, { content });
+          response = await api.put(`/nodes/${nodeId}`, {
+            content,
+            privacy_level: privacyLevel,
+            ai_usage: aiUsage
+          });
         } else if (mediaBlob || uploadedFile) {
           // Determine which file to upload
           const fileToUpload = uploadedFile || new File([mediaBlob], 'recording.webm', { type: mediaBlob.type });
@@ -162,7 +171,12 @@ const NodeForm = forwardRef(
             try {
               const uploadResult = await uploadFileInChunks(
                 fileToUpload,
-                { parent_id: parentId, node_type: 'user' },
+                {
+                  parent_id: parentId,
+                  node_type: 'user',
+                  privacy_level: privacyLevel,
+                  ai_usage: aiUsage
+                },
                 (progress) => {
                   setUploadProgress(progress);
                 }
@@ -187,6 +201,8 @@ const NodeForm = forwardRef(
             const formData = new FormData();
             formData.append('audio_file', fileToUpload);
             if (parentId) formData.append('parent_id', parentId);
+            formData.append('privacy_level', privacyLevel);
+            formData.append('ai_usage', aiUsage);
 
             response = await api.post("/nodes/", formData, {
               headers: { 'Content-Type': 'multipart/form-data' }
@@ -201,7 +217,12 @@ const NodeForm = forwardRef(
           }
         } else {
           // Create a new text node
-          response = await api.post("/nodes/", { content, parent_id: parentId });
+          response = await api.post("/nodes/", {
+            content,
+            parent_id: parentId,
+            privacy_level: privacyLevel,
+            ai_usage: aiUsage
+          });
         }
         // Delete draft after successful save
         deleteDraft();
@@ -261,6 +282,16 @@ const NodeForm = forwardRef(
           placeholder="Write your thoughts here..."
           disabled={!editMode && (recStatus === 'recording' || uploadedFile)}
         />
+
+        {/* Privacy Settings */}
+        <PrivacySelector
+          privacyLevel={privacyLevel}
+          aiUsage={aiUsage}
+          onPrivacyChange={setPrivacyLevel}
+          onAIUsageChange={setAiUsage}
+          disabled={loading}
+        />
+
         {error && <div style={{ color: "red" }}>{error}</div>}
 
         {/* Auto-save status indicator */}

@@ -120,11 +120,15 @@ def generate_user_profile(self, user_id: int, model_id: str):
             # Step 5: Save to database (95% progress)
             self.update_state(state='PROGRESS', meta={'progress': 95, 'status': 'Saving profile'})
 
+            # Default privacy for AI-generated profiles: private + chat
+            from backend.utils.privacy import PrivacyLevel, AIUsage
             new_profile = UserProfile(
                 user_id=user.id,
                 content=profile_text,
                 generated_by=model_id,
-                tokens_used=total_tokens
+                tokens_used=total_tokens,
+                privacy_level=PrivacyLevel.PRIVATE,
+                ai_usage=AIUsage.CHAT
             )
             db.session.add(new_profile)
             db.session.commit()
