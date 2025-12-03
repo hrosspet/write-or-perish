@@ -17,7 +17,7 @@ const NodeForm = forwardRef(
     const [uploadedNodeId, setUploadedNodeId] = useState(null);
     const [uploadProgress, setUploadProgress] = useState(0);
     const [isUploading, setIsUploading] = useState(false);
-    const [showDraftRecovery, setShowDraftRecovery] = useState(false);
+    const [hasDraft, setHasDraft] = useState(false);
 
     // Draft auto-save hook
     const {
@@ -58,29 +58,22 @@ const NodeForm = forwardRef(
       { enabled: false }
     );
 
-    // Show draft recovery dialog when a draft is loaded
+    // Auto-populate form with draft when loaded
     useEffect(() => {
       if (isDraftLoaded && draft && draft.content) {
-        // Only show recovery if draft content differs from initial content
-        const draftDiffersFromInitial = draft.content !== (initialContent || "");
-        if (draftDiffersFromInitial) {
-          setShowDraftRecovery(true);
-        }
-      }
-    }, [isDraftLoaded, draft, initialContent]);
-
-    // Handle draft recovery
-    const handleRecoverDraft = useCallback(() => {
-      if (draft && draft.content) {
+        // Auto-populate the form with draft content
         setContent(draft.content);
+        setHasDraft(true);
       }
-      setShowDraftRecovery(false);
-    }, [draft]);
+    }, [isDraftLoaded, draft]);
 
+    // Handle discard draft
     const handleDiscardDraft = useCallback(() => {
       deleteDraft();
-      setShowDraftRecovery(false);
-    }, [deleteDraft]);
+      setHasDraft(false);
+      // Reset content to initial value (empty for new nodes, original content for edit mode)
+      setContent(initialContent || "");
+    }, [deleteDraft, initialContent]);
 
     // Auto-start polling when uploadedNodeId is set
     useEffect(() => {
@@ -95,6 +88,7 @@ const NodeForm = forwardRef(
         setLoading(false);
         // Delete draft after successful transcription
         deleteDraft();
+        setHasDraft(false);
         const normalizedData = { ...transcriptionData, id: transcriptionData.node_id };
         onSuccess(normalizedData);
         setUploadedNodeId(null);
@@ -211,6 +205,7 @@ const NodeForm = forwardRef(
         }
         // Delete draft after successful save
         deleteDraft();
+        setHasDraft(false);
         onSuccess(response.data);
         setLoading(false);
       } catch (err) {
@@ -240,55 +235,6 @@ const NodeForm = forwardRef(
 
     return (
       <form onSubmit={handleSubmit}>
-        {/* Draft recovery dialog */}
-        {showDraftRecovery && (
-          <div style={{
-            padding: '12px',
-            marginBottom: '12px',
-            backgroundColor: '#fff3cd',
-            border: '1px solid #ffc107',
-            borderRadius: '4px'
-          }}>
-            <div style={{ marginBottom: '8px', fontWeight: 'bold' }}>
-              Unsaved draft found
-            </div>
-            <div style={{ marginBottom: '8px', fontSize: '0.9em', color: '#666' }}>
-              You have an unsaved draft from {draft?.updated_at ? new Date(draft.updated_at).toLocaleString() : 'earlier'}.
-              Would you like to recover it?
-            </div>
-            <div style={{ display: 'flex', gap: '8px' }}>
-              <button
-                type="button"
-                onClick={handleRecoverDraft}
-                style={{
-                  padding: '6px 12px',
-                  backgroundColor: '#28a745',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer'
-                }}
-              >
-                Recover Draft
-              </button>
-              <button
-                type="button"
-                onClick={handleDiscardDraft}
-                style={{
-                  padding: '6px 12px',
-                  backgroundColor: '#dc3545',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer'
-                }}
-              >
-                Discard
-              </button>
-            </div>
-          </div>
-        )}
-
         {/* Text entry */}
         <textarea
           value={content}
@@ -298,6 +244,7 @@ const NodeForm = forwardRef(
             // Auto-save draft when user types
             if (newContent.trim()) {
               saveDraft(newContent);
+              setHasDraft(true);
             }
             // Discard recording or uploaded file if user types
             if (!editMode) {
@@ -368,6 +315,16 @@ const NodeForm = forwardRef(
                 ? "Submitting..."
                 : "Submit"}
             </button>
+            {hasDraft && (
+              <button
+                type="button"
+                onClick={handleDiscardDraft}
+                disabled={loading}
+                style={{ padding: '8px 16px', cursor: 'pointer' }}
+              >
+                Discard draft
+              </button>
+            )}
             {!editMode && (
               <>
                 <MicButton
