@@ -93,6 +93,39 @@ def can_user_access_node(node, user_id: Optional[int] = None) -> bool:
     return False
 
 
+def can_user_edit_node(node, user_id: Optional[int] = None) -> bool:
+    """Check if a user can edit a node.
+
+    A user can edit a node if they are:
+    1. The owner of the node (node.user_id == user_id)
+    2. The "LLM requester" - the owner of the parent node for an AI-generated node
+       (useful when users want to edit AI responses they requested)
+
+    Args:
+        node: The Node object to check edit permissions for
+        user_id: The user ID to check (defaults to current_user.id)
+
+    Returns:
+        True if user can edit, False otherwise
+    """
+    if user_id is None:
+        if not current_user.is_authenticated:
+            return False
+        user_id = current_user.id
+
+    # Check if user is the owner
+    is_owner = node.user_id == user_id
+
+    # Check if user is the LLM requester (parent node owner)
+    is_llm_requester = (
+        node.node_type == "llm" and
+        node.parent and
+        node.parent.user_id == user_id
+    )
+
+    return is_owner or is_llm_requester
+
+
 def can_ai_use_node_for_chat(node) -> bool:
     """Check if AI can use a node's content for generating chat responses.
 

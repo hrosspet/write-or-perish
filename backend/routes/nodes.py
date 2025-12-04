@@ -17,6 +17,7 @@ from backend.utils.privacy import (
     validate_ai_usage,
     get_default_privacy_settings,
     can_user_access_node,
+    can_user_edit_node,
     PrivacyLevel,
     AIUsage
 )
@@ -493,14 +494,7 @@ def update_node(node_id):
     node = Node.query.get_or_404(node_id)
 
     # Check authorization: owner OR LLM requester (parent node owner)
-    is_owner = node.user_id == current_user.id
-    is_llm_requester = (
-        node.node_type == "llm" and
-        node.parent and
-        node.parent.user_id == current_user.id
-    )
-
-    if not is_owner and not is_llm_requester:
+    if not can_user_edit_node(node):
         return jsonify({"error": "Not authorized"}), 403
     data = request.get_json()
     new_content = data.get("content")
@@ -1327,16 +1321,8 @@ def serve_audio_file(filename):
 @login_required
 def delete_node(node_id):
     node = Node.query.get_or_404(node_id)
-    # Allow deletion if:
-    # 1. Current user is the node creator, OR
-    # 2. For LLM nodes: current user is the parent node's creator (they requested the response)
-    is_owner = node.user_id == current_user.id
-    is_llm_requester = (
-        node.node_type == "llm" and
-        node.parent and
-        node.parent.user_id == current_user.id
-    )
-    if not is_owner and not is_llm_requester:
+    # Allow deletion if user is the owner or LLM requester (parent node owner)
+    if not can_user_edit_node(node):
         return jsonify({"error": "Not authorized"}), 403
 
     # Update all children: set their parent_id to None

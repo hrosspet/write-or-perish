@@ -2,6 +2,7 @@ from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
 from backend.models import Draft, Node
 from backend.extensions import db
+from backend.utils.privacy import can_user_edit_node
 
 drafts_bp = Blueprint("drafts_bp", __name__)
 
@@ -20,6 +21,16 @@ def get_draft():
     """
     node_id = request.args.get("node_id", type=int)
     parent_id = request.args.get("parent_id", type=int)
+
+    # Validate node_id if provided - user must own the node OR be LLM requester (parent node owner)
+    if node_id:
+        node = Node.query.get(node_id)
+        if not node:
+            return jsonify({"error": "Node not found"}), 404
+
+        # Check authorization using shared utility function
+        if not can_user_edit_node(node):
+            return jsonify({"error": "Not authorized to access drafts for this node"}), 403
 
     # Build query for the user's draft matching the context
     query = Draft.query.filter_by(user_id=current_user.id)
@@ -68,12 +79,14 @@ def save_draft():
     node_id = data.get("node_id")
     parent_id = data.get("parent_id")
 
-    # Validate node_id if provided - user must own the node they're editing
+    # Validate node_id if provided - user must own the node OR be LLM requester (parent node owner)
     if node_id:
         node = Node.query.get(node_id)
         if not node:
             return jsonify({"error": "Node not found"}), 404
-        if node.user_id != current_user.id:
+
+        # Check authorization using shared utility function
+        if not can_user_edit_node(node):
             return jsonify({"error": "Not authorized to edit this node"}), 403
 
     # Validate parent_id if provided - parent must exist
@@ -138,6 +151,16 @@ def delete_draft():
     """
     node_id = request.args.get("node_id", type=int)
     parent_id = request.args.get("parent_id", type=int)
+
+    # Validate node_id if provided - user must own the node OR be LLM requester (parent node owner)
+    if node_id:
+        node = Node.query.get(node_id)
+        if not node:
+            return jsonify({"error": "Node not found"}), 404
+
+        # Check authorization using shared utility function
+        if not can_user_edit_node(node):
+            return jsonify({"error": "Not authorized to delete drafts for this node"}), 403
 
     # Build query for the user's draft matching the context
     query = Draft.query.filter_by(user_id=current_user.id)
