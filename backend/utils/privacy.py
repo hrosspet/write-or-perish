@@ -73,6 +73,12 @@ def can_user_access_node(node, user_id: Optional[int] = None) -> bool:
     if node.user_id == user_id:
         return True
 
+    # For LLM nodes: check if the user is the requester (parent node's owner)
+    # This allows users to access AI responses they requested
+    node_type = getattr(node, 'node_type', 'user')
+    if node_type == "llm" and node.parent and node.parent.user_id == user_id:
+        return True
+
     # Check privacy level
     privacy_level = getattr(node, 'privacy_level', PrivacyLevel.PRIVATE)
 

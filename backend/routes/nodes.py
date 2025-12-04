@@ -298,20 +298,36 @@ def compute_descendant_counts(node):
     return total
 
 
-def serialize_node_recursive(n):
-    # Sort the children using the cached _descendant_count
-    sorted_children = sorted(n.children, key=lambda child: child._descendant_count, reverse=True)
+def serialize_node_recursive(n, user_id=None):
+    """Recursively serialize a node and its accessible children.
+
+    Args:
+        n: Node to serialize
+        user_id: User ID to check access for (defaults to current_user.id)
+
+    Returns:
+        dict: Serialized node with only accessible children
+    """
+    if user_id is None:
+        user_id = current_user.id if current_user.is_authenticated else None
+
+    # Filter children to only include those the user can access
+    accessible_children = [child for child in n.children if can_user_access_node(child, user_id)]
+
+    # Sort the accessible children using the cached _descendant_count
+    sorted_children = sorted(accessible_children, key=lambda child: child._descendant_count, reverse=True)
+
     return {
         "id": n.id,
         "content": n.content,
         "node_type": n.node_type,
-        "child_count": len(n.children),
+        "child_count": len(accessible_children),  # Only count accessible children
         "created_at": n.created_at.isoformat(),
         "updated_at": n.updated_at.isoformat(),
         "username": n.user.username if n.user else "Unknown",
         # You might also want to pass the descendant count along for display.
         "descendant_count": n._descendant_count,
-        "children": [serialize_node_recursive(child) for child in sorted_children]
+        "children": [serialize_node_recursive(child, user_id) for child in sorted_children]
     }
 
 
@@ -521,29 +537,34 @@ def get_node(node_id):
     # Compute descendant counts once for the entire subtree.
     compute_descendant_counts(node)
 
-    # Build ancestors as before.
+    # Build ancestors, filtering by privacy
     ancestors = []
     current = node.parent
     while current:
-        ancestors.insert(0, {
-            "id": current.id,
-            "username": current.user.username if current.user else "Unknown",
-            "preview": make_preview(current.content),
-            "node_type": current.node_type,
-            "child_count": len(current.children),
-            "created_at": current.created_at.isoformat()
-        })
+        # Only include ancestor if user has access
+        if can_user_access_node(current, current_user.id):
+            ancestors.insert(0, {
+                "id": current.id,
+                "username": current.user.username if current.user else "Unknown",
+                "preview": make_preview(current.content),
+                "node_type": current.node_type,
+                "child_count": len(current.children),
+                "created_at": current.created_at.isoformat()
+            })
         current = current.parent
+
+    # Filter children by privacy and serialize
+    accessible_children = [child for child in node.children if can_user_access_node(child, current_user.id)]
+    sorted_children = sorted(accessible_children, key=lambda child: child._descendant_count, reverse=True)
 
     # Serialize the current node (its children are now sorted descending by descendant count).
     node_data = {
         "id": node.id,
         "content": node.content,
         "node_type": node.node_type,
-        "child_count": len(node.children),
+        "child_count": len(accessible_children),
         "ancestors": ancestors,
-        "children": [serialize_node_recursive(child) for child in sorted(node.children,
-                      key=lambda child: child._descendant_count, reverse=True)],
+        "children": [serialize_node_recursive(child, current_user.id) for child in sorted_children],
         "created_at": node.created_at.isoformat(),
         "updated_at": node.updated_at.isoformat(),
         "user": {
@@ -663,13 +684,16 @@ def request_llm_response(node_id):
         db.session.commit()
 
     # 2. Create the placeholder node
+    # AI nodes inherit privacy settings from their parent node
     llm_node = Node(
         user_id=llm_user.id,
         parent_id=parent_node.id,
         node_type="llm",
         llm_model=model_id,
         content="[LLM response generation pending...]",
-        llm_task_status='pending'
+        llm_task_status='pending',
+        privacy_level=parent_node.privacy_level,
+        ai_usage=parent_node.ai_usage
     )
     db.session.add(llm_node)
     db.session.commit()
