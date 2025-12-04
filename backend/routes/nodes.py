@@ -491,7 +491,16 @@ def create_node():
 @login_required
 def update_node(node_id):
     node = Node.query.get_or_404(node_id)
-    if node.user_id != current_user.id:
+
+    # Check authorization: owner OR LLM requester (parent node owner)
+    is_owner = node.user_id == current_user.id
+    is_llm_requester = (
+        node.node_type == "llm" and
+        node.parent and
+        node.parent.user_id == current_user.id
+    )
+
+    if not is_owner and not is_llm_requester:
         return jsonify({"error": "Not authorized"}), 403
     data = request.get_json()
     new_content = data.get("content")
