@@ -21,6 +21,7 @@ const NodeForm = forwardRef(
     const [hasDraft, setHasDraft] = useState(false);
 
     // Privacy settings state - use initial values if provided (edit mode), otherwise defaults
+    // For new nodes with a parent, we'll update these after fetching the parent
     const [privacyLevel, setPrivacyLevel] = useState(initialPrivacyLevel || "private");
     const [aiUsage, setAiUsage] = useState(initialAiUsage || "none");
 
@@ -62,6 +63,25 @@ const NodeForm = forwardRef(
       uploadedNodeId ? `/nodes/${uploadedNodeId}/transcription-status` : null,
       { enabled: false }
     );
+
+    // Fetch parent node privacy settings when creating a child node
+    useEffect(() => {
+      // Only fetch parent if we have a parentId and we're not in edit mode
+      // and we haven't explicitly provided initial privacy settings
+      if (parentId && !editMode && !initialPrivacyLevel && !initialAiUsage) {
+        api.get(`/nodes/${parentId}`)
+          .then((response) => {
+            const parent = response.data;
+            // Set privacy settings to match parent's settings
+            setPrivacyLevel(parent.privacy_level || "private");
+            setAiUsage(parent.ai_usage || "none");
+          })
+          .catch((err) => {
+            console.error("Error fetching parent node:", err);
+            // If we can't fetch parent, keep the defaults
+          });
+      }
+    }, [parentId, editMode, initialPrivacyLevel, initialAiUsage]);
 
     // Auto-populate form with draft when loaded
     useEffect(() => {
