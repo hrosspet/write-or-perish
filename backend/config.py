@@ -22,7 +22,7 @@ class Config:
     MODEL_CONTEXT_WINDOWS = {
         "gpt-5": 128000,
         "gpt-5.1": 272000,
-        "gpt-5.2": 400000,
+        "gpt-5.2": 272000,  # Temporarily 272k until OpenAI fixes their API limit (should be 400k)
         "claude-sonnet-4.5": 1000000,
         "claude-opus-4.5": 200000,
         "claude-opus-3": 200000,
