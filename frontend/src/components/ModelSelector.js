@@ -35,6 +35,7 @@ const ModelSelector = ({ nodeId, selectedModel, onModelChange }) => {
   const models = [
     { id: 'gpt-5', name: 'GPT-5', provider: 'OpenAI' },
     { id: 'gpt-5.1', name: 'GPT-5.1', provider: 'OpenAI' },
+    { id: 'gpt-5.2', name: 'GPT-5.2', provider: 'OpenAI' },
     { id: 'claude-sonnet-4.5', name: 'Claude 4.5 Sonnet', provider: 'Anthropic' },
     { id: 'claude-opus-4.5', name: 'Claude 4.5 Opus', provider: 'Anthropic' },
     { id: 'claude-opus-3', name: 'Claude 3 Opus', provider: 'Anthropic' },

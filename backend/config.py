@@ -22,6 +22,7 @@ class Config:
     MODEL_CONTEXT_WINDOWS = {
         "gpt-5": 128000,
         "gpt-5.1": 272000,
+        "gpt-5.2": 400000,
         "claude-sonnet-4.5": 1000000,
         "claude-opus-4.5": 200000,
         "claude-opus-3": 200000,
@@ -41,6 +42,11 @@ class Config:
             "provider": "openai",
             "api_model": "gpt-5.1",
             "display_name": "GPT-5.1"
+        },
+        "gpt-5.2": {
+            "provider": "openai",
+            "api_model": "gpt-5.2",
+            "display_name": "GPT-5.2"
         },
         "claude-sonnet-4.5": {
             "provider": "anthropic",
