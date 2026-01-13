@@ -6,7 +6,7 @@ from celery.utils.log import get_task_logger
 from datetime import datetime
 
 from backend.celery_app import celery, flask_app
-from backend.models import Node, User
+from backend.models import Node, User, UserProfile
 from backend.extensions import db
 from backend.llm_providers import LLMProvider
 from backend.utils.tokens import approximate_token_count, calculate_max_export_tokens
@@ -15,12 +15,30 @@ logger = get_task_logger(__name__)
 
 # Placeholder for injecting user's writing archive into messages
 USER_EXPORT_PLACEHOLDER = "{user_export}"
+# Placeholder for injecting user's AI-generated profile into messages
+USER_PROFILE_PLACEHOLDER = "{user_profile}"
 
 
 def build_user_export_content(user, max_tokens=None, filter_ai_usage=False):
     """Import the actual implementation from export_data routes."""
     from backend.routes.export_data import build_user_export_content as _build
     return _build(user, max_tokens, filter_ai_usage)
+
+
+def get_user_profile_content(user_id):
+    """
+    Get the most recent user profile content if AI usage is permitted.
+
+    Returns the profile content if ai_usage is 'chat' (AI can use for responses),
+    otherwise returns None.
+    """
+    profile = UserProfile.query.filter_by(user_id=user_id).order_by(
+        UserProfile.created_at.desc()
+    ).first()
+
+    if profile and profile.ai_usage == "chat":
+        return profile.content
+    return None
 
 
 class LLMCompletionTask(Task):
@@ -95,6 +113,20 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             )
             user_export_content = None
 
+            # Check if any node contains the {user_profile} placeholder
+            needs_profile = any(
+                USER_PROFILE_PLACEHOLDER in node.content
+                for node in node_chain if node.content
+            )
+            user_profile_content = None
+
+            if needs_profile:
+                user_profile_content = get_user_profile_content(user_id)
+                if user_profile_content:
+                    logger.info(f"Retrieved user profile for {user_id}: {len(user_profile_content)} chars")
+                else:
+                    logger.info(f"No profile with chat permission found for user {user_id}")
+
             if needs_export:
                 # Calculate token budget for export (same logic as profile generation)
                 from backend.utils.tokens import get_model_context_window
@@ -128,6 +160,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         message_text = message_text.replace(
                             USER_EXPORT_PLACEHOLDER,
                             user_export_content
+                        )
+                    # Replace {user_profile} placeholder if present
+                    if user_profile_content and USER_PROFILE_PLACEHOLDER in message_text:
+                        message_text = message_text.replace(
+                            USER_PROFILE_PLACEHOLDER,
+                            user_profile_content
                         )
 
                 messages.append({
