@@ -9,6 +9,7 @@ from backend.celery_app import celery, flask_app
 from backend.models import Node, User
 from backend.extensions import db
 from backend.llm_providers import LLMProvider
+from backend.utils.tokens import approximate_token_count, calculate_max_export_tokens
 
 logger = get_task_logger(__name__)
 
@@ -20,14 +21,6 @@ def build_user_export_content(user, max_tokens=None, filter_ai_usage=False):
     """Import the actual implementation from export_data routes."""
     from backend.routes.export_data import build_user_export_content as _build
     return _build(user, max_tokens, filter_ai_usage)
-
-
-def approximate_token_count(text: str) -> int:
-    """
-    Approximate token count using word count * 4/3.
-    This is a rough estimate that works reasonably well for English text.
-    """
-    return max(1, int(len(text.split()) * 4 / 3))
 
 
 class LLMCompletionTask(Task):
@@ -60,7 +53,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
         model_id: Model identifier (e.g., "gpt-5", "claude-sonnet-4.5").
         user_id: ID of the user requesting the completion.
     """
-    logger.info(f"Starting LLM completion task for parent {parent_node_id}, updating node {llm_node_id}")
+    logger.info(f"Starting LLM completion task for parent {parent_node_id}, updating node {llm_node_id}, model={model_id}")
 
     with flask_app.app_context():
         parent_node = Node.query.get(parent_node_id)
@@ -104,12 +97,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             if needs_export:
                 # Calculate token budget for export (same logic as profile generation)
-                model_context_window = flask_app.config["MODEL_CONTEXT_WINDOWS"].get(model_id, 200000)
-                buffer_percent = flask_app.config.get("PROFILE_CONTEXT_BUFFER_PERCENT", 0.07)
-                buffer_tokens = int(model_context_window * buffer_percent)
-                # Reserve tokens for conversation context (~4 chars per token)
-                conversation_tokens = sum(len(n.content or "") // 4 for n in node_chain)
-                max_export_tokens = model_context_window - conversation_tokens - buffer_tokens
+                from backend.utils.tokens import get_model_context_window
+                context_window = get_model_context_window(model_id)
+                conversation_tokens = sum(approximate_token_count(n.content or "") for n in node_chain)
+                max_export_tokens = calculate_max_export_tokens(model_id, reserved_tokens=conversation_tokens)
+                logger.info(f"Export token budget: model={model_id}, context_window={context_window}, conversation_tokens={conversation_tokens}, max_export_tokens={max_export_tokens}")
 
                 user = User.query.get(user_id)
                 if user and max_export_tokens > 0:
@@ -118,7 +110,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         max_tokens=max_export_tokens,
                         filter_ai_usage=True
                     )
-                    logger.info(f"Built user export for {user_id}: {len(user_export_content or '')} chars")
+                    logger.info(f"Built user export for {user_id}: {len(user_export_content or '')} chars, ~{approximate_token_count(user_export_content or '')} tokens")
 
             messages = []
             for node in node_chain:
@@ -154,11 +146,18 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             }
             model_config = flask_app.config["SUPPORTED_MODELS"][model_id]
             provider = model_config["provider"]
+            api_model = model_config["api_model"]
+
+            # Log total context being sent
+            total_content = "".join(m["content"][0]["text"] for m in messages if m.get("content"))
+            estimated_tokens = approximate_token_count(total_content)
+            logger.info(f"Calling LLM API: model_id={model_id}, api_model={api_model}, provider={provider}, estimated_tokens={estimated_tokens}, total_chars={len(total_content)}")
+
             if provider == "anthropic" and not api_keys["anthropic"]:
                 raise ValueError("Anthropic API key is not configured.")
             elif provider == "openai" and not api_keys["openai"]:
                 raise ValueError("OpenAI API key is not configured.")
-            
+
             response = LLMProvider.get_completion(model_id, messages, api_keys)
             llm_text = response["content"]
             total_tokens = response["total_tokens"]
