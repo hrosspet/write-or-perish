@@ -2,6 +2,7 @@ from flask import Blueprint, jsonify, Response, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node, NodeVersion, UserProfile
 from backend.extensions import db
+from backend.utils.tokens import approximate_token_count, calculate_max_export_tokens
 from datetime import datetime
 import os
 
@@ -237,12 +238,7 @@ def export_threads():
         }
     )
 
-def approximate_token_count(text):
-    """
-    Approximate token count for a text string.
-    Uses a simple heuristic: ~4 characters per token.
-    """
-    return len(text) // 4
+# approximate_token_count is imported from backend.utils.tokens
 
 @export_bp.route("/export/estimate_profile_tokens", methods=["POST"])
 @login_required
@@ -294,11 +290,8 @@ def estimate_profile_tokens():
         }), 500
 
     # Calculate max tokens for export based on model's context window
-    model_context_window = current_app.config["MODEL_CONTEXT_WINDOWS"].get(model_id, 200000)
     prompt_tokens = approximate_token_count(prompt_template)
-    buffer_percent = current_app.config.get("PROFILE_CONTEXT_BUFFER_PERCENT", 0.07)
-    buffer_tokens = int(model_context_window * buffer_percent)
-    MAX_EXPORT_TOKENS = model_context_window - prompt_tokens - buffer_tokens
+    MAX_EXPORT_TOKENS = calculate_max_export_tokens(model_id, reserved_tokens=prompt_tokens)
 
     # Use the core export logic to get user's writing (with token limit)
     # Filter by AI usage to only include nodes where ai_usage is 'chat' or 'train'

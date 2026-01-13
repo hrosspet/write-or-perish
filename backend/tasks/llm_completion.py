@@ -9,6 +9,7 @@ from backend.celery_app import celery, flask_app
 from backend.models import Node, User
 from backend.extensions import db
 from backend.llm_providers import LLMProvider
+from backend.utils.tokens import approximate_token_count, calculate_max_export_tokens
 
 logger = get_task_logger(__name__)
 
@@ -20,14 +21,6 @@ def build_user_export_content(user, max_tokens=None, filter_ai_usage=False):
     """Import the actual implementation from export_data routes."""
     from backend.routes.export_data import build_user_export_content as _build
     return _build(user, max_tokens, filter_ai_usage)
-
-
-def approximate_token_count(text: str) -> int:
-    """
-    Approximate token count using word count * 4/3.
-    This is a rough estimate that works reasonably well for English text.
-    """
-    return max(1, int(len(text.split()) * 4 / 3))
 
 
 class LLMCompletionTask(Task):
@@ -104,12 +97,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             if needs_export:
                 # Calculate token budget for export (same logic as profile generation)
-                model_context_window = flask_app.config["MODEL_CONTEXT_WINDOWS"].get(model_id, 200000)
-                buffer_percent = flask_app.config.get("PROFILE_CONTEXT_BUFFER_PERCENT", 0.07)
-                buffer_tokens = int(model_context_window * buffer_percent)
-                # Reserve tokens for conversation context (~4 chars per token)
-                conversation_tokens = sum(len(n.content or "") // 4 for n in node_chain)
-                max_export_tokens = model_context_window - conversation_tokens - buffer_tokens
+                conversation_tokens = sum(approximate_token_count(n.content or "") for n in node_chain)
+                max_export_tokens = calculate_max_export_tokens(model_id, reserved_tokens=conversation_tokens)
 
                 user = User.query.get(user_id)
                 if user and max_export_tokens > 0:

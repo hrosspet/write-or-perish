@@ -9,6 +9,7 @@ from backend.celery_app import celery, flask_app
 from backend.models import User, UserProfile
 from backend.extensions import db
 from backend.llm_providers import LLMProvider
+from backend.utils.tokens import approximate_token_count, calculate_max_export_tokens
 
 logger = get_task_logger(__name__)
 
@@ -68,12 +69,8 @@ def generate_user_profile(self, user_id: int, model_id: str):
                 raise FileNotFoundError(f"Prompt template not found at {prompt_template_path}")
 
             # Calculate max tokens for export based on model's context window
-            model_context_window = flask_app.config["MODEL_CONTEXT_WINDOWS"].get(model_id, 200000)
-            # Estimate prompt tokens: ~4 characters per token
-            prompt_tokens = len(prompt_template) // 4
-            buffer_percent = flask_app.config.get("PROFILE_CONTEXT_BUFFER_PERCENT", 0.07)
-            buffer_tokens = int(model_context_window * buffer_percent)
-            MAX_EXPORT_TOKENS = model_context_window - prompt_tokens - buffer_tokens
+            prompt_tokens = approximate_token_count(prompt_template)
+            MAX_EXPORT_TOKENS = calculate_max_export_tokens(model_id, reserved_tokens=prompt_tokens)
 
             # Filter by AI usage to only include nodes where ai_usage is 'chat' or 'train'
             user_export = build_user_export_content(user, max_tokens=MAX_EXPORT_TOKENS, filter_ai_usage=True)
