@@ -29,7 +29,7 @@ class Config:
     }
 
     # Buffer for token estimation error (percentage of context window)
-    PROFILE_CONTEXT_BUFFER_PERCENT = 0.07  # 7%
+    PROFILE_CONTEXT_BUFFER_PERCENT = 0.08  # 8%
 
     # Supported models configuration
     SUPPORTED_MODELS = {
