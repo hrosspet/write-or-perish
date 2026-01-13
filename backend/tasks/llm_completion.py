@@ -12,6 +12,15 @@ from backend.llm_providers import LLMProvider
 
 logger = get_task_logger(__name__)
 
+# Placeholder for injecting user's writing archive into messages
+USER_EXPORT_PLACEHOLDER = "{user_export}"
+
+
+def build_user_export_content(user, max_tokens=None, filter_ai_usage=False):
+    """Import the actual implementation from export_data routes."""
+    from backend.routes.export_data import build_user_export_content as _build
+    return _build(user, max_tokens, filter_ai_usage)
+
 
 def approximate_token_count(text: str) -> int:
     """
@@ -86,6 +95,31 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             llm_node.llm_task_progress = 30
             db.session.commit()
 
+            # Check if any node contains the {user_export} placeholder
+            needs_export = any(
+                USER_EXPORT_PLACEHOLDER in node.content
+                for node in node_chain if node.content
+            )
+            user_export_content = None
+
+            if needs_export:
+                # Calculate token budget for export (same logic as profile generation)
+                model_context_window = flask_app.config["MODEL_CONTEXT_WINDOWS"].get(model_id, 200000)
+                buffer_percent = flask_app.config.get("PROFILE_CONTEXT_BUFFER_PERCENT", 0.07)
+                buffer_tokens = int(model_context_window * buffer_percent)
+                # Reserve tokens for conversation context (~4 chars per token)
+                conversation_tokens = sum(len(n.content or "") // 4 for n in node_chain)
+                max_export_tokens = model_context_window - conversation_tokens - buffer_tokens
+
+                user = User.query.get(user_id)
+                if user and max_export_tokens > 0:
+                    user_export_content = build_user_export_content(
+                        user,
+                        max_tokens=max_export_tokens,
+                        filter_ai_usage=True
+                    )
+                    logger.info(f"Built user export for {user_id}: {len(user_export_content or '')} chars")
+
             messages = []
             for node in node_chain:
                 author = node.user.username if node.user else "Unknown"
@@ -97,7 +131,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 else:
                     role = "user"
                     message_text = f"author {author}: {node.content}"
-                
+                    # Replace {user_export} placeholder if present
+                    if user_export_content and USER_EXPORT_PLACEHOLDER in message_text:
+                        message_text = message_text.replace(
+                            USER_EXPORT_PLACEHOLDER,
+                            user_export_content
+                        )
+
                 messages.append({
                     "role": role,
                     "content": [{"type": "text", "text": message_text}]
