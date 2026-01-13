@@ -4,10 +4,13 @@ LLM Provider Abstraction Layer
 This module provides a unified interface for calling different LLM providers
 (OpenAI and Anthropic) with automatic format conversion.
 """
+import logging
 
 from anthropic import Anthropic
 from openai import OpenAI
 from flask import current_app
+
+logger = logging.getLogger(__name__)
 
 
 class LLMProvider:
@@ -117,6 +120,10 @@ class LLMProvider:
 
         # Claude Opus 3 has a lower max_tokens limit than newer models
         max_tokens = 4096 if "claude-3-opus" in model else 10000
+
+        # Log the actual API call details
+        total_input_chars = sum(len(m.get("content", "")) for m in anthropic_messages)
+        logger.info(f"Anthropic API call: model={model}, num_messages={len(anthropic_messages)}, total_input_chars={total_input_chars}, max_tokens={max_tokens}")
 
         response = client.messages.create(
             model=model,
