@@ -21,6 +21,7 @@ from backend.utils.privacy import (
     PrivacyLevel,
     AIUsage
 )
+from backend.utils.quotes import find_quote_ids, get_quote_data, has_quotes
 
 # ---------------------------------------------------------------------------
 # Voice‑Mode helpers
@@ -581,6 +582,46 @@ def get_node(node_id):
         "ai_usage": node.ai_usage
     }
     return jsonify(node_data), 200
+
+# Resolve {quote:ID} placeholders in a node's content for frontend rendering.
+@nodes_bp.route("/<int:node_id>/resolve-quotes", methods=["GET"])
+@login_required
+def resolve_node_quotes(node_id):
+    """
+    Return quote metadata for frontend rendering of {quote:ID} placeholders.
+
+    Returns:
+        {
+            "quotes": {
+                "123": { "id": 123, "content": "...", "username": "...", ... },
+                "456": null  // if not accessible
+            },
+            "has_quotes": true
+        }
+    """
+    node = Node.query.get_or_404(node_id)
+
+    # Check if user has permission to access this node
+    if not can_user_access_node(node, current_user.id):
+        return jsonify({"error": "Not authorized to access this node"}), 403
+
+    # Find all quote IDs in the content
+    quote_ids = find_quote_ids(node.content)
+
+    if not quote_ids:
+        return jsonify({
+            "quotes": {},
+            "has_quotes": False
+        }), 200
+
+    # Get quote data with access checks
+    quote_data = get_quote_data(quote_ids, current_user.id)
+
+    return jsonify({
+        "quotes": quote_data,
+        "has_quotes": True
+    }), 200
+
 
 # Retrieve children of a node (as previews).
 @nodes_bp.route("/<int:node_id>/children", methods=["GET"])

@@ -10,6 +10,7 @@ from backend.models import Node, User, UserProfile
 from backend.extensions import db
 from backend.llm_providers import LLMProvider
 from backend.utils.tokens import approximate_token_count, calculate_max_export_tokens
+from backend.utils.quotes import resolve_quotes, has_quotes
 
 logger = get_task_logger(__name__)
 
@@ -120,6 +121,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             )
             user_profile_content = None
 
+            # Check if any node contains {quote:ID} placeholders
+            needs_quotes = any(
+                has_quotes(node.content)
+                for node in node_chain if node.content
+            )
+            if needs_quotes:
+                logger.info("Detected {quote:ID} placeholders in conversation chain")
+
             if needs_profile:
                 user_profile_content = get_user_profile_content(user_id)
                 if user_profile_content:
@@ -167,6 +176,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             USER_PROFILE_PLACEHOLDER,
                             user_profile_content
                         )
+                    # Resolve {quote:ID} placeholders if present
+                    if needs_quotes and has_quotes(message_text):
+                        message_text, resolved_ids = resolve_quotes(message_text, user_id, for_llm=True)
+                        if resolved_ids:
+                            logger.info(f"Resolved quotes for node IDs: {resolved_ids}")
 
                 messages.append({
                     "role": role,
