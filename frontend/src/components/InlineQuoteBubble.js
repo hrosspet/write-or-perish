@@ -1,4 +1,5 @@
 import React from 'react';
+import ReactMarkdown from 'react-markdown';
 import NodeFooter from './NodeFooter';
 
 /**
@@ -16,7 +17,8 @@ const InlineQuoteBubble = ({ quote, onClick }) => {
   }
 
   const text = quote.content || "";
-  const truncatedText = text.length > 150 ? text.substring(0, 150) + "..." : text;
+  // Use same length as Feed's Bubble component (250 chars)
+  const truncatedText = text.length > 250 ? text.substring(0, 250) + "..." : text;
 
   return (
     <div style={bubbleStyle} onClick={() => onClick(quote.id)}>
@@ -24,7 +26,9 @@ const InlineQuoteBubble = ({ quote, onClick }) => {
         Quoted from @{quote.username}
       </div>
       <div style={contentStyle}>
-        {truncatedText}
+        <ReactMarkdown components={markdownComponents}>
+          {truncatedText}
+        </ReactMarkdown>
       </div>
       <NodeFooter
         username={quote.username}
@@ -33,6 +37,26 @@ const InlineQuoteBubble = ({ quote, onClick }) => {
       />
     </div>
   );
+};
+
+// Markdown component overrides for consistent styling
+const markdownComponents = {
+  p: ({ node, ...props }) => (
+    <p style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word", margin: 0 }} {...props} />
+  ),
+  code: ({ node, inline, className, children, ...props }) =>
+    inline ? (
+      <code style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }} {...props}>
+        {children}
+      </code>
+    ) : (
+      <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }} {...props}>
+        <code>{children}</code>
+      </pre>
+    ),
+  li: ({ node, ...props }) => (
+    <li style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }} {...props} />
+  ),
 };
 
 const bubbleStyle = {
