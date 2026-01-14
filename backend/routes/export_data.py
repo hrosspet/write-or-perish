@@ -3,6 +3,7 @@ from flask_login import login_required, current_user
 from backend.models import Node, NodeVersion, UserProfile
 from backend.extensions import db
 from backend.utils.tokens import approximate_token_count, calculate_max_export_tokens
+from backend.utils.quotes import resolve_quotes, has_quotes
 from datetime import datetime
 import os
 
@@ -45,7 +46,7 @@ def export_data():
         })
     return jsonify(user_data), 200
 
-def format_node_tree(node, index_path="1", processed_nodes=None, filter_ai_usage=False):
+def format_node_tree(node, index_path="1", processed_nodes=None, filter_ai_usage=False, user_id=None):
     """
     Recursively format a node and its descendants into a human-readable tree structure
     using Markdown headers. Uses depth-first traversal for maximum readability.
@@ -55,6 +56,7 @@ def format_node_tree(node, index_path="1", processed_nodes=None, filter_ai_usage
         index_path: The hierarchical index (e.g., "1.1.2")
         processed_nodes: Set of node IDs already processed (to avoid infinite loops)
         filter_ai_usage: If True, only include child nodes where ai_usage is 'chat' or 'train'
+        user_id: User ID for resolving {quote:ID} placeholders (for access checks)
 
     Returns:
         str: Formatted text representation of the node tree
@@ -83,7 +85,13 @@ def format_node_tree(node, index_path="1", processed_nodes=None, filter_ai_usage
 
     # Build the node text - no content indentation for token efficiency
     result = f"{header_prefix} [{index_path}] {node_type_display} ({author}) - {timestamp}\n"
-    result += node.content
+
+    # Resolve {quote:ID} placeholders in content if user_id provided
+    content = node.content
+    if user_id and has_quotes(content):
+        content, _ = resolve_quotes(content, user_id, for_llm=False)
+
+    result += content
     result += "\n\n"
 
     # Process children (depth-first traversal)
@@ -107,7 +115,8 @@ def format_node_tree(node, index_path="1", processed_nodes=None, filter_ai_usage
             child,
             index_path=child_index,
             processed_nodes=processed_nodes,
-            filter_ai_usage=filter_ai_usage
+            filter_ai_usage=filter_ai_usage,
+            user_id=user_id
         )
 
     return result
@@ -151,7 +160,7 @@ def build_user_export_content(user, max_tokens=None, filter_ai_usage=False):
 
         for node in all_top_level_nodes:
             # Format the thread to estimate its token count
-            thread_text = format_node_tree(node, index_path=str(len(top_level_nodes) + 1), filter_ai_usage=filter_ai_usage)
+            thread_text = format_node_tree(node, index_path=str(len(top_level_nodes) + 1), filter_ai_usage=filter_ai_usage, user_id=user.id)
             thread_tokens = approximate_token_count(thread_text)
 
             # Add overhead for thread header (approx 20 tokens)
@@ -194,7 +203,7 @@ def build_user_export_content(user, max_tokens=None, filter_ai_usage=False):
         export_lines.append("")
 
         # Format the entire thread tree (depth-first traversal)
-        thread_text = format_node_tree(node, index_path=str(thread_num), filter_ai_usage=filter_ai_usage)
+        thread_text = format_node_tree(node, index_path=str(thread_num), filter_ai_usage=filter_ai_usage, user_id=user.id)
         export_lines.append(thread_text)
 
         export_lines.append("---")

@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import ReactMarkdown from "react-markdown";
 import NodeFooter from "./NodeFooter";
 import SpeakerIcon from "./SpeakerIcon";
 import ModelSelector from "./ModelSelector";
@@ -9,6 +8,7 @@ import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 import api from "../api";
 import NodeForm from "./NodeForm";
 import Bubble from "./Bubble";
+import QuotedContent from "./QuotedContent";
 
 // Recursive component to render children nodes.
 function RenderChildTree({ nodes, onBubbleClick }) {
@@ -48,6 +48,7 @@ function NodeDetail() {
   const [showEditOverlay, setShowEditOverlay] = useState(false);
   const [selectedModel, setSelectedModel] = useState("gpt-5");
   const [llmTaskNodeId, setLlmTaskNodeId] = useState(null);
+  const [quotes, setQuotes] = useState({});
   const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
   // LLM completion polling - enabled automatically when llmTaskNodeId is set
@@ -64,6 +65,7 @@ function NodeDetail() {
   useEffect(() => {
     setLoading(true);
     setError("");
+    setQuotes({}); // Reset quotes when node changes
     api
       .get(`/nodes/${id}`)
       .then((response) => {
@@ -80,6 +82,28 @@ function NodeDetail() {
         }
       });
   }, [id, backendUrl]);
+
+  // Fetch quote data when node loads (if content contains {quote:ID} placeholders)
+  useEffect(() => {
+    if (!node || !node.content) return;
+
+    // Check if content contains {quote:ID} patterns
+    const quotePattern = /\{quote:(\d+)\}/;
+    if (!quotePattern.test(node.content)) return;
+
+    // Fetch quotes for this node
+    api
+      .get(`/nodes/${id}/resolve-quotes`)
+      .then((response) => {
+        if (response.data.has_quotes && response.data.quotes) {
+          setQuotes(response.data.quotes);
+        }
+      })
+      .catch((err) => {
+        console.error("Error fetching quotes:", err);
+        // Don't show error to user - quotes will just not render
+      });
+  }, [id, node]);
 
   // Handle LLM completion
   useEffect(() => {
@@ -183,28 +207,11 @@ function NodeDetail() {
     <div>
       <hr style={{ borderColor: "#333" }} />
       <div style={highlightedTextStyle}>
-        <ReactMarkdown
-          components={{
-            p: ({ node, ...props }) => (
-              <p style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }} {...props} />
-            ),
-            code: ({ node, inline, className, children, ...props }) =>
-              inline ? (
-                <code style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }} {...props}>
-                  {children}
-                </code>
-              ) : (
-                <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }} {...props}>
-                  <code>{children}</code>
-                </pre>
-              ),
-            li: ({ node, ...props }) => (
-              <li style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }} {...props} />
-            )
-          }}
-        >
-          {node.content}
-        </ReactMarkdown>
+        <QuotedContent
+          content={node.content}
+          quotes={quotes}
+          onQuoteClick={handleBubbleClick}
+        />
       </div>
       <div style={actionContainerStyle}>
         <NodeFooter
