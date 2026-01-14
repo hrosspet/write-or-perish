@@ -41,15 +41,14 @@ def get_quote_data(node_ids: List[int], user_id: int) -> Dict[int, Optional[dict
     Returns:
         Dict mapping node_id to node data dict (or None if not accessible)
     """
-    from backend.models import Node, User
+    from backend.models import Node
     from backend.utils.privacy import can_user_access_node
 
     result = {}
-    user = User.query.get(user_id) if user_id else None
 
     for node_id in node_ids:
         node = Node.query.get(node_id)
-        if node and can_user_access_node(user, node):
+        if node and can_user_access_node(node, user_id):
             result[node_id] = {
                 "id": node.id,
                 "content": node.content,
