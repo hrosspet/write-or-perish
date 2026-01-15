@@ -152,7 +152,9 @@ export function useTranscriptionSSE(nodeId, options = {}) {
   const [isComplete, setIsComplete] = useState(false);
   const [finalContent, setFinalContent] = useState(null);
 
-  const url = nodeId ? `/api/sse/nodes/${nodeId}/transcription-stream` : null;
+  // Use REACT_APP_BACKEND_URL for SSE since EventSource doesn't go through CRA proxy
+  const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
+  const url = nodeId ? `${backendUrl}/api/sse/nodes/${nodeId}/transcription-stream` : null;
 
   const eventHandlers = {
     chunk_complete: (data) => {
@@ -243,7 +245,9 @@ export function useTTSStreamSSE(nodeId, options = {}) {
   const [isComplete, setIsComplete] = useState(false);
   const [finalUrl, setFinalUrl] = useState(null);
 
-  const url = nodeId ? `/api/sse/nodes/${nodeId}/tts-stream` : null;
+  // Use REACT_APP_BACKEND_URL for SSE since EventSource doesn't go through CRA proxy
+  const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
+  const url = nodeId ? `${backendUrl}/api/sse/nodes/${nodeId}/tts-stream` : null;
 
   const eventHandlers = {
     chunk_ready: (data) => {
