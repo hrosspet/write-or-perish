@@ -93,6 +93,11 @@ export function useSSE(url, options = {}) {
       Object.entries(eventHandlers).forEach(([eventType, handler]) => {
         eventSource.addEventListener(eventType, (e) => {
           try {
+            // Skip if data is undefined or empty (can happen on connection errors)
+            if (!e.data) {
+              console.warn(`SSE event ${eventType} received with no data`);
+              return;
+            }
             const data = JSON.parse(e.data);
             setLastEvent({ type: eventType, data });
             handler(data);
