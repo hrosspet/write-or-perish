@@ -56,6 +56,8 @@ const NodeForm = forwardRef(
 
     // Streaming transcription mode (real-time transcription while recording)
     const [useStreamingMode, setUseStreamingMode] = useState(false);
+    // Track streaming node ID when transcription completes (for "review before save" flow)
+    const [streamingNodeId, setStreamingNodeId] = useState(null);
 
     // Streaming transcription hook
     const {
@@ -201,6 +203,23 @@ const NodeForm = forwardRef(
       setError("");
       try {
         let response;
+
+        // Handle streaming transcription completion - node already exists
+        if (streamingNodeId) {
+          // Update the streaming node with any edits the user made
+          response = await api.put(`/nodes/${streamingNodeId}`, {
+            content,
+            privacy_level: privacyLevel,
+            ai_usage: aiUsage
+          });
+          deleteDraft();
+          setHasDraft(false);
+          setStreamingNodeId(null);
+          onSuccess(response.data);
+          setLoading(false);
+          return;
+        }
+
         if (editMode && nodeId) {
           // Update (edit) existing node (text only)
           response = await api.put(`/nodes/${nodeId}`, {
@@ -441,10 +460,12 @@ const NodeForm = forwardRef(
                     aiUsage={aiUsage}
                     onTranscriptUpdate={(transcript) => setContent(transcript)}
                     onComplete={(data) => {
+                      // Don't navigate immediately - let user review/edit the transcript first
                       setLoading(false);
-                      deleteDraft();
-                      setHasDraft(false);
-                      onSuccess({ id: data.nodeId, content: data.content });
+                      setContent(data.content);
+                      setStreamingNodeId(data.nodeId);
+                      // Note: The node already exists with this content on the server
+                      // User can now edit and click "Save" to finalize
                     }}
                     onError={(err) => {
                       setError(err.message || 'Streaming transcription failed');
