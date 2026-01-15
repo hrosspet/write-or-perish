@@ -1048,7 +1048,8 @@ def init_chunked_upload():
         "total_chunks": 38,
         "upload_id": "unique-id",
         "parent_id": 123,  // optional
-        "node_type": "user"  // optional
+        "node_type": "user",  // optional
+        "streaming_transcription": false  // optional - enable per-chunk transcription after reassembly
     }
 
     Returns: { "node_id": 456, "upload_id": "unique-id" }
@@ -1061,6 +1062,7 @@ def init_chunked_upload():
     upload_id = data.get("upload_id")
     parent_id = data.get("parent_id")
     node_type = data.get("node_type", "user")
+    streaming_transcription = data.get("streaming_transcription", False)
 
     # Get privacy settings (with defaults)
     privacy_level = data.get("privacy_level", PrivacyLevel.PRIVATE)
@@ -1108,7 +1110,8 @@ def init_chunked_upload():
         "filename": filename,
         "filesize": filesize,
         "total_chunks": total_chunks,
-        "uploaded_chunks": []
+        "uploaded_chunks": [],
+        "streaming_transcription": streaming_transcription
     }
 
     import json
@@ -1202,7 +1205,8 @@ def finalize_chunked_upload():
     Request body:
     {
         "upload_id": "unique-id",
-        "node_id": 456
+        "node_id": 456,
+        "streaming_transcription": false  // optional - use streaming mode
     }
 
     Returns: node info (same as create_node endpoint)
@@ -1210,6 +1214,7 @@ def finalize_chunked_upload():
     data = request.get_json() or {}
     upload_id = data.get("upload_id")
     node_id = data.get("node_id")
+    streaming_transcription = data.get("streaming_transcription", False)
 
     if not all([upload_id, node_id]):
         return jsonify({"error": "Missing required fields"}), 400
@@ -1233,6 +1238,10 @@ def finalize_chunked_upload():
     metadata_path = chunk_dir / "metadata.json"
     with open(metadata_path, "r") as f:
         metadata = json.load(f)
+
+    # Check if streaming was requested in init
+    if metadata.get("streaming_transcription"):
+        streaming_transcription = True
 
     # Verify all chunks received
     expected_chunks = list(range(metadata["total_chunks"]))
@@ -1286,14 +1295,43 @@ def finalize_chunked_upload():
 
     # Enqueue transcription task
     api_key = current_app.config.get("OPENAI_API_KEY")
+    session_id = None
+
     if api_key:
-        from backend.tasks.transcription import transcribe_audio
+        if streaming_transcription:
+            # Use streaming transcription - splits audio server-side and transcribes in chunks
+            from backend.tasks.streaming_transcription import transcribe_uploaded_file_streaming
+            import uuid
 
-        task = transcribe_audio.delay(node.id, str(target_path), metadata["filename"])
-        node.transcription_task_id = task.id
-        db.session.commit()
+            session_id = str(uuid.uuid4())
 
-        current_app.logger.info(f"Enqueued transcription task {task.id} for node {node.id}")
+            # Enable streaming mode on the node
+            node.streaming_transcription = True
+            node.streaming_session_id = session_id
+            node.transcription_status = 'processing'
+            db.session.commit()
+
+            task = transcribe_uploaded_file_streaming.delay(
+                node.id,
+                str(target_path),
+                session_id
+            )
+            node.transcription_task_id = task.id
+            db.session.commit()
+
+            current_app.logger.info(
+                f"Enqueued streaming transcription task {task.id} for node {node.id}, "
+                f"session {session_id}"
+            )
+        else:
+            # Use regular transcription
+            from backend.tasks.transcription import transcribe_audio
+
+            task = transcribe_audio.delay(node.id, str(target_path), metadata["filename"])
+            node.transcription_task_id = task.id
+            db.session.commit()
+
+            current_app.logger.info(f"Enqueued transcription task {task.id} for node {node.id}")
 
     return jsonify({
         "id": node.id,
@@ -1302,7 +1340,9 @@ def finalize_chunked_upload():
         "node_type": node.node_type,
         "created_at": node.created_at.isoformat(),
         "transcription_status": node.transcription_status,
-        "transcription_task_id": node.transcription_task_id
+        "transcription_task_id": node.transcription_task_id,
+        "session_id": session_id,
+        "streaming_transcription": streaming_transcription
     }), 200
 
 
