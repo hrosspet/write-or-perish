@@ -25,7 +25,7 @@ def format_sse_message(data, event=None):
     return msg
 
 
-@sse_bp.route("/<int:node_id>/transcription-stream")
+@sse_bp.route("/nodes/<int:node_id>/transcription-stream")
 @login_required
 def transcription_stream(node_id):
     """
@@ -139,7 +139,7 @@ def transcription_stream(node_id):
     )
 
 
-@sse_bp.route("/<int:node_id>/tts-stream")
+@sse_bp.route("/nodes/<int:node_id>/tts-stream")
 @login_required
 def tts_stream(node_id):
     """

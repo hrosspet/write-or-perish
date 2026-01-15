@@ -137,6 +137,6 @@ def create_app():
     # SSE (Server-Sent Events) blueprint – real-time streaming updates.
     # --------------------------------------------------------------------
     from backend.routes.sse import sse_bp
-    app.register_blueprint(sse_bp, url_prefix="/api/sse/nodes")
+    app.register_blueprint(sse_bp, url_prefix="/api/sse")
 
     return app
