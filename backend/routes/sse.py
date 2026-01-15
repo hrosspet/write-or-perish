@@ -53,6 +53,9 @@ def transcription_stream(node_id):
     # Get the last chunk index the client has seen
     last_chunk = request.args.get('last_chunk', -1, type=int)
 
+    # Capture app reference for use in generator (needed for app context)
+    app = current_app._get_current_object()
+
     def generate():
         last_sent_chunk = last_chunk
         heartbeat_interval = 15  # seconds
@@ -66,59 +69,63 @@ def transcription_stream(node_id):
                 yield format_sse_message({"message": "Connection timeout"}, event="close")
                 break
 
-            # Refresh node data from database
-            db.session.expire(node)
-            db.session.refresh(node)
+            # Use app context for database operations (generator runs outside request context)
+            with app.app_context():
+                # Re-fetch node to get fresh data
+                current_node = Node.query.get(node_id)
+                if not current_node:
+                    yield format_sse_message({"error": "Node not found"}, event="error")
+                    break
 
-            # Get any new completed chunks
-            new_chunks = NodeTranscriptChunk.query.filter(
-                NodeTranscriptChunk.node_id == node_id,
-                NodeTranscriptChunk.chunk_index > last_sent_chunk,
-                NodeTranscriptChunk.status.in_(['completed', 'failed'])
-            ).order_by(NodeTranscriptChunk.chunk_index).all()
+                # Get any new completed chunks
+                new_chunks = NodeTranscriptChunk.query.filter(
+                    NodeTranscriptChunk.node_id == node_id,
+                    NodeTranscriptChunk.chunk_index > last_sent_chunk,
+                    NodeTranscriptChunk.status.in_(['completed', 'failed'])
+                ).order_by(NodeTranscriptChunk.chunk_index).all()
 
-            for chunk in new_chunks:
-                if chunk.status == 'completed':
+                for chunk in new_chunks:
+                    if chunk.status == 'completed':
+                        yield format_sse_message({
+                            "chunk_index": chunk.chunk_index,
+                            "text": chunk.text,
+                            "status": "completed"
+                        }, event="chunk_complete")
+                    else:
+                        yield format_sse_message({
+                            "chunk_index": chunk.chunk_index,
+                            "error": chunk.error,
+                            "status": "failed"
+                        }, event="chunk_error")
+
+                    last_sent_chunk = chunk.chunk_index
+
+                # Check if transcription is complete (status is 'completed')
+                if current_node.transcription_status == 'completed':
                     yield format_sse_message({
-                        "chunk_index": chunk.chunk_index,
-                        "text": chunk.text,
-                        "status": "completed"
-                    }, event="chunk_complete")
-                else:
+                        "message": "Transcription complete",
+                        "content": current_node.content
+                    }, event="all_complete")
+                    break
+
+                # Check if transcription failed
+                if current_node.transcription_status == 'failed':
                     yield format_sse_message({
-                        "chunk_index": chunk.chunk_index,
-                        "error": chunk.error,
-                        "status": "failed"
-                    }, event="chunk_error")
+                        "message": "Transcription failed",
+                        "error": current_node.transcription_error
+                    }, event="error")
+                    break
 
-                last_sent_chunk = chunk.chunk_index
+                # Send heartbeat to keep connection alive
+                if time.time() - last_heartbeat > heartbeat_interval:
+                    yield format_sse_message({
+                        "timestamp": time.time(),
+                        "completed_chunks": current_node.streaming_completed_chunks or 0,
+                        "total_chunks": current_node.streaming_total_chunks
+                    }, event="heartbeat")
+                    last_heartbeat = time.time()
 
-            # Check if transcription is complete (status is 'completed')
-            if node.transcription_status == 'completed':
-                yield format_sse_message({
-                    "message": "Transcription complete",
-                    "content": node.content
-                }, event="all_complete")
-                break
-
-            # Check if transcription failed
-            if node.transcription_status == 'failed':
-                yield format_sse_message({
-                    "message": "Transcription failed",
-                    "error": node.transcription_error
-                }, event="error")
-                break
-
-            # Send heartbeat to keep connection alive
-            if time.time() - last_heartbeat > heartbeat_interval:
-                yield format_sse_message({
-                    "timestamp": time.time(),
-                    "completed_chunks": node.streaming_completed_chunks or 0,
-                    "total_chunks": node.streaming_total_chunks
-                }, event="heartbeat")
-                last_heartbeat = time.time()
-
-            # Sleep briefly before checking again
+            # Sleep briefly before checking again (outside app context)
             time.sleep(1)
 
     return Response(
@@ -169,6 +176,9 @@ def tts_stream(node_id):
     # Get the last chunk index the client has seen
     last_chunk = request.args.get('last_chunk', -1, type=int)
 
+    # Capture app reference for use in generator (needed for app context)
+    app = current_app._get_current_object()
+
     def generate():
         last_sent_chunk = last_chunk
         heartbeat_interval = 15  # seconds
@@ -182,57 +192,61 @@ def tts_stream(node_id):
                 yield format_sse_message({"message": "Connection timeout"}, event="close")
                 break
 
-            # Refresh node data from database
-            db.session.expire(node)
-            db.session.refresh(node)
+            # Use app context for database operations (generator runs outside request context)
+            with app.app_context():
+                # Re-fetch node to get fresh data
+                current_node = Node.query.get(node_id)
+                if not current_node:
+                    yield format_sse_message({"error": "Node not found"}, event="error")
+                    break
 
-            # Get any new completed TTS chunks
-            new_chunks = TTSChunk.query.filter(
-                TTSChunk.node_id == node_id,
-                TTSChunk.chunk_index > last_sent_chunk,
-                TTSChunk.status == 'completed'
-            ).order_by(TTSChunk.chunk_index).all()
+                # Get any new completed TTS chunks
+                new_chunks = TTSChunk.query.filter(
+                    TTSChunk.node_id == node_id,
+                    TTSChunk.chunk_index > last_sent_chunk,
+                    TTSChunk.status == 'completed'
+                ).order_by(TTSChunk.chunk_index).all()
 
-            for chunk in new_chunks:
-                yield format_sse_message({
-                    "chunk_index": chunk.chunk_index,
-                    "audio_url": chunk.audio_url,
-                    "status": "ready"
-                }, event="chunk_ready")
-                last_sent_chunk = chunk.chunk_index
+                for chunk in new_chunks:
+                    yield format_sse_message({
+                        "chunk_index": chunk.chunk_index,
+                        "audio_url": chunk.audio_url,
+                        "status": "ready"
+                    }, event="chunk_ready")
+                    last_sent_chunk = chunk.chunk_index
 
-            # Check if TTS generation is complete
-            if node.tts_task_status == 'completed':
-                yield format_sse_message({
-                    "message": "TTS generation complete",
-                    "tts_url": node.audio_tts_url
-                }, event="all_complete")
-                break
+                # Check if TTS generation is complete
+                if current_node.tts_task_status == 'completed':
+                    yield format_sse_message({
+                        "message": "TTS generation complete",
+                        "tts_url": current_node.audio_tts_url
+                    }, event="all_complete")
+                    break
 
-            # Check if TTS generation failed
-            if node.tts_task_status == 'failed':
-                yield format_sse_message({
-                    "message": "TTS generation failed"
-                }, event="error")
-                break
+                # Check if TTS generation failed
+                if current_node.tts_task_status == 'failed':
+                    yield format_sse_message({
+                        "message": "TTS generation failed"
+                    }, event="error")
+                    break
 
-            # Send heartbeat to keep connection alive
-            if time.time() - last_heartbeat > heartbeat_interval:
-                total_chunks = TTSChunk.query.filter_by(node_id=node_id).count()
-                completed_chunks = TTSChunk.query.filter_by(
-                    node_id=node_id,
-                    status='completed'
-                ).count()
+                # Send heartbeat to keep connection alive
+                if time.time() - last_heartbeat > heartbeat_interval:
+                    total_chunks = TTSChunk.query.filter_by(node_id=node_id).count()
+                    completed_chunks = TTSChunk.query.filter_by(
+                        node_id=node_id,
+                        status='completed'
+                    ).count()
 
-                yield format_sse_message({
-                    "timestamp": time.time(),
-                    "completed_chunks": completed_chunks,
-                    "total_chunks": total_chunks,
-                    "progress": node.tts_task_progress
-                }, event="heartbeat")
-                last_heartbeat = time.time()
+                    yield format_sse_message({
+                        "timestamp": time.time(),
+                        "completed_chunks": completed_chunks,
+                        "total_chunks": total_chunks,
+                        "progress": current_node.tts_task_progress
+                    }, event="heartbeat")
+                    last_heartbeat = time.time()
 
-            # Sleep briefly before checking again
+            # Sleep briefly before checking again (outside app context)
             time.sleep(1)
 
     return Response(
