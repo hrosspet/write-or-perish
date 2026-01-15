@@ -1,5 +1,8 @@
 """
 Celery task for asynchronous TTS generation.
+
+Supports streaming playback - each chunk's audio URL is stored in TTSChunk
+and can be played as soon as it's ready, without waiting for all chunks.
 """
 from celery import Task
 from celery.utils.log import get_task_logger
@@ -7,13 +10,18 @@ from openai import OpenAI
 from pathlib import Path
 from pydub import AudioSegment
 import os
+from datetime import datetime
 
 from backend.celery_app import celery, flask_app
-from backend.models import Node, UserProfile
+from backend.models import Node, UserProfile, TTSChunk
 from backend.extensions import db
 from backend.utils.audio_processing import chunk_text
 
 logger = get_task_logger(__name__)
+
+# Audio storage root path (matches the one in routes/nodes.py)
+import pathlib
+AUDIO_STORAGE_ROOT = pathlib.Path(os.environ.get("AUDIO_STORAGE_PATH", "data/audio")).resolve()
 
 
 class TTSTask(Task):
@@ -114,6 +122,16 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str):
             logger.info(f"Text split into {len(chunks)} chunks for TTS")
 
             # Step 3: Generate TTS (40% -> 90% progress)
+            # Create TTSChunk records for streaming playback
+            for i in range(len(chunks)):
+                tts_chunk = TTSChunk(
+                    node_id=node.id,
+                    chunk_index=i,
+                    status='pending'
+                )
+                db.session.add(tts_chunk)
+            db.session.commit()
+
             if len(chunks) == 1:
                 # Single chunk: direct streaming to MP3
                 self.update_state(state='PROGRESS', meta={'progress': 40, 'status': 'Generating audio'})
@@ -127,8 +145,18 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str):
                 ) as resp:
                     resp.stream_to_file(final_path)
 
+                # Update the single TTSChunk record
+                tts_chunk = TTSChunk.query.filter_by(node_id=node.id, chunk_index=0).first()
+                if tts_chunk:
+                    rel_path = final_path.relative_to(AUDIO_STORAGE_ROOT)
+                    tts_chunk.audio_url = f"/media/{rel_path.as_posix()}"
+                    tts_chunk.status = 'completed'
+                    tts_chunk.completed_at = datetime.utcnow()
+                    db.session.commit()
+
             else:
-                # Multiple chunks: generate parts and concatenate
+                # Multiple chunks: generate parts for streaming playback
+                # Each chunk is immediately available for streaming as soon as it's generated
                 audio_parts = []
                 chunk_progress_step = 50 / len(chunks)  # 40% -> 90% split across chunks
 
@@ -142,9 +170,15 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str):
                         }
                     )
                     node.tts_task_progress = progress
+
+                    # Update TTSChunk status to processing
+                    tts_chunk = TTSChunk.query.filter_by(node_id=node.id, chunk_index=i).first()
+                    if tts_chunk:
+                        tts_chunk.status = 'processing'
                     db.session.commit()
 
-                    part_path = target_dir / f"tts_part{i}.mp3"
+                    # Store each chunk separately for streaming playback
+                    part_path = target_dir / f"tts_chunk_{i}.mp3"
 
                     with client.audio.speech.with_streaming_response.create(
                         model="gpt-4o-mini-tts",
@@ -153,23 +187,28 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str):
                     ) as resp:
                         resp.stream_to_file(part_path)
 
-                    # Load into AudioSegment
+                    # Update TTSChunk with URL immediately (for streaming playback)
+                    if tts_chunk:
+                        rel_path = part_path.relative_to(AUDIO_STORAGE_ROOT)
+                        tts_chunk.audio_url = f"/media/{rel_path.as_posix()}"
+                        tts_chunk.status = 'completed'
+                        tts_chunk.completed_at = datetime.utcnow()
+                        db.session.commit()
+
+                    # Load into AudioSegment for final concatenation
                     segment = AudioSegment.from_file(str(part_path), format="mp3")
-                    audio_parts.append(segment)
+                    audio_parts.append((i, segment, part_path))
 
-                    # Cleanup part file
-                    try:
-                        part_path.unlink()
-                    except Exception as e:
-                        logger.warning(f"Failed to delete part file: {e}")
-
-                # Concatenate all segments
+                # Concatenate all segments into final file
                 self.update_state(state='PROGRESS', meta={'progress': 90, 'status': 'Combining audio'})
                 node.tts_task_progress = 90
                 db.session.commit()
 
-                combined = sum(audio_parts)
+                combined = sum([part[1] for part in audio_parts])
                 combined.export(final_path, format="mp3")
+
+                # Note: We keep the chunk files for streaming playback
+                # They can be cleaned up later or kept for faster seeking
 
             # Step 4: Update node record (95% progress)
             self.update_state(state='PROGRESS', meta={'progress': 95, 'status': 'Finalizing'})

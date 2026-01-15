@@ -133,4 +133,10 @@ def create_app():
     from backend.routes.media import media_bp
     app.register_blueprint(media_bp, url_prefix="/media")
 
+    # --------------------------------------------------------------------
+    # SSE (Server-Sent Events) blueprint – real-time streaming updates.
+    # --------------------------------------------------------------------
+    from backend.routes.sse import sse_bp
+    app.register_blueprint(sse_bp, url_prefix="/api/sse/nodes")
+
     return app

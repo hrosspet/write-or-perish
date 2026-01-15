@@ -2,10 +2,14 @@ import React, { useState, forwardRef, useImperativeHandle, useEffect, useCallbac
 import { useMediaRecorder } from "../hooks/useMediaRecorder";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 import { useDraft } from "../hooks/useDraft";
+import { useStreamingTranscription } from "../hooks/useStreamingTranscription";
+import { useTranscriptionSSE } from "../hooks/useSSE";
 import MicButton from "./MicButton";
+import StreamingMicButton from "./StreamingMicButton";
 import PrivacySelector from "./PrivacySelector";
 import api from "../api";
 import { uploadFileInChunks } from "../utils/chunkedUpload";
+import { uploadFileWithStreamingTranscription } from "../utils/streamingChunkedUpload";
 
 const NodeForm = forwardRef(
   (
@@ -52,7 +56,88 @@ const NodeForm = forwardRef(
     const [uploadedFile, setUploadedFile] = useState(null);
     const fileInputRef = React.useRef(null);
 
-    // Transcription polling
+    // Streaming transcription mode (real-time transcription while recording)
+    const [useStreamingMode, setUseStreamingMode] = useState(false);
+    // Node ID for streaming upload (to subscribe to SSE)
+    const [streamingUploadNodeId, setStreamingUploadNodeId] = useState(null);
+
+    // SSE subscription for streaming file upload transcription
+    const {
+      chunks: sseTranscriptChunks,
+      isComplete: sseTranscriptionComplete,
+      finalContent: sseFinalContent,
+    } = useTranscriptionSSE(streamingUploadNodeId, {
+      enabled: !!streamingUploadNodeId,
+      onChunkComplete: (data) => {
+        // Update content with latest assembled transcript
+        const allChunks = [...sseTranscriptChunks, { index: data.chunk_index, text: data.text }]
+          .sort((a, b) => a.index - b.index);
+        setContent(allChunks.map(c => c.text).join('\n\n'));
+      },
+      onAllComplete: (data) => {
+        setLoading(false);
+        deleteDraft();
+        setHasDraft(false);
+        onSuccess({ id: streamingUploadNodeId, content: data.content });
+        setStreamingUploadNodeId(null);
+      },
+      onError: (err) => {
+        setError(err.error || 'Streaming transcription failed');
+        setLoading(false);
+        setStreamingUploadNodeId(null);
+      },
+    });
+
+    // Update content when SSE chunks change
+    useEffect(() => {
+      if (sseTranscriptChunks.length > 0 && streamingUploadNodeId) {
+        const assembled = sseTranscriptChunks
+          .sort((a, b) => a.index - b.index)
+          .map(c => c.text)
+          .join('\n\n');
+        setContent(assembled);
+      }
+    }, [sseTranscriptChunks, streamingUploadNodeId]);
+
+    // Handle SSE transcription completion
+    useEffect(() => {
+      if (sseTranscriptionComplete && sseFinalContent && streamingUploadNodeId) {
+        setLoading(false);
+        deleteDraft();
+        setHasDraft(false);
+        onSuccess({ id: streamingUploadNodeId, content: sseFinalContent });
+        setStreamingUploadNodeId(null);
+      }
+    }, [sseTranscriptionComplete, sseFinalContent, streamingUploadNodeId, deleteDraft, onSuccess]);
+
+    // Streaming transcription hook (for live recording)
+    const {
+      isRecording: isStreamingRecording,
+    } = useStreamingTranscription({
+      parentId,
+      privacyLevel,
+      aiUsage,
+      chunkIntervalMs: 5 * 60 * 1000, // 5 minutes
+      onTranscriptUpdate: (transcript) => {
+        // Update the main content to show live transcription
+        if (useStreamingMode) {
+          setContent(transcript);
+        }
+      },
+      onComplete: (data) => {
+        // Streaming transcription complete
+        setLoading(false);
+        deleteDraft();
+        setHasDraft(false);
+        onSuccess({ id: data.nodeId, content: data.content });
+      },
+      onError: (err) => {
+        setError(err.message || 'Streaming transcription failed');
+        setLoading(false);
+      },
+    });
+
+    // Transcription polling (for non-streaming mode)
     const {
       status: transcriptionStatus,
       progress: transcriptionProgress,
@@ -189,51 +274,111 @@ const NodeForm = forwardRef(
             setUploadProgress(0);
 
             try {
-              const uploadResult = await uploadFileInChunks(
-                fileToUpload,
-                {
-                  parent_id: parentId,
-                  node_type: 'user',
-                  privacy_level: privacyLevel,
-                  ai_usage: aiUsage
-                },
-                (progress) => {
-                  setUploadProgress(progress);
-                }
-              );
+              if (useStreamingMode) {
+                // Streaming mode: upload chunks with immediate transcription
+                // SSE will update content as chunks are transcribed
+                const uploadResult = await uploadFileWithStreamingTranscription(
+                  fileToUpload,
+                  {
+                    parent_id: parentId,
+                    node_type: 'user',
+                    privacy_level: privacyLevel,
+                    ai_usage: aiUsage
+                  },
+                  (progress) => {
+                    setUploadProgress(progress);
+                  }
+                );
 
-              setIsUploading(false);
-              setUploadProgress(100);
+                setIsUploading(false);
+                setUploadProgress(100);
 
-              // uploadFileInChunks returns data directly (not axios response)
-              const nodeId = uploadResult.id;
-              setUploadedNodeId(nodeId);
-              // Keep loading state active while transcription is in progress
-              // Polling will start automatically via useEffect
-              return;
+                // Set streaming node ID to trigger SSE subscription
+                setStreamingUploadNodeId(uploadResult.nodeId);
+                // Keep loading state active while transcription is in progress
+                // SSE will handle completion
+                return;
+              } else {
+                // Regular mode: upload all chunks first, then transcribe
+                const uploadResult = await uploadFileInChunks(
+                  fileToUpload,
+                  {
+                    parent_id: parentId,
+                    node_type: 'user',
+                    privacy_level: privacyLevel,
+                    ai_usage: aiUsage
+                  },
+                  (progress) => {
+                    setUploadProgress(progress);
+                  }
+                );
+
+                setIsUploading(false);
+                setUploadProgress(100);
+
+                // uploadFileInChunks returns data directly (not axios response)
+                const nodeId = uploadResult.id;
+                setUploadedNodeId(nodeId);
+                // Keep loading state active while transcription is in progress
+                // Polling will start automatically via useEffect
+                return;
+              }
             } catch (uploadErr) {
               setIsUploading(false);
               setUploadProgress(0);
               throw uploadErr;
             }
           } else {
-            // Use traditional upload for small files (< 10MB)
-            const formData = new FormData();
-            formData.append('audio_file', fileToUpload);
-            if (parentId) formData.append('parent_id', parentId);
-            formData.append('privacy_level', privacyLevel);
-            formData.append('ai_usage', aiUsage);
+            // Small files (< 10MB) - use traditional or streaming upload based on mode
+            if (useStreamingMode) {
+              // Use streaming upload even for small files when mode is enabled
+              setIsUploading(true);
+              setUploadProgress(0);
 
-            response = await api.post("/nodes/", formData, {
-              headers: { 'Content-Type': 'multipart/form-data' }
-            });
+              try {
+                const uploadResult = await uploadFileWithStreamingTranscription(
+                  fileToUpload,
+                  {
+                    parent_id: parentId,
+                    node_type: 'user',
+                    privacy_level: privacyLevel,
+                    ai_usage: aiUsage
+                  },
+                  (progress) => {
+                    setUploadProgress(progress);
+                  }
+                );
 
-            // Set the node ID to trigger polling via useEffect
-            const nodeId = response.data.id;
-            setUploadedNodeId(nodeId);
-            // Keep loading state active while transcription is in progress
-            // Polling will start automatically via useEffect
-            return;
+                setIsUploading(false);
+                setUploadProgress(100);
+
+                // Set streaming node ID to trigger SSE subscription
+                setStreamingUploadNodeId(uploadResult.nodeId);
+                return;
+              } catch (uploadErr) {
+                setIsUploading(false);
+                setUploadProgress(0);
+                throw uploadErr;
+              }
+            } else {
+              // Traditional upload for small files
+              const formData = new FormData();
+              formData.append('audio_file', fileToUpload);
+              if (parentId) formData.append('parent_id', parentId);
+              formData.append('privacy_level', privacyLevel);
+              formData.append('ai_usage', aiUsage);
+
+              response = await api.post("/nodes/", formData, {
+                headers: { 'Content-Type': 'multipart/form-data' }
+              });
+
+              // Set the node ID to trigger polling via useEffect
+              const nodeId = response.data.id;
+              setUploadedNodeId(nodeId);
+              // Keep loading state active while transcription is in progress
+              // Polling will start automatically via useEffect
+              return;
+            }
           }
         } else {
           // Create a new text node
@@ -378,14 +523,58 @@ const NodeForm = forwardRef(
             )}
             {!editMode && (
               <>
-                <MicButton
-                  status={recStatus}
-                  mediaUrl={mediaUrl}
-                  duration={recDuration}
-                  startRecording={startRecording}
-                  stopRecording={stopRecording}
-                  resetRecording={resetRecording}
-                />
+                {/* Mode toggle for streaming vs regular recording */}
+                <label style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  fontSize: '0.85em',
+                  cursor: 'pointer',
+                  padding: '4px 8px',
+                  backgroundColor: useStreamingMode ? '#e7f3ff' : '#f8f9fa',
+                  borderRadius: '4px',
+                  border: '1px solid #dee2e6',
+                }}>
+                  <input
+                    type="checkbox"
+                    checked={useStreamingMode}
+                    onChange={(e) => setUseStreamingMode(e.target.checked)}
+                    disabled={recStatus === 'recording' || isStreamingRecording || loading}
+                  />
+                  <span title="Enable real-time transcription while recording (for long recordings)">
+                    Live transcription
+                  </span>
+                </label>
+
+                {/* Render appropriate mic button based on mode */}
+                {useStreamingMode ? (
+                  <StreamingMicButton
+                    parentId={parentId}
+                    privacyLevel={privacyLevel}
+                    aiUsage={aiUsage}
+                    onTranscriptUpdate={(transcript) => setContent(transcript)}
+                    onComplete={(data) => {
+                      setLoading(false);
+                      deleteDraft();
+                      setHasDraft(false);
+                      onSuccess({ id: data.nodeId, content: data.content });
+                    }}
+                    onError={(err) => {
+                      setError(err.message || 'Streaming transcription failed');
+                      setLoading(false);
+                    }}
+                    disabled={loading || uploadedFile}
+                  />
+                ) : (
+                  <MicButton
+                    status={recStatus}
+                    mediaUrl={mediaUrl}
+                    duration={recDuration}
+                    startRecording={startRecording}
+                    stopRecording={stopRecording}
+                    resetRecording={resetRecording}
+                  />
+                )}
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -396,7 +585,7 @@ const NodeForm = forwardRef(
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  disabled={recStatus === 'recording'}
+                  disabled={recStatus === 'recording' || isStreamingRecording}
                   style={{ padding: '8px 16px', cursor: 'pointer' }}
                 >
                   Upload
