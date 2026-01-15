@@ -1,0 +1,6 @@
+Write me a letter from my future self, based on where I seem to be heading based on all my writing so far.
+
+## INPUT
+<user_export>
+{user_export}
+</user_export>
