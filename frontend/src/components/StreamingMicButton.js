@@ -27,15 +27,11 @@ export default function StreamingMicButton({
 }) {
   const {
     sessionState,
-    transcript,
     duration,
     chunkCount,
-    uploadedChunks,
     transcribedChunks,
     errorMessage,
-    isRecording,
     isSSEConnected,
-    mediaUrl,
     startStreaming,
     stopStreaming,
     cancelStreaming,

@@ -56,29 +56,17 @@ const NodeForm = forwardRef(
 
     // Streaming transcription mode (real-time transcription while recording)
     const [useStreamingMode, setUseStreamingMode] = useState(false);
-    const [streamingTranscript, setStreamingTranscript] = useState('');
 
     // Streaming transcription hook
     const {
-      sessionState: streamingSessionState,
-      nodeId: streamingNodeId,
-      transcript: liveTranscript,
-      duration: streamingDuration,
-      chunkCount: streamingChunkCount,
-      transcribedChunks,
       isRecording: isStreamingRecording,
-      mediaUrl: streamingMediaUrl,
-      startStreaming,
-      stopStreaming,
-      cancelStreaming,
     } = useStreamingTranscription({
       parentId,
       privacyLevel,
       aiUsage,
       chunkIntervalMs: 5 * 60 * 1000, // 5 minutes
       onTranscriptUpdate: (transcript) => {
-        setStreamingTranscript(transcript);
-        // Also update the main content to show live transcription
+        // Update the main content to show live transcription
         if (useStreamingMode) {
           setContent(transcript);
         }
