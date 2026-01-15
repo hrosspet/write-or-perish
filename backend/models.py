@@ -126,6 +126,10 @@ class Draft(db.Model):
     Temporary storage for auto-saved drafts.
     Drafts are private - only visible to the user who created them.
     Deleted when the user saves or discards their work.
+
+    Also used for streaming transcription sessions - audio chunks are
+    uploaded and transcribed in real-time, with transcript text appended
+    to the draft content as each chunk completes.
     """
     id = db.Column(db.Integer, primary_key=True)
     # The user who owns this draft
@@ -139,6 +143,15 @@ class Draft(db.Model):
     # Timestamps
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Streaming transcription fields
+    session_id = db.Column(db.String(36), nullable=True, unique=True, index=True)  # UUID for streaming session
+    streaming_status = db.Column(db.String(20), nullable=True)  # recording, finalizing, completed, failed
+    streaming_total_chunks = db.Column(db.Integer, nullable=True)  # Total chunks expected (set on finalize)
+    streaming_completed_chunks = db.Column(db.Integer, default=0)  # Chunks transcribed so far
+    # Privacy settings for when this draft becomes a node
+    privacy_level = db.Column(db.String(20), nullable=True)
+    ai_usage = db.Column(db.String(20), nullable=True)
 
     # Relationships
     user = db.relationship("User", backref="drafts")
@@ -181,11 +194,17 @@ class NodeTranscriptChunk(db.Model):
     Stores individual transcript chunks for streaming transcription.
     During streaming recording, each 5-minute audio chunk is transcribed
     independently and stored here. When recording is finalized, these
-    chunks are assembled into the final node content.
+    chunks are assembled into the final node/draft content.
+
+    Can be associated with either:
+    - A session_id (for draft-based streaming, before node is created)
+    - A node_id (legacy, or after draft is saved as node)
     """
     id = db.Column(db.Integer, primary_key=True)
-    # Which node this chunk belongs to
-    node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=False)
+    # Which node this chunk belongs to (nullable for draft-based streaming)
+    node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True)
+    # Session ID for draft-based streaming (links to Draft.session_id)
+    session_id = db.Column(db.String(36), nullable=True, index=True)
     # Zero-based index of the chunk
     chunk_index = db.Column(db.Integer, nullable=False)
     # Transcribed text for this chunk
@@ -202,8 +221,9 @@ class NodeTranscriptChunk(db.Model):
     # Relationship back to node
     node = db.relationship("Node", backref="transcript_chunks")
 
-    # Unique constraint: one chunk per index per node
+    # Unique constraint: one chunk per index per session OR per node
     __table_args__ = (
+        db.UniqueConstraint('session_id', 'chunk_index', name='uq_session_chunk_index'),
         db.UniqueConstraint('node_id', 'chunk_index', name='uq_node_chunk_index'),
     )
 

@@ -56,12 +56,14 @@ const NodeForm = forwardRef(
 
     // Streaming transcription mode (real-time transcription while recording)
     const [useStreamingMode, setUseStreamingMode] = useState(false);
-    // Track streaming node ID when transcription completes (for "review before save" flow)
-    const [streamingNodeId, setStreamingNodeId] = useState(null);
+    // Track streaming session ID when transcription completes (for "review before save" flow)
+    // With draft-based streaming, no node exists until user explicitly saves
+    const [streamingSessionId, setStreamingSessionId] = useState(null);
 
-    // Streaming transcription hook
+    // Streaming transcription hook (draft-based - no node created until explicit save)
     const {
       isRecording: isStreamingRecording,
+      saveAsNode: saveStreamingAsNode,
     } = useStreamingTranscription({
       parentId,
       privacyLevel,
@@ -74,11 +76,12 @@ const NodeForm = forwardRef(
         }
       },
       onComplete: (data) => {
-        // Streaming transcription complete
+        // Streaming transcription complete - transcript is in draft, not saved as node yet
+        // User can now review/edit the transcript and click Save to create the node
         setLoading(false);
-        deleteDraft();
-        setHasDraft(false);
-        onSuccess({ id: data.nodeId, content: data.content });
+        setContent(data.content);
+        setStreamingSessionId(data.sessionId);
+        // Note: No node exists yet - user must click Save to create it
       },
       onError: (err) => {
         setError(err.message || 'Streaming transcription failed');
@@ -204,18 +207,14 @@ const NodeForm = forwardRef(
       try {
         let response;
 
-        // Handle streaming transcription completion - node already exists
-        if (streamingNodeId) {
-          // Update the streaming node with any edits the user made
-          response = await api.put(`/nodes/${streamingNodeId}`, {
-            content,
-            privacy_level: privacyLevel,
-            ai_usage: aiUsage
-          });
+        // Handle streaming transcription completion - draft exists, create node from it
+        if (streamingSessionId) {
+          // Save the streaming draft as a node with any edits the user made
+          const nodeData = await saveStreamingAsNode(content);
           deleteDraft();
           setHasDraft(false);
-          setStreamingNodeId(null);
-          onSuccess(response.data);
+          setStreamingSessionId(null);
+          onSuccess(nodeData);
           setLoading(false);
           return;
         }
@@ -461,11 +460,11 @@ const NodeForm = forwardRef(
                     onTranscriptUpdate={(transcript) => setContent(transcript)}
                     onComplete={(data) => {
                       // Don't navigate immediately - let user review/edit the transcript first
+                      // With draft-based streaming, no node exists yet - just a draft
                       setLoading(false);
                       setContent(data.content);
-                      setStreamingNodeId(data.nodeId);
-                      // Note: The node already exists with this content on the server
-                      // User can now edit and click "Save" to finalize
+                      setStreamingSessionId(data.sessionId);
+                      // Note: No node exists yet - user must click Save to create it
                     }}
                     onError={(err) => {
                       setError(err.message || 'Streaming transcription failed');

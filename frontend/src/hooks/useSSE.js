@@ -231,6 +231,116 @@ export function useTranscriptionSSE(nodeId, options = {}) {
 }
 
 /**
+ * useDraftTranscriptionSSE - Specialized hook for draft-based streaming transcription.
+ *
+ * This is similar to useTranscriptionSSE but works with session_id instead of node_id,
+ * and includes content_update events as the draft is updated in real-time.
+ *
+ * @param {string} sessionId - Session ID to subscribe to
+ * @param {Object} options
+ * @param {boolean} options.enabled - Whether to connect
+ * @param {Function} options.onChunkComplete - Called when a chunk is transcribed
+ * @param {Function} options.onContentUpdate - Called when draft content is updated
+ * @param {Function} options.onAllComplete - Called when all chunks are done
+ * @param {Function} options.onError - Called on transcription error
+ */
+export function useDraftTranscriptionSSE(sessionId, options = {}) {
+  const {
+    enabled = false,
+    onChunkComplete = null,
+    onContentUpdate = null,
+    onAllComplete = null,
+    onError = null,
+  } = options;
+
+  const [chunks, setChunks] = useState([]); // Array of { index, text }
+  const [isComplete, setIsComplete] = useState(false);
+  const [finalContent, setFinalContent] = useState(null);
+  const [draftContent, setDraftContent] = useState('');
+
+  // Use REACT_APP_BACKEND_URL for SSE since EventSource doesn't go through CRA proxy
+  const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
+  const url = sessionId ? `${backendUrl}/api/sse/drafts/${sessionId}/transcription-stream` : null;
+
+  const eventHandlers = {
+    chunk_complete: (data) => {
+      setChunks(prev => {
+        // Add or update chunk
+        const existing = prev.find(c => c.index === data.chunk_index);
+        if (existing) {
+          return prev.map(c =>
+            c.index === data.chunk_index ? { ...c, text: data.text } : c
+          );
+        }
+        return [...prev, { index: data.chunk_index, text: data.text }].sort(
+          (a, b) => a.index - b.index
+        );
+      });
+      if (onChunkComplete) {
+        onChunkComplete(data);
+      }
+    },
+    chunk_error: (data) => {
+      if (onError) {
+        onError(data);
+      }
+    },
+    content_update: (data) => {
+      setDraftContent(data.content);
+      if (onContentUpdate) {
+        onContentUpdate(data);
+      }
+    },
+    all_complete: (data) => {
+      setIsComplete(true);
+      setFinalContent(data.content);
+      setDraftContent(data.content);
+      if (onAllComplete) {
+        onAllComplete(data);
+      }
+    },
+    error: (data) => {
+      if (onError) {
+        onError(data);
+      }
+    },
+    heartbeat: () => {
+      // Keep-alive, no action needed
+    },
+  };
+
+  const { isConnected, error, disconnect } = useSSE(url, {
+    enabled,
+    eventHandlers,
+  });
+
+  // Get assembled transcript from chunks
+  const getAssembledTranscript = useCallback(() => {
+    return chunks.map(c => c.text).join('\n\n');
+  }, [chunks]);
+
+  // Reset state
+  const reset = useCallback(() => {
+    setChunks([]);
+    setIsComplete(false);
+    setFinalContent(null);
+    setDraftContent('');
+  }, []);
+
+  return {
+    isConnected,
+    error,
+    chunks,
+    isComplete,
+    finalContent,
+    draftContent,
+    getAssembledTranscript,
+    disconnect,
+    reset,
+  };
+}
+
+/**
  * useTTSStreamSSE - Specialized hook for streaming TTS playback updates.
  *
  * @param {number} nodeId - Node ID to subscribe to
