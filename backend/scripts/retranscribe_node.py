@@ -11,12 +11,14 @@ Example:
 The script will:
 1. Look up the node in the database
 2. Find the audio file (webm, mp3, etc.)
-3. Reset the transcription status
-4. Queue a new transcription task via Celery
+3. Convert webm to mp3 if needed (browser webm lacks duration metadata)
+4. Reset the transcription status
+5. Queue a new transcription task via Celery
 """
 import sys
 import os
 import pathlib
+import subprocess
 from typing import Optional
 
 # Add project root to path
@@ -28,6 +30,33 @@ from backend.models import Node
 from backend.tasks.transcription import transcribe_audio
 
 AUDIO_STORAGE_ROOT = pathlib.Path(os.environ.get("AUDIO_STORAGE_PATH", "data/audio")).resolve()
+
+
+def convert_webm_to_mp3(webm_path: pathlib.Path) -> Optional[pathlib.Path]:
+    """Convert webm to mp3 using ffmpeg (streams, doesn't load all to memory)."""
+    mp3_path = webm_path.with_suffix('.mp3')
+
+    if mp3_path.exists():
+        print(f"  MP3 already exists: {mp3_path}")
+        return mp3_path
+
+    print(f"  Converting webm to mp3 (browser webm lacks duration metadata)...")
+    try:
+        result = subprocess.run([
+            'ffmpeg', '-i', str(webm_path),
+            '-vn', '-acodec', 'libmp3lame', '-b:a', '128k',
+            str(mp3_path)
+        ], capture_output=True, text=True)
+
+        if result.returncode != 0:
+            print(f"  FFmpeg error: {result.stderr[:500]}")
+            return None
+
+        print(f"  Converted: {mp3_path.stat().st_size / 1024 / 1024:.2f} MB")
+        return mp3_path
+    except Exception as e:
+        print(f"  Conversion failed: {e}")
+        return None
 
 
 def find_audio_file(user_id: int, node_id: int) -> Optional[pathlib.Path]:
@@ -87,6 +116,14 @@ def main():
 
         print(f"\nFound audio file: {audio_file}")
         print(f"  Size: {audio_file.stat().st_size / 1024 / 1024:.2f} MB")
+
+        # Convert webm to mp3 if needed (browser webm lacks duration metadata)
+        if audio_file.suffix.lower() == '.webm':
+            mp3_file = convert_webm_to_mp3(audio_file)
+            if mp3_file:
+                audio_file = mp3_file
+            else:
+                print("\nWarning: Could not convert webm to mp3, trying with original")
 
         # Reset transcription status
         node.transcription_status = 'pending'
