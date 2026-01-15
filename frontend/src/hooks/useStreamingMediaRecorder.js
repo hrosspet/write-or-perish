@@ -90,8 +90,8 @@ export function useStreamingMediaRecorder({
           chunksRef.current.push(e.data);
 
           // Call the onChunkReady callback for streaming transcription
-          // Only call for intermediate chunks (not the final one on stop)
-          if (mediaRecorder.state === 'recording' && onChunkReady) {
+          // Upload ALL chunks including the final one - needed for short recordings
+          if (onChunkReady) {
             const chunkIndex = chunkIndexRef.current;
             chunkIndexRef.current += 1;
             setChunkCount(prev => prev + 1);
