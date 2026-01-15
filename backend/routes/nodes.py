@@ -1358,6 +1358,306 @@ def serve_audio_file(filename):
     return send_file(file_path)
 
 
+# ---------------------------------------------------------------------------
+# Streaming Transcription endpoints (real-time transcription during recording)
+# ---------------------------------------------------------------------------
+
+
+@nodes_bp.route("/streaming/init", methods=["POST"])
+@login_required
+def init_streaming_transcription():
+    """Initialize a streaming transcription session.
+
+    Creates a placeholder node ready to receive audio chunks that will be
+    transcribed in real-time as they arrive.
+
+    Request body:
+    {
+        "parent_id": 123,  // optional
+        "node_type": "user",  // optional
+        "privacy_level": "private",  // optional
+        "ai_usage": "none",  // optional
+        "chunk_interval_ms": 300000  // 5 minutes in milliseconds
+    }
+
+    Returns: { "node_id": 456, "session_id": "unique-session-id" }
+    """
+    data = request.get_json() or {}
+
+    parent_id = data.get("parent_id")
+    node_type = data.get("node_type", "user")
+    privacy_level = data.get("privacy_level", PrivacyLevel.PRIVATE)
+    ai_usage = data.get("ai_usage", AIUsage.NONE)
+    chunk_interval_ms = data.get("chunk_interval_ms", 300000)  # Default 5 minutes
+
+    # Validate privacy settings
+    if not validate_privacy_level(privacy_level):
+        return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
+    if not validate_ai_usage(ai_usage):
+        return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
+
+    # Generate session ID
+    import uuid
+    session_id = str(uuid.uuid4())
+
+    # Create placeholder node with streaming mode enabled
+    placeholder_text = "[Voice note – streaming transcription in progress]"
+    node = Node(
+        user_id=current_user.id,
+        parent_id=parent_id,
+        node_type=node_type,
+        content=placeholder_text,
+        transcription_status='processing',
+        streaming_transcription=True,
+        streaming_session_id=session_id,
+        streaming_total_chunks=None,  # Unknown until recording stops
+        streaming_completed_chunks=0,
+        privacy_level=privacy_level,
+        ai_usage=ai_usage
+    )
+    db.session.add(node)
+    db.session.commit()
+
+    # Create directory for chunk storage
+    chunk_dir = AUDIO_STORAGE_ROOT / f"streaming/{current_user.id}/{session_id}"
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+
+    current_app.logger.info(
+        f"Initialized streaming transcription session {session_id} for node {node.id} "
+        f"(chunk_interval: {chunk_interval_ms}ms)"
+    )
+
+    return jsonify({
+        "node_id": node.id,
+        "session_id": session_id,
+        "sse_url": f"/api/sse/nodes/{node.id}/transcription-stream"
+    }), 201
+
+
+@nodes_bp.route("/<int:node_id>/audio-chunk", methods=["POST"])
+@login_required
+def upload_audio_chunk(node_id):
+    """Upload an audio chunk for streaming transcription.
+
+    Receives an audio chunk from the frontend during recording, stores it,
+    and immediately queues it for transcription.
+
+    Expects multipart/form-data with:
+    - chunk: audio file blob
+    - chunk_index: integer (0-based)
+    - session_id: string (from init_streaming_transcription)
+
+    Returns: { "chunk_index": 0, "task_id": "celery-task-id" }
+    """
+    node = Node.query.get_or_404(node_id)
+
+    # Verify ownership
+    if node.user_id != current_user.id:
+        return jsonify({"error": "Unauthorized"}), 403
+
+    # Verify streaming mode
+    if not node.streaming_transcription:
+        return jsonify({"error": "Node is not in streaming transcription mode"}), 400
+
+    # Get form data
+    if "chunk" not in request.files:
+        return jsonify({"error": "Missing chunk file"}), 400
+
+    chunk_file = request.files["chunk"]
+    chunk_index = request.form.get("chunk_index")
+    session_id = request.form.get("session_id")
+
+    if chunk_index is None:
+        return jsonify({"error": "Missing chunk_index"}), 400
+    if not session_id:
+        return jsonify({"error": "Missing session_id"}), 400
+
+    try:
+        chunk_index = int(chunk_index)
+    except ValueError:
+        return jsonify({"error": "Invalid chunk_index"}), 400
+
+    # Verify session ID matches
+    if node.streaming_session_id != session_id:
+        return jsonify({"error": "Session ID mismatch"}), 400
+
+    # Save chunk to disk
+    chunk_dir = AUDIO_STORAGE_ROOT / f"streaming/{current_user.id}/{session_id}"
+    if not chunk_dir.exists():
+        return jsonify({"error": "Streaming session not found"}), 404
+
+    chunk_filename = f"chunk_{chunk_index:04d}.webm"
+    chunk_path = chunk_dir / chunk_filename
+    chunk_file.save(chunk_path)
+
+    # Create transcript chunk record
+    from backend.models import NodeTranscriptChunk
+
+    # Check if chunk already exists (retry scenario)
+    existing_chunk = NodeTranscriptChunk.query.filter_by(
+        node_id=node_id,
+        chunk_index=chunk_index
+    ).first()
+
+    if existing_chunk:
+        # Update existing chunk if it failed before
+        if existing_chunk.status == 'failed':
+            existing_chunk.status = 'pending'
+            existing_chunk.error = None
+            db.session.commit()
+            transcript_chunk = existing_chunk
+        else:
+            return jsonify({
+                "message": "Chunk already uploaded",
+                "chunk_index": chunk_index,
+                "status": existing_chunk.status
+            }), 200
+    else:
+        transcript_chunk = NodeTranscriptChunk(
+            node_id=node_id,
+            chunk_index=chunk_index,
+            status='pending'
+        )
+        db.session.add(transcript_chunk)
+        db.session.commit()
+
+    # Queue transcription task
+    from backend.tasks.streaming_transcription import transcribe_chunk
+
+    task = transcribe_chunk.delay(
+        node_id=node_id,
+        chunk_index=chunk_index,
+        chunk_path=str(chunk_path)
+    )
+
+    # Update chunk with task ID
+    transcript_chunk.task_id = task.id
+    transcript_chunk.status = 'processing'
+    db.session.commit()
+
+    current_app.logger.info(
+        f"Received audio chunk {chunk_index} for node {node_id}, "
+        f"enqueued transcription task {task.id}"
+    )
+
+    return jsonify({
+        "chunk_index": chunk_index,
+        "task_id": task.id,
+        "status": "processing"
+    }), 202
+
+
+@nodes_bp.route("/<int:node_id>/finalize-streaming", methods=["POST"])
+@login_required
+def finalize_streaming_transcription(node_id):
+    """Finalize streaming transcription.
+
+    Called when the user stops recording. Assembles all transcribed chunks
+    into the final node content.
+
+    Request body:
+    {
+        "session_id": "unique-session-id",
+        "total_chunks": 5  // Total number of chunks sent
+    }
+
+    Returns: Node info with assembled transcript
+    """
+    node = Node.query.get_or_404(node_id)
+
+    # Verify ownership
+    if node.user_id != current_user.id:
+        return jsonify({"error": "Unauthorized"}), 403
+
+    # Verify streaming mode
+    if not node.streaming_transcription:
+        return jsonify({"error": "Node is not in streaming transcription mode"}), 400
+
+    data = request.get_json() or {}
+    session_id = data.get("session_id")
+    total_chunks = data.get("total_chunks")
+
+    if not session_id:
+        return jsonify({"error": "Missing session_id"}), 400
+    if total_chunks is None:
+        return jsonify({"error": "Missing total_chunks"}), 400
+
+    # Verify session ID matches
+    if node.streaming_session_id != session_id:
+        return jsonify({"error": "Session ID mismatch"}), 400
+
+    # Update total chunks now that we know the final count
+    node.streaming_total_chunks = total_chunks
+    db.session.commit()
+
+    # Queue finalization task
+    from backend.tasks.streaming_transcription import finalize_streaming
+
+    task = finalize_streaming.delay(
+        node_id=node_id,
+        session_id=session_id,
+        total_chunks=total_chunks
+    )
+
+    current_app.logger.info(
+        f"Finalizing streaming transcription for node {node_id}, "
+        f"total_chunks: {total_chunks}, task: {task.id}"
+    )
+
+    return jsonify({
+        "message": "Finalization started",
+        "task_id": task.id,
+        "node_id": node_id,
+        "total_chunks": total_chunks
+    }), 202
+
+
+@nodes_bp.route("/<int:node_id>/streaming-status", methods=["GET"])
+@login_required
+def get_streaming_status(node_id):
+    """Get the current streaming transcription status for a node.
+
+    Returns status of all chunks and overall transcription progress.
+    """
+    node = Node.query.get_or_404(node_id)
+
+    # Check ownership
+    if node.user_id != current_user.id and not getattr(current_user, "is_admin", False):
+        return jsonify({"error": "Unauthorized"}), 403
+
+    if not node.streaming_transcription:
+        return jsonify({"error": "Node is not in streaming transcription mode"}), 400
+
+    # Get all chunks
+    from backend.models import NodeTranscriptChunk
+
+    chunks = NodeTranscriptChunk.query.filter_by(node_id=node_id).order_by(
+        NodeTranscriptChunk.chunk_index
+    ).all()
+
+    chunk_statuses = [{
+        "chunk_index": c.chunk_index,
+        "status": c.status,
+        "text": c.text if c.status == 'completed' else None,
+        "error": c.error if c.status == 'failed' else None
+    } for c in chunks]
+
+    completed_count = sum(1 for c in chunks if c.status == 'completed')
+    failed_count = sum(1 for c in chunks if c.status == 'failed')
+
+    return jsonify({
+        "node_id": node_id,
+        "session_id": node.streaming_session_id,
+        "transcription_status": node.transcription_status,
+        "streaming_transcription": node.streaming_transcription,
+        "total_chunks": node.streaming_total_chunks,
+        "completed_chunks": completed_count,
+        "failed_chunks": failed_count,
+        "chunks": chunk_statuses,
+        "content": node.content if node.transcription_status == 'completed' else None
+    })
+
+
 @nodes_bp.route("/<int:node_id>", methods=["DELETE"])
 @login_required
 def delete_node(node_id):

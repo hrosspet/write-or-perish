@@ -91,6 +91,16 @@ class Node(db.Model):
     tts_task_status = db.Column(db.String(20), nullable=True)  # pending, processing, completed, failed
     tts_task_progress = db.Column(db.Integer, default=0)
 
+    # Streaming transcription fields
+    # Indicates this node is using streaming transcription mode
+    streaming_transcription = db.Column(db.Boolean, default=False)
+    # Total expected chunks (set when recording starts with known interval)
+    streaming_total_chunks = db.Column(db.Integer, nullable=True)
+    # Number of chunks that have completed transcription
+    streaming_completed_chunks = db.Column(db.Integer, default=0)
+    # Session ID for streaming upload (groups chunks together)
+    streaming_session_id = db.Column(db.String(64), nullable=True)
+
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
@@ -164,3 +174,62 @@ class UserProfile(db.Model):
 
     # Relationship back to user
     user = db.relationship("User", backref="profiles")
+
+
+class NodeTranscriptChunk(db.Model):
+    """
+    Stores individual transcript chunks for streaming transcription.
+    During streaming recording, each 5-minute audio chunk is transcribed
+    independently and stored here. When recording is finalized, these
+    chunks are assembled into the final node content.
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    # Which node this chunk belongs to
+    node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=False)
+    # Zero-based index of the chunk
+    chunk_index = db.Column(db.Integer, nullable=False)
+    # Transcribed text for this chunk
+    text = db.Column(db.Text, nullable=True)
+    # Status of this chunk's transcription
+    status = db.Column(db.String(20), nullable=False, default="pending")  # pending, processing, completed, failed
+    # Error message if transcription failed
+    error = db.Column(db.Text, nullable=True)
+    # Celery task ID for tracking
+    task_id = db.Column(db.String(255), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    completed_at = db.Column(db.DateTime, nullable=True)
+
+    # Relationship back to node
+    node = db.relationship("Node", backref="transcript_chunks")
+
+    # Unique constraint: one chunk per index per node
+    __table_args__ = (
+        db.UniqueConstraint('node_id', 'chunk_index', name='uq_node_chunk_index'),
+    )
+
+
+class TTSChunk(db.Model):
+    """
+    Stores individual TTS audio chunk URLs for streaming TTS playback.
+    When TTS is generated, each text chunk produces an audio file that
+    can be played immediately while subsequent chunks are still generating.
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    # Which node this TTS chunk belongs to
+    node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=False)
+    # Zero-based index of the chunk
+    chunk_index = db.Column(db.Integer, nullable=False)
+    # URL to the audio chunk file
+    audio_url = db.Column(db.String, nullable=True)
+    # Status of this chunk's generation
+    status = db.Column(db.String(20), nullable=False, default="pending")  # pending, processing, completed, failed
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    completed_at = db.Column(db.DateTime, nullable=True)
+
+    # Relationship back to node
+    node = db.relationship("Node", backref="tts_chunks")
+
+    # Unique constraint: one chunk per index per node
+    __table_args__ = (
+        db.UniqueConstraint('node_id', 'chunk_index', name='uq_node_tts_chunk_index'),
+    )

@@ -2,7 +2,9 @@ import React, { useState, forwardRef, useImperativeHandle, useEffect, useCallbac
 import { useMediaRecorder } from "../hooks/useMediaRecorder";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 import { useDraft } from "../hooks/useDraft";
+import { useStreamingTranscription } from "../hooks/useStreamingTranscription";
 import MicButton from "./MicButton";
+import StreamingMicButton from "./StreamingMicButton";
 import PrivacySelector from "./PrivacySelector";
 import api from "../api";
 import { uploadFileInChunks } from "../utils/chunkedUpload";
@@ -52,7 +54,49 @@ const NodeForm = forwardRef(
     const [uploadedFile, setUploadedFile] = useState(null);
     const fileInputRef = React.useRef(null);
 
-    // Transcription polling
+    // Streaming transcription mode (real-time transcription while recording)
+    const [useStreamingMode, setUseStreamingMode] = useState(false);
+    const [streamingTranscript, setStreamingTranscript] = useState('');
+
+    // Streaming transcription hook
+    const {
+      sessionState: streamingSessionState,
+      nodeId: streamingNodeId,
+      transcript: liveTranscript,
+      duration: streamingDuration,
+      chunkCount: streamingChunkCount,
+      transcribedChunks,
+      isRecording: isStreamingRecording,
+      mediaUrl: streamingMediaUrl,
+      startStreaming,
+      stopStreaming,
+      cancelStreaming,
+    } = useStreamingTranscription({
+      parentId,
+      privacyLevel,
+      aiUsage,
+      chunkIntervalMs: 5 * 60 * 1000, // 5 minutes
+      onTranscriptUpdate: (transcript) => {
+        setStreamingTranscript(transcript);
+        // Also update the main content to show live transcription
+        if (useStreamingMode) {
+          setContent(transcript);
+        }
+      },
+      onComplete: (data) => {
+        // Streaming transcription complete
+        setLoading(false);
+        deleteDraft();
+        setHasDraft(false);
+        onSuccess({ id: data.nodeId, content: data.content });
+      },
+      onError: (err) => {
+        setError(err.message || 'Streaming transcription failed');
+        setLoading(false);
+      },
+    });
+
+    // Transcription polling (for non-streaming mode)
     const {
       status: transcriptionStatus,
       progress: transcriptionProgress,
@@ -378,14 +422,58 @@ const NodeForm = forwardRef(
             )}
             {!editMode && (
               <>
-                <MicButton
-                  status={recStatus}
-                  mediaUrl={mediaUrl}
-                  duration={recDuration}
-                  startRecording={startRecording}
-                  stopRecording={stopRecording}
-                  resetRecording={resetRecording}
-                />
+                {/* Mode toggle for streaming vs regular recording */}
+                <label style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  fontSize: '0.85em',
+                  cursor: 'pointer',
+                  padding: '4px 8px',
+                  backgroundColor: useStreamingMode ? '#e7f3ff' : '#f8f9fa',
+                  borderRadius: '4px',
+                  border: '1px solid #dee2e6',
+                }}>
+                  <input
+                    type="checkbox"
+                    checked={useStreamingMode}
+                    onChange={(e) => setUseStreamingMode(e.target.checked)}
+                    disabled={recStatus === 'recording' || isStreamingRecording || loading}
+                  />
+                  <span title="Enable real-time transcription while recording (for long recordings)">
+                    Live transcription
+                  </span>
+                </label>
+
+                {/* Render appropriate mic button based on mode */}
+                {useStreamingMode ? (
+                  <StreamingMicButton
+                    parentId={parentId}
+                    privacyLevel={privacyLevel}
+                    aiUsage={aiUsage}
+                    onTranscriptUpdate={(transcript) => setContent(transcript)}
+                    onComplete={(data) => {
+                      setLoading(false);
+                      deleteDraft();
+                      setHasDraft(false);
+                      onSuccess({ id: data.nodeId, content: data.content });
+                    }}
+                    onError={(err) => {
+                      setError(err.message || 'Streaming transcription failed');
+                      setLoading(false);
+                    }}
+                    disabled={loading || uploadedFile}
+                  />
+                ) : (
+                  <MicButton
+                    status={recStatus}
+                    mediaUrl={mediaUrl}
+                    duration={recDuration}
+                    startRecording={startRecording}
+                    stopRecording={stopRecording}
+                    resetRecording={resetRecording}
+                  />
+                )}
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -396,7 +484,7 @@ const NodeForm = forwardRef(
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  disabled={recStatus === 'recording'}
+                  disabled={recStatus === 'recording' || isStreamingRecording}
                   style={{ padding: '8px 16px', cursor: 'pointer' }}
                 >
                   Upload

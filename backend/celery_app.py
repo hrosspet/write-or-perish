@@ -36,3 +36,4 @@ from backend.tasks import transcription  # noqa: F401
 from backend.tasks import llm_completion  # noqa: F401
 from backend.tasks import tts  # noqa: F401
 from backend.tasks import exports  # noqa: F401
+from backend.tasks import streaming_transcription  # noqa: F401
