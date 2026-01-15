@@ -11,6 +11,7 @@ import { useStreamingTranscription } from '../hooks/useStreamingTranscription';
  * @param {number} parentId - Parent node ID (optional)
  * @param {string} privacyLevel - Privacy level for the node
  * @param {string} aiUsage - AI usage setting
+ * @param {Function} onRecordingStart - Called when recording starts (before streaming init)
  * @param {Function} onTranscriptUpdate - Called with updated transcript text
  * @param {Function} onComplete - Called when recording and transcription is complete
  * @param {Function} onError - Called on errors
@@ -20,6 +21,7 @@ export default function StreamingMicButton({
   parentId = null,
   privacyLevel = 'private',
   aiUsage = 'none',
+  onRecordingStart = null,
   onTranscriptUpdate = null,
   onComplete = null,
   onError = null,
@@ -47,13 +49,17 @@ export default function StreamingMicButton({
 
   const handleClick = useCallback(() => {
     if (sessionState === 'idle') {
+      // Call onRecordingStart before starting to capture pre-existing content
+      if (onRecordingStart) {
+        onRecordingStart();
+      }
       startStreaming();
     } else if (sessionState === 'recording') {
       stopStreaming();
     } else if (sessionState === 'complete' || sessionState === 'error') {
       cancelStreaming();
     }
-  }, [sessionState, startStreaming, stopStreaming, cancelStreaming]);
+  }, [sessionState, startStreaming, stopStreaming, cancelStreaming, onRecordingStart]);
 
   // Format duration as MM:SS
   const formatDuration = (seconds) => {

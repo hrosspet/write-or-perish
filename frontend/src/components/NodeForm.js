@@ -59,6 +59,8 @@ const NodeForm = forwardRef(
     // Track streaming session ID when transcription completes (for "review before save" flow)
     // With draft-based streaming, no node exists until user explicitly saves
     const [streamingSessionId, setStreamingSessionId] = useState(null);
+    // Track content that existed before streaming started (to append new transcript to it)
+    const preStreamingContentRef = React.useRef("");
 
     // Streaming transcription hook (draft-based - no node created until explicit save)
     const {
@@ -457,18 +459,33 @@ const NodeForm = forwardRef(
                     parentId={parentId}
                     privacyLevel={privacyLevel}
                     aiUsage={aiUsage}
-                    onTranscriptUpdate={(transcript) => setContent(transcript)}
+                    onRecordingStart={() => {
+                      // Capture content before streaming starts so we can append to it
+                      preStreamingContentRef.current = content;
+                    }}
+                    onTranscriptUpdate={(transcript) => {
+                      // Append new transcript to pre-existing content
+                      const prefix = preStreamingContentRef.current;
+                      const separator = prefix && transcript ? '\n\n' : '';
+                      setContent(prefix + separator + transcript);
+                    }}
                     onComplete={(data) => {
                       // Don't navigate immediately - let user review/edit the transcript first
                       // With draft-based streaming, no node exists yet - just a draft
                       setLoading(false);
-                      setContent(data.content);
+                      // Append final transcript to pre-existing content
+                      const prefix = preStreamingContentRef.current;
+                      const separator = prefix && data.content ? '\n\n' : '';
+                      setContent(prefix + separator + data.content);
                       setStreamingSessionId(data.sessionId);
+                      // Clear the ref for next recording
+                      preStreamingContentRef.current = "";
                       // Note: No node exists yet - user must click Save to create it
                     }}
                     onError={(err) => {
                       setError(err.message || 'Streaming transcription failed');
                       setLoading(false);
+                      preStreamingContentRef.current = "";
                     }}
                     disabled={loading || uploadedFile}
                   />
