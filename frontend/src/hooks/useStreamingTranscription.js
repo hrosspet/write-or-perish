@@ -97,11 +97,9 @@ export function useStreamingTranscription(options = {}) {
   // SSE subscription for transcription updates (draft-based)
   const {
     isConnected: sseConnected,
-    chunks: transcriptChunks,
     isComplete: transcriptionComplete,
     finalContent,
     draftContent,
-    getAssembledTranscript,
     disconnect: disconnectSSE,
     reset: resetSSE,
   } = useDraftTranscriptionSSE(sessionId, {
