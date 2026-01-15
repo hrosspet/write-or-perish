@@ -17,6 +17,7 @@ The script will:
 import sys
 import os
 import pathlib
+from typing import Optional
 
 # Add project root to path
 project_root = pathlib.Path(__file__).parent.parent.parent
@@ -29,7 +30,7 @@ from backend.tasks.transcription import transcribe_audio
 AUDIO_STORAGE_ROOT = pathlib.Path(os.environ.get("AUDIO_STORAGE_PATH", "data/audio")).resolve()
 
 
-def find_audio_file(user_id: int, node_id: int) -> pathlib.Path | None:
+def find_audio_file(user_id: int, node_id: int) -> Optional[pathlib.Path]:
     """Find the audio file for a node, checking common extensions."""
     node_dir = AUDIO_STORAGE_ROOT / f"user/{user_id}/node/{node_id}"
 
