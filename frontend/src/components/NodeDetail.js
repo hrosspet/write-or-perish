@@ -140,7 +140,13 @@ function NodeDetail() {
       api
         .delete(`/nodes/${id}`)
         .then(() => {
-          navigate("/dashboard");
+          // Navigate to parent node if it exists, otherwise go to dashboard
+          if (node.ancestors && node.ancestors.length > 0) {
+            const parentNode = node.ancestors[node.ancestors.length - 1];
+            navigate(`/node/${parentNode.id}`);
+          } else {
+            navigate("/dashboard");
+          }
         })
         .catch((err) => {
           console.error(err);
