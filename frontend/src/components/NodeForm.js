@@ -1,8 +1,6 @@
 import React, { useState, forwardRef, useImperativeHandle, useEffect, useCallback } from "react";
-import { useMediaRecorder } from "../hooks/useMediaRecorder";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 import { useDraft } from "../hooks/useDraft";
-import MicButton from "./MicButton";
 import StreamingMicButton from "./StreamingMicButton";
 import PrivacySelector from "./PrivacySelector";
 import api from "../api";
@@ -39,22 +37,10 @@ const NodeForm = forwardRef(
       parentId: editMode ? null : parentId
     });
 
-    // Audio recording state
-    const {
-      status: recStatus,
-      mediaBlob,
-      mediaUrl,
-      duration: recDuration,
-      startRecording,
-      stopRecording,
-      resetRecording
-    } = useMediaRecorder();
     // Audio file upload state
     const [uploadedFile, setUploadedFile] = useState(null);
     const fileInputRef = React.useRef(null);
 
-    // Streaming transcription mode (real-time transcription while recording)
-    const [useStreamingMode, setUseStreamingMode] = useState(false);
     // Track streaming session ID when transcription completes (for "review before save" flow)
     // With draft-based streaming, no node exists until user explicitly saves
     const [streamingSessionId, setStreamingSessionId] = useState(null);
@@ -160,10 +146,6 @@ const NodeForm = forwardRef(
 
       setError("");
       setUploadedFile(file);
-      // Reset recording if user uploads a file
-      if (recStatus !== 'idle') {
-        resetRecording();
-      }
       // Clear text content
       setContent("");
     };
@@ -171,8 +153,8 @@ const NodeForm = forwardRef(
     const handleSubmit = async (event) => {
       event && event.preventDefault();
       // Validate: require content or audio
-      if (!editMode && (mediaBlob || uploadedFile)) {
-        // Submit audio recording or uploaded file
+      if (!editMode && uploadedFile) {
+        // Submit uploaded audio file
       } else if (!content.trim()) {
         setError("Content is required.");
         return;
@@ -203,9 +185,9 @@ const NodeForm = forwardRef(
             privacy_level: privacyLevel,
             ai_usage: aiUsage
           });
-        } else if (mediaBlob || uploadedFile) {
-          // Determine which file to upload
-          const fileToUpload = uploadedFile || new File([mediaBlob], 'recording.webm', { type: mediaBlob.type });
+        } else if (uploadedFile) {
+          // Upload audio file
+          const fileToUpload = uploadedFile;
 
           // Check file size - use chunked upload for files larger than 10MB
           const useChunkedUpload = fileToUpload.size > 10 * 1024 * 1024;
@@ -287,7 +269,7 @@ const NodeForm = forwardRef(
 
     useImperativeHandle(ref, () => ({
       submit: () => handleSubmit({ preventDefault: () => {} }),
-      isDirty: () => content.trim().length > 0 || mediaBlob || uploadedFile,
+      isDirty: () => content.trim().length > 0 || uploadedFile,
     }));
 
     // Format time ago for last saved indicator
@@ -314,20 +296,15 @@ const NodeForm = forwardRef(
               saveDraft(newContent);
               setHasDraft(true);
             }
-            // Discard recording or uploaded file if user types
-            if (!editMode) {
-              if (recStatus !== 'idle') {
-                resetRecording();
-              }
-              if (uploadedFile) {
-                setUploadedFile(null);
-              }
+            // Discard uploaded file if user types
+            if (!editMode && uploadedFile) {
+              setUploadedFile(null);
             }
           }}
           rows={20}
           style={{ width: "100%" }}
           placeholder="Write your thoughts here..."
-          disabled={!editMode && (recStatus === 'recording' || uploadedFile)}
+          disabled={!editMode && uploadedFile}
         />
 
         {/* Privacy Settings */}
@@ -405,83 +382,48 @@ const NodeForm = forwardRef(
             )}
             {!editMode && (
               <>
-                {/* Mode toggle for streaming vs regular recording */}
-                <label style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '4px',
-                  fontSize: '0.85em',
-                  cursor: 'pointer',
-                  padding: '4px 8px',
-                  backgroundColor: useStreamingMode ? '#e7f3ff' : '#f8f9fa',
-                  borderRadius: '4px',
-                  border: '1px solid #dee2e6',
-                }}>
-                  <input
-                    type="checkbox"
-                    checked={useStreamingMode}
-                    onChange={(e) => setUseStreamingMode(e.target.checked)}
-                    disabled={recStatus === 'recording' || isStreamingRecording || loading}
-                  />
-                  <span title="Enable real-time transcription while recording (for long recordings)">
-                    Live transcription
-                  </span>
-                </label>
-
-                {/* Render appropriate mic button based on mode */}
-                {useStreamingMode ? (
-                  <StreamingMicButton
-                    parentId={parentId}
-                    privacyLevel={privacyLevel}
-                    aiUsage={aiUsage}
-                    onRecordingStart={() => {
-                      // Capture content before streaming starts so we can append to it
-                      preStreamingContentRef.current = content;
-                      setIsStreamingRecording(true);
-                    }}
-                    onTranscriptUpdate={(transcript) => {
-                      // Append new transcript to pre-existing content
-                      const prefix = preStreamingContentRef.current;
-                      const separator = prefix && transcript ? '\n\n' : '';
-                      setContent(prefix + separator + transcript);
-                    }}
-                    onComplete={(data) => {
-                      // Don't navigate immediately - let user review/edit the transcript first
-                      // With draft-based streaming, no node exists yet - just a draft
-                      setLoading(false);
-                      setIsStreamingRecording(false);
-                      // Append final transcript to pre-existing content
-                      const prefix = preStreamingContentRef.current;
-                      const separator = prefix && data.content ? '\n\n' : '';
-                      const combinedContent = prefix + separator + data.content;
-                      setContent(combinedContent);
-                      setStreamingSessionId(data.sessionId);
-                      // Save combined content to the regular draft so it persists on reopen
-                      saveDraft(combinedContent);
-                      setHasDraft(true);
-                      // Don't clear preStreamingContentRef here - a late SSE event could
-                      // trigger onTranscriptUpdate after this, and it needs the prefix.
-                      // The ref gets overwritten when next recording starts anyway.
-                      // Note: No node exists yet - user must click Save to create it
-                    }}
-                    onError={(err) => {
-                      setError(err.message || 'Streaming transcription failed');
-                      setLoading(false);
-                      setIsStreamingRecording(false);
-                      // Don't clear preStreamingContentRef - user might retry and we want to preserve content
-                    }}
-                    disabled={loading || uploadedFile}
-                  />
-                ) : (
-                  <MicButton
-                    status={recStatus}
-                    mediaUrl={mediaUrl}
-                    duration={recDuration}
-                    startRecording={startRecording}
-                    stopRecording={stopRecording}
-                    resetRecording={resetRecording}
-                  />
-                )}
+                <StreamingMicButton
+                  parentId={parentId}
+                  privacyLevel={privacyLevel}
+                  aiUsage={aiUsage}
+                  onRecordingStart={() => {
+                    // Capture content before streaming starts so we can append to it
+                    preStreamingContentRef.current = content;
+                    setIsStreamingRecording(true);
+                  }}
+                  onTranscriptUpdate={(transcript) => {
+                    // Append new transcript to pre-existing content
+                    const prefix = preStreamingContentRef.current;
+                    const separator = prefix && transcript ? '\n\n' : '';
+                    setContent(prefix + separator + transcript);
+                  }}
+                  onComplete={(data) => {
+                    // Don't navigate immediately - let user review/edit the transcript first
+                    // With draft-based streaming, no node exists yet - just a draft
+                    setLoading(false);
+                    setIsStreamingRecording(false);
+                    // Append final transcript to pre-existing content
+                    const prefix = preStreamingContentRef.current;
+                    const separator = prefix && data.content ? '\n\n' : '';
+                    const combinedContent = prefix + separator + data.content;
+                    setContent(combinedContent);
+                    setStreamingSessionId(data.sessionId);
+                    // Save combined content to the regular draft so it persists on reopen
+                    saveDraft(combinedContent);
+                    setHasDraft(true);
+                    // Don't clear preStreamingContentRef here - a late SSE event could
+                    // trigger onTranscriptUpdate after this, and it needs the prefix.
+                    // The ref gets overwritten when next recording starts anyway.
+                    // Note: No node exists yet - user must click Save to create it
+                  }}
+                  onError={(err) => {
+                    setError(err.message || 'Streaming transcription failed');
+                    setLoading(false);
+                    setIsStreamingRecording(false);
+                    // Don't clear preStreamingContentRef - user might retry and we want to preserve content
+                  }}
+                  disabled={loading || uploadedFile}
+                />
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -492,7 +434,7 @@ const NodeForm = forwardRef(
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  disabled={recStatus === 'recording' || isStreamingRecording}
+                  disabled={isStreamingRecording}
                   style={{ padding: '8px 16px', cursor: 'pointer' }}
                 >
                   Upload

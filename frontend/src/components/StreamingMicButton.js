@@ -1,4 +1,4 @@
-import React, { useCallback } from 'react';
+import React, { useCallback, useEffect } from 'react';
 import { useStreamingTranscription } from '../hooks/useStreamingTranscription';
 
 /**
@@ -30,10 +30,6 @@ export default function StreamingMicButton({
   const {
     sessionState,
     duration,
-    chunkCount,
-    transcribedChunks,
-    errorMessage,
-    isSSEConnected,
     startStreaming,
     stopStreaming,
     cancelStreaming,
@@ -41,12 +37,23 @@ export default function StreamingMicButton({
     parentId,
     privacyLevel,
     aiUsage,
-    //chunkIntervalMs: 5 * 60 * 1000, // 5 minutes
+    // chunkIntervalMs: 5 * 60 * 1000, // 5 minutes
     chunkIntervalMs: 10 * 1000, // 10 seconds
     onTranscriptUpdate,
     onComplete,
     onError,
   });
+
+  // Auto-reset to idle after completion (no need for "Done - Click to reset" step)
+  useEffect(() => {
+    if (sessionState === 'complete') {
+      // Small delay to ensure onComplete has finished
+      const timer = setTimeout(() => {
+        cancelStreaming();
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+  }, [sessionState, cancelStreaming]);
 
   const handleClick = useCallback(() => {
     if (sessionState === 'idle') {
@@ -57,7 +64,7 @@ export default function StreamingMicButton({
       startStreaming();
     } else if (sessionState === 'recording') {
       stopStreaming();
-    } else if (sessionState === 'complete' || sessionState === 'error') {
+    } else if (sessionState === 'error') {
       cancelStreaming();
     }
   }, [sessionState, startStreaming, stopStreaming, cancelStreaming, onRecordingStart]);
@@ -76,14 +83,14 @@ export default function StreamingMicButton({
         return (
           <>
             <MicIcon />
-            <span>Stream Record</span>
+            <span>Record</span>
           </>
         );
       case 'initializing':
         return (
           <>
-            <LoadingIcon />
-            <span>Starting...</span>
+            <MicIcon />
+            <span>Record</span>
           </>
         );
       case 'recording':
@@ -91,11 +98,6 @@ export default function StreamingMicButton({
           <>
             <StopIcon />
             <span>{formatDuration(duration)}</span>
-            {chunkCount > 0 && (
-              <span style={{ fontSize: '0.8em', marginLeft: '4px' }}>
-                ({transcribedChunks}/{chunkCount} chunks)
-              </span>
-            )}
           </>
         );
       case 'finalizing':
@@ -106,62 +108,45 @@ export default function StreamingMicButton({
           </>
         );
       case 'complete':
+        // Auto-reset will kick in, but just in case show idle state
         return (
           <>
-            <CheckIcon />
-            <span>Done - Click to reset</span>
+            <MicIcon />
+            <span>Record</span>
           </>
         );
       case 'error':
         return (
           <>
             <ErrorIcon />
-            <span>Error - Click to retry</span>
+            <span>Error - Retry</span>
           </>
         );
       default:
-        return <MicIcon />;
+        return (
+          <>
+            <MicIcon />
+            <span>Record</span>
+          </>
+        );
     }
   };
 
-  const buttonStyle = {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '6px',
-    padding: '8px 16px',
-    border: sessionState === 'recording' ? '2px solid #dc3545' : '1px solid #ccc',
-    borderRadius: '4px',
-    backgroundColor: sessionState === 'recording' ? '#fff0f0' : '#fff',
-    cursor: disabled ? 'not-allowed' : 'pointer',
-    opacity: disabled ? 0.5 : 1,
-    transition: 'all 0.2s ease',
-  };
-
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-      <button
-        type="button"
-        onClick={handleClick}
-        disabled={disabled || sessionState === 'initializing' || sessionState === 'finalizing'}
-        style={buttonStyle}
-      >
-        {getButtonContent()}
-      </button>
-
-      {/* SSE connection indicator */}
-      {(sessionState === 'recording' || sessionState === 'finalizing') && (
-        <div style={{ fontSize: '0.75em', color: isSSEConnected ? '#28a745' : '#ffc107' }}>
-          {isSSEConnected ? 'Live transcription active' : 'Connecting...'}
-        </div>
-      )}
-
-      {/* Error message */}
-      {errorMessage && (
-        <div style={{ fontSize: '0.8em', color: '#dc3545' }}>
-          {errorMessage}
-        </div>
-      )}
-    </div>
+    <button
+      type="button"
+      onClick={handleClick}
+      disabled={disabled || sessionState === 'initializing' || sessionState === 'finalizing'}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: '6px',
+        padding: '8px 16px',
+        cursor: disabled || sessionState === 'initializing' || sessionState === 'finalizing' ? 'not-allowed' : 'pointer',
+      }}
+    >
+      {getButtonContent()}
+    </button>
   );
 }
 
@@ -184,12 +169,6 @@ const LoadingIcon = () => (
     <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8z" opacity="0.3" />
     <path d="M12 2v4c3.31 0 6 2.69 6 6h4c0-5.52-4.48-10-10-10z" />
     <style>{`@keyframes spin { 100% { transform: rotate(360deg); } }`}</style>
-  </svg>
-);
-
-const CheckIcon = () => (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="#28a745">
-    <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
   </svg>
 );
 
