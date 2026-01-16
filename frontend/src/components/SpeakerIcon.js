@@ -95,23 +95,26 @@ const SpeakerIcon = ({ nodeId, profileId, content }) => {
       if (!audioSrc) {
         setLoading(true);
         // Attempt to fetch existing audio URLs
+        let original_url = null;
         let tts_url = null;
         try {
           const res = await api.get(`${baseUrl}/audio`, {
             validateStatus: (status) => status === 200 || status === 404
           });
           if (res.status === 200) {
+            original_url = res.data.original_url;
             tts_url = res.data.tts_url;
           }
-          // If status is 404, tts_url remains null (no audio exists yet)
+          // If status is 404, both remain null (no audio exists yet)
         } catch (getErr) {
           // Handle any other errors
           console.error('Error checking for audio:', getErr);
         }
 
-        let urlPath = tts_url;
+        // Prefer original recording over TTS
+        let urlPath = original_url || tts_url;
         if (!urlPath) {
-          // Start async TTS generation
+          // No audio exists - start async TTS generation
           await api.post(`${baseUrl}/tts`);
           setTtsTaskActive(true);
           return;
