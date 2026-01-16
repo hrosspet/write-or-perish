@@ -28,9 +28,10 @@ const extractMarkdownHeader = (content) => {
  */
 const SpeakerIcon = ({ nodeId, profileId, content }) => {
   const { user } = useUser();
-  const { loadAudio, currentAudio, isPlaying } = useAudio();
+  const { loadAudio, loadAudioQueue, currentAudio, isPlaying } = useAudio();
   const [loading, setLoading] = useState(false);
   const [audioSrc, setAudioSrc] = useState(null);
+  const [audioChunks, setAudioChunks] = useState(null); // For chunked playback
   const [ttsTaskActive, setTtsTaskActive] = useState(false);
 
   const isNode = nodeId != null;
@@ -55,6 +56,7 @@ const SpeakerIcon = ({ nodeId, profileId, content }) => {
   // Reset audio state when the node/profile changes
   useEffect(() => {
     setAudioSrc(null);
+    setAudioChunks(null);
     setLoading(false);
     setTtsTaskActive(false);
   }, [nodeId, profileId]);
@@ -92,46 +94,76 @@ const SpeakerIcon = ({ nodeId, profileId, content }) => {
     if (loading || ttsTaskActive) return;
 
     try {
-      if (!audioSrc) {
-        setLoading(true);
-        // Attempt to fetch existing audio URLs
-        let original_url = null;
-        let tts_url = null;
+      // If we already have audio chunks cached, play them
+      if (audioChunks && audioChunks.length > 0) {
+        await loadAudioQueue(audioChunks, { title: fullTitle, id, type: isNode ? 'node' : 'profile' });
+        return;
+      }
+
+      // If we already have a single audio source, play it
+      if (audioSrc) {
+        await loadAudio({ url: audioSrc, title: fullTitle, id, type: isNode ? 'node' : 'profile' });
+        return;
+      }
+
+      setLoading(true);
+
+      // Attempt to fetch existing audio URLs
+      let original_url = null;
+      let tts_url = null;
+      try {
+        const res = await api.get(`${baseUrl}/audio`, {
+          validateStatus: (status) => status === 200 || status === 404
+        });
+        if (res.status === 200) {
+          original_url = res.data.original_url;
+          tts_url = res.data.tts_url;
+        }
+        // If status is 404, both remain null (no audio exists yet)
+      } catch (getErr) {
+        // Handle any other errors
+        console.error('Error checking for audio:', getErr);
+      }
+
+      // Prefer original recording over TTS
+      let urlPath = original_url || tts_url;
+
+      if (!urlPath && isNode) {
+        // No single audio file - check for audio chunks (streaming transcription nodes)
         try {
-          const res = await api.get(`${baseUrl}/audio`, {
+          const chunksRes = await api.get(`${baseUrl}/audio-chunks`, {
             validateStatus: (status) => status === 200 || status === 404
           });
-          if (res.status === 200) {
-            original_url = res.data.original_url;
-            tts_url = res.data.tts_url;
+          if (chunksRes.status === 200 && chunksRes.data.chunks?.length > 0) {
+            // Build full URLs for chunks
+            const chunkUrls = chunksRes.data.chunks.map(chunk =>
+              chunk.startsWith('http') ? chunk : `${process.env.REACT_APP_BACKEND_URL}${chunk}`
+            );
+            setAudioChunks(chunkUrls);
+            setLoading(false);
+            await loadAudioQueue(chunkUrls, { title: fullTitle, id, type: 'node' });
+            return;
           }
-          // If status is 404, both remain null (no audio exists yet)
-        } catch (getErr) {
-          // Handle any other errors
-          console.error('Error checking for audio:', getErr);
+        } catch (chunksErr) {
+          console.error('Error checking for audio chunks:', chunksErr);
         }
-
-        // Prefer original recording over TTS
-        let urlPath = original_url || tts_url;
-        if (!urlPath) {
-          // No audio exists - start async TTS generation
-          await api.post(`${baseUrl}/tts`);
-          setTtsTaskActive(true);
-          return;
-        }
-
-        const srcUrl = urlPath.startsWith('http')
-          ? urlPath
-          : `${process.env.REACT_APP_BACKEND_URL}${urlPath}`;
-        setAudioSrc(srcUrl);
-
-        // Load audio into global player
-        await loadAudio({ url: srcUrl, title: fullTitle, id, type: isNode ? 'node' : 'profile' });
-        setLoading(false);
-      } else {
-        // Audio already loaded - trigger play in global player
-        await loadAudio({ url: audioSrc, title: fullTitle, id, type: isNode ? 'node' : 'profile' });
       }
+
+      if (!urlPath) {
+        // No audio exists - start async TTS generation
+        await api.post(`${baseUrl}/tts`);
+        setTtsTaskActive(true);
+        return;
+      }
+
+      const srcUrl = urlPath.startsWith('http')
+        ? urlPath
+        : `${process.env.REACT_APP_BACKEND_URL}${urlPath}`;
+      setAudioSrc(srcUrl);
+
+      // Load audio into global player
+      await loadAudio({ url: srcUrl, title: fullTitle, id, type: isNode ? 'node' : 'profile' });
+      setLoading(false);
     } catch (err) {
       console.error('Error playing audio:', err);
       setLoading(false);

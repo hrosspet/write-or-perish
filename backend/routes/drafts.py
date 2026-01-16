@@ -504,7 +504,8 @@ def save_streaming_as_node(session_id):
         content=content,
         privacy_level=draft.privacy_level or "private",
         ai_usage=draft.ai_usage or "none",
-        transcription_status="completed"
+        transcription_status="completed",
+        streaming_transcription=True  # Mark as having chunked audio
     )
     db.session.add(node)
     db.session.commit()

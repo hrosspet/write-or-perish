@@ -17,8 +17,12 @@ export const AudioProvider = ({ children }) => {
   const [duration, setDuration] = useState(0);
   const [loading, setLoading] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1);
+  const [currentChunkIndex, setCurrentChunkIndex] = useState(0);
+  const [totalChunks, setTotalChunks] = useState(0);
   const audioRef = useRef(null);
   const intervalRef = useRef(null);
+  const audioQueueRef = useRef([]);
+  const queueMetadataRef = useRef(null);
 
   // Update current time periodically
   const startTimeTracking = useCallback(() => {
@@ -67,9 +71,37 @@ export const AudioProvider = ({ children }) => {
     };
 
     audio.onended = () => {
-      setIsPlaying(false);
-      stopTimeTracking();
-      setCurrentTime(0);
+      // Check if there are more chunks in the queue
+      const queue = audioQueueRef.current;
+
+      if (queue.length > 0) {
+        // Play next chunk
+        const nextUrl = queue.shift();
+        setCurrentChunkIndex(prev => prev + 1);
+
+        const nextAudio = new Audio(nextUrl);
+        audioRef.current = nextAudio;
+        nextAudio.playbackRate = playbackRate;
+
+        nextAudio.onloadedmetadata = () => {
+          setDuration(prev => prev); // Keep accumulated duration
+        };
+        nextAudio.ontimeupdate = () => setCurrentTime(nextAudio.currentTime);
+        nextAudio.onended = audio.onended; // Reuse same handler
+        nextAudio.onpause = () => { setIsPlaying(false); stopTimeTracking(); };
+        nextAudio.onplay = () => { setIsPlaying(true); startTimeTracking(); };
+        nextAudio.onerror = audio.onerror;
+
+        nextAudio.play().catch(err => console.error('Error playing next chunk:', err));
+      } else {
+        // Queue finished
+        setIsPlaying(false);
+        stopTimeTracking();
+        setCurrentTime(0);
+        setCurrentChunkIndex(0);
+        setTotalChunks(0);
+        queueMetadataRef.current = null;
+      }
     };
 
     audio.onpause = () => {
@@ -90,6 +122,102 @@ export const AudioProvider = ({ children }) => {
     };
 
     // Auto-play the audio
+    try {
+      await audio.play();
+    } catch (err) {
+      console.error('Error playing audio:', err);
+      setLoading(false);
+    }
+  }, [startTimeTracking, stopTimeTracking, playbackRate]);
+
+  // Load and play a queue of audio URLs (for chunked playback)
+  const loadAudioQueue = useCallback(async (urls, audioData) => {
+    if (!urls || urls.length === 0) return;
+
+    // If there's already audio playing, pause it first
+    if (audioRef.current) {
+      audioRef.current.pause();
+      stopTimeTracking();
+    }
+
+    // Store remaining URLs in queue (skip first one, we'll play it directly)
+    audioQueueRef.current = urls.slice(1);
+    queueMetadataRef.current = audioData;
+    setTotalChunks(urls.length);
+    setCurrentChunkIndex(0);
+
+    setLoading(true);
+    setCurrentAudio(audioData);
+
+    // Create audio element for first chunk
+    const audio = new Audio(urls[0]);
+    audioRef.current = audio;
+    audio.playbackRate = playbackRate;
+
+    audio.onloadedmetadata = () => {
+      setDuration(audio.duration);
+      setLoading(false);
+    };
+
+    audio.ontimeupdate = () => {
+      setCurrentTime(audio.currentTime);
+    };
+
+    audio.onended = () => {
+      // Check if there are more chunks in the queue
+      const queue = audioQueueRef.current;
+
+      if (queue.length > 0) {
+        // Play next chunk
+        const nextUrl = queue.shift();
+        setCurrentChunkIndex(prev => prev + 1);
+
+        const nextAudio = new Audio(nextUrl);
+        audioRef.current = nextAudio;
+        nextAudio.playbackRate = playbackRate;
+
+        nextAudio.onloadedmetadata = () => {
+          setDuration(prev => prev);
+        };
+        nextAudio.ontimeupdate = () => setCurrentTime(nextAudio.currentTime);
+        nextAudio.onended = audio.onended;
+        nextAudio.onpause = () => { setIsPlaying(false); stopTimeTracking(); };
+        nextAudio.onplay = () => { setIsPlaying(true); startTimeTracking(); };
+        nextAudio.onerror = audio.onerror;
+
+        nextAudio.play().catch(err => console.error('Error playing next chunk:', err));
+      } else {
+        // Queue finished
+        setIsPlaying(false);
+        stopTimeTracking();
+        setCurrentTime(0);
+        setCurrentChunkIndex(0);
+        setTotalChunks(0);
+        audioQueueRef.current = [];
+        queueMetadataRef.current = null;
+      }
+    };
+
+    audio.onpause = () => {
+      setIsPlaying(false);
+      stopTimeTracking();
+    };
+
+    audio.onplay = () => {
+      setIsPlaying(true);
+      startTimeTracking();
+    };
+
+    audio.onerror = (e) => {
+      console.error('Error loading audio chunk:', e);
+      setLoading(false);
+      setIsPlaying(false);
+      stopTimeTracking();
+      audioQueueRef.current = [];
+      queueMetadataRef.current = null;
+    };
+
+    // Auto-play the first chunk
     try {
       await audio.play();
     } catch (err) {
@@ -177,7 +305,10 @@ export const AudioProvider = ({ children }) => {
     duration,
     loading,
     playbackRate,
+    currentChunkIndex,
+    totalChunks,
     loadAudio,
+    loadAudioQueue,
     play,
     pause,
     stop,

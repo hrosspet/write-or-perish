@@ -835,6 +835,45 @@ def get_audio_urls(node_id):
     return jsonify({"error": "No audio available for this node"}), 404
 
 
+@nodes_bp.route("/<int:node_id>/audio-chunks", methods=["GET"])
+@login_required
+@voice_mode_required
+def get_audio_chunks(node_id):
+    """Return list of audio chunk URLs for streaming transcription nodes.
+
+    For nodes recorded with streaming transcription, the audio is stored as
+    multiple chunk files (chunk_0000.webm, chunk_0001.webm, etc.).
+
+    Response: 200 OK – `{ chunks: ["/media/nodes/1/123/chunk_0000.webm", ...] }`
+              404     – when no chunks exist
+    """
+    node = Node.query.get_or_404(node_id)
+
+    # Check if this is a streaming transcription node with chunks
+    if not node.streaming_transcription:
+        return jsonify({"error": "Not a streaming transcription node"}), 404
+
+    # Find chunk files on disk
+    chunk_dir = AUDIO_STORAGE_ROOT / f"nodes/{node.user_id}/{node_id}"
+
+    if not chunk_dir.exists():
+        return jsonify({"error": "No audio chunks found"}), 404
+
+    # Get all chunk files sorted by name
+    chunk_files = sorted(chunk_dir.glob("chunk_*.webm"))
+
+    if not chunk_files:
+        return jsonify({"error": "No audio chunks found"}), 404
+
+    # Build URLs
+    chunk_urls = [
+        f"/media/nodes/{node.user_id}/{node_id}/{f.name}"
+        for f in chunk_files
+    ]
+
+    return jsonify({"chunks": chunk_urls}), 200
+
+
 @nodes_bp.route("/<int:node_id>/tts", methods=["POST"])
 @login_required
 @voice_mode_required
