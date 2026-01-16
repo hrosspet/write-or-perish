@@ -11,7 +11,7 @@ WorkingDirectory=/home/hrosspet/write-or-perish
 EnvironmentFile=/home/hrosspet/write-or-perish/.env.production
 PIDFile=/home/hrosspet/write-or-perish/celery-worker.pid
 
-ExecStart=/bin/bash -c 'source ~/miniconda3/etc/profile.d/conda.sh && conda activate write-or-perish && celery -A backend.celery_app:celery worker --loglevel=info --logfile=/home/hrosspet/write-or-perish/logs/celery-worker.log --pidfile=/home/hrosspet/write-or-perish/celery-worker.pid --detach --concurrency=1'
+ExecStart=/bin/bash -c 'source ~/miniconda3/etc/profile.d/conda.sh && conda activate write-or-perish && celery -A backend.celery_app:celery worker --loglevel=info --logfile=/home/hrosspet/write-or-perish/logs/celery-worker.log --pidfile=/home/hrosspet/write-or-perish/celery-worker.pid --detach --concurrency=4'
 
 ExecReload=/bin/kill -s HUP $MAINPID
 ExecStop=/bin/kill -s TERM $MAINPID
