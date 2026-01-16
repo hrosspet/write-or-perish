@@ -2,7 +2,6 @@ import React, { useState, forwardRef, useImperativeHandle, useEffect, useCallbac
 import { useMediaRecorder } from "../hooks/useMediaRecorder";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 import { useDraft } from "../hooks/useDraft";
-import { useStreamingTranscription } from "../hooks/useStreamingTranscription";
 import MicButton from "./MicButton";
 import StreamingMicButton from "./StreamingMicButton";
 import PrivacySelector from "./PrivacySelector";
@@ -62,34 +61,8 @@ const NodeForm = forwardRef(
     // Track content that existed before streaming started (to append new transcript to it)
     const preStreamingContentRef = React.useRef("");
 
-    // Streaming transcription hook (draft-based - no node created until explicit save)
-    const {
-      isRecording: isStreamingRecording,
-      saveAsNode: saveStreamingAsNode,
-    } = useStreamingTranscription({
-      parentId,
-      privacyLevel,
-      aiUsage,
-      chunkIntervalMs: 5 * 60 * 1000, // 5 minutes
-      onTranscriptUpdate: (transcript) => {
-        // Update the main content to show live transcription
-        if (useStreamingMode) {
-          setContent(transcript);
-        }
-      },
-      onComplete: (data) => {
-        // Streaming transcription complete - transcript is in draft, not saved as node yet
-        // User can now review/edit the transcript and click Save to create the node
-        setLoading(false);
-        setContent(data.content);
-        setStreamingSessionId(data.sessionId);
-        // Note: No node exists yet - user must click Save to create it
-      },
-      onError: (err) => {
-        setError(err.message || 'Streaming transcription failed');
-        setLoading(false);
-      },
-    });
+    // Track if streaming is in progress (set by StreamingMicButton callbacks)
+    const [isStreamingRecording, setIsStreamingRecording] = useState(false);
 
     // Transcription polling (for non-streaming mode)
     const {
@@ -212,11 +185,13 @@ const NodeForm = forwardRef(
         // Handle streaming transcription completion - draft exists, create node from it
         if (streamingSessionId) {
           // Save the streaming draft as a node with any edits the user made
-          const nodeData = await saveStreamingAsNode(content);
+          const response = await api.post(`/drafts/streaming/${streamingSessionId}/save-as-node`, {
+            content
+          });
           deleteDraft();
           setHasDraft(false);
           setStreamingSessionId(null);
-          onSuccess(nodeData);
+          onSuccess(response.data);
           setLoading(false);
           return;
         }
@@ -462,6 +437,7 @@ const NodeForm = forwardRef(
                     onRecordingStart={() => {
                       // Capture content before streaming starts so we can append to it
                       preStreamingContentRef.current = content;
+                      setIsStreamingRecording(true);
                     }}
                     onTranscriptUpdate={(transcript) => {
                       // Append new transcript to pre-existing content
@@ -473,6 +449,7 @@ const NodeForm = forwardRef(
                       // Don't navigate immediately - let user review/edit the transcript first
                       // With draft-based streaming, no node exists yet - just a draft
                       setLoading(false);
+                      setIsStreamingRecording(false);
                       // Append final transcript to pre-existing content
                       const prefix = preStreamingContentRef.current;
                       const separator = prefix && data.content ? '\n\n' : '';
@@ -485,6 +462,7 @@ const NodeForm = forwardRef(
                     onError={(err) => {
                       setError(err.message || 'Streaming transcription failed');
                       setLoading(false);
+                      setIsStreamingRecording(false);
                       preStreamingContentRef.current = "";
                     }}
                     disabled={loading || uploadedFile}
