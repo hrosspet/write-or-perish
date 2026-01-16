@@ -126,6 +126,33 @@ else
     warn "Redis may not be working correctly"
 fi
 
+# Install/update Gunicorn service
+log "Installing Gunicorn service..."
+GUNICORN_SERVICE_SOURCE="$PROJECT_DIR/write-or-perish.service"
+GUNICORN_SERVICE_TARGET="/etc/systemd/system/write-or-perish.service"
+
+if [ -f "$GUNICORN_SERVICE_SOURCE" ]; then
+    # Check if service file has changed
+    if ! sudo diff -q "$GUNICORN_SERVICE_SOURCE" "$GUNICORN_SERVICE_TARGET" >/dev/null 2>&1; then
+        log "Gunicorn service file has changed, updating..."
+
+        # Copy new service file
+        sudo cp "$GUNICORN_SERVICE_SOURCE" "$GUNICORN_SERVICE_TARGET" || error "Failed to copy Gunicorn service file"
+
+        # Reload systemd daemon
+        sudo systemctl daemon-reload || error "Failed to reload systemd daemon"
+
+        log "Gunicorn service file updated"
+    else
+        log "Gunicorn service file unchanged"
+    fi
+
+    # Enable Gunicorn service
+    sudo systemctl enable write-or-perish || warn "Failed to enable Gunicorn service"
+else
+    error "Gunicorn service file not found at $GUNICORN_SERVICE_SOURCE"
+fi
+
 # Install/update Celery worker service
 log "Installing Celery worker service..."
 CELERY_SERVICE_SOURCE="$PROJECT_DIR/write-or-perish-celery.service"
