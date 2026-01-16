@@ -1,6 +1,32 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 
 /**
+ * Extract the WebM header (initialization segment) from an ArrayBuffer.
+ * The header includes EBML, Segment, Info, and Tracks elements.
+ * Everything before the first Cluster element (ID: 0x1F 0x43 0xB6 0x75) is the header.
+ *
+ * @param {ArrayBuffer} buffer - The first chunk's data
+ * @returns {ArrayBuffer} - The header bytes
+ */
+function extractWebMHeader(buffer) {
+  const data = new Uint8Array(buffer);
+
+  // WebM Cluster element ID: 0x1F 0x43 0xB6 0x75
+  // Find the first occurrence of this sequence
+  for (let i = 0; i < data.length - 3; i++) {
+    if (data[i] === 0x1F && data[i + 1] === 0x43 && data[i + 2] === 0xB6 && data[i + 3] === 0x75) {
+      // Found the Cluster element - everything before it is the header
+      return buffer.slice(0, i);
+    }
+  }
+
+  // If no Cluster found, return a reasonable portion as header (first 4KB)
+  // This shouldn't happen in normal recordings
+  console.warn('WebM Cluster element not found, using first 4KB as header');
+  return buffer.slice(0, Math.min(4096, buffer.byteLength));
+}
+
+/**
  * useStreamingMediaRecorder hook for recording audio with real-time chunk emission.
  *
  * This hook uses MediaRecorder with timeslice to emit audio chunks at regular intervals
@@ -25,6 +51,7 @@ export function useStreamingMediaRecorder({
   const chunksRef = useRef([]); // All chunks for final assembly
   const chunkIndexRef = useRef(0);
   const durationIntervalRef = useRef(null);
+  const webmHeaderRef = useRef(null); // Store WebM header from first chunk
 
   // Clean up on unmount
   useEffect(() => {
@@ -58,6 +85,7 @@ export function useStreamingMediaRecorder({
     streamRef.current = null;
     chunksRef.current = [];
     chunkIndexRef.current = 0;
+    webmHeaderRef.current = null;
     setMediaBlob(null);
     setMediaUrl('');
     setDuration(0);
@@ -85,7 +113,7 @@ export function useStreamingMediaRecorder({
       chunksRef.current = [];
       chunkIndexRef.current = 0;
 
-      mediaRecorder.ondataavailable = (e) => {
+      mediaRecorder.ondataavailable = async (e) => {
         if (e.data && e.data.size > 0) {
           chunksRef.current.push(e.data);
 
@@ -96,8 +124,27 @@ export function useStreamingMediaRecorder({
             chunkIndexRef.current += 1;
             setChunkCount(prev => prev + 1);
 
-            // Create a separate blob for this chunk
-            const chunkBlob = new Blob([e.data], { type: mediaRecorder.mimeType });
+            let chunkBlob;
+
+            if (chunkIndex === 0) {
+              // First chunk contains the WebM header - extract and store it
+              // The header includes EBML, Segment, Info, and Tracks elements
+              const arrayBuffer = await e.data.arrayBuffer();
+              const header = extractWebMHeader(arrayBuffer);
+              webmHeaderRef.current = header;
+
+              // First chunk is already valid, use as-is
+              chunkBlob = new Blob([e.data], { type: mediaRecorder.mimeType });
+            } else {
+              // Subsequent chunks need the header prepended to be valid WebM files
+              if (webmHeaderRef.current) {
+                chunkBlob = new Blob([webmHeaderRef.current, e.data], { type: mediaRecorder.mimeType });
+              } else {
+                // Fallback if header extraction failed
+                chunkBlob = new Blob([e.data], { type: mediaRecorder.mimeType });
+              }
+            }
+
             onChunkReady(chunkBlob, chunkIndex);
           }
         }
