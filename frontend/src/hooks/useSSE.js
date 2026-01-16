@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 
 /**
  * useSSE hook for subscribing to Server-Sent Events.
@@ -27,6 +27,7 @@ export function useSSE(url, options = {}) {
 
   const eventSourceRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
+  const connectRef = useRef(null);
 
   const disconnect = useCallback(() => {
     if (reconnectTimeoutRef.current) {
@@ -68,9 +69,10 @@ export function useSSE(url, options = {}) {
           setError('Connection closed');
 
           // Attempt to reconnect after delay
+          // Use connectRef.current to get the latest connect function with current URL
           reconnectTimeoutRef.current = setTimeout(() => {
-            if (enabled) {
-              connect();
+            if (connectRef.current) {
+              connectRef.current();
             }
           }, reconnectDelay);
         }
@@ -112,6 +114,11 @@ export function useSSE(url, options = {}) {
       setError(err.message);
     }
   }, [url, enabled, onMessage, eventHandlers, reconnectDelay, disconnect]);
+
+  // Keep connectRef updated so reconnection timer always uses latest function
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
 
   // Connect/disconnect based on enabled state
   useEffect(() => {
@@ -263,14 +270,35 @@ export function useDraftTranscriptionSSE(sessionId, options = {}) {
   const lastChunkIndexRef = useRef(-1);
   const [reconnectChunkIndex, setReconnectChunkIndex] = useState(-1);
 
+  // Store callback refs to ensure handlers always call latest callbacks
+  const onChunkCompleteRef = useRef(onChunkComplete);
+  const onContentUpdateRef = useRef(onContentUpdate);
+  const onAllCompleteRef = useRef(onAllComplete);
+  const onErrorRef = useRef(onError);
+
+  // Track last event time for stale connection detection
+  const lastEventTimeRef = useRef(Date.now());
+
+  // Keep refs updated
+  useEffect(() => {
+    onChunkCompleteRef.current = onChunkComplete;
+    onContentUpdateRef.current = onContentUpdate;
+    onAllCompleteRef.current = onAllComplete;
+    onErrorRef.current = onError;
+  }, [onChunkComplete, onContentUpdate, onAllComplete, onError]);
+
   // Use REACT_APP_BACKEND_URL for SSE since EventSource doesn't go through CRA proxy
   const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
   // Include last_chunk param for reconnection support - only add if we've received chunks
   const lastChunkParam = reconnectChunkIndex >= 0 ? `?last_chunk=${reconnectChunkIndex}` : '';
   const url = sessionId ? `${backendUrl}/api/sse/drafts/${sessionId}/transcription-stream${lastChunkParam}` : null;
 
-  const eventHandlers = {
+  // Memoize eventHandlers to prevent unnecessary reconnections
+  // Handlers use refs internally to always call latest callbacks
+  const eventHandlers = useMemo(() => ({
     chunk_complete: (data) => {
+      // Track last event time for stale connection detection
+      lastEventTimeRef.current = Date.now();
       // Track last received chunk for reconnection (ref doesn't trigger re-renders)
       lastChunkIndexRef.current = Math.max(lastChunkIndexRef.current, data.chunk_index);
 
@@ -286,38 +314,43 @@ export function useDraftTranscriptionSSE(sessionId, options = {}) {
           (a, b) => a.index - b.index
         );
       });
-      if (onChunkComplete) {
-        onChunkComplete(data);
+      if (onChunkCompleteRef.current) {
+        onChunkCompleteRef.current(data);
       }
     },
     chunk_error: (data) => {
-      if (onError) {
-        onError(data);
+      lastEventTimeRef.current = Date.now();
+      if (onErrorRef.current) {
+        onErrorRef.current(data);
       }
     },
     content_update: (data) => {
+      lastEventTimeRef.current = Date.now();
       setDraftContent(data.content);
-      if (onContentUpdate) {
-        onContentUpdate(data);
+      if (onContentUpdateRef.current) {
+        onContentUpdateRef.current(data);
       }
     },
     all_complete: (data) => {
+      lastEventTimeRef.current = Date.now();
       setIsComplete(true);
       setFinalContent(data.content);
       setDraftContent(data.content);
-      if (onAllComplete) {
-        onAllComplete(data);
+      if (onAllCompleteRef.current) {
+        onAllCompleteRef.current(data);
       }
     },
     error: (data) => {
-      if (onError) {
-        onError(data);
+      lastEventTimeRef.current = Date.now();
+      if (onErrorRef.current) {
+        onErrorRef.current(data);
       }
     },
     heartbeat: () => {
-      // Keep-alive, no action needed
+      // Track last event time for stale connection detection
+      lastEventTimeRef.current = Date.now();
     },
-  };
+  }), []); // Empty deps - handlers use refs internally
 
   const { isConnected, error, disconnect } = useSSE(url, {
     enabled,
@@ -333,6 +366,27 @@ export function useDraftTranscriptionSSE(sessionId, options = {}) {
     }
     wasConnectedRef.current = isConnected;
   }, [isConnected, enabled, isComplete]);
+
+  // Stale connection detection: if no events received for 45s (3x heartbeat interval),
+  // force a reconnect by updating reconnectChunkIndex
+  useEffect(() => {
+    if (!enabled || isComplete) return;
+
+    const STALE_THRESHOLD_MS = 45000; // 45 seconds (3x the 15s heartbeat interval)
+    const CHECK_INTERVAL_MS = 10000; // Check every 10 seconds
+
+    const intervalId = setInterval(() => {
+      const timeSinceLastEvent = Date.now() - lastEventTimeRef.current;
+      if (timeSinceLastEvent > STALE_THRESHOLD_MS && isConnected) {
+        console.warn(`SSE connection appears stale (no events for ${Math.round(timeSinceLastEvent / 1000)}s), forcing reconnect`);
+        // Force disconnect and reconnect by updating reconnectChunkIndex
+        disconnect();
+        setReconnectChunkIndex(lastChunkIndexRef.current);
+      }
+    }, CHECK_INTERVAL_MS);
+
+    return () => clearInterval(intervalId);
+  }, [enabled, isComplete, isConnected, disconnect]);
 
   // Get assembled transcript from chunks
   const getAssembledTranscript = useCallback(() => {
