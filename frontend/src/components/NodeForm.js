@@ -459,15 +459,16 @@ const NodeForm = forwardRef(
                       // Save combined content to the regular draft so it persists on reopen
                       saveDraft(combinedContent);
                       setHasDraft(true);
-                      // Clear the ref for next recording
-                      preStreamingContentRef.current = "";
+                      // Don't clear preStreamingContentRef here - a late SSE event could
+                      // trigger onTranscriptUpdate after this, and it needs the prefix.
+                      // The ref gets overwritten when next recording starts anyway.
                       // Note: No node exists yet - user must click Save to create it
                     }}
                     onError={(err) => {
                       setError(err.message || 'Streaming transcription failed');
                       setLoading(false);
                       setIsStreamingRecording(false);
-                      preStreamingContentRef.current = "";
+                      // Don't clear preStreamingContentRef - user might retry and we want to preserve content
                     }}
                     disabled={loading || uploadedFile}
                   />

@@ -133,15 +133,15 @@ export function useStreamingTranscription(options = {}) {
     },
   });
 
-  // Update transcript when draft content changes from SSE
+  // Update internal transcript when draft content changes from SSE
+  // Note: Don't call onTranscriptUpdate here - it's already called in onContentUpdate callback.
+  // Calling it here too causes duplicate updates, and the effect can run AFTER onComplete
+  // due to React's effect timing, overwriting the combined content with just the new transcript.
   useEffect(() => {
     if (draftContent) {
       setTranscript(draftContent);
-      if (onTranscriptUpdate) {
-        onTranscriptUpdate(draftContent);
-      }
     }
-  }, [draftContent, onTranscriptUpdate]);
+  }, [draftContent]);
 
   // Handle transcription completion
   useEffect(() => {
