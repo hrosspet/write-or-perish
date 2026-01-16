@@ -37,8 +37,7 @@ export default function StreamingMicButton({
     parentId,
     privacyLevel,
     aiUsage,
-    // chunkIntervalMs: 5 * 60 * 1000, // 5 minutes
-    chunkIntervalMs: 10 * 1000, // 10 seconds
+    chunkIntervalMs: 5 * 60 * 1000, // 5 minutes
     onTranscriptUpdate,
     onComplete,
     onError,
