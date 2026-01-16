@@ -453,8 +453,12 @@ const NodeForm = forwardRef(
                       // Append final transcript to pre-existing content
                       const prefix = preStreamingContentRef.current;
                       const separator = prefix && data.content ? '\n\n' : '';
-                      setContent(prefix + separator + data.content);
+                      const combinedContent = prefix + separator + data.content;
+                      setContent(combinedContent);
                       setStreamingSessionId(data.sessionId);
+                      // Save combined content to the regular draft so it persists on reopen
+                      saveDraft(combinedContent);
+                      setHasDraft(true);
                       // Clear the ref for next recording
                       preStreamingContentRef.current = "";
                       // Note: No node exists yet - user must click Save to create it
