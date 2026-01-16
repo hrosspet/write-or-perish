@@ -1661,18 +1661,34 @@ def get_streaming_status(node_id):
 @nodes_bp.route("/<int:node_id>", methods=["DELETE"])
 @login_required
 def delete_node(node_id):
+    from backend.models import NodeVersion, NodeTranscriptChunk, TTSChunk, Draft
+
     node = Node.query.get_or_404(node_id)
     # Allow deletion if user is the owner or LLM requester (parent node owner)
     if not can_user_edit_node(node):
         return jsonify({"error": "Not authorized"}), 403
 
     # Update all children: set their parent_id to None
-    # (This “orphans” the children so they become top‑level nodes.)
+    # (This "orphans" the children so they become top‑level nodes.)
     try:
         Node.query.filter_by(parent_id=node.id).update({"parent_id": None})
+
+        # Clean up related records that have foreign keys to this node
+        NodeVersion.query.filter_by(node_id=node.id).delete()
+        NodeTranscriptChunk.query.filter_by(node_id=node.id).delete()
+        TTSChunk.query.filter_by(node_id=node.id).delete()
+
+        # Update drafts that reference this node
+        Draft.query.filter_by(node_id=node.id).update({"node_id": None})
+        Draft.query.filter_by(parent_id=node.id).update({"parent_id": None})
+
+        # Update linked_node_id references in other nodes
+        Node.query.filter_by(linked_node_id=node.id).update({"linked_node_id": None})
+
         db.session.delete(node)
         db.session.commit()
         return jsonify({"message": "Node deleted successfully"}), 200
     except Exception as e:
         db.session.rollback()
+        current_app.logger.error(f"Error deleting node {node_id}: {e}")
         return jsonify({"error": "Error deleting node", "details": str(e)}), 500
