@@ -39,10 +39,10 @@ server {
        proxy_buffering off;
        proxy_cache off;
 
-       # SSE connections can last up to 10 minutes
+       # SSE connections can last up to 2 hours (for long recordings)
        proxy_connect_timeout 60s;
-       proxy_send_timeout 600s;
-       proxy_read_timeout 600s;
+       proxy_send_timeout 7200s;
+       proxy_read_timeout 7200s;
 
        # Ensure chunked encoding works properly
        chunked_transfer_encoding on;

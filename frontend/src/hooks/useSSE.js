@@ -258,12 +258,22 @@ export function useDraftTranscriptionSSE(sessionId, options = {}) {
   const [finalContent, setFinalContent] = useState(null);
   const [draftContent, setDraftContent] = useState('');
 
+  // Track last received chunk for reconnection
+  // Use ref for tracking (no re-renders) and state for URL (triggers reconnect when needed)
+  const lastChunkIndexRef = useRef(-1);
+  const [reconnectChunkIndex, setReconnectChunkIndex] = useState(-1);
+
   // Use REACT_APP_BACKEND_URL for SSE since EventSource doesn't go through CRA proxy
   const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
-  const url = sessionId ? `${backendUrl}/api/sse/drafts/${sessionId}/transcription-stream` : null;
+  // Include last_chunk param for reconnection support - only add if we've received chunks
+  const lastChunkParam = reconnectChunkIndex >= 0 ? `?last_chunk=${reconnectChunkIndex}` : '';
+  const url = sessionId ? `${backendUrl}/api/sse/drafts/${sessionId}/transcription-stream${lastChunkParam}` : null;
 
   const eventHandlers = {
     chunk_complete: (data) => {
+      // Track last received chunk for reconnection (ref doesn't trigger re-renders)
+      lastChunkIndexRef.current = Math.max(lastChunkIndexRef.current, data.chunk_index);
+
       setChunks(prev => {
         // Add or update chunk
         const existing = prev.find(c => c.index === data.chunk_index);
@@ -314,6 +324,16 @@ export function useDraftTranscriptionSSE(sessionId, options = {}) {
     eventHandlers,
   });
 
+  // When connection drops, update reconnectChunkIndex to trigger reconnect with last_chunk param
+  const wasConnectedRef = useRef(false);
+  useEffect(() => {
+    if (wasConnectedRef.current && !isConnected && enabled && !isComplete) {
+      // Connection was lost - update state to trigger reconnect with proper URL
+      setReconnectChunkIndex(lastChunkIndexRef.current);
+    }
+    wasConnectedRef.current = isConnected;
+  }, [isConnected, enabled, isComplete]);
+
   // Get assembled transcript from chunks
   const getAssembledTranscript = useCallback(() => {
     return chunks.map(c => c.text).join('\n\n');
@@ -325,6 +345,8 @@ export function useDraftTranscriptionSSE(sessionId, options = {}) {
     setIsComplete(false);
     setFinalContent(null);
     setDraftContent('');
+    lastChunkIndexRef.current = -1;
+    setReconnectChunkIndex(-1);
   }, []);
 
   return {

@@ -64,6 +64,7 @@ export function useStreamingTranscription(options = {}) {
 
       await api.post(`/drafts/streaming/${sessionIdRef.current}/audio-chunk`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 600000, // 10 minutes - generous buffer for 5-min audio chunks on slow connections
       });
 
       setUploadedChunks(prev => prev + 1);
@@ -216,6 +217,8 @@ export function useStreamingTranscription(options = {}) {
       // Call finalize endpoint
       await api.post(`/drafts/streaming/${sessionIdRef.current}/finalize`, {
         total_chunks: totalChunks,
+      }, {
+        timeout: 120000, // 2 minutes for finalize (just queues the task)
       });
 
       // SSE will notify when complete

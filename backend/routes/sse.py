@@ -299,12 +299,14 @@ def draft_transcription_stream(session_id):
         last_content_version = ""
         heartbeat_interval = 15  # seconds
         last_heartbeat = time.time()
-        max_idle_time = 600  # 10 minutes max connection time
+        # Safety net timeout - connection normally closes when streaming_status becomes
+        # 'completed' or 'failed'. This just prevents orphaned connections.
+        max_connection_time = 7200  # 2 hours
         start_time = time.time()
 
         while True:
-            # Check for timeout
-            if time.time() - start_time > max_idle_time:
+            # Check for max connection time (safety net)
+            if time.time() - start_time > max_connection_time:
                 yield format_sse_message({"message": "Connection timeout"}, event="close")
                 break
 
