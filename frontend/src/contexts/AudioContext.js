@@ -588,7 +588,10 @@ export const AudioProvider = ({ children }) => {
     }
 
     // Calculate current cumulative time and add 10 seconds
-    const currentCumulative = calculateCumulativeTime(currentChunkIndexRef.current, audioRef.current?.currentTime || 0);
+    // Subtract the timestamp offset to get the actual position within the chunk
+    const rawTime = audioRef.current?.currentTime || 0;
+    const timeInChunk = rawTime - chunkTimestampOffsetRef.current;
+    const currentCumulative = calculateCumulativeTime(currentChunkIndexRef.current, timeInChunk);
     seekToCumulativeTime(currentCumulative + 10);
   }, [calculateCumulativeTime, seekToCumulativeTime]);
 
@@ -607,7 +610,10 @@ export const AudioProvider = ({ children }) => {
     }
 
     // Calculate current cumulative time and subtract 10 seconds
-    const currentCumulative = calculateCumulativeTime(currentChunkIndexRef.current, audioRef.current?.currentTime || 0);
+    // Subtract the timestamp offset to get the actual position within the chunk
+    const rawTime = audioRef.current?.currentTime || 0;
+    const timeInChunk = rawTime - chunkTimestampOffsetRef.current;
+    const currentCumulative = calculateCumulativeTime(currentChunkIndexRef.current, timeInChunk);
     seekToCumulativeTime(currentCumulative - 10);
   }, [calculateCumulativeTime, seekToCumulativeTime]);
 
