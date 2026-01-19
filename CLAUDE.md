@@ -33,6 +33,10 @@ Ensure:
 - Code lints without errors
 - Changes are production-ready
 
+### Local Code Verification
+
+**Frontend**: Run `npm run build 2>&1 | tail -30` from the `frontend/` directory to check for compilation errors. There is no separate lint script - the build process will catch TypeScript/JSX errors.
+
 ### Production Environment
 
 - URL: https://writeorperish.org
