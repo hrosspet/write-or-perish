@@ -38,7 +38,10 @@ export const AudioProvider = ({ children }) => {
     const durations = chunkDurationsRef.current;
     if (!durations.length) return timeInChunk;
     const completedChunksDuration = durations.slice(0, chunkIndex).reduce((a, b) => a + b, 0);
-    return completedChunksDuration + timeInChunk;
+    const result = completedChunksDuration + timeInChunk;
+    // DEBUG: Log cumulative time calculation
+    console.log('[AudioDebug] calculateCumulativeTime:', { chunkIndex, timeInChunk, durations: [...durations], completedChunksDuration, result });
+    return result;
   }, []);
 
   // Update current time periodically
@@ -48,7 +51,6 @@ export const AudioProvider = ({ children }) => {
     }
     // Capture the current playback ID to check if interval is still valid
     const currentPlaybackId = playbackIdRef.current;
-    const currentChunkIdx = currentChunkIndexRef.current;
 
     intervalRef.current = setInterval(() => {
       // Check if this interval is still valid (playback ID hasn't changed)
@@ -59,6 +61,8 @@ export const AudioProvider = ({ children }) => {
       }
       if (audioRef.current && isFinite(audioRef.current.currentTime)) {
         const timeInChunk = audioRef.current.currentTime;
+        // Read chunk index from ref directly for most up-to-date value
+        const currentChunkIdx = currentChunkIndexRef.current;
         setCurrentTime(timeInChunk);
         setCumulativeTime(calculateCumulativeTime(currentChunkIdx, timeInChunk));
       }
@@ -73,21 +77,61 @@ export const AudioProvider = ({ children }) => {
   }, []);
 
   // Preload metadata for all chunks to get their durations
+  // Note: MediaRecorder-produced files often lack proper duration metadata.
+  // We try multiple strategies but ultimately rely on actual playback to correct durations.
   const preloadChunkDurations = useCallback(async (urls) => {
     const durations = await Promise.all(
       urls.map(url => new Promise((resolve) => {
         const audio = new Audio();
         audio.crossOrigin = 'use-credentials';
         audio.preload = 'metadata';
+        let resolved = false;
+
+        const resolveOnce = (duration) => {
+          if (resolved) return;
+          resolved = true;
+          audio.onloadedmetadata = null;
+          audio.ondurationchange = null;
+          audio.onerror = null;
+          audio.src = ''; // Release the resource
+          resolve(duration);
+        };
+
+        // Try to get duration from metadata
         audio.onloadedmetadata = () => {
           const dur = audio.duration;
-          audio.src = ''; // Release the resource
-          resolve(isFinite(dur) ? dur : 300);
+          if (isFinite(dur) && dur > 0 && dur < 36000) { // Valid and less than 10 hours
+            resolveOnce(dur);
+          }
+          // If not valid, wait for durationchange or timeout
         };
+
+        // Some browsers update duration after more data loads
+        audio.ondurationchange = () => {
+          const dur = audio.duration;
+          if (isFinite(dur) && dur > 0 && dur < 36000) {
+            resolveOnce(dur);
+          }
+        };
+
         audio.onerror = () => {
           // Fallback: estimate 5 minutes per chunk (typical recording chunk size)
-          resolve(300);
+          resolveOnce(300);
         };
+
+        // Timeout: if we can't get duration in 3 seconds, use fallback
+        setTimeout(() => {
+          if (!resolved) {
+            console.warn(`[AudioDebug] Could not determine duration for chunk, using fallback 300s: ${url}`);
+            resolveOnce(300);
+          }
+        }, 3000);
+
+        // DEBUG: Log what the browser reports
+        audio.onloadeddata = () => {
+          console.log('[AudioDebug] preload onloadeddata:', { url, duration: audio.duration, resolved });
+        };
+
         audio.src = url;
       }))
     );
@@ -136,6 +180,8 @@ export const AudioProvider = ({ children }) => {
   const playChunkAtTime = useCallback((chunkIndex, timeInChunk, shouldAutoPlay = true) => {
     const urls = allChunkUrlsRef.current;
     const durations = chunkDurationsRef.current;
+
+    console.log('[AudioDebug] playChunkAtTime called:', { chunkIndex, timeInChunk, shouldAutoPlay, durations: [...durations], totalChunks: urls.length });
 
     if (!urls.length || chunkIndex >= urls.length) return;
 
@@ -216,7 +262,25 @@ export const AudioProvider = ({ children }) => {
       // Check if this handler is still valid
       if (playbackIdRef.current !== thisPlaybackId) return;
 
+      // CRITICAL: Update this chunk's duration based on actual playback time
+      // This fixes the issue where preloaded metadata durations are incorrect
+      // (common with MediaRecorder-produced files that lack proper duration headers)
+      const actualDuration = audio.currentTime;
+      if (isFinite(actualDuration) && actualDuration > 0) {
+        const currentDurations = chunkDurationsRef.current;
+        const existingDuration = currentDurations[chunkIndex];
+        // Update if significantly different (more than 0.5 sec)
+        if (!existingDuration || Math.abs(existingDuration - actualDuration) > 0.5) {
+          const updatedDurations = [...currentDurations];
+          updatedDurations[chunkIndex] = actualDuration;
+          chunkDurationsRef.current = updatedDurations;
+          setChunkDurations(updatedDurations);
+          recalculateTotalDuration(updatedDurations);
+        }
+      }
+
       const queue = audioQueueRef.current;
+      console.log('[AudioDebug] onended:', { chunkIndex, actualDuration, queueLength: queue.length, durations: [...chunkDurationsRef.current] });
       if (queue.length > 0) {
         const nextIndex = chunkIndex + 1;
         playChunkAtTime(nextIndex, 0, true);
@@ -414,6 +478,7 @@ export const AudioProvider = ({ children }) => {
 
   // Seek to a cumulative time position (works across chunks)
   const seekToCumulativeTime = useCallback((targetCumulativeTime) => {
+    console.log('[AudioDebug] seekToCumulativeTime called:', { targetCumulativeTime, currentChunk: currentChunkIndexRef.current, durations: [...chunkDurationsRef.current] });
     // Guard against invalid input
     if (!isFinite(targetCumulativeTime)) {
       console.warn('seekToCumulativeTime: invalid target time', targetCumulativeTime);
