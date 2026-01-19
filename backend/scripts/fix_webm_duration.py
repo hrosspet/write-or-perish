@@ -80,10 +80,12 @@ def fix_webm_duration(filepath, dry_run=False):
         # Remux the file with ffmpeg
         # -i: input file
         # -c copy: copy streams without re-encoding (fast)
+        # -copyts: preserve original timestamps (important for chunked recordings!)
         # -y: overwrite output file
         result = subprocess.run(
             [
                 'ffmpeg', '-y',
+                '-copyts',
                 '-i', filepath,
                 '-c', 'copy',
                 temp_path
