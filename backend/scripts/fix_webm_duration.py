@@ -289,6 +289,9 @@ def fix_webm_duration(filepath, dry_run=False):
         # Step 4: Replace original with remuxed file
         shutil.move(temp_path, filepath)
 
+        # Ensure file is readable by web server (644 = rw-r--r--)
+        os.chmod(filepath, 0o644)
+
         # Step 5: Set correct EBML duration if needed
         if start_time is not None and start_time > 0:
             set_ebml_duration(filepath, actual_duration)

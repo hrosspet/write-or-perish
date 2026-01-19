@@ -375,6 +375,9 @@ def fix_webm_duration(filepath: str) -> Tuple[bool, str, Optional[float]]:
         # Step 4: Replace original with remuxed file
         shutil.move(temp_path, filepath)
 
+        # Ensure file is readable by web server (644 = rw-r--r--)
+        os.chmod(filepath, 0o644)
+
         # Step 5: Directly set the correct duration in EBML metadata
         if start_time is not None and start_time > 0:
             if _set_ebml_duration(filepath, actual_duration):
