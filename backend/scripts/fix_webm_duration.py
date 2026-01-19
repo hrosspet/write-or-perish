@@ -3,8 +3,10 @@
 Fix WebM duration metadata for chunked audio files.
 
 WebM files recorded via MediaRecorder with timeslice often lack proper duration
-metadata in their headers. This script uses ffmpeg to remux the files, which
-calculates and writes the correct duration.
+metadata in their headers. This script:
+1. Remuxes with ffmpeg to get duration metadata (even if wrong)
+2. Calculates actual_duration = ffmpeg_duration - start_time
+3. Directly edits the EBML Duration to set the correct value
 
 Usage:
     python fix_webm_duration.py /path/to/chunks/directory
@@ -19,10 +21,159 @@ import argparse
 import glob
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 
+
+# =============================================================================
+# EBML Direct Duration Editing
+# =============================================================================
+
+EBML_ID = b'\x1a\x45\xdf\xa3'
+SEGMENT_ID = b'\x18\x53\x80\x67'
+INFO_ID = b'\x15\x49\xa9\x66'
+DURATION_ID = b'\x44\x89'
+TIMECODE_SCALE_ID = b'\x2a\xd7\xb1'
+
+
+def _read_vint(data, pos):
+    if pos >= len(data):
+        return None, pos
+    first_byte = data[pos]
+    if first_byte & 0x80:
+        length, value = 1, first_byte & 0x7f
+    elif first_byte & 0x40:
+        length, value = 2, first_byte & 0x3f
+    elif first_byte & 0x20:
+        length, value = 3, first_byte & 0x1f
+    elif first_byte & 0x10:
+        length, value = 4, first_byte & 0x0f
+    elif first_byte & 0x08:
+        length, value = 5, first_byte & 0x07
+    elif first_byte & 0x04:
+        length, value = 6, first_byte & 0x03
+    elif first_byte & 0x02:
+        length, value = 7, first_byte & 0x01
+    elif first_byte & 0x01:
+        length, value = 8, 0
+    else:
+        return None, pos
+    for i in range(1, length):
+        if pos + i >= len(data):
+            return None, pos
+        value = (value << 8) | data[pos + i]
+    return value, pos + length
+
+
+def _read_element_id(data, pos):
+    if pos >= len(data):
+        return None, pos
+    first_byte = data[pos]
+    if first_byte & 0x80:
+        length = 1
+    elif first_byte & 0x40:
+        length = 2
+    elif first_byte & 0x20:
+        length = 3
+    elif first_byte & 0x10:
+        length = 4
+    else:
+        return None, pos
+    if pos + length > len(data):
+        return None, pos
+    return data[pos:pos + length], pos + length
+
+
+def _find_info_element(data):
+    pos = 0
+    elem_id, pos = _read_element_id(data, pos)
+    if elem_id != EBML_ID:
+        return None, None
+    elem_size, pos = _read_vint(data, pos)
+    pos += elem_size
+    elem_id, pos = _read_element_id(data, pos)
+    if elem_id != SEGMENT_ID:
+        return None, None
+    segment_size, pos = _read_vint(data, pos)
+    search_limit = min(pos + 100000, len(data))
+    while pos < search_limit:
+        elem_id, new_pos = _read_element_id(data, pos)
+        if elem_id is None:
+            break
+        elem_size, new_pos = _read_vint(data, new_pos)
+        if elem_size is None:
+            break
+        if elem_id == INFO_ID:
+            return new_pos, elem_size
+        if elem_size == 0xffffffffffffff:
+            pos = new_pos
+            continue
+        pos = new_pos + elem_size
+    return None, None
+
+
+def _find_duration_in_info(data, info_start, info_size):
+    pos = info_start
+    end = info_start + info_size
+    timecode_scale = 1000000
+    duration_pos = None
+    duration_size = None
+    while pos < end:
+        elem_id, pos = _read_element_id(data, pos)
+        if elem_id is None:
+            break
+        elem_size, pos = _read_vint(data, pos)
+        if elem_size is None:
+            break
+        if elem_id == TIMECODE_SCALE_ID:
+            timecode_scale = 0
+            for i in range(elem_size):
+                timecode_scale = (timecode_scale << 8) | data[pos + i]
+        if elem_id == DURATION_ID:
+            duration_pos = pos
+            duration_size = elem_size
+        pos += elem_size
+    return duration_pos, duration_size, timecode_scale
+
+
+def set_ebml_duration(filepath, duration_seconds):
+    """Directly set the Duration metadata in a WebM file's EBML structure."""
+    try:
+        with open(filepath, 'rb') as f:
+            data = bytearray(f.read())
+        info_start, info_size = _find_info_element(data)
+        if info_start is None:
+            print(f"  Warning: Could not find Info element in {filepath}")
+            return False
+        duration_pos, duration_size, timecode_scale = _find_duration_in_info(
+            data, info_start, info_size
+        )
+        if duration_pos is None:
+            print(f"  Warning: Could not find Duration element in {filepath}")
+            return False
+        new_duration_ns = duration_seconds * 1e9
+        new_duration_value = new_duration_ns / timecode_scale
+        if duration_size == 8:
+            new_duration_bytes = struct.pack('>d', new_duration_value)
+        elif duration_size == 4:
+            new_duration_bytes = struct.pack('>f', new_duration_value)
+        else:
+            print(f"  Warning: Unexpected duration size: {duration_size}")
+            return False
+        data[duration_pos:duration_pos + duration_size] = new_duration_bytes
+        with open(filepath, 'wb') as f:
+            f.write(data)
+        return True
+    except Exception as e:
+        print(f"  Warning: Error setting EBML duration: {e}")
+        return False
+
+
+# =============================================================================
+# FFprobe helpers
+# =============================================================================
 
 def get_webm_duration(filepath):
     """Get the duration of a WebM file using ffprobe. Returns None if unavailable."""
@@ -46,13 +197,39 @@ def get_webm_duration(filepath):
         return None
 
 
+def get_webm_start_time(filepath):
+    """Get the start_time of a WebM file using ffprobe."""
+    try:
+        result = subprocess.run(
+            [
+                'ffprobe', '-v', 'error',
+                '-show_entries', 'format=start_time',
+                '-of', 'csv=p=0',
+                filepath
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        start_str = result.stdout.strip()
+        if start_str and start_str != 'N/A':
+            return float(start_str)
+        return None
+    except (subprocess.TimeoutExpired, ValueError, FileNotFoundError):
+        return None
+
+
+# =============================================================================
+# Main fix function
+# =============================================================================
+
 def fix_webm_duration(filepath, dry_run=False):
     """
-    Fix the duration metadata of a WebM file by remuxing it with ffmpeg.
+    Fix the duration metadata of a WebM file.
 
-    Args:
-        filepath: Path to the WebM file
-        dry_run: If True, only report what would be done
+    1. Remux with ffmpeg to get duration (even if wrong: duration = start_time + actual)
+    2. Calculate actual_duration = ffmpeg_duration - start_time
+    3. Directly edit EBML Duration to set correct value
 
     Returns:
         tuple: (success: bool, message: str, old_duration, new_duration)
@@ -63,7 +240,6 @@ def fix_webm_duration(filepath, dry_run=False):
     if not filepath.endswith('.webm'):
         return False, f"Not a WebM file: {filepath}", None, None
 
-    # Get current duration
     old_duration = get_webm_duration(filepath)
 
     if dry_run:
@@ -72,16 +248,11 @@ def fix_webm_duration(filepath, dry_run=False):
         else:
             return True, f"Would fix: {filepath} (current duration: {old_duration:.2f}s)", old_duration, None
 
-    # Create a temporary file for the remuxed output
     fd, temp_path = tempfile.mkstemp(suffix='.webm')
     os.close(fd)
 
     try:
-        # Remux the file with ffmpeg
-        # -i: input file
-        # -c copy: copy streams without re-encoding (fast)
-        # -copyts: preserve original timestamps (important for chunked recordings!)
-        # -y: overwrite output file
+        # Step 1: Remux with ffmpeg
         result = subprocess.run(
             [
                 'ffmpeg', '-y',
@@ -96,19 +267,34 @@ def fix_webm_duration(filepath, dry_run=False):
         )
 
         if result.returncode != 0:
+            os.unlink(temp_path)
             return False, f"ffmpeg failed: {result.stderr}", old_duration, None
 
-        # Verify the new file has duration
-        new_duration = get_webm_duration(temp_path)
+        # Step 2: Get (wrong) duration and start_time
+        ffmpeg_duration = get_webm_duration(temp_path)
+        start_time = get_webm_start_time(temp_path)
 
-        if new_duration is None:
+        if ffmpeg_duration is None:
             os.unlink(temp_path)
             return False, "Remuxed file still has no duration", old_duration, None
 
-        # Replace the original file with the fixed one
+        # Step 3: Calculate actual duration
+        if start_time is not None and start_time > 0:
+            actual_duration = ffmpeg_duration - start_time
+        else:
+            actual_duration = ffmpeg_duration
+
+        # Step 4: Replace original with remuxed file
         shutil.move(temp_path, filepath)
 
-        return True, f"Fixed: {filepath}", old_duration, new_duration
+        # Step 5: Set correct EBML duration if needed
+        if start_time is not None and start_time > 0:
+            set_ebml_duration(filepath, actual_duration)
+
+        # Verify final duration
+        final_duration = get_webm_duration(filepath)
+
+        return True, f"Fixed: {filepath}", old_duration, final_duration
 
     except subprocess.TimeoutExpired:
         if os.path.exists(temp_path):
