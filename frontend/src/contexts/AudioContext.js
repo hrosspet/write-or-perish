@@ -65,14 +65,16 @@ export const AudioProvider = ({ children }) => {
     const durations = await Promise.all(
       urls.map(url => new Promise((resolve) => {
         const audio = new Audio();
+        audio.crossOrigin = 'use-credentials';
         audio.preload = 'metadata';
         audio.onloadedmetadata = () => {
-          resolve(audio.duration);
+          const dur = audio.duration;
           audio.src = ''; // Release the resource
+          resolve(isFinite(dur) ? dur : 300);
         };
         audio.onerror = () => {
-          console.error('Error loading chunk metadata:', url);
-          resolve(0); // Fallback to 0 on error
+          // Fallback: estimate 5 minutes per chunk (typical recording chunk size)
+          resolve(300);
         };
         audio.src = url;
       }))
@@ -94,12 +96,22 @@ export const AudioProvider = ({ children }) => {
     return { chunkIndex: lastIndex, timeInChunk: durations[lastIndex] || 0 };
   }, []);
 
+  // Helper to recalculate total duration from chunk durations
+  const recalculateTotalDuration = useCallback((durations) => {
+    const total = durations.reduce((a, b) => a + b, 0);
+    setTotalDuration(total);
+    return total;
+  }, []);
+
   // Create and play a chunk at a specific index and time
   const playChunkAtTime = useCallback((chunkIndex, timeInChunk, shouldAutoPlay = true) => {
     const urls = allChunkUrlsRef.current;
     const durations = chunkDurationsRef.current;
 
     if (!urls.length || chunkIndex >= urls.length) return;
+
+    // Ensure timeInChunk is valid
+    const safeTimeInChunk = isFinite(timeInChunk) ? timeInChunk : 0;
 
     // Update current chunk index
     currentChunkIndexRef.current = chunkIndex;
@@ -114,8 +126,20 @@ export const AudioProvider = ({ children }) => {
     audio.playbackRate = playbackRate;
 
     audio.onloadedmetadata = () => {
-      setDuration(durations[chunkIndex]);
-      audio.currentTime = timeInChunk;
+      const actualDuration = audio.duration;
+      // Update the stored duration with actual value if it differs significantly
+      if (isFinite(actualDuration) && Math.abs(durations[chunkIndex] - actualDuration) > 1) {
+        durations[chunkIndex] = actualDuration;
+        chunkDurationsRef.current = durations;
+        setChunkDurations([...durations]);
+        recalculateTotalDuration(durations);
+      }
+      setDuration(actualDuration);
+      // Seek to requested time (clamped to valid range)
+      const clampedTime = Math.max(0, Math.min(safeTimeInChunk, actualDuration));
+      if (clampedTime > 0) {
+        audio.currentTime = clampedTime;
+      }
       setLoading(false);
     };
 
@@ -168,7 +192,7 @@ export const AudioProvider = ({ children }) => {
     if (shouldAutoPlay) {
       audio.play().catch(err => console.error('Error playing chunk:', err));
     }
-  }, [playbackRate, calculateCumulativeTime, startTimeTracking, stopTimeTracking]);
+  }, [playbackRate, calculateCumulativeTime, startTimeTracking, stopTimeTracking, recalculateTotalDuration]);
 
   const loadAudio = useCallback(async (audioData) => {
     // If there's already audio playing, pause it first
@@ -321,13 +345,19 @@ export const AudioProvider = ({ children }) => {
 
   // Seek to a cumulative time position (works across chunks)
   const seekToCumulativeTime = useCallback((targetCumulativeTime) => {
+    // Guard against invalid input
+    if (!isFinite(targetCumulativeTime)) {
+      console.warn('seekToCumulativeTime: invalid target time', targetCumulativeTime);
+      return;
+    }
+
     const durations = chunkDurationsRef.current;
     const urls = allChunkUrlsRef.current;
 
     // For single audio (no chunks)
     if (!durations.length || !urls.length) {
-      if (audioRef.current) {
-        const clampedTime = Math.max(0, Math.min(targetCumulativeTime, audioRef.current.duration || 0));
+      if (audioRef.current && isFinite(audioRef.current.duration)) {
+        const clampedTime = Math.max(0, Math.min(targetCumulativeTime, audioRef.current.duration));
         audioRef.current.currentTime = clampedTime;
         setCurrentTime(clampedTime);
         setCumulativeTime(clampedTime);
@@ -337,6 +367,10 @@ export const AudioProvider = ({ children }) => {
 
     // Clamp to valid range
     const totalDur = durations.reduce((a, b) => a + b, 0);
+    if (!isFinite(totalDur) || totalDur <= 0) {
+      console.warn('seekToCumulativeTime: invalid total duration', totalDur);
+      return;
+    }
     const clampedTime = Math.max(0, Math.min(targetCumulativeTime, totalDur));
 
     // Find which chunk and position
@@ -344,8 +378,9 @@ export const AudioProvider = ({ children }) => {
 
     // If same chunk, just seek within it
     if (chunkIndex === currentChunkIndexRef.current && audioRef.current) {
-      audioRef.current.currentTime = timeInChunk;
-      setCurrentTime(timeInChunk);
+      const safeTime = isFinite(timeInChunk) ? timeInChunk : 0;
+      audioRef.current.currentTime = safeTime;
+      setCurrentTime(safeTime);
       setCumulativeTime(clampedTime);
     } else {
       // Different chunk - need to load it

@@ -33,6 +33,11 @@ Ensure:
 - Code lints without errors
 - Changes are production-ready
 
+### Git Commit Rules
+
+- **NEVER amend commits** unless explicitly instructed by the user. We work on `main` and cannot force push.
+- Always create new commits for fixes and changes.
+
 ### Local Code Verification
 
 **Frontend**: Run `npm run build 2>&1 | tail -30` from the `frontend/` directory to check for compilation errors. There is no separate lint script - the build process will catch TypeScript/JSX errors.

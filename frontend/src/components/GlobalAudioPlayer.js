@@ -11,7 +11,6 @@ const GlobalAudioPlayer = () => {
     // Use cumulative values for display (falls back gracefully for single audio)
     cumulativeTime,
     totalDuration,
-    totalChunks,
     play,
     pause,
     stop,
@@ -21,9 +20,9 @@ const GlobalAudioPlayer = () => {
     changePlaybackRate,
   } = useAudio();
 
-  // Use cumulative time/duration for display
-  const displayTime = cumulativeTime;
-  const displayDuration = totalDuration;
+  // Use cumulative time/duration for display with fallbacks
+  const displayTime = cumulativeTime || 0;
+  const displayDuration = totalDuration || 0;
 
   // Don't show the player if there's no audio loaded
   if (!currentAudio) {
@@ -38,11 +37,14 @@ const GlobalAudioPlayer = () => {
   };
 
   const handleSeek = (e) => {
+    if (!displayDuration || displayDuration <= 0) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const x = e.clientX - rect.left;
-    const percentage = x / rect.width;
+    const percentage = Math.max(0, Math.min(1, x / rect.width));
     const newTime = percentage * displayDuration;
-    seekToCumulativeTime(newTime);
+    if (isFinite(newTime)) {
+      seekToCumulativeTime(newTime);
+    }
   };
 
   return (
@@ -189,7 +191,6 @@ const GlobalAudioPlayer = () => {
         minWidth: '70px',
       }}>
         {formatTime(displayTime)} / {formatTime(displayDuration)}
-        {totalChunks > 1 && <span style={{ marginLeft: '4px', color: '#888' }}>({totalChunks} chunks)</span>}
       </div>
 
       {/* Progress bar */}
