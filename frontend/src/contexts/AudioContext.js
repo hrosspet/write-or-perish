@@ -559,6 +559,8 @@ export const AudioProvider = ({ children }) => {
     // (Playing at the end would immediately trigger onended)
     if (clampedTime >= totalDur - 0.1) {
       console.log('[AudioDebug] Seeking to end, showing end position');
+      // Increment playback ID to invalidate any pending interval callbacks
+      playbackIdRef.current += 1;
       if (audioRef.current) {
         audioRef.current.pause();
       }
