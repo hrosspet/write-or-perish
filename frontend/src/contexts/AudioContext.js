@@ -326,20 +326,14 @@ export const AudioProvider = ({ children }) => {
         const nextIndex = chunkIndex + 1;
         playChunkAtTime(nextIndex, 0, true);
       } else {
-        // Playback finished
+        // Playback finished - keep metadata so user can seek back or replay
+        // Only stop() clears everything
         setIsPlaying(false);
         stopTimeTracking();
-        setCurrentTime(0);
-        setCumulativeTime(0);
-        setCurrentChunkIndex(0);
-        currentChunkIndexRef.current = 0;
-        setTotalChunks(0);
-        audioQueueRef.current = [];
-        allChunkUrlsRef.current = [];
-        chunkDurationsRef.current = [];
-        setChunkDurations([]);
-        setTotalDuration(0);
-        queueMetadataRef.current = null;
+        // Show position at end of total duration
+        const totalDur = chunkDurationsRef.current.reduce((a, b) => a + b, 0);
+        setCurrentTime(chunkDurationsRef.current[chunkIndex] || 0);
+        setCumulativeTime(totalDur);
       }
     };
 
@@ -561,6 +555,23 @@ export const AudioProvider = ({ children }) => {
     }
     const clampedTime = Math.max(0, Math.min(targetCumulativeTime, totalDur));
 
+    // If seeking to the exact end, just show end position without playing
+    // (Playing at the end would immediately trigger onended)
+    if (clampedTime >= totalDur - 0.1) {
+      console.log('[AudioDebug] Seeking to end, showing end position');
+      if (audioRef.current) {
+        audioRef.current.pause();
+      }
+      setIsPlaying(false);
+      stopTimeTracking();
+      const lastChunkIndex = durations.length - 1;
+      setCurrentChunkIndex(lastChunkIndex);
+      currentChunkIndexRef.current = lastChunkIndex;
+      setCurrentTime(durations[lastChunkIndex] || 0);
+      setCumulativeTime(totalDur);
+      return;
+    }
+
     // Find which chunk and position
     const { chunkIndex, timeInChunk } = findChunkForTime(clampedTime, durations);
 
@@ -581,7 +592,7 @@ export const AudioProvider = ({ children }) => {
       }
       playChunkAtTime(chunkIndex, timeInChunk, wasPlaying);
     }
-  }, [findChunkForTime, isPlaying, playChunkAtTime]);
+  }, [findChunkForTime, isPlaying, playChunkAtTime, stopTimeTracking]);
 
   const skipForward = useCallback(() => {
     const durations = chunkDurationsRef.current;
