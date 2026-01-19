@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import NodeFooter from "./NodeFooter";
 import SpeakerIcon from "./SpeakerIcon";
@@ -49,6 +49,7 @@ function NodeDetail() {
   const [selectedModel, setSelectedModel] = useState("gpt-5");
   const [llmTaskNodeId, setLlmTaskNodeId] = useState(null);
   const [quotes, setQuotes] = useState({});
+  const highlightedNodeRef = useRef(null);
   const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
   // LLM completion polling - enabled automatically when llmTaskNodeId is set
@@ -104,6 +105,13 @@ function NodeDetail() {
         // Don't show error to user - quotes will just not render
       });
   }, [id, node]);
+
+  // Scroll to the highlighted node after loading
+  useEffect(() => {
+    if (!loading && node && highlightedNodeRef.current) {
+      highlightedNodeRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [loading, node]);
 
   // Handle LLM completion
   useEffect(() => {
@@ -210,7 +218,7 @@ function NodeDetail() {
     : (node.children ? node.children.length : 0);
 
   const highlightedNodeSection = (
-    <div>
+    <div ref={highlightedNodeRef}>
       <hr style={{ borderColor: "#333" }} />
       <div style={highlightedTextStyle}>
         <QuotedContent
