@@ -222,6 +222,9 @@ def _set_ebml_duration(filepath: str, duration_seconds: float) -> bool:
         with open(filepath, 'wb') as f:
             f.write(data)
 
+        # Ensure file is readable by web server (644 = rw-r--r--)
+        os.chmod(filepath, 0o644)
+
         return True
 
     except Exception as e:

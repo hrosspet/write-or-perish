@@ -165,6 +165,8 @@ def set_ebml_duration(filepath, duration_seconds):
         data[duration_pos:duration_pos + duration_size] = new_duration_bytes
         with open(filepath, 'wb') as f:
             f.write(data)
+        # Ensure file is readable by web server (644 = rw-r--r--)
+        os.chmod(filepath, 0o644)
         return True
     except Exception as e:
         print(f"  Warning: Error setting EBML duration: {e}")
