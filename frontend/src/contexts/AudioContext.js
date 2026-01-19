@@ -30,6 +30,8 @@ export const AudioProvider = ({ children }) => {
   const chunkDurationsRef = useRef([]);
   const currentChunkIndexRef = useRef(0);
   const queueMetadataRef = useRef(null);
+  // Playback ID to prevent stale event handlers from updating state
+  const playbackIdRef = useRef(0);
 
   // Calculate cumulative time based on chunk index and current position
   const calculateCumulativeTime = useCallback((chunkIndex, timeInChunk) => {
@@ -103,12 +105,37 @@ export const AudioProvider = ({ children }) => {
     return total;
   }, []);
 
+  // Clean up an audio element by removing handlers and pausing
+  const cleanupAudio = useCallback((audio) => {
+    if (!audio) return;
+    audio.onloadedmetadata = null;
+    audio.ontimeupdate = null;
+    audio.onended = null;
+    audio.onpause = null;
+    audio.onplay = null;
+    audio.onerror = null;
+    try {
+      audio.pause();
+    } catch (e) {
+      // Ignore errors when pausing
+    }
+  }, []);
+
   // Create and play a chunk at a specific index and time
   const playChunkAtTime = useCallback((chunkIndex, timeInChunk, shouldAutoPlay = true) => {
     const urls = allChunkUrlsRef.current;
     const durations = chunkDurationsRef.current;
 
     if (!urls.length || chunkIndex >= urls.length) return;
+
+    // Increment playback ID to invalidate any stale event handlers
+    playbackIdRef.current += 1;
+    const thisPlaybackId = playbackIdRef.current;
+
+    // Clean up old audio element before creating new one
+    if (audioRef.current) {
+      cleanupAudio(audioRef.current);
+    }
 
     // Ensure timeInChunk is valid
     const safeTimeInChunk = isFinite(timeInChunk) ? timeInChunk : 0;
@@ -126,13 +153,17 @@ export const AudioProvider = ({ children }) => {
     audio.playbackRate = playbackRate;
 
     audio.onloadedmetadata = () => {
+      // Check if this handler is still valid
+      if (playbackIdRef.current !== thisPlaybackId) return;
+
       const actualDuration = audio.duration;
       // Update the stored duration with actual value if it differs significantly
       if (isFinite(actualDuration) && Math.abs(durations[chunkIndex] - actualDuration) > 1) {
-        durations[chunkIndex] = actualDuration;
-        chunkDurationsRef.current = durations;
-        setChunkDurations([...durations]);
-        recalculateTotalDuration(durations);
+        const updatedDurations = [...durations];
+        updatedDurations[chunkIndex] = actualDuration;
+        chunkDurationsRef.current = updatedDurations;
+        setChunkDurations(updatedDurations);
+        recalculateTotalDuration(updatedDurations);
       }
       setDuration(actualDuration);
       // Seek to requested time (clamped to valid range)
@@ -144,15 +175,21 @@ export const AudioProvider = ({ children }) => {
     };
 
     audio.ontimeupdate = () => {
+      // Check if this handler is still valid
+      if (playbackIdRef.current !== thisPlaybackId) return;
+
       const timeInCurrentChunk = audio.currentTime;
       setCurrentTime(timeInCurrentChunk);
-      setCumulativeTime(calculateCumulativeTime(currentChunkIndexRef.current, timeInCurrentChunk));
+      setCumulativeTime(calculateCumulativeTime(chunkIndex, timeInCurrentChunk));
     };
 
     audio.onended = () => {
+      // Check if this handler is still valid
+      if (playbackIdRef.current !== thisPlaybackId) return;
+
       const queue = audioQueueRef.current;
       if (queue.length > 0) {
-        const nextIndex = currentChunkIndexRef.current + 1;
+        const nextIndex = chunkIndex + 1;
         playChunkAtTime(nextIndex, 0, true);
       } else {
         // Playback finished
@@ -173,16 +210,19 @@ export const AudioProvider = ({ children }) => {
     };
 
     audio.onpause = () => {
+      if (playbackIdRef.current !== thisPlaybackId) return;
       setIsPlaying(false);
       stopTimeTracking();
     };
 
     audio.onplay = () => {
+      if (playbackIdRef.current !== thisPlaybackId) return;
       setIsPlaying(true);
       startTimeTracking();
     };
 
     audio.onerror = (e) => {
+      if (playbackIdRef.current !== thisPlaybackId) return;
       console.error('Error loading audio chunk:', e);
       setLoading(false);
       setIsPlaying(false);
@@ -192,7 +232,7 @@ export const AudioProvider = ({ children }) => {
     if (shouldAutoPlay) {
       audio.play().catch(err => console.error('Error playing chunk:', err));
     }
-  }, [playbackRate, calculateCumulativeTime, startTimeTracking, stopTimeTracking, recalculateTotalDuration]);
+  }, [playbackRate, calculateCumulativeTime, startTimeTracking, stopTimeTracking, recalculateTotalDuration, cleanupAudio]);
 
   const loadAudio = useCallback(async (audioData) => {
     // If there's already audio playing, pause it first
