@@ -17,10 +17,6 @@ export async function uploadFileInChunks(
   const totalChunks = Math.ceil(file.size / chunkSize);
   const uploadId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
-  console.log(
-    `Starting chunked upload: ${file.name}, Size: ${(file.size / (1024 * 1024)).toFixed(2)}MB, Chunks: ${totalChunks}`
-  );
-
   try {
     // Step 1: Initialize upload session
     const initResponse = await api.post("/nodes/upload/init", {
@@ -53,20 +49,14 @@ export async function uploadFileInChunks(
       if (onProgress) {
         onProgress(progress);
       }
-
-      console.log(
-        `Uploaded chunk ${chunkIndex + 1}/${totalChunks} (${progress}%)`
-      );
     }
 
     // Step 3: Finalize upload
-    console.log("Finalizing upload...");
     const finalizeResponse = await api.post("/nodes/upload/finalize", {
       upload_id: uploadId,
       node_id: node_id,
     });
 
-    console.log("Upload completed successfully");
     return finalizeResponse.data;
   } catch (error) {
     console.error("Chunked upload failed:", error);

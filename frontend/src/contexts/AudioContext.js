@@ -42,8 +42,6 @@ export const AudioProvider = ({ children }) => {
     if (!durations.length) return timeInChunk;
     const completedChunksDuration = durations.slice(0, chunkIndex).reduce((a, b) => a + b, 0);
     const result = completedChunksDuration + timeInChunk;
-    // DEBUG: Log cumulative time calculation
-    console.log('[AudioDebug] calculateCumulativeTime:', { chunkIndex, timeInChunk, durations: [...durations], completedChunksDuration, result });
     return result;
   }, []);
 
@@ -132,11 +130,6 @@ export const AudioProvider = ({ children }) => {
           }
         }, 3000);
 
-        // DEBUG: Log what the browser reports
-        audio.onloadeddata = () => {
-          console.log('[AudioDebug] preload onloadeddata:', { url, duration: audio.duration, resolved });
-        };
-
         audio.src = url;
       }))
     );
@@ -185,8 +178,6 @@ export const AudioProvider = ({ children }) => {
   const playChunkAtTime = useCallback((chunkIndex, timeInChunk, shouldAutoPlay = true) => {
     const urls = allChunkUrlsRef.current;
     const durations = chunkDurationsRef.current;
-
-    console.log('[AudioDebug] playChunkAtTime called:', { chunkIndex, timeInChunk, shouldAutoPlay, durations: [...durations], totalChunks: urls.length });
 
     if (!urls.length || chunkIndex >= urls.length) return;
 
@@ -257,7 +248,6 @@ export const AudioProvider = ({ children }) => {
 
       const clampedTime = Math.max(expectedOffset, Math.min(rawSeekTime, (audio.duration || expectedOffset + 300)));
       if (isFinite(clampedTime)) {
-        console.log('[AudioDebug] Seeking to rawTime:', clampedTime, 'for timeInChunk:', safeTimeInChunk, 'offset:', expectedOffset);
         audio.currentTime = clampedTime;
       }
     };
@@ -279,15 +269,12 @@ export const AudioProvider = ({ children }) => {
         // Allow some tolerance (within 5 seconds of expected)
         if (rawTime > expectedOffset - 5 && rawTime < expectedOffset + durations[chunkIndex] + 5) {
           chunkTimestampOffsetRef.current = expectedOffset;
-          console.log('[AudioDebug] Detected continuous timestamps, offset:', expectedOffset, 'rawTime:', rawTime);
         } else if (rawTime < 5) {
           // Raw time is near 0, so this chunk has normal timestamps starting at 0
           chunkTimestampOffsetRef.current = 0;
-          console.log('[AudioDebug] Chunk has normal timestamps (starts at 0), rawTime:', rawTime);
         } else {
           // Unexpected case - use raw time as offset
           chunkTimestampOffsetRef.current = rawTime;
-          console.log('[AudioDebug] Unexpected timestamp, using rawTime as offset:', rawTime);
         }
       }
 
@@ -321,7 +308,6 @@ export const AudioProvider = ({ children }) => {
       }
 
       const queue = audioQueueRef.current;
-      console.log('[AudioDebug] onended:', { chunkIndex, actualDuration, queueLength: queue.length, durations: [...chunkDurationsRef.current] });
       if (queue.length > 0) {
         const nextIndex = chunkIndex + 1;
         playChunkAtTime(nextIndex, 0, true);
@@ -463,10 +449,8 @@ export const AudioProvider = ({ children }) => {
     // Otherwise fall back to browser metadata detection (unreliable for WebM with continuous timestamps)
     let durations;
     if (serverDurations && serverDurations.length === urls.length && serverDurations.every(d => d != null)) {
-      console.log('[AudioDebug] Using server-provided durations:', serverDurations);
       durations = serverDurations;
     } else {
-      console.log('[AudioDebug] Falling back to browser metadata detection');
       durations = await preloadChunkDurations(urls);
     }
     chunkDurationsRef.current = durations;
@@ -526,7 +510,6 @@ export const AudioProvider = ({ children }) => {
 
   // Seek to a cumulative time position (works across chunks)
   const seekToCumulativeTime = useCallback((targetCumulativeTime) => {
-    console.log('[AudioDebug] seekToCumulativeTime called:', { targetCumulativeTime, currentChunk: currentChunkIndexRef.current, durations: [...chunkDurationsRef.current] });
     // Guard against invalid input
     if (!isFinite(targetCumulativeTime)) {
       console.warn('seekToCumulativeTime: invalid target time', targetCumulativeTime);
@@ -558,7 +541,6 @@ export const AudioProvider = ({ children }) => {
     // If seeking to the exact end, just show end position without playing
     // (Playing at the end would immediately trigger onended)
     if (clampedTime >= totalDur - 0.1) {
-      console.log('[AudioDebug] Seeking to end, showing end position');
       // Increment playback ID to invalidate any pending interval callbacks
       playbackIdRef.current += 1;
       if (audioRef.current) {
@@ -582,7 +564,6 @@ export const AudioProvider = ({ children }) => {
       const safeTime = isFinite(timeInChunk) ? timeInChunk : 0;
       // Add timestamp offset for WebM with continuous timestamps
       const rawSeekTime = safeTime + chunkTimestampOffsetRef.current;
-      console.log('[AudioDebug] Seeking within chunk, rawTime:', rawSeekTime, 'timeInChunk:', safeTime, 'offset:', chunkTimestampOffsetRef.current);
       audioRef.current.currentTime = rawSeekTime;
       setCurrentTime(safeTime);
       setCumulativeTime(clampedTime);
