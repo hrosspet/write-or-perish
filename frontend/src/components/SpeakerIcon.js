@@ -32,6 +32,7 @@ const SpeakerIcon = ({ nodeId, profileId, content }) => {
   const [loading, setLoading] = useState(false);
   const [audioSrc, setAudioSrc] = useState(null);
   const [audioChunks, setAudioChunks] = useState(null); // For chunked playback
+  const [audioChunkDurations, setAudioChunkDurations] = useState(null); // Server-provided durations
   const [ttsTaskActive, setTtsTaskActive] = useState(false);
 
   const isNode = nodeId != null;
@@ -57,6 +58,7 @@ const SpeakerIcon = ({ nodeId, profileId, content }) => {
   useEffect(() => {
     setAudioSrc(null);
     setAudioChunks(null);
+    setAudioChunkDurations(null);
     setLoading(false);
     setTtsTaskActive(false);
   }, [nodeId, profileId]);
@@ -96,7 +98,7 @@ const SpeakerIcon = ({ nodeId, profileId, content }) => {
     try {
       // If we already have audio chunks cached, play them
       if (audioChunks && audioChunks.length > 0) {
-        await loadAudioQueue(audioChunks, { title: fullTitle, id, type: isNode ? 'node' : 'profile' });
+        await loadAudioQueue(audioChunks, { title: fullTitle, id, type: isNode ? 'node' : 'profile' }, audioChunkDurations);
         return;
       }
 
@@ -135,13 +137,20 @@ const SpeakerIcon = ({ nodeId, profileId, content }) => {
             validateStatus: (status) => status === 200 || status === 404
           });
           if (chunksRes.status === 200 && chunksRes.data.chunks?.length > 0) {
-            // Build full URLs for chunks
-            const chunkUrls = chunksRes.data.chunks.map(chunk =>
-              chunk.startsWith('http') ? chunk : `${process.env.REACT_APP_BACKEND_URL}${chunk}`
+            // Backend returns [{url, duration}, ...] with accurate durations from ffprobe
+            const chunksData = chunksRes.data.chunks;
+            const chunkUrls = chunksData.map(chunk => {
+              const url = typeof chunk === 'string' ? chunk : chunk.url;
+              return url.startsWith('http') ? url : `${process.env.REACT_APP_BACKEND_URL}${url}`;
+            });
+            // Extract server-provided durations (accurate via ffprobe)
+            const chunkDurations = chunksData.map(chunk =>
+              typeof chunk === 'object' && chunk.duration != null ? chunk.duration : null
             );
             setAudioChunks(chunkUrls);
+            setAudioChunkDurations(chunkDurations);
             setLoading(false);
-            await loadAudioQueue(chunkUrls, { title: fullTitle, id, type: 'node' });
+            await loadAudioQueue(chunkUrls, { title: fullTitle, id, type: 'node' }, chunkDurations);
             return;
           }
         } catch (chunksErr) {

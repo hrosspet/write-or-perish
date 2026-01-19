@@ -22,6 +22,7 @@ from backend.utils.privacy import (
     AIUsage
 )
 from backend.utils.quotes import find_quote_ids, get_quote_data, has_quotes
+from backend.utils.webm_utils import get_webm_duration
 
 # ---------------------------------------------------------------------------
 # Voice‑Mode helpers
@@ -844,8 +845,12 @@ def get_audio_chunks(node_id):
     For nodes recorded with streaming transcription, the audio is stored as
     multiple chunk files (chunk_0000.webm, chunk_0001.webm, etc.).
 
-    Response: 200 OK – `{ chunks: ["/media/nodes/1/123/chunk_0000.webm", ...] }`
+    Response: 200 OK – `{ chunks: [{url: "...", duration: 300.0}, ...] }`
               404     – when no chunks exist
+
+    Note: Duration is obtained via ffprobe which correctly reads EBML metadata.
+    Browsers incorrectly calculate duration from timestamps for WebM files
+    with non-zero start times (common with MediaRecorder timeslice recordings).
     """
     node = Node.query.get_or_404(node_id)
 
@@ -865,13 +870,19 @@ def get_audio_chunks(node_id):
     if not chunk_files:
         return jsonify({"error": "No audio chunks found"}), 404
 
-    # Build URLs
-    chunk_urls = [
-        f"/media/nodes/{node.user_id}/{node_id}/{f.name}"
-        for f in chunk_files
-    ]
+    # Build chunk info with URLs and durations
+    # Duration from ffprobe is accurate; browser's audio.duration is not
+    # for WebM files with continuous timestamps across chunks
+    chunks = []
+    for f in chunk_files:
+        url = f"/media/nodes/{node.user_id}/{node_id}/{f.name}"
+        duration = get_webm_duration(str(f))
+        # Fallback to 300s if ffprobe fails (typical chunk size)
+        if duration is None:
+            duration = 300.0
+        chunks.append({"url": url, "duration": duration})
 
-    return jsonify({"chunks": chunk_urls}), 200
+    return jsonify({"chunks": chunks}), 200
 
 
 @nodes_bp.route("/<int:node_id>/tts", methods=["POST"])

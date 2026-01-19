@@ -443,7 +443,9 @@ export const AudioProvider = ({ children }) => {
   }, [startTimeTracking, stopTimeTracking, playbackRate]);
 
   // Load and play a queue of audio URLs (for chunked playback)
-  const loadAudioQueue = useCallback(async (urls, audioData) => {
+  // serverDurations: optional array of durations from backend (accurate via ffprobe)
+  // When provided, these are used instead of browser metadata detection
+  const loadAudioQueue = useCallback(async (urls, audioData, serverDurations = null) => {
     if (!urls || urls.length === 0) return;
 
     // If there's already audio playing, pause it first
@@ -463,8 +465,16 @@ export const AudioProvider = ({ children }) => {
     currentChunkIndexRef.current = 0;
     chunkTimestampOffsetRef.current = 0;
 
-    // Preload all chunk durations
-    const durations = await preloadChunkDurations(urls);
+    // Use server-provided durations if available (accurate via ffprobe)
+    // Otherwise fall back to browser metadata detection (unreliable for WebM with continuous timestamps)
+    let durations;
+    if (serverDurations && serverDurations.length === urls.length && serverDurations.every(d => d != null)) {
+      console.log('[AudioDebug] Using server-provided durations:', serverDurations);
+      durations = serverDurations;
+    } else {
+      console.log('[AudioDebug] Falling back to browser metadata detection');
+      durations = await preloadChunkDurations(urls);
+    }
     chunkDurationsRef.current = durations;
     setChunkDurations(durations);
 
