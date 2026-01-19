@@ -3,6 +3,7 @@ from flask_login import login_required, current_user
 from backend.models import Draft, Node, NodeTranscriptChunk
 from backend.extensions import db
 from backend.utils.privacy import can_user_edit_node
+from backend.utils.webm_utils import fix_last_chunk_duration, is_ffmpeg_available
 import uuid
 import pathlib
 import os
@@ -515,6 +516,14 @@ def save_streaming_as_node(session_id):
     node_audio_dir = AUDIO_STORAGE_ROOT / f"nodes/{current_user.id}/{node.id}"
 
     if draft_audio_dir.exists():
+        # Fix the last chunk's duration metadata before moving (if not already fixed during finalization)
+        if is_ffmpeg_available():
+            success, message = fix_last_chunk_duration(str(draft_audio_dir))
+            if success:
+                current_app.logger.info(f"Fixed last chunk duration: {message}")
+            else:
+                current_app.logger.warning(f"Could not fix last chunk duration: {message}")
+
         try:
             # Create node audio directory
             node_audio_dir.mkdir(parents=True, exist_ok=True)

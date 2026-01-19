@@ -17,6 +17,7 @@ from backend.celery_app import celery, flask_app
 from backend.models import Node, NodeTranscriptChunk, Draft
 from backend.extensions import db
 from backend.utils.audio_processing import compress_audio_if_needed
+from backend.utils.webm_utils import fix_last_chunk_duration, is_ffmpeg_available
 
 logger = get_task_logger(__name__)
 
@@ -508,6 +509,22 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int):
             )
         else:
             final_content = f"# {timestamp} Voice note\n\n{full_transcript}"
+
+        # Fix the duration metadata of the last chunk (WebM files from MediaRecorder
+        # often lack proper duration, which causes playback issues)
+        if is_ffmpeg_available():
+            audio_storage_root = pathlib.Path(
+                os.environ.get("AUDIO_STORAGE_PATH", "data/audio")
+            ).resolve()
+            chunk_dir = audio_storage_root / f"drafts/{draft.user_id}/{session_id}"
+            if chunk_dir.exists():
+                success, message = fix_last_chunk_duration(str(chunk_dir))
+                if success:
+                    logger.info(f"Fixed last chunk duration for session {session_id}: {message}")
+                else:
+                    logger.warning(f"Could not fix last chunk duration for session {session_id}: {message}")
+        else:
+            logger.warning("ffmpeg not available, skipping last chunk duration fix")
 
         # Refresh draft and update
         db.session.refresh(draft)
