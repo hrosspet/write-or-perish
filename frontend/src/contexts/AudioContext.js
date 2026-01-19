@@ -46,11 +46,21 @@ export const AudioProvider = ({ children }) => {
     if (intervalRef.current) {
       clearInterval(intervalRef.current);
     }
+    // Capture the current playback ID to check if interval is still valid
+    const currentPlaybackId = playbackIdRef.current;
+    const currentChunkIdx = currentChunkIndexRef.current;
+
     intervalRef.current = setInterval(() => {
-      if (audioRef.current) {
+      // Check if this interval is still valid (playback ID hasn't changed)
+      if (playbackIdRef.current !== currentPlaybackId) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+        return;
+      }
+      if (audioRef.current && isFinite(audioRef.current.currentTime)) {
         const timeInChunk = audioRef.current.currentTime;
         setCurrentTime(timeInChunk);
-        setCumulativeTime(calculateCumulativeTime(currentChunkIndexRef.current, timeInChunk));
+        setCumulativeTime(calculateCumulativeTime(currentChunkIdx, timeInChunk));
       }
     }, 100);
   }, [calculateCumulativeTime]);
@@ -109,6 +119,7 @@ export const AudioProvider = ({ children }) => {
   const cleanupAudio = useCallback((audio) => {
     if (!audio) return;
     audio.onloadedmetadata = null;
+    audio.oncanplay = null;
     audio.ontimeupdate = null;
     audio.onended = null;
     audio.onpause = null;
@@ -128,6 +139,9 @@ export const AudioProvider = ({ children }) => {
 
     if (!urls.length || chunkIndex >= urls.length) return;
 
+    // IMPORTANT: Stop the interval FIRST to prevent race conditions
+    stopTimeTracking();
+
     // Increment playback ID to invalidate any stale event handlers
     playbackIdRef.current += 1;
     const thisPlaybackId = playbackIdRef.current;
@@ -144,6 +158,11 @@ export const AudioProvider = ({ children }) => {
     currentChunkIndexRef.current = chunkIndex;
     setCurrentChunkIndex(chunkIndex);
 
+    // Immediately update cumulative time for UI feedback
+    const newCumulativeTime = calculateCumulativeTime(chunkIndex, safeTimeInChunk);
+    setCumulativeTime(newCumulativeTime);
+    setCurrentTime(safeTimeInChunk);
+
     // Update queue to contain chunks after current one
     audioQueueRef.current = urls.slice(chunkIndex + 1);
 
@@ -152,6 +171,9 @@ export const AudioProvider = ({ children }) => {
     audioRef.current = audio;
     audio.playbackRate = playbackRate;
 
+    // Track if we've already seeked (to avoid multiple seeks)
+    let hasSeeked = false;
+
     audio.onloadedmetadata = () => {
       // Check if this handler is still valid
       if (playbackIdRef.current !== thisPlaybackId) return;
@@ -159,19 +181,26 @@ export const AudioProvider = ({ children }) => {
       const actualDuration = audio.duration;
       // Update the stored duration with actual value if it differs significantly
       if (isFinite(actualDuration) && Math.abs(durations[chunkIndex] - actualDuration) > 1) {
-        const updatedDurations = [...durations];
+        const updatedDurations = [...chunkDurationsRef.current];
         updatedDurations[chunkIndex] = actualDuration;
         chunkDurationsRef.current = updatedDurations;
         setChunkDurations(updatedDurations);
         recalculateTotalDuration(updatedDurations);
       }
       setDuration(actualDuration);
-      // Seek to requested time (clamped to valid range)
-      const clampedTime = Math.max(0, Math.min(safeTimeInChunk, actualDuration));
-      if (clampedTime > 0) {
+      setLoading(false);
+    };
+
+    // Use canplay event for seeking - this fires when the browser can actually seek
+    audio.oncanplay = () => {
+      if (playbackIdRef.current !== thisPlaybackId) return;
+      if (hasSeeked) return; // Only seek once
+      hasSeeked = true;
+
+      const clampedTime = Math.max(0, Math.min(safeTimeInChunk, audio.duration || 0));
+      if (clampedTime > 0 && isFinite(clampedTime)) {
         audio.currentTime = clampedTime;
       }
-      setLoading(false);
     };
 
     audio.ontimeupdate = () => {
