@@ -18,7 +18,7 @@ from backend.utils.audio_processing import (
     OPENAI_MAX_AUDIO_BYTES,
     OPENAI_MAX_DURATION_SEC
 )
-from backend.tasks.llm_completion import get_openai_chat_key
+from backend.utils.api_keys import get_openai_chat_key
 
 logger = get_task_logger(__name__)
 

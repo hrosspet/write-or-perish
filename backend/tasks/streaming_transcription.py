@@ -18,7 +18,7 @@ from backend.models import Node, NodeTranscriptChunk, Draft
 from backend.extensions import db
 from backend.utils.audio_processing import compress_audio_if_needed
 from backend.utils.webm_utils import fix_last_chunk_duration, is_ffmpeg_available
-from backend.tasks.llm_completion import get_openai_chat_key
+from backend.utils.api_keys import get_openai_chat_key
 
 logger = get_task_logger(__name__)
 

@@ -16,7 +16,7 @@ from backend.celery_app import celery, flask_app
 from backend.models import Node, UserProfile, TTSChunk
 from backend.extensions import db
 from backend.utils.audio_processing import chunk_text
-from backend.tasks.llm_completion import get_openai_chat_key
+from backend.utils.api_keys import get_openai_chat_key
 
 logger = get_task_logger(__name__)
 
