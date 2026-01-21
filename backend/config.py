@@ -11,9 +11,13 @@ class Config:
     TWITTER_API_KEY = os.environ.get("TWITTER_API_KEY")
     TWITTER_API_SECRET = os.environ.get("TWITTER_API_SECRET")
     
-    # LLM API keys
-    OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-    ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+    # LLM API keys - separated by usage type for privacy
+    # CHAT keys: used when content has ai_usage='chat' (responses only, no training)
+    # TRAIN keys: used when content has ai_usage='train' (can be used for training)
+    OPENAI_API_KEY_CHAT = os.environ.get("OPENAI_API_KEY_CHAT")
+    OPENAI_API_KEY_TRAIN = os.environ.get("OPENAI_API_KEY_TRAIN")
+    ANTHROPIC_API_KEY_CHAT = os.environ.get("ANTHROPIC_API_KEY_CHAT")
+    ANTHROPIC_API_KEY_TRAIN = os.environ.get("ANTHROPIC_API_KEY_TRAIN")
 
     # Default model (for backward compatibility and fallback)
     DEFAULT_LLM_MODEL = os.environ.get("LLM_NAME", "claude-opus-4.5")

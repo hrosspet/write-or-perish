@@ -16,6 +16,7 @@ from backend.celery_app import celery, flask_app
 from backend.models import Node, UserProfile, TTSChunk
 from backend.extensions import db
 from backend.utils.audio_processing import chunk_text
+from backend.tasks.llm_completion import get_openai_chat_key
 
 logger = get_task_logger(__name__)
 
@@ -93,10 +94,10 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str):
                     'tts_url': node.audio_tts_url
                 }
 
-            # Get OpenAI API key
-            api_key = flask_app.config.get("OPENAI_API_KEY")
+            # Get OpenAI API key (always use CHAT key for audio operations)
+            api_key = get_openai_chat_key(flask_app.config)
             if not api_key:
-                raise ValueError("OPENAI_API_KEY not configured")
+                raise ValueError("OpenAI API key not configured (set OPENAI_API_KEY_CHAT or OPENAI_API_KEY)")
 
             text = node.content or ""
             if not text:
@@ -270,9 +271,10 @@ def generate_tts_audio_for_profile(self, profile_id: int, audio_storage_root: st
                     'tts_url': profile.audio_tts_url
                 }
 
-            api_key = flask_app.config.get("OPENAI_API_KEY")
+            # Get OpenAI API key (always use CHAT key for audio operations)
+            api_key = get_openai_chat_key(flask_app.config)
             if not api_key:
-                raise ValueError("OPENAI_API_KEY not configured")
+                raise ValueError("OpenAI API key not configured (set OPENAI_API_KEY_CHAT or OPENAI_API_KEY)")
 
             text = profile.content or ""
             if not text:

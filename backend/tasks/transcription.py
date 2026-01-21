@@ -18,6 +18,7 @@ from backend.utils.audio_processing import (
     OPENAI_MAX_AUDIO_BYTES,
     OPENAI_MAX_DURATION_SEC
 )
+from backend.tasks.llm_completion import get_openai_chat_key
 
 logger = get_task_logger(__name__)
 
@@ -64,10 +65,10 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
         db.session.commit()
 
         try:
-            # Get OpenAI API key
-            api_key = flask_app.config.get("OPENAI_API_KEY")
+            # Get OpenAI API key (always use CHAT key for audio operations)
+            api_key = get_openai_chat_key(flask_app.config)
             if not api_key:
-                raise ValueError("OPENAI_API_KEY not configured")
+                raise ValueError("OpenAI API key not configured (set OPENAI_API_KEY_CHAT or OPENAI_API_KEY)")
 
             # No timeout - let Celery handle task limits
             client = OpenAI(api_key=api_key)

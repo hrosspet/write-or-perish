@@ -18,6 +18,7 @@ from backend.models import Node, NodeTranscriptChunk, Draft
 from backend.extensions import db
 from backend.utils.audio_processing import compress_audio_if_needed
 from backend.utils.webm_utils import fix_last_chunk_duration, is_ffmpeg_available
+from backend.tasks.llm_completion import get_openai_chat_key
 
 logger = get_task_logger(__name__)
 
@@ -75,10 +76,10 @@ def transcribe_chunk(self, node_id: int, chunk_index: int, chunk_path: str):
         db.session.commit()
 
         try:
-            # Get OpenAI API key
-            api_key = flask_app.config.get("OPENAI_API_KEY")
+            # Get OpenAI API key (always use CHAT key for audio operations)
+            api_key = get_openai_chat_key(flask_app.config)
             if not api_key:
-                raise ValueError("OPENAI_API_KEY not configured")
+                raise ValueError("OpenAI API key not configured (set OPENAI_API_KEY_CHAT or OPENAI_API_KEY)")
 
             client = OpenAI(api_key=api_key)
             file_path = pathlib.Path(chunk_path)
@@ -336,10 +337,10 @@ def transcribe_draft_chunk(self, session_id: str, chunk_index: int, chunk_path: 
         db.session.commit()
 
         try:
-            # Get OpenAI API key
-            api_key = flask_app.config.get("OPENAI_API_KEY")
+            # Get OpenAI API key (always use CHAT key for audio operations)
+            api_key = get_openai_chat_key(flask_app.config)
             if not api_key:
-                raise ValueError("OPENAI_API_KEY not configured")
+                raise ValueError("OpenAI API key not configured (set OPENAI_API_KEY_CHAT or OPENAI_API_KEY)")
 
             client = OpenAI(api_key=api_key)
             file_path = pathlib.Path(chunk_path)
