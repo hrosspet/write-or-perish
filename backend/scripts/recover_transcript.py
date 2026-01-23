@@ -4,13 +4,13 @@ Flask shell script to recover full transcript from the last draft.
 Usage (on production server):
     cd /path/to/project-root
     flask shell
-    >>> exec(open('backend/recover_transcript.py').read())
+    >>> exec(open('backend/scripts/recover_transcript.py').read())
 """
 
 import os
 import pathlib
 from backend.models import Draft, NodeTranscriptChunk
-from backend.app import db
+from backend.extensions import db
 
 AUDIO_STORAGE_ROOT = pathlib.Path(
     os.environ.get("AUDIO_STORAGE_PATH", "data/audio")
