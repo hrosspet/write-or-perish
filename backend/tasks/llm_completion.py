@@ -21,10 +21,10 @@ USER_EXPORT_PLACEHOLDER = "{user_export}"
 USER_PROFILE_PLACEHOLDER = "{user_profile}"
 
 
-def build_user_export_content(user, max_tokens=None, filter_ai_usage=False):
+def build_user_export_content(user, max_tokens=None, filter_ai_usage=False, created_before=None):
     """Import the actual implementation from export_data routes."""
     from backend.routes.export_data import build_user_export_content as _build
-    return _build(user, max_tokens, filter_ai_usage)
+    return _build(user, max_tokens, filter_ai_usage, created_before)
 
 
 def get_user_profile_content(user_id):
@@ -109,10 +109,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             db.session.commit()
 
             # Check if any node contains the {user_export} placeholder
-            needs_export = any(
-                USER_EXPORT_PLACEHOLDER in node.content
-                for node in node_chain if node.content
-            )
+            # Find the first node containing it to use its timestamp as cutoff
+            export_node = None
+            for node in node_chain:
+                if node.content and USER_EXPORT_PLACEHOLDER in node.content:
+                    export_node = node
+                    break
+            needs_export = export_node is not None
             user_export_content = None
 
             # Check if any node contains the {user_profile} placeholder
@@ -147,12 +150,16 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
                 user = User.query.get(user_id)
                 if user and max_export_tokens > 0:
+                    # Use the timestamp of the node containing {user_export} as cutoff
+                    # to only include archive data created before that node
+                    created_before = export_node.created_at if export_node else None
                     user_export_content = build_user_export_content(
                         user,
                         max_tokens=max_export_tokens,
-                        filter_ai_usage=True
+                        filter_ai_usage=True,
+                        created_before=created_before
                     )
-                    logger.info(f"Built user export for {user_id}: {len(user_export_content or '')} chars, ~{approximate_token_count(user_export_content or '')} tokens")
+                    logger.info(f"Built user export for {user_id}: {len(user_export_content or '')} chars, ~{approximate_token_count(user_export_content or '')} tokens, cutoff={created_before}")
 
             messages = []
             for node in node_chain:

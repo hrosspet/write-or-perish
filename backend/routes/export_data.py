@@ -46,7 +46,7 @@ def export_data():
         })
     return jsonify(user_data), 200
 
-def format_node_tree(node, index_path="1", processed_nodes=None, filter_ai_usage=False, user_id=None):
+def format_node_tree(node, index_path="1", processed_nodes=None, filter_ai_usage=False, user_id=None, created_before=None):
     """
     Recursively format a node and its descendants into a human-readable tree structure
     using Markdown headers. Uses depth-first traversal for maximum readability.
@@ -57,6 +57,8 @@ def format_node_tree(node, index_path="1", processed_nodes=None, filter_ai_usage
         processed_nodes: Set of node IDs already processed (to avoid infinite loops)
         filter_ai_usage: If True, only include child nodes where ai_usage is 'chat' or 'train'
         user_id: User ID for resolving {quote:ID} placeholders (for access checks)
+        created_before: Optional datetime. If provided, only include child nodes created before
+                       this timestamp.
 
     Returns:
         str: Formatted text representation of the node tree
@@ -96,13 +98,13 @@ def format_node_tree(node, index_path="1", processed_nodes=None, filter_ai_usage
 
     # Process children (depth-first traversal)
     # Filter children by AI usage if requested (for AI profile generation)
+    # Also filter by created_before if specified
+    children = node.children
     if filter_ai_usage:
-        children = sorted(
-            [c for c in node.children if c.ai_usage in ['chat', 'train']],
-            key=lambda c: c.created_at
-        )
-    else:
-        children = sorted(node.children, key=lambda c: c.created_at)
+        children = [c for c in children if c.ai_usage in ['chat', 'train']]
+    if created_before:
+        children = [c for c in children if c.created_at < created_before]
+    children = sorted(children, key=lambda c: c.created_at)
 
     for i, child in enumerate(children):
         child_index = f"{index_path}.{i+1}"
@@ -116,12 +118,13 @@ def format_node_tree(node, index_path="1", processed_nodes=None, filter_ai_usage
             index_path=child_index,
             processed_nodes=processed_nodes,
             filter_ai_usage=filter_ai_usage,
-            user_id=user_id
+            user_id=user_id,
+            created_before=created_before
         )
 
     return result
 
-def build_user_export_content(user, max_tokens=None, filter_ai_usage=False):
+def build_user_export_content(user, max_tokens=None, filter_ai_usage=False, created_before=None):
     """
     Core export logic: Build a human-readable text export of all threads for a given user.
 
@@ -131,6 +134,9 @@ def build_user_export_content(user, max_tokens=None, filter_ai_usage=False):
                    threads that fit within this limit.
         filter_ai_usage: If True, only include nodes where ai_usage is 'chat' or 'train'.
                         Use True for AI profile generation, False for user data export.
+        created_before: Optional datetime. If provided, only includes threads (and nodes within
+                       threads) created before this timestamp. Used when {user_export} is detected
+                       in a node to only include archive data up to that point.
 
     Returns:
         str: Formatted export content, or None if no threads found
@@ -144,6 +150,10 @@ def build_user_export_content(user, max_tokens=None, filter_ai_usage=False):
     # Only filter by AI usage if requested (for AI profile generation)
     if filter_ai_usage:
         query = query.filter(Node.ai_usage.in_(['chat', 'train']))
+
+    # Filter by creation timestamp if specified (for {user_export} context limiting)
+    if created_before:
+        query = query.filter(Node.created_at < created_before)
 
     all_top_level_nodes = query.order_by(Node.created_at.desc()).all()
 
@@ -160,7 +170,7 @@ def build_user_export_content(user, max_tokens=None, filter_ai_usage=False):
 
         for node in all_top_level_nodes:
             # Format the thread to estimate its token count
-            thread_text = format_node_tree(node, index_path=str(len(top_level_nodes) + 1), filter_ai_usage=filter_ai_usage, user_id=user.id)
+            thread_text = format_node_tree(node, index_path=str(len(top_level_nodes) + 1), filter_ai_usage=filter_ai_usage, user_id=user.id, created_before=created_before)
             thread_tokens = approximate_token_count(thread_text)
 
             # Add overhead for thread header (approx 20 tokens)
@@ -203,7 +213,7 @@ def build_user_export_content(user, max_tokens=None, filter_ai_usage=False):
         export_lines.append("")
 
         # Format the entire thread tree (depth-first traversal)
-        thread_text = format_node_tree(node, index_path=str(thread_num), filter_ai_usage=filter_ai_usage, user_id=user.id)
+        thread_text = format_node_tree(node, index_path=str(thread_num), filter_ai_usage=filter_ai_usage, user_id=user.id, created_before=created_before)
         export_lines.append(thread_text)
 
         export_lines.append("---")
