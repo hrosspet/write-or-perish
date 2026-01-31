@@ -99,7 +99,7 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str):
             if not api_key:
                 raise ValueError("OpenAI API key not configured (set OPENAI_API_KEY_CHAT or OPENAI_API_KEY)")
 
-            text = node.content or ""
+            text = node.get_content() or ""
             if not text:
                 raise ValueError("No content to generate TTS for")
 
@@ -276,7 +276,7 @@ def generate_tts_audio_for_profile(self, profile_id: int, audio_storage_root: st
             if not api_key:
                 raise ValueError("OpenAI API key not configured (set OPENAI_API_KEY_CHAT or OPENAI_API_KEY)")
 
-            text = profile.content or ""
+            text = profile.get_content() or ""
             if not text:
                 raise ValueError("No content to generate TTS for")
 

@@ -30,7 +30,7 @@ def get_latest_profile(user):
     if profile:
         return {
             "id": profile.id,
-            "content": profile.content,
+            "content": profile.get_content(),
             "generated_by": profile.generated_by,
             "tokens_used": profile.tokens_used,
             "created_at": profile.created_at.isoformat()
@@ -45,7 +45,8 @@ def get_dashboard():
     user_nodes = Node.query.filter_by(user_id=current_user.id, parent_id=None).order_by(Node.created_at.desc()).all()
     nodes_list = []
     for node in user_nodes:
-        preview = node.content[:200] + ("..." if len(node.content) > 200 else "")
+        content = node.get_content()
+        preview = content[:200] + ("..." if len(content) > 200 else "")
         nodes_list.append({
             "id": node.id,
             "preview": preview,
@@ -92,7 +93,8 @@ def get_public_dashboard(username):
                       .order_by(Node.created_at.desc()).all()
     nodes_list = []
     for node in nodes:
-        preview = node.content[:200] + ("..." if len(node.content) > 200 else "")
+        content = node.get_content()
+        preview = content[:200] + ("..." if len(content) > 200 else "")
         nodes_list.append({
             "id": node.id,
             "preview": preview,
