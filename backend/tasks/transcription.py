@@ -207,7 +207,7 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
             else:
                 final_content = transcript
 
-            node.content = final_content or node.content
+            node.set_content(final_content or node.get_content())
             node.transcription_status = 'completed'
             node.transcription_progress = 100
             node.transcription_completed_at = datetime.utcnow()

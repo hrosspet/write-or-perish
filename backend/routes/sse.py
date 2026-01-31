@@ -88,7 +88,7 @@ def transcription_stream(node_id):
                     if chunk.status == 'completed':
                         yield format_sse_message({
                             "chunk_index": chunk.chunk_index,
-                            "text": chunk.text,
+                            "text": chunk.get_text(),
                             "status": "completed"
                         }, event="chunk_complete")
                     else:
@@ -104,7 +104,7 @@ def transcription_stream(node_id):
                 if current_node.transcription_status == 'completed':
                     yield format_sse_message({
                         "message": "Transcription complete",
-                        "content": current_node.content
+                        "content": current_node.get_content()
                     }, event="all_complete")
                     break
 
@@ -329,7 +329,7 @@ def draft_transcription_stream(session_id):
                     if chunk.status == 'completed':
                         yield format_sse_message({
                             "chunk_index": chunk.chunk_index,
-                            "text": chunk.text,
+                            "text": chunk.get_text(),
                             "status": "completed"
                         }, event="chunk_complete")
                     else:
@@ -342,18 +342,19 @@ def draft_transcription_stream(session_id):
                     last_sent_chunk = chunk.chunk_index
 
                 # Check if content has been updated
-                if current_draft.content != last_content_version:
+                current_content = current_draft.get_content()
+                if current_content != last_content_version:
                     yield format_sse_message({
-                        "content": current_draft.content,
+                        "content": current_content,
                         "completed_chunks": current_draft.streaming_completed_chunks or 0
                     }, event="content_update")
-                    last_content_version = current_draft.content
+                    last_content_version = current_content
 
                 # Check if streaming is complete
                 if current_draft.streaming_status == 'completed':
                     yield format_sse_message({
                         "message": "Transcription complete",
-                        "content": current_draft.content,
+                        "content": current_draft.get_content(),
                         "draft_id": current_draft.id
                     }, event="all_complete")
                     break

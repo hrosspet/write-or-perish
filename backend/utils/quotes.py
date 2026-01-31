@@ -51,7 +51,7 @@ def get_quote_data(node_ids: List[int], user_id: int) -> Dict[int, Optional[dict
         if node and can_user_access_node(node, user_id):
             result[node_id] = {
                 "id": node.id,
-                "content": node.content,
+                "content": node.get_content(),
                 "username": node.user.username if node.user else "Unknown",
                 "user_id": node.user_id,
                 "created_at": node.created_at.isoformat() if node.created_at else None,

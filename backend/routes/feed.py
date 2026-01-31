@@ -25,7 +25,7 @@ def get_feed():
     for node in top_nodes:
         nodes_list.append({
             "id": node.id,
-            "preview": make_preview(node.content),
+            "preview": make_preview(node.get_content()),
             "node_type": node.node_type,
             "child_count": len(node.children),
             "created_at": node.created_at.isoformat(),

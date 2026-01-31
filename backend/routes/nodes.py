@@ -323,7 +323,7 @@ def serialize_node_recursive(n, user_id=None):
 
     return {
         "id": n.id,
-        "content": n.content,
+        "content": n.get_content(),
         "node_type": n.node_type,
         "child_count": len(accessible_children),  # Only count accessible children
         "created_at": n.created_at.isoformat(),
@@ -399,11 +399,11 @@ def create_node():
             user_id=current_user.id,
             parent_id=parent_id,
             node_type=node_type,
-            content=placeholder_text,
             transcription_status='pending',  # Set initial status
             privacy_level=privacy_level,
             ai_usage=ai_usage
         )
+        node.set_content(placeholder_text)
         db.session.add(node)
         db.session.commit()  # Need node.id for the file path.
 
@@ -467,11 +467,11 @@ def create_node():
         user_id=current_user.id,
         parent_id=parent_id,
         node_type=node_type,
-        content=content,
         linked_node_id=linked_node_id,
         privacy_level=privacy_level,
         ai_usage=ai_usage
     )
+    node.set_content(content)
     db.session.add(node)
     try:
         db.session.commit()
@@ -480,7 +480,7 @@ def create_node():
         return jsonify({"error": "DB error creating node"}), 500
     return jsonify({
         "id": node.id,
-        "content": node.content,
+        "content": node.get_content(),
         "node_type": node.node_type,
         "parent_id": node.parent_id,
         "linked_node_id": node.linked_node_id,
@@ -518,9 +518,10 @@ def update_node(node_id):
         node.ai_usage = ai_usage
 
     # Save the current version before update.
-    version = NodeVersion(node_id=node.id, content=node.content)
+    version = NodeVersion(node_id=node.id)
+    version.set_content(node.get_content())
     db.session.add(version)
-    node.content = new_content
+    node.set_content(new_content)
     try:
         db.session.commit()
     except Exception as e:
@@ -552,7 +553,7 @@ def get_node(node_id):
             ancestors.insert(0, {
                 "id": current.id,
                 "username": current.user.username if current.user else "Unknown",
-                "preview": make_preview(current.content),
+                "preview": make_preview(current.get_content()),
                 "node_type": current.node_type,
                 "child_count": len(current.children),
                 "created_at": current.created_at.isoformat()
@@ -566,7 +567,7 @@ def get_node(node_id):
     # Serialize the current node (its children are now sorted descending by descendant count).
     node_data = {
         "id": node.id,
-        "content": node.content,
+        "content": node.get_content(),
         "node_type": node.node_type,
         "child_count": len(accessible_children),
         "ancestors": ancestors,
@@ -608,7 +609,7 @@ def resolve_node_quotes(node_id):
         return jsonify({"error": "Not authorized to access this node"}), 403
 
     # Find all quote IDs in the content
-    quote_ids = find_quote_ids(node.content)
+    quote_ids = find_quote_ids(node.get_content())
 
     if not quote_ids:
         return jsonify({
@@ -635,7 +636,7 @@ def get_children(node_id):
     children = Node.query.filter_by(parent_id=node_id).all()
     children_list = [{
         "id": child.id,
-        "preview": make_preview(child.content),
+        "preview": make_preview(child.get_content()),
         "child_count": len(child.children),
         "node_type": child.node_type,
     } for child in children]
@@ -736,11 +737,11 @@ def request_llm_response(node_id):
         parent_id=parent_node.id,
         node_type="llm",
         llm_model=model_id,
-        content="[LLM response generation pending...]",
         llm_task_status='pending',
         privacy_level=parent_node.privacy_level,
         ai_usage=parent_node.ai_usage
     )
+    llm_node.set_content("[LLM response generation pending...]")
     db.session.add(llm_node)
     db.session.commit()
 
@@ -779,9 +780,9 @@ def add_linked_node(node_id):
         user_id=current_user.id,
         parent_id=parent_node.id,
         node_type="link",
-        content=additional_text,
         linked_node_id=linked_node_id
     )
+    new_node.set_content(additional_text)
     db.session.add(new_node)
     try:
         db.session.commit()
@@ -792,7 +793,7 @@ def add_linked_node(node_id):
         "message": "Linked node added",
         "node": {
             "id": new_node.id,
-            "content": new_node.content,
+            "content": new_node.get_content(),
             "node_type": new_node.node_type,
             "linked_node_id": new_node.linked_node_id,
             "created_at": new_node.created_at.isoformat(),
@@ -978,7 +979,7 @@ def get_transcription_status(node_id):
         "error": node.transcription_error,
         "started_at": node.transcription_started_at.isoformat() if node.transcription_started_at else None,
         "completed_at": node.transcription_completed_at.isoformat() if node.transcription_completed_at else None,
-        "content": node.content if node.transcription_status == 'completed' else None,
+        "content": node.get_content() if node.transcription_status == 'completed' else None,
         "task_info": task_info  # Real-time progress from Celery
     })
 
@@ -1012,7 +1013,7 @@ def get_llm_status(node_id):
                     if llm_node:
                         created_node = {
                             "id": llm_node.id,
-                            "content": llm_node.content,
+                            "content": llm_node.get_content(),
                             "node_type": llm_node.node_type,
                             "llm_model": llm_node.llm_model,
                             "created_at": llm_node.created_at.isoformat()
@@ -1141,11 +1142,11 @@ def init_chunked_upload():
         user_id=current_user.id,
         parent_id=parent_id,
         node_type=node_type,
-        content=placeholder_text,
         transcription_status='pending',
         privacy_level=privacy_level,
         ai_usage=ai_usage
     )
+    node.set_content(placeholder_text)
     db.session.add(node)
     db.session.commit()
 
@@ -1324,7 +1325,7 @@ def finalize_chunked_upload():
     rel_path = target_path.relative_to(AUDIO_STORAGE_ROOT)
     node.audio_original_url = f"/media/{rel_path.as_posix()}"
     node.audio_mime_type = f"audio/{ext}"
-    node.content = "[Voice note – transcription pending]"
+    node.set_content("[Voice note – transcription pending]")
     db.session.commit()
 
     # Clean up chunks
@@ -1457,7 +1458,6 @@ def init_streaming_transcription():
         user_id=current_user.id,
         parent_id=parent_id,
         node_type=node_type,
-        content=placeholder_text,
         transcription_status='processing',
         streaming_transcription=True,
         streaming_session_id=session_id,
@@ -1466,6 +1466,7 @@ def init_streaming_transcription():
         privacy_level=privacy_level,
         ai_usage=ai_usage
     )
+    node.set_content(placeholder_text)
     db.session.add(node)
     db.session.commit()
 
@@ -1705,7 +1706,7 @@ def get_streaming_status(node_id):
         "completed_chunks": completed_count,
         "failed_chunks": failed_count,
         "chunks": chunk_statuses,
-        "content": node.content if node.transcription_status == 'completed' else None
+        "content": node.get_content() if node.transcription_status == 'completed' else None
     })
 
 

@@ -63,7 +63,7 @@ def get_draft():
 
     return jsonify({
         "id": draft.id,
-        "content": draft.content,
+        "content": draft.get_content(),
         "node_id": draft.node_id,
         "parent_id": draft.parent_id,
         "created_at": draft.created_at.isoformat() + "Z",
@@ -121,15 +121,15 @@ def save_draft():
 
     if draft:
         # Update existing draft
-        draft.content = content
+        draft.set_content(content)
     else:
         # Create new draft
         draft = Draft(
             user_id=current_user.id,
             node_id=node_id,
-            parent_id=parent_id,
-            content=content
+            parent_id=parent_id
         )
+        draft.set_content(content)
         db.session.add(draft)
 
     db.session.commit()
@@ -139,7 +139,7 @@ def save_draft():
 
     return jsonify({
         "id": draft.id,
-        "content": draft.content,
+        "content": draft.get_content(),
         "node_id": draft.node_id,
         "parent_id": draft.parent_id,
         "created_at": draft.created_at.isoformat() + "Z",
@@ -232,7 +232,6 @@ def init_streaming():
     draft = Draft(
         user_id=current_user.id,
         parent_id=parent_id,
-        content="",  # Will be populated as chunks are transcribed
         session_id=session_id,
         streaming_status="recording",
         streaming_total_chunks=None,
@@ -240,6 +239,7 @@ def init_streaming():
         privacy_level=privacy_level,
         ai_usage=ai_usage
     )
+    draft.set_content("")  # Will be populated as chunks are transcribed
     db.session.add(draft)
     db.session.commit()
 
@@ -448,7 +448,7 @@ def get_streaming_status(session_id):
     chunk_statuses = [{
         "chunk_index": c.chunk_index,
         "status": c.status,
-        "text": c.text if c.status == 'completed' else None,
+        "text": c.get_text() if c.status == 'completed' else None,
         "error": c.error if c.status == 'failed' else None
     } for c in chunks]
 
@@ -463,7 +463,7 @@ def get_streaming_status(session_id):
         "completed_chunks": completed_count,
         "failed_chunks": failed_count,
         "chunks": chunk_statuses,
-        "content": draft.content
+        "content": draft.get_content()
     })
 
 
@@ -495,19 +495,19 @@ def save_streaming_as_node(session_id):
         return jsonify({"error": "Streaming session is not complete"}), 400
 
     data = request.get_json() or {}
-    content = data.get("content", draft.content)
+    content = data.get("content", draft.get_content())
 
     # Create the node
     node = Node(
         user_id=current_user.id,
         parent_id=draft.parent_id,
         node_type="user",
-        content=content,
         privacy_level=draft.privacy_level or "private",
         ai_usage=draft.ai_usage or "none",
         transcription_status="completed",
         streaming_transcription=True  # Mark as having chunked audio
     )
+    node.set_content(content)
     db.session.add(node)
     db.session.commit()
 
@@ -556,7 +556,7 @@ def save_streaming_as_node(session_id):
 
     return jsonify({
         "id": node.id,
-        "content": node.content,
+        "content": node.get_content(),
         "parent_id": node.parent_id,
         "privacy_level": node.privacy_level,
         "ai_usage": node.ai_usage,

@@ -120,12 +120,12 @@ def generate_user_profile(self, user_id: int, model_id: str):
             from backend.utils.privacy import PrivacyLevel, AIUsage
             new_profile = UserProfile(
                 user_id=user.id,
-                content=profile_text,
                 generated_by=model_id,
                 tokens_used=total_tokens,
                 privacy_level=PrivacyLevel.PRIVATE,
                 ai_usage=AIUsage.CHAT
             )
+            new_profile.set_content(profile_text)
             db.session.add(new_profile)
             db.session.commit()
 

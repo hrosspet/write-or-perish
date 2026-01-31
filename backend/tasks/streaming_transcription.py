@@ -115,7 +115,7 @@ def transcribe_chunk(self, node_id: int, chunk_index: int, chunk_path: str):
                         logger.warning(f"Failed to delete compressed file: {e}")
 
             # Update chunk record with transcript
-            chunk_record.text = transcript
+            chunk_record.set_text(transcript)
             chunk_record.status = 'completed'
             chunk_record.completed_at = datetime.utcnow()
             db.session.commit()
@@ -228,8 +228,9 @@ def finalize_streaming(self, node_id: int, session_id: str, total_chunks: int):
         # Assemble transcript from completed chunks
         transcripts = []
         for chunk in sorted(completed_chunks, key=lambda c: c.chunk_index):
-            if chunk.text:
-                transcripts.append(chunk.text)
+            chunk_text = chunk.get_text()
+            if chunk_text:
+                transcripts.append(chunk_text)
 
         full_transcript = "\n\n".join(transcripts)
 
@@ -247,7 +248,7 @@ def finalize_streaming(self, node_id: int, session_id: str, total_chunks: int):
             final_content = f"# {timestamp} Voice note\n\n{full_transcript}"
 
         # Update node
-        node.content = final_content
+        node.set_content(final_content)
         node.transcription_status = 'completed'
         node.transcription_completed_at = datetime.utcnow()
         node.transcription_progress = 100
@@ -376,7 +377,7 @@ def transcribe_draft_chunk(self, session_id: str, chunk_index: int, chunk_path: 
                         logger.warning(f"Failed to delete compressed file: {e}")
 
             # Update chunk record with transcript
-            chunk_record.text = transcript
+            chunk_record.set_text(transcript)
             chunk_record.status = 'completed'
             chunk_record.completed_at = datetime.utcnow()
             db.session.commit()
@@ -392,8 +393,8 @@ def transcribe_draft_chunk(self, session_id: str, chunk_index: int, chunk_path: 
                 ).order_by(NodeTranscriptChunk.chunk_index).all()
 
                 # Reassemble content from all completed chunks
-                transcripts = [c.text for c in completed_chunks if c.text]
-                draft.content = "\n\n".join(transcripts)
+                transcripts = [c.get_text() for c in completed_chunks if c.get_text()]
+                draft.set_content("\n\n".join(transcripts))
                 draft.streaming_completed_chunks = len(completed_chunks)
                 db.session.commit()
 
@@ -493,8 +494,9 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int):
         # Final content assembly from completed chunks
         transcripts = []
         for chunk in sorted(completed_chunks, key=lambda c: c.chunk_index):
-            if chunk.text:
-                transcripts.append(chunk.text)
+            chunk_text = chunk.get_text()
+            if chunk_text:
+                transcripts.append(chunk_text)
 
         full_transcript = "\n\n".join(transcripts)
 
@@ -529,7 +531,7 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int):
 
         # Refresh draft and update
         db.session.refresh(draft)
-        draft.content = final_content
+        draft.set_content(final_content)
         draft.streaming_status = 'completed'
         draft.streaming_completed_chunks = len(completed_chunks)
         db.session.commit()

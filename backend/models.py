@@ -1,6 +1,7 @@
 from datetime import datetime
 from flask_login import UserMixin
 from backend.extensions import db
+from backend.utils.encryption import encrypt_content, decrypt_content
 
 class User(db.Model, UserMixin):
     id = db.Column(db.Integer, primary_key=True)
@@ -110,6 +111,14 @@ class Node(db.Model):
     linked_children = db.relationship("Node", backref=db.backref("linked_parent", remote_side=[id]),
                                       lazy=True, foreign_keys=[linked_node_id])
 
+    def set_content(self, plaintext: str):
+        """Set content with encryption."""
+        self.content = encrypt_content(plaintext)
+
+    def get_content(self) -> str:
+        """Get decrypted content."""
+        return decrypt_content(self.content)
+
 class NodeVersion(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     # Which node this version belongs to
@@ -120,6 +129,14 @@ class NodeVersion(db.Model):
 
     # Optional backreference, if you need to access versions from a Node instance:
     node = db.relationship("Node", backref="versions")
+
+    def set_content(self, plaintext: str):
+        """Set content with encryption."""
+        self.content = encrypt_content(plaintext)
+
+    def get_content(self) -> str:
+        """Get decrypted content."""
+        return decrypt_content(self.content)
 
 class Draft(db.Model):
     """
@@ -158,6 +175,14 @@ class Draft(db.Model):
     node = db.relationship("Node", foreign_keys=[node_id])
     parent = db.relationship("Node", foreign_keys=[parent_id])
 
+    def set_content(self, plaintext: str):
+        """Set content with encryption."""
+        self.content = encrypt_content(plaintext)
+
+    def get_content(self) -> str:
+        """Get decrypted content."""
+        return decrypt_content(self.content)
+
 
 class UserProfile(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -187,6 +212,14 @@ class UserProfile(db.Model):
 
     # Relationship back to user
     user = db.relationship("User", backref="profiles")
+
+    def set_content(self, plaintext: str):
+        """Set content with encryption."""
+        self.content = encrypt_content(plaintext)
+
+    def get_content(self) -> str:
+        """Get decrypted content."""
+        return decrypt_content(self.content)
 
 
 class NodeTranscriptChunk(db.Model):
@@ -226,6 +259,14 @@ class NodeTranscriptChunk(db.Model):
         db.UniqueConstraint('session_id', 'chunk_index', name='uq_session_chunk_index'),
         db.UniqueConstraint('node_id', 'chunk_index', name='uq_node_chunk_index'),
     )
+
+    def set_text(self, plaintext: str):
+        """Set text with encryption."""
+        self.text = encrypt_content(plaintext)
+
+    def get_text(self) -> str:
+        """Get decrypted text."""
+        return decrypt_content(self.text)
 
 
 class TTSChunk(db.Model):
