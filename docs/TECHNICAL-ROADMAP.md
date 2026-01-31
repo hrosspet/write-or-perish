@@ -288,11 +288,15 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 ### Remaining Tasks (Still Blocking):
 
-- ⚠️ **Separate API keys for chat vs train** - Use different OpenAI/Anthropic API keys based on node ai_usage setting to ensure proper separation of training data (#39)
+- ✅ **Separate API keys for chat vs train** - COMPLETED: Different OpenAI/Anthropic API keys used based on node ai_usage setting (#39)
+
+### Alpha Blockers (New):
+
+- ⚠️ **GCP KMS encryption** - Encrypt node content at rest using Cloud KMS (defense in depth for privacy)
+- ⚠️ **Rebrand to Loore** - Rename application, update all branding, configure new domain (loore.org or loore.tech)
 
 ### NOT Implemented (Future Work):
 
-- **GCP KMS encryption** - Content not yet encrypted at rest (can be added later without breaking changes)
 - **Email infrastructure** - Not yet implemented (SendGrid/AWS SES)
 - **Circles implementation** - Privacy level exists but circles functionality not yet built (moved to Phase 4)
 
@@ -676,9 +680,9 @@ This roadmap prioritizes **privacy & encryption first** (Phase -1), then **found
 **Second Milestone:** After Phase 1-2 (12 weeks total), you'll have RAG + MemeOS integration for personal use
 
 **Next Steps:**
-1. **IMMEDIATE:** Set up GCP KMS (key ring + crypto key)
-2. Begin Phase -1: Privacy & Encryption Infrastructure (3 weeks)
-3. Migrate existing nodes to encrypted storage (set all to privacy_level='training')
+1. ✅ **COMPLETED:** API key separation for chat vs train operations
+2. **ALPHA BLOCKER:** Set up GCP KMS (key ring + crypto key) and implement application-level encryption
+3. **ALPHA BLOCKER:** Rebrand to Loore (frontend, backend, domain, documentation)
 4. Update user-facing docs with clear privacy promise
 5. Set up Phase 0: Testing infrastructure alongside encryption work
 6. Iterate based on learnings at each phase
