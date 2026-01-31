@@ -22,6 +22,7 @@ from backend.utils.privacy import (
     AIUsage
 )
 from backend.utils.quotes import find_quote_ids, get_quote_data, has_quotes
+from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.webm_utils import get_webm_duration
 
 # ---------------------------------------------------------------------------
@@ -414,7 +415,7 @@ def create_node():
         db.session.commit()
 
         # -- Enqueue async transcription task
-        api_key = current_app.config.get("OPENAI_API_KEY")
+        api_key = get_openai_chat_key(current_app.config)
         if api_key:
             from backend.tasks.transcription import transcribe_audio
 
@@ -908,7 +909,7 @@ def generate_tts(node_id):
         return jsonify({"message": "TTS already available", "tts_url": node.audio_tts_url}), 200
 
     # Check if OpenAI API key is configured
-    api_key = current_app.config.get("OPENAI_API_KEY")
+    api_key = get_openai_chat_key(current_app.config)
     if not api_key:
         return jsonify({"error": "TTS not configured (missing API key)"}), 500
 
@@ -1335,7 +1336,7 @@ def finalize_chunked_upload():
         current_app.logger.warning(f"Failed to clean up chunks: {e}")
 
     # Enqueue transcription task
-    api_key = current_app.config.get("OPENAI_API_KEY")
+    api_key = get_openai_chat_key(current_app.config)
     if api_key:
         from backend.tasks.transcription import transcribe_audio
 

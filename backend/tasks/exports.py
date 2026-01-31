@@ -10,6 +10,7 @@ from backend.models import User, UserProfile
 from backend.extensions import db
 from backend.llm_providers import LLMProvider
 from backend.utils.tokens import approximate_token_count, calculate_max_export_tokens
+from backend.utils.api_keys import get_api_keys_for_usage
 
 logger = get_task_logger(__name__)
 
@@ -104,10 +105,7 @@ def generate_user_profile(self, user_id: int, model_id: str):
             # Step 4: Call LLM API (60% -> 90% progress)
             self.update_state(state='PROGRESS', meta={'progress': 60, 'status': 'Generating profile'})
 
-            api_keys = {
-                "openai": flask_app.config.get("OPENAI_API_KEY"),
-                "anthropic": flask_app.config.get("ANTHROPIC_API_KEY")
-            }
+            api_keys = get_api_keys_for_usage(flask_app.config, 'chat')
 
             response = LLMProvider.get_completion(model_id, messages, api_keys)
             profile_text = response["content"]

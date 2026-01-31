@@ -13,6 +13,7 @@ from backend.utils.privacy import (
     PrivacyLevel,
     AIUsage
 )
+from backend.utils.api_keys import get_openai_chat_key
 
 profile_bp = Blueprint("profile", __name__)
 
@@ -59,7 +60,7 @@ def generate_tts(profile_id):
     if profile.audio_tts_url:
         return jsonify({"message": "TTS already available", "tts_url": profile.audio_tts_url}), 200
 
-    if not current_app.config.get("OPENAI_API_KEY"):
+    if not get_openai_chat_key(current_app.config):
         return jsonify({"error": "TTS not configured (missing API key)"}), 500
 
     # Enqueue async TTS generation task
