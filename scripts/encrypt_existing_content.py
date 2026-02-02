@@ -94,10 +94,13 @@ def backup_audio_files(backup_dir: str) -> str:
     print(f"Creating audio backup: {backup_file}")
     print(f"This may take a while for large audio collections...")
 
+    # Convert to absolute path since zip runs with cwd=audio_dir
+    backup_file_abs = os.path.abspath(backup_file)
+
     try:
         # Use zip to preserve directory structure
         subprocess.run(
-            ["zip", "-r", backup_file, "."],
+            ["zip", "-r", backup_file_abs, "."],
             cwd=audio_dir,
             check=True,
             capture_output=True,

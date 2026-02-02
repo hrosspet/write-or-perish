@@ -14,20 +14,19 @@ GCP Cloud KMS provides application-level encryption for:
 
 This is a defense-in-depth measure that adds encryption on top of database-level encryption.
 
+**Authentication**: This guide uses Workload Identity (the VM's attached service account) instead of a downloaded JSON key file. This means there are no credentials stored on disk — the VM authenticates to GCP automatically.
+
 ## Prerequisites
 
 - Google Cloud Platform account
 - `gcloud` CLI installed and configured
-- Access to create KMS keys and service accounts
+- A GCE VM (your production server) in project `dauntless-arc-365912`
 
-## Step 1: Create a GCP Project (if needed)
+## Step 1: Set Your GCP Project
 
 ```bash
-# Create a new project (or use an existing one)
-gcloud projects create loore-production --name="Loore Production"
-
-# Set as current project
-gcloud config set project loore-production
+# Set as current project (project ID: dauntless-arc-365912, display name: "Loore Production")
+gcloud config set project dauntless-arc-365912
 ```
 
 ## Step 2: Enable the Cloud KMS API
@@ -41,7 +40,7 @@ gcloud services enable cloudkms.googleapis.com
 Key rings are regional containers for keys. Choose a region close to your servers.
 
 ```bash
-# Create a key ring in us-central1 (adjust region as needed)
+# Create a key ring (adjust region as needed)
 gcloud kms keyrings create loore-keyring \
     --location=us-central1
 ```
@@ -58,55 +57,69 @@ gcloud kms keys create content-encryption-key \
 
 Note the full key name format:
 ```
-projects/loore-production/locations/us-central1/keyRings/loore-keyring/cryptoKeys/content-encryption-key
+projects/dauntless-arc-365912/locations/us-central1/keyRings/loore-keyring/cryptoKeys/content-encryption-key
 ```
 
-## Step 5: Create a Service Account
+## Step 5: Create a Service Account for the VM
+
+If your VM doesn't already have a dedicated service account, create one:
 
 ```bash
-# Create service account for the application
-gcloud iam service-accounts create loore-kms-sa \
-    --display-name="Loore KMS Service Account"
+# Create service account
+gcloud iam service-accounts create loore-vm-sa \
+    --display-name="Loore VM Service Account"
 ```
 
-## Step 6: Grant Permissions
+## Step 6: Grant KMS Permissions to the Service Account
 
 ```bash
-# Grant encrypt/decrypt permissions to the service account
+# Grant encrypt/decrypt permissions
 gcloud kms keys add-iam-policy-binding content-encryption-key \
     --location=us-central1 \
     --keyring=loore-keyring \
-    --member="serviceAccount:loore-kms-sa@loore-production.iam.gserviceaccount.com" \
+    --member="serviceAccount:loore-vm-sa@dauntless-arc-365912.iam.gserviceaccount.com" \
     --role="roles/cloudkms.cryptoKeyEncrypterDecrypter"
 ```
 
-## Step 7: Create and Download Service Account Key
+## Step 7: Attach the Service Account to Your VM
+
+This is the key step — instead of downloading a JSON key file, you attach the service account directly to the VM. The VM then authenticates automatically.
 
 ```bash
-# Create a JSON key file
-gcloud iam service-accounts keys create ./kms-credentials.json \
-    --iam-account=loore-kms-sa@loore-production.iam.gserviceaccount.com
+# Stop the VM first (required to change service account)
+gcloud compute instances stop instance-20250317-165954 --zone=us-central1-c
+
+# Set the service account on the VM
+gcloud compute instances set-service-account instance-20250317-165954 \
+    --zone=us-central1-c \
+    --service-account=loore-vm-sa@dauntless-arc-365912.iam.gserviceaccount.com \
+    --scopes=https://www.googleapis.com/auth/cloudkms
+
+# Start the VM
+gcloud compute instances start instance-20250317-165954 --zone=us-central1-c
 ```
 
-**IMPORTANT**: Keep this file secure! Never commit it to git.
+Replace `YOUR_VM_NAME` and `YOUR_ZONE` with your actual VM name and zone (e.g., `us-central1-a`). You can find these with:
+
+```bash
+gcloud compute instances list
+```
+
+> **Note**: If the VM already has a service account with other scopes, you can combine them:
+> `--scopes=https://www.googleapis.com/auth/cloudkms,https://www.googleapis.com/auth/cloud-platform`
 
 ## Step 8: Configure the Application
 
-Add these environment variables to your production server:
+The only environment variable needed on the production server is the key name. **No credentials file is needed** — the VM authenticates automatically via its attached service account.
 
 ```bash
-# The full path to the KMS key
-export GCP_KMS_KEY_NAME="projects/loore-production/locations/us-central1/keyRings/loore-keyring/cryptoKeys/content-encryption-key"
-
-# Path to the service account credentials
-export GOOGLE_APPLICATION_CREDENTIALS="/path/to/kms-credentials.json"
+export GCP_KMS_KEY_NAME="projects/dauntless-arc-365912/locations/us-central1/keyRings/loore-keyring/cryptoKeys/content-encryption-key"
 ```
 
-For systemd services, add these to your service file:
+For systemd services, add to your service file:
 ```ini
 [Service]
-Environment="GCP_KMS_KEY_NAME=projects/loore-production/locations/us-central1/keyRings/loore-keyring/cryptoKeys/content-encryption-key"
-Environment="GOOGLE_APPLICATION_CREDENTIALS=/path/to/kms-credentials.json"
+Environment="GCP_KMS_KEY_NAME=projects/dauntless-arc-365912/locations/us-central1/keyRings/loore-keyring/cryptoKeys/content-encryption-key"
 ```
 
 ## Step 9: Install the GCP Client Library
@@ -120,6 +133,18 @@ pip install google-cloud-kms
 Add to `requirements.txt`:
 ```
 google-cloud-kms>=2.0.0
+```
+
+## Step 10: Verify Authentication
+
+SSH into the VM and verify the service account is attached:
+
+```bash
+# Check which service account the VM is using
+curl -H "Metadata-Flavor: Google" \
+    http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email
+
+# Should print: loore-vm-sa@dauntless-arc-365912.iam.gserviceaccount.com
 ```
 
 ---
@@ -177,8 +202,7 @@ Once backups are verified:
 
 ```bash
 # Set required environment variables
-export GCP_KMS_KEY_NAME="projects/loore-production/locations/us-central1/keyRings/loore-keyring/cryptoKeys/content-encryption-key"
-export GOOGLE_APPLICATION_CREDENTIALS="/path/to/kms-credentials.json"
+export GCP_KMS_KEY_NAME="projects/dauntless-arc-365912/locations/us-central1/keyRings/loore-keyring/cryptoKeys/content-encryption-key"
 export DATABASE_URL="postgresql://user:password@localhost/writeorperish"
 
 # Run database encryption
@@ -257,12 +281,27 @@ For local development without GCP, disable encryption:
 export ENCRYPTION_DISABLED=true
 ```
 
-Or use a separate development KMS key:
+For local development **with** encryption (e.g., testing), you can use a JSON key file since Workload Identity is only available on GCE VMs:
 
 ```bash
-export GCP_KMS_KEY_NAME="projects/loore-development/locations/us-central1/keyRings/dev-keyring/cryptoKeys/dev-key"
-export GOOGLE_APPLICATION_CREDENTIALS="/path/to/dev-credentials.json"
+# Create a separate dev service account and key
+gcloud iam service-accounts create loore-kms-dev \
+    --display-name="Loore KMS Dev"
+
+gcloud kms keys add-iam-policy-binding content-encryption-key \
+    --location=us-central1 \
+    --keyring=loore-keyring \
+    --member="serviceAccount:loore-kms-dev@dauntless-arc-365912.iam.gserviceaccount.com" \
+    --role="roles/cloudkms.cryptoKeyEncrypterDecrypter"
+
+gcloud iam service-accounts keys create ./kms-dev-credentials.json \
+    --iam-account=loore-kms-dev@dauntless-arc-365912.iam.gserviceaccount.com
+
+export GCP_KMS_KEY_NAME="projects/dauntless-arc-365912/locations/us-central1/keyRings/loore-keyring/cryptoKeys/content-encryption-key"
+export GOOGLE_APPLICATION_CREDENTIALS="./kms-dev-credentials.json"
 ```
+
+> **Note**: `kms-dev-credentials.json` is in `.gitignore`. Never commit credential files.
 
 ---
 
@@ -284,15 +323,34 @@ gcloud kms keys update content-encryption-key \
 
 ---
 
+# Security Model
+
+## What KMS + Workload Identity protects against
+
+| Threat | Protected? | Notes |
+|--------|-----------|-------|
+| Database dump leaked (SQL injection, stolen backup) | Yes | Content is ciphertext without KMS access |
+| Disk/storage snapshot accessed separately | Yes | Encrypted at application level |
+| VM fully compromised (root shell) | Partially | Attacker can call KMS API while they have access, but can't extract a key file to use later offline |
+| Insider with GCP console access | Audit trail | All KMS operations are logged in Cloud Audit Logs |
+| Key file stolen and used offline | N/A | No key file exists — Workload Identity only |
+
+## Comparison with JSON key file approach
+
+With a JSON key file on disk, an attacker who compromises the VM can copy the key file and decrypt data offline at their leisure, even after you revoke access. With Workload Identity, credentials are short-lived tokens rotated automatically — revoking the service account immediately cuts off access.
+
+---
+
 # Troubleshooting
 
 ## "google.auth.exceptions.DefaultCredentialsError"
-- Ensure `GOOGLE_APPLICATION_CREDENTIALS` is set and points to a valid JSON file
-- Check that the service account has the required permissions
+- Verify the VM has a service account attached: `curl -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email`
+- For local dev, ensure `GOOGLE_APPLICATION_CREDENTIALS` is set and points to a valid JSON file
 
 ## "Permission denied" when encrypting/decrypting
 - Verify the service account has `cloudkms.cryptoKeyEncrypterDecrypter` role
 - Check that `GCP_KMS_KEY_NAME` is correct
+- Ensure the VM was started with the `cloudkms` scope
 
 ## "Key not found"
 - Verify the full key path is correct

@@ -43,6 +43,10 @@ Thumbs.db
 prompt.txt
 data/
 
+# GCP credentials
+kms-credentials.json
+*-credentials.json
+
 # Deployment files
 deployment.log
 gunicorn.pid
