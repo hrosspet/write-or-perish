@@ -42,6 +42,8 @@ Ensure:
 
 **Frontend**: Run `npm run build 2>&1 | tail -30` from the `frontend/` directory to check for compilation errors. There is no separate lint script - the build process will catch TypeScript/JSX errors.
 
+**IMPORTANT**: Running `npm run build` changes the working directory to `frontend/`. Always use absolute paths or `cd` back to the repo root before running git commands, otherwise `git add` will fail with `pathspec did not match any files`.
+
 ### Database Migrations
 
 The project uses **Flask-Migrate + Alembic**. Migrations are auto-generated and applied during deployment.
