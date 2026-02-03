@@ -304,7 +304,7 @@ function Dashboard() {
       if (entries[0].isIntersecting) {
         fetchMoreNodes(nodesPage + 1);
       }
-    });
+    }, { rootMargin: "200px" });
 
     if (nodeSentinelRef.current) {
       nodeObserverRef.current.observe(nodeSentinelRef.current);
@@ -707,9 +707,9 @@ function Dashboard() {
             onClick={() => navigate(`/node/${node.id}`)}
           />
         ))}
-        {loadingMoreNodes && <div style={{ padding: "20px", textAlign: "center", color: "#888" }}>Loading more...</div>}
-        {hasMoreNodes && <div ref={nodeSentinelRef} style={{ height: "1px" }} />}
       </div>
+      {loadingMoreNodes && <div style={{ padding: "20px", textAlign: "center", color: "#888" }}>Loading more...</div>}
+      {hasMoreNodes && <div ref={nodeSentinelRef} style={{ height: "20px" }} />}
     </div>
   );
 }

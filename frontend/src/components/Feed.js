@@ -50,7 +50,7 @@ function Feed() {
       if (entries[0].isIntersecting) {
         fetchPage(page + 1);
       }
-    });
+    }, { rootMargin: "200px" });
 
     if (sentinelRef.current) {
       observerRef.current.observe(sentinelRef.current);
@@ -77,7 +77,7 @@ function Feed() {
         ))}
       </div>
       {loadingMore && <div style={{ padding: "20px", textAlign: "center", color: "#888" }}>Loading more...</div>}
-      {hasMore && <div ref={sentinelRef} style={{ height: "1px" }} />}
+      {hasMore && <div ref={sentinelRef} style={{ height: "20px" }} />}
     </div>
   );
 }
