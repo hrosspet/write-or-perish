@@ -64,7 +64,9 @@ def _get_kms_client():
         with _kms_client_lock:
             if _kms_client is None:
                 from google.cloud import kms
-                _kms_client = kms.KeyManagementServiceClient()
+                _kms_client = kms.KeyManagementServiceClient(
+                    transport="rest",
+                )
     return _kms_client
 
 
