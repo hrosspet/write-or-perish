@@ -11,6 +11,7 @@ const GlobalAudioPlayer = () => {
     // Use cumulative values for display (falls back gracefully for single audio)
     cumulativeTime,
     totalDuration,
+    generatingTTS,
     play,
     pause,
     stop,
@@ -189,8 +190,23 @@ const GlobalAudioPlayer = () => {
         color: '#b0b0b0',
         fontSize: '11px',
         minWidth: '70px',
+        display: 'flex',
+        alignItems: 'center',
+        gap: '4px',
       }}>
         {formatTime(displayTime)} / {formatTime(displayDuration)}
+        {generatingTTS && (
+          <span
+            style={{
+              fontSize: '9px',
+              color: '#61dafb',
+              animation: 'pulse 1.5s ease-in-out infinite',
+            }}
+            title="Generating more audio..."
+          >
+            ●
+          </span>
+        )}
       </div>
 
       {/* Progress bar */}

@@ -23,6 +23,9 @@ export const AudioProvider = ({ children }) => {
   const [chunkDurations, setChunkDurations] = useState([]);
   const [totalDuration, setTotalDuration] = useState(0);
   const [cumulativeTime, setCumulativeTime] = useState(0);
+  const [generatingTTS, setGeneratingTTS] = useState(false);
+  // Track whether playback ended while waiting for more chunks
+  const waitingForChunksRef = useRef(false);
   const audioRef = useRef(null);
   const intervalRef = useRef(null);
   const audioQueueRef = useRef([]);
@@ -311,9 +314,15 @@ export const AudioProvider = ({ children }) => {
       if (queue.length > 0) {
         const nextIndex = chunkIndex + 1;
         playChunkAtTime(nextIndex, 0, true);
+      } else if (generatingTTS) {
+        // Queue empty but TTS still generating - wait for more chunks
+        waitingForChunksRef.current = true;
+        setIsPlaying(false);
+        stopTimeTracking();
       } else {
         // Playback finished - keep metadata so user can seek back or replay
         // Only stop() clears everything
+        waitingForChunksRef.current = false;
         setIsPlaying(false);
         stopTimeTracking();
         // Show position at end of total duration
@@ -346,7 +355,7 @@ export const AudioProvider = ({ children }) => {
     if (shouldAutoPlay) {
       audio.play().catch(err => console.error('Error playing chunk:', err));
     }
-  }, [playbackRate, calculateCumulativeTime, startTimeTracking, stopTimeTracking, recalculateTotalDuration, cleanupAudio]);
+  }, [playbackRate, calculateCumulativeTime, startTimeTracking, stopTimeTracking, recalculateTotalDuration, cleanupAudio, generatingTTS]);
 
   const loadAudio = useCallback(async (audioData) => {
     // If there's already audio playing, pause it first
@@ -467,6 +476,42 @@ export const AudioProvider = ({ children }) => {
     // Play the first chunk
     playChunkAtTime(0, 0, true);
   }, [stopTimeTracking, preloadChunkDurations, playChunkAtTime]);
+
+  // Append a single chunk URL to the active audio queue (for streaming TTS)
+  const appendChunkToQueue = useCallback(async (url, serverDuration = null) => {
+    const urls = allChunkUrlsRef.current;
+
+    // Append URL
+    urls.push(url);
+    const newIndex = urls.length - 1;
+
+    // Get duration: use server-provided or preload from browser
+    let dur;
+    if (serverDuration != null && isFinite(serverDuration) && serverDuration > 0) {
+      dur = serverDuration;
+    } else {
+      const durations = await preloadChunkDurations([url]);
+      dur = durations[0];
+    }
+
+    // Append duration
+    chunkDurationsRef.current.push(dur);
+    setChunkDurations([...chunkDurationsRef.current]);
+
+    // Update totals
+    setTotalChunks(urls.length);
+    const newTotal = chunkDurationsRef.current.reduce((a, b) => a + b, 0);
+    setTotalDuration(newTotal);
+
+    // Also add to queue if playback hasn't reached this chunk yet
+    audioQueueRef.current.push(url);
+
+    // If playback ended waiting for more chunks, auto-play the new chunk
+    if (waitingForChunksRef.current) {
+      waitingForChunksRef.current = false;
+      playChunkAtTime(newIndex, 0, true);
+    }
+  }, [preloadChunkDurations, playChunkAtTime]);
 
   const play = useCallback(async () => {
     if (audioRef.current && !isPlaying) {
@@ -660,8 +705,11 @@ export const AudioProvider = ({ children }) => {
     cumulativeTime,
     totalDuration,
     chunkDurations,
+    generatingTTS,
+    setGeneratingTTS,
     loadAudio,
     loadAudioQueue,
+    appendChunkToQueue,
     play,
     pause,
     stop,
