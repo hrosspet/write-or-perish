@@ -201,32 +201,34 @@ def chunk_text(text: str, max_chars: int = 4096) -> list:
 TTS_MAX_CHARS = 4096
 
 
-def adaptive_chunk_text(text: str, first_chunk_gen_secs: float = 10.0) -> list:
+def adaptive_chunk_text(text: str, first_chunk_gen_secs: float = 7.5) -> list:
     """
     Split text into chunks for streaming TTS with a small first chunk.
 
-    The first chunk is small enough to generate within first_chunk_gen_secs,
-    so playback can start quickly. All subsequent chunks use the full model
-    limit (4096 chars) to minimize the number of stitches.
+    The first chunk is small enough to generate quickly so playback starts
+    fast. All subsequent chunks use the full model limit (4096 chars) to
+    minimize the number of stitches.
 
     Based on benchmarked rates for gpt-4o-mini-tts:
-      - Generation: ~106 chars/s (4096 chars in ~39s)
-      - Audio output: ~0.062s of audio per char (~254s per 4096-char chunk)
-      - First chunk of ~1060 chars generates in ~10s, plays for ~66s
-      - Second chunk of 4096 chars generates in ~39s — ready before first
-        chunk finishes playing (39s < 66s)
+      - Generation: ~106 chars/s pure API (~4s fixed overhead for encryption/DB/SSE)
+      - Audio output: ~0.062s of audio per char
+      - First chunk of ~800 chars: ~7.5s API + ~4s overhead = ~12s total,
+        produces ~50s of audio
+      - Second chunk of 4096 chars: ~39s to generate — fits within the
+        50s the first chunk plays
 
     All splits happen at sentence boundaries — never mid-sentence.
 
     Args:
         text: Full text to split
-        first_chunk_gen_secs: Target generation time for the first chunk (seconds)
+        first_chunk_gen_secs: Target API generation time for the first chunk (seconds).
+                              Does not include fixed overhead (~4s for encryption/DB/SSE).
     """
     gen_chars_per_sec = 106.0  # benchmarked for gpt-4o-mini-tts
 
     # First chunk: sized to generate within target time, capped at model limit
     first_chunk_chars = min(int(first_chunk_gen_secs * gen_chars_per_sec),
-                           TTS_MAX_CHARS)  # ~1060
+                           TTS_MAX_CHARS)  # ~795
 
     if len(text) <= first_chunk_chars:
         return [text]
