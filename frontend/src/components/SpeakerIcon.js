@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import { useEffect } from 'react';
 import { FaVolumeUp, FaSpinner } from 'react-icons/fa';
 import api from '../api';
 import { useUser } from '../contexts/UserContext';
 import { useAudio } from '../contexts/AudioContext';
 import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
+import { useTTSStreamSSE } from '../hooks/useSSE';
 
 /**
  * Extracts the first markdown header from content
@@ -28,12 +29,14 @@ const extractMarkdownHeader = (content) => {
  */
 const SpeakerIcon = ({ nodeId, profileId, content }) => {
   const { user } = useUser();
-  const { loadAudio, loadAudioQueue, currentAudio, isPlaying } = useAudio();
+  const { loadAudio, loadAudioQueue, appendChunkToQueue, setGeneratingTTS, currentAudio, isPlaying } = useAudio();
   const [loading, setLoading] = useState(false);
   const [audioSrc, setAudioSrc] = useState(null);
   const [audioChunks, setAudioChunks] = useState(null); // For chunked playback
   const [audioChunkDurations, setAudioChunkDurations] = useState(null); // Server-provided durations
   const [ttsTaskActive, setTtsTaskActive] = useState(false);
+  const [sseActive, setSseActive] = useState(false);
+  const sseChunkCountRef = useRef(0);
 
   const isNode = nodeId != null;
   const id = isNode ? nodeId : profileId;
@@ -44,14 +47,57 @@ const SpeakerIcon = ({ nodeId, profileId, content }) => {
   const baseTitle = isNode ? `Node ${id}` : `Profile ${id}`;
   const fullTitle = header ? `${baseTitle}: ${header}` : baseTitle;
 
-  // TTS generation polling - enabled automatically when ttsTaskActive is true
+  // SSE streaming for TTS chunks - only for nodes
+  const handleChunkReady = useCallback((data) => {
+    const chunkUrl = data.audio_url.startsWith('http')
+      ? data.audio_url
+      : `${process.env.REACT_APP_BACKEND_URL}${data.audio_url}`;
+    const chunkDuration = data.duration != null ? data.duration : null;
+
+    sseChunkCountRef.current += 1;
+
+    if (sseChunkCountRef.current === 1) {
+      // First chunk: start playback immediately via loadAudioQueue
+      setLoading(false);
+      loadAudioQueue(
+        [chunkUrl],
+        { title: fullTitle, id, type: 'node' },
+        chunkDuration != null ? [chunkDuration] : null
+      );
+    } else {
+      // Subsequent chunks: append to the active queue
+      appendChunkToQueue(chunkUrl, chunkDuration);
+    }
+  }, [fullTitle, id, loadAudioQueue, appendChunkToQueue]);
+
+  const handleAllComplete = useCallback((data) => {
+    setSseActive(false);
+    setGeneratingTTS(false);
+    sseChunkCountRef.current = 0;
+
+    // Cache the final TTS URL for future replay
+    if (data.tts_url) {
+      const finalUrl = data.tts_url.startsWith('http')
+        ? data.tts_url
+        : `${process.env.REACT_APP_BACKEND_URL}${data.tts_url}`;
+      setAudioSrc(finalUrl);
+    }
+  }, [setGeneratingTTS]);
+
+  const { disconnect: disconnectSSE } = useTTSStreamSSE(isNode ? nodeId : null, {
+    enabled: sseActive,
+    onChunkReady: handleChunkReady,
+    onAllComplete: handleAllComplete,
+  });
+
+  // TTS generation polling - fallback when SSE isn't used (profiles, or SSE failure)
   const {
     status: ttsStatus,
     data: ttsData,
     error: ttsError
   } = useAsyncTaskPolling(
     ttsTaskActive ? `${baseUrl}/tts-status` : null,
-    { enabled: ttsTaskActive }  // Auto-start when ttsTaskActive is true
+    { enabled: ttsTaskActive }
   );
 
   // Reset audio state when the node/profile changes
@@ -61,9 +107,21 @@ const SpeakerIcon = ({ nodeId, profileId, content }) => {
     setAudioChunkDurations(null);
     setLoading(false);
     setTtsTaskActive(false);
+    setSseActive(false);
+    sseChunkCountRef.current = 0;
   }, [nodeId, profileId]);
 
-  // Handle TTS completion
+  // Clean up SSE on unmount
+  useEffect(() => {
+    return () => {
+      if (sseActive) {
+        disconnectSSE();
+        setGeneratingTTS(false);
+      }
+    };
+  }, [sseActive, disconnectSSE, setGeneratingTTS]);
+
+  // Handle TTS completion (polling fallback)
   useEffect(() => {
     if (ttsStatus === 'completed' && ttsData) {
       const ttsUrl = isNode ? ttsData.node?.audio_tts_url : ttsData.profile?.audio_tts_url;
@@ -93,7 +151,7 @@ const SpeakerIcon = ({ nodeId, profileId, content }) => {
   }
 
   const handleClick = async () => {
-    if (loading || ttsTaskActive) return;
+    if (loading || ttsTaskActive || sseActive) return;
 
     try {
       // If we already have audio chunks cached, play them
@@ -189,7 +247,17 @@ const SpeakerIcon = ({ nodeId, profileId, content }) => {
       if (!urlPath) {
         // No audio exists - start async TTS generation
         await api.post(`${baseUrl}/tts`);
-        setTtsTaskActive(true);
+
+        if (isNode) {
+          // Use SSE for streaming playback (nodes only)
+          sseChunkCountRef.current = 0;
+          setSseActive(true);
+          setGeneratingTTS(true);
+          // loading stays true until first chunk arrives
+        } else {
+          // Fall back to polling for profiles
+          setTtsTaskActive(true);
+        }
         return;
       }
 
@@ -205,6 +273,8 @@ const SpeakerIcon = ({ nodeId, profileId, content }) => {
       console.error('Error playing audio:', err);
       setLoading(false);
       setTtsTaskActive(false);
+      setSseActive(false);
+      setGeneratingTTS(false);
     }
   };
 
@@ -214,10 +284,12 @@ const SpeakerIcon = ({ nodeId, profileId, content }) => {
     currentAudio.type === (isNode ? 'node' : 'profile') &&
     isPlaying;
 
+  const isActive = loading || ttsTaskActive || sseActive;
+
   return (
-    <button onClick={handleClick} title={loading ? 'Loading audio...' : 'Play audio'}
+    <button onClick={handleClick} title={isActive ? 'Generating audio...' : 'Play audio'}
         style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, marginLeft: '8px' }}>
-      {loading ? <FaSpinner className="spin" /> : <FaVolumeUp color={isCurrentlyPlaying ? '#61dafb' : 'inherit'} />}
+      {isActive ? <FaSpinner className="spin" /> : <FaVolumeUp color={isCurrentlyPlaying ? '#61dafb' : 'inherit'} />}
     </button>
   );
 };
