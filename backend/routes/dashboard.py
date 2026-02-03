@@ -30,7 +30,7 @@ def get_latest_profile(user):
     if profile:
         return {
             "id": profile.id,
-            "content": profile.content,
+            "content": profile.get_content(),
             "generated_by": profile.generated_by,
             "tokens_used": profile.tokens_used,
             "created_at": profile.created_at.isoformat()
@@ -42,10 +42,17 @@ def get_latest_profile(user):
 @dashboard_bp.route("/", methods=["GET"])
 @login_required
 def get_dashboard():
-    user_nodes = Node.query.filter_by(user_id=current_user.id, parent_id=None).order_by(Node.created_at.desc()).all()
+    page = request.args.get("page", 1, type=int)
+    per_page = request.args.get("per_page", 20, type=int)
+    per_page = min(per_page, 100)
+
+    query = Node.query.filter_by(user_id=current_user.id, parent_id=None).order_by(Node.created_at.desc())
+    pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+
     nodes_list = []
-    for node in user_nodes:
-        preview = node.content[:200] + ("..." if len(node.content) > 200 else "")
+    for node in pagination.items:
+        content = node.get_content()
+        preview = content[:200] + ("..." if len(content) > 200 else "")
         nodes_list.append({
             "id": node.id,
             "preview": preview,
@@ -75,24 +82,32 @@ def get_dashboard():
             "target_daily_tokens": 1000000  # the 1M tokens/day collective goal
         },
         "nodes": nodes_list,
+        "has_more": pagination.has_next,
+        "page": page,
+        "total_nodes": pagination.total,
         "latest_profile": get_latest_profile(current_user)
     }
     return jsonify(dashboard), 200
 
 
-# Public view of any user’s dashboard; no private stats provided.
+# Public view of any user's dashboard; no private stats provided.
 @dashboard_bp.route("/<string:username>", methods=["GET"])
 @login_required
 def get_public_dashboard(username):
     # Lookup the user by their (unique) handle (username).
     user = User.query.filter_by(username=username).first_or_404()
-    
-    # Get top-level nodes for the user.
-    nodes = Node.query.filter_by(user_id=user.id, parent_id=None)\
-                      .order_by(Node.created_at.desc()).all()
+
+    page = request.args.get("page", 1, type=int)
+    per_page = request.args.get("per_page", 20, type=int)
+    per_page = min(per_page, 100)
+
+    query = Node.query.filter_by(user_id=user.id, parent_id=None).order_by(Node.created_at.desc())
+    pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+
     nodes_list = []
-    for node in nodes:
-        preview = node.content[:200] + ("..." if len(node.content) > 200 else "")
+    for node in pagination.items:
+        content = node.get_content()
+        preview = content[:200] + ("..." if len(content) > 200 else "")
         nodes_list.append({
             "id": node.id,
             "preview": preview,
@@ -109,7 +124,7 @@ def get_public_dashboard(username):
         "global_tokens": get_global_tokens(),
         "target_daily_tokens": 1000000  # the 1M tokens/day target
     }
-    
+
     dashboard = {
         "user": {
             "id": user.id,
@@ -118,6 +133,9 @@ def get_public_dashboard(username):
         },
         "stats": stats,
         "nodes": nodes_list,
+        "has_more": pagination.has_next,
+        "page": page,
+        "total_nodes": pagination.total,
         "latest_profile": get_latest_profile(user)
     }
     return jsonify(dashboard), 200

@@ -112,7 +112,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # Find the first node containing it to use its timestamp as cutoff
             export_node = None
             for node in node_chain:
-                if node.content and USER_EXPORT_PLACEHOLDER in node.content:
+                node_content = node.get_content()
+                if node_content and USER_EXPORT_PLACEHOLDER in node_content:
                     export_node = node
                     break
             needs_export = export_node is not None
@@ -120,15 +121,15 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             # Check if any node contains the {user_profile} placeholder
             needs_profile = any(
-                USER_PROFILE_PLACEHOLDER in node.content
-                for node in node_chain if node.content
+                USER_PROFILE_PLACEHOLDER in node.get_content()
+                for node in node_chain if node.get_content()
             )
             user_profile_content = None
 
             # Check if any node contains {quote:ID} placeholders
             needs_quotes = any(
-                has_quotes(node.content)
-                for node in node_chain if node.content
+                has_quotes(node.get_content())
+                for node in node_chain if node.get_content()
             )
             if needs_quotes:
                 logger.info("Detected {quote:ID} placeholders in conversation chain")
@@ -144,7 +145,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # Calculate token budget for export (same logic as profile generation)
                 from backend.utils.tokens import get_model_context_window
                 context_window = get_model_context_window(model_id)
-                conversation_tokens = sum(approximate_token_count(n.content or "") for n in node_chain)
+                conversation_tokens = sum(approximate_token_count(n.get_content() or "") for n in node_chain)
                 max_export_tokens = calculate_max_export_tokens(model_id, reserved_tokens=conversation_tokens)
                 logger.info(f"Export token budget: model={model_id}, context_window={context_window}, conversation_tokens={conversation_tokens}, max_export_tokens={max_export_tokens}")
 
@@ -165,13 +166,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             for node in node_chain:
                 author = node.user.username if node.user else "Unknown"
                 is_llm_node = node.node_type == "llm" or (node.llm_model is not None)
+                node_content = node.get_content()
 
                 if is_llm_node:
                     role = "assistant"
-                    message_text = node.content
+                    message_text = node_content
                 else:
                     role = "user"
-                    message_text = f"author {author}: {node.content}"
+                    message_text = f"author {author}: {node_content}"
                     # Replace {user_export} placeholder if present
                     if user_export_content and USER_EXPORT_PLACEHOLDER in message_text:
                         message_text = message_text.replace(
@@ -231,16 +233,16 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             contributing_nodes = [n for n in node_chain if n.node_type != "llm"]
             if contributing_nodes and total_tokens:
-                total_weight = sum(approximate_token_count(n.content) for n in contributing_nodes)
+                total_weight = sum(approximate_token_count(n.get_content()) for n in contributing_nodes)
                 for n in contributing_nodes:
-                    weight = approximate_token_count(n.content)
+                    weight = approximate_token_count(n.get_content())
                     share = int(round(total_tokens * (weight / total_weight))) if total_weight > 0 else 0
                     n.distributed_tokens += share
                     db.session.add(n)
 
             # Step 5: Update the placeholder LLM node with the response
             self.update_state(state='PROGRESS', meta={'progress': 95, 'status': 'Finalizing'})
-            llm_node.content = llm_text
+            llm_node.set_content(llm_text)
             llm_node.llm_task_status = 'completed'
             llm_node.llm_task_progress = 100
             db.session.commit()

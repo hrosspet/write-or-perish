@@ -143,7 +143,7 @@ def update_profile(profile_id):
     if not new_content.strip():
         return jsonify({"error": "Content cannot be empty"}), 400
 
-    profile.content = new_content
+    profile.set_content(new_content)
 
     # Handle privacy settings updates (optional)
     if "privacy_level" in data:
@@ -164,7 +164,7 @@ def update_profile(profile_id):
             "message": "Profile updated successfully",
             "profile": {
                 "id": profile.id,
-                "content": profile.content,
+                "content": profile.get_content(),
                 "generated_by": profile.generated_by,
                 "tokens_used": profile.tokens_used,
                 "created_at": profile.created_at.isoformat(),

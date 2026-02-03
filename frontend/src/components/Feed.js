@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import api from "../api";
 import Bubble from "./Bubble";
@@ -6,22 +6,56 @@ import Bubble from "./Bubble";
 function Feed() {
   const [feedNodes, setFeedNodes] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
+  const [hasMore, setHasMore] = useState(false);
+  const [page, setPage] = useState(1);
   const navigate = useNavigate();
 
-  useEffect(() => {
-    api.get("/feed")
+  const fetchPage = useCallback((pageNum) => {
+    const isFirst = pageNum === 1;
+    if (isFirst) setLoading(true);
+    else setLoadingMore(true);
+
+    api.get(`/feed?page=${pageNum}&per_page=20`)
       .then(response => {
-        // Assuming the API returns only top-level nodes.
-        setFeedNodes(response.data.nodes);
-        setLoading(false);
+        const { nodes, has_more } = response.data;
+        setFeedNodes(prev => isFirst ? nodes : [...prev, ...nodes]);
+        setHasMore(has_more);
+        setPage(pageNum);
       })
       .catch(err => {
         console.error(err);
         setError("Error loading feed.");
+      })
+      .finally(() => {
         setLoading(false);
+        setLoadingMore(false);
       });
   }, []);
+
+  useEffect(() => {
+    fetchPage(1);
+  }, [fetchPage]);
+
+  // Auto-load on scroll near bottom
+  useEffect(() => {
+    if (!hasMore || loading || loadingMore) return;
+
+    const handleScroll = () => {
+      const scrollBottom = window.innerHeight + window.scrollY;
+      const docHeight = document.documentElement.scrollHeight;
+      if (docHeight - scrollBottom < 300) {
+        fetchPage(page + 1);
+      }
+    };
+
+    window.addEventListener("scroll", handleScroll, { passive: true });
+    // Check immediately in case content doesn't fill the viewport
+    handleScroll();
+
+    return () => window.removeEventListener("scroll", handleScroll);
+  }, [hasMore, loading, loadingMore, page, fetchPage]);
 
   const handleBubbleClick = (nodeId) => {
     navigate(`/node/${nodeId}`);
@@ -38,6 +72,15 @@ function Feed() {
           <Bubble key={node.id} isHighlighted={true} node={node} onClick={handleBubbleClick} />
         ))}
       </div>
+      {loadingMore && <div style={{ padding: "20px", textAlign: "center", color: "#888" }}>Loading more...</div>}
+      {hasMore && !loadingMore && (
+        <div
+          style={{ padding: "20px", textAlign: "center", cursor: "pointer", color: "#888" }}
+          onClick={() => fetchPage(page + 1)}
+        >
+          Load more...
+        </div>
+      )}
     </div>
   );
 }

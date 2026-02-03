@@ -24,9 +24,10 @@
 - **Docker setup** - Files exist but unverified/incomplete
 - **Backend tests** - Privacy-related tests only (~3 test files)
 - **Frontend tests** - Placeholder only
+- **API key separation for chat vs train** (#39) - ✅ Complete
 
 ### Alpha Blockers (Critical)
-- **API key separation for chat vs train** (#39) - Last privacy blocker
+- None remaining from original list - new items added below
 
 ### Development Velocity Blockers
 - Docker setup unverified (may not work out of box)
@@ -39,19 +40,11 @@
 
 **Goal:** Ship current functionality to friends with privacy guarantees.
 
-### A.1 API Key Separation (BLOCKING)
+### A.1 API Key Separation ✅ COMPLETE
 
 **What:** Use different OpenAI/Anthropic API keys based on `ai_usage` setting.
 
-**Why first:** This is the ONLY remaining blocker for alpha release. The privacy system is implemented, but without this, the "chat" vs "train" distinction is meaningless from a data separation perspective.
-
-**Implementation:**
-- Add `OPENAI_API_KEY_CHAT` and `OPENAI_API_KEY_TRAIN` environment variables
-- Add `ANTHROPIC_API_KEY_CHAT` and `ANTHROPIC_API_KEY_TRAIN` environment variables
-- Modify LLM provider abstraction to select key based on node's `ai_usage` setting
-- Update deployment configs and documentation
-
-**Scope:** Backend only, ~2-3 files, no frontend changes.
+**Status:** Implemented. Separate API keys now used for chat vs train operations.
 
 ### A.2 Basic Monitoring (Alpha Requirement)
 
@@ -79,7 +72,25 @@
 
 **Scope:** Documentation only, no code.
 
-**Alpha Deliverable:** Ship to friends with privacy guarantees + monitoring.
+### A.4 Application-Level Encryption with GCP KMS
+
+**What:** Encrypt sensitive user data at rest using Google Cloud KMS.
+
+**Why:** Defense in depth - even if database is compromised, encrypted fields remain protected. Critical for user trust and privacy guarantees.
+
+**Scope:** Backend infrastructure + deployment configuration. See TECHNICAL-ROADMAP.md Phase -1 for implementation details.
+
+### A.5 Rebrand to Loore
+
+**What:** Rename the application from "Write or Perish" to "Loore".
+
+**Domain options:**
+- **loore.org** - Non-profit/community feel, memorable
+- **loore.tech** - Tech-forward, professional
+
+**Scope:** Frontend branding, backend config, deployment, documentation, DNS setup.
+
+**Alpha Deliverable:** Ship to friends with privacy guarantees + monitoring + encryption + Loore branding.
 
 ---
 
@@ -470,10 +481,11 @@ claude  # "Working on Intention Market feature..."
 
 ## Next Actions
 
-1. **TODAY:** Start A.1 (API key separation) - This is the alpha blocker
-2. **THIS WEEK:** A.2 (Sentry integration) + A.3 (Alpha docs) in parallel
-3. **NEXT WEEK:** Phase B (Docker + tests) - all items can run parallel
-4. **THEN:** Phase C infrastructure, leading to Phase D parallelization
+1. ✅ **COMPLETED:** A.1 (API key separation)
+2. **NOW:** A.4 (GCP KMS encryption) + A.5 (Rebrand to Loore)
+3. **PARALLEL:** A.2 (Sentry integration) + A.3 (Alpha docs)
+4. **THEN:** Phase B (Docker + tests) - all items can run parallel
+5. **THEN:** Phase C infrastructure, leading to Phase D parallelization
 
 ---
 

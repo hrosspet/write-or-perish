@@ -28,7 +28,7 @@ def export_data():
     for node in nodes:
         user_data["nodes"].append({
             "id": node.id,
-            "content": node.content,
+            "content": node.get_content(),
             "node_type": node.node_type,
             "parent_id": node.parent_id,
             "linked_node_id": node.linked_node_id,
@@ -41,7 +41,7 @@ def export_data():
         user_data["versions"].append({
             "id": version.id,
             "node_id": version.node_id,
-            "content": version.content,
+            "content": version.get_content(),
             "timestamp": version.timestamp.isoformat()
         })
     return jsonify(user_data), 200
@@ -89,7 +89,7 @@ def format_node_tree(node, index_path="1", processed_nodes=None, filter_ai_usage
     result = f"{header_prefix} [{index_path}] {node_type_display} ({author}) - {timestamp}\n"
 
     # Resolve {quote:ID} placeholders in content if user_id provided
-    content = node.content
+    content = node.get_content()
     if user_id and has_quotes(content):
         content, _ = resolve_quotes(content, user_id, for_llm=False)
 
@@ -428,7 +428,7 @@ def get_profile_status(task_id):
             if profile and profile.user_id == current_user.id:
                 profile_data = {
                     "id": profile.id,
-                    "content": profile.content,
+                    "content": profile.get_content(),
                     "generated_by": profile.generated_by,
                     "tokens_used": profile.tokens_used,
                     "created_at": profile.created_at.isoformat()
@@ -495,12 +495,12 @@ def create_profile():
     # Create new profile with generated_by="user"
     profile = UserProfile(
         user_id=current_user.id,
-        content=content,
         generated_by="user",
         tokens_used=0,
         privacy_level=privacy_level,
         ai_usage=ai_usage
     )
+    profile.set_content(content)
 
     try:
         db.session.add(profile)
@@ -510,7 +510,7 @@ def create_profile():
             "message": "Profile created successfully",
             "profile": {
                 "id": profile.id,
-                "content": profile.content,
+                "content": profile.get_content(),
                 "generated_by": profile.generated_by,
                 "tokens_used": profile.tokens_used,
                 "created_at": profile.created_at.isoformat(),
