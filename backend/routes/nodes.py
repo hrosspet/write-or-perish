@@ -1420,6 +1420,9 @@ def serve_audio_file(filename):
     This is a **development‑only** helper to unblock tests.  In production the
     app would be served by the web server (e.g. nginx) or a cloud storage
     bucket.  Range requests are *not* implemented; whole file is returned.
+
+    Note: The production media blueprint (media_bp at /media) handles
+    encrypted .enc files. This endpoint is only used in tests.
     """
     file_path = AUDIO_STORAGE_ROOT / filename
     if not file_path.is_file():
