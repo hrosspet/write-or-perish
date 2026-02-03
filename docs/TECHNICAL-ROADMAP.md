@@ -49,13 +49,13 @@ These technical capabilities are production-ready and form the foundation:
 
 ✅ **Node visibility levels and access control** - COMPLETED: Added privacy_level column (private/circles/public) and ai_usage column (none/chat/train) with API enforcement to control who can read each node
 
-**Application-level encryption with GCP KMS** - Encrypt all node content at rest using Cloud KMS, transparently decrypt on authorized access
+✅ **Application-level encryption with GCP KMS** - COMPLETED: Envelope encryption (v2) using AES-256-GCM with KMS-wrapped DEKs. REST transport for gevent compatibility. In-memory DEK cache (up to 4096 entries) to minimize KMS calls. Format: `ENC:v2:<wrapped-dek>:<nonce+ciphertext>`. Audio files also encrypted at rest via `encrypt_file()` — uploads, streaming chunks, and TTS output all get `.enc` extension on disk while DB URLs remain clean (media route handles `.enc` fallback).
 
 **Embedding isolation architecture** - Generate embeddings server-side from plaintext, store with user_id in pgvector, always filter queries by user_id + visibility
 
 **User promise and transparency** - Clear communication: "Journals encrypted at rest. Semantic indexes power search/AI for your account only, never exposed publicly unless you choose"
 
-**Data migration for existing nodes** - Encrypt all existing nodes using KMS, default to privacy_level='training', seamless backward compatibility
+✅ **Data migration for existing nodes** - COMPLETED: Migration script (`scripts/encrypt_existing_content.py`) encrypts all existing node content, versions, drafts, profiles, and transcript chunks. Supports v1→v2 re-encryption.
 
 ### Authentication & Authorization
 
@@ -69,7 +69,7 @@ These technical capabilities are production-ready and form the foundation:
 
 **Cloud file storage with S3/R2** - Migrate from local file storage to cloud object storage for audio files with encryption at rest and CDN integration
 
-**File encryption at rest** - Encrypt all audio files in S3 with user-specific keys, decrypt on-demand for authorized users only
+✅ **File encryption at rest** - COMPLETED: All audio files (uploads, streaming chunks, TTS) encrypted at rest using `encrypt_file()` with envelope encryption (AES-256-GCM + KMS-wrapped DEK). Binary format: `[4-byte DEK length][wrapped DEK][nonce][ciphertext]`. Files get `.enc` extension; media route transparently serves encrypted files. Transcription tasks use `decrypt_file_to_temp()` to decrypt before sending to OpenAI
 
 **Email sending infrastructure** - SMTP service (SendGrid/AWS SES) for password recovery, notifications, and digests with template management
 
@@ -292,7 +292,7 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 ### Alpha Blockers (New):
 
-- ⚠️ **GCP KMS encryption** - Encrypt node content at rest using Cloud KMS (defense in depth for privacy)
+- ✅ **GCP KMS encryption** - COMPLETED: Envelope encryption with AES-256-GCM + KMS-wrapped DEKs. All existing content migrated. Paginated Feed and Dashboard with infinite scroll to handle large node counts.
 - ⚠️ **Rebrand to Loore** - Rename application, update all branding, configure new domain (loore.org or loore.tech)
 
 ### NOT Implemented (Future Work):
@@ -681,7 +681,7 @@ This roadmap prioritizes **privacy & encryption first** (Phase -1), then **found
 
 **Next Steps:**
 1. ✅ **COMPLETED:** API key separation for chat vs train operations
-2. **ALPHA BLOCKER:** Set up GCP KMS (key ring + crypto key) and implement application-level encryption
+2. ✅ **COMPLETED:** GCP KMS envelope encryption for content at rest (v2 format, REST transport, DEK caching, paginated Feed/Dashboard) and audio files at rest
 3. **ALPHA BLOCKER:** Rebrand to Loore (frontend, backend, domain, documentation)
 4. Update user-facing docs with clear privacy promise
 5. Set up Phase 0: Testing infrastructure alongside encryption work

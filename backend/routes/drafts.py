@@ -8,6 +8,7 @@ import uuid
 import pathlib
 import os
 import shutil
+from backend.utils.encryption import encrypt_file
 
 drafts_bp = Blueprint("drafts_bp", __name__)
 
@@ -310,6 +311,9 @@ def upload_streaming_chunk(session_id):
     chunk_path = chunk_dir / chunk_filename
     chunk_file.save(chunk_path)
 
+    # Encrypt the audio chunk at rest
+    encrypted_path = encrypt_file(str(chunk_path))
+
     # Create transcript chunk record (linked to session, not node)
     existing_chunk = NodeTranscriptChunk.query.filter_by(
         session_id=session_id,
@@ -345,7 +349,7 @@ def upload_streaming_chunk(session_id):
     task = transcribe_draft_chunk.delay(
         session_id=session_id,
         chunk_index=chunk_index,
-        chunk_path=str(chunk_path)
+        chunk_path=encrypted_path
     )
 
     # Update chunk with task ID

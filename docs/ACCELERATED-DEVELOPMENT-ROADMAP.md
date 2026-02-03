@@ -27,7 +27,7 @@
 - **API key separation for chat vs train** (#39) - ✅ Complete
 
 ### Alpha Blockers (Critical)
-- None remaining from original list - new items added below
+- ⚠️ **Rebrand to Loore** (A.5)
 
 ### Development Velocity Blockers
 - Docker setup unverified (may not work out of box)
@@ -72,13 +72,23 @@
 
 **Scope:** Documentation only, no code.
 
-### A.4 Application-Level Encryption with GCP KMS
+### A.4 Application-Level Encryption with GCP KMS ✅ COMPLETE
 
 **What:** Encrypt sensitive user data at rest using Google Cloud KMS.
 
 **Why:** Defense in depth - even if database is compromised, encrypted fields remain protected. Critical for user trust and privacy guarantees.
 
-**Scope:** Backend infrastructure + deployment configuration. See TECHNICAL-ROADMAP.md Phase -1 for implementation details.
+**Status:** Implemented. Key technical decisions and details:
+- **Envelope encryption (v2):** Random AES-256 DEK per record, KMS only wraps/unwraps the 32-byte DEK (bypasses 64KB KMS plaintext limit)
+- **Format:** `ENC:v2:<base64-wrapped-dek>:<base64(nonce + ciphertext + tag)>`
+- **REST transport:** KMS client uses REST instead of gRPC to avoid gevent monkey-patching deadlocks
+- **DEK cache:** In-memory LRU cache (4096 entries) avoids repeated KMS calls for already-decrypted content
+- **Migration script:** `scripts/encrypt_existing_content.py` encrypts all existing nodes, versions, drafts, profiles, and transcript chunks
+- **Audio file encryption:** All audio files (uploads, streaming chunks, TTS output) encrypted at rest via `encrypt_file()`. DB URLs stored without `.enc` — media route handles `.enc` fallback transparently. Transcription tasks decrypt to temp files before sending to OpenAI.
+- **Paginated Feed/Dashboard:** Infinite scroll (20 nodes per page) to avoid decrypting too many nodes at once
+- **VM Workload Identity:** Service account attached to VM, no JSON key files needed
+- **Setup docs:** `docs/GCP-KMS-SETUP.md` covers full GCP configuration
+- **Dependencies added:** `google-cloud-kms>=2.0.0`, `cryptography>=41.0.0`
 
 ### A.5 Rebrand to Loore
 
@@ -90,7 +100,7 @@
 
 **Scope:** Frontend branding, backend config, deployment, documentation, DNS setup.
 
-**Alpha Deliverable:** Ship to friends with privacy guarantees + monitoring + encryption + Loore branding.
+**Alpha Deliverable:** Ship to friends with privacy guarantees + monitoring + ✅ encryption + Loore branding.
 
 ---
 
@@ -482,10 +492,11 @@ claude  # "Working on Intention Market feature..."
 ## Next Actions
 
 1. ✅ **COMPLETED:** A.1 (API key separation)
-2. **NOW:** A.4 (GCP KMS encryption) + A.5 (Rebrand to Loore)
-3. **PARALLEL:** A.2 (Sentry integration) + A.3 (Alpha docs)
-4. **THEN:** Phase B (Docker + tests) - all items can run parallel
-5. **THEN:** Phase C infrastructure, leading to Phase D parallelization
+2. ✅ **COMPLETED:** A.4 (GCP KMS encryption)
+3. **NOW:** A.5 (Rebrand to Loore)
+4. **PARALLEL:** A.2 (Sentry integration) + A.3 (Alpha docs)
+5. **THEN:** Phase B (Docker + tests) - all items can run parallel
+6. **THEN:** Phase C infrastructure, leading to Phase D parallelization
 
 ---
 

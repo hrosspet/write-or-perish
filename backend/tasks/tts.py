@@ -17,6 +17,7 @@ from backend.models import Node, UserProfile, TTSChunk
 from backend.extensions import db
 from backend.utils.audio_processing import chunk_text
 from backend.utils.api_keys import get_openai_chat_key
+from backend.utils.encryption import encrypt_file
 
 logger = get_task_logger(__name__)
 
@@ -146,6 +147,9 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str):
                 ) as resp:
                     resp.stream_to_file(final_path)
 
+                # Encrypt the audio file at rest
+                encrypt_file(str(final_path))
+
                 # Update the single TTSChunk record
                 tts_chunk = TTSChunk.query.filter_by(node_id=node.id, chunk_index=0).first()
                 if tts_chunk:
@@ -196,9 +200,12 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str):
                         tts_chunk.completed_at = datetime.utcnow()
                         db.session.commit()
 
-                    # Load into AudioSegment for final concatenation
+                    # Load into AudioSegment for final concatenation BEFORE encrypting
                     segment = AudioSegment.from_file(str(part_path), format="mp3")
                     audio_parts.append((i, segment, part_path))
+
+                    # Encrypt the chunk file at rest (for streaming playback)
+                    encrypt_file(str(part_path))
 
                 # Concatenate all segments into final file
                 self.update_state(state='PROGRESS', meta={'progress': 90, 'status': 'Combining audio'})
@@ -208,8 +215,8 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str):
                 combined = sum([part[1] for part in audio_parts])
                 combined.export(final_path, format="mp3")
 
-                # Note: We keep the chunk files for streaming playback
-                # They can be cleaned up later or kept for faster seeking
+                # Encrypt the combined final file at rest
+                encrypt_file(str(final_path))
 
             # Step 4: Update node record (95% progress)
             self.update_state(state='PROGRESS', meta={'progress': 95, 'status': 'Finalizing'})
@@ -308,6 +315,9 @@ def generate_tts_audio_for_profile(self, profile_id: int, audio_storage_root: st
                     voice="alloy"
                 ) as resp:
                     resp.stream_to_file(final_path)
+
+                # Encrypt the audio file at rest
+                encrypt_file(str(final_path))
             else:
                 audio_parts = []
                 chunk_progress_step = 50 / len(chunks)
@@ -336,6 +346,7 @@ def generate_tts_audio_for_profile(self, profile_id: int, audio_storage_root: st
                     segment = AudioSegment.from_file(str(part_path), format="mp3")
                     audio_parts.append(segment)
 
+                    # Encrypt or delete the part file
                     try:
                         part_path.unlink()
                     except Exception as e:
@@ -347,6 +358,9 @@ def generate_tts_audio_for_profile(self, profile_id: int, audio_storage_root: st
 
                 combined = sum(audio_parts)
                 combined.export(final_path, format="mp3")
+
+                # Encrypt the combined final file at rest
+                encrypt_file(str(final_path))
 
             self.update_state(state='PROGRESS', meta={'progress': 95, 'status': 'Finalizing'})
             profile.tts_task_progress = 95

@@ -24,6 +24,7 @@ from backend.utils.privacy import (
 from backend.utils.quotes import find_quote_ids, get_quote_data, has_quotes
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.webm_utils import get_webm_duration
+from backend.utils.encryption import encrypt_file
 
 # ---------------------------------------------------------------------------
 # Voice‑Mode helpers
@@ -83,6 +84,8 @@ def _save_audio_file(file_storage, user_id: int, node_id: int, variant: str) -> 
     target_dir.mkdir(parents=True, exist_ok=True)
     target_path = target_dir / f"{variant}.{ext}"
     file_storage.save(target_path)
+    # Encrypt the audio file at rest (URL stored without .enc)
+    encrypt_file(str(target_path))
     # Produce URL to be consumed externally, routed via /media endpoint.
     # We use the relative path from AUDIO_STORAGE_ROOT for portability.
     rel_path = target_path.relative_to(AUDIO_STORAGE_ROOT)
@@ -866,8 +869,14 @@ def get_audio_chunks(node_id):
     if not chunk_dir.exists():
         return jsonify({"error": "No audio chunks found"}), 404
 
-    # Get all chunk files sorted by name
+    # Get all chunk files sorted by name (support both plain and encrypted)
     chunk_files = sorted(chunk_dir.glob("chunk_*.webm"))
+    chunk_files_enc = sorted(chunk_dir.glob("chunk_*.webm.enc"))
+    # Prefer encrypted files if they exist, fall back to plain
+    if not chunk_files and chunk_files_enc:
+        chunk_files = chunk_files_enc
+    elif not chunk_files and not chunk_files_enc:
+        return jsonify({"error": "No audio chunks found"}), 404
 
     if not chunk_files:
         return jsonify({"error": "No audio chunks found"}), 404
@@ -877,11 +886,18 @@ def get_audio_chunks(node_id):
     # for WebM files with continuous timestamps across chunks
     chunks = []
     for f in chunk_files:
-        url = f"/media/nodes/{node.user_id}/{node_id}/{f.name}"
-        duration = get_webm_duration(str(f))
-        # Fallback to 300s if ffprobe fails (typical chunk size)
-        if duration is None:
+        # Strip .enc from filename for URL (media route handles .enc fallback)
+        fname = f.name
+        if fname.endswith('.enc'):
+            fname = fname[:-4]
+        url = f"/media/nodes/{node.user_id}/{node_id}/{fname}"
+        # Duration: skip for encrypted files (ffprobe can't read them)
+        if f.name.endswith('.enc'):
             duration = 300.0
+        else:
+            duration = get_webm_duration(str(f))
+            if duration is None:
+                duration = 300.0
         chunks.append({"url": url, "duration": duration})
 
     return jsonify({"chunks": chunks}), 200
@@ -1321,6 +1337,9 @@ def finalize_chunked_upload():
         )
         # Don't fail - continue with transcription
 
+    # Encrypt the assembled audio file at rest (URL stored without .enc)
+    encrypt_file(str(target_path))
+
     # Update node with audio info
     rel_path = target_path.relative_to(AUDIO_STORAGE_ROOT)
     node.audio_original_url = f"/media/{rel_path.as_posix()}"
@@ -1542,6 +1561,9 @@ def upload_audio_chunk(node_id):
     chunk_path = chunk_dir / chunk_filename
     chunk_file.save(chunk_path)
 
+    # Encrypt the audio chunk at rest
+    encrypted_path = encrypt_file(str(chunk_path))
+
     # Create transcript chunk record
     from backend.models import NodeTranscriptChunk
 
@@ -1579,7 +1601,7 @@ def upload_audio_chunk(node_id):
     task = transcribe_chunk.delay(
         node_id=node_id,
         chunk_index=chunk_index,
-        chunk_path=str(chunk_path)
+        chunk_path=encrypted_path
     )
 
     # Update chunk with task ID

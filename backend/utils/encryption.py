@@ -344,6 +344,41 @@ def decrypt_file(filepath: str) -> bytes:
         raise
 
 
+def decrypt_file_to_temp(filepath: str) -> str:
+    """
+    Decrypt a .enc file to a temporary file and return the temp path.
+
+    Useful for passing decrypted audio to external APIs (e.g. OpenAI)
+    that need to read from a file path.
+
+    Args:
+        filepath: Path to the encrypted file (with .enc extension)
+
+    Returns:
+        Path to a temporary file containing the decrypted content.
+        Caller is responsible for deleting the temp file.
+    """
+    import tempfile
+
+    # Determine original extension (strip .enc)
+    original_path = filepath
+    if filepath.endswith('.enc'):
+        original_path = filepath[:-4]
+
+    ext = os.path.splitext(original_path)[1] or '.bin'
+
+    decrypted_bytes = decrypt_file(filepath)
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+    try:
+        tmp.write(decrypted_bytes)
+        tmp.close()
+        return tmp.name
+    except Exception:
+        tmp.close()
+        os.unlink(tmp.name)
+        raise
+
+
 def is_file_encrypted(filepath: str) -> bool:
     """Check if a file is encrypted (has .enc extension)."""
     return filepath.endswith('.enc')

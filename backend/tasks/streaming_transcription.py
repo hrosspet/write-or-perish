@@ -19,6 +19,7 @@ from backend.extensions import db
 from backend.utils.audio_processing import compress_audio_if_needed
 from backend.utils.webm_utils import fix_last_chunk_duration, is_ffmpeg_available
 from backend.utils.api_keys import get_openai_chat_key
+from backend.utils.encryption import decrypt_file_to_temp
 
 logger = get_task_logger(__name__)
 
@@ -84,7 +85,18 @@ def transcribe_chunk(self, node_id: int, chunk_index: int, chunk_path: str):
             client = OpenAI(api_key=api_key)
             file_path = pathlib.Path(chunk_path)
 
-            if not file_path.exists():
+            # Check for encrypted version (.enc) if plain file doesn't exist
+            temp_decrypted = None
+            if not file_path.exists() and pathlib.Path(chunk_path + '.enc').exists():
+                logger.info(f"Found encrypted chunk, decrypting: {chunk_path}.enc")
+                temp_decrypted = decrypt_file_to_temp(chunk_path + '.enc')
+                file_path = pathlib.Path(temp_decrypted)
+            elif file_path.suffix == '.enc':
+                # Path was passed with .enc extension directly
+                logger.info(f"Decrypting encrypted chunk: {chunk_path}")
+                temp_decrypted = decrypt_file_to_temp(chunk_path)
+                file_path = pathlib.Path(temp_decrypted)
+            elif not file_path.exists():
                 raise FileNotFoundError(f"Audio chunk file not found: {chunk_path}")
 
             # Compress if needed (webm -> mp3 for better compatibility)
@@ -113,6 +125,12 @@ def transcribe_chunk(self, node_id: int, chunk_index: int, chunk_path: str):
                         os.unlink(processed_path)
                     except Exception as e:
                         logger.warning(f"Failed to delete compressed file: {e}")
+                # Clean up temp decrypted file
+                if temp_decrypted:
+                    try:
+                        os.unlink(temp_decrypted)
+                    except Exception as e:
+                        logger.warning(f"Failed to delete temp decrypted file: {e}")
 
             # Update chunk record with transcript
             chunk_record.set_text(transcript)
@@ -346,7 +364,18 @@ def transcribe_draft_chunk(self, session_id: str, chunk_index: int, chunk_path: 
             client = OpenAI(api_key=api_key)
             file_path = pathlib.Path(chunk_path)
 
-            if not file_path.exists():
+            # Check for encrypted version (.enc) if plain file doesn't exist
+            temp_decrypted = None
+            if not file_path.exists() and pathlib.Path(chunk_path + '.enc').exists():
+                logger.info(f"Found encrypted chunk, decrypting: {chunk_path}.enc")
+                temp_decrypted = decrypt_file_to_temp(chunk_path + '.enc')
+                file_path = pathlib.Path(temp_decrypted)
+            elif file_path.suffix == '.enc':
+                # Path was passed with .enc extension directly
+                logger.info(f"Decrypting encrypted chunk: {chunk_path}")
+                temp_decrypted = decrypt_file_to_temp(chunk_path)
+                file_path = pathlib.Path(temp_decrypted)
+            elif not file_path.exists():
                 raise FileNotFoundError(f"Audio chunk file not found: {chunk_path}")
 
             # Compress if needed (webm -> mp3 for better compatibility)
@@ -375,6 +404,12 @@ def transcribe_draft_chunk(self, session_id: str, chunk_index: int, chunk_path: 
                         os.unlink(processed_path)
                     except Exception as e:
                         logger.warning(f"Failed to delete compressed file: {e}")
+                # Clean up temp decrypted file
+                if temp_decrypted:
+                    try:
+                        os.unlink(temp_decrypted)
+                    except Exception as e:
+                        logger.warning(f"Failed to delete temp decrypted file: {e}")
 
             # Update chunk record with transcript
             chunk_record.set_text(transcript)

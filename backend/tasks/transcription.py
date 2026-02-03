@@ -19,6 +19,7 @@ from backend.utils.audio_processing import (
     OPENAI_MAX_DURATION_SEC
 )
 from backend.utils.api_keys import get_openai_chat_key
+from backend.utils.encryption import decrypt_file_to_temp
 
 logger = get_task_logger(__name__)
 
@@ -74,7 +75,13 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
             client = OpenAI(api_key=api_key)
             file_path = pathlib.Path(audio_file_path)
 
-            if not file_path.exists():
+            # Check for encrypted version (.enc) if plain file doesn't exist
+            temp_decrypted = None
+            if not file_path.exists() and pathlib.Path(audio_file_path + '.enc').exists():
+                logger.info(f"Found encrypted file, decrypting: {audio_file_path}.enc")
+                temp_decrypted = decrypt_file_to_temp(audio_file_path + '.enc')
+                file_path = pathlib.Path(temp_decrypted)
+            elif not file_path.exists():
                 raise FileNotFoundError(f"Audio file not found: {audio_file_path}")
 
             # Step 1: Compress if needed (10% progress)
@@ -192,6 +199,13 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
                     os.unlink(processed_path)
                 except Exception as e:
                     logger.warning(f"Failed to delete compressed file: {e}")
+
+            # Clean up temp decrypted file
+            if temp_decrypted:
+                try:
+                    os.unlink(temp_decrypted)
+                except Exception as e:
+                    logger.warning(f"Failed to delete temp decrypted file: {e}")
 
             # Step 4: Update node with transcript (100% progress)
             self.update_state(state='PROGRESS', meta={'progress': 100, 'status': 'Complete'})
