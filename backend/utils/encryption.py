@@ -12,10 +12,13 @@ Format: ENC:v2:<base64-wrapped-dek>:<base64(nonce + ciphertext + tag)>
 Legacy format (v1) is still supported for decryption only.
 """
 import base64
+import logging
 import os
-from functools import lru_cache
+import threading
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+logger = logging.getLogger(__name__)
 
 # Encryption marker prefixes
 ENCRYPTED_PREFIX_V1 = "ENC:v1:"
@@ -25,6 +28,17 @@ ENCRYPTED_PREFIX_V2 = "ENC:v2:"
 DEK_SIZE = 32
 # AES-GCM nonce size in bytes
 NONCE_SIZE = 12
+
+# In-memory LRU cache for unwrapped DEKs: wrapped_dek_b64 -> dek_bytes
+# Avoids repeated KMS calls for the same wrapped DEK.
+_DEK_CACHE_MAX = 4096
+_dek_cache = {}
+_dek_cache_order = []
+_dek_cache_lock = threading.Lock()
+
+# KMS client singleton with reconnection support
+_kms_client = None
+_kms_client_lock = threading.Lock()
 
 
 def is_encryption_enabled() -> bool:
@@ -43,29 +57,85 @@ def get_kms_key_name() -> str:
     return os.environ.get("GCP_KMS_KEY_NAME", "")
 
 
-@lru_cache(maxsize=1)
 def _get_kms_client():
-    """Get a cached KMS client instance."""
-    from google.cloud import kms
-    return kms.KeyManagementServiceClient()
+    """Get the KMS client, creating one if needed."""
+    global _kms_client
+    if _kms_client is None:
+        with _kms_client_lock:
+            if _kms_client is None:
+                from google.cloud import kms
+                _kms_client = kms.KeyManagementServiceClient()
+    return _kms_client
+
+
+def _reset_kms_client():
+    """Force recreation of the KMS client (e.g. after a stale connection)."""
+    global _kms_client
+    with _kms_client_lock:
+        _kms_client = None
+
+
+def _cache_get(wrapped_dek_b64: str) -> bytes | None:
+    """Look up a DEK in the in-memory cache."""
+    with _dek_cache_lock:
+        return _dek_cache.get(wrapped_dek_b64)
+
+
+def _cache_put(wrapped_dek_b64: str, dek: bytes):
+    """Store a DEK in the in-memory cache with LRU eviction."""
+    with _dek_cache_lock:
+        if wrapped_dek_b64 in _dek_cache:
+            _dek_cache_order.remove(wrapped_dek_b64)
+        elif len(_dek_cache) >= _DEK_CACHE_MAX:
+            oldest = _dek_cache_order.pop(0)
+            del _dek_cache[oldest]
+        _dek_cache[wrapped_dek_b64] = dek
+        _dek_cache_order.append(wrapped_dek_b64)
+
+
+def _kms_encrypt(request):
+    """KMS encrypt with retry on stale gRPC connection."""
+    try:
+        return _get_kms_client().encrypt(request=request)
+    except Exception as e:
+        if "Deadline Exceeded" in str(e) or "DEADLINE_EXCEEDED" in str(e):
+            logger.warning("KMS deadline exceeded on encrypt, reconnecting...")
+            _reset_kms_client()
+            return _get_kms_client().encrypt(request=request)
+        raise
+
+
+def _kms_decrypt(request):
+    """KMS decrypt with retry on stale gRPC connection."""
+    try:
+        return _get_kms_client().decrypt(request=request)
+    except Exception as e:
+        if "Deadline Exceeded" in str(e) or "DEADLINE_EXCEEDED" in str(e):
+            logger.warning("KMS deadline exceeded on decrypt, reconnecting...")
+            _reset_kms_client()
+            return _get_kms_client().decrypt(request=request)
+        raise
 
 
 def _wrap_dek(dek: bytes) -> bytes:
     """Encrypt a DEK using KMS."""
-    client = _get_kms_client()
-    response = client.encrypt(
-        request={"name": get_kms_key_name(), "plaintext": dek}
-    )
+    response = _kms_encrypt({"name": get_kms_key_name(), "plaintext": dek})
     return response.ciphertext
 
 
 def _unwrap_dek(wrapped_dek: bytes) -> bytes:
-    """Decrypt a DEK using KMS."""
-    client = _get_kms_client()
-    response = client.decrypt(
-        request={"name": get_kms_key_name(), "ciphertext": wrapped_dek}
-    )
-    return response.plaintext
+    """Decrypt a DEK using KMS, with in-memory caching."""
+    # Check cache first
+    cache_key = base64.b64encode(wrapped_dek).decode("ascii")
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    # Cache miss — call KMS
+    response = _kms_decrypt({"name": get_kms_key_name(), "ciphertext": wrapped_dek})
+    dek = response.plaintext
+    _cache_put(cache_key, dek)
+    return dek
 
 
 def encrypt_content(plaintext: str) -> str:
@@ -150,12 +220,9 @@ def decrypt_content(ciphertext: str) -> str:
 
 def _decrypt_v1(ciphertext: str) -> str:
     """Decrypt legacy v1 format (direct KMS encryption)."""
-    client = _get_kms_client()
     ciphertext_b64 = ciphertext[len(ENCRYPTED_PREFIX_V1):]
     ciphertext_bytes = base64.b64decode(ciphertext_b64)
-    response = client.decrypt(
-        request={"name": get_kms_key_name(), "ciphertext": ciphertext_bytes}
-    )
+    response = _kms_decrypt({"name": get_kms_key_name(), "ciphertext": ciphertext_bytes})
     return response.plaintext.decode("utf-8")
 
 
