@@ -42,6 +42,16 @@ Ensure:
 
 **Frontend**: Run `npm run build 2>&1 | tail -30` from the `frontend/` directory to check for compilation errors. There is no separate lint script - the build process will catch TypeScript/JSX errors.
 
+### Database Migrations
+
+The project uses **Flask-Migrate + Alembic**. Migrations are auto-generated and applied during deployment.
+
+- **Do NOT write manual migration scripts.** The deploy script (`deploy.sh`) runs `flask db migrate` which auto-detects model changes and generates Alembic migrations automatically.
+- When adding/changing columns in `backend/models.py`, just change the model — the migration will be auto-generated on deploy.
+- Auto-generated migrations are committed back to git by the deploy script with `[skip ci]` tag.
+- Migration files live in `migrations/versions/`.
+- Dockerization (Makefile, docker-compose) exists but is **not yet in use**.
+
 ### Production Environment
 
 - URL: https://writeorperish.org

@@ -147,6 +147,10 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str):
                 ) as resp:
                     resp.stream_to_file(final_path)
 
+                # Get duration before encrypting
+                segment = AudioSegment.from_file(str(final_path), format="mp3")
+                chunk_duration = len(segment) / 1000.0  # ms to seconds
+
                 # Encrypt the audio file at rest
                 encrypt_file(str(final_path))
 
@@ -155,6 +159,7 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str):
                 if tts_chunk:
                     rel_path = final_path.relative_to(AUDIO_STORAGE_ROOT)
                     tts_chunk.audio_url = f"/media/{rel_path.as_posix()}"
+                    tts_chunk.duration = chunk_duration
                     tts_chunk.status = 'completed'
                     tts_chunk.completed_at = datetime.utcnow()
                     db.session.commit()
@@ -192,17 +197,19 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str):
                     ) as resp:
                         resp.stream_to_file(part_path)
 
-                    # Update TTSChunk with URL immediately (for streaming playback)
+                    # Load into AudioSegment for final concatenation BEFORE encrypting
+                    segment = AudioSegment.from_file(str(part_path), format="mp3")
+                    chunk_duration = len(segment) / 1000.0  # ms to seconds
+                    audio_parts.append((i, segment, part_path))
+
+                    # Update TTSChunk with URL and duration immediately (for streaming playback)
                     if tts_chunk:
                         rel_path = part_path.relative_to(AUDIO_STORAGE_ROOT)
                         tts_chunk.audio_url = f"/media/{rel_path.as_posix()}"
+                        tts_chunk.duration = chunk_duration
                         tts_chunk.status = 'completed'
                         tts_chunk.completed_at = datetime.utcnow()
                         db.session.commit()
-
-                    # Load into AudioSegment for final concatenation BEFORE encrypting
-                    segment = AudioSegment.from_file(str(part_path), format="mp3")
-                    audio_parts.append((i, segment, part_path))
 
                     # Encrypt the chunk file at rest (for streaming playback)
                     encrypt_file(str(part_path))

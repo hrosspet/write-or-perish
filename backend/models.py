@@ -282,6 +282,8 @@ class TTSChunk(db.Model):
     chunk_index = db.Column(db.Integer, nullable=False)
     # URL to the audio chunk file
     audio_url = db.Column(db.String, nullable=True)
+    # Duration of the audio chunk in seconds (from pydub/ffprobe)
+    duration = db.Column(db.Float, nullable=True)
     # Status of this chunk's generation
     status = db.Column(db.String(20), nullable=False, default="pending")  # pending, processing, completed, failed
     created_at = db.Column(db.DateTime, default=datetime.utcnow)

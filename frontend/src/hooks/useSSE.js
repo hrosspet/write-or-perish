@@ -432,40 +432,55 @@ export function useTTSStreamSSE(nodeId, options = {}) {
     onAllComplete = null,
   } = options;
 
-  const [audioChunks, setAudioChunks] = useState([]); // Array of { index, url }
+  const [audioChunks, setAudioChunks] = useState([]); // Array of { index, url, duration }
   const [isComplete, setIsComplete] = useState(false);
   const [finalUrl, setFinalUrl] = useState(null);
+
+  // Store callback refs to ensure handlers always call latest callbacks
+  const onChunkReadyRef = useRef(onChunkReady);
+  const onAllCompleteRef = useRef(onAllComplete);
+
+  useEffect(() => {
+    onChunkReadyRef.current = onChunkReady;
+    onAllCompleteRef.current = onAllComplete;
+  }, [onChunkReady, onAllComplete]);
 
   // Use REACT_APP_BACKEND_URL for SSE since EventSource doesn't go through CRA proxy
   const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
   const url = nodeId ? `${backendUrl}/api/sse/nodes/${nodeId}/tts-stream` : null;
 
-  const eventHandlers = {
+  // Memoize eventHandlers to prevent unnecessary reconnections
+  // Handlers use refs internally to always call latest callbacks
+  const eventHandlers = useMemo(() => ({
     chunk_ready: (data) => {
       setAudioChunks(prev => {
         const existing = prev.find(c => c.index === data.chunk_index);
         if (existing) {
           return prev;
         }
-        return [...prev, { index: data.chunk_index, url: data.audio_url }].sort(
+        return [...prev, {
+          index: data.chunk_index,
+          url: data.audio_url,
+          duration: data.duration != null ? data.duration : null
+        }].sort(
           (a, b) => a.index - b.index
         );
       });
-      if (onChunkReady) {
-        onChunkReady(data);
+      if (onChunkReadyRef.current) {
+        onChunkReadyRef.current(data);
       }
     },
     all_complete: (data) => {
       setIsComplete(true);
       setFinalUrl(data.tts_url);
-      if (onAllComplete) {
-        onAllComplete(data);
+      if (onAllCompleteRef.current) {
+        onAllCompleteRef.current(data);
       }
     },
     heartbeat: () => {
       // Keep-alive, no action needed
     },
-  };
+  }), []); // Empty deps - handlers use refs internally
 
   const { isConnected, error, disconnect } = useSSE(url, {
     enabled,

@@ -208,11 +208,14 @@ def tts_stream(node_id):
                 ).order_by(TTSChunk.chunk_index).all()
 
                 for chunk in new_chunks:
-                    yield format_sse_message({
+                    chunk_data = {
                         "chunk_index": chunk.chunk_index,
                         "audio_url": chunk.audio_url,
                         "status": "ready"
-                    }, event="chunk_ready")
+                    }
+                    if chunk.duration is not None:
+                        chunk_data["duration"] = chunk.duration
+                    yield format_sse_message(chunk_data, event="chunk_ready")
                     last_sent_chunk = chunk.chunk_index
 
                 # Check if TTS generation is complete
