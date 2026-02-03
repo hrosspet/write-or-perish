@@ -212,9 +212,16 @@ export const AudioProvider = ({ children }) => {
     audioQueueRef.current = urls.slice(chunkIndex + 1);
 
     // Create new audio element
-    const audio = new Audio(urls[chunkIndex]);
+    const chunkUrl = urls[chunkIndex];
+    const audio = new Audio(chunkUrl);
     audioRef.current = audio;
     audio.playbackRate = playbackRate;
+
+    // Detect if this is a WebM file with continuous timestamps
+    // WebM files from MediaRecorder with timeslice have timestamps that continue
+    // across chunks (chunk 0: 0-300s, chunk 1: 300-600s, etc.)
+    // MP3 and other formats start at timestamp 0 in each file
+    const isWebM = chunkUrl.toLowerCase().includes('.webm');
 
     // Track if we've already seeked (to avoid multiple seeks)
     let hasSeeked = false;
@@ -226,13 +233,19 @@ export const AudioProvider = ({ children }) => {
       if (playbackIdRef.current !== thisPlaybackId) return;
 
       const actualDuration = audio.duration;
-      // Update the stored duration with actual value if it differs significantly
-      if (isFinite(actualDuration) && Math.abs(durations[chunkIndex] - actualDuration) > 1) {
-        const updatedDurations = [...chunkDurationsRef.current];
-        updatedDurations[chunkIndex] = actualDuration;
-        chunkDurationsRef.current = updatedDurations;
-        setChunkDurations(updatedDurations);
-        recalculateTotalDuration(updatedDurations);
+
+      if (isWebM) {
+        // WebM duration includes all prior chunks, so don't compare directly
+        // The ontimeupdate handler will detect the offset and correct durations
+      } else {
+        // For MP3 and other formats, update stored duration if significantly different
+        if (isFinite(actualDuration) && Math.abs(durations[chunkIndex] - actualDuration) > 1) {
+          const updatedDurations = [...chunkDurationsRef.current];
+          updatedDurations[chunkIndex] = actualDuration;
+          chunkDurationsRef.current = updatedDurations;
+          setChunkDurations(updatedDurations);
+          recalculateTotalDuration(updatedDurations);
+        }
       }
       setDuration(actualDuration);
       setLoading(false);
@@ -244,16 +257,32 @@ export const AudioProvider = ({ children }) => {
       if (hasSeeked) return; // Only seek once
       hasSeeked = true;
 
-      // For WebM with continuous timestamps, we need to add the expected offset
-      // to seek to the correct raw position in the file
-      const expectedOffset = durations.slice(0, chunkIndex).reduce((a, b) => a + b, 0);
-      const rawSeekTime = safeTimeInChunk + expectedOffset;
-
-      const clampedTime = Math.max(expectedOffset, Math.min(rawSeekTime, (audio.duration || expectedOffset + 300)));
-      if (isFinite(clampedTime)) {
-        audio.currentTime = clampedTime;
+      if (isWebM) {
+        // For WebM with continuous timestamps, add the expected offset
+        const expectedOffset = durations.slice(0, chunkIndex).reduce((a, b) => a + b, 0);
+        const rawSeekTime = safeTimeInChunk + expectedOffset;
+        const clampedTime = Math.max(expectedOffset, Math.min(rawSeekTime, (audio.duration || expectedOffset + 300)));
+        if (isFinite(clampedTime)) {
+          audio.currentTime = clampedTime;
+        }
+      } else {
+        // For MP3 and other formats, seek directly within the chunk
+        if (safeTimeInChunk > 0 && isFinite(safeTimeInChunk)) {
+          const clampedTime = Math.min(safeTimeInChunk, audio.duration || 300);
+          audio.currentTime = clampedTime;
+        }
       }
     };
+
+    // Set the timestamp offset immediately based on format detection
+    // (don't wait for ontimeupdate which fires too late for initial seek)
+    if (isWebM) {
+      // Will be refined in ontimeupdate, but set a reasonable initial value
+      chunkTimestampOffsetRef.current = durations.slice(0, chunkIndex).reduce((a, b) => a + b, 0);
+    } else {
+      // MP3 and other formats always start at 0
+      chunkTimestampOffsetRef.current = 0;
+    }
 
     audio.ontimeupdate = () => {
       // Check if this handler is still valid
@@ -261,24 +290,20 @@ export const AudioProvider = ({ children }) => {
 
       const rawTime = audio.currentTime;
 
-      // Detect timestamp offset on first time update
-      // WebM files from MediaRecorder with timeslice have continuous timestamps
-      // (chunk 0: 0-300s, chunk 1: 300-600s, etc.)
+      // Refine timestamp offset detection on first time update (WebM only)
       if (!hasDetectedOffset) {
         hasDetectedOffset = true;
-        // Expected start time for this chunk (sum of previous chunk durations)
-        const expectedOffset = durations.slice(0, chunkIndex).reduce((a, b) => a + b, 0);
-        // If the raw time is close to the expected offset, we have continuous timestamps
-        // Allow some tolerance (within 5 seconds of expected)
-        if (rawTime > expectedOffset - 5 && rawTime < expectedOffset + durations[chunkIndex] + 5) {
-          chunkTimestampOffsetRef.current = expectedOffset;
-        } else if (rawTime < 5) {
-          // Raw time is near 0, so this chunk has normal timestamps starting at 0
-          chunkTimestampOffsetRef.current = 0;
-        } else {
-          // Unexpected case - use raw time as offset
-          chunkTimestampOffsetRef.current = rawTime;
+        if (isWebM) {
+          const expectedOffset = durations.slice(0, chunkIndex).reduce((a, b) => a + b, 0);
+          if (rawTime > expectedOffset - 5 && rawTime < expectedOffset + durations[chunkIndex] + 5) {
+            chunkTimestampOffsetRef.current = expectedOffset;
+          } else if (rawTime < 5) {
+            chunkTimestampOffsetRef.current = 0;
+          } else {
+            chunkTimestampOffsetRef.current = rawTime;
+          }
         }
+        // For non-WebM, offset stays 0 (set above)
       }
 
       // Calculate time within chunk by subtracting the offset
