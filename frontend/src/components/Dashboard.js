@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import api from "../api";
@@ -35,6 +35,12 @@ function Dashboard() {
   const [dateOrdering, setDateOrdering] = useState("modified");
   const [importing, setImporting] = useState(false);
 
+  const [hasMoreNodes, setHasMoreNodes] = useState(false);
+  const [nodesPage, setNodesPage] = useState(1);
+  const [loadingMoreNodes, setLoadingMoreNodes] = useState(false);
+  const nodeObserverRef = useRef();
+  const nodeSentinelRef = useRef();
+
   const navigate = useNavigate();
   const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
@@ -42,9 +48,11 @@ function Dashboard() {
   const endpoint = username ? `/dashboard/${username}` : "/dashboard";
 
   useEffect(() => {
-    api.get(endpoint)
+    api.get(`${endpoint}?page=1&per_page=20`)
       .then((response) => {
         setDashboardData(response.data);
+        setHasMoreNodes(response.data.has_more);
+        setNodesPage(1);
         setLoading(false);
       })
       .catch((err) => {
@@ -266,6 +274,46 @@ function Dashboard() {
     setShowImportDialog(false);
     setImportFiles(null);
   };
+
+  const fetchMoreNodes = useCallback((nextPage) => {
+    setLoadingMoreNodes(true);
+    api.get(`${endpoint}?page=${nextPage}&per_page=20`)
+      .then((response) => {
+        setDashboardData(prev => ({
+          ...prev,
+          nodes: [...prev.nodes, ...response.data.nodes]
+        }));
+        setHasMoreNodes(response.data.has_more);
+        setNodesPage(nextPage);
+      })
+      .catch((err) => {
+        console.error("Error loading more nodes:", err);
+      })
+      .finally(() => {
+        setLoadingMoreNodes(false);
+      });
+  }, [endpoint]);
+
+  // Infinite scroll for nodes
+  useEffect(() => {
+    if (loading || loadingMoreNodes || !hasMoreNodes) return;
+
+    if (nodeObserverRef.current) nodeObserverRef.current.disconnect();
+
+    nodeObserverRef.current = new IntersectionObserver(entries => {
+      if (entries[0].isIntersecting) {
+        fetchMoreNodes(nodesPage + 1);
+      }
+    });
+
+    if (nodeSentinelRef.current) {
+      nodeObserverRef.current.observe(nodeSentinelRef.current);
+    }
+
+    return () => {
+      if (nodeObserverRef.current) nodeObserverRef.current.disconnect();
+    };
+  }, [loading, loadingMoreNodes, hasMoreNodes, nodesPage, fetchMoreNodes]);
 
 
   if (loading) return <div>Loading dashboard...</div>;
@@ -659,6 +707,8 @@ function Dashboard() {
             onClick={() => navigate(`/node/${node.id}`)}
           />
         ))}
+        {loadingMoreNodes && <div style={{ padding: "20px", textAlign: "center", color: "#888" }}>Loading more...</div>}
+        {hasMoreNodes && <div ref={nodeSentinelRef} style={{ height: "1px" }} />}
       </div>
     </div>
   );
