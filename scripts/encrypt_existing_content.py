@@ -114,90 +114,70 @@ def backup_audio_files(backup_dir: str) -> str:
 
 
 def encrypt_database_content():
-    """Encrypt all existing content in the database."""
+    """Encrypt all existing content in the database using v2 envelope encryption.
+
+    Decrypts any v1-encrypted content first, then re-encrypts everything with v2.
+    """
     from backend import create_app
     from backend.extensions import db
     from backend.models import Node, NodeVersion, Draft, UserProfile, NodeTranscriptChunk
-    from backend.utils.encryption import encrypt_content, is_encryption_enabled, is_content_encrypted
+    from backend.utils.encryption import (
+        encrypt_content, decrypt_content, is_encryption_enabled,
+        ENCRYPTED_PREFIX_V1, ENCRYPTED_PREFIX_V2,
+    )
 
     if not is_encryption_enabled():
         print("ERROR: Encryption is not enabled!")
         print("Please set GCP_KMS_KEY_NAME environment variable.")
         return False
 
+    def encrypt_field(record, field_name, label, stats):
+        """Encrypt a single field, decrypting v1 first if needed."""
+        value = getattr(record, field_name)
+        if not value:
+            return
+        if value.startswith(ENCRYPTED_PREFIX_V2):
+            stats["skipped"] += 1
+            return
+        if value.startswith(ENCRYPTED_PREFIX_V1):
+            value = decrypt_content(value)
+            stats["re_encrypted"] += 1
+        else:
+            stats["newly_encrypted"] += 1
+        setattr(record, field_name, encrypt_content(value))
+        stats["total"] += 1
+
     app = create_app()
     with app.app_context():
-        # Encrypt Node content
-        print("\nEncrypting Node content...")
-        nodes = Node.query.all()
-        encrypted_count = 0
-        for node in nodes:
-            if node.content and not is_content_encrypted(node.content):
-                node.content = encrypt_content(node.content)
-                encrypted_count += 1
-                if encrypted_count % 100 == 0:
-                    print(f"  Encrypted {encrypted_count} nodes...")
+        models_fields = [
+            (Node, "content", "Node"),
+            (NodeVersion, "content", "NodeVersion"),
+            (Draft, "content", "Draft"),
+            (UserProfile, "content", "UserProfile"),
+            (NodeTranscriptChunk, "text", "NodeTranscriptChunk"),
+        ]
+
+        for model_class, field_name, label in models_fields:
+            print(f"\nEncrypting {label} {field_name}...")
+            records = model_class.query.all()
+            stats = {"total": 0, "newly_encrypted": 0, "re_encrypted": 0, "skipped": 0}
+            for i, record in enumerate(records, 1):
+                encrypt_field(record, field_name, label, stats)
+                if i % 100 == 0:
+                    print(f"  Processed {i} {label} records...")
                     db.session.commit()
-        db.session.commit()
-        print(f"  Total nodes encrypted: {encrypted_count}")
-
-        # Encrypt NodeVersion content
-        print("\nEncrypting NodeVersion content...")
-        versions = NodeVersion.query.all()
-        encrypted_count = 0
-        for version in versions:
-            if version.content and not is_content_encrypted(version.content):
-                version.content = encrypt_content(version.content)
-                encrypted_count += 1
-                if encrypted_count % 100 == 0:
-                    print(f"  Encrypted {encrypted_count} versions...")
-                    db.session.commit()
-        db.session.commit()
-        print(f"  Total versions encrypted: {encrypted_count}")
-
-        # Encrypt Draft content
-        print("\nEncrypting Draft content...")
-        drafts = Draft.query.all()
-        encrypted_count = 0
-        for draft in drafts:
-            if draft.content and not is_content_encrypted(draft.content):
-                draft.content = encrypt_content(draft.content)
-                encrypted_count += 1
-        db.session.commit()
-        print(f"  Total drafts encrypted: {encrypted_count}")
-
-        # Encrypt UserProfile content
-        print("\nEncrypting UserProfile content...")
-        profiles = UserProfile.query.all()
-        encrypted_count = 0
-        for profile in profiles:
-            if profile.content and not is_content_encrypted(profile.content):
-                profile.content = encrypt_content(profile.content)
-                encrypted_count += 1
-        db.session.commit()
-        print(f"  Total profiles encrypted: {encrypted_count}")
-
-        # Encrypt NodeTranscriptChunk text
-        print("\nEncrypting NodeTranscriptChunk text...")
-        chunks = NodeTranscriptChunk.query.all()
-        encrypted_count = 0
-        for chunk in chunks:
-            if chunk.text and not is_content_encrypted(chunk.text):
-                chunk.text = encrypt_content(chunk.text)
-                encrypted_count += 1
-                if encrypted_count % 100 == 0:
-                    print(f"  Encrypted {encrypted_count} chunks...")
-                    db.session.commit()
-        db.session.commit()
-        print(f"  Total chunks encrypted: {encrypted_count}")
+            db.session.commit()
+            print(f"  {label}: {stats['newly_encrypted']} new, "
+                  f"{stats['re_encrypted']} re-encrypted (v1->v2), "
+                  f"{stats['skipped']} already v2")
 
         print("\nDatabase content encryption complete!")
         return True
 
 
 def encrypt_audio_files():
-    """Encrypt all existing audio files using GCP KMS."""
-    from backend.utils.encryption import is_encryption_enabled
+    """Encrypt all existing audio files using envelope encryption."""
+    from backend.utils.encryption import encrypt_file, is_encryption_enabled
 
     if not is_encryption_enabled():
         print("ERROR: Encryption is not enabled!")
@@ -210,12 +190,6 @@ def encrypt_audio_files():
         return True  # Not an error - just no files to encrypt
 
     print(f"\nEncrypting audio files in {audio_dir}...")
-    print("This may take a while for large audio collections...")
-
-    # Import KMS encryption
-    from backend.utils.encryption import _get_kms_client, get_kms_key_name
-    client = _get_kms_client()
-    key_name = get_kms_key_name()
 
     encrypted_count = 0
     skipped_count = 0
@@ -224,43 +198,20 @@ def encrypt_audio_files():
         for filename in files:
             filepath = os.path.join(root, filename)
 
-            # Skip already encrypted files (they have .enc extension)
             if filename.endswith('.enc'):
                 skipped_count += 1
                 continue
 
-            # Skip metadata files
             if filename.endswith('.json'):
                 continue
 
             try:
-                # Read the audio file
-                with open(filepath, 'rb') as f:
-                    plaintext = f.read()
-
-                # Encrypt using KMS
-                response = client.encrypt(
-                    request={
-                        "name": key_name,
-                        "plaintext": plaintext,
-                    }
-                )
-
-                # Write encrypted file with .enc extension
-                encrypted_filepath = filepath + '.enc'
-                with open(encrypted_filepath, 'wb') as f:
-                    f.write(response.ciphertext)
-
-                # Remove original file
-                os.remove(filepath)
-
+                encrypt_file(filepath)
                 encrypted_count += 1
                 if encrypted_count % 10 == 0:
                     print(f"  Encrypted {encrypted_count} audio files...")
-
             except Exception as e:
                 print(f"  ERROR encrypting {filepath}: {e}")
-                # Don't remove original if encryption failed
 
     print(f"  Total audio files encrypted: {encrypted_count}")
     print(f"  Skipped (already encrypted): {skipped_count}")

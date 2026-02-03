@@ -66,8 +66,8 @@ If your VM doesn't already have a dedicated service account, create one:
 
 ```bash
 # Create service account
-gcloud iam service-accounts create loore-vm-sa \
-    --display-name="Loore VM Service Account"
+gcloud iam service-accounts create loore-kms-sa \
+    --display-name="Loore KMS Service Account"
 ```
 
 ## Step 6: Grant KMS Permissions to the Service Account
@@ -77,7 +77,7 @@ gcloud iam service-accounts create loore-vm-sa \
 gcloud kms keys add-iam-policy-binding content-encryption-key \
     --location=us-central1 \
     --keyring=loore-keyring \
-    --member="serviceAccount:loore-vm-sa@dauntless-arc-365912.iam.gserviceaccount.com" \
+    --member="serviceAccount:loore-kms-sa@dauntless-arc-365912.iam.gserviceaccount.com" \
     --role="roles/cloudkms.cryptoKeyEncrypterDecrypter"
 ```
 
@@ -92,7 +92,7 @@ gcloud compute instances stop instance-20250317-165954 --zone=us-central1-c
 # Set the service account on the VM
 gcloud compute instances set-service-account instance-20250317-165954 \
     --zone=us-central1-c \
-    --service-account=loore-vm-sa@dauntless-arc-365912.iam.gserviceaccount.com \
+    --service-account=loore-kms-sa@dauntless-arc-365912.iam.gserviceaccount.com \
     --scopes=https://www.googleapis.com/auth/cloudkms
 
 # Start the VM
@@ -112,30 +112,19 @@ gcloud compute instances list
 
 The only environment variable needed on the production server is the key name. **No credentials file is needed** — the VM authenticates automatically via its attached service account.
 
-```bash
-export GCP_KMS_KEY_NAME="projects/dauntless-arc-365912/locations/us-central1/keyRings/loore-keyring/cryptoKeys/content-encryption-key"
-```
-
-For systemd services, add to your service file:
-```ini
-[Service]
-Environment="GCP_KMS_KEY_NAME=projects/dauntless-arc-365912/locations/us-central1/keyRings/loore-keyring/cryptoKeys/content-encryption-key"
-```
-
-## Step 9: Install the GCP Client Library
-
-The application needs the `google-cloud-kms` library:
+Add to `.env.production` on the server:
 
 ```bash
-pip install google-cloud-kms
+GCP_KMS_KEY_NAME=projects/dauntless-arc-365912/locations/us-central1/keyRings/loore-keyring/cryptoKeys/content-encryption-key
 ```
 
-Add to `requirements.txt`:
-```
-google-cloud-kms>=2.0.0
+Then restart the services:
+
+```bash
+sudo systemctl restart write-or-perish write-or-perish-celery
 ```
 
-## Step 10: Verify Authentication
+## Step 9: Verify Authentication
 
 SSH into the VM and verify the service account is attached:
 
@@ -144,7 +133,7 @@ SSH into the VM and verify the service account is attached:
 curl -H "Metadata-Flavor: Google" \
     http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email
 
-# Should print: loore-vm-sa@dauntless-arc-365912.iam.gserviceaccount.com
+# Should print: loore-kms-sa@dauntless-arc-365912.iam.gserviceaccount.com
 ```
 
 ---
