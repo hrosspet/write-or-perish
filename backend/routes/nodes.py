@@ -24,7 +24,7 @@ from backend.utils.privacy import (
 from backend.utils.quotes import find_quote_ids, get_quote_data, has_quotes
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.webm_utils import get_webm_duration
-from backend.utils.encryption import encrypt_file
+from backend.utils.encryption import encrypt_file, decrypt_file_to_temp
 
 # ---------------------------------------------------------------------------
 # Voice‑Mode helpers
@@ -834,10 +834,22 @@ def get_audio_urls(node_id):
     original_url = node.audio_original_url if _media_file_exists(node.audio_original_url) else None
     tts_url = node.audio_tts_url if _media_file_exists(node.audio_tts_url) else None
 
-    if original_url or tts_url:
+    # Check if audio chunks exist (streaming transcription nodes)
+    has_audio_chunks = False
+    if node.streaming_transcription:
+        chunk_dir = AUDIO_STORAGE_ROOT / f"nodes/{node.user_id}/{node_id}"
+        if chunk_dir.exists():
+            has_chunks = (
+                list(chunk_dir.glob("chunk_*.webm")) or
+                list(chunk_dir.glob("chunk_*.webm.enc"))
+            )
+            has_audio_chunks = bool(has_chunks)
+
+    if original_url or tts_url or has_audio_chunks:
         return jsonify({
             "original_url": original_url,
             "tts_url": tts_url,
+            "has_audio_chunks": has_audio_chunks,
         }), 200
 
     # Check if TTS generation is in progress
@@ -903,9 +915,23 @@ def get_audio_chunks(node_id):
         if fname.endswith('.enc'):
             fname = fname[:-4]
         url = f"/media/nodes/{node.user_id}/{node_id}/{fname}"
-        # Duration: skip for encrypted files (ffprobe can't read them)
+        # For encrypted files, decrypt to temp file to get accurate duration
         if f.name.endswith('.enc'):
-            duration = 300.0
+            temp_path = None
+            try:
+                temp_path = decrypt_file_to_temp(str(f))
+                duration = get_webm_duration(temp_path)
+                if duration is None:
+                    duration = 300.0
+            except Exception as e:
+                current_app.logger.warning(f"Failed to get duration for encrypted chunk {f.name}: {e}")
+                duration = 300.0
+            finally:
+                if temp_path:
+                    try:
+                        os.unlink(temp_path)
+                    except OSError:
+                        pass
         else:
             duration = get_webm_duration(str(f))
             if duration is None:

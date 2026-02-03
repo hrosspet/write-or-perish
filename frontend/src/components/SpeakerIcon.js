@@ -113,6 +113,7 @@ const SpeakerIcon = ({ nodeId, profileId, content }) => {
       // Attempt to fetch existing audio URLs
       let original_url = null;
       let tts_url = null;
+      let has_audio_chunks = false;
       try {
         const res = await api.get(`${baseUrl}/audio`, {
           validateStatus: (status) => status === 200 || status === 404
@@ -120,6 +121,7 @@ const SpeakerIcon = ({ nodeId, profileId, content }) => {
         if (res.status === 200) {
           original_url = res.data.original_url;
           tts_url = res.data.tts_url;
+          has_audio_chunks = res.data.has_audio_chunks || false;
         }
         // If status is 404, both remain null (no audio exists yet)
       } catch (getErr) {
@@ -127,7 +129,33 @@ const SpeakerIcon = ({ nodeId, profileId, content }) => {
         console.error('Error checking for audio:', getErr);
       }
 
-      // Prefer original recording over TTS
+      // Prefer original recording (including audio chunks) over TTS
+      // If audio chunks exist, try loading them before falling back to TTS
+      if (has_audio_chunks && isNode) {
+        try {
+          const chunksRes = await api.get(`${baseUrl}/audio-chunks`, {
+            validateStatus: (status) => status === 200 || status === 404
+          });
+          if (chunksRes.status === 200 && chunksRes.data.chunks?.length > 0) {
+            const chunksData = chunksRes.data.chunks;
+            const chunkUrls = chunksData.map(chunk => {
+              const url = typeof chunk === 'string' ? chunk : chunk.url;
+              return url.startsWith('http') ? url : `${process.env.REACT_APP_BACKEND_URL}${url}`;
+            });
+            const chunkDurations = chunksData.map(chunk =>
+              typeof chunk === 'object' && chunk.duration != null ? chunk.duration : null
+            );
+            setAudioChunks(chunkUrls);
+            setAudioChunkDurations(chunkDurations);
+            setLoading(false);
+            await loadAudioQueue(chunkUrls, { title: fullTitle, id, type: 'node' }, chunkDurations);
+            return;
+          }
+        } catch (chunksErr) {
+          console.error('Error loading audio chunks:', chunksErr);
+        }
+      }
+
       let urlPath = original_url || tts_url;
 
       if (!urlPath && isNode) {
