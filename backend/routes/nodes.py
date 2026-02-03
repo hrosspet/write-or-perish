@@ -821,11 +821,23 @@ def get_audio_urls(node_id):
     """
     node = Node.query.get_or_404(node_id)
 
-    # If any audio exists, return it
-    if node.audio_original_url or node.audio_tts_url:
+    def _media_file_exists(url):
+        """Check if the file (or its .enc version) exists on disk."""
+        if not url:
+            return False
+        rel_path = url.replace("/media/", "", 1)
+        file_path = AUDIO_STORAGE_ROOT / rel_path
+        enc_path = AUDIO_STORAGE_ROOT / (rel_path + '.enc')
+        return file_path.is_file() or enc_path.is_file()
+
+    # Only return URLs for files that actually exist on disk
+    original_url = node.audio_original_url if _media_file_exists(node.audio_original_url) else None
+    tts_url = node.audio_tts_url if _media_file_exists(node.audio_tts_url) else None
+
+    if original_url or tts_url:
         return jsonify({
-            "original_url": node.audio_original_url,
-            "tts_url": node.audio_tts_url,
+            "original_url": original_url,
+            "tts_url": tts_url,
         }), 200
 
     # Check if TTS generation is in progress
