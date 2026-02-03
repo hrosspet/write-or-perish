@@ -15,7 +15,7 @@ from datetime import datetime
 from backend.celery_app import celery, flask_app
 from backend.models import Node, UserProfile, TTSChunk
 from backend.extensions import db
-from backend.utils.audio_processing import chunk_text
+from backend.utils.audio_processing import chunk_text, adaptive_chunk_text
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.encryption import encrypt_file
 
@@ -120,8 +120,9 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str):
             node.tts_task_progress = 30
             db.session.commit()
 
-            chunks = chunk_text(text, max_chars=4096)
-            logger.info(f"Text split into {len(chunks)} chunks for TTS")
+            chunks = adaptive_chunk_text(text)
+            logger.info(f"Text split into {len(chunks)} chunks for TTS "
+                         f"(sizes: {[len(c) for c in chunks]})")
 
             # Step 3: Generate TTS (40% -> 90% progress)
             # Create TTSChunk records for streaming playback

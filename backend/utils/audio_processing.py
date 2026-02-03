@@ -135,10 +135,49 @@ def chunk_audio(file_path: pathlib.Path, chunk_duration_sec: int = CHUNK_DURATIO
         return []
 
 
+def _split_at_sentence(text: str, max_chars: int) -> int:
+    """
+    Find the last sentence boundary within max_chars.
+    Never splits mid-sentence. Returns the number of characters to include.
+
+    Looks for sentence-ending punctuation (.!?) followed by whitespace or
+    end-of-string. Always finds a sentence boundary — only falls back to
+    max_chars if the entire text within the limit is a single sentence
+    (no sentence boundary found at all).
+    """
+    if len(text) <= max_chars:
+        return len(text)
+
+    chunk = text[:max_chars]
+
+    # Find the last sentence boundary: punctuation followed by space or newline
+    # Search from the end backwards for the best split point
+    best = -1
+    for i in range(len(chunk) - 1, 0, -1):
+        if chunk[i] in '.!?' and (i + 1 >= len(chunk) or chunk[i + 1] in ' \n\r\t'):
+            best = i + 1  # Include the punctuation
+            break
+
+    if best > 0:
+        # Skip any trailing whitespace after the punctuation
+        while best < len(chunk) and chunk[best] in ' \n\r\t':
+            best += 1
+        return best
+
+    # No sentence boundary found — this is one very long sentence.
+    # Fall back to word boundary as last resort to avoid splitting a word.
+    split_point = chunk.rfind(' ')
+    if split_point > 0:
+        return split_point
+
+    return max_chars
+
+
 def chunk_text(text: str, max_chars: int = 4096) -> list:
     """
     Split text into chunks for TTS generation.
-    Tries to split on sentence boundaries when possible.
+    Always splits at sentence boundaries — never mid-sentence.
+    max_chars is the TTS model's input limit (4096 for gpt-4o-mini-tts).
     """
     if len(text) <= max_chars:
         return [text]
@@ -151,24 +190,62 @@ def chunk_text(text: str, max_chars: int = 4096) -> list:
             chunks.append(remaining)
             break
 
-        # Try to find a sentence boundary within the limit
-        chunk = remaining[:max_chars]
+        split_point = _split_at_sentence(remaining, max_chars)
+        chunks.append(remaining[:split_point].strip())
+        remaining = remaining[split_point:].strip()
 
-        # Look for sentence endings (period, question mark, exclamation)
-        last_period = max(chunk.rfind('. '), chunk.rfind('.\n'))
-        last_question = max(chunk.rfind('? '), chunk.rfind('?\n'))
-        last_exclaim = max(chunk.rfind('! '), chunk.rfind('!\n'))
+    return chunks
 
-        split_point = max(last_period, last_question, last_exclaim)
 
-        if split_point > max_chars * 0.5:  # Only split on sentence if it's not too early
-            split_point += 2  # Include the punctuation and space/newline
-        else:
-            # Fall back to word boundary
-            split_point = chunk.rfind(' ')
-            if split_point == -1:
-                split_point = max_chars
+# TTS model input limit
+TTS_MAX_CHARS = 4096
 
+
+def adaptive_chunk_text(text: str, first_chunk_gen_secs: float = 10.0) -> list:
+    """
+    Split text into chunks for streaming TTS with a small first chunk.
+
+    The first chunk is small enough to generate within first_chunk_gen_secs,
+    so playback can start quickly. All subsequent chunks use the full model
+    limit (4096 chars) to minimize the number of stitches.
+
+    Based on benchmarked rates for gpt-4o-mini-tts:
+      - Generation: ~106 chars/s (4096 chars in ~39s)
+      - Audio output: ~0.062s of audio per char (~254s per 4096-char chunk)
+      - First chunk of ~1060 chars generates in ~10s, plays for ~66s
+      - Second chunk of 4096 chars generates in ~39s — ready before first
+        chunk finishes playing (39s < 66s)
+
+    All splits happen at sentence boundaries — never mid-sentence.
+
+    Args:
+        text: Full text to split
+        first_chunk_gen_secs: Target generation time for the first chunk (seconds)
+    """
+    gen_chars_per_sec = 106.0  # benchmarked for gpt-4o-mini-tts
+
+    # First chunk: sized to generate within target time, capped at model limit
+    first_chunk_chars = min(int(first_chunk_gen_secs * gen_chars_per_sec),
+                           TTS_MAX_CHARS)  # ~1060
+
+    if len(text) <= first_chunk_chars:
+        return [text]
+
+    chunks = []
+    remaining = text
+
+    # First chunk: small for quick start
+    split_point = _split_at_sentence(remaining, first_chunk_chars)
+    chunks.append(remaining[:split_point].strip())
+    remaining = remaining[split_point:].strip()
+
+    # Remaining chunks: use full model limit
+    while remaining:
+        if len(remaining) <= TTS_MAX_CHARS:
+            chunks.append(remaining)
+            break
+
+        split_point = _split_at_sentence(remaining, TTS_MAX_CHARS)
         chunks.append(remaining[:split_point].strip())
         remaining = remaining[split_point:].strip()
 
