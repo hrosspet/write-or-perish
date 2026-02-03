@@ -75,7 +75,7 @@ def _reset_kms_client():
         _kms_client = None
 
 
-def _cache_get(wrapped_dek_b64: str) -> bytes | None:
+def _cache_get(wrapped_dek_b64: str):
     """Look up a DEK in the in-memory cache."""
     with _dek_cache_lock:
         return _dek_cache.get(wrapped_dek_b64)
