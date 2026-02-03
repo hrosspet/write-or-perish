@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import api from "../api";
@@ -38,8 +38,6 @@ function Dashboard() {
   const [hasMoreNodes, setHasMoreNodes] = useState(false);
   const [nodesPage, setNodesPage] = useState(1);
   const [loadingMoreNodes, setLoadingMoreNodes] = useState(false);
-  const nodeObserverRef = useRef();
-  const nodeSentinelRef = useRef();
 
   const navigate = useNavigate();
   const backendUrl = process.env.REACT_APP_BACKEND_URL;
@@ -294,26 +292,23 @@ function Dashboard() {
       });
   }, [endpoint]);
 
-  // Infinite scroll for nodes
+  // Auto-load on scroll near bottom
   useEffect(() => {
-    if (loading || loadingMoreNodes || !hasMoreNodes) return;
+    if (!hasMoreNodes || loading || loadingMoreNodes) return;
 
-    if (nodeObserverRef.current) nodeObserverRef.current.disconnect();
-
-    nodeObserverRef.current = new IntersectionObserver(entries => {
-      if (entries[0].isIntersecting) {
+    const handleScroll = () => {
+      const scrollBottom = window.innerHeight + window.scrollY;
+      const docHeight = document.documentElement.scrollHeight;
+      if (docHeight - scrollBottom < 300) {
         fetchMoreNodes(nodesPage + 1);
       }
-    }, { rootMargin: "200px" });
-
-    if (nodeSentinelRef.current) {
-      nodeObserverRef.current.observe(nodeSentinelRef.current);
-    }
-
-    return () => {
-      if (nodeObserverRef.current) nodeObserverRef.current.disconnect();
     };
-  }, [loading, loadingMoreNodes, hasMoreNodes, nodesPage, fetchMoreNodes]);
+
+    window.addEventListener("scroll", handleScroll, { passive: true });
+    handleScroll();
+
+    return () => window.removeEventListener("scroll", handleScroll);
+  }, [hasMoreNodes, loading, loadingMoreNodes, nodesPage, fetchMoreNodes]);
 
 
   if (loading) return <div>Loading dashboard...</div>;
@@ -709,7 +704,14 @@ function Dashboard() {
         ))}
       </div>
       {loadingMoreNodes && <div style={{ padding: "20px", textAlign: "center", color: "#888" }}>Loading more...</div>}
-      {hasMoreNodes && <div ref={nodeSentinelRef} style={{ height: "20px" }} />}
+      {hasMoreNodes && !loadingMoreNodes && (
+        <div
+          style={{ padding: "20px", textAlign: "center", cursor: "pointer", color: "#888" }}
+          onClick={() => fetchMoreNodes(nodesPage + 1)}
+        >
+          Load more...
+        </div>
+      )}
     </div>
   );
 }

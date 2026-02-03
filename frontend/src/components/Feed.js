@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import api from "../api";
 import Bubble from "./Bubble";
@@ -11,8 +11,6 @@ function Feed() {
   const [hasMore, setHasMore] = useState(false);
   const [page, setPage] = useState(1);
   const navigate = useNavigate();
-  const observerRef = useRef();
-  const sentinelRef = useRef();
 
   const fetchPage = useCallback((pageNum) => {
     const isFirst = pageNum === 1;
@@ -40,26 +38,24 @@ function Feed() {
     fetchPage(1);
   }, [fetchPage]);
 
-  // Infinite scroll via IntersectionObserver
+  // Auto-load on scroll near bottom
   useEffect(() => {
-    if (loading || loadingMore || !hasMore) return;
+    if (!hasMore || loading || loadingMore) return;
 
-    if (observerRef.current) observerRef.current.disconnect();
-
-    observerRef.current = new IntersectionObserver(entries => {
-      if (entries[0].isIntersecting) {
+    const handleScroll = () => {
+      const scrollBottom = window.innerHeight + window.scrollY;
+      const docHeight = document.documentElement.scrollHeight;
+      if (docHeight - scrollBottom < 300) {
         fetchPage(page + 1);
       }
-    }, { rootMargin: "200px" });
-
-    if (sentinelRef.current) {
-      observerRef.current.observe(sentinelRef.current);
-    }
-
-    return () => {
-      if (observerRef.current) observerRef.current.disconnect();
     };
-  }, [loading, loadingMore, hasMore, page, fetchPage]);
+
+    window.addEventListener("scroll", handleScroll, { passive: true });
+    // Check immediately in case content doesn't fill the viewport
+    handleScroll();
+
+    return () => window.removeEventListener("scroll", handleScroll);
+  }, [hasMore, loading, loadingMore, page, fetchPage]);
 
   const handleBubbleClick = (nodeId) => {
     navigate(`/node/${nodeId}`);
@@ -77,7 +73,14 @@ function Feed() {
         ))}
       </div>
       {loadingMore && <div style={{ padding: "20px", textAlign: "center", color: "#888" }}>Loading more...</div>}
-      {hasMore && <div ref={sentinelRef} style={{ height: "20px" }} />}
+      {hasMore && !loadingMore && (
+        <div
+          style={{ padding: "20px", textAlign: "center", cursor: "pointer", color: "#888" }}
+          onClick={() => fetchPage(page + 1)}
+        >
+          Load more...
+        </div>
+      )}
     </div>
   );
 }
