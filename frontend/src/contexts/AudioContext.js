@@ -23,7 +23,12 @@ export const AudioProvider = ({ children }) => {
   const [chunkDurations, setChunkDurations] = useState([]);
   const [totalDuration, setTotalDuration] = useState(0);
   const [cumulativeTime, setCumulativeTime] = useState(0);
-  const [generatingTTS, setGeneratingTTS] = useState(false);
+  const [generatingTTS, _setGeneratingTTS] = useState(false);
+  const generatingTTSRef = useRef(false);
+  const setGeneratingTTS = useCallback((value) => {
+    generatingTTSRef.current = value;
+    _setGeneratingTTS(value);
+  }, []);
   // Track whether playback ended while waiting for more chunks
   const waitingForChunksRef = useRef(false);
   const audioRef = useRef(null);
@@ -339,7 +344,7 @@ export const AudioProvider = ({ children }) => {
       if (queue.length > 0) {
         const nextIndex = chunkIndex + 1;
         playChunkAtTime(nextIndex, 0, true);
-      } else if (generatingTTS) {
+      } else if (generatingTTSRef.current) {
         // Queue empty but TTS still generating - wait for more chunks
         waitingForChunksRef.current = true;
         setIsPlaying(false);
@@ -380,7 +385,7 @@ export const AudioProvider = ({ children }) => {
     if (shouldAutoPlay) {
       audio.play().catch(err => console.error('Error playing chunk:', err));
     }
-  }, [playbackRate, calculateCumulativeTime, startTimeTracking, stopTimeTracking, recalculateTotalDuration, cleanupAudio, generatingTTS]);
+  }, [playbackRate, calculateCumulativeTime, startTimeTracking, stopTimeTracking, recalculateTotalDuration, cleanupAudio]);
 
   const loadAudio = useCallback(async (audioData) => {
     // If there's already audio playing, pause it first
