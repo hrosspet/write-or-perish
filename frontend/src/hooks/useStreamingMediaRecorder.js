@@ -114,6 +114,9 @@ export function useStreamingMediaRecorder({
       chunkIndexRef.current = 0;
 
       mediaRecorder.ondataavailable = async (e) => {
+        const recorderState = recorderRef.current?.state || 'unknown';
+        console.log(`[StreamingRecorder] ondataavailable fired: size=${e.data?.size || 0}, recorderState=${recorderState}, timeSinceStart=${Date.now() - startTimeRef.current}ms`);
+
         if (e.data && e.data.size > 0) {
           chunksRef.current.push(e.data);
 
@@ -145,12 +148,16 @@ export function useStreamingMediaRecorder({
               }
             }
 
+            console.log(`[StreamingRecorder] Chunk ${chunkIndex} ready: blobSize=${chunkBlob.size}, rawSize=${e.data.size}, totalChunks=${chunksRef.current.length}`);
             onChunkReady(chunkBlob, chunkIndex);
           }
+        } else {
+          console.warn(`[StreamingRecorder] ondataavailable with empty data: size=${e.data?.size}, recorderState=${recorderState}`);
         }
       };
 
       mediaRecorder.onstop = () => {
+        console.log(`[StreamingRecorder] onstop fired: totalChunks=${chunksRef.current.length}, chunkIndex=${chunkIndexRef.current}`);
         // Combine all chunks into final blob
         const blob = new Blob(chunksRef.current, { type: mediaRecorder.mimeType });
         const url = URL.createObjectURL(blob);
@@ -200,8 +207,10 @@ export function useStreamingMediaRecorder({
 
   const stopRecording = useCallback(() => {
     if (recorderRef.current && recorderRef.current.state === 'recording') {
-      // Request final data before stopping
-      recorderRef.current.requestData();
+      console.log(`[StreamingRecorder] stopRecording called: chunksRef.length=${chunksRef.current.length}, chunkIndex=${chunkIndexRef.current}`);
+      // stop() fires a final ondataavailable with all remaining data, then onstop.
+      // Do NOT call requestData() before stop() — it creates a race condition
+      // where the final chunk's ondataavailable may not fire reliably.
       recorderRef.current.stop();
     }
   }, []);

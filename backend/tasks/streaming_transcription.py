@@ -518,6 +518,17 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int):
             # Refresh the session to get updated data
             db.session.expire_all()
 
+        # Log whether we exited by completion or timeout
+        if elapsed >= max_wait_seconds:
+            logger.warning(
+                f"Session {session_id}: TIMED OUT after {elapsed}s waiting for chunks. "
+                f"Expected {total_chunks}, got {len(completed)} completed + {len(failed)} failed"
+            )
+        else:
+            logger.info(
+                f"Session {session_id}: All chunks processed in {elapsed}s"
+            )
+
         # Get final chunk status
         chunks = NodeTranscriptChunk.query.filter_by(session_id=session_id).order_by(
             NodeTranscriptChunk.chunk_index
