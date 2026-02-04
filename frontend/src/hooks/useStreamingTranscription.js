@@ -4,6 +4,37 @@ import { useDraftTranscriptionSSE } from './useSSE';
 import api from '../api';
 
 /**
+ * Play an error sound using the Web Audio API.
+ * Uses two descending tones to create an unmistakable "error" alert.
+ */
+function playErrorSound() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const playTone = (freq, startTime, duration) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.frequency.value = freq;
+      osc.type = 'square';
+      gain.gain.setValueAtTime(0.15, startTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, startTime + duration);
+      osc.start(startTime);
+      osc.stop(startTime + duration);
+    };
+    const now = ctx.currentTime;
+    playTone(660, now, 0.15);
+    playTone(440, now + 0.18, 0.15);
+    playTone(330, now + 0.36, 0.25);
+    // Close context after sounds finish
+    setTimeout(() => ctx.close(), 1000);
+  } catch (e) {
+    // Audio not available - silently ignore
+    console.warn('[StreamingTranscription] Could not play error sound:', e);
+  }
+}
+
+/**
  * useStreamingTranscription - Complete streaming transcription workflow (Draft-based).
  *
  * This hook orchestrates the entire streaming transcription process using drafts:
@@ -49,34 +80,75 @@ export function useStreamingTranscription(options = {}) {
   const sessionIdRef = useRef(null);
   const draftIdRef = useRef(null);
   const totalChunksRef = useRef(0);
+  const pendingUploadsRef = useRef([]); // Track in-flight upload promises
+  const failedChunksRef = useRef([]); // Track chunks that failed all retries
+
+  // Network status
+  const [isOffline, setIsOffline] = useState(!navigator.onLine);
+
+  /**
+   * Upload a single chunk with exponential backoff retry.
+   * Returns true on success, false if all retries exhausted.
+   */
+  const uploadChunkWithRetry = useCallback(async (blob, chunkIndex, sessionId) => {
+    const maxRetries = 4;
+    const baseDelay = 2000; // 2 seconds
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const formData = new FormData();
+        formData.append('chunk', blob, `chunk_${chunkIndex}.webm`);
+        formData.append('chunk_index', chunkIndex.toString());
+
+        await api.post(`/drafts/streaming/${sessionId}/audio-chunk`, formData, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+          timeout: 600000,
+        });
+
+        console.log(`[StreamingTranscription] Upload complete: chunk=${chunkIndex}` + (attempt > 0 ? ` (after ${attempt} retries)` : ''));
+        return true;
+      } catch (err) {
+        if (attempt < maxRetries) {
+          const delay = baseDelay * Math.pow(2, attempt); // 2s, 4s, 8s, 16s
+          console.warn(`[StreamingTranscription] Upload failed (attempt ${attempt + 1}/${maxRetries + 1}): chunk=${chunkIndex}, retrying in ${delay}ms...`, err.message);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        } else {
+          console.error(`[StreamingTranscription] Upload FAILED after ${maxRetries + 1} attempts: chunk=${chunkIndex}`, err);
+          return false;
+        }
+      }
+    }
+    return false;
+  }, []);
 
   // Handle chunk upload
   const uploadChunk = useCallback(async (blob, chunkIndex) => {
     if (!sessionIdRef.current) {
-      console.error('Cannot upload chunk: session not initialized');
+      console.error('[StreamingTranscription] Cannot upload chunk: session not initialized');
       return;
     }
 
-    try {
-      const formData = new FormData();
-      formData.append('chunk', blob, `chunk_${chunkIndex}.webm`);
-      formData.append('chunk_index', chunkIndex.toString());
+    const sessionId = sessionIdRef.current;
+    console.log(`[StreamingTranscription] Starting upload: chunk=${chunkIndex}, blobSize=${blob.size}, session=${sessionId}`);
 
-      await api.post(`/drafts/streaming/${sessionIdRef.current}/audio-chunk`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-        timeout: 600000, // 10 minutes - generous buffer for 5-min audio chunks on slow connections
-      });
+    const uploadPromise = (async () => {
+      const success = await uploadChunkWithRetry(blob, chunkIndex, sessionId);
 
-      setUploadedChunks(prev => prev + 1);
-      totalChunksRef.current = Math.max(totalChunksRef.current, chunkIndex + 1);
-
-    } catch (err) {
-      console.error('Failed to upload chunk:', err);
-      if (onError) {
-        onError(err);
+      if (success) {
+        setUploadedChunks(prev => prev + 1);
+        totalChunksRef.current = Math.max(totalChunksRef.current, chunkIndex + 1);
+      } else {
+        // Store failed chunk for retry when network returns
+        failedChunksRef.current.push({ blob, chunkIndex, sessionId });
+        playErrorSound();
+        if (onError) {
+          onError(new Error(`Failed to upload chunk ${chunkIndex} after retries`));
+        }
       }
-    }
-  }, [onError]);
+    })();
+
+    pendingUploadsRef.current.push(uploadPromise);
+  }, [onError, uploadChunkWithRetry]);
 
   // Streaming media recorder
   const {
@@ -90,6 +162,7 @@ export function useStreamingTranscription(options = {}) {
     stopRecording: stopMediaRecorder,
     resetRecording: resetMediaRecorder,
     getTotalChunks,
+    getPartialBlob,
   } = useStreamingMediaRecorder({
     chunkIntervalMs,
     onChunkReady: uploadChunk,
@@ -128,6 +201,7 @@ export function useStreamingTranscription(options = {}) {
     },
     onError: (data) => {
       console.error('Transcription error:', data);
+      playErrorSound();
       if (onError) {
         onError(new Error(data.error || 'Transcription failed'));
       }
@@ -151,6 +225,48 @@ export function useStreamingTranscription(options = {}) {
       setTranscript(finalContent);
     }
   }, [transcriptionComplete, finalContent]);
+
+  // Online/offline detection and retry failed chunks
+  useEffect(() => {
+    const handleOnline = async () => {
+      setIsOffline(false);
+      console.log('[StreamingTranscription] Network back online');
+
+      // Retry failed chunks
+      if (failedChunksRef.current.length > 0) {
+        console.log(`[StreamingTranscription] Retrying ${failedChunksRef.current.length} failed chunks...`);
+        const chunksToRetry = [...failedChunksRef.current];
+        failedChunksRef.current = [];
+
+        for (const { blob, chunkIndex, sessionId } of chunksToRetry) {
+          const success = await uploadChunkWithRetry(blob, chunkIndex, sessionId);
+          if (success) {
+            setUploadedChunks(prev => prev + 1);
+            totalChunksRef.current = Math.max(totalChunksRef.current, chunkIndex + 1);
+          } else {
+            // Still failing — put it back
+            failedChunksRef.current.push({ blob, chunkIndex, sessionId });
+          }
+        }
+
+        if (failedChunksRef.current.length > 0) {
+          console.warn(`[StreamingTranscription] ${failedChunksRef.current.length} chunks still failing after online retry`);
+        }
+      }
+    };
+
+    const handleOffline = () => {
+      setIsOffline(true);
+      console.log('[StreamingTranscription] Network went offline');
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [uploadChunkWithRetry]);
 
   // Initialize streaming session (creates draft, NOT node)
   const initSession = useCallback(async () => {
@@ -203,15 +319,26 @@ export function useStreamingTranscription(options = {}) {
 
   // Stop streaming and finalize
   const stopStreaming = useCallback(async () => {
-    // Stop recording first
+    console.log(`[StreamingTranscription] stopStreaming called: session=${sessionIdRef.current}, pendingUploads=${pendingUploadsRef.current.length}`);
+
+    // Stop recording first — this triggers a final ondataavailable with remaining audio
     stopMediaRecorder();
     setSessionState('finalizing');
 
-    // Wait a moment for final chunk to be captured
-    await new Promise(resolve => setTimeout(resolve, 500));
+    // Wait for the final ondataavailable event to fire and push to chunksRef.
+    // The event is async (queued in the event loop after stop()), so we need
+    // to yield control back to the event loop before reading the chunk count.
+    await new Promise(resolve => setTimeout(resolve, 100));
 
-    // Get total chunks
+    // Now wait for ALL pending uploads to complete (including the final chunk's upload)
+    // This replaces the old blind 500ms timeout with an actual guarantee.
+    const uploadsToWait = [...pendingUploadsRef.current];
+    console.log(`[StreamingTranscription] Waiting for ${uploadsToWait.length} pending uploads to complete...`);
+    await Promise.allSettled(uploadsToWait);
+
+    // Get total chunks — should now include the final chunk
     const totalChunks = getTotalChunks();
+    console.log(`[StreamingTranscription] All uploads settled. totalChunks=${totalChunks}, uploadedChunks=${totalChunksRef.current}`);
 
     try {
       // Call finalize endpoint
@@ -221,11 +348,13 @@ export function useStreamingTranscription(options = {}) {
         timeout: 120000, // 2 minutes for finalize (just queues the task)
       });
 
+      console.log(`[StreamingTranscription] Finalize request sent: total_chunks=${totalChunks}`);
       // SSE will notify when complete
       // Keep finalizing state until SSE signals completion
 
     } catch (err) {
-      console.error('Failed to finalize streaming:', err);
+      console.error(`[StreamingTranscription] Finalize FAILED:`, err);
+      playErrorSound();
       setErrorMessage(err.message);
       if (onError) {
         onError(err);
@@ -271,6 +400,8 @@ export function useStreamingTranscription(options = {}) {
     draftIdRef.current = null;
     sessionIdRef.current = null;
     totalChunksRef.current = 0;
+    pendingUploadsRef.current = [];
+    failedChunksRef.current = [];
   }, [disconnectSSE, resetMediaRecorder, resetSSE]);
 
   return {
@@ -289,6 +420,7 @@ export function useStreamingTranscription(options = {}) {
     // Connection status
     isRecording: recorderStatus === 'recording',
     isSSEConnected: sseConnected,
+    isOffline,
 
     // Media
     mediaBlob,
@@ -299,5 +431,6 @@ export function useStreamingTranscription(options = {}) {
     stopStreaming,
     saveAsNode,
     cancelStreaming,
+    getPartialBlob,
   };
 }

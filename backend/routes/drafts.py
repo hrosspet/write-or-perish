@@ -357,8 +357,13 @@ def upload_streaming_chunk(session_id):
     transcript_chunk.status = 'processing'
     db.session.commit()
 
+    # Count total chunks in DB for this session for debugging
+    total_db_chunks = NodeTranscriptChunk.query.filter_by(session_id=session_id).count()
     current_app.logger.info(
         f"Received audio chunk {chunk_index} for session {session_id}, "
+        f"file_size={chunk_path.stat().st_size if chunk_path.exists() else 'N/A'}, "
+        f"encrypted_path={encrypted_path}, "
+        f"total_db_chunks={total_db_chunks}, "
         f"enqueued transcription task {task.id}"
     )
 
@@ -415,9 +420,13 @@ def finalize_streaming(session_id):
         total_chunks=total_chunks
     )
 
+    # Log chunk status at time of finalize request
+    existing_chunks = NodeTranscriptChunk.query.filter_by(session_id=session_id).all()
+    chunk_summary = [(c.chunk_index, c.status) for c in existing_chunks]
     current_app.logger.info(
         f"Finalizing streaming session {session_id}, "
-        f"total_chunks: {total_chunks}, task: {task.id}"
+        f"total_chunks: {total_chunks}, task: {task.id}, "
+        f"existing_chunks_in_db: {chunk_summary}"
     )
 
     return jsonify({
