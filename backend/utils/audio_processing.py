@@ -62,7 +62,14 @@ def compress_audio_if_needed(file_path: pathlib.Path, logger=None) -> pathlib.Pa
 
 
 def get_audio_duration(file_path: pathlib.Path, logger=None) -> float:
-    """Get audio duration in seconds."""
+    """Get audio duration in seconds.
+
+    Tries ffprobe directly first. If that fails (common with WebM files from
+    browser MediaRecorder that lack duration metadata), remuxes to a temp file
+    with ``ffmpeg -c copy`` and reads the duration from the remuxed output.
+    This avoids the old pydub fallback which loaded the entire file into memory
+    and could OOM-kill the Celery worker on large files.
+    """
     if logger is None:
         logger = current_app.logger
 
@@ -71,14 +78,34 @@ def get_audio_duration(file_path: pathlib.Path, logger=None) -> float:
         probe = ffmpeg.probe(str(file_path))
         return float(probe['format']['duration'])
     except (ffmpeg.Error, KeyError, TypeError) as e:
-        logger.error(f"Failed to get audio duration with ffprobe: {e}")
-        # Fallback to pydub for safety
+        logger.warning(f"ffprobe failed to get duration directly: {e}")
+
+    # Fallback: remux with ffmpeg (stream copy, no re-encoding) to produce
+    # a file with correct duration metadata, then read it with ffprobe.
+    # Same approach used in webm_utils.fix_webm_duration().
+    from backend.utils.webm_utils import get_webm_duration
+    try:
+        fd, temp_path = tempfile.mkstemp(suffix=file_path.suffix)
+        os.close(fd)
         try:
-            audio = AudioSegment.from_file(str(file_path))
-            return len(audio) / 1000.0
-        except Exception as e_pydub:
-            logger.error(f"Pydub fallback also failed: {e_pydub}")
-            return 0.0
+            import subprocess
+            result = subprocess.run(
+                ['ffmpeg', '-y', '-i', str(file_path), '-c', 'copy', temp_path],
+                capture_output=True, text=True, timeout=120
+            )
+            if result.returncode == 0:
+                duration = get_webm_duration(temp_path)
+                if duration is not None:
+                    logger.info(f"Got duration via remux fallback: {duration:.1f}s")
+                    return duration
+            logger.error(f"Remux fallback failed: {result.stderr[:200] if result.stderr else 'unknown'}")
+        finally:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+    except Exception as e_remux:
+        logger.error(f"Remux fallback also failed: {e_remux}")
+
+    return 0.0
 
 
 def chunk_audio(file_path: pathlib.Path, chunk_duration_sec: int = CHUNK_DURATION_SEC, logger=None) -> list:
