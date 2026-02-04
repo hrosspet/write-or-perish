@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect } from 'react';
+import React, { useCallback, useEffect, useMemo } from 'react';
 import { useStreamingTranscription } from '../hooks/useStreamingTranscription';
 
 /**
@@ -30,9 +30,12 @@ export default function StreamingMicButton({
   const {
     sessionState,
     duration,
+    mediaBlob,
+    isOffline,
     startStreaming,
     stopStreaming,
     cancelStreaming,
+    getPartialBlob,
   } = useStreamingTranscription({
     parentId,
     privacyLevel,
@@ -53,6 +56,23 @@ export default function StreamingMicButton({
       return () => clearTimeout(timer);
     }
   }, [sessionState, cancelStreaming]);
+
+  const handleDownload = useCallback(() => {
+    const blob = mediaBlob || getPartialBlob();
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `recording-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.webm`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [mediaBlob, getPartialBlob]);
+
+  const showDownload = useMemo(() => {
+    return ['recording', 'finalizing', 'complete', 'error'].includes(sessionState);
+  }, [sessionState]);
 
   const handleClick = useCallback(() => {
     if (sessionState === 'idle') {
@@ -132,20 +152,55 @@ export default function StreamingMicButton({
   };
 
   return (
-    <button
-      type="button"
-      onClick={handleClick}
-      disabled={disabled || sessionState === 'initializing' || sessionState === 'finalizing'}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: '6px',
-        padding: '8px 16px',
-        cursor: disabled || sessionState === 'initializing' || sessionState === 'finalizing' ? 'not-allowed' : 'pointer',
-      }}
-    >
-      {getButtonContent()}
-    </button>
+    <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-start', gap: '4px' }}>
+      {isOffline && sessionState === 'recording' && (
+        <div style={{
+          padding: '4px 10px',
+          backgroundColor: '#fff3cd',
+          color: '#856404',
+          border: '1px solid #ffc107',
+          borderRadius: '4px',
+          fontSize: '12px',
+          lineHeight: '1.4',
+        }}>
+          Offline — recording continues, uploads will retry when connection returns
+        </div>
+      )}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+        <button
+          type="button"
+          onClick={handleClick}
+          disabled={disabled || sessionState === 'initializing' || sessionState === 'finalizing'}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            padding: '8px 16px',
+            cursor: disabled || sessionState === 'initializing' || sessionState === 'finalizing' ? 'not-allowed' : 'pointer',
+          }}
+        >
+          {getButtonContent()}
+        </button>
+        {showDownload && (
+          <button
+            type="button"
+            onClick={handleDownload}
+            title="Download recording"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px',
+              padding: '8px 12px',
+              cursor: 'pointer',
+              fontSize: '12px',
+            }}
+          >
+            <DownloadIcon />
+            <span>Save audio</span>
+          </button>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -174,5 +229,11 @@ const LoadingIcon = () => (
 const ErrorIcon = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="#dc3545">
     <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z" />
+  </svg>
+);
+
+const DownloadIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z" />
   </svg>
 );

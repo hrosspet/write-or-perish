@@ -220,6 +220,12 @@ export function useStreamingMediaRecorder({
     return chunksRef.current.length;
   }, []);
 
+  // Get a partial blob from chunks recorded so far (for download during recording)
+  const getPartialBlob = useCallback(() => {
+    if (chunksRef.current.length === 0) return null;
+    return new Blob(chunksRef.current, { type: 'audio/webm' });
+  }, []);
+
   return {
     status,
     mediaBlob,
@@ -231,6 +237,7 @@ export function useStreamingMediaRecorder({
     stopRecording,
     resetRecording,
     getTotalChunks,
+    getPartialBlob,
     chunkIntervalMs,
   };
 }
