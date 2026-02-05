@@ -645,6 +645,18 @@ def get_children(node_id):
     } for child in children]
     return jsonify({"children": children_list}), 200
 
+@nodes_bp.route("/models", methods=["GET"])
+@login_required
+def get_models():
+    """Return the list of supported models for the frontend."""
+    supported = current_app.config["SUPPORTED_MODELS"]
+    models = [
+        {"id": model_id, "name": cfg["display_name"], "provider": cfg["provider"]}
+        for model_id, cfg in supported.items()
+    ]
+    return jsonify({"models": models}), 200
+
+
 # Get the default model from server config
 @nodes_bp.route("/default-model", methods=["GET"])
 @login_required

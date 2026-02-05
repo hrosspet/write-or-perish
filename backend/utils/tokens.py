@@ -26,7 +26,10 @@ def get_model_context_window(model_id: str) -> int:
     Returns:
         Context window size in tokens
     """
-    return current_app.config["MODEL_CONTEXT_WINDOWS"].get(model_id, 200000)
+    model_config = current_app.config["SUPPORTED_MODELS"].get(model_id)
+    if model_config:
+        return model_config.get("context_window", 200000)
+    return 200000
 
 
 def calculate_max_export_tokens(

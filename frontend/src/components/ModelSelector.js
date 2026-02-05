@@ -10,6 +10,14 @@ import api from '../api';
  */
 const ModelSelector = ({ nodeId, selectedModel, onModelChange }) => {
   const [loading, setLoading] = useState(true);
+  const [models, setModels] = useState([]);
+
+  useEffect(() => {
+    // Fetch available models from backend (single source of truth)
+    api.get('/nodes/models')
+      .then((response) => setModels(response.data.models))
+      .catch((error) => console.error('Error fetching models:', error));
+  }, []);
 
   useEffect(() => {
     const fetchSuggestedModel = async () => {
@@ -30,16 +38,6 @@ const ModelSelector = ({ nodeId, selectedModel, onModelChange }) => {
       setLoading(false); // No node, so not loading
     }
   }, [nodeId, onModelChange]);
-
-  // Available models for the dropdown
-  const models = [
-    { id: 'gpt-5', name: 'GPT-5', provider: 'OpenAI' },
-    { id: 'gpt-5.1', name: 'GPT-5.1', provider: 'OpenAI' },
-    { id: 'gpt-5.2', name: 'GPT-5.2', provider: 'OpenAI' },
-    { id: 'claude-sonnet-4.5', name: 'Claude 4.5 Sonnet', provider: 'Anthropic' },
-    { id: 'claude-opus-4.5', name: 'Claude 4.5 Opus', provider: 'Anthropic' },
-    { id: 'claude-opus-3', name: 'Claude 3 Opus', provider: 'Anthropic' },
-  ];
 
   return (
     <select

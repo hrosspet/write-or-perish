@@ -20,53 +20,55 @@ class Config:
     ANTHROPIC_API_KEY_TRAIN = os.environ.get("ANTHROPIC_API_KEY_TRAIN")
 
     # Default model (for backward compatibility and fallback)
-    DEFAULT_LLM_MODEL = os.environ.get("LLM_NAME", "claude-opus-4.5")
-
-    # Model context window limits (input tokens)
-    MODEL_CONTEXT_WINDOWS = {
-        "gpt-5": 128000,
-        "gpt-5.1": 272000,
-        "gpt-5.2": 272000,  # Temporarily 272k until OpenAI fixes their API limit (should be 400k)
-        "claude-sonnet-4.5": 200000,  # Temporarily 200k due to API tier limit (should be 1M with higher tier)
-        "claude-opus-4.5": 200000,
-        "claude-opus-3": 200000,
-    }
+    DEFAULT_LLM_MODEL = os.environ.get("LLM_NAME", "claude-opus-4.6")
 
     # Buffer for token estimation error (percentage of context window)
     PROFILE_CONTEXT_BUFFER_PERCENT = 0.14  # 14%
 
-    # Supported models configuration
+    # Supported models configuration (single source of truth for all model metadata)
     SUPPORTED_MODELS = {
         "gpt-5": {
             "provider": "openai",
             "api_model": "gpt-5",
-            "display_name": "GPT-5"
+            "display_name": "GPT-5",
+            "context_window": 128000,
         },
         "gpt-5.1": {
             "provider": "openai",
             "api_model": "gpt-5.1",
-            "display_name": "GPT-5.1"
+            "display_name": "GPT-5.1",
+            "context_window": 272000,
         },
         "gpt-5.2": {
             "provider": "openai",
             "api_model": "gpt-5.2",
-            "display_name": "GPT-5.2"
+            "display_name": "GPT-5.2",
+            "context_window": 272000,  # Temporarily 272k until OpenAI fixes their API limit (should be 400k)
         },
         "claude-sonnet-4.5": {
             "provider": "anthropic",
             "api_model": "claude-sonnet-4-5-20250929",
-            "display_name": "Claude 4.5 Sonnet"
+            "display_name": "Claude 4.5 Sonnet",
+            "context_window": 200000,  # Temporarily 200k due to API tier limit (should be 1M with higher tier)
         },
         "claude-opus-4.5": {
             "provider": "anthropic",
             "api_model": "claude-opus-4-5-20251101",
-            "display_name": "Claude 4.5 Opus"
+            "display_name": "Claude 4.5 Opus",
+            "context_window": 200000,  # Temporarily 200k due to API tier limit (should be 1M with higher tier)
+        },
+        "claude-opus-4.6": {
+            "provider": "anthropic",
+            "api_model": "claude-opus-4-6",
+            "display_name": "Claude 4.6 Opus",
+            "context_window": 200000,  # Temporarily 200k due to API tier limit (should be 1M with higher tier)
         },
         "claude-opus-3": {
             "provider": "anthropic",
             "api_model": "claude-3-opus-20240229",
-            "display_name": "Claude 3 Opus"
-        }
+            "display_name": "Claude 3 Opus",
+            "context_window": 200000,
+        },
     }
 
     FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
