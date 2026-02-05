@@ -1,8 +1,13 @@
-import React, { useEffect } from "react";
+import React, { useState, useEffect } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { useUser } from "../contexts/UserContext";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL;
+
+const ERROR_MESSAGES = {
+  invalid_or_expired: "This sign-in link is invalid or has expired. Please request a new one.",
+  link_already_used: "This sign-in link has already been used. Please request a new one.",
+};
 
 function LoginPage() {
   const [searchParams] = useSearchParams();
@@ -10,6 +15,13 @@ function LoginPage() {
   const { user, loading } = useUser();
 
   const returnUrl = searchParams.get("returnUrl") || "/dashboard";
+  const errorCode = searchParams.get("error");
+
+  const [showEmailForm, setShowEmailForm] = useState(false);
+  const [emailInput, setEmailInput] = useState("");
+  const [emailLoading, setEmailLoading] = useState(false);
+  const [emailSent, setEmailSent] = useState(false);
+  const [emailError, setEmailError] = useState("");
 
   // If already logged in, redirect to returnUrl
   useEffect(() => {
@@ -19,9 +31,32 @@ function LoginPage() {
   }, [user, loading, returnUrl, navigate]);
 
   const handleTwitterLogin = () => {
-    // Pass the returnUrl to the backend via the next parameter
     const nextParam = encodeURIComponent(returnUrl);
     window.location.href = `${backendUrl}/auth/login?next=${nextParam}`;
+  };
+
+  const handleEmailSubmit = async (e) => {
+    e.preventDefault();
+    setEmailError("");
+    setEmailLoading(true);
+
+    try {
+      const res = await fetch(`${backendUrl}/auth/magic-link/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: emailInput, next_url: returnUrl }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setEmailError(data.error || "Something went wrong. Please try again.");
+      } else {
+        setEmailSent(true);
+      }
+    } catch {
+      setEmailError("Network error. Please try again.");
+    } finally {
+      setEmailLoading(false);
+    }
   };
 
   if (loading) {
@@ -32,7 +67,6 @@ function LoginPage() {
     );
   }
 
-  // If user is logged in, show nothing while redirecting
   if (user) {
     return null;
   }
@@ -66,6 +100,12 @@ function LoginPage() {
           Sign in to continue
         </p>
 
+        {errorCode && ERROR_MESSAGES[errorCode] && (
+          <p style={{ color: "#ff6b6b", marginBottom: "20px", fontSize: "14px" }}>
+            {ERROR_MESSAGES[errorCode]}
+          </p>
+        )}
+
         <button
           onClick={handleTwitterLogin}
           style={{
@@ -95,33 +135,96 @@ function LoginPage() {
           Sign in with X
         </button>
 
-        <button
-          disabled
-          style={{
-            width: "100%",
-            padding: "12px 20px",
-            backgroundColor: "#333",
-            color: "#666",
-            border: "1px solid #444",
-            borderRadius: "4px",
-            fontSize: "16px",
-            cursor: "not-allowed",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: "10px"
-          }}
-        >
-          <svg
-            width="20"
-            height="20"
-            viewBox="0 0 24 24"
-            fill="currentColor"
+        {!showEmailForm && !emailSent && (
+          <button
+            onClick={() => setShowEmailForm(true)}
+            style={{
+              width: "100%",
+              padding: "12px 20px",
+              backgroundColor: "#333",
+              color: "#e0e0e0",
+              border: "1px solid #444",
+              borderRadius: "4px",
+              fontSize: "16px",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "10px"
+            }}
           >
-            <path d="M20 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z" />
-          </svg>
-          Sign in with Email (Coming Soon)
-        </button>
+            <svg
+              width="20"
+              height="20"
+              viewBox="0 0 24 24"
+              fill="currentColor"
+            >
+              <path d="M20 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z" />
+            </svg>
+            Sign in with Email
+          </button>
+        )}
+
+        {showEmailForm && !emailSent && (
+          <form onSubmit={handleEmailSubmit} style={{ textAlign: "left" }}>
+            <label
+              htmlFor="email"
+              style={{ color: "#aaa", fontSize: "14px", display: "block", marginBottom: "6px" }}
+            >
+              Email address
+            </label>
+            <input
+              id="email"
+              type="email"
+              value={emailInput}
+              onChange={(e) => setEmailInput(e.target.value)}
+              placeholder="you@example.com"
+              required
+              style={{
+                width: "100%",
+                padding: "10px 12px",
+                backgroundColor: "#2a2a2a",
+                color: "#e0e0e0",
+                border: "1px solid #444",
+                borderRadius: "4px",
+                fontSize: "16px",
+                marginBottom: "12px",
+                boxSizing: "border-box",
+              }}
+            />
+            {emailError && (
+              <p style={{ color: "#ff6b6b", fontSize: "14px", margin: "0 0 12px 0" }}>
+                {emailError}
+              </p>
+            )}
+            <button
+              type="submit"
+              disabled={emailLoading}
+              style={{
+                width: "100%",
+                padding: "12px 20px",
+                backgroundColor: emailLoading ? "#555" : "#1DA1F2",
+                color: "white",
+                border: "none",
+                borderRadius: "4px",
+                fontSize: "16px",
+                cursor: emailLoading ? "not-allowed" : "pointer",
+              }}
+            >
+              {emailLoading ? "Sending..." : "Send Sign-in Link"}
+            </button>
+          </form>
+        )}
+
+        {emailSent && (
+          <div style={{ color: "#4caf50", marginTop: "10px" }}>
+            <p style={{ fontSize: "16px", fontWeight: "bold" }}>Check your inbox!</p>
+            <p style={{ fontSize: "14px", color: "#888" }}>
+              We sent a sign-in link to <strong style={{ color: "#e0e0e0" }}>{emailInput}</strong>.
+              It expires in 15 minutes.
+            </p>
+          </div>
+        )}
       </div>
     </div>
   );
