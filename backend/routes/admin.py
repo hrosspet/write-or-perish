@@ -71,7 +71,7 @@ def whitelist_user():
         return jsonify({"error": "User with that handle already exists."}), 400
 
     # Create a new user with the handle
-    user = User(twitter_id=handle, username=handle, approved=True)
+    user = User(twitter_id=None, username=handle, approved=True)
     db.session.add(user)
     try:
         db.session.commit()
