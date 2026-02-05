@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route, Navigate, useNavigate } from 'react-router-dom';
 import LandingPage from "./components/LandingPage";
 import Dashboard from "./components/Dashboard";
 import Feed from "./components/Feed";
@@ -18,6 +18,7 @@ function App() {
   const [showTerms, setShowTerms] = useState(false);
   const [showAlpha, setShowAlpha] = useState(false);
   const { user, setUser } = useUser();
+  const navigate = useNavigate();
 
   // When the user info is loaded, check if they have accepted the terms.
   useEffect(() => {
@@ -106,9 +107,9 @@ function App() {
             <NodeForm
               ref={nodeFormRef}
               parentId={null}
-              onSuccess={() => {
+              onSuccess={(data) => {
                 setShowNewEntry(false);
-                window.location.reload();
+                navigate(`/node/${data.id}`);
               }}
             />
           </div>
