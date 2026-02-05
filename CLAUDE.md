@@ -23,7 +23,7 @@ The project uses GitHub Actions for CI/CD with direct deployment to production:
 
 - Develop locally on feature branches
 - Push to GitHub to trigger CI checks
-- **Merge to `main` = Deploy to production** (https://writeorperish.org)
+- **Merge to `main` = Deploy to production** (https://loore.org)
 - There is NO staging environment
 
 ### Before Pushing to Main
@@ -56,7 +56,7 @@ The project uses **Flask-Migrate + Alembic**. Migrations are auto-generated and 
 
 ### Production Environment
 
-- URL: https://writeorperish.org
+- URL: https://loore.org
 - Backend: Flask + Gunicorn
 - Frontend: React (built and served via nginx)
 - Database: PostgreSQL

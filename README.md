@@ -85,7 +85,7 @@ SECRET_KEY=your-secret-key
 DATABASE_URL=postgresql://username:password@localhost/writeorperish
 TWITTER_API_KEY=your-twitter-api-key
 TWITTER_API_SECRET=your-twitter-api-secret
-FRONTEND_URL=https://writeorperish.org
+FRONTEND_URL=https://loore.org
 OPENAI_API_KEY=your-openai-api-key
 ```
 

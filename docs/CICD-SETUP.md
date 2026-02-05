@@ -58,7 +58,7 @@ Add these secrets:
 | Secret Name | Description | Example Value |
 |-------------|-------------|---------------|
 | `SSH_PRIVATE_KEY` | Private SSH key content | Content of `github_deploy_key` file |
-| `VM_HOST` | VM IP address or hostname | `35.123.45.67` or `writeorperish.org` |
+| `VM_HOST` | VM IP address or hostname | `35.123.45.67` or `loore.org` |
 | `VM_USER` | SSH username on VM | `hrosspet` |
 
 To get the private key content:
