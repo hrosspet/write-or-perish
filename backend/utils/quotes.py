@@ -244,6 +244,8 @@ class ExportQuoteResolver:
         self.entries: List[NodeEntry] = []
         self.included_count: int = 0
         self.included_ids: Set[int] = set()
+        # Tracks node IDs whose content was embedded (separate from truncation)
+        self._embedded_ids: Set[int] = set()
         # Maps node_id -> {quoted_node_id -> embedded_content} for final rendering
         self.embedded_quotes: Dict[int, Dict[int, str]] = {}
         # Cache of node metadata (tokens, quote_ids) to avoid repeated DB queries
@@ -293,10 +295,15 @@ class ExportQuoteResolver:
 
         Entries are kept in order (assumed to be sorted newest-first),
         and we include as many as fit within the budget.
+
+        Note: Preserves _embedded_ids - nodes whose content was embedded
+        are always considered "included" even if they're not in the
+        truncated entry list.
         """
         total = 0
         self.included_count = 0
-        self.included_ids = set()
+        # Start with embedded IDs - these are always "included"
+        self.included_ids = set(self._embedded_ids)
 
         for i, entry in enumerate(self.entries):
             entry_tokens = entry.total_tokens
@@ -386,8 +393,9 @@ class ExportQuoteResolver:
                         if nested_quote_id not in entry.quote_ids:
                             entry.quote_ids.append(nested_quote_id)
 
-                    # Mark as included (content is now in the export via embedding)
-                    self.included_ids.add(quoted_id)
+                    # Mark as embedded (content is now in the export via embedding)
+                    # This is tracked separately so _truncate() preserves it
+                    self._embedded_ids.add(quoted_id)
 
                     # Track for final rendering
                     if entry.node_id not in self.embedded_quotes:
