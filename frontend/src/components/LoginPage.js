@@ -94,7 +94,7 @@ function LoginPage() {
         }}
       >
         <h1 style={{ color: "#e0e0e0", marginBottom: "10px" }}>
-          Welcome to Write or Perish
+          Welcome to Loore
         </h1>
         <p style={{ color: "#888", marginBottom: "30px" }}>
           Sign in to continue

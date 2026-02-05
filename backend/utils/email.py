@@ -12,12 +12,12 @@ def send_magic_link_email(to_email, magic_link_url):
     sender = config.get("MAIL_DEFAULT_SENDER", "login@loore.org")
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = "Your Write or Perish sign-in link"
+    msg["Subject"] = "Your Loore sign-in link"
     msg["From"] = sender
     msg["To"] = to_email
 
     text_body = (
-        "Sign in to Write or Perish\n\n"
+        "Sign in to Loore\n\n"
         f"Click the link below to sign in:\n{magic_link_url}\n\n"
         "This link expires in 15 minutes and can only be used once.\n\n"
         "If you didn't request this, you can safely ignore this email."
@@ -27,7 +27,7 @@ def send_magic_link_email(to_email, magic_link_url):
 <html>
 <body style="font-family: -apple-system, sans-serif; background: #121212; color: #e0e0e0; padding: 40px;">
   <div style="max-width: 480px; margin: 0 auto; background: #1e1e1e; border-radius: 8px; border: 1px solid #333; padding: 40px;">
-    <h2 style="margin-top: 0;">Sign in to Write or Perish</h2>
+    <h2 style="margin-top: 0;">Sign in to Loore</h2>
     <p>Click the button below to sign in:</p>
     <a href="{magic_link_url}"
        style="display: inline-block; padding: 12px 24px; background: #1DA1F2; color: white;
