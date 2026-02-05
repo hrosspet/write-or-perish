@@ -1,5 +1,5 @@
 import React from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { useUser } from "../contexts/UserContext";
 import GlobalAudioPlayer from "./GlobalAudioPlayer";
 
@@ -7,14 +7,16 @@ const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
 function NavBar({ onNewEntryClick }) {
   const { user } = useUser();
+  const location = useLocation();
 
   // When "Write" is clicked:
-  // If no user is logged in, redirect to login.
+  // If no user is logged in, redirect to login page with return URL.
   // Otherwise, proceed to open the entry modal.
   const handleWriteClick = (e) => {
     e.preventDefault();
     if (!user) {
-      window.location.href = `${backendUrl}/auth/login`;
+      const returnUrl = encodeURIComponent(location.pathname + location.search);
+      window.location.href = `/login?returnUrl=${returnUrl}`;
     } else {
       onNewEntryClick();
     }
@@ -59,6 +61,15 @@ function NavBar({ onNewEntryClick }) {
           style={{ color: "#e0e0e0", textDecoration: "none", marginRight: "10px" }}
         >
           Admin
+        </Link>
+      )}
+
+      {!user && (
+        <Link
+          to={`/login?returnUrl=${encodeURIComponent(location.pathname + location.search)}`}
+          style={{ color: "#e0e0e0", textDecoration: "none", marginRight: "10px" }}
+        >
+          Login
         </Link>
       )}
 

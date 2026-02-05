@@ -9,6 +9,8 @@ import TermsModal from "./components/TermsModal";
 import AdminPanel from "./components/AdminPanel";
 import AlphaModal from "./components/AlphaModal";
 import NodeDetailWrapper from "./components/NodeDetailWrapper";
+import LoginPage from "./components/LoginPage";
+import ProtectedRoute from "./components/ProtectedRoute";
 import { useUser } from "./contexts/UserContext";
 import { AudioProvider } from "./contexts/AudioContext";
 
@@ -136,11 +138,12 @@ function App() {
 
         <Routes>
           <Route path="/" element={<LandingPage />} />
-          <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
           <Route path="/dashboard/:username" element={<Dashboard />} />
           <Route path="/feed" element={<Feed />} />
-          <Route path="/node/:id" element={<NodeDetailWrapper />} />
-          <Route path="/admin" element={<AdminPanel />} />
+          <Route path="/node/:id" element={<ProtectedRoute><NodeDetailWrapper /></ProtectedRoute>} />
+          <Route path="/admin" element={<ProtectedRoute><AdminPanel /></ProtectedRoute>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
         </div>

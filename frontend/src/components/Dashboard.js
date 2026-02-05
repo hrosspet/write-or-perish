@@ -40,7 +40,6 @@ function Dashboard() {
   const [loadingMoreNodes, setLoadingMoreNodes] = useState(false);
 
   const navigate = useNavigate();
-  const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
   // Decide which endpoint to call based on the URL.
   const endpoint = username ? `/dashboard/${username}` : "/dashboard";
@@ -55,12 +54,8 @@ function Dashboard() {
       })
       .catch((err) => {
         console.error(err);
-        if (err.response && err.response.status === 401) {
-          window.location.href = `${backendUrl}/auth/login`;
-        } else {
-          setError("Error fetching dashboard data. Are you logged in?");
-          setLoading(false);
-        }
+        setError("Error fetching dashboard data.");
+        setLoading(false);
       });
 
     // Fetch default model for profile generation
@@ -72,7 +67,7 @@ function Dashboard() {
         console.error("Error fetching default model:", err);
         setSelectedModel("claude-opus-4.5"); // Fallback
       });
-  }, [endpoint, backendUrl]);
+  }, [endpoint]);
 
   const handleProfileSubmit = (e) => {
     e.preventDefault();

@@ -50,7 +50,6 @@ function NodeDetail() {
   const [llmTaskNodeId, setLlmTaskNodeId] = useState(null);
   const [quotes, setQuotes] = useState({});
   const highlightedNodeRef = useRef(null);
-  const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
   // LLM completion polling - enabled automatically when llmTaskNodeId is set
   const {
@@ -75,14 +74,10 @@ function NodeDetail() {
       })
       .catch((err) => {
         console.error(err);
-        if (err.response?.status === 401) {
-          window.location.href = `${backendUrl}/auth/login`;
-        } else {
-          setError("Error fetching node details.");
-          setLoading(false);
-        }
+        setError("Error fetching node details.");
+        setLoading(false);
       });
-  }, [id, backendUrl]);
+  }, [id]);
 
   // Fetch quote data when node loads (if content contains {quote:ID} placeholders)
   useEffect(() => {

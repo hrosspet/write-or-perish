@@ -1,16 +1,41 @@
-from flask import Blueprint, redirect, url_for, flash, current_app
+from flask import Blueprint, redirect, url_for, flash, current_app, request
 from flask_login import login_user, logout_user, login_required, current_user
 from backend.models import User
 from backend.extensions import db
 from flask_dance.contrib.twitter import twitter
 from flask import session
 import logging
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 auth_bp = Blueprint("auth_bp", __name__)
 
+
+def is_safe_redirect_url(target):
+    """
+    Validate that the redirect URL is safe (relative path only).
+    Prevents open redirect vulnerabilities.
+    """
+    if not target:
+        return False
+    # Must start with / and not // (which would be protocol-relative)
+    if not target.startswith('/') or target.startswith('//'):
+        return False
+    # Parse the URL to check for any tricks
+    parsed = urlparse(target)
+    # Ensure no scheme or netloc (hostname)
+    if parsed.scheme or parsed.netloc:
+        return False
+    return True
+
+
 @auth_bp.route("/login")
 def login():
+    # Capture the 'next' parameter for post-login redirect
+    next_url = request.args.get('next')
+    if next_url and is_safe_redirect_url(next_url):
+        session['next_url'] = next_url
+
     if not twitter.authorized:
         # If not authorized, start the OAuth flow.
         return redirect(url_for("twitter.login"))
@@ -41,10 +66,15 @@ def login():
 
     login_user(user)
     flash("Logged in successfully!", "success")
-    # Instead of redirecting using url_for() to the backend dashboard,
-    # redirect using the FRONTEND_URL from your config.
-    frontend_dashboard = f"{current_app.config.get('FRONTEND_URL')}/dashboard"
-    return redirect(frontend_dashboard)
+
+    # Redirect to stored next_url if available, otherwise dashboard
+    frontend_url = current_app.config.get('FRONTEND_URL')
+    next_url = session.pop('next_url', None)
+    if next_url and is_safe_redirect_url(next_url):
+        redirect_url = f"{frontend_url}{next_url}"
+    else:
+        redirect_url = f"{frontend_url}/dashboard"
+    return redirect(redirect_url)
 
 @auth_bp.route("/logout")
 @login_required
