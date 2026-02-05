@@ -3,7 +3,9 @@ from flask_login import login_required, current_user
 from backend.models import Node, NodeVersion, UserProfile
 from backend.extensions import db
 from backend.utils.tokens import approximate_token_count, calculate_max_export_tokens
-from backend.utils.quotes import resolve_quotes, has_quotes
+from backend.utils.quotes import (
+    resolve_quotes, has_quotes, ExportQuoteResolver, resolve_quotes_for_export
+)
 from datetime import datetime
 import os
 
@@ -46,7 +48,17 @@ def export_data():
         })
     return jsonify(user_data), 200
 
-def format_node_tree(node, index_path="1", processed_nodes=None, filter_ai_usage=False, user_id=None, created_before=None):
+
+def format_node_tree(
+    node,
+    index_path="1",
+    processed_nodes=None,
+    filter_ai_usage=False,
+    user_id=None,
+    created_before=None,
+    embedded_quotes=None,
+    included_ids=None
+):
     """
     Recursively format a node and its descendants into a human-readable tree structure
     using Markdown headers. Uses depth-first traversal for maximum readability.
@@ -59,6 +71,11 @@ def format_node_tree(node, index_path="1", processed_nodes=None, filter_ai_usage
         user_id: User ID for resolving {quote:ID} placeholders (for access checks)
         created_before: Optional datetime. If provided, only include child nodes created before
                        this timestamp.
+        embedded_quotes: Optional dict from ExportQuoteResolver mapping
+                        node_id -> {quoted_id -> content}. When provided, uses smart
+                        quote resolution that embeds only when needed.
+        included_ids: Optional set of node IDs included in the export. Used with
+                     embedded_quotes for reference-based resolution.
 
     Returns:
         str: Formatted text representation of the node tree
@@ -88,10 +105,17 @@ def format_node_tree(node, index_path="1", processed_nodes=None, filter_ai_usage
     # Build the node text - no content indentation for token efficiency
     result = f"{header_prefix} [{index_path}] {node_type_display} ({author}) - {timestamp}\n"
 
-    # Resolve {quote:ID} placeholders in content if user_id provided
+    # Resolve {quote:ID} placeholders in content
     content = node.get_content()
-    if user_id and has_quotes(content):
-        content, _ = resolve_quotes(content, user_id, for_llm=False)
+    if has_quotes(content):
+        if embedded_quotes is not None:
+            # Use smart resolution from ExportQuoteResolver
+            content = resolve_quotes_for_export(
+                content, node.id, embedded_quotes, user_id
+            )
+        elif user_id:
+            # Fallback to simple resolution (depth 1)
+            content, _ = resolve_quotes(content, user_id, for_llm=False, max_depth=1)
 
     result += content
     result += "\n\n"
@@ -104,6 +128,11 @@ def format_node_tree(node, index_path="1", processed_nodes=None, filter_ai_usage
         children = [c for c in children if c.ai_usage in ['chat', 'train']]
     if created_before:
         children = [c for c in children if c.created_at < created_before]
+
+    # If we have included_ids, filter to only include nodes in the export
+    if included_ids is not None:
+        children = [c for c in children if c.id in included_ids]
+
     children = sorted(children, key=lambda c: c.created_at)
 
     for i, child in enumerate(children):
@@ -119,19 +148,61 @@ def format_node_tree(node, index_path="1", processed_nodes=None, filter_ai_usage
             processed_nodes=processed_nodes,
             filter_ai_usage=filter_ai_usage,
             user_id=user_id,
-            created_before=created_before
+            created_before=created_before,
+            embedded_quotes=embedded_quotes,
+            included_ids=included_ids
         )
 
     return result
+
+
+def _collect_all_nodes_in_tree(node, filter_ai_usage=False, created_before=None, collected=None):
+    """
+    Recursively collect all nodes in a tree.
+
+    Args:
+        node: Root node of the tree
+        filter_ai_usage: If True, only include nodes where ai_usage is 'chat' or 'train'
+        created_before: Optional datetime filter
+        collected: Set of already collected node IDs (to avoid duplicates)
+
+    Returns:
+        List of Node objects in the tree
+    """
+    if collected is None:
+        collected = set()
+
+    if node.id in collected:
+        return []
+
+    collected.add(node.id)
+    result = [node]
+
+    children = node.children
+    if filter_ai_usage:
+        children = [c for c in children if c.ai_usage in ['chat', 'train']]
+    if created_before:
+        children = [c for c in children if c.created_at < created_before]
+
+    for child in children:
+        result.extend(_collect_all_nodes_in_tree(
+            child, filter_ai_usage, created_before, collected
+        ))
+
+    return result
+
 
 def build_user_export_content(user, max_tokens=None, filter_ai_usage=False, created_before=None):
     """
     Core export logic: Build a human-readable text export of all threads for a given user.
 
+    When max_tokens is specified, uses the ExportQuoteResolver for smart quote resolution
+    that ensures quoted content is available even when the export is truncated.
+
     Args:
         user: User object to export threads for
         max_tokens: Optional maximum token count. If provided, only includes most recent
-                   threads that fit within this limit.
+                   threads that fit within this limit, and uses smart quote resolution.
         filter_ai_usage: If True, only include nodes where ai_usage is 'chat' or 'train'.
                         Use True for AI profile generation, False for user data export.
         created_before: Optional datetime. If provided, only includes threads (and nodes within
@@ -160,29 +231,45 @@ def build_user_export_content(user, max_tokens=None, filter_ai_usage=False, crea
     if not all_top_level_nodes:
         return None
 
-    # If max_tokens is specified, select only the most recent threads that fit
-    top_level_nodes = []
+    # Variables for smart quote resolution (used when max_tokens is specified)
+    embedded_quotes = None
+    included_ids = None
+
+    # If max_tokens is specified, use ExportQuoteResolver for smart quote handling
     if max_tokens:
-        accumulated_tokens = 0
+        # Collect ALL nodes from all threads
+        all_nodes = []
+        for top_node in all_top_level_nodes:
+            all_nodes.extend(_collect_all_nodes_in_tree(
+                top_node, filter_ai_usage, created_before
+            ))
+
+        # Sort by created_at descending (newest first)
+        all_nodes.sort(key=lambda n: n.created_at, reverse=True)
+
         # Reserve tokens for header and footer
-        header_footer_tokens = 50
-        accumulated_tokens += header_footer_tokens
+        header_footer_tokens = 100
 
-        for node in all_top_level_nodes:
-            # Format the thread to estimate its token count
-            thread_text = format_node_tree(node, index_path=str(len(top_level_nodes) + 1), filter_ai_usage=filter_ai_usage, user_id=user.id, created_before=created_before)
-            thread_tokens = approximate_token_count(thread_text)
+        # Create resolver with adjusted token budget
+        resolver = ExportQuoteResolver(user.id, max_tokens - header_footer_tokens)
 
-            # Add overhead for thread header (approx 20 tokens)
-            thread_tokens += 20
+        # Add all nodes to the resolver
+        for node in all_nodes:
+            content = node.get_content()
+            resolver.add_node(
+                node_id=node.id,
+                created_at=node.created_at,
+                content=content
+            )
 
-            if accumulated_tokens + thread_tokens <= max_tokens:
-                top_level_nodes.append(node)
-                accumulated_tokens += thread_tokens
-            else:
-                # Stop adding threads - we've hit the limit
-                break
+        # Run the resolution algorithm
+        resolver.resolve()
 
+        # Get the results
+        included_ids, embedded_quotes = resolver.get_resolution_result()
+
+        # Filter top-level nodes to only those with content in the export
+        top_level_nodes = [n for n in all_top_level_nodes if n.id in included_ids]
         # Reverse to get chronological order (oldest to newest among selected)
         top_level_nodes.reverse()
     else:
@@ -213,7 +300,15 @@ def build_user_export_content(user, max_tokens=None, filter_ai_usage=False, crea
         export_lines.append("")
 
         # Format the entire thread tree (depth-first traversal)
-        thread_text = format_node_tree(node, index_path=str(thread_num), filter_ai_usage=filter_ai_usage, user_id=user.id, created_before=created_before)
+        thread_text = format_node_tree(
+            node,
+            index_path=str(thread_num),
+            filter_ai_usage=filter_ai_usage,
+            user_id=user.id,
+            created_before=created_before,
+            embedded_quotes=embedded_quotes,
+            included_ids=included_ids
+        )
         export_lines.append(thread_text)
 
         export_lines.append("---")
