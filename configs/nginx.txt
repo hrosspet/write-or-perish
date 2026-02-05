@@ -1,5 +1,6 @@
+# Primary domain: loore.org
 server {
-   server_name writeorperish.org www.writeorperish.org;
+   server_name loore.org www.loore.org;
    root /home/hrosspet/write-or-perish/frontend/build;
    index index.html index.htm;
 
@@ -71,29 +72,43 @@ server {
    }
 
     listen 443 ssl; # managed by Certbot
-    ssl_certificate /etc/letsencrypt/live/writeorperish.org/fullchain.pem; # managed by Certbot
-    ssl_certificate_key /etc/letsencrypt/live/writeorperish.org/privkey.pem; # managed by Certbot
+    ssl_certificate /etc/letsencrypt/live/loore.org/fullchain.pem; # managed by Certbot
+    ssl_certificate_key /etc/letsencrypt/live/loore.org/privkey.pem; # managed by Certbot
     include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
     ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
 
 
 }
+
+# HTTP -> HTTPS redirect for loore.org
 server {
-    if ($host = www.writeorperish.org) {
+    if ($host = www.loore.org) {
         return 301 https://$host$request_uri;
     } # managed by Certbot
 
 
-    if ($host = writeorperish.org) {
+    if ($host = loore.org) {
         return 301 https://$host$request_uri;
     } # managed by Certbot
 
 
    listen 80;
-   server_name writeorperish.org www.writeorperish.org;
+   server_name loore.org www.loore.org;
     return 404; # managed by Certbot
 
 
+}
 
+# Redirect old domain writeorperish.org -> loore.org
+server {
+    listen 80;
+    listen 443 ssl;
+    server_name writeorperish.org www.writeorperish.org;
 
+    ssl_certificate /etc/letsencrypt/live/writeorperish.org/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/writeorperish.org/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    return 301 https://loore.org$request_uri;
 }
