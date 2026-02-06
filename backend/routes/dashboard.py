@@ -63,7 +63,7 @@ def get_dashboard():
             "username": node.user.username
         })
     # Determine if Voice Mode is enabled for this user (admin or paid plan)
-    voice_mode_enabled = bool(current_user.is_admin or getattr(current_user, 'plan', 'free') != 'free')
+    voice_mode_enabled = current_user.has_voice_mode
     dashboard = {
         "user": {
             "id": current_user.id,
@@ -168,7 +168,7 @@ def update_user():
     try:
         db.session.commit()
         # Include voice mode feature flag and user plan in the response
-        voice_mode_enabled = bool(current_user.is_admin or getattr(current_user, 'plan', 'free') != 'free')
+        voice_mode_enabled = current_user.has_voice_mode
         return jsonify({
             "message": "Profile updated successfully.",
             "user": {

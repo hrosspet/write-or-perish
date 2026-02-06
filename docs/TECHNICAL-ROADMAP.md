@@ -33,6 +33,20 @@ These technical capabilities are production-ready and form the foundation:
 - **Chunked file upload** - Handle large audio files (>10MB) by splitting into chunks and server-side assembly
 - **Audio transcription pipeline** - Convert speech to text with file compression and chunk splitting for large files
 
+### User Plan Tiers
+
+Users have a `plan` column (string, max 16 chars) on the User model. The plan controls feature gating via `User.has_voice_mode` and the `@voice_mode_required` decorator. New plans/features can be gated by adding similar properties to the User model.
+
+| Plan | Default for | Voice Mode | Notes |
+|------|-------------|------------|-------|
+| `free` | — | No | No paying users have this tier currently. Reserved for future free-tier signups. |
+| `alpha` | All new registrations | Yes | Current default. All existing users were migrated to this tier. |
+| `pro` | — | Yes | Future paid tier. No users on this plan yet. |
+
+- **Admins** (`is_admin=True`) bypass all plan checks.
+- Plan tiers that grant Voice Mode are defined in `User.VOICE_MODE_PLANS` (`models.py`).
+- The frontend receives `voice_mode_enabled` (boolean) from the `/dashboard` endpoint — it does not check plans directly.
+
 ### CI/CD & DevOps
 - **GitHub Actions CI pipeline** - Automated testing on all branches and PRs with backend tests, frontend tests, linting, and security scans
 - **Automated deployment pipeline** - Push to main triggers frontend build and SSH deployment to production VM

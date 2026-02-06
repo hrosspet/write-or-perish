@@ -95,12 +95,12 @@ def data(app, tmp_path):
     """Create users and nodes with audio files on disk.
 
     - alice: free plan (no voice mode)
-    - bob: pro plan (has voice mode)
-    - carol: author of nodes, pro plan
+    - bob: alpha plan (has voice mode)
+    - carol: author of nodes, alpha plan
     """
     alice = User(username="alice", approved=True, plan="free")
-    bob = User(username="bob", approved=True, plan="pro")
-    carol = User(username="carol", approved=True, plan="pro")
+    bob = User(username="bob", approved=True, plan="alpha")
+    carol = User(username="carol", approved=True, plan="alpha")
     _db.session.add_all([alice, bob, carol])
     _db.session.flush()
 

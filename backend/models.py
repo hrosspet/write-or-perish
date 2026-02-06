@@ -26,8 +26,18 @@ class User(db.Model, UserMixin):
     # databases created before this change.)
     is_admin = db.Column(db.Boolean, default=False, nullable=False)
 
-    # Subscription plan ("free", "pro", etc.).  Used for future gating of Voice‑mode.
-    plan = db.Column(db.String(16), nullable=False, default="free")
+    # Subscription plan ("free", "alpha", "pro", etc.).
+    plan = db.Column(db.String(16), nullable=False, default="alpha")
+
+    # Plans that grant Voice-Mode access (any non-free plan).
+    VOICE_MODE_PLANS = {"alpha", "pro"}
+
+    @property
+    def has_voice_mode(self):
+        """Whether this user can access Voice-Mode features."""
+        if self.is_admin:
+            return True
+        return (self.plan or "free") in self.VOICE_MODE_PLANS
 
     def get_id(self):
         return str(self.id)

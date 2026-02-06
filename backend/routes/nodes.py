@@ -34,22 +34,17 @@ from backend.utils.encryption import encrypt_file, decrypt_file_to_temp
 
 def voice_mode_required(f):
     """Decorator that restricts an endpoint to users who are allowed to access
-    Voice‑Mode (currently admins or paying users)."""
+    Voice‑Mode (see User.has_voice_mode)."""
 
     @wraps(f)
     def wrapper(*args, **kwargs):
         if not current_user.is_authenticated:
             return jsonify({"error": "Authentication required"}), 401
 
-        # Allow admins.
-        if getattr(current_user, "is_admin", False):
-            return f(*args, **kwargs)
+        if not current_user.has_voice_mode:
+            return jsonify({"error": "Voice mode not enabled for this account"}), 403
 
-        # Allow paying users (plan != 'free').
-        if getattr(current_user, "plan", "free") != "free":
-            return f(*args, **kwargs)
-
-        return jsonify({"error": "Voice mode not enabled for this account"}), 403
+        return f(*args, **kwargs)
 
     return wrapper
 
@@ -837,8 +832,7 @@ def get_audio_urls(node_id):
     # Public nodes: any authenticated user can listen.
     # Non-public nodes: require voice-mode (admin or paid plan).
     if node.privacy_level != "public":
-        is_voice = getattr(current_user, "is_admin", False) or getattr(current_user, "plan", "free") != "free"
-        if not is_voice:
+        if not current_user.has_voice_mode:
             return jsonify({"error": "Voice mode not enabled for this account"}), 403
 
     def _media_file_exists(url):
@@ -905,8 +899,7 @@ def get_audio_chunks(node_id):
     # Public nodes: any authenticated user can listen.
     # Non-public nodes: require voice-mode (admin or paid plan).
     if node.privacy_level != "public":
-        is_voice = getattr(current_user, "is_admin", False) or getattr(current_user, "plan", "free") != "free"
-        if not is_voice:
+        if not current_user.has_voice_mode:
             return jsonify({"error": "Voice mode not enabled for this account"}), 403
 
     # Check if this is a streaming transcription node with chunks
