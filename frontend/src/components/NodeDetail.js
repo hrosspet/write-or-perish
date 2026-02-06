@@ -74,7 +74,11 @@ function NodeDetail() {
       })
       .catch((err) => {
         console.error(err);
-        setError("Error fetching node details.");
+        if (err.response && err.response.status === 403) {
+          setError("You don't have access to this node.");
+        } else {
+          setError("Error fetching node details.");
+        }
         setLoading(false);
       });
   }, [id]);

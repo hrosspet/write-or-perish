@@ -9,6 +9,7 @@ the two-column privacy system:
 from enum import Enum
 from typing import Optional
 from flask_login import current_user
+from sqlalchemy import or_
 
 
 class PrivacyLevel(str, Enum):
@@ -91,6 +92,23 @@ def can_user_access_node(node, user_id: Optional[int] = None) -> bool:
         return False
 
     return False
+
+
+def accessible_nodes_filter(node_model, user_id: int):
+    """Return a SQLAlchemy filter clause for nodes accessible by the given user.
+
+    This is the query-level counterpart of can_user_access_node().
+    Use it to filter list queries (feed, public dashboard) so that only
+    accessible nodes are returned from the database.
+
+    Currently allows: owner's own nodes + public nodes.
+    When circles are implemented, update this alongside can_user_access_node().
+    """
+    return or_(
+        node_model.user_id == user_id,
+        node_model.privacy_level == PrivacyLevel.PUBLIC,
+        # TODO: add circles membership subquery when circles feature is built
+    )
 
 
 def can_user_edit_node(node, user_id: Optional[int] = None) -> bool:

@@ -3,6 +3,7 @@ from flask_login import login_required, current_user
 from backend.models import Node, User, UserProfile
 from backend.extensions import db
 from datetime import date
+from backend.utils.privacy import accessible_nodes_filter
 
 dashboard_bp = Blueprint("dashboard_bp", __name__)
 
@@ -101,7 +102,11 @@ def get_public_dashboard(username):
     per_page = request.args.get("per_page", 20, type=int)
     per_page = min(per_page, 100)
 
-    query = Node.query.filter_by(user_id=user.id, parent_id=None).order_by(Node.created_at.desc())
+    query = Node.query.filter(
+        Node.user_id == user.id,
+        Node.parent_id.is_(None),
+        accessible_nodes_filter(Node, current_user.id)
+    ).order_by(Node.created_at.desc())
     pagination = query.paginate(page=page, per_page=per_page, error_out=False)
 
     nodes_list = []
