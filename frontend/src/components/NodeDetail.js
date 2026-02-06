@@ -257,7 +257,7 @@ function NodeDetail() {
           {isOwner && <button onClick={() => setShowEditOverlay(true)}>Edit</button>}
           {isOwner && <button onClick={handleDelete}>Delete</button>}
           {/* Speaker icon for audio playback */}
-          <SpeakerIcon nodeId={node.id} content={node.content} />
+          <SpeakerIcon nodeId={node.id} content={node.content} isPublic={node.privacy_level === 'public'} />
         </div>
       </div>
       <hr style={{ borderColor: "#333" }} />

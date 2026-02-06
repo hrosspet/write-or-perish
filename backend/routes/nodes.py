@@ -825,7 +825,6 @@ def add_linked_node(node_id):
 
 @nodes_bp.route("/<int:node_id>/audio", methods=["GET"])
 @login_required
-@voice_mode_required
 def get_audio_urls(node_id):
     """Return JSON with URLs for original or TTS audio associated with a node.
 
@@ -834,6 +833,13 @@ def get_audio_urls(node_id):
               404     – when neither audio exists and no generation in progress.
     """
     node = Node.query.get_or_404(node_id)
+
+    # Public nodes: any authenticated user can listen.
+    # Non-public nodes: require voice-mode (admin or paid plan).
+    if node.privacy_level != "public":
+        is_voice = getattr(current_user, "is_admin", False) or getattr(current_user, "plan", "free") != "free"
+        if not is_voice:
+            return jsonify({"error": "Voice mode not enabled for this account"}), 403
 
     def _media_file_exists(url):
         """Check if the file (or its .enc version) exists on disk."""
@@ -881,7 +887,6 @@ def get_audio_urls(node_id):
 
 @nodes_bp.route("/<int:node_id>/audio-chunks", methods=["GET"])
 @login_required
-@voice_mode_required
 def get_audio_chunks(node_id):
     """Return list of audio chunk URLs for streaming transcription nodes.
 
@@ -896,6 +901,13 @@ def get_audio_chunks(node_id):
     with non-zero start times (common with MediaRecorder timeslice recordings).
     """
     node = Node.query.get_or_404(node_id)
+
+    # Public nodes: any authenticated user can listen.
+    # Non-public nodes: require voice-mode (admin or paid plan).
+    if node.privacy_level != "public":
+        is_voice = getattr(current_user, "is_admin", False) or getattr(current_user, "plan", "free") != "free"
+        if not is_voice:
+            return jsonify({"error": "Voice mode not enabled for this account"}), 403
 
     # Check if this is a streaming transcription node with chunks
     if not node.streaming_transcription:

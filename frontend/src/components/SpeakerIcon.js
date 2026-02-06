@@ -27,7 +27,7 @@ const extractMarkdownHeader = (content) => {
  * SpeakerIcon component fetches and plays audio for a node or profile.
  * Shows loading spinner, play/pause state.
  */
-const SpeakerIcon = ({ nodeId, profileId, content }) => {
+const SpeakerIcon = ({ nodeId, profileId, content, isPublic }) => {
   const { user } = useUser();
   const { loadAudio, loadAudioQueue, appendChunkToQueue, setGeneratingTTS, currentAudio, isPlaying } = useAudio();
   const [loading, setLoading] = useState(false);
@@ -145,8 +145,8 @@ const SpeakerIcon = ({ nodeId, profileId, content }) => {
     }
   }, [ttsStatus, ttsData, ttsError, isNode, id, loadAudio, fullTitle]);
 
-  // Show only if voice mode enabled for current user
-  if (!user || !user.voice_mode_enabled) {
+  // Show for voice-mode users, or for any authenticated user on public posts
+  if (!user || (!user.voice_mode_enabled && !isPublic)) {
     return null;
   }
 
@@ -245,7 +245,12 @@ const SpeakerIcon = ({ nodeId, profileId, content }) => {
       }
 
       if (!urlPath) {
-        // No audio exists - start async TTS generation
+        // No audio exists — only voice-mode users may generate TTS
+        if (!user.voice_mode_enabled) {
+          setLoading(false);
+          return;
+        }
+        // Start async TTS generation
         await api.post(`${baseUrl}/tts`);
 
         if (isNode) {
