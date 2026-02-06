@@ -30,9 +30,13 @@ def list_users():
             "created_at": user.created_at.isoformat(),
             "accepted_terms_at": user.accepted_terms_at.isoformat() if user.accepted_terms_at else None,
             "approved": user.approved,
-            "email": user.email
+            "email": user.email,
+            "plan": user.plan
         })
-    return jsonify({"users": user_list}), 200
+    return jsonify({
+        "users": user_list,
+        "allowed_plans": sorted(User.ALLOWED_PLANS)
+    }), 200
 
 @admin_bp.route("/users/<int:user_id>/toggle", methods=["POST"])
 @login_required
@@ -55,6 +59,19 @@ def update_user_email(user_id):
     user.email = email
     db.session.commit()
     return jsonify({"message": "Email updated", "email": user.email}), 200
+
+@admin_bp.route("/users/<int:user_id>/update_plan", methods=["PUT"])
+@login_required
+@admin_required
+def update_user_plan(user_id):
+    data = request.get_json()
+    plan = data.get("plan")
+    if plan not in User.ALLOWED_PLANS:
+        return jsonify({"error": f"Invalid plan. Allowed: {sorted(User.ALLOWED_PLANS)}"}), 400
+    user = User.query.get_or_404(user_id)
+    user.plan = plan
+    db.session.commit()
+    return jsonify({"message": "Plan updated", "plan": user.plan}), 200
 
 # New endpoint: Whitelist a user by handle.
 @admin_bp.route("/whitelist", methods=["POST"])

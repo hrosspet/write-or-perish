@@ -3,6 +3,7 @@ import api from "../api";
 
 function AdminPanel() {
   const [users, setUsers] = useState([]);
+  const [allowedPlans, setAllowedPlans] = useState([]);
   const [error, setError] = useState("");
   const [newHandle, setNewHandle] = useState("");
   const [newHandleError, setNewHandleError] = useState("");
@@ -11,6 +12,9 @@ function AdminPanel() {
     try {
       const response = await api.get("/admin/users");
       setUsers(response.data.users);
+      if (response.data.allowed_plans) {
+        setAllowedPlans(response.data.allowed_plans);
+      }
     } catch (err) {
       console.error(err);
       setError("Error fetching users.");
@@ -40,6 +44,16 @@ function AdminPanel() {
     } catch (err) {
       console.error(err);
       setError("Error updating email.");
+    }
+  };
+
+  const updatePlan = async (userId, newPlan) => {
+    try {
+      await api.put(`/admin/users/${userId}/update_plan`, { plan: newPlan });
+      fetchUsers();
+    } catch (err) {
+      console.error(err);
+      setError("Error updating plan.");
     }
   };
 
@@ -84,6 +98,7 @@ function AdminPanel() {
             <th style={{ border: "1px solid #333", padding: "8px" }}>ID</th>
             <th style={{ border: "1px solid #333", padding: "8px" }}>Username</th>
             <th style={{ border: "1px solid #333", padding: "8px" }}>Approved</th>
+            <th style={{ border: "1px solid #333", padding: "8px" }}>Plan</th>
             <th style={{ border: "1px solid #333", padding: "8px" }}>Email</th>
             <th style={{ border: "1px solid #333", padding: "8px" }}>Actions</th>
           </tr>
@@ -95,6 +110,16 @@ function AdminPanel() {
               <td style={{ border: "1px solid #333", padding: "8px" }}>{u.username}</td>
               <td style={{ border: "1px solid #333", padding: "8px" }}>
                 {u.approved ? "Active" : "Inactive"}
+              </td>
+              <td style={{ border: "1px solid #333", padding: "8px" }}>
+                <select
+                  value={u.plan || "free"}
+                  onChange={(e) => updatePlan(u.id, e.target.value)}
+                >
+                  {allowedPlans.map((p) => (
+                    <option key={p} value={p}>{p}</option>
+                  ))}
+                </select>
               </td>
               <td style={{ border: "1px solid #333", padding: "8px" }}>
                 {u.email || "None"}

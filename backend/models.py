@@ -29,6 +29,9 @@ class User(db.Model, UserMixin):
     # Subscription plan ("free", "alpha", "pro", etc.).
     plan = db.Column(db.String(16), nullable=False, default="alpha")
 
+    # All valid subscription plans (single source of truth).
+    ALLOWED_PLANS = {"free", "alpha", "pro"}
+
     # Plans that grant Voice-Mode access (any non-free plan).
     VOICE_MODE_PLANS = {"alpha", "pro"}
 
