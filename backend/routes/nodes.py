@@ -18,6 +18,7 @@ from backend.utils.privacy import (
     get_default_privacy_settings,
     can_user_access_node,
     can_user_edit_node,
+    find_human_owner,
     PrivacyLevel,
     AIUsage
 )
@@ -581,8 +582,9 @@ def get_node(node_id):
             "id": node.user.id,
             "username": node.user.username,
         },
-        # Include parent user ID for LLM nodes (so frontend can check delete permission)
-        "parent_user_id": node.parent.user_id if node.parent else None,
+        # Include human owner ID for LLM nodes (so frontend can check edit/delete permission)
+        # For chains like Human → LLM → LLM, this returns the human's user_id
+        "parent_user_id": find_human_owner(node) if node.node_type == "llm" else (node.parent.user_id if node.parent else None),
         # Privacy settings
         "privacy_level": node.privacy_level,
         "ai_usage": node.ai_usage

@@ -55,6 +55,28 @@ def validate_ai_usage(ai_usage: str) -> bool:
     return ai_usage in VALID_AI_USAGE
 
 
+def find_human_owner(node) -> Optional[int]:
+    """Find the human owner of an LLM node by traversing up the parent chain.
+
+    For chains like Human → LLM → LLM, this returns the human's user_id.
+    Traverses up the parent chain, skipping LLM-authored nodes, until finding
+    a human author or running out of parents.
+
+    Args:
+        node: The Node object to find the human owner for
+
+    Returns:
+        The user_id of the human owner, or None if not found
+    """
+    current = node.parent
+    while current:
+        # If this node is NOT an LLM node, we found the human owner
+        if getattr(current, 'node_type', 'user') != "llm":
+            return current.user_id
+        current = current.parent
+    return None
+
+
 def can_user_access_node(node, user_id: Optional[int] = None) -> bool:
     """Check if a user can access a node based on privacy level.
 
@@ -74,11 +96,14 @@ def can_user_access_node(node, user_id: Optional[int] = None) -> bool:
     if node.user_id == user_id:
         return True
 
-    # For LLM nodes: check if the user is the requester (parent node's owner)
-    # This allows users to access AI responses they requested
+    # For LLM nodes: check if the user is the human owner (may be multiple levels up)
+    # This allows users to access AI responses they requested, even in chains
+    # like Human → LLM → LLM where the immediate parent is also an LLM
     node_type = getattr(node, 'node_type', 'user')
-    if node_type == "llm" and node.parent and node.parent.user_id == user_id:
-        return True
+    if node_type == "llm":
+        human_owner_id = find_human_owner(node)
+        if human_owner_id == user_id:
+            return True
 
     # Check privacy level
     privacy_level = getattr(node, 'privacy_level', PrivacyLevel.PRIVATE)
@@ -116,8 +141,9 @@ def can_user_edit_node(node, user_id: Optional[int] = None) -> bool:
 
     A user can edit a node if they are:
     1. The owner of the node (node.user_id == user_id)
-    2. The "LLM requester" - the owner of the parent node for an AI-generated node
-       (useful when users want to edit AI responses they requested)
+    2. The "human owner" - the first non-LLM ancestor in the parent chain
+       (useful when users want to edit AI responses they requested, even in
+       chains like Human → LLM → LLM)
 
     Args:
         node: The Node object to check edit permissions for
@@ -134,14 +160,13 @@ def can_user_edit_node(node, user_id: Optional[int] = None) -> bool:
     # Check if user is the owner
     is_owner = node.user_id == user_id
 
-    # Check if user is the LLM requester (parent node owner)
-    is_llm_requester = (
+    # Check if user is the human owner (first non-LLM ancestor)
+    is_human_owner = (
         node.node_type == "llm" and
-        node.parent and
-        node.parent.user_id == user_id
+        find_human_owner(node) == user_id
     )
 
-    return is_owner or is_llm_requester
+    return is_owner or is_human_owner
 
 
 def can_ai_use_node_for_chat(node) -> bool:
