@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import NodeFooter from "./NodeFooter";
 import SpeakerIcon from "./SpeakerIcon";
+import DownloadAudioIcon from "./DownloadAudioIcon";
 import ModelSelector from "./ModelSelector";
 import { useUser } from "../contexts/UserContext";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
@@ -258,6 +259,7 @@ function NodeDetail() {
           {isOwner && <button onClick={handleDelete}>Delete</button>}
           {/* Speaker icon for audio playback */}
           <SpeakerIcon nodeId={node.id} content={node.content} isPublic={node.privacy_level === 'public'} />
+          <DownloadAudioIcon nodeId={node.id} isPublic={node.privacy_level === 'public'} />
         </div>
       </div>
       <hr style={{ borderColor: "#333" }} />

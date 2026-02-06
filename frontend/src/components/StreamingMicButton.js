@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useStreamingTranscription } from '../hooks/useStreamingTranscription';
 
 /**
@@ -46,6 +46,23 @@ export default function StreamingMicButton({
     onError,
   });
 
+  // Preserve the recorded blob so the download button stays visible after auto-reset
+  const [lastMediaBlob, setLastMediaBlob] = useState(null);
+
+  // Capture blob when recording completes, before auto-reset clears it
+  useEffect(() => {
+    if (sessionState === 'complete' && mediaBlob) {
+      setLastMediaBlob(mediaBlob);
+    }
+  }, [sessionState, mediaBlob]);
+
+  // Clear preserved blob when starting a new recording
+  useEffect(() => {
+    if (sessionState === 'initializing') {
+      setLastMediaBlob(null);
+    }
+  }, [sessionState]);
+
   // Auto-reset to idle after completion (no need for "Done - Click to reset" step)
   useEffect(() => {
     if (sessionState === 'complete') {
@@ -58,7 +75,7 @@ export default function StreamingMicButton({
   }, [sessionState, cancelStreaming]);
 
   const handleDownload = useCallback(() => {
-    const blob = mediaBlob || getPartialBlob();
+    const blob = mediaBlob || getPartialBlob() || lastMediaBlob;
     if (!blob) return;
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -68,11 +85,11 @@ export default function StreamingMicButton({
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  }, [mediaBlob, getPartialBlob]);
+  }, [mediaBlob, getPartialBlob, lastMediaBlob]);
 
   const showDownload = useMemo(() => {
-    return ['recording', 'finalizing', 'complete', 'error'].includes(sessionState);
-  }, [sessionState]);
+    return ['recording', 'finalizing', 'complete', 'error'].includes(sessionState) || lastMediaBlob != null;
+  }, [sessionState, lastMediaBlob]);
 
   const handleClick = useCallback(() => {
     if (sessionState === 'idle') {
