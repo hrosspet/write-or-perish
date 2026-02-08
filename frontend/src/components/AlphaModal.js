@@ -24,7 +24,8 @@ function AlphaModal({ user, onUpdate }) {
   const modalStyle = {
     position: "fixed",
     top: 0, left: 0, right: 0, bottom: 0,
-    backgroundColor: "rgba(0,0,0,0.8)",
+    backgroundColor: "rgba(0,0,0,0.7)",
+    backdropFilter: "blur(8px)",
     display:"flex",
     alignItems:"center",
     justifyContent:"center",
@@ -32,11 +33,15 @@ function AlphaModal({ user, onUpdate }) {
   };
 
   const contentStyle = {
-    backgroundColor: "#1e1e1e",
-    padding: "20px",
-    borderRadius: "8px",
+    backgroundColor: "var(--bg-card)",
+    border: "1px solid var(--border)",
+    padding: "2rem",
+    borderRadius: "12px",
     width: "400px",
-    color: "#e0e0e0"
+    maxWidth: "90vw",
+    color: "var(--text-primary)",
+    fontFamily: "var(--sans)",
+    fontWeight: 300,
   };
 
   // If the user already provided an email, show the thank-you message
@@ -44,10 +49,10 @@ function AlphaModal({ user, onUpdate }) {
     return (
       <div style={modalStyle}>
         <div style={contentStyle}>
-          <h2>Alpha Release – Thank You!</h2>
-          <p>
+          <h2 style={{ fontFamily: "var(--serif)", fontWeight: 300, fontSize: "1.4rem" }}>Alpha Release</h2>
+          <p style={{ color: "var(--text-secondary)", lineHeight: 1.6 }}>
             Thank you for providing your email. You've been added to our waiting list.
-            We will contact you at <strong>{user.email}</strong> once your account is approved.
+            We will contact you at <strong style={{ color: "var(--text-primary)" }}>{user.email}</strong> once your account is approved.
           </p>
         </div>
       </div>
@@ -58,25 +63,51 @@ function AlphaModal({ user, onUpdate }) {
   return (
     <div style={modalStyle}>
       <div style={contentStyle}>
-        <h2>Alpha Release – Waiting List</h2>
-        <p>
-          Thank you for signing up for our limited alpha release! You’ve been added to the waiting list.
-          If you’d like to be notified when your account is approved, please provide your email below.
+        <h2 style={{ fontFamily: "var(--serif)", fontWeight: 300, fontSize: "1.4rem" }}>Alpha Release</h2>
+        <p style={{ color: "var(--text-secondary)", lineHeight: 1.6 }}>
+          Thank you for signing up for our limited alpha release! You've been added to the waiting list.
+          If you'd like to be notified when your account is approved, please provide your email below.
         </p>
         <form onSubmit={handleSubmit}>
           <div>
-            <label htmlFor="email">Email (optional):</label>
-            <input 
-              type="email" 
-              id="email" 
-              value={email} 
+            <label htmlFor="email" style={{
+              fontFamily: "var(--sans)",
+              fontWeight: 400,
+              fontSize: "0.75rem",
+              textTransform: "uppercase",
+              letterSpacing: "0.12em",
+              color: "var(--text-muted)",
+            }}>Email (optional)</label>
+            <input
+              type="email"
+              id="email"
+              value={email}
               onChange={(e) => setEmail(e.target.value)}
-              style={{ width: "100%", padding: "8px", marginTop: "8px" }} 
+              style={{
+                width: "100%",
+                padding: "10px 12px",
+                marginTop: "8px",
+                backgroundColor: "var(--bg-deep)",
+                color: "var(--text-primary)",
+                border: "1px solid var(--border)",
+                borderRadius: "8px",
+                fontFamily: "var(--sans)",
+                fontSize: "16px",
+                boxSizing: "border-box",
+              }}
             />
           </div>
-          {error && <div style={{ color: "red", marginTop: "10px" }}>{error}</div>}
+          {error && <div style={{ color: "var(--accent)", marginTop: "10px" }}>{error}</div>}
           <div style={{ marginTop: "20px" }}>
-            <button type="submit" disabled={loading}>
+            <button
+              type="submit"
+              disabled={loading}
+              style={{
+                borderColor: "var(--accent)",
+                color: "var(--accent)",
+                padding: "10px 20px",
+              }}
+            >
               {loading ? "Submitting..." : "Submit"}
             </button>
           </div>

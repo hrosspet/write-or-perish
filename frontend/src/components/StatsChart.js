@@ -32,11 +32,6 @@ const StatsChart = ({ username }) => {
     const endpoint = username ? `/stats/${username}` : '/stats';
     api.get(endpoint)
       .then(response => {
-        // Response from backend has:
-        //   { personal: [{ date:"YYYY-MM-DD", tokens: ...}, ...],
-        //     global:   [{ date:"YYYY-MM-DD", tokens: ...}, ...],
-        //     personal_total: <number>,
-        //     global_total:   <number> }
         const personal = response.data.personal;
         const global = response.data.global;
         const personal_total = response.data.personal_total;
@@ -55,10 +50,8 @@ const StatsChart = ({ username }) => {
         // Build the union of dates as the x-axis.
         const dateSet = new Set([...personal.map(p => p.date), ...global.map(g => g.date)]);
         let combinedDates = Array.from(dateSet);
-        // Dates are in ISO format so alphabetic sort works (earlier dates will come first)
         combinedDates.sort();
-        
-        // For each combined date, pull tokens from the personal and global lookup maps (or default to 0)
+
         const personalTokens = combinedDates.map(date => personalMap[date] || 0);
         const globalTokens = combinedDates.map(date => globalMap[date] || 0);
 
@@ -68,23 +61,23 @@ const StatsChart = ({ username }) => {
             {
               label: 'Personal Daily Tokens',
               data: personalTokens,
-              borderColor: 'rgba(97, 218, 251, 1)',
-              backgroundColor: 'rgba(97, 218, 251, 0.2)',
+              borderColor: '#c4956a',
+              backgroundColor: 'rgba(196, 149, 106, 0.2)',
               pointRadius: 5,
               pointBackgroundColor: (context) => {
                 const index = context.dataIndex;
-                return (index === combinedDates.length - 1) ? '#ffcc00' : 'rgba(97, 218, 251, 1)';
+                return (index === combinedDates.length - 1) ? '#e8e2d6' : '#c4956a';
               },
             },
             {
               label: 'Global Daily Tokens',
               data: globalTokens,
-              borderColor: 'rgba(162, 155, 254, 1)',
-              backgroundColor: 'rgba(162, 155, 254, 0.2)',
+              borderColor: '#a89a8a',
+              backgroundColor: 'rgba(168, 154, 138, 0.2)',
               pointRadius: 5,
               pointBackgroundColor: (context) => {
                 const index = context.dataIndex;
-                return (index === combinedDates.length - 1) ? '#ffcc00' : 'rgba(162, 155, 254, 1)';
+                return (index === combinedDates.length - 1) ? '#e8e2d6' : '#a89a8a';
               },
             },
           ],
@@ -97,7 +90,7 @@ const StatsChart = ({ username }) => {
   }, [username]);
 
   if (!chartData) {
-    return <div style={{ color: "#e0e0e0" }}>Loading Chart...</div>;
+    return <div style={{ color: "var(--text-muted)", fontFamily: "var(--sans)" }}>Loading Chart...</div>;
   }
 
   // Chart options, including color settings for dark mode.
@@ -107,22 +100,36 @@ const StatsChart = ({ username }) => {
       title: {
         display: true,
         text: 'Daily Token Progress',
-        color: "#e0e0e0",
+        color: "var(--text-primary)",
+        font: {
+          family: "'Outfit', sans-serif",
+          weight: 300,
+        },
       },
       legend: {
         labels: {
-          color: "#e0e0e0",
+          color: "#a89a8a",
+          font: {
+            family: "'Outfit', sans-serif",
+            weight: 300,
+          },
         },
       },
     },
     scales: {
       x: {
-        ticks: { color: "#e0e0e0" },
-        grid: { color: "#333" },
+        ticks: {
+          color: "#6d635a",
+          font: { family: "'Outfit', sans-serif", weight: 300 },
+        },
+        grid: { color: "#2a2725" },
       },
       y: {
-        ticks: { color: "#e0e0e0" },
-        grid: { color: "#333" },
+        ticks: {
+          color: "#6d635a",
+          font: { family: "'Outfit', sans-serif", weight: 300 },
+        },
+        grid: { color: "#2a2725" },
       },
     },
   };
@@ -136,9 +143,12 @@ const StatsChart = ({ username }) => {
             bottom: '300px',
             right: '250px',
             backgroundColor: 'rgba(0, 0, 0, 0.55)',
-            borderRadius: '4px',
-            color: '#e0e0e0',
-            fontSize: '0.9em'
+            borderRadius: '6px',
+            color: 'var(--text-secondary)',
+            fontSize: '0.85em',
+            fontFamily: 'var(--sans)',
+            fontWeight: 300,
+            padding: '2px 8px',
           }}
         >
           Total: {totals.personal_total} / {totals.global_total}

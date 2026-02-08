@@ -48,12 +48,14 @@ const ModelSelector = ({ nodeId, selectedModel, onModelChange }) => {
       style={{
         marginRight: '8px',
         padding: '8px 12px',
-        borderRadius: '4px',
-        border: '1px solid #ccc',
-        backgroundColor: loading ? '#f5f5f5' : 'white',
+        borderRadius: '6px',
+        border: '1px solid var(--border)',
+        backgroundColor: 'var(--bg-deep)',
+        color: 'var(--text-secondary)',
         cursor: loading ? 'not-allowed' : 'pointer',
         fontSize: '14px',
-        fontFamily: 'inherit',
+        fontFamily: 'var(--sans)',
+        fontWeight: 300,
       }}
     >
       {models.map((m) => (

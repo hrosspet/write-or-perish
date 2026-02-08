@@ -61,21 +61,35 @@ function Feed() {
     navigate(`/node/${nodeId}`);
   };
 
-  if (loading) return <div style={{ padding: "20px" }}>Loading feed...</div>;
-  if (error) return <div style={{ padding: "20px", color: "red" }}>{error}</div>;
+  if (loading) return <div style={{ padding: "20px", color: "var(--text-muted)" }}>Loading feed...</div>;
+  if (error) return <div style={{ padding: "20px", color: "var(--accent)" }}>{error}</div>;
 
   return (
-    <div style={{ padding: "20px", maxWidth: "1000px", margin: "0 auto" }}>
-      <h2 style={{ color: "#e0e0e0" }}>Feed</h2>
+    <div style={{ padding: "20px", maxWidth: "680px", margin: "0 auto" }}>
+      <h2 style={{
+        color: "var(--text-primary)",
+        fontFamily: "var(--serif)",
+        fontWeight: 300,
+        fontSize: "2rem",
+        marginBottom: "8px",
+      }}>
+        Feed
+      </h2>
+      <div style={{
+        width: "40px",
+        height: "1px",
+        backgroundColor: "var(--accent)",
+        marginBottom: "32px",
+      }} />
       <div style={{ display: "flex", flexDirection: "column"}}>
         {feedNodes.map(node => (
-          <Bubble key={node.id} isHighlighted={true} node={node} onClick={handleBubbleClick} />
+          <Bubble key={node.id} node={node} onClick={handleBubbleClick} />
         ))}
       </div>
-      {loadingMore && <div style={{ padding: "20px", textAlign: "center", color: "#888" }}>Loading more...</div>}
+      {loadingMore && <div style={{ padding: "20px", textAlign: "center", color: "var(--text-muted)" }}>Loading more...</div>}
       {hasMore && !loadingMore && (
         <div
-          style={{ padding: "20px", textAlign: "center", cursor: "pointer", color: "#888" }}
+          style={{ padding: "20px", textAlign: "center", cursor: "pointer", color: "var(--text-muted)" }}
           onClick={() => fetchPage(page + 1)}
         >
           Load more...

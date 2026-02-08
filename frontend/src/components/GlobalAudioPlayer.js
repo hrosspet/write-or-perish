@@ -57,9 +57,10 @@ const GlobalAudioPlayer = () => {
     }}>
       {/* Title */}
       <div style={{
-        color: '#e0e0e0',
+        color: 'var(--text-primary)',
         fontSize: '13px',
-        fontWeight: '400',
+        fontWeight: '300',
+        fontFamily: 'var(--sans)',
         maxWidth: '200px',
         overflow: 'hidden',
         textOverflow: 'ellipsis',
@@ -78,7 +79,7 @@ const GlobalAudioPlayer = () => {
             style={{
               background: 'none',
               border: 'none',
-              color: loading ? '#666' : '#61dafb',
+              color: loading ? 'var(--text-muted)' : 'var(--accent)',
               cursor: loading ? 'not-allowed' : 'pointer',
               fontSize: '16px',
               padding: '4px',
@@ -96,7 +97,7 @@ const GlobalAudioPlayer = () => {
             style={{
               background: 'none',
               border: 'none',
-              color: loading ? '#666' : '#61dafb',
+              color: loading ? 'var(--text-muted)' : 'var(--accent)',
               cursor: loading ? 'not-allowed' : 'pointer',
               fontSize: '16px',
               padding: '4px',
@@ -115,7 +116,7 @@ const GlobalAudioPlayer = () => {
           style={{
             background: 'none',
             border: 'none',
-            color: loading ? '#666' : '#e0e0e0',
+            color: loading ? 'var(--text-muted)' : 'var(--text-primary)',
             cursor: loading ? 'not-allowed' : 'pointer',
             fontSize: '14px',
             padding: '4px',
@@ -133,7 +134,7 @@ const GlobalAudioPlayer = () => {
           style={{
             background: 'none',
             border: 'none',
-            color: loading ? '#666' : '#e0e0e0',
+            color: loading ? 'var(--text-muted)' : 'var(--text-primary)',
             cursor: loading ? 'not-allowed' : 'pointer',
             fontSize: '14px',
             padding: '4px',
@@ -151,7 +152,7 @@ const GlobalAudioPlayer = () => {
           style={{
             background: 'none',
             border: 'none',
-            color: loading ? '#666' : '#e0e0e0',
+            color: loading ? 'var(--text-muted)' : 'var(--text-primary)',
             cursor: loading ? 'not-allowed' : 'pointer',
             fontSize: '14px',
             padding: '4px',
@@ -168,9 +169,9 @@ const GlobalAudioPlayer = () => {
           title="Change playback speed"
           style={{
             background: 'none',
-            border: '1px solid #666',
+            border: '1px solid var(--border)',
             borderRadius: '4px',
-            color: loading ? '#666' : '#e0e0e0',
+            color: loading ? 'var(--text-muted)' : 'var(--text-primary)',
             cursor: loading ? 'not-allowed' : 'pointer',
             fontSize: '11px',
             padding: '2px 6px',
@@ -187,7 +188,7 @@ const GlobalAudioPlayer = () => {
 
       {/* Time display */}
       <div style={{
-        color: '#b0b0b0',
+        color: 'var(--text-muted)',
         fontSize: '11px',
         minWidth: '70px',
         display: 'flex',
@@ -199,7 +200,7 @@ const GlobalAudioPlayer = () => {
           <span
             style={{
               fontSize: '9px',
-              color: '#61dafb',
+              color: 'var(--accent)',
               animation: 'pulse 1.5s ease-in-out infinite',
             }}
             title="Generating more audio..."
@@ -215,7 +216,7 @@ const GlobalAudioPlayer = () => {
         style={{
           width: '150px',
           height: '5px',
-          backgroundColor: '#444',
+          backgroundColor: 'var(--bg-card)',
           borderRadius: '3px',
           cursor: 'pointer',
           position: 'relative',
@@ -226,7 +227,7 @@ const GlobalAudioPlayer = () => {
           style={{
             height: '100%',
             width: `${displayDuration > 0 ? (displayTime / displayDuration) * 100 : 0}%`,
-            backgroundColor: '#61dafb',
+            backgroundColor: 'var(--accent)',
             borderRadius: '3px',
             transition: 'width 0.1s linear',
           }}

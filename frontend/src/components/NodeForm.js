@@ -302,8 +302,22 @@ const NodeForm = forwardRef(
             }
           }}
           rows={20}
-          style={{ width: "100%" }}
-          placeholder="Write your thoughts here..."
+          style={{
+            width: "100%",
+            backgroundColor: "var(--bg-deep)",
+            border: "1px solid var(--border)",
+            borderRadius: "8px",
+            padding: "14px 16px",
+            fontFamily: "var(--sans)",
+            fontSize: "0.95rem",
+            fontWeight: 300,
+            color: "var(--text-primary)",
+            lineHeight: 1.6,
+            minHeight: "250px",
+            boxSizing: "border-box",
+            transition: "border-color 0.3s ease",
+          }}
+          placeholder="What's present for you right now..."
           disabled={!editMode && uploadedFile}
         />
 
@@ -316,25 +330,27 @@ const NodeForm = forwardRef(
           disabled={loading}
         />
 
-        {error && <div style={{ color: "red" }}>{error}</div>}
+        {error && <div style={{ color: "var(--accent)", fontFamily: "var(--sans)", fontSize: "0.9rem" }}>{error}</div>}
 
         {/* Auto-save status indicator */}
         {content.trim() && (
           <div style={{
             marginTop: '4px',
             fontSize: '0.85em',
-            color: '#666',
+            fontFamily: 'var(--sans)',
+            fontWeight: 300,
+            color: 'var(--text-muted)',
             display: 'flex',
             alignItems: 'center',
             gap: '4px'
           }}>
             {isDraftSaving ? (
               <>
-                <span style={{ color: '#ffc107' }}>Saving...</span>
+                <span style={{ color: 'var(--accent)' }}>Saving...</span>
               </>
             ) : lastSaved ? (
               <>
-                <span style={{ color: '#28a745' }}>Draft saved {formatTimeAgo(lastSaved)}</span>
+                <span style={{ color: 'var(--text-muted)' }}>Draft saved {formatTimeAgo(lastSaved)}</span>
               </>
             ) : null}
           </div>
@@ -342,8 +358,20 @@ const NodeForm = forwardRef(
 
         {/* Display uploaded file info */}
         {uploadedFile && (
-          <div style={{ marginTop: '8px', padding: '8px', backgroundColor: '#f0f0f0', borderRadius: '4px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <span>📁 {uploadedFile.name} ({(uploadedFile.size / 1024 / 1024).toFixed(2)} MB)</span>
+          <div style={{
+            marginTop: '8px',
+            padding: '8px 12px',
+            backgroundColor: 'var(--bg-surface)',
+            border: '1px solid var(--border)',
+            borderRadius: '6px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            color: 'var(--text-secondary)',
+            fontFamily: 'var(--sans)',
+            fontSize: '0.85rem',
+          }}>
+            <span>{uploadedFile.name} ({(uploadedFile.size / 1024 / 1024).toFixed(2)} MB)</span>
             <button
               type="button"
               onClick={() => {
@@ -359,7 +387,14 @@ const NodeForm = forwardRef(
 
         {!hideSubmit && (
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '8px' }}>
-            <button type="submit" disabled={loading}>
+            <button
+              type="submit"
+              disabled={loading}
+              style={{
+                borderColor: 'var(--accent)',
+                color: 'var(--accent)',
+              }}
+            >
               {isUploading
                 ? `Uploading... ${uploadProgress}%`
                 : loading && transcriptionStatus === 'processing' && transcriptionProgress > 0
@@ -411,16 +446,11 @@ const NodeForm = forwardRef(
                     // Save combined content to the regular draft so it persists on reopen
                     saveDraft(combinedContent);
                     setHasDraft(true);
-                    // Don't clear preStreamingContentRef here - a late SSE event could
-                    // trigger onTranscriptUpdate after this, and it needs the prefix.
-                    // The ref gets overwritten when next recording starts anyway.
-                    // Note: No node exists yet - user must click Save to create it
                   }}
                   onError={(err) => {
                     setError(err.message || 'Streaming transcription failed');
                     setLoading(false);
                     setIsStreamingRecording(false);
-                    // Don't clear preStreamingContentRef - user might retry and we want to preserve content
                   }}
                   disabled={loading || uploadedFile}
                 />

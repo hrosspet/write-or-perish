@@ -22,6 +22,18 @@ function NavBar({ onNewEntryClick }) {
     }
   };
 
+  const currentPath = location.pathname;
+
+  const linkStyle = (path) => ({
+    color: currentPath === path ? 'var(--accent)' : 'var(--text-muted)',
+    textDecoration: "none",
+    fontFamily: "var(--sans)",
+    fontWeight: 300,
+    fontSize: "0.85rem",
+    letterSpacing: "0.04em",
+    transition: "color 0.3s ease",
+  });
+
   return (
     <nav
       style={{
@@ -29,60 +41,76 @@ function NavBar({ onNewEntryClick }) {
         top: 0,
         left: 0,
         right: 0,
-        padding: "10px",
-        backgroundColor: "#1f1f1f",
-        borderBottom: "1px solid #333",
+        height: "56px",
+        backgroundColor: "var(--bg-surface)",
+        borderBottom: "1px solid var(--border)",
         display: "flex",
         alignItems: "center",
-        zIndex: 1000
+        zIndex: 1000,
+        padding: "0 24px",
       }}
     >
-      <Link to="/" style={{ color: "#e0e0e0", textDecoration: "none", marginRight: "10px" }}>
-        Home
-      </Link>
-      <Link to="/dashboard" style={{ color: "#e0e0e0", textDecoration: "none", marginRight: "10px" }}>
-        Dashboard
-      </Link>
-      <Link to="/feed" style={{ color: "#e0e0e0", textDecoration: "none", marginRight: "10px" }}>
-        Feed
-      </Link>
-
       <Link
-        to="#"
-        onClick={handleWriteClick}
-        style={{ color: "#e0e0e0", textDecoration: "none", marginRight: "10px" }}
+        to="/"
+        style={{
+          color: "var(--text-primary)",
+          textDecoration: "none",
+          fontFamily: "var(--serif)",
+          fontWeight: 300,
+          fontSize: "0.85rem",
+          textTransform: "uppercase",
+          letterSpacing: "0.25em",
+          marginRight: "auto",
+        }}
       >
-        Write
+        Loore
       </Link>
 
-      {user && user.is_admin && (
-        <Link
-          to="/admin"
-          style={{ color: "#e0e0e0", textDecoration: "none", marginRight: "10px" }}
-        >
-          Admin
+      <div style={{ display: "flex", alignItems: "center", gap: "20px" }}>
+        <Link to="/dashboard" style={linkStyle("/dashboard")}>
+          Dashboard
         </Link>
-      )}
-
-      {!user && (
-        <Link
-          to={`/login?returnUrl=${encodeURIComponent(location.pathname + location.search)}`}
-          style={{ color: "#e0e0e0", textDecoration: "none", marginRight: "10px" }}
-        >
-          Login
+        <Link to="/feed" style={linkStyle("/feed")}>
+          Feed
         </Link>
-      )}
 
-      {user && (
-        <a
-          href={`${backendUrl}/auth/logout`}
-          style={{ color: "#e0e0e0", textDecoration: "none", marginRight: "10px" }}
+        <Link
+          to="#"
+          onClick={handleWriteClick}
+          style={linkStyle("")}
         >
-          Logout
-        </a>
-      )}
+          Write
+        </Link>
 
-      <GlobalAudioPlayer />
+        {user && user.is_admin && (
+          <Link
+            to="/admin"
+            style={linkStyle("/admin")}
+          >
+            Admin
+          </Link>
+        )}
+
+        {!user && (
+          <Link
+            to={`/login?returnUrl=${encodeURIComponent(location.pathname + location.search)}`}
+            style={linkStyle("/login")}
+          >
+            Login
+          </Link>
+        )}
+
+        {user && (
+          <a
+            href={`${backendUrl}/auth/logout`}
+            style={linkStyle("")}
+          >
+            Logout
+          </a>
+        )}
+
+        <GlobalAudioPlayer />
+      </div>
     </nav>
   );
 }
