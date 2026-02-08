@@ -81,7 +81,7 @@ function Feed() {
         backgroundColor: "var(--accent)",
         marginBottom: "32px",
       }} />
-      <div style={{ display: "flex", flexDirection: "column"}}>
+      <div style={{ display: "flex", flexDirection: "column", gap: "1rem"}}>
         {feedNodes.map(node => (
           <Bubble key={node.id} node={node} onClick={handleBubbleClick} />
         ))}

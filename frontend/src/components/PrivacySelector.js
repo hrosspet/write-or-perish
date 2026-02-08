@@ -15,22 +15,27 @@ const PrivacySelector = ({
     marginBottom: '6px',
     fontFamily: 'var(--sans)',
     fontWeight: 400,
-    fontSize: '0.75rem',
+    fontSize: '0.7rem',
     textTransform: 'uppercase',
-    letterSpacing: '0.12em',
+    letterSpacing: '0.14em',
     color: 'var(--text-muted)',
   };
 
   const selectStyle = {
     width: '100%',
-    padding: '8px',
+    padding: '10px 14px',
     borderRadius: '6px',
     border: '1px solid var(--border)',
-    backgroundColor: disabled ? 'var(--bg-surface)' : 'var(--bg-deep)',
+    backgroundColor: disabled ? 'var(--bg-surface)' : 'var(--bg-input)',
     color: 'var(--text-secondary)',
-    fontSize: '14px',
+    fontSize: '0.9rem',
     fontFamily: 'var(--sans)',
     fontWeight: 300,
+    appearance: 'none',
+    WebkitAppearance: 'none',
+    outline: 'none',
+    cursor: 'pointer',
+    transition: 'border-color 0.3s',
   };
 
   const descStyle = {
@@ -45,10 +50,6 @@ const PrivacySelector = ({
     <div style={{
       marginTop: '12px',
       marginBottom: '12px',
-      padding: '12px',
-      backgroundColor: 'var(--bg-deep)',
-      borderRadius: '8px',
-      border: '1px solid var(--border)'
     }}>
       <div style={{ marginBottom: '12px' }}>
         <label style={labelStyle}>
