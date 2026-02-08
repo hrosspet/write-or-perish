@@ -17,7 +17,7 @@ function RenderChildTree({ nodes, onBubbleClick }) {
     <div>
       {nodes.map((child, index) => {
         const containerStyle = (nodes.length > 1)
-          ? { marginLeft: "20px", paddingLeft: "10px", borderLeft: "2px solid #61dafb" }
+          ? { marginLeft: "20px", paddingLeft: "10px", borderLeft: "2px solid var(--border)" }
           : { marginLeft: "0px" };
 
         return (
@@ -29,7 +29,7 @@ function RenderChildTree({ nodes, onBubbleClick }) {
               }
             </div>
             {index < nodes.length - 1 && (
-              <hr style={{ borderColor: "#333", marginLeft: containerStyle.marginLeft }} />
+              <hr style={{ borderColor: "var(--border)", marginLeft: containerStyle.marginLeft }} />
             )}
           </div>
         );
@@ -127,9 +127,9 @@ function NodeDetail() {
     }
   }, [llmStatus, llmData, llmError, navigate]);
 
-  if (loading) return <div>Loading node...</div>;
-  if (error) return <div>{error}</div>;
-  if (!node) return <div>No node found.</div>;
+  if (loading) return <div style={{ color: "var(--text-muted)", padding: "20px" }}>Loading node...</div>;
+  if (error) return <div style={{ color: "var(--accent)", padding: "20px" }}>{error}</div>;
+  if (!node) return <div style={{ color: "var(--text-muted)", padding: "20px" }}>No node found.</div>;
 
   const handleBubbleClick = (nodeId) => {
     navigate(`/node/${nodeId}`);
@@ -194,14 +194,15 @@ function NodeDetail() {
     </div>
   );
 
-  // Highlighted node section – note the left indent applied on both the content and the footer/buttons container.
+  // Highlighted node section
   const highlightedTextStyle = {
     boxSizing: "border-box",
-    padding: "10px",
+    padding: "1.8rem 2rem",
     margin: "10px 0",
-    backgroundColor: "#2e2e2e",
-    border: "2px solid #61dafb",
-    borderLeft: "2px solid #61dafb",
+    backgroundColor: "var(--bg-card)",
+    border: "1px solid var(--border)",
+    borderLeft: "3px solid var(--accent)",
+    borderRadius: "10px",
     width: "95%",
     maxWidth: "1500px",
     marginLeft: "20px"
@@ -219,7 +220,7 @@ function NodeDetail() {
 
   const highlightedNodeSection = (
     <div ref={highlightedNodeRef}>
-      <hr style={{ borderColor: "#333" }} />
+      <hr style={{ borderColor: "var(--border)" }} />
       <div style={highlightedTextStyle}>
         <QuotedContent
           content={node.content}
@@ -262,7 +263,7 @@ function NodeDetail() {
           <DownloadAudioIcon nodeId={node.id} isPublic={node.privacy_level === 'public'} />
         </div>
       </div>
-      <hr style={{ borderColor: "#333" }} />
+      <hr style={{ borderColor: "var(--border)" }} />
     </div>
   );
 
@@ -275,9 +276,57 @@ function NodeDetail() {
     </div>
   );
 
+  // Modal overlay style
+  const modalOverlayStyle = {
+    position: "fixed",
+    top: 0, left: 0, right: 0, bottom: 0,
+    backgroundColor: "rgba(0,0,0,0.7)",
+    backdropFilter: "blur(8px)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 1000
+  };
+
+  const modalContentStyle = {
+    background: "var(--bg-card)",
+    border: "1px solid var(--border)",
+    padding: "2rem",
+    borderRadius: "12px",
+    width: "640px",
+    maxWidth: "90vw",
+    position: "relative"
+  };
+
+  const modalCloseStyle = {
+    position: "absolute",
+    top: "12px",
+    right: "16px",
+    fontSize: "24px",
+    cursor: "pointer",
+    color: "var(--text-muted)",
+    background: "none",
+    border: "none",
+    padding: "4px",
+    lineHeight: 1,
+  };
+
+  const modalHeadingStyle = {
+    marginBottom: "20px",
+    fontFamily: "var(--serif)",
+    fontSize: "1.4rem",
+    fontWeight: 300,
+    color: "var(--text-primary)",
+  };
+
   return (
     <div style={{ padding: "20px" }}>
-      <h2>Thread</h2>
+      <h2 style={{
+        fontFamily: "var(--serif)",
+        fontWeight: 300,
+        fontSize: "1.8rem",
+        color: "var(--text-primary)",
+      }}>Thread</h2>
       {ancestorsSection}
       {highlightedNodeSection}
       {childrenSection}
@@ -285,40 +334,20 @@ function NodeDetail() {
       {/* Overlay for "Add Text" */}
       {showChildFormOverlay && (
         <div
-          style={{
-            position: "fixed",
-            top: 0, left: 0, right: 0, bottom: 0,
-            backgroundColor: "rgba(0,0,0,0.8)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 1000
-          }}
+          style={modalOverlayStyle}
           onClick={() => setShowChildFormOverlay(false)}
         >
           <div
-            style={{
-              background: "#1e1e1e",
-              padding: "20px",
-              borderRadius: "8px",
-              width: "1000px",
-              position: "relative"
-            }}
+            style={modalContentStyle}
             onClick={(e) => e.stopPropagation()}
           >
-            <div
-              style={{
-                position: "absolute",
-                top: "10px",
-                right: "10px",
-                fontSize: "24px",
-                cursor: "pointer"
-              }}
+            <button
+              style={modalCloseStyle}
               onClick={() => setShowChildFormOverlay(false)}
             >
               &times;
-            </div>
-            <h2 style={{ marginBottom: "20px" }}>Add Text</h2>
+            </button>
+            <h2 style={modalHeadingStyle}>Add Text</h2>
             <NodeForm
               parentId={node.id}
               onSuccess={(data) => {
@@ -333,40 +362,20 @@ function NodeDetail() {
       {/* Overlay for "Edit Text" */}
       {showEditOverlay && (
         <div
-          style={{
-            position: "fixed",
-            top: 0, left: 0, right: 0, bottom: 0,
-            backgroundColor: "rgba(0,0,0,0.8)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 1000
-          }}
+          style={modalOverlayStyle}
           onClick={() => setShowEditOverlay(false)}
         >
           <div
-            style={{
-              background: "#1e1e1e",
-              padding: "20px",
-              borderRadius: "8px",
-              width: "1000px",
-              position: "relative"
-            }}
+            style={modalContentStyle}
             onClick={(e) => e.stopPropagation()}
           >
-            <div
-              style={{
-                position: "absolute",
-                top: "10px",
-                right: "10px",
-                fontSize: "24px",
-                cursor: "pointer"
-              }}
+            <button
+              style={modalCloseStyle}
               onClick={() => setShowEditOverlay(false)}
             >
               &times;
-            </div>
-            <h2 style={{ marginBottom: "20px" }}>Edit Text</h2>
+            </button>
+            <h2 style={modalHeadingStyle}>Edit Text</h2>
             <NodeForm
               editMode={true}
               nodeId={node.id}

@@ -1,8 +1,7 @@
 .App {
   text-align: left;
-  /* Dark background for your main app container */
-  background-color: #121212;
-  color: #e0e0e0;
+  background-color: var(--bg-deep);
+  color: var(--text-primary);
 }
 
 .App-logo {
@@ -11,19 +10,18 @@
 }
 
 .App-header {
-  background-color: #1f1f1f;
+  background-color: var(--bg-surface);
   min-height: 100vh;
   display: flex;
   flex-direction: column;
   align-items: left;
   justify-content: left;
   font-size: calc(10px + 2vmin);
-  color: #e0e0e0;
+  color: var(--text-primary);
 }
 
 .App-link {
-  /* A bright accent color works in a dark theme */
-  color: #61dafb;
+  color: var(--accent);
 }
 
 @media (prefers-reduced-motion: no-preference) {

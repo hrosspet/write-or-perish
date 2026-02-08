@@ -9,17 +9,17 @@ const NodeFooter = ({ username, createdAt, childrenCount }) => {
   // use "/dashboard" for the link. Otherwise, use "/dashboard/username" for the public dashboard.
   const linkUrl = user && user.username === username ? '/dashboard' : `/dashboard/${username}`;
   const formattedDateTime = createdAt ? new Date(createdAt).toLocaleString() : "";
-  
+
   return (
     <div style={footerStyle}>
-      <Link to={linkUrl} style={{ color: "#aba9a9", textDecoration: "none" }}>
+      <Link to={linkUrl} style={{ color: "var(--text-muted)", textDecoration: "none", transition: "color 0.3s ease" }}>
         {username}
       </Link>
-      <span>|</span>
+      <span style={{ color: "var(--border)" }}>&middot;</span>
       <span>{formattedDateTime}</span>
       {childrenCount > 0 && (
         <>
-          <span>|</span>
+          <span style={{ color: "var(--border)" }}>&middot;</span>
           <FaRegCommentDots />
           <span>{childrenCount}</span>
         </>
@@ -29,12 +29,14 @@ const NodeFooter = ({ username, createdAt, childrenCount }) => {
 };
 
 const footerStyle = {
-  fontSize: "0.8em",
-  color: "#aba9a9",
-  marginTop: "8px",
+  fontSize: "0.75rem",
+  fontFamily: "var(--sans)",
+  fontWeight: 300,
+  color: "var(--text-muted)",
+  marginTop: "12px",
   display: "flex",
   alignItems: "center",
-  gap: "5px"
+  gap: "6px"
 };
 
 export default NodeFooter;

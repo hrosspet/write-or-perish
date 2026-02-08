@@ -31,7 +31,7 @@ function App() {
       } else {
         setShowTerms(false);
       }
-      // Also, if they have accepted terms but are not approved (and haven’t provided an email),
+      // Also, if they have accepted terms but are not approved (and haven't provided an email),
       // show the waiting-list modal.
       // if (user.accepted_terms_at && user.approved === false && !user.email) {
       if (user.accepted_terms_at && !user.approved) {
@@ -72,7 +72,8 @@ function App() {
           style={{
             position: 'fixed',
             top: 0, left: 0, right: 0, bottom: 0,
-            backgroundColor: 'rgba(0, 0, 0, 0.8)',
+            backgroundColor: 'rgba(0, 0, 0, 0.7)',
+            backdropFilter: 'blur(8px)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
@@ -83,27 +84,38 @@ function App() {
             onClick={(e) => e.stopPropagation()}
             style={{
               position: 'relative',
-              background: '#1e1e1e',
-              padding: '20px',
-              borderRadius: '8px',
-              width: '800px'
+              background: 'var(--bg-card)',
+              border: '1px solid var(--border)',
+              padding: '2rem',
+              borderRadius: '12px',
+              width: '640px',
+              maxWidth: '90vw',
             }}
           >
-            <div
+            <button
               style={{
                 position: 'absolute',
-                top: '10px',
-                right: '10px',
+                top: '12px',
+                right: '16px',
                 fontSize: '24px',
-                fontWeight: 'bold',
-                color: '#e0e0e0',
-                cursor: 'pointer'
+                color: 'var(--text-muted)',
+                cursor: 'pointer',
+                background: 'none',
+                border: 'none',
+                padding: '4px',
+                lineHeight: 1,
               }}
               onClick={handleCloseModal}
             >
               &times;
-            </div>
-            <h2 style={{ color: '#e0e0e0', marginBottom: '20px' }}>
+            </button>
+            <h2 style={{
+              fontFamily: 'var(--serif)',
+              fontSize: '1.4rem',
+              fontWeight: 300,
+              color: 'var(--text-primary)',
+              marginBottom: '20px',
+            }}>
               Write New Entry
             </h2>
             <NodeForm
@@ -118,7 +130,7 @@ function App() {
         </div>
       )}
 
-      {/* Render the Terms Modal if the user hasn’t accepted the terms yet */}
+      {/* Render the Terms Modal if the user hasn't accepted the terms yet */}
       {showTerms && (
         <TermsModal
           onAccepted={(acceptedTimestamp) => {

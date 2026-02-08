@@ -61,7 +61,7 @@ function LoginPage() {
 
   if (loading) {
     return (
-      <div style={{ padding: "40px", textAlign: "center" }}>
+      <div style={{ padding: "40px", textAlign: "center", color: "var(--text-muted)" }}>
         <p>Loading...</p>
       </div>
     );
@@ -84,24 +84,30 @@ function LoginPage() {
     >
       <div
         style={{
-          backgroundColor: "#1e1e1e",
+          backgroundColor: "var(--bg-card)",
           padding: "40px",
-          borderRadius: "8px",
-          border: "1px solid #333",
+          borderRadius: "10px",
+          border: "1px solid var(--border)",
           maxWidth: "400px",
           width: "100%",
           textAlign: "center"
         }}
       >
-        <h1 style={{ color: "#e0e0e0", marginBottom: "10px" }}>
+        <h1 style={{
+          fontFamily: "var(--serif)",
+          fontWeight: 300,
+          fontSize: "1.8rem",
+          color: "var(--text-primary)",
+          marginBottom: "10px"
+        }}>
           Welcome to Loore
         </h1>
-        <p style={{ color: "#888", marginBottom: "30px" }}>
+        <p style={{ color: "var(--text-muted)", marginBottom: "30px", fontFamily: "var(--sans)", fontWeight: 300 }}>
           Sign in to continue
         </p>
 
         {errorCode && ERROR_MESSAGES[errorCode] && (
-          <p style={{ color: "#ff6b6b", marginBottom: "20px", fontSize: "14px" }}>
+          <p style={{ color: "var(--accent)", marginBottom: "20px", fontSize: "14px", fontFamily: "var(--sans)" }}>
             {ERROR_MESSAGES[errorCode]}
           </p>
         )}
@@ -114,8 +120,10 @@ function LoginPage() {
             backgroundColor: "#1DA1F2",
             color: "white",
             border: "none",
-            borderRadius: "4px",
+            borderRadius: "8px",
             fontSize: "16px",
+            fontFamily: "var(--sans)",
+            fontWeight: 400,
             cursor: "pointer",
             display: "flex",
             alignItems: "center",
@@ -141,11 +149,13 @@ function LoginPage() {
             style={{
               width: "100%",
               padding: "12px 20px",
-              backgroundColor: "#333",
-              color: "#e0e0e0",
-              border: "1px solid #444",
-              borderRadius: "4px",
+              backgroundColor: "transparent",
+              color: "var(--text-secondary)",
+              border: "1px solid var(--border)",
+              borderRadius: "8px",
               fontSize: "16px",
+              fontFamily: "var(--sans)",
+              fontWeight: 300,
               cursor: "pointer",
               display: "flex",
               alignItems: "center",
@@ -169,7 +179,16 @@ function LoginPage() {
           <form onSubmit={handleEmailSubmit} style={{ textAlign: "left" }}>
             <label
               htmlFor="email"
-              style={{ color: "#aaa", fontSize: "14px", display: "block", marginBottom: "6px" }}
+              style={{
+                color: "var(--text-muted)",
+                fontSize: "0.75rem",
+                fontFamily: "var(--sans)",
+                fontWeight: 400,
+                textTransform: "uppercase",
+                letterSpacing: "0.12em",
+                display: "block",
+                marginBottom: "6px"
+              }}
             >
               Email address
             </label>
@@ -183,17 +202,18 @@ function LoginPage() {
               style={{
                 width: "100%",
                 padding: "10px 12px",
-                backgroundColor: "#2a2a2a",
-                color: "#e0e0e0",
-                border: "1px solid #444",
-                borderRadius: "4px",
+                backgroundColor: "var(--bg-deep)",
+                color: "var(--text-primary)",
+                border: "1px solid var(--border)",
+                borderRadius: "8px",
                 fontSize: "16px",
+                fontFamily: "var(--sans)",
                 marginBottom: "12px",
                 boxSizing: "border-box",
               }}
             />
             {emailError && (
-              <p style={{ color: "#ff6b6b", fontSize: "14px", margin: "0 0 12px 0" }}>
+              <p style={{ color: "var(--accent)", fontSize: "14px", margin: "0 0 12px 0", fontFamily: "var(--sans)" }}>
                 {emailError}
               </p>
             )}
@@ -203,11 +223,13 @@ function LoginPage() {
               style={{
                 width: "100%",
                 padding: "12px 20px",
-                backgroundColor: emailLoading ? "#555" : "#1DA1F2",
-                color: "white",
+                backgroundColor: emailLoading ? "var(--bg-surface)" : "var(--accent)",
+                color: emailLoading ? "var(--text-muted)" : "#0e0d0b",
                 border: "none",
-                borderRadius: "4px",
+                borderRadius: "8px",
                 fontSize: "16px",
+                fontFamily: "var(--sans)",
+                fontWeight: 500,
                 cursor: emailLoading ? "not-allowed" : "pointer",
               }}
             >
@@ -217,10 +239,10 @@ function LoginPage() {
         )}
 
         {emailSent && (
-          <div style={{ color: "#4caf50", marginTop: "10px" }}>
-            <p style={{ fontSize: "16px", fontWeight: "bold" }}>Check your inbox!</p>
-            <p style={{ fontSize: "14px", color: "#888" }}>
-              We sent a sign-in link to <strong style={{ color: "#e0e0e0" }}>{emailInput}</strong>.
+          <div style={{ marginTop: "10px" }}>
+            <p style={{ fontSize: "16px", fontWeight: 400, fontFamily: "var(--serif)", color: "var(--accent)" }}>Check your inbox!</p>
+            <p style={{ fontSize: "14px", color: "var(--text-muted)", fontFamily: "var(--sans)", fontWeight: 300 }}>
+              We sent a sign-in link to <strong style={{ color: "var(--text-primary)" }}>{emailInput}</strong>.
               It expires in 15 minutes.
             </p>
           </div>

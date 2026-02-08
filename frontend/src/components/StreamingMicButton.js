@@ -173,11 +173,13 @@ export default function StreamingMicButton({
       {isOffline && sessionState === 'recording' && (
         <div style={{
           padding: '4px 10px',
-          backgroundColor: '#fff3cd',
-          color: '#856404',
-          border: '1px solid #ffc107',
-          borderRadius: '4px',
+          backgroundColor: 'var(--bg-card)',
+          color: 'var(--accent)',
+          border: '1px solid var(--accent)',
+          borderRadius: '6px',
           fontSize: '12px',
+          fontFamily: 'var(--sans)',
+          fontWeight: 300,
           lineHeight: '1.4',
         }}>
           Offline — recording continues, uploads will retry when connection returns

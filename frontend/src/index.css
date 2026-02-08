@@ -1,11 +1,38 @@
+/* Design System Tokens */
+:root {
+  /* Backgrounds */
+  --bg-deep: #0e0d0b;
+  --bg-surface: #161514;
+  --bg-card: #1a1917;
+
+  /* Text */
+  --text-primary: #e8e2d6;
+  --text-secondary: #a89a8a;
+  --text-muted: #6d635a;
+
+  /* Accent */
+  --accent: #c4956a;
+  --accent-hover: #d4a574;
+
+  /* Borders */
+  --border: #2a2725;
+  --border-hover: #3d3833;
+
+  /* Fonts */
+  --serif: 'Cormorant Garamond', Georgia, 'Times New Roman', serif;
+  --sans: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
 html, body, #root {
   margin: 0;
   padding: 0;
   height: 100%;
   width: 100%;
-  background-color: #121212 !important;  /* dark background */
-  color: #e0e0e0 !important;             /* light text */
+  background-color: var(--bg-deep) !important;
+  color: var(--text-primary) !important;
+  font-family: var(--sans);
 }
+
 /* Spinner animation for loading icons */
 .spin {
   animation: spin 1s linear infinite;
@@ -20,19 +47,19 @@ html, body, #root {
 }
 
 a:link {
-  color: #61dafb;   /* Unvisited */
+  color: var(--accent);
 }
 
 a:visited {
-  color: #a29bfe;   /* Visited: noticeably different from unvisited */
+  color: var(--text-secondary);
 }
 
 a:hover, a:focus {
-  color: #84d3ff;   /* Hovered */
+  color: var(--accent-hover);
 }
 
 a:active {
-  color: #84d3ff;
+  color: var(--accent-hover);
 }
 
 /* Smooth transition for link color changes */
@@ -43,10 +70,10 @@ a {
 
 /* Dark styling for buttons, inputs, and textareas */
 button, input, textarea {
-  background-color: #1e1e1e;
-  color: #e0e0e0;
-  border: 1px solid #333;
-  font-family: inherit;
+  background-color: var(--bg-deep);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  font-family: var(--sans);
   outline: none;
 }
 
@@ -54,19 +81,39 @@ button, input, textarea {
 button {
   cursor: pointer;
   padding: 10px 20px;
-  border-radius: 4px;
-  transition: background-color 0.3s, color 0.3s;
+  border-radius: 6px;
+  background-color: transparent;
+  color: var(--text-secondary);
+  transition: background-color 0.3s, color 0.3s, border-color 0.3s;
 }
 
 /* Change button appearance on hover/active */
 button:hover {
-  background-color: #333;
+  background-color: rgba(196, 149, 106, 0.08);
+  border-color: var(--border-hover);
+  color: var(--text-primary);
 }
 button:active {
-  background-color: #444;
+  background-color: rgba(196, 149, 106, 0.12);
 }
 
 /* Code blocks */
 code {
   font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New', monospace;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-deep);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-hover);
 }

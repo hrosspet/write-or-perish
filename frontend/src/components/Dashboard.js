@@ -306,45 +306,57 @@ function Dashboard() {
   }, [hasMoreNodes, loading, loadingMoreNodes, nodesPage, fetchMoreNodes]);
 
 
-  if (loading) return <div>Loading dashboard...</div>;
-  if (error) return <div>{error}</div>;
+  if (loading) return <div style={{ padding: "20px", color: "var(--text-muted)" }}>Loading dashboard...</div>;
+  if (error) return <div style={{ padding: "20px", color: "var(--accent)" }}>{error}</div>;
 
   const { user, nodes } = dashboardData;
 
+  // Button styles
+  const ghostBtnStyle = {
+    backgroundColor: "transparent",
+    color: "var(--text-secondary)",
+    border: "1px solid var(--border)",
+    padding: "8px 16px",
+    cursor: "pointer",
+    borderRadius: "6px",
+    fontFamily: "var(--sans)",
+    fontSize: "0.85rem",
+    fontWeight: 300,
+  };
+
+  const primaryBtnStyle = {
+    ...ghostBtnStyle,
+    borderColor: "var(--accent)",
+    color: "var(--accent)",
+  };
+
+  const cancelBtnStyle = {
+    ...ghostBtnStyle,
+  };
+
   return (
-    <div style={{ padding: "20px" }}>
-      <h1>{user.username}</h1>
-      
+    <div style={{ padding: "20px", maxWidth: "800px", margin: "0 auto" }}>
+      <h1 style={{
+        fontFamily: "var(--serif)",
+        fontWeight: 300,
+        fontSize: "2rem",
+        color: "var(--text-primary)",
+      }}>{user.username}</h1>
+
       {/* Only allow profile actions on your own dashboard */}
       {!username && (
         <>
           <div style={{ display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap", marginBottom: "20px" }}>
-            <button
-              onClick={handleExportData}
-              style={{
-                backgroundColor: "#2a5f2a",
-                color: "white",
-                border: "none",
-                padding: "8px 16px",
-                cursor: "pointer",
-                borderRadius: "4px"
-              }}
-            >
+            <button onClick={handleExportData} style={ghostBtnStyle}>
               Export Data
             </button>
             <label
               style={{
-                backgroundColor: "#2a5f2a",
-                color: "white",
-                border: "none",
-                padding: "8px 16px",
+                ...ghostBtnStyle,
                 cursor: importing ? "not-allowed" : "pointer",
-                borderRadius: "4px",
                 opacity: importing ? 0.6 : 1,
-                fontSize: "inherit",
-                fontFamily: "inherit",
-                fontWeight: "inherit",
-                lineHeight: "inherit"
+                display: "inline-flex",
+                alignItems: "center",
               }}
             >
               {importing ? "Analyzing..." : "Import Data"}
@@ -366,12 +378,8 @@ function Dashboard() {
                 onClick={handleGenerateProfile}
                 disabled={generatingProfile || !!profileTaskId}
                 style={{
-                  backgroundColor: "#2a5a7a",
-                  color: "white",
-                  border: "none",
-                  padding: "8px 16px",
+                  ...primaryBtnStyle,
                   cursor: (generatingProfile || profileTaskId) ? "not-allowed" : "pointer",
-                  borderRadius: "4px",
                   opacity: (generatingProfile || profileTaskId) ? 0.6 : 1
                 }}
               >
@@ -392,42 +400,22 @@ function Dashboard() {
           {showProfileConfirmation && (
             <div style={{
               marginTop: "20px",
-              padding: "15px",
-              backgroundColor: "#2a2a2a",
-              borderRadius: "4px",
-              border: "1px solid #444"
+              padding: "2rem",
+              backgroundColor: "var(--bg-card)",
+              borderRadius: "10px",
+              border: "1px solid var(--border)"
             }}>
-              <h3>Confirm Profile Generation</h3>
-              <p>
-                This will use approximately <strong>{estimatedTokens.toLocaleString()}</strong> tokens
-                to analyze all your writing and generate a profile using <strong>{selectedModel}</strong>.
+              <h3 style={{ fontFamily: "var(--serif)", fontWeight: 300, color: "var(--text-primary)", margin: "0 0 12px 0" }}>Confirm Profile Generation</h3>
+              <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
+                This will use approximately <strong style={{ color: "var(--text-primary)" }}>{estimatedTokens.toLocaleString()}</strong> tokens
+                to analyze all your writing and generate a profile using <strong style={{ color: "var(--text-primary)" }}>{selectedModel}</strong>.
               </p>
-              <p>Do you want to proceed?</p>
+              <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>Do you want to proceed?</p>
               <div style={{ display: "flex", gap: "10px", marginTop: "10px" }}>
-                <button
-                  onClick={handleConfirmProfileGeneration}
-                  style={{
-                    backgroundColor: "#2a5a7a",
-                    color: "white",
-                    border: "none",
-                    padding: "8px 16px",
-                    cursor: "pointer",
-                    borderRadius: "4px"
-                  }}
-                >
+                <button onClick={handleConfirmProfileGeneration} style={primaryBtnStyle}>
                   Yes, Generate Profile
                 </button>
-                <button
-                  onClick={handleCancelProfileGeneration}
-                  style={{
-                    backgroundColor: "#444",
-                    color: "white",
-                    border: "none",
-                    padding: "8px 16px",
-                    cursor: "pointer",
-                    borderRadius: "4px"
-                  }}
-                >
+                <button onClick={handleCancelProfileGeneration} style={cancelBtnStyle}>
                   Cancel
                 </button>
               </div>
@@ -438,25 +426,34 @@ function Dashboard() {
           {showImportDialog && importFiles && (
             <div style={{
               marginTop: "20px",
-              padding: "15px",
-              backgroundColor: "#2a2a2a",
-              borderRadius: "4px",
-              border: "1px solid #444"
+              padding: "2rem",
+              backgroundColor: "var(--bg-card)",
+              borderRadius: "10px",
+              border: "1px solid var(--border)"
             }}>
-              <h3>Confirm Import</h3>
-              <p>
-                Found <strong>{importFiles.total_files}</strong> .md file{importFiles.total_files !== 1 ? 's' : ''}
+              <h3 style={{ fontFamily: "var(--serif)", fontWeight: 300, color: "var(--text-primary)", margin: "0 0 12px 0" }}>Confirm Import</h3>
+              <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
+                Found <strong style={{ color: "var(--text-primary)" }}>{importFiles.total_files}</strong> .md file{importFiles.total_files !== 1 ? 's' : ''}
                 ({importFiles.total_size.toLocaleString()} bytes)
               </p>
-              <p>
-                Estimated tokens: <strong>{importFiles.total_tokens.toLocaleString()}</strong>
+              <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
+                Estimated tokens: <strong style={{ color: "var(--text-primary)" }}>{importFiles.total_tokens.toLocaleString()}</strong>
               </p>
 
               <div style={{ marginTop: "15px", marginBottom: "15px" }}>
-                <label style={{ display: "block", marginBottom: "10px", fontWeight: "bold" }}>
-                  Import Type:
+                <label style={{
+                  display: "block",
+                  marginBottom: "10px",
+                  fontFamily: "var(--sans)",
+                  fontWeight: 400,
+                  fontSize: "0.75rem",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.12em",
+                  color: "var(--text-muted)"
+                }}>
+                  Import Type
                 </label>
-                <label style={{ display: "block", marginBottom: "8px", cursor: "pointer" }}>
+                <label style={{ display: "block", marginBottom: "8px", cursor: "pointer", color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
                   <input
                     type="radio"
                     value="separate_nodes"
@@ -466,7 +463,7 @@ function Dashboard() {
                   />
                   Import as separate top-level nodes (one thread per file)
                 </label>
-                <label style={{ display: "block", cursor: "pointer" }}>
+                <label style={{ display: "block", cursor: "pointer", color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
                   <input
                     type="radio"
                     value="single_thread"
@@ -479,10 +476,19 @@ function Dashboard() {
               </div>
 
               <div style={{ marginTop: "15px", marginBottom: "15px" }}>
-                <label style={{ display: "block", marginBottom: "10px", fontWeight: "bold" }}>
-                  Date Ordering:
+                <label style={{
+                  display: "block",
+                  marginBottom: "10px",
+                  fontFamily: "var(--sans)",
+                  fontWeight: 400,
+                  fontSize: "0.75rem",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.12em",
+                  color: "var(--text-muted)"
+                }}>
+                  Date Ordering
                 </label>
-                <label style={{ display: "block", marginBottom: "8px", cursor: "pointer" }}>
+                <label style={{ display: "block", marginBottom: "8px", cursor: "pointer", color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
                   <input
                     type="radio"
                     value="modified"
@@ -492,7 +498,7 @@ function Dashboard() {
                   />
                   Order by modification date
                 </label>
-                <label style={{ display: "block", cursor: "pointer" }}>
+                <label style={{ display: "block", cursor: "pointer", color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
                   <input
                     type="radio"
                     value="created"
@@ -509,12 +515,8 @@ function Dashboard() {
                   onClick={handleConfirmImport}
                   disabled={importing}
                   style={{
-                    backgroundColor: "#2a5a7a",
-                    color: "white",
-                    border: "none",
-                    padding: "8px 16px",
+                    ...primaryBtnStyle,
                     cursor: importing ? "not-allowed" : "pointer",
-                    borderRadius: "4px",
                     opacity: importing ? 0.6 : 1
                   }}
                 >
@@ -524,12 +526,8 @@ function Dashboard() {
                   onClick={handleCancelImport}
                   disabled={importing}
                   style={{
-                    backgroundColor: "#444",
-                    color: "white",
-                    border: "none",
-                    padding: "8px 16px",
+                    ...cancelBtnStyle,
                     cursor: importing ? "not-allowed" : "pointer",
-                    borderRadius: "4px",
                     opacity: importing ? 0.6 : 1
                   }}
                 >
@@ -542,13 +540,19 @@ function Dashboard() {
           {/* Display unified profile */}
           <div style={{
             marginTop: "30px",
-            padding: "20px",
-            backgroundColor: "#1a1a1a",
-            borderRadius: "8px",
-            border: "1px solid #333"
+            padding: "2rem",
+            backgroundColor: "var(--bg-card)",
+            borderRadius: "10px",
+            border: "1px solid var(--border)"
           }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "15px" }}>
-              <h3 style={{ color: "#e0e0e0", margin: 0 }}>Profile</h3>
+              <h3 style={{
+                fontFamily: "var(--serif)",
+                fontSize: "1.4rem",
+                fontWeight: 300,
+                color: "var(--text-primary)",
+                margin: 0
+              }}>Profile</h3>
               {!editingProfile && (
                 <button
                   onClick={() => {
@@ -557,22 +561,20 @@ function Dashboard() {
                     setProfilePrivacyLevel(dashboardData.latest_profile?.privacy_level || "private");
                     setProfileAiUsage(dashboardData.latest_profile?.ai_usage || "chat");
                   }}
-                  style={{
-                    backgroundColor: "#2a5a7a",
-                    color: "white",
-                    border: "none",
-                    padding: "6px 12px",
-                    cursor: "pointer",
-                    borderRadius: "4px",
-                    fontSize: "0.9em"
-                  }}
+                  style={ghostBtnStyle}
                 >
                   Edit Profile
                 </button>
               )}
             </div>
             {dashboardData.latest_profile && (
-              <p style={{ fontSize: "0.9em", color: "#888", marginBottom: "15px" }}>
+              <p style={{
+                fontSize: "0.8rem",
+                color: "var(--text-muted)",
+                marginBottom: "15px",
+                fontFamily: "var(--sans)",
+                fontWeight: 300,
+              }}>
                 {dashboardData.latest_profile.generated_by === "user" ? "Edited" : "Generated"} by {dashboardData.latest_profile.generated_by} on{" "}
                 {new Date(dashboardData.latest_profile.created_at).toLocaleString()}
                 {dashboardData.latest_profile.tokens_used > 0 && (
@@ -588,14 +590,16 @@ function Dashboard() {
                   rows={20}
                   style={{
                     width: "100%",
-                    backgroundColor: "#2a2a2a",
-                    color: "#d0d0d0",
-                    border: "1px solid #444",
-                    borderRadius: "4px",
-                    padding: "10px",
-                    fontFamily: "inherit",
-                    fontSize: "inherit",
-                    lineHeight: "1.6"
+                    backgroundColor: "var(--bg-deep)",
+                    color: "var(--text-secondary)",
+                    border: "1px solid var(--border)",
+                    borderRadius: "8px",
+                    padding: "14px 16px",
+                    fontFamily: "var(--sans)",
+                    fontSize: "0.95rem",
+                    fontWeight: 300,
+                    lineHeight: "1.6",
+                    boxSizing: "border-box",
                   }}
                   placeholder="Write your profile here..."
                 />
@@ -606,40 +610,53 @@ function Dashboard() {
                   onAIUsageChange={setProfileAiUsage}
                 />
                 <div style={{ display: "flex", gap: "10px", marginTop: "10px" }}>
-                  <button
-                    type="submit"
-                    style={{
-                      backgroundColor: "#2a5a7a",
-                      color: "white",
-                      border: "none",
-                      padding: "8px 16px",
-                      cursor: "pointer",
-                      borderRadius: "4px"
-                    }}
-                  >
+                  <button type="submit" style={primaryBtnStyle}>
                     Save
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setEditingProfile(false)}
-                    style={{
-                      backgroundColor: "#444",
-                      color: "white",
-                      border: "none",
-                      padding: "8px 16px",
-                      cursor: "pointer",
-                      borderRadius: "4px"
-                    }}
-                  >
+                  <button type="button" onClick={() => setEditingProfile(false)} style={cancelBtnStyle}>
                     Cancel
                   </button>
                 </div>
               </form>
             ) : dashboardData.latest_profile ? (
-              <div style={{
+              <div className="loore-profile" style={{
                 lineHeight: "1.6",
-                color: "#d0d0d0"
+                color: "var(--text-secondary)",
               }}>
+                <style>{`
+                  .loore-profile h1, .loore-profile h2, .loore-profile h3 {
+                    font-family: var(--serif);
+                    font-weight: 300;
+                    color: var(--text-primary);
+                  }
+                  .loore-profile h1 { font-size: 1.4rem; }
+                  .loore-profile h2 {
+                    font-family: var(--sans);
+                    font-size: 0.75rem;
+                    font-weight: 400;
+                    text-transform: uppercase;
+                    letter-spacing: 0.12em;
+                    color: var(--text-muted);
+                    margin-top: 1.5rem;
+                  }
+                  .loore-profile h3 { font-size: 1rem; }
+                  .loore-profile p, .loore-profile li {
+                    font-family: var(--sans);
+                    font-weight: 300;
+                    color: var(--text-secondary);
+                    font-size: 0.95rem;
+                  }
+                  .loore-profile strong {
+                    color: var(--text-primary);
+                    font-weight: 500;
+                  }
+                  .loore-profile a {
+                    color: var(--accent);
+                  }
+                  .loore-profile hr {
+                    border-color: var(--border);
+                  }
+                `}</style>
                 <ReactMarkdown
                   components={{
                     p: ({ node, ...props }) => (
@@ -665,7 +682,7 @@ function Dashboard() {
                 <SpeakerIcon profileId={dashboardData.latest_profile.id} content={dashboardData.latest_profile.content} />
               </div>
             ) : (
-              <p style={{ color: "#888", fontStyle: "italic" }}>
+              <p style={{ color: "var(--text-muted)", fontStyle: "italic", fontFamily: "var(--serif)" }}>
                 No profile yet. Click "Edit Profile" to create one or use "Generate Profile" to have AI create one for you.
               </p>
             )}
@@ -677,7 +694,14 @@ function Dashboard() {
       {dashboardData.stats && <DashboardContent dashboardData={dashboardData} username={username} />}
 
       {/* Graphical (bubble-style) view of top-level entries */}
-      <h3 style={{ color: "#e0e0e0", marginTop: "40px", textAlign: "left"}}>
+      <h3 style={{
+        fontFamily: "var(--serif)",
+        fontWeight: 300,
+        fontSize: "1.4rem",
+        color: "var(--text-primary)",
+        marginTop: "40px",
+        textAlign: "left"
+      }}>
         Top-Level Entries
       </h3>
       <div
@@ -685,7 +709,7 @@ function Dashboard() {
           display: "flex",
           flexDirection: "column",
           maxWidth: "1000px",
-          alignItems: "flex-start" // Aligns children to the left.
+          alignItems: "flex-start"
         }}
       >
         {nodes.map((node) => (
@@ -693,15 +717,15 @@ function Dashboard() {
             key={node.id}
             node={node}
             isHighlighted={true}
-            leftAlign={true}  // Ensures the bubble is left aligned.
+            leftAlign={true}
             onClick={() => navigate(`/node/${node.id}`)}
           />
         ))}
       </div>
-      {loadingMoreNodes && <div style={{ padding: "20px", textAlign: "center", color: "#888" }}>Loading more...</div>}
+      {loadingMoreNodes && <div style={{ padding: "20px", textAlign: "center", color: "var(--text-muted)" }}>Loading more...</div>}
       {hasMoreNodes && !loadingMoreNodes && (
         <div
-          style={{ padding: "20px", textAlign: "center", cursor: "pointer", color: "#888" }}
+          style={{ padding: "20px", textAlign: "center", cursor: "pointer", color: "var(--text-muted)" }}
           onClick={() => fetchMoreNodes(nodesPage + 1)}
         >
           Load more...
