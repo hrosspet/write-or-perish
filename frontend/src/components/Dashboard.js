@@ -590,7 +590,7 @@ function Dashboard() {
                   rows={20}
                   style={{
                     width: "100%",
-                    backgroundColor: "var(--bg-deep)",
+                    backgroundColor: "var(--bg-input)",
                     color: "var(--text-secondary)",
                     border: "1px solid var(--border)",
                     borderRadius: "8px",

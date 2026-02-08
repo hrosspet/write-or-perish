@@ -50,7 +50,7 @@ const ModelSelector = ({ nodeId, selectedModel, onModelChange }) => {
         padding: '8px 12px',
         borderRadius: '6px',
         border: '1px solid var(--border)',
-        backgroundColor: 'var(--bg-deep)',
+        backgroundColor: 'var(--bg-input)',
         color: 'var(--text-secondary)',
         cursor: loading ? 'not-allowed' : 'pointer',
         fontSize: '14px',

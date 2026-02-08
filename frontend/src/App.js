@@ -90,6 +90,7 @@ function App() {
               borderRadius: '12px',
               width: '640px',
               maxWidth: '90vw',
+              boxShadow: '0 24px 80px rgba(0,0,0,0.5)',
             }}
           >
             <button

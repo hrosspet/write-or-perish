@@ -2,21 +2,26 @@
 :root {
   /* Backgrounds */
   --bg-deep: #0e0d0b;
-  --bg-surface: #161514;
-  --bg-card: #1a1917;
+  --bg-surface: #181714;
+  --bg-card: #211f1b;
+  --bg-card-hover: #282520;
+  --bg-input: #151311;
 
   /* Text */
-  --text-primary: #e8e2d6;
-  --text-secondary: #a89a8a;
-  --text-muted: #6d635a;
+  --text-primary: #ede8dd;
+  --text-secondary: #a89f91;
+  --text-muted: #736b5f;
 
   /* Accent */
   --accent: #c4956a;
   --accent-hover: #d4a574;
+  --accent-dim: #a07a55;
+  --accent-glow: #c4956a40;
+  --accent-subtle: #c4956a15;
 
   /* Borders */
-  --border: #2a2725;
-  --border-hover: #3d3833;
+  --border: #302c27;
+  --border-hover: #433e36;
 
   /* Fonts */
   --serif: 'Cormorant Garamond', Georgia, 'Times New Roman', serif;

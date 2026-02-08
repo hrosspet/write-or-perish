@@ -304,7 +304,7 @@ const NodeForm = forwardRef(
           rows={20}
           style={{
             width: "100%",
-            backgroundColor: "var(--bg-deep)",
+            backgroundColor: "var(--bg-input)",
             border: "1px solid var(--border)",
             borderRadius: "8px",
             padding: "14px 16px",

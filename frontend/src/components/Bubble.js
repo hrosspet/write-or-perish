@@ -36,8 +36,8 @@ const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => 
       onClick={() => onClick(node.id)}
       onMouseEnter={(e) => {
         e.currentTarget.style.borderColor = 'var(--border-hover)';
-        e.currentTarget.style.boxShadow = '0 4px 20px rgba(0,0,0,0.2)';
-        e.currentTarget.style.transform = 'translateY(-2px)';
+        e.currentTarget.style.boxShadow = '0 4px 24px rgba(0,0,0,0.3)';
+        e.currentTarget.style.transform = 'translateY(-1px)';
       }}
       onMouseLeave={(e) => {
         e.currentTarget.style.borderColor = 'var(--border)';
