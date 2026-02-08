@@ -17,11 +17,8 @@ function LandingPage() {
       }}
     >
       <h1 style={{ fontSize: "2rem", marginBottom: "1.5rem" }}>
-        Loore: Uncover your lore. Self-author. Connect. Transcend.
+        Loore: <em>Uncover your lore. Self-author. Connect. Transcend.</em>
       </h1>
-      <p style={{ fontSize: "1.15rem", marginBottom: "2rem" }}>
-        Loore is a tool for self-authoring — helping you uncover the story you're living, see through your own blind spots, and gradually connect your personal becoming to the greater whole.
-      </p>
       <a
         href={`${backendUrl}/auth/login`}
         style={{
@@ -50,6 +47,9 @@ function LandingPage() {
           color: "#b0b0b0",
         }}
       >
+        <p>
+          Loore is a tool for self-authoring — helping you uncover the story you're living, see through your own blind spots, and gradually connect your personal becoming to the greater whole.
+        </p>
         <p>
           You are already living a story. But most of it runs beneath awareness — patterns inherited, narratives distorted, intentions half-formed. Loore helps you uncover your own lore: the actual shape of your life, not just the story you tell yourself.
         </p>
