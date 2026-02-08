@@ -390,12 +390,6 @@ const styles = {
 };
 
 function LandingPage() {
-  const [mounted, setMounted] = useState(false);
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
-
   return (
     <>
       <style>{styles.global}</style>
