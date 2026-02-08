@@ -1,7 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
 
-const backendUrl = process.env.REACT_APP_BACKEND_URL;
-
 function useOnScreen(ref, threshold = 0.15) {
   const [visible, setVisible] = useState(false);
   useEffect(() => {
@@ -409,7 +407,7 @@ function LandingPage() {
             A tool for seeing the story you're actually living — and shaping it
             with intention.
           </p>
-          <a href={`${backendUrl}/auth/login`} className="loore-cta">
+          <a href="/login?returnUrl=%2F" className="loore-cta">
             <span>Join the Alpha</span>
             <span className="loore-cta-arrow">→</span>
           </a>
@@ -523,7 +521,7 @@ function LandingPage() {
             </p>
           </FadeSection>
           <FadeSection delay={0.15}>
-            <a href={`${backendUrl}/auth/login`} className="loore-cta">
+            <a href="/login?returnUrl=%2F" className="loore-cta">
               <span>Begin your lore</span>
               <span className="loore-cta-arrow">→</span>
             </a>
