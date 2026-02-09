@@ -335,7 +335,7 @@ function Dashboard() {
   };
 
   return (
-    <div style={{ padding: "20px", maxWidth: "800px", margin: "0 auto" }}>
+    <div style={{ padding: "3rem 2rem 4rem", maxWidth: "820px", margin: "0 auto" }}>
       <h1 style={{
         fontFamily: "var(--serif)",
         fontWeight: 300,
@@ -346,7 +346,7 @@ function Dashboard() {
       {/* Only allow profile actions on your own dashboard */}
       {!username && (
         <>
-          <div style={{ display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap", marginBottom: "20px" }}>
+          <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", flexWrap: "wrap", marginBottom: "2.5rem" }}>
             <button onClick={handleExportData} style={ghostBtnStyle}>
               Export Data
             </button>
@@ -624,12 +624,17 @@ function Dashboard() {
                 color: "var(--text-secondary)",
               }}>
                 <style>{`
-                  .loore-profile h1, .loore-profile h2, .loore-profile h3 {
-                    font-family: var(--serif);
-                    font-weight: 300;
-                    color: var(--text-primary);
+                  .loore-profile h1 {
+                    font-family: var(--sans);
+                    font-weight: 500;
+                    font-size: 0.7rem;
+                    letter-spacing: 0.2em;
+                    text-transform: uppercase;
+                    color: var(--accent);
+                    margin-bottom: 2rem;
+                    padding-bottom: 0.8rem;
+                    border-bottom: 1px solid var(--border);
                   }
-                  .loore-profile h1 { font-size: 1.4rem; }
                   .loore-profile h2 {
                     font-family: var(--sans);
                     font-size: 0.75rem;
@@ -638,13 +643,59 @@ function Dashboard() {
                     letter-spacing: 0.12em;
                     color: var(--text-muted);
                     margin-top: 1.5rem;
+                    margin-bottom: 1rem;
+                    padding-bottom: 0.5rem;
+                    border-bottom: 1px solid var(--border);
                   }
-                  .loore-profile h3 { font-size: 1rem; }
+                  .loore-profile h3 {
+                    font-family: var(--serif);
+                    font-weight: 300;
+                    font-size: 1rem;
+                    color: var(--text-primary);
+                  }
                   .loore-profile p, .loore-profile li {
                     font-family: var(--sans);
                     font-weight: 300;
                     color: var(--text-secondary);
                     font-size: 0.95rem;
+                  }
+                  .loore-profile ul {
+                    list-style: none;
+                    padding: 0;
+                  }
+                  .loore-profile ul li {
+                    padding: 0.35rem 0;
+                    padding-left: 1rem;
+                    position: relative;
+                  }
+                  .loore-profile ul li::before {
+                    content: '';
+                    position: absolute;
+                    left: 0;
+                    top: 0.85em;
+                    width: 4px;
+                    height: 4px;
+                    border-radius: 50%;
+                    background: var(--accent);
+                  }
+                  .loore-profile ol {
+                    list-style: none;
+                    counter-reset: surface-counter;
+                    padding: 0;
+                  }
+                  .loore-profile ol li {
+                    counter-increment: surface-counter;
+                    padding: 0.35rem 0;
+                    padding-left: 1.5rem;
+                    position: relative;
+                  }
+                  .loore-profile ol li::before {
+                    content: counter(surface-counter) '.';
+                    position: absolute;
+                    left: 0;
+                    color: var(--accent);
+                    font-weight: 500;
+                    font-size: 0.85rem;
                   }
                   .loore-profile strong {
                     color: var(--text-primary);

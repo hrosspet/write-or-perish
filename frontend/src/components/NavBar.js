@@ -30,7 +30,7 @@ function NavBar({ onNewEntryClick }) {
     fontFamily: "var(--sans)",
     fontWeight: 300,
     fontSize: "0.85rem",
-    letterSpacing: "0.04em",
+    letterSpacing: "0.02em",
     transition: "color 0.3s ease",
   });
 
@@ -53,20 +53,20 @@ function NavBar({ onNewEntryClick }) {
       <Link
         to="/"
         style={{
-          color: "var(--text-primary)",
+          color: "var(--text-muted)",
           textDecoration: "none",
           fontFamily: "var(--serif)",
           fontWeight: 300,
           fontSize: "0.85rem",
           textTransform: "uppercase",
-          letterSpacing: "0.25em",
+          letterSpacing: "0.3em",
           marginRight: "auto",
         }}
       >
         Loore
       </Link>
 
-      <div style={{ display: "flex", alignItems: "center", gap: "20px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "1.8rem" }}>
         <Link to="/dashboard" style={linkStyle("/dashboard")}>
           Dashboard
         </Link>

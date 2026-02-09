@@ -2,6 +2,9 @@ import React from 'react';
 import NodeFooter from './NodeFooter';
 
 const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => {
+  // Detect voice notes
+  const isVoiceNote = node.has_audio || (node.title && /^voice\s+note/i.test(node.title));
+
   // Use full content if available; otherwise use preview.
   const text = node.content || node.preview || "";
 
@@ -19,7 +22,7 @@ const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => 
     : (node.children ? node.children.length : 0);
 
   const bubbleStyle = {
-    padding: "1.8rem 2rem",
+    padding: "1.6rem 1.8rem",
     margin: leftAlign ? "8px 0" : "8px auto",
     background: "var(--bg-card)",
     border: "1px solid var(--border)",
@@ -49,7 +52,7 @@ const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => 
         fontFamily: "var(--serif)",
         fontSize: "1.2rem",
         color: "var(--text-primary)",
-        marginBottom: body ? "8px" : "0",
+        marginBottom: body ? "0.6rem" : "0",
         fontWeight: 400,
       }}>
         {title.length > 120 ? title.substring(0, 120) + "..." : title}
@@ -57,25 +60,45 @@ const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => 
       {body && (
         <div style={{
           fontFamily: "var(--sans)",
-          fontSize: "0.95rem",
+          fontSize: "0.92rem",
           fontWeight: 300,
           color: "var(--text-secondary)",
-          lineHeight: 1.5,
+          lineHeight: 1.7,
           overflow: "hidden",
           display: "-webkit-box",
-          WebkitLineClamp: 3,
+          WebkitLineClamp: 2,
           WebkitBoxOrient: "vertical",
         }}>
           {body.length > 250 ? body.substring(0, 250) + "..." : body}
         </div>
       )}
-      {/* Stop propagation in footer so clicks on the Link (author handle) don't trigger the bubble's onClick */}
-      <div onClick={(e) => e.stopPropagation()}>
+      {/* Footer row with optional tag + node footer */}
+      <div onClick={(e) => e.stopPropagation()} style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+      }}>
         <NodeFooter
           username={node.username}
           createdAt={node.created_at}
           childrenCount={childrenCount}
         />
+        {isVoiceNote && (
+          <span style={{
+            fontFamily: "var(--sans)",
+            fontSize: "0.65rem",
+            fontWeight: 500,
+            textTransform: "uppercase",
+            letterSpacing: "0.08em",
+            color: "var(--accent-dim)",
+            backgroundColor: "var(--accent-subtle)",
+            padding: "3px 8px",
+            borderRadius: "4px",
+            marginLeft: "auto",
+          }}>
+            Voice Note
+          </span>
+        )}
       </div>
     </div>
   );

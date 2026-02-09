@@ -65,22 +65,24 @@ function Feed() {
   if (error) return <div style={{ padding: "20px", color: "var(--accent)" }}>{error}</div>;
 
   return (
-    <div style={{ padding: "20px", maxWidth: "680px", margin: "0 auto" }}>
-      <h2 style={{
-        color: "var(--text-primary)",
-        fontFamily: "var(--serif)",
-        fontWeight: 300,
-        fontSize: "2rem",
-        marginBottom: "8px",
-      }}>
-        Feed
-      </h2>
-      <div style={{
-        width: "40px",
-        height: "1px",
-        backgroundColor: "var(--accent)",
-        marginBottom: "32px",
-      }} />
+    <div style={{ padding: "3rem 2rem 4rem", maxWidth: "720px", margin: "0 auto" }}>
+      <div style={{ marginBottom: "2.5rem" }}>
+        <h2 style={{
+          color: "var(--text-primary)",
+          fontFamily: "var(--serif)",
+          fontWeight: 300,
+          fontSize: "2rem",
+          marginBottom: "0.8rem",
+        }}>
+          Feed
+        </h2>
+        <div style={{
+          width: "40px",
+          height: "1px",
+          backgroundColor: "var(--accent)",
+          opacity: 0.5,
+        }} />
+      </div>
       <div style={{ display: "flex", flexDirection: "column", gap: "1rem"}}>
         {feedNodes.map(node => (
           <Bubble key={node.id} node={node} onClick={handleBubbleClick} />

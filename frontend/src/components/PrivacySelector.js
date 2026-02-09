@@ -61,9 +61,9 @@ const PrivacySelector = ({
           disabled={disabled}
           style={selectStyle}
         >
-          <option value="private">Private - Only I can see this</option>
-          <option value="circles">Circles - Shared with specific groups (coming soon)</option>
-          <option value="public">Public - Anyone can see this</option>
+          <option value="private">🔒 Private · Only I can see this</option>
+          <option value="circles">👥 Circles · Shared with specific groups (coming soon)</option>
+          <option value="public">🌐 Public · Anyone can see this</option>
         </select>
         <div style={descStyle}>
           {privacyLevel === 'private' && 'This note is private and only visible to you.'}
@@ -82,9 +82,9 @@ const PrivacySelector = ({
           disabled={disabled}
           style={selectStyle}
         >
-          <option value="none">None - No AI access</option>
-          <option value="chat">Chat - AI can use for responses (not training)</option>
-          <option value="train">Train - AI can use for training data</option>
+          <option value="none">🚫 None · No AI access</option>
+          <option value="chat">💬 Chat · AI can use for responses</option>
+          <option value="train">🧠 Train · AI can use for training</option>
         </select>
         <div style={descStyle}>
           {aiUsage === 'none' && 'AI will not access this note.'}
