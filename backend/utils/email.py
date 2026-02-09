@@ -25,21 +25,32 @@ def send_magic_link_email(to_email, magic_link_url):
 
     html_body = f"""\
 <html>
-<body style="font-family: -apple-system, sans-serif; background: #121212; color: #e0e0e0; padding: 40px;">
-  <div style="max-width: 480px; margin: 0 auto; background: #1e1e1e; border-radius: 8px; border: 1px solid #333; padding: 40px;">
-    <h2 style="margin-top: 0;">Sign in to Loore</h2>
-    <p>Click the button below to sign in:</p>
-    <a href="{magic_link_url}"
-       style="display: inline-block; padding: 12px 24px; background: #1DA1F2; color: white;
-              text-decoration: none; border-radius: 4px; margin: 16px 0;">
+<body style="font-family: 'Outfit', -apple-system, sans-serif; background: #0e0d0b; color: #ede8dd; padding: 40px 20px; margin: 0;">
+  <div style="max-width: 460px; margin: 0 auto; background: #181714; border-radius: 10px; border: 1px solid #302c27; padding: 48px 40px;">
+    <div style="font-family: 'Cormorant Garamond', Georgia, serif; font-size: 14px; font-weight: 300; text-transform: uppercase; letter-spacing: 0.3em; color: #736b5f; margin-bottom: 32px;">
+      Loore
+    </div>
+    <h2 style="font-family: 'Cormorant Garamond', Georgia, serif; font-weight: 300; font-size: 28px; color: #ede8dd; margin: 0 0 12px 0;">
       Sign in
+    </h2>
+    <p style="font-size: 15px; font-weight: 300; color: #a89f91; margin: 0 0 28px 0; line-height: 1.6;">
+      Click the button below to continue to your account.
+    </p>
+    <a href="{magic_link_url}"
+       style="display: inline-block; padding: 12px 32px; background: transparent; color: #c4956a;
+              text-decoration: none; border-radius: 6px; border: 1px solid #c4956a;
+              font-family: 'Outfit', -apple-system, sans-serif; font-size: 14px; font-weight: 400;
+              letter-spacing: 0.04em;">
+      Sign in to Loore
     </a>
-    <p style="color: #888; font-size: 14px; margin-top: 24px;">
-      This link expires in 15 minutes and can only be used once.
-    </p>
-    <p style="color: #666; font-size: 12px;">
-      If you didn't request this, you can safely ignore this email.
-    </p>
+    <div style="border-top: 1px solid #302c27; margin-top: 36px; padding-top: 20px;">
+      <p style="color: #736b5f; font-size: 13px; font-weight: 300; margin: 0 0 6px 0; line-height: 1.5;">
+        This link expires in 15 minutes and can only be used once.
+      </p>
+      <p style="color: #736b5f; font-size: 12px; font-weight: 300; margin: 0; line-height: 1.5;">
+        If you didn't request this, you can safely ignore this email.
+      </p>
+    </div>
   </div>
 </body>
 </html>"""
