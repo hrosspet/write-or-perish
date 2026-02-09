@@ -290,7 +290,7 @@ function NodeDetail() {
     border: "1px solid var(--border)",
     padding: "2rem",
     borderRadius: "12px",
-    width: "780px",
+    width: "1170px",
     maxWidth: "90vw",
     maxHeight: "90vh",
     overflowY: "auto",
