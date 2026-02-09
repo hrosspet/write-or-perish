@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Loore — Logo Refinements (V5 + V6)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400;1,500&family=Outfit:wght@300;400;500&display=swap" rel="stylesheet" />
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg-deep: #0e0d0b;
+    --bg-card: #211f1b;
+    --text-primary: #ede8dd;
+    --text-secondary: #a89f91;
+    --text-muted: #736b5f;
+    --accent: #c4956a;
+    --accent-dim: #a07a55;
+    --border: #302c27;
+    --border-hover: #433e36;
+    --serif: 'Cormorant Garamond', Georgia, serif;
+    --sans: 'Outfit', system-ui, sans-serif;
+  }
+
+  body {
+    background: var(--bg-deep);
+    color: var(--text-primary);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+    padding: 3rem 2rem 6rem;
+  }
+
+  .page-title {
+    text-align: center;
+    font-family: var(--serif);
+    font-weight: 300;
+    font-size: 2rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .page-sub {
+    text-align: center;
+    font-family: var(--sans);
+    font-weight: 300;
+    font-size: 0.9rem;
+    color: var(--text-muted);
+    margin-bottom: 3.5rem;
+  }
+
+  .section-label {
+    font-family: var(--sans);
+    font-weight: 500;
+    font-size: 0.65rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 1.5rem;
+    max-width: 1000px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2rem;
+    max-width: 1000px;
+    margin: 0 auto 3rem;
+  }
+
+  @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 2rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .card-name {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 1.1rem;
+    color: var(--text-primary);
+    margin-bottom: 0.4rem;
+    align-self: flex-start;
+  }
+
+  .card-desc {
+    font-family: var(--sans);
+    font-weight: 300;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    line-height: 1.6;
+    margin-bottom: 2rem;
+    align-self: flex-start;
+  }
+
+  .logo-area {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-height: 160px;
+    margin-bottom: 1.5rem;
+  }
+
+  .size-row {
+    display: flex;
+    align-items: flex-end;
+    gap: 2.5rem;
+    width: 100%;
+    justify-content: center;
+    padding-top: 1.2rem;
+    border-top: 1px solid var(--border);
+  }
+
+  .size-row span {
+    font-family: var(--sans);
+    font-size: 0.62rem;
+    color: var(--text-muted);
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  /* Comparison row */
+  .compare-section {
+    max-width: 1000px;
+    margin: 0 auto 3rem;
+  }
+
+  .compare-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 2rem;
+  }
+
+  .compare-label {
+    font-family: var(--sans);
+    font-weight: 500;
+    font-size: 0.65rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 1.5rem;
+  }
+
+  .navbar-mock {
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+    padding: 12px 20px;
+    background: #181714;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 0.75rem;
+  }
+
+  .navbar-mock:last-child { margin-bottom: 0; }
+
+  .nav-text {
+    font-family: var(--serif);
+    font-weight: 300;
+    font-size: 0.85rem;
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+
+  .nav-links {
+    margin-left: auto;
+    display: flex;
+    gap: 1.5rem;
+    font-family: var(--sans);
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    font-weight: 300;
+  }
+
+  .nav-links span.active { color: var(--accent); }
+
+  .nav-label-tag {
+    font-family: var(--sans);
+    font-size: 0.6rem;
+    color: var(--text-muted);
+    opacity: 0.5;
+    margin-left: 0.3rem;
+  }
+
+  /* Dark bg sections for contrast testing */
+  .on-dark, .on-light-dark {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 3rem;
+    padding: 2.5rem;
+    border-radius: 8px;
+    margin-top: 1.5rem;
+  }
+
+  .on-dark { background: var(--bg-deep); border: 1px solid var(--border); }
+
+  .favicon-grid {
+    display: flex;
+    gap: 1.5rem;
+    align-items: center;
+    justify-content: center;
+    margin-top: 1.5rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--border);
+  }
+
+  .favicon-box {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.6rem;
+  }
+
+  .favicon-box span {
+    font-family: var(--sans);
+    font-size: 0.6rem;
+    color: var(--text-muted);
+  }
+
+  .favicon-frame {
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border);
+  }
+
+  .favicon-frame.dark { background: var(--bg-deep); }
+  .favicon-frame.mid { background: var(--bg-card); }
+  .favicon-frame.browser { background: #2b2b2b; border-radius: 4px; width: 20px; height: 20px; }
+</style>
+</head>
+<body>
+
+<h1 class="page-title">Refined Finalists</h1>
+<p class="page-sub">Variation 5 (gap rotated ~12° clockwise) &amp; Variation 6 (with baseline tails)</p>
+
+<div class="section-label" style="margin-bottom: 1.5rem;">Main Mark — Large</div>
+
+<div class="grid">
+
+  <!-- VARIATION 5 REFINED: Rotated gap -->
+  <div class="card">
+    <div class="card-name">The Uncovering (refined)</div>
+    <div class="card-desc">Gap rotated ~12° clockwise. The asymmetry makes it feel less like a logo template and more like something hand-placed, intentional.</div>
+    <div class="logo-area">
+      <svg width="150" height="150" viewBox="0 0 150 150" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <!-- Circle broken with gap rotated ~12° clockwise from top -->
+        <!-- Gap goes from about -78° to -102° on unit circle (top-right offset) -->
+        <!-- Arc: start at ~(75 + 58*cos(-65°), 75 + 58*sin(-65°)) to ~(75 + 58*cos(-115°), 75 + 58*sin(-115°)) -->
+        <!-- Going the long way around (large arc) -->
+        <path d="
+          M 99.5, 22.4
+          A 58,58 0 1,1 51.2, 17.8
+        " stroke="#736b5f" stroke-width="1" opacity="0.45" stroke-linecap="round" />
+        <!-- ECG heartbeat -->
+        <path d="
+          M 24,76
+          L 40,76
+          L 50,72
+          L 57,78
+          L 66,38
+          L 78,108
+          L 86,52
+          L 92,76
+          L 102,74
+          L 126,74
+        " stroke="#c4956a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+        <!-- Calligraphic emphasis on main spike -->
+        <path d="
+          M 57,78
+          L 66,38
+          L 78,108
+          L 86,52
+        " stroke="#c4956a" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round" opacity="0.55" />
+      </svg>
+    </div>
+    <div class="size-row">
+      <span>
+        <svg width="48" height="48" viewBox="0 0 150 150" fill="none"><path d="M 99.5,22.4 A 58,58 0 1,1 51.2,17.8" stroke="#736b5f" stroke-width="1.8" opacity="0.45" stroke-linecap="round"/><path d="M 24,76 L 40,76 L 50,72 L 57,78 L 66,38 L 78,108 L 86,52 L 92,76 L 102,74 L 126,74" stroke="#c4956a" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/><path d="M 57,78 L 66,38 L 78,108 L 86,52" stroke="#c4956a" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.55"/></svg>
+        Medium
+      </span>
+      <span>
+        <svg width="32" height="32" viewBox="0 0 150 150" fill="none"><path d="M 99.5,22.4 A 58,58 0 1,1 51.2,17.8" stroke="#736b5f" stroke-width="2.5" opacity="0.45" stroke-linecap="round"/><path d="M 24,76 L 40,76 L 50,72 L 57,78 L 66,38 L 78,108 L 86,52 L 92,76 L 102,74 L 126,74" stroke="#c4956a" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M 57,78 L 66,38 L 78,108 L 86,52" stroke="#c4956a" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" opacity="0.55"/></svg>
+        Small
+      </span>
+      <span>
+        <svg width="20" height="20" viewBox="0 0 150 150" fill="none"><path d="M 99.5,22.4 A 58,58 0 1,1 51.2,17.8" stroke="#736b5f" stroke-width="4" opacity="0.45" stroke-linecap="round"/><path d="M 24,76 L 40,76 L 50,72 L 57,78 L 66,38 L 78,108 L 86,52 L 92,76 L 102,74 L 126,74" stroke="#c4956a" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Tiny
+      </span>
+    </div>
+  </div>
+
+  <!-- VARIATION 6 REFINED: With baseline tails -->
+  <div class="card">
+    <div class="card-name">Essential Beat (refined)</div>
+    <div class="card-desc">Short horizontal baseline tails added at both ends. Now clearly reads as ECG even at small sizes, while keeping the minimalism.</div>
+    <div class="logo-area">
+      <svg width="140" height="120" viewBox="0 0 140 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="
+          M 12,68
+          L 32,68
+          L 42,62
+          L 50,72
+          L 66,14
+          L 84,106
+          L 96,42
+          L 104,68
+          L 112,68
+          L 128,68
+        " stroke="#c4956a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+        <!-- Calligraphic emphasis -->
+        <path d="
+          M 50,72
+          L 66,14
+          L 84,106
+          L 96,42
+        " stroke="#c4956a" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.55" />
+      </svg>
+    </div>
+    <div class="size-row">
+      <span>
+        <svg width="56" height="40" viewBox="0 0 140 120" fill="none"><path d="M 12,68 L 32,68 L 42,62 L 50,72 L 66,14 L 84,106 L 96,42 L 104,68 L 112,68 L 128,68" stroke="#c4956a" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/><path d="M 50,72 L 66,14 L 84,106 L 96,42" stroke="#c4956a" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.55"/></svg>
+        Medium
+      </span>
+      <span>
+        <svg width="36" height="26" viewBox="0 0 140 120" fill="none"><path d="M 12,68 L 32,68 L 42,62 L 50,72 L 66,14 L 84,106 L 96,42 L 104,68 L 112,68 L 128,68" stroke="#c4956a" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/><path d="M 50,72 L 66,14 L 84,106 L 96,42" stroke="#c4956a" stroke-width="7.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.55"/></svg>
+        Small
+      </span>
+      <span>
+        <svg width="22" height="16" viewBox="0 0 140 120" fill="none"><path d="M 12,68 L 32,68 L 42,62 L 50,72 L 66,14 L 84,106 L 96,42 L 104,68 L 112,68 L 128,68" stroke="#c4956a" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Tiny
+      </span>
+    </div>
+  </div>
+
+</div>
+
+<!-- Navbar context -->
+<div class="compare-section">
+  <div class="compare-card">
+    <div class="compare-label">In the navbar</div>
+
+    <div class="navbar-mock">
+      <svg width="24" height="24" viewBox="0 0 150 150" fill="none"><path d="M 99.5,22.4 A 58,58 0 1,1 51.2,17.8" stroke="#736b5f" stroke-width="2.5" opacity="0.45" stroke-linecap="round"/><path d="M 24,76 L 40,76 L 50,72 L 57,78 L 66,38 L 78,108 L 86,52 L 92,76 L 102,74 L 126,74" stroke="#c4956a" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M 57,78 L 66,38 L 78,108 L 86,52" stroke="#c4956a" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" opacity="0.55"/></svg>
+      <span class="nav-text">Loore</span>
+      <span class="nav-label-tag">V5 — The Uncovering</span>
+      <div class="nav-links"><span class="active">Dashboard</span> <span>Feed</span> <span>Write</span> <span>Logout</span></div>
+    </div>
+
+    <div class="navbar-mock">
+      <svg width="36" height="20" viewBox="0 0 140 120" fill="none"><path d="M 12,68 L 32,68 L 42,62 L 50,72 L 66,14 L 84,106 L 96,42 L 104,68 L 112,68 L 128,68" stroke="#c4956a" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/><path d="M 50,72 L 66,14 L 84,106 L 96,42" stroke="#c4956a" stroke-width="7.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.55"/></svg>
+      <span class="nav-text">Loore</span>
+      <span class="nav-label-tag">V6 — Essential Beat</span>
+      <div class="nav-links"><span class="active">Dashboard</span> <span>Feed</span> <span>Write</span> <span>Logout</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- Favicon test -->
+<div class="compare-section">
+  <div class="compare-card">
+    <div class="compare-label">Favicon &amp; app icon test</div>
+
+    <div class="favicon-grid">
+      <div class="favicon-box">
+        <div class="favicon-frame dark">
+          <svg width="20" height="20" viewBox="0 0 150 150" fill="none"><path d="M 99.5,22.4 A 58,58 0 1,1 51.2,17.8" stroke="#736b5f" stroke-width="4" opacity="0.45" stroke-linecap="round"/><path d="M 24,76 L 40,76 L 50,72 L 57,78 L 66,38 L 78,108 L 86,52 L 92,76 L 102,74 L 126,74" stroke="#c4956a" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+        <span>V5 dark</span>
+      </div>
+
+      <div class="favicon-box">
+        <div class="favicon-frame mid">
+          <svg width="20" height="20" viewBox="0 0 150 150" fill="none"><path d="M 99.5,22.4 A 58,58 0 1,1 51.2,17.8" stroke="#736b5f" stroke-width="4" opacity="0.45" stroke-linecap="round"/><path d="M 24,76 L 40,76 L 50,72 L 57,78 L 66,38 L 78,108 L 86,52 L 92,76 L 102,74 L 126,74" stroke="#c4956a" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+        <span>V5 card bg</span>
+      </div>
+
+      <div class="favicon-box">
+        <div class="favicon-frame browser">
+          <svg width="14" height="14" viewBox="0 0 150 150" fill="none"><path d="M 99.5,22.4 A 58,58 0 1,1 51.2,17.8" stroke="#736b5f" stroke-width="5" opacity="0.45" stroke-linecap="round"/><path d="M 24,76 L 40,76 L 50,72 L 57,78 L 66,38 L 78,108 L 86,52 L 92,76 L 102,74 L 126,74" stroke="#c4956a" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+        <span>V5 tab</span>
+      </div>
+
+      <div style="width: 1px; height: 40px; background: var(--border);"></div>
+
+      <div class="favicon-box">
+        <div class="favicon-frame dark">
+          <svg width="22" height="14" viewBox="0 0 140 120" fill="none"><path d="M 12,68 L 32,68 L 42,62 L 50,72 L 66,14 L 84,106 L 96,42 L 104,68 L 112,68 L 128,68" stroke="#c4956a" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+        <span>V6 dark</span>
+      </div>
+
+      <div class="favicon-box">
+        <div class="favicon-frame mid">
+          <svg width="22" height="14" viewBox="0 0 140 120" fill="none"><path d="M 12,68 L 32,68 L 42,62 L 50,72 L 66,14 L 84,106 L 96,42 L 104,68 L 112,68 L 128,68" stroke="#c4956a" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+        <span>V6 card bg</span>
+      </div>
+
+      <div class="favicon-box">
+        <div class="favicon-frame browser">
+          <svg width="14" height="10" viewBox="0 0 140 120" fill="none"><path d="M 12,68 L 32,68 L 42,62 L 50,72 L 66,14 L 84,106 L 96,42 L 104,68 L 112,68 L 128,68" stroke="#c4956a" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+        <span>V6 tab</span>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Side by side final comparison on page background -->
+<div class="compare-section">
+  <div class="compare-card">
+    <div class="compare-label">Side by side — on page background</div>
+    <div class="on-dark">
+
+      <div style="text-align: center;">
+        <svg width="100" height="100" viewBox="0 0 150 150" fill="none"><path d="M 99.5,22.4 A 58,58 0 1,1 51.2,17.8" stroke="#736b5f" stroke-width="1.5" opacity="0.45" stroke-linecap="round"/><path d="M 24,76 L 40,76 L 50,72 L 57,78 L 66,38 L 78,108 L 86,52 L 92,76 L 102,74 L 126,74" stroke="#c4956a" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M 57,78 L 66,38 L 78,108 L 86,52" stroke="#c4956a" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" opacity="0.55"/></svg>
+        <div style="font-family: var(--serif); font-weight: 300; font-size: 0.85rem; letter-spacing: 0.3em; text-transform: uppercase; color: var(--text-muted); margin-top: 0.8rem;">Loore</div>
+      </div>
+
+      <div style="width: 1px; height: 80px; background: var(--border);"></div>
+
+      <div style="text-align: center;">
+        <svg width="120" height="70" viewBox="0 0 140 120" fill="none"><path d="M 12,68 L 32,68 L 42,62 L 50,72 L 66,14 L 84,106 L 96,42 L 104,68 L 112,68 L 128,68" stroke="#c4956a" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M 50,72 L 66,14 L 84,106 L 96,42" stroke="#c4956a" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" opacity="0.55"/></svg>
+        <div style="font-family: var(--serif); font-weight: 300; font-size: 0.85rem; letter-spacing: 0.3em; text-transform: uppercase; color: var(--text-muted); margin-top: 0.8rem;">Loore</div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

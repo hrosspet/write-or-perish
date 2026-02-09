@@ -1,7 +1,8 @@
 from PIL import Image, ImageDraw
 import os
 
-ACCENT = (196, 149, 106)
+BG_COLOR = (33, 31, 27)  # #211f1b — the card background from the preview
+ACCENT = (196, 149, 106, 255)
 ACCENT_DIM = (196, 149, 106, 140)
 
 S = 512 / 140.0
@@ -33,11 +34,10 @@ def generate_logo(size, output_path):
     main_w = max(MAIN_W_BASE * f, 2)
     spike_w = max(SPIKE_W_BASE * f, 3)
 
-    # Transparent background
-    img = Image.new('RGBA', (ss_size, ss_size), (0, 0, 0, 0))
+    img = Image.new('RGBA', (ss_size, ss_size), BG_COLOR + (255,))
     draw = ImageDraw.Draw(img)
     for i in range(len(points) - 1):
-        draw_round_line(draw, points[i], points[i+1], main_w, ACCENT + (255,))
+        draw_round_line(draw, points[i], points[i+1], main_w, ACCENT)
 
     overlay = Image.new('RGBA', (ss_size, ss_size), (0, 0, 0, 0))
     od = ImageDraw.Draw(overlay)
@@ -48,9 +48,12 @@ def generate_logo(size, output_path):
 
     img = Image.alpha_composite(img, overlay)
     img = img.resize((size, size), Image.LANCZOS)
-    img.save(output_path, 'PNG')
+
+    final = Image.new('RGB', (size, size), BG_COLOR)
+    final.paste(img, mask=img.split()[3])
+    final.save(output_path, 'PNG')
     print(f"  ok {output_path} ({size}x{size})")
-    return img
+    return final
 
 output_dir = '/home/claude/icons'
 os.makedirs(output_dir, exist_ok=True)
@@ -67,23 +70,25 @@ images = {}
 for size, name in sizes.items():
     images[size] = generate_logo(size, os.path.join(output_dir, name))
 
-# ICO needs RGB fallback — composite onto dark bg for .ico only
-from PIL import Image as PILImage
-ico_img = Image.new('RGBA', (32, 32), (14, 13, 11, 255))
-ico_img = Image.alpha_composite(ico_img, images[32])
-ico_rgb = ico_img.convert('RGB')
-ico_rgb.save(os.path.join(output_dir, 'favicon.ico'), format='ICO', sizes=[(16,16),(32,32)])
+images[32].save(os.path.join(output_dir, 'favicon.ico'), format='ICO', sizes=[(16,16),(32,32)])
 print("  ok favicon.ico")
 
-# SVGs
 svg_pts = " ".join(f"{'M' if i==0 else 'L'} {x:.1f},{y:.1f}" for i,(x,y) in enumerate(ECG_POINTS))
 spike_pts = " ".join(f"{'M' if i==0 else 'L'} {ECG_POINTS[SPIKE_INDICES[i]][0]:.1f},{ECG_POINTS[SPIKE_INDICES[i]][1]:.1f}" for i in range(len(SPIKE_INDICES)))
 
 with open(os.path.join(output_dir, 'loore-logo.svg'), 'w') as f:
     f.write(f'''<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="512" height="512" fill="#211f1b"/>
   <path d="{svg_pts}" stroke="#c4956a" stroke-width="27" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="{spike_pts}" stroke="#c4956a" stroke-width="41" stroke-linecap="round" stroke-linejoin="round" opacity="0.55"/>
 </svg>''')
-print("  ok loore-logo.svg (transparent)")
+print("  ok loore-logo.svg")
+
+with open(os.path.join(output_dir, 'loore-logo-transparent.svg'), 'w') as f:
+    f.write(f'''<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="{svg_pts}" stroke="#c4956a" stroke-width="27" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="{spike_pts}" stroke="#c4956a" stroke-width="41" stroke-linecap="round" stroke-linejoin="round" opacity="0.55"/>
+</svg>''')
+print("  ok loore-logo-transparent.svg")
 
 print("\nDone!")
