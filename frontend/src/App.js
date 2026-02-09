@@ -25,8 +25,8 @@ function App() {
   // When the user info is loaded, check if they have accepted the terms.
   useEffect(() => {
     if (user) {
-      // Show terms modal if not accepted.
-      if (!user.accepted_terms_at) {
+      // Show terms modal if not accepted or if terms version is outdated.
+      if (!user.terms_up_to_date) {
         setShowTerms(true);
       } else {
         setShowTerms(false);
@@ -34,7 +34,7 @@ function App() {
       // Also, if they have accepted terms but are not approved (and haven't provided an email),
       // show the waiting-list modal.
       // if (user.accepted_terms_at && user.approved === false && !user.email) {
-      if (user.accepted_terms_at && !user.approved) {
+      if (user.terms_up_to_date && !user.approved) {
         setShowAlpha(true);
       } else {
         setShowAlpha(false);
@@ -137,8 +137,8 @@ function App() {
       {/* Render the Terms Modal if the user hasn't accepted the terms yet */}
       {showTerms && (
         <TermsModal
-          onAccepted={(acceptedTimestamp) => {
-            setUser({ ...user, accepted_terms_at: acceptedTimestamp });
+          onAccepted={() => {
+            setUser({ ...user, terms_up_to_date: true });
             setShowTerms(false);
           }}
         />
