@@ -49,11 +49,11 @@ const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => 
       }}
     >
       <div style={{
-        fontFamily: "var(--serif)",
-        fontSize: "1.2rem",
+        fontFamily: "var(--sans)",
+        fontSize: "1rem",
         color: "var(--text-primary)",
         marginBottom: body ? "0.6rem" : "0",
-        fontWeight: 500,
+        fontWeight: 400,
       }}>
         {title.length > 120 ? title.substring(0, 120) + "..." : title}
       </div>
