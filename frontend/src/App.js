@@ -89,8 +89,10 @@ function App() {
               border: '1px solid var(--border)',
               padding: '2rem',
               borderRadius: '12px',
-              width: '640px',
+              width: '780px',
               maxWidth: '90vw',
+              maxHeight: '90vh',
+              overflowY: 'auto',
               boxShadow: '0 24px 80px rgba(0,0,0,0.5)',
             }}
           >
