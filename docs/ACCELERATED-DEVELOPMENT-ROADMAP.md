@@ -19,15 +19,23 @@
 
 ### Already Done
 - **Core journaling** (Feature 1) - Production-ready
-- **Privacy infrastructure** (Phase -1) - Two-column privacy system implemented
-- **CI/CD pipeline** - GitHub Actions runs tests, deploys to production
+- **Privacy infrastructure** (Phase -1) - Two-column privacy system implemented, privacy filtering enforced on feed/dashboard/node detail, recursive human owner resolution for LLM access control
+- **GCP KMS encryption** (A.4) - Envelope encryption for all content + audio at rest
+- **API key separation for chat vs train** (#39) - ✅ Complete
+- **Magic link email authentication** (#54) - Passwordless login via email, replacing Twitter-only OAuth
+- **Dedicated login page** (#53) - Standalone login page with redirect flow
+- **Rebrand to Loore** (A.5) - ✅ Complete: domain (loore.org), all branding, icons, emails, landing page
+- **Full UI redesign** (#56) - Warm literary design system across all pages, dark theme, responsive mobile
+- **User plan tiers** - Standardized (free/alpha/pro) with admin dashboard management and migration scripts
+- **Multi-model LLM updates** - Claude Opus 4.6 support, centralized model config
+- **CI/CD pipeline** - GitHub Actions runs tests, deploys to production, path-based job skipping
 - **Docker setup** - Files exist but unverified/incomplete
 - **Backend tests** - Privacy-related tests only (~3 test files)
 - **Frontend tests** - Placeholder only
-- **API key separation for chat vs train** (#39) - ✅ Complete
+- **Terms of service** - Acceptance tracking with admin reset on account deactivation
 
 ### Alpha Blockers (Critical)
-- ⚠️ **Rebrand to Loore** (A.5)
+- ✅ All alpha blockers resolved (A.1-A.5 complete)
 
 ### Development Velocity Blockers
 - Docker setup unverified (may not work out of box)
@@ -90,17 +98,45 @@
 - **Setup docs:** `docs/GCP-KMS-SETUP.md` covers full GCP configuration
 - **Dependencies added:** `google-cloud-kms>=2.0.0`, `cryptography>=41.0.0`
 
-### A.5 Rebrand to Loore
+### A.5 Rebrand to Loore ✅ COMPLETE
 
 **What:** Rename the application from "Write or Perish" to "Loore".
 
-**Domain options:**
-- **loore.org** - Non-profit/community feel, memorable
-- **loore.tech** - Tech-forward, professional
+**Status:** Implemented. Key changes:
+- **Domain:** loore.org (production)
+- **Frontend:** All pages rebranded, landing page rewritten with new Loore vision and copy
+- **Icons:** Redesigned app icons with new branding
+- **Navbar:** Enlarged logo text with waveform icon
+- **Email:** Sign-in email redesigned to match Loore branding
+- **Login page:** Rebranded and redesigned
 
-**Scope:** Frontend branding, backend config, deployment, documentation, DNS setup.
+**Alpha Deliverable:** ✅ Shipped to friends with privacy guarantees + monitoring + encryption + Loore branding.
 
-**Alpha Deliverable:** Ship to friends with privacy guarantees + monitoring + ✅ encryption + Loore branding.
+### A.6 Full UI Redesign ✅ COMPLETE (Unplanned)
+
+**What:** Complete redesign of all app pages to a warm literary design system.
+
+**Status:** Implemented (#56 + follow-up commits). Key changes:
+- Dark theme with warm literary aesthetic across all pages
+- Login page redesigned with branded sign-in email
+- Contrast and readability improvements throughout
+- Privacy selectors, write modal, and feed card spacing refined
+- Browser autofill styling overridden to preserve dark theme
+- Typography: switched to Outfit (sans-serif) for body text readability
+- Font weight increases for write textarea and card titles
+- Responsive: mobile button wrapping, modal height constraints, wider desktop modals (780px→1170px)
+
+### A.7 Magic Link Email Authentication ✅ COMPLETE (Unplanned)
+
+**What:** Passwordless authentication via email magic links (#54).
+
+**Status:** Implemented. Replaces Twitter-only OAuth as primary auth method. Includes dedicated login page with redirect flow (#53). Partial email infrastructure now in place (basic SMTP).
+
+### A.8 User Plan Tier Standardization ✅ COMPLETE (Unplanned)
+
+**What:** Standardized plan tiers (free/alpha/pro) with admin management.
+
+**Status:** Implemented. All existing users migrated to alpha plan. Admin dashboard has plan dropdown. Feature gating via `User.has_voice_mode` and plan-based decorators.
 
 ---
 
@@ -493,10 +529,13 @@ claude  # "Working on Intention Market feature..."
 
 1. ✅ **COMPLETED:** A.1 (API key separation)
 2. ✅ **COMPLETED:** A.4 (GCP KMS encryption)
-3. **NOW:** A.5 (Rebrand to Loore)
-4. **PARALLEL:** A.2 (Sentry integration) + A.3 (Alpha docs)
-5. **THEN:** Phase B (Docker + tests) - all items can run parallel
-6. **THEN:** Phase C infrastructure, leading to Phase D parallelization
+3. ✅ **COMPLETED:** A.5 (Rebrand to Loore)
+4. ✅ **COMPLETED:** A.6 (Full UI redesign)
+5. ✅ **COMPLETED:** A.7 (Magic link email authentication)
+6. ✅ **COMPLETED:** A.8 (User plan tier standardization)
+7. **NOW:** A.2 (Sentry integration) + A.3 (Alpha docs)
+8. **THEN:** Phase B (Docker + tests) - all items can run parallel
+9. **THEN:** Phase C infrastructure, leading to Phase D parallelization
 
 ---
 

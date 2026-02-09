@@ -25,7 +25,7 @@ These technical capabilities are production-ready and form the foundation:
 
 ### Core Features
 - **Asynchronous processing via Celery** - Long-running tasks (transcription, LLM, TTS) run in background with polling
-- **Multi-model LLM provider abstraction** - Unified interface for OpenAI and Anthropic with automatic routing
+- **Multi-model LLM provider abstraction** - Unified interface for OpenAI and Anthropic (including Claude Opus 4.6) with centralized model config and automatic routing
 - **User profile generation system** - AI-powered analysis of user's writing to create personalized profiles
 - **OAuth authentication flow** - Twitter login with approval/whitelist system
 - **Tree-structured node system** - Hierarchical content organization with parent/child relationships
@@ -47,8 +47,21 @@ Users have a `plan` column (string, max 16 chars) on the User model. The plan co
 - Plan tiers that grant Voice Mode are defined in `User.VOICE_MODE_PLANS` (`models.py`).
 - The frontend receives `voice_mode_enabled` (boolean) from the `/dashboard` endpoint — it does not check plans directly.
 
+### Authentication & User Management
+- **Magic link email authentication** - Passwordless login via email magic links, replacing Twitter-only OAuth (#54)
+- **Dedicated login page** - Standalone login page with redirect flow (#53)
+- **User plan tiers** - Standardized plan system (free/alpha/pro) with admin dashboard management, migration scripts, and feature gating via `User.has_voice_mode`
+- **Terms of service acceptance** - Terms acceptance tracking with admin ability to reset on account deactivation
+
+### UI/UX
+- **Warm literary design system** - Complete UI redesign across all app pages with cohesive dark theme (#56)
+- **Responsive mobile design** - Mobile-optimized modals, button wrapping, and spacing
+- **Typography system** - Sans-serif (Outfit) for body/readability, refined font weights and contrast
+- **Loore branding** - Full rebrand with custom icons, waveform logo, and literary-themed landing page
+
 ### CI/CD & DevOps
 - **GitHub Actions CI pipeline** - Automated testing on all branches and PRs with backend tests, frontend tests, linting, and security scans
+- **Path-based CI optimization** - Skip unrelated jobs based on changed file paths for faster CI runs
 - **Automated deployment pipeline** - Push to main triggers frontend build and SSH deployment to production VM
 - **Security scanning** - Bandit for Python security issues and Safety for vulnerable dependencies run on every commit
 - **Code quality checks** - Flake8 linting for backend and frontend lint checks catch issues early
@@ -85,7 +98,7 @@ Users have a `plan` column (string, max 16 chars) on the User model. The plan co
 
 ✅ **File encryption at rest** - COMPLETED: All audio files (uploads, streaming chunks, TTS) encrypted at rest using `encrypt_file()` with envelope encryption (AES-256-GCM + KMS-wrapped DEK). Binary format: `[4-byte DEK length][wrapped DEK][nonce][ciphertext]`. Files get `.enc` extension; media route transparently serves encrypted files. Transcription tasks use `decrypt_file_to_temp()` to decrypt before sending to OpenAI
 
-**Email sending infrastructure** - SMTP service (SendGrid/AWS SES) for password recovery, notifications, and digests with template management
+**Email sending infrastructure expansion** - Currently magic link auth emails work via SMTP. Expand to SendGrid/AWS SES for notifications, digests, and template management at scale
 
 **Real-time communication with WebSockets** - WebSocket server for live notifications (matches, shares, messages) without polling, using Socket.IO or similar
 
@@ -288,7 +301,7 @@ Based on current project state, dependencies, and strategic value, here's the re
 4. ✅ **Fine-grained permission system** - `can_user_access_node()` checks privacy level and ownership
 5. ✅ **AI usage permissions** - `can_ai_use_node_for_chat()` and `can_ai_use_node_for_training()` functions
 6. ✅ **API endpoints for privacy** - Updated all Node and UserProfile creation/edit endpoints to accept and validate privacy settings
-7. ✅ **Authorization enforcement** - GET /nodes/<id> enforces privacy with authorization check
+7. ✅ **Authorization enforcement** - GET /nodes/<id> enforces privacy with authorization check. Privacy filtering also enforced on Feed, Dashboard, and Node Detail views. Recursive human owner resolution for LLM node access control.
 8. ✅ **Data migration scripts**:
    - `backend/scripts/migrate_privacy_settings.py` - Migrates existing nodes to privacy='private', ai_usage='train'
    - `backend/scripts/migrate_profile_privacy_settings.py` - Migrates existing profiles to privacy='private', ai_usage='chat'
@@ -307,11 +320,11 @@ Based on current project state, dependencies, and strategic value, here's the re
 ### Alpha Blockers (New):
 
 - ✅ **GCP KMS encryption** - COMPLETED: Envelope encryption with AES-256-GCM + KMS-wrapped DEKs. All existing content migrated. Paginated Feed and Dashboard with infinite scroll to handle large node counts.
-- ⚠️ **Rebrand to Loore** - Rename application, update all branding, configure new domain (loore.org or loore.tech)
+- ✅ **Rebrand to Loore** - COMPLETED: Application renamed to Loore, domain switched to loore.org, all branding updated (landing page, login page, email templates, icons, navbar logo with waveform icon)
 
 ### NOT Implemented (Future Work):
 
-- **Email infrastructure** - Not yet implemented (SendGrid/AWS SES)
+- **Email infrastructure at scale** - Basic SMTP works for magic link auth; SendGrid/AWS SES needed for notifications and digests
 - **Circles implementation** - Privacy level exists but circles functionality not yet built (moved to Phase 4)
 
 **Deliverable:** Two-column privacy system for Nodes and UserProfiles with authorization enforcement and comprehensive tests
@@ -696,10 +709,13 @@ This roadmap prioritizes **privacy & encryption first** (Phase -1), then **found
 **Next Steps:**
 1. ✅ **COMPLETED:** API key separation for chat vs train operations
 2. ✅ **COMPLETED:** GCP KMS envelope encryption for content at rest (v2 format, REST transport, DEK caching, paginated Feed/Dashboard) and audio files at rest
-3. **ALPHA BLOCKER:** Rebrand to Loore (frontend, backend, domain, documentation)
-4. Update user-facing docs with clear privacy promise
-5. Set up Phase 0: Testing infrastructure alongside encryption work
-6. Iterate based on learnings at each phase
+3. ✅ **COMPLETED:** Rebrand to Loore (frontend, backend, domain loore.org, landing page, icons, email templates)
+4. ✅ **COMPLETED:** Magic link email authentication (replaces Twitter-only login)
+5. ✅ **COMPLETED:** Full UI redesign with warm literary design system
+6. ✅ **COMPLETED:** User plan tier standardization with admin management
+7. Update user-facing docs with clear privacy promise
+8. Set up Phase 0: Testing infrastructure alongside encryption work
+9. Iterate based on learnings at each phase
 
 This is ambitious but achievable. Each phase delivers value, and the foundation work (especially privacy) ensures sustainable velocity and user trust throughout.
 
