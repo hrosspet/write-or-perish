@@ -114,6 +114,36 @@ Users have a `plan` column (string, max 16 chars) on the User model. The plan co
 
 **Spam detection and rate limiting** - ML-based spam detection for shares and intentions with progressive penalties (warnings → temp ban → permanent ban)
 
+### License & Legal Compliance (Priority: BETA BLOCKER)
+
+**These items must be addressed before Loore moves beyond the small alpha circle. See `docs/LICENSE-TODO.md` for full details.**
+
+**Legal entity disclosure** - Identify the legal entity operating Loore (personal name, OSVČ, s.r.o.) and add to the terms so users know who they're contracting with
+
+**Jurisdiction & governing law** - Specify Czech Republic / EU jurisdiction and applicable law (required for enforceable agreement and GDPR compliance)
+
+**GDPR rights section in terms** - Add explicit mention of data subject rights: access, rectification, erasure, portability, right to object, right to lodge complaint with ÚOOÚ
+
+**Account deletion feature** - Build account deletion, then update terms to describe what's purged, retained, sent to AI providers, and in backups
+
+**Data export / portability** - Implement GDPR-required data export feature and document it in terms
+
+**Age restriction** - Set explicit minimum age for the service (16 is GDPR default in CZ) and add to terms
+
+**Backup documentation** - Document what's backed up, retention period, encryption status, and how long deleted data persists in backups
+
+**Cookie / tracking disclosure** - Disclose cookie usage (session cookies at minimum); may need cookie banner for EU compliance
+
+**Content moderation policy** - Define procedures for illegal public content before public release
+
+**Separate consent step for AI training** - Build distinct UI action for AI training consent (not just a toggle); update license to reflect UX
+
+**Third-party service audit** - Audit deployed application for undisclosed third-party services (analytics, CDN, font providers) and add to terms
+
+**Link to full OpenAI Content Sharing Agreement** - Provide direct link to full text or host a copy (currently only summarized)
+
+**License versioning** - Maintain version numbers so it's clear which version a user accepted and when terms changed (v2.0 already in use)
+
 ### Mobile & Offline Support
 
 **Mobile-optimized API design** - RESTful API with pagination, partial responses, and efficient payloads for mobile bandwidth constraints

@@ -139,6 +139,35 @@
 
 **Status:** Implemented. All existing users migrated to alpha plan. Admin dashboard has plan dropdown. Feature gating via `User.has_voice_mode` and plan-based decorators.
 
+### A.9 License & Legal Compliance (Beta Blocker)
+
+**What:** Address legal and compliance gaps in the terms of service before moving beyond the alpha circle.
+
+**Why:** Current terms are alpha-grade. Before broader beta release, the license needs legal entity disclosure, GDPR rights, jurisdiction, and several technical features (account deletion, data export) to be compliant.
+
+**Full details:** See `docs/LICENSE-TODO.md` for the complete checklist (15 items).
+
+**Key items requiring code changes:**
+1. **Account deletion feature** - Build it, then update terms to describe what's purged/retained
+2. **Data export / portability** - GDPR-required; implement and document
+3. **Cookie / tracking disclosure** - Disclose session cookies; may need cookie banner for EU
+4. **Separate consent step for AI training** - Distinct UI action, not just a toggle
+5. **Third-party service audit** - Audit app for undisclosed services (analytics, CDN, fonts)
+
+**Key items requiring terms/docs updates only:**
+6. Legal entity disclosure (OSVČ, s.r.o., etc.)
+7. Jurisdiction & governing law (Czech Republic / EU)
+8. GDPR rights section (access, rectification, erasure, portability, complaint to ÚOOÚ)
+9. Age restriction (16 minimum for CZ GDPR)
+10. Backup details documentation
+11. Content moderation policy
+12. Link to full OpenAI Content Sharing Agreement
+13. License versioning (v2.0 already in use — maintain going forward)
+
+**Note:** Item 9 from LICENSE-TODO (Circles feature) is already tracked in Phase D. Item 8 (audit logs) is already tracked in Technical Roadmap under Compliance & Safety.
+
+**Scope:** Mix of code features + legal/docs. Code items can be parallelized with Phase B.
+
 ---
 
 ## Phase B: Development Automation (1-2 weeks, can partially overlap with A)
@@ -535,8 +564,9 @@ claude  # "Working on Intention Market feature..."
 5. ✅ **COMPLETED:** A.7 (Magic link email authentication)
 6. ✅ **COMPLETED:** A.8 (User plan tier standardization)
 7. **NOW:** A.2 (Sentry integration) + A.3 (Alpha docs)
-8. **THEN:** Phase B (Docker + tests) - all items can run parallel
-9. **THEN:** Phase C infrastructure, leading to Phase D parallelization
+8. **NEXT:** A.9 (License & legal compliance for beta) - code items can parallel with Phase B
+9. **THEN:** Phase B (Docker + tests) - all items can run parallel
+10. **THEN:** Phase C infrastructure, leading to Phase D parallelization
 
 ---
 
