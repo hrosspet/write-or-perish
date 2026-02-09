@@ -92,7 +92,7 @@ function TermsModal({ onAccepted }) {
               <strong style={{ color: "var(--text-primary)" }}>All content is encrypted at rest,</strong> but developers can technically decrypt it (every such event is logged). This is a trust-based model, not a cryptographic guarantee.
             </li>
             <li style={tldrItem}>
-              <strong style={{ color: "var(--text-primary)" }}>If you enable AI chat,</strong> your content is sent to third-party AI providers (OpenAI, Anthropic) for processing. If you enable AI training, that's <strong style={{ color: "var(--text-primary)" }}>essentially irrevocable for already-trained models.</strong>
+              <strong style={{ color: "var(--text-primary)" }}>If you enable AI chat,</strong> your content is sent to third-party AI providers (OpenAI, Anthropic) for processing. If you enable AI training, that's <strong style={{ color: "var(--text-primary)" }}>essentially irrevocable for already-trained models.</strong> Also, for AI training, <strong style={{ color: "var(--text-primary)" }}>don't submit content you don't have the rights for!</strong>
             </li>
             <li style={tldrItem}>
               <strong style={{ color: "var(--text-primary)" }}>You own your content.</strong> We claim no rights to it except what's needed to run the service &mdash; and, if you opt in to training, a license to train our own models too.
