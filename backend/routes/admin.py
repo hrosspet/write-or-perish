@@ -44,6 +44,9 @@ def list_users():
 def toggle_user_status(user_id):
     user = User.query.get_or_404(user_id)
     user.approved = not user.approved  # Toggle the approved flag
+    if not user.approved:
+        # Reset terms acceptance so user must re-accept on next login
+        user.accepted_terms_at = None
     db.session.commit()
     return jsonify({"message": "User status updated", "approved": user.approved}), 200
 
