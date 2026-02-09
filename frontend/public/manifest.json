@@ -1,6 +1,6 @@
 {
-  "short_name": "W x P",
-  "name": "Write or Perish",
+  "short_name": "Loore",
+  "name": "Loore",
   "icons": [
     {
       "src": "favicon.ico",
@@ -8,18 +8,18 @@
       "type": "image/x-icon"
     },
     {
-      "src":"/android-chrome-192x192.png",
-      "sizes":"192x192",
-      "type":"image/png"
+      "src": "/android-chrome-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png"
     },
     {
-      "src":"/android-chrome-512x512.png",
-      "sizes":"512x512",
-      "type":"image/png"
+      "src": "/android-chrome-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png"
     }
   ],
   "start_url": ".",
   "display": "standalone",
-  "theme_color": "#000000",
-  "background_color": "#ffffff"
+  "theme_color": "#0e0d0b",
+  "background_color": "#0e0d0b"
 }
