@@ -310,7 +310,7 @@ const NodeForm = forwardRef(
             padding: "14px 16px",
             fontFamily: "var(--serif)",
             fontSize: "1.05rem",
-            fontWeight: 400,
+            fontWeight: 500,
             color: "var(--text-primary)",
             lineHeight: 1.6,
             minHeight: "250px",

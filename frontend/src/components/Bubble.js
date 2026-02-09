@@ -53,7 +53,7 @@ const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => 
         fontSize: "1.2rem",
         color: "var(--text-primary)",
         marginBottom: body ? "0.6rem" : "0",
-        fontWeight: 400,
+        fontWeight: 500,
       }}>
         {title.length > 120 ? title.substring(0, 120) + "..." : title}
       </div>
