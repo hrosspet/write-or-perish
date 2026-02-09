@@ -91,6 +91,20 @@ button, input, textarea {
   outline: none;
 }
 
+/* Override browser autofill styling to keep dark theme */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+textarea:-webkit-autofill,
+textarea:-webkit-autofill:hover,
+textarea:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 1000px var(--bg-input) inset !important;
+  -webkit-text-fill-color: var(--text-primary) !important;
+  caret-color: var(--text-primary);
+  font-family: var(--sans) !important;
+  transition: background-color 5000s ease-in-out 0s;
+}
+
 /* Button-specific styles */
 button {
   cursor: pointer;
