@@ -234,9 +234,8 @@ function NodeDetail() {
           createdAt={node.created_at}
           childrenCount={highlightedChildrenCount}
         />
-        <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
           <button onClick={() => setShowChildFormOverlay(true)}>Add Text</button>
-          {/* Only show LLM Response button and model selector if AI usage allows it */}
           {node.ai_usage !== 'none' && (
             <>
               <button onClick={handleLLMResponse} disabled={!!llmTaskNodeId}>
@@ -248,7 +247,6 @@ function NodeDetail() {
                   ? "Generating..."
                   : "LLM Response"}
               </button>
-              {/* Model selector dropdown */}
               <ModelSelector
                 nodeId={node.id}
                 selectedModel={selectedModel}
@@ -258,7 +256,6 @@ function NodeDetail() {
           )}
           {isOwner && <button onClick={() => setShowEditOverlay(true)}>Edit</button>}
           {isOwner && <button onClick={handleDelete}>Delete</button>}
-          {/* Speaker icon for audio playback */}
           <SpeakerIcon nodeId={node.id} content={node.content} isPublic={node.privacy_level === 'public'} />
           <DownloadAudioIcon nodeId={node.id} isPublic={node.privacy_level === 'public'} />
         </div>
@@ -293,8 +290,10 @@ function NodeDetail() {
     border: "1px solid var(--border)",
     padding: "2rem",
     borderRadius: "12px",
-    width: "640px",
+    width: "780px",
     maxWidth: "90vw",
+    maxHeight: "90vh",
+    overflowY: "auto",
     position: "relative"
   };
 
