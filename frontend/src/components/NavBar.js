@@ -53,20 +53,28 @@ function NavBar({ onNewEntryClick }) {
       <Link
         to="/"
         style={{
-          color: "var(--text-muted)",
+          color: "var(--text-secondary)",
           textDecoration: "none",
           fontFamily: "var(--serif)",
           fontWeight: 300,
-          fontSize: "0.85rem",
+          fontSize: "1.15rem",
           textTransform: "uppercase",
           letterSpacing: "0.3em",
           marginRight: "auto",
+          display: "flex",
+          alignItems: "center",
+          gap: "10px",
         }}
       >
+        <img
+          src="/loore-logo-transparent.svg"
+          alt=""
+          style={{ height: "22px", width: "auto", opacity: 0.7 }}
+        />
         Loore
       </Link>
 
-      <div style={{ display: "flex", alignItems: "center", gap: "1.8rem" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "clamp(0.8rem, 2vw, 1.8rem)" }}>
         <Link to="/dashboard" style={linkStyle("/dashboard")}>
           Dashboard
         </Link>
