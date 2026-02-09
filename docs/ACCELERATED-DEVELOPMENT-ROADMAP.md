@@ -21,10 +21,10 @@
 - **Core journaling** (Feature 1) - Production-ready
 - **Privacy infrastructure** (Phase -1) - Two-column privacy system implemented, privacy filtering enforced on feed/dashboard/node detail, recursive human owner resolution for LLM access control
 - **GCP KMS encryption** (A.4) - Envelope encryption for all content + audio at rest
-- **API key separation for chat vs train** (#39) - ✅ Complete
+- **API key separation for chat vs train** (#39) - Complete
 - **Magic link email authentication** (#54) - Passwordless login via email, replacing Twitter-only OAuth
 - **Dedicated login page** (#53) - Standalone login page with redirect flow
-- **Rebrand to Loore** (A.5) - ✅ Complete: domain (loore.org), all branding, icons, emails, landing page
+- **Rebrand to Loore** (A.5) - Complete: domain (loore.org), all branding, icons, emails, landing page
 - **Full UI redesign** (#56) - Warm literary design system across all pages, dark theme, responsive mobile
 - **User plan tiers** - Standardized (free/alpha/pro) with admin dashboard management and migration scripts
 - **Multi-model LLM updates** - Claude Opus 4.6 support, centralized model config
@@ -35,7 +35,8 @@
 - **Terms of service** - Acceptance tracking with admin reset on account deactivation
 
 ### Alpha Blockers (Critical)
-- ✅ All alpha blockers resolved (A.1-A.5 complete)
+- ⚠️ **A.2 Basic Monitoring** - Sentry integration + health check endpoint + request logging not yet implemented
+- ⚠️ **A.3 Alpha Documentation** - In progress: privacy promise docs, user guide, known limitations
 
 ### Development Velocity Blockers
 - Docker setup unverified (may not work out of box)
@@ -588,7 +589,7 @@ Copy-paste these when starting an agent on a feature branch:
 
 ### Download Feature Agent
 ```
-You're working on the Download feature (MemeOS integration) for Write or Perish.
+You're working on the Download feature (MemeOS integration) for Loore.
 
 Read docs/FOUR-FEATURE-ECOSYSTEM.md section "Feature 2: Download" for requirements.
 Read docs/TECHNICAL-ROADMAP.md "Phase 1-2" for technical approach.
@@ -605,7 +606,7 @@ Minimize changes to existing files, especially NodeDetail.tsx.
 
 ### Upload Feature Agent
 ```
-You're working on the Upload feature (broadcasting/sharing) for Write or Perish.
+You're working on the Upload feature (broadcasting/sharing) for Loore.
 
 Read docs/FOUR-FEATURE-ECOSYSTEM.md section "Feature 3: Upload" for requirements.
 Read docs/TECHNICAL-ROADMAP.md "Phase 4-5" for technical approach.
@@ -624,7 +625,7 @@ Minimize changes to existing files, especially NodeDetail.tsx.
 
 ### Intention Market Agent
 ```
-You're working on the Intention Market feature for Write or Perish.
+You're working on the Intention Market feature for Loore.
 
 Read docs/FOUR-FEATURE-ECOSYSTEM.md section "Feature 4: Intention Market" for requirements.
 Read docs/TECHNICAL-ROADMAP.md "Phase 6-7" for technical approach.

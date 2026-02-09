@@ -1,4 +1,4 @@
-# Technical Roadmap: Write or Perish Four-Feature Ecosystem
+# Technical Roadmap: Loore Four-Feature Ecosystem
 
 **Date:** November 24, 2025
 **Status:** Planning Phase
@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-This document outlines the technical infrastructure needed to evolve Write or Perish from a journaling app into a complete four-feature ecosystem:
+This document outlines the technical infrastructure needed to evolve Loore from a journaling app into a complete four-feature ecosystem:
 
 1. **Effortless Journaling** (Input) - ✅ Complete
 2. **Download** (Consume) - Context-aware content recommendations from MemeOS
@@ -444,7 +444,7 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 **Note:** Shares respect privacy levels. Only training/public nodes can be suggested for sharing unless user explicitly opts in.
 
-**Why now:** Proves core sharing value without external API complexity. Users can share to other Write or Perish users.
+**Why now:** Proves core sharing value without external API complexity. Users can share to other Loore users.
 
 ---
 
