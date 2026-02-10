@@ -1,0 +1,945 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Loore — Component Previews</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400;1,500&family=Outfit:wght@300;400;500&display=swap" rel="stylesheet" />
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    /* REVISED palette — wider contrast steps */
+    --bg-deep: #0e0d0b;
+    --bg-surface: #181714;
+    --bg-card: #211f1b;
+    --bg-card-hover: #282520;
+    --bg-input: #151311;
+    --text-primary: #ede8dd;
+    --text-secondary: #a89f91;
+    --text-muted: #736b5f;
+    --accent: #c4956a;
+    --accent-dim: #a07a55;
+    --accent-glow: #c4956a40;
+    --accent-subtle: #c4956a15;
+    --border: #302c27;
+    --border-hover: #433e36;
+    --serif: 'Cormorant Garamond', Georgia, serif;
+    --sans: 'Outfit', system-ui, sans-serif;
+  }
+
+  body {
+    background: var(--bg-deep);
+    color: var(--text-primary);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+
+  /* Tab navigation for switching views */
+  .preview-tabs {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 1000;
+    display: flex;
+    gap: 0;
+    background: #0a0908;
+    border-bottom: 1px solid var(--border);
+    font-family: var(--sans);
+  }
+
+  .preview-tab {
+    padding: 14px 28px;
+    font-size: 0.85rem;
+    font-weight: 400;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    cursor: pointer;
+    border: none;
+    background: none;
+    border-bottom: 2px solid transparent;
+    transition: all 0.3s ease;
+  }
+
+  .preview-tab:hover { color: var(--text-secondary); }
+  .preview-tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+
+  .preview-section {
+    display: none;
+    padding-top: 50px;
+    min-height: 100vh;
+  }
+
+  .preview-section.active { display: block; }
+
+  /* ========================================
+     SHARED: NavBar
+     ======================================== */
+  .nav {
+    height: 56px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 2rem;
+    background: var(--bg-surface);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 50px;
+    z-index: 100;
+  }
+
+  .nav-logo {
+    font-family: var(--serif);
+    font-weight: 300;
+    font-size: 0.85rem;
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    text-decoration: none;
+    transition: color 0.3s;
+  }
+
+  .nav-logo:hover { color: var(--text-primary); }
+
+  .nav-links {
+    display: flex;
+    gap: 1.8rem;
+    align-items: center;
+  }
+
+  .nav-link {
+    font-family: var(--sans);
+    font-weight: 300;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    text-decoration: none;
+    transition: color 0.3s;
+    letter-spacing: 0.02em;
+  }
+
+  .nav-link:hover { color: var(--text-primary); }
+  .nav-link.active { color: var(--accent); }
+
+
+  /* ========================================
+     FEED
+     ======================================== */
+  .feed-page {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 3rem 2rem 4rem;
+  }
+
+  .feed-header {
+    margin-bottom: 2.5rem;
+  }
+
+  .feed-title {
+    font-family: var(--serif);
+    font-weight: 300;
+    font-size: 2rem;
+    color: var(--text-primary);
+    margin-bottom: 0.8rem;
+  }
+
+  .feed-divider {
+    width: 40px;
+    height: 1px;
+    background: var(--accent);
+    opacity: 0.5;
+  }
+
+  .feed-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .feed-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.6rem 1.8rem;
+    cursor: pointer;
+    transition: border-color 0.3s ease, box-shadow 0.3s ease, transform 0.3s ease;
+  }
+
+  .feed-card:hover {
+    border-color: var(--border-hover);
+    box-shadow: 0 4px 24px rgba(0,0,0,0.3);
+    transform: translateY(-1px);
+  }
+
+  .feed-card-title {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 1.2rem;
+    color: var(--text-primary);
+    margin-bottom: 0.6rem;
+    line-height: 1.35;
+  }
+
+  .feed-card-body {
+    font-family: var(--sans);
+    font-weight: 300;
+    font-size: 0.92rem;
+    color: var(--text-secondary);
+    line-height: 1.7;
+    margin-bottom: 0.9rem;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .feed-card-meta {
+    font-family: var(--sans);
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .feed-card-meta .sep { opacity: 0.4; }
+
+  .feed-card-tag {
+    font-size: 0.65rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--accent-dim);
+    background: var(--accent-subtle);
+    padding: 2px 8px;
+    border-radius: 3px;
+    margin-left: auto;
+  }
+
+
+  /* ========================================
+     DASHBOARD
+     ======================================== */
+  .dash-page {
+    max-width: 820px;
+    margin: 0 auto;
+    padding: 3rem 2rem 4rem;
+  }
+
+  .dash-username {
+    font-family: var(--serif);
+    font-weight: 300;
+    font-size: 2rem;
+    color: var(--text-primary);
+    margin-bottom: 1.5rem;
+  }
+
+  .dash-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin-bottom: 2.5rem;
+  }
+
+  .btn-ghost {
+    font-family: var(--sans);
+    font-weight: 400;
+    font-size: 0.82rem;
+    letter-spacing: 0.03em;
+    padding: 8px 18px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-secondary);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+  }
+
+  .btn-ghost:hover {
+    border-color: var(--border-hover);
+    color: var(--text-primary);
+    background: rgba(255,255,255,0.02);
+  }
+
+  .btn-primary {
+    font-family: var(--sans);
+    font-weight: 400;
+    font-size: 0.82rem;
+    letter-spacing: 0.03em;
+    padding: 8px 18px;
+    border: 1px solid var(--accent);
+    background: transparent;
+    color: var(--accent);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+  }
+
+  .btn-primary:hover {
+    background: var(--accent-subtle);
+    box-shadow: 0 0 20px var(--accent-glow);
+  }
+
+  .model-select {
+    font-family: var(--sans);
+    font-weight: 300;
+    font-size: 0.82rem;
+    padding: 8px 14px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    border-radius: 6px;
+    cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
+    outline: none;
+  }
+
+  .model-select:focus { border-color: var(--accent); }
+
+  /* Profile card */
+  .profile-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 2rem 2.2rem;
+    position: relative;
+  }
+
+  .profile-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 0.5rem;
+  }
+
+  .profile-title {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 1.4rem;
+    color: var(--text-primary);
+  }
+
+  .profile-edit {
+    font-family: var(--sans);
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    background: none;
+    border: 1px solid var(--border);
+    padding: 5px 14px;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: all 0.3s;
+  }
+
+  .profile-edit:hover {
+    color: var(--text-secondary);
+    border-color: var(--border-hover);
+  }
+
+  .profile-meta {
+    font-family: var(--sans);
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-bottom: 2rem;
+    letter-spacing: 0.02em;
+  }
+
+  .surface-label {
+    font-family: var(--sans);
+    font-weight: 500;
+    font-size: 0.7rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 2rem;
+    padding-bottom: 0.8rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .surface-section {
+    margin-bottom: 2.2rem;
+  }
+
+  .surface-heading {
+    font-family: var(--sans);
+    font-weight: 500;
+    font-size: 0.78rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .surface-body {
+    font-family: var(--sans);
+    font-weight: 300;
+    font-size: 0.93rem;
+    line-height: 1.8;
+    color: var(--text-secondary);
+  }
+
+  .surface-body strong {
+    font-weight: 400;
+    color: var(--text-primary);
+  }
+
+  .surface-body ul {
+    list-style: none;
+    padding: 0;
+  }
+
+  .surface-body li {
+    padding: 0.35rem 0;
+    padding-left: 1rem;
+    position: relative;
+  }
+
+  .surface-body li::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0.85rem;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: var(--accent-dim);
+    opacity: 0.6;
+  }
+
+  .surface-body ol {
+    list-style: none;
+    padding: 0;
+    counter-reset: surface-counter;
+  }
+
+  .surface-body ol li {
+    counter-increment: surface-counter;
+    padding-left: 1.5rem;
+  }
+
+  .surface-body ol li::before {
+    content: counter(surface-counter) '.';
+    position: absolute;
+    left: 0;
+    top: 0.35rem;
+    width: auto;
+    height: auto;
+    border-radius: 0;
+    background: none;
+    font-size: 0.8rem;
+    color: var(--accent-dim);
+    font-weight: 400;
+    opacity: 1;
+  }
+
+
+  /* ========================================
+     WRITE MODAL
+     ======================================== */
+  .write-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(5, 4, 3, 0.75);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 500;
+    padding: 2rem;
+  }
+
+  .write-modal {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 2rem 2.2rem 1.8rem;
+    width: 100%;
+    max-width: 620px;
+    position: relative;
+    box-shadow: 0 24px 80px rgba(0,0,0,0.5);
+  }
+
+  .write-close {
+    position: absolute;
+    top: 1.2rem;
+    right: 1.4rem;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 1.4rem;
+    cursor: pointer;
+    transition: color 0.3s;
+    line-height: 1;
+  }
+
+  .write-close:hover { color: var(--text-primary); }
+
+  .write-title {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 1.4rem;
+    color: var(--text-primary);
+    margin-bottom: 1.5rem;
+  }
+
+  .write-textarea {
+    width: 100%;
+    min-height: 220px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 18px;
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 1.05rem;
+    line-height: 1.75;
+    color: var(--text-primary);
+    resize: vertical;
+    outline: none;
+    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+    margin-bottom: 1.5rem;
+  }
+
+  .write-textarea::placeholder {
+    color: var(--text-muted);
+    font-style: italic;
+  }
+
+  .write-textarea:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-glow);
+  }
+
+  .write-field-label {
+    font-family: var(--sans);
+    font-weight: 400;
+    font-size: 0.7rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 0.5rem;
+  }
+
+  .write-select {
+    width: 100%;
+    font-family: var(--sans);
+    font-weight: 300;
+    font-size: 0.9rem;
+    padding: 10px 14px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    border-radius: 6px;
+    outline: none;
+    appearance: none;
+    -webkit-appearance: none;
+    margin-bottom: 0.4rem;
+    cursor: pointer;
+    transition: border-color 0.3s;
+  }
+
+  .write-select:focus { border-color: var(--accent); }
+
+  .write-field-desc {
+    font-family: var(--sans);
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    margin-bottom: 1.2rem;
+    font-weight: 300;
+  }
+
+  .write-buttons {
+    display: flex;
+    gap: 0.6rem;
+    margin-top: 0.5rem;
+  }
+
+
+  /* ========================================
+     LOGIN
+     ======================================== */
+  .login-page {
+    min-height: calc(100vh - 106px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+  }
+
+  .login-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 3rem 2.5rem;
+    width: 100%;
+    max-width: 380px;
+    text-align: center;
+    box-shadow: 0 16px 60px rgba(0,0,0,0.3);
+  }
+
+  .login-logo {
+    font-family: var(--serif);
+    font-weight: 300;
+    font-size: 0.85rem;
+    letter-spacing: 0.35em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 2rem;
+  }
+
+  .login-heading {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 1.6rem;
+    color: var(--text-primary);
+    margin-bottom: 0.4rem;
+  }
+
+  .login-sub {
+    font-family: var(--sans);
+    font-weight: 300;
+    font-size: 0.9rem;
+    color: var(--text-muted);
+    margin-bottom: 2.2rem;
+  }
+
+  .login-btn {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+    font-family: var(--sans);
+    font-weight: 400;
+    font-size: 0.9rem;
+    padding: 12px 20px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    text-decoration: none;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-primary);
+    margin-bottom: 0.75rem;
+  }
+
+  .login-btn:hover {
+    border-color: var(--border-hover);
+    background: rgba(255,255,255,0.03);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+  }
+
+  .login-btn.x-btn {
+    background: #151311;
+    border-color: var(--border);
+  }
+
+  .login-btn.email-btn {
+    border-color: var(--border);
+    color: var(--text-secondary);
+  }
+
+  .login-divider {
+    font-family: var(--sans);
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    margin: 0.6rem 0;
+    opacity: 0.5;
+  }
+
+  .login-btn-icon {
+    font-size: 1rem;
+    opacity: 0.8;
+  }
+</style>
+</head>
+<body>
+
+<!-- Tab navigation -->
+<div class="preview-tabs">
+  <button class="preview-tab active" onclick="switchTab('feed')">Feed</button>
+  <button class="preview-tab" onclick="switchTab('dashboard')">Dashboard</button>
+  <button class="preview-tab" onclick="switchTab('write')">Write</button>
+  <button class="preview-tab" onclick="switchTab('login')">Login</button>
+</div>
+
+<!-- ===================== FEED ===================== -->
+<div id="feed" class="preview-section active">
+  <nav class="nav">
+    <a href="#" class="nav-logo">Loore</a>
+    <div class="nav-links">
+      <a href="#" class="nav-link">Dashboard</a>
+      <a href="#" class="nav-link active">Feed</a>
+      <a href="#" class="nav-link">Write</a>
+      <a href="#" class="nav-link">Logout</a>
+    </div>
+  </nav>
+
+  <div class="feed-page">
+    <div class="feed-header">
+      <h1 class="feed-title">Feed</h1>
+      <div class="feed-divider"></div>
+    </div>
+
+    <div class="feed-cards">
+      <div class="feed-card">
+        <h3 class="feed-card-title">2026-02-08 09:51:05 Voice note</h3>
+        <p class="feed-card-body">Alright, Sunday, February 8th, 2026, and I'm in Žlutice, in Western Bohemia, on a walk with my son Herbert. It's the weekend, so I'm not supposed to work, but today I...</p>
+        <div class="feed-card-meta">
+          <span>hrosspet</span>
+          <span class="sep">·</span>
+          <span>08/02/2026, 09:51:09</span>
+          <span class="sep">·</span>
+          <span>💬 1</span>
+          <span class="feed-card-tag">Voice note</span>
+        </div>
+      </div>
+
+      <div class="feed-card">
+        <h3 class="feed-card-title">2026-02-07 09:52:51 Voice note</h3>
+        <p class="feed-card-body">Today is February 7, 2026, and I'm here in Western Mongolia, visiting my wife's parents, and yeah, maybe I want to journal about yesterday, which was pretty crazy. My...</p>
+        <div class="feed-card-meta">
+          <span>hrosspet</span>
+          <span class="sep">·</span>
+          <span>07/02/2026, 09:53:44</span>
+          <span class="sep">·</span>
+          <span>💬 1</span>
+          <span class="feed-card-tag">Voice note</span>
+        </div>
+      </div>
+
+      <div class="feed-card">
+        <h3 class="feed-card-title">Lore on Loore</h3>
+        <p class="feed-card-body">We're currently in the final stage before alpha release. We have all technical features done, we've rebranded from Write or Perish, which had a different vision initially, into Loore....</p>
+        <div class="feed-card-meta">
+          <span>hrosspet</span>
+          <span class="sep">·</span>
+          <span>06/02/2026, 13:28:14</span>
+          <span class="sep">·</span>
+          <span>💬 1</span>
+        </div>
+      </div>
+
+      <div class="feed-card">
+        <h3 class="feed-card-title">2026-02-06 11:43:00 Voice note</h3>
+        <p class="feed-card-body">So, today is February 20th, 2026, and I am recording this via org. The past couple of days have been working a lot on the hardware, which means that Brand New. It's b...</p>
+        <div class="feed-card-meta">
+          <span>hrosspet</span>
+          <span class="sep">·</span>
+          <span>06/02/2026, 11:43:30</span>
+        </div>
+      </div>
+
+      <div class="feed-card">
+        <h3 class="feed-card-title">The Four-Feature Distributed Intelligence Network</h3>
+        <p class="feed-card-body">Date: November 21, 2025. Status: Ideation / Brainstorming Phase. Vision: A complete ecosystem for thinking, learning, creating, and conne...</p>
+        <div class="feed-card-meta">
+          <span>hrosspet</span>
+          <span class="sep">·</span>
+          <span>05/02/2026, 14:34:22</span>
+        </div>
+      </div>
+
+      <div class="feed-card">
+        <h3 class="feed-card-title">Decision: Loore vs MemeOS branding (and domain retention)</h3>
+        <p class="feed-card-body">Context — MemeOS domains are expiring today. I've been planning to rebrand from "Write or Perish" to "Loore". MemeOS was another can...</p>
+        <div class="feed-card-meta">
+          <span>hrosspet</span>
+          <span class="sep">·</span>
+          <span>05/02/2026, 13:55:35</span>
+          <span class="sep">·</span>
+          <span>💬 1</span>
+        </div>
+      </div>
+
+      <div class="feed-card">
+        <h3 class="feed-card-title">2026-02-05 Daily journal</h3>
+        <p class="feed-card-body">It's 10am, I had a small breakfast, did the morning routine, meditated for ~10 mins. And now it's time to start working. Today I'd love to finish the coding for Alpha relea...</p>
+        <div class="feed-card-meta">
+          <span>hrosspet</span>
+          <span class="sep">·</span>
+          <span>05/02/2026, 09:10:15</span>
+          <span class="sep">·</span>
+          <span>💬 1</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== DASHBOARD ===================== -->
+<div id="dashboard" class="preview-section">
+  <nav class="nav">
+    <a href="#" class="nav-logo">Loore</a>
+    <div class="nav-links">
+      <a href="#" class="nav-link active">Dashboard</a>
+      <a href="#" class="nav-link">Feed</a>
+      <a href="#" class="nav-link">Write</a>
+      <a href="#" class="nav-link">Logout</a>
+    </div>
+  </nav>
+
+  <div class="dash-page">
+    <h1 class="dash-username">hrosspet</h1>
+
+    <div class="dash-actions">
+      <button class="btn-ghost">Export Data</button>
+      <button class="btn-ghost">Import Data</button>
+      <select class="model-select">
+        <option>Claude 4.6 Opus</option>
+        <option>Claude 4.5 Sonnet</option>
+      </select>
+      <button class="btn-primary">Generate Profile</button>
+    </div>
+
+    <div class="profile-card">
+      <div class="profile-header">
+        <h2 class="profile-title">Profile</h2>
+        <button class="profile-edit">Edit Profile</button>
+      </div>
+      <p class="profile-meta">Generated by gpt-5.2 on 12/12/2025, 13:31:29 (245,587 tokens)</p>
+
+      <div class="surface-label">Surface Map</div>
+
+      <div class="surface-section">
+        <div class="surface-heading">Identity Anchors</div>
+        <div class="surface-body">
+          <ul>
+            <li><strong>Handle:</strong> hrosspet.</li>
+            <li><strong>Male, 30s, Czech,</strong> based in <strong>Prague</strong> (mentions Divoká Šárka, Prague 6; also trips to Slovakia, mentions Valašsko/Valach).</li>
+            <li>Married to <strong>Pája</strong> (also written as Paya/Faya/Taya in transcripts). Long-running <strong>marital crisis / repair</strong> arc.</li>
+            <li><strong>Parent:</strong> son <strong>Herbert</strong> (born ~late 2024; "one-year-old" in Nov/Dec 2025). Also has a stepdaughter Julča (and "Anička from Impro" appears as a person; but Julča is the stepdaughter in the home context).</li>
+            <li><strong>Work identity:</strong> ML/AI background; prior work includes Apple, GoodAI, forecasting / prediction market + LLM project, ARC evals, and alignment-adjacent work. Currently <strong>not full-time employed / on parental leave</strong>, building his own tools.</li>
+            <li><strong>Self-identifiers:</strong> meditator/spiritual practitioner (references Vajrayāna, tantra, "stream entry"), writer (book drafts like <strong>"Spirituality via Scientific Lens" / "The Hyperstition Loop"</strong>), builder of Write or Perish / Gregario, MemeOS, WishField.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="surface-section">
+        <div class="surface-heading">Recurring Territories (top themes)</div>
+        <div class="surface-body">
+          <ol>
+            <li><strong>Relationship + intimacy + repair:</strong> couples therapy, unmet recognition, "what she needs to hear," boundaries, jealousy/cheating semantics, rituals of apology, oscillation between hope/collapse.</li>
+            <li><strong>Parenting logistics + exhaustion:</strong> Herbert's sleep, nursing, childcare division, being "on walks with Herbert," joy in his development, but also chronic lack of slack.</li>
+            <li><strong>Work as calling vs compulsion:</strong> deep dives into building the platform; identity as "builder," tension between balanced days and work-sprints; fear of burnout / addiction-like patterns.</li>
+            <li><strong>Spirituality/ritual/phenomenology:</strong> cacao/tea rituals, cold plunges, qigong, "emptiness," "ground," prayer/intention, hyperstition, signs/synchronicity, mythic mode.</li>
+            <li><strong>Civilizational/AI alignment & coordination:</strong> AI for human reasoning, post-AGI macrostrategy, "alignment protocol between individuals," memetics/egregores, "opposite of Moloch."</li>
+          </ol>
+        </div>
+      </div>
+
+      <div class="surface-section">
+        <div class="surface-heading">Stated Struggles & Desires</div>
+        <div class="surface-body">
+          <ul>
+            <li>Wants <strong>time for work</strong> and hates that childcare/relationship chaos consumes bandwidth; wants to "employ the world" / not do it alone.</li>
+            <li>Wants to feel <strong>seen</strong> by Pája — specifically appreciated for what he does for Herbert/household/future; wants intimacy (sexual + emotional).</li>
+            <li>Repeated question: <strong>"What do I actually want?"</strong> (in relationships, life structure, identity). Also "Who do I want to be?"</li>
+            <li>Reports <strong>hopelessness/carelessness</strong> phase (Aug 2025): "I didn't care," autopilot, thoughts of divorce (not acted on), low motivation.</li>
+            <li>Struggles with <strong>boundary-setting</strong>: tendency to absorb, hold space, then withdraw or go numb.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== WRITE ===================== -->
+<div id="write" class="preview-section">
+  <nav class="nav">
+    <a href="#" class="nav-logo">Loore</a>
+    <div class="nav-links">
+      <a href="#" class="nav-link">Dashboard</a>
+      <a href="#" class="nav-link">Feed</a>
+      <a href="#" class="nav-link active">Write</a>
+      <a href="#" class="nav-link">Logout</a>
+    </div>
+  </nav>
+
+  <div class="write-overlay" style="position: relative; min-height: calc(100vh - 106px);">
+    <div class="write-modal">
+      <button class="write-close">×</button>
+      <h2 class="write-title">Write New Entry</h2>
+
+      <textarea class="write-textarea" placeholder="What's present for you right now..."></textarea>
+
+      <div class="write-field-label">Privacy Level</div>
+      <select class="write-select">
+        <option>🔒 Private · Only I can see this</option>
+        <option>🌐 Public · Visible on your feed</option>
+      </select>
+      <p class="write-field-desc">This note is private and only visible to you.</p>
+
+      <div class="write-field-label">AI Usage</div>
+      <select class="write-select">
+        <option>🚫 None · No AI access</option>
+        <option>💬 Chat · AI can use for responses (not training)</option>
+        <option>🧠 Train · AI can use for training data</option>
+      </select>
+      <p class="write-field-desc">AI will not access this note.</p>
+
+      <div class="write-buttons">
+        <button class="btn-primary">Submit</button>
+        <button class="btn-ghost">🎙 Record</button>
+        <button class="btn-ghost">Upload</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== LOGIN ===================== -->
+<div id="login" class="preview-section">
+  <nav class="nav">
+    <a href="#" class="nav-logo">Loore</a>
+    <div class="nav-links">
+      <a href="#" class="nav-link">Dashboard</a>
+      <a href="#" class="nav-link">Feed</a>
+      <a href="#" class="nav-link">Write</a>
+      <a href="#" class="nav-link active">Login</a>
+    </div>
+  </nav>
+
+  <div class="login-page">
+    <div class="login-card">
+      <div class="login-logo">Loore</div>
+      <h2 class="login-heading">Welcome back</h2>
+      <p class="login-sub">Sign in to continue your lore</p>
+
+      <button class="login-btn x-btn">
+        <span class="login-btn-icon">𝕏</span>
+        <span>Sign in with X</span>
+      </button>
+
+      <div class="login-divider">or</div>
+
+      <button class="login-btn email-btn">
+        <span class="login-btn-icon">✉</span>
+        <span>Sign in with Email</span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+  function switchTab(id) {
+    document.querySelectorAll('.preview-section').forEach(s => s.classList.remove('active'));
+    document.querySelectorAll('.preview-tab').forEach(t => t.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+    event.target.classList.add('active');
+    window.scrollTo(0, 0);
+  }
+</script>
+
+</body>
+</html>
