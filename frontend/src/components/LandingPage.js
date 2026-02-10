@@ -471,7 +471,7 @@ function LandingPage() {
               <p className="loore-section-body">
                 As you clarify who you are and what you're for, sharing becomes
                 natural — not performance, but offering. Your lore becomes part
-                of a larger weave. A way of connecting that starts from truth.
+                of a larger weave. A way of connecting that stems from authenticity.
               </p>
             </FadeSection>
           </div>
