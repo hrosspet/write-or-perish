@@ -34,6 +34,13 @@ function Dashboard() {
   const [importType, setImportType] = useState("separate_nodes");
   const [dateOrdering, setDateOrdering] = useState("modified");
   const [importing, setImporting] = useState(false);
+  const [importPrivacy, setImportPrivacy] = useState("private");
+  const [importAiUsage, setImportAiUsage] = useState("none");
+
+  // For Twitter import
+  const [showTwitterImportDialog, setShowTwitterImportDialog] = useState(false);
+  const [twitterImportData, setTwitterImportData] = useState(null);
+  const [includeReplies, setIncludeReplies] = useState(false);
 
   const [hasMoreNodes, setHasMoreNodes] = useState(false);
   const [nodesPage, setNodesPage] = useState(1);
@@ -246,7 +253,9 @@ function Dashboard() {
     api.post("/import/confirm", {
       files: importFiles.files,
       import_type: importType,
-      date_ordering: dateOrdering
+      date_ordering: dateOrdering,
+      privacy_level: importPrivacy,
+      ai_usage: importAiUsage
     })
       .then((response) => {
         setShowImportDialog(false);
@@ -266,6 +275,62 @@ function Dashboard() {
   const handleCancelImport = () => {
     setShowImportDialog(false);
     setImportFiles(null);
+  };
+
+  const handleTwitterImportFile = (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append("zip_file", file);
+
+    setImporting(true);
+    api.post("/import/twitter/analyze", formData, {
+      headers: { "Content-Type": "multipart/form-data" }
+    })
+      .then((response) => {
+        setTwitterImportData(response.data);
+        setShowTwitterImportDialog(true);
+        setImporting(false);
+      })
+      .catch((err) => {
+        console.error("Error analyzing Twitter import:", err);
+        setError(err.response?.data?.error || "Error analyzing Twitter export. Please try again.");
+        setImporting(false);
+      });
+
+    // Reset file input so the same file can be re-selected
+    event.target.value = "";
+  };
+
+  const handleConfirmTwitterImport = () => {
+    if (!twitterImportData) return;
+
+    setImporting(true);
+    api.post("/import/twitter/confirm", {
+      tweets: twitterImportData.tweets,
+      import_type: importType,
+      include_replies: includeReplies,
+      privacy_level: importPrivacy,
+      ai_usage: importAiUsage
+    })
+      .then(() => {
+        setShowTwitterImportDialog(false);
+        setTwitterImportData(null);
+        setImporting(false);
+        setError("");
+        window.location.reload();
+      })
+      .catch((err) => {
+        console.error("Error importing Twitter data:", err);
+        setError(err.response?.data?.error || "Error importing Twitter data. Please try again.");
+        setImporting(false);
+      });
+  };
+
+  const handleCancelTwitterImport = () => {
+    setShowTwitterImportDialog(false);
+    setTwitterImportData(null);
   };
 
   const fetchMoreNodes = useCallback((nextPage) => {
@@ -359,11 +424,29 @@ function Dashboard() {
                 alignItems: "center",
               }}
             >
-              {importing ? "Analyzing..." : "Import Data"}
+              {importing ? "Analyzing..." : "Import Markdown"}
               <input
                 type="file"
                 accept=".zip"
                 onChange={handleImportFile}
+                disabled={importing}
+                style={{ display: "none" }}
+              />
+            </label>
+            <label
+              style={{
+                ...ghostBtnStyle,
+                cursor: importing ? "not-allowed" : "pointer",
+                opacity: importing ? 0.6 : 1,
+                display: "inline-flex",
+                alignItems: "center",
+              }}
+            >
+              {importing ? "Analyzing..." : "Import Twitter"}
+              <input
+                type="file"
+                accept=".zip"
+                onChange={handleTwitterImportFile}
                 disabled={importing}
                 style={{ display: "none" }}
               />
@@ -510,6 +593,13 @@ function Dashboard() {
                 </label>
               </div>
 
+              <PrivacySelector
+                privacyLevel={importPrivacy}
+                aiUsage={importAiUsage}
+                onPrivacyChange={setImportPrivacy}
+                onAIUsageChange={setImportAiUsage}
+              />
+
               <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
                 <button
                   onClick={handleConfirmImport}
@@ -524,6 +614,119 @@ function Dashboard() {
                 </button>
                 <button
                   onClick={handleCancelImport}
+                  disabled={importing}
+                  style={{
+                    ...cancelBtnStyle,
+                    cursor: importing ? "not-allowed" : "pointer",
+                    opacity: importing ? 0.6 : 1
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Twitter import confirmation dialog */}
+          {showTwitterImportDialog && twitterImportData && (
+            <div style={{
+              marginTop: "20px",
+              padding: "2rem",
+              backgroundColor: "var(--bg-card)",
+              borderRadius: "10px",
+              border: "1px solid var(--border)"
+            }}>
+              <h3 style={{ fontFamily: "var(--serif)", fontWeight: 300, color: "var(--text-primary)", margin: "0 0 12px 0" }}>Confirm Twitter Import</h3>
+              <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
+                Found <strong style={{ color: "var(--text-primary)" }}>{twitterImportData.total_tweets}</strong> tweets
+                ({twitterImportData.original_count} original, {twitterImportData.reply_count} replies)
+              </p>
+              {twitterImportData.skipped_retweets > 0 && (
+                <p style={{ color: "var(--text-muted)", fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.85rem" }}>
+                  Skipped {twitterImportData.skipped_retweets} retweets
+                </p>
+              )}
+              <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
+                Estimated tokens: <strong style={{ color: "var(--text-primary)" }}>
+                  {includeReplies
+                    ? twitterImportData.total_tokens.toLocaleString()
+                    : twitterImportData.tweets
+                        .filter(t => !t.is_reply)
+                        .reduce((sum, t) => sum + t.token_count, 0)
+                        .toLocaleString()
+                  }
+                </strong>
+                {" "}({includeReplies ? twitterImportData.total_tweets : twitterImportData.original_count} tweets)
+              </p>
+
+              <div style={{ marginTop: "15px", marginBottom: "15px" }}>
+                <label style={{ display: "block", cursor: "pointer", color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
+                  <input
+                    type="checkbox"
+                    checked={includeReplies}
+                    onChange={(e) => setIncludeReplies(e.target.checked)}
+                    style={{ marginRight: "8px" }}
+                  />
+                  Include replies ({twitterImportData.reply_count})
+                </label>
+              </div>
+
+              <div style={{ marginTop: "15px", marginBottom: "15px" }}>
+                <label style={{
+                  display: "block",
+                  marginBottom: "10px",
+                  fontFamily: "var(--sans)",
+                  fontWeight: 400,
+                  fontSize: "0.75rem",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.12em",
+                  color: "var(--text-muted)"
+                }}>
+                  Import Type
+                </label>
+                <label style={{ display: "block", marginBottom: "8px", cursor: "pointer", color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
+                  <input
+                    type="radio"
+                    value="separate_nodes"
+                    checked={importType === "separate_nodes"}
+                    onChange={(e) => setImportType(e.target.value)}
+                    style={{ marginRight: "8px" }}
+                  />
+                  Import as separate top-level nodes (one node per tweet)
+                </label>
+                <label style={{ display: "block", cursor: "pointer", color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
+                  <input
+                    type="radio"
+                    value="single_thread"
+                    checked={importType === "single_thread"}
+                    onChange={(e) => setImportType(e.target.value)}
+                    style={{ marginRight: "8px" }}
+                  />
+                  Import as a single thread (all tweets connected sequentially)
+                </label>
+              </div>
+
+              <PrivacySelector
+                privacyLevel={importPrivacy}
+                aiUsage={importAiUsage}
+                onPrivacyChange={setImportPrivacy}
+                onAIUsageChange={setImportAiUsage}
+              />
+
+              <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
+                <button
+                  onClick={handleConfirmTwitterImport}
+                  disabled={importing}
+                  style={{
+                    ...primaryBtnStyle,
+                    cursor: importing ? "not-allowed" : "pointer",
+                    opacity: importing ? 0.6 : 1
+                  }}
+                >
+                  {importing ? "Importing..." : "Confirm Import"}
+                </button>
+                <button
+                  onClick={handleCancelTwitterImport}
                   disabled={importing}
                   style={{
                     ...cancelBtnStyle,

@@ -5,6 +5,8 @@ from backend.extensions import db
 from datetime import datetime
 import zipfile
 import io
+import json
+import re
 from werkzeug.utils import secure_filename
 
 import_bp = Blueprint("import_bp", __name__)
@@ -167,6 +169,8 @@ def confirm_import():
     files = data.get('files', [])
     import_type = data.get('import_type', 'separate_nodes')
     date_ordering = data.get('date_ordering', 'modified')
+    privacy_level = data.get('privacy_level', 'private')
+    ai_usage = data.get('ai_usage', 'none')
 
     if not files:
         return jsonify({"error": "No files provided"}), 400
@@ -206,7 +210,9 @@ def confirm_import():
                     parent_id=parent_node.id if parent_node else None,
                     node_type="user",
                     content=node_content,
-                    token_count=approximate_token_count(node_content)
+                    token_count=approximate_token_count(node_content),
+                    privacy_level=privacy_level,
+                    ai_usage=ai_usage
                 )
 
                 db.session.add(node)
@@ -236,7 +242,9 @@ def confirm_import():
                     parent_id=None,
                     node_type="user",
                     content=node_content,
-                    token_count=approximate_token_count(node_content)
+                    token_count=approximate_token_count(node_content),
+                    privacy_level=privacy_level,
+                    ai_usage=ai_usage
                 )
 
                 db.session.add(node)
@@ -257,3 +265,261 @@ def confirm_import():
         db.session.rollback()
         current_app.logger.error(f"Error confirming import: {str(e)}")
         return jsonify({"error": "Failed to import files", "details": str(e)}), 500
+
+
+@import_bp.route("/import/twitter/analyze", methods=["POST"])
+@login_required
+def analyze_twitter_import():
+    """
+    Analyze a Twitter/X data export zip file.
+
+    Expects:
+        - multipart/form-data with 'zip_file' field containing a Twitter data export
+
+    Returns:
+        {
+            "tweets": [...],
+            "total_tweets": N,
+            "original_count": N,
+            "reply_count": N,
+            "skipped_retweets": N,
+            "total_tokens": N,
+            "total_size": N
+        }
+    """
+    if 'zip_file' not in request.files:
+        return jsonify({"error": "No zip_file provided"}), 400
+
+    zip_file = request.files['zip_file']
+
+    if zip_file.filename == '':
+        return jsonify({"error": "No file selected"}), 400
+
+    if not zip_file.filename.lower().endswith('.zip'):
+        return jsonify({"error": "File must be a .zip file"}), 400
+
+    try:
+        zip_bytes = io.BytesIO(zip_file.read())
+
+        tweets_js_content = None
+
+        with zipfile.ZipFile(zip_bytes, 'r') as zip_ref:
+            # Find data/tweets.js — may be nested under a top-level folder
+            for name in zip_ref.namelist():
+                if name.endswith('data/tweets.js') or name == 'data/tweets.js':
+                    tweets_js_content = zip_ref.read(name).decode('utf-8')
+                    break
+
+        if tweets_js_content is None:
+            return jsonify({
+                "error": "Could not find data/tweets.js in the zip archive. "
+                         "Please upload the original Twitter/X data export."
+            }), 400
+
+        # Strip the JS variable assignment prefix to get valid JSON
+        # Format: window.YTD.tweets.part0 = [...]
+        json_match = re.search(r'=\s*(\[.*)', tweets_js_content, re.DOTALL)
+        if not json_match:
+            return jsonify({
+                "error": "Could not parse tweets.js — unexpected format."
+            }), 400
+
+        raw_tweets = json.loads(json_match.group(1))
+
+        tweets = []
+        skipped_retweets = 0
+        original_count = 0
+        reply_count = 0
+        total_tokens = 0
+        total_size = 0
+
+        for entry in raw_tweets:
+            tweet = entry.get('tweet', entry)
+
+            full_text = tweet.get('full_text', '')
+
+            # Skip retweets
+            if full_text.startswith('RT @'):
+                skipped_retweets += 1
+                continue
+
+            id_str = tweet.get('id_str', '')
+            created_at = tweet.get('created_at', '')
+            favorite_count = int(tweet.get('favorite_count', 0))
+            retweet_count = int(tweet.get('retweet_count', 0))
+            in_reply_to_status_id_str = tweet.get(
+                'in_reply_to_status_id_str', None
+            )
+            in_reply_to_screen_name = tweet.get(
+                'in_reply_to_screen_name', None
+            )
+
+            is_reply = bool(in_reply_to_status_id_str)
+            if is_reply:
+                reply_count += 1
+            else:
+                original_count += 1
+
+            token_count = approximate_token_count(full_text)
+            total_tokens += token_count
+            total_size += len(full_text.encode('utf-8'))
+
+            tweets.append({
+                "id_str": id_str,
+                "full_text": full_text,
+                "created_at": created_at,
+                "is_reply": is_reply,
+                "in_reply_to_screen_name": in_reply_to_screen_name,
+                "favorite_count": favorite_count,
+                "retweet_count": retweet_count,
+                "token_count": token_count
+            })
+
+        return jsonify({
+            "tweets": tweets,
+            "total_tweets": len(tweets),
+            "original_count": original_count,
+            "reply_count": reply_count,
+            "skipped_retweets": skipped_retweets,
+            "total_tokens": total_tokens,
+            "total_size": total_size
+        }), 200
+
+    except zipfile.BadZipFile:
+        return jsonify({"error": "Invalid zip file"}), 400
+    except json.JSONDecodeError as e:
+        return jsonify({
+            "error": "Failed to parse tweets JSON",
+            "details": str(e)
+        }), 400
+    except Exception as e:
+        current_app.logger.error(
+            f"Error analyzing Twitter import: {str(e)}"
+        )
+        return jsonify({
+            "error": "Failed to analyze Twitter export",
+            "details": str(e)
+        }), 500
+
+
+@import_bp.route("/import/twitter/confirm", methods=["POST"])
+@login_required
+def confirm_twitter_import():
+    """
+    Create nodes from analyzed Twitter data.
+
+    Request body:
+        {
+            "tweets": [...],
+            "import_type": "single_thread" | "separate_nodes",
+            "include_replies": true | false,
+            "privacy_level": "private",
+            "ai_usage": "none"
+        }
+
+    Returns:
+        {
+            "message": "Import successful",
+            "nodes_created": N,
+            "thread_count": N
+        }
+    """
+    data = request.get_json()
+
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+
+    tweets = data.get('tweets', [])
+    import_type = data.get('import_type', 'separate_nodes')
+    include_replies = data.get('include_replies', False)
+    privacy_level = data.get('privacy_level', 'private')
+    ai_usage = data.get('ai_usage', 'none')
+
+    if not tweets:
+        return jsonify({"error": "No tweets provided"}), 400
+
+    if import_type not in ['single_thread', 'separate_nodes']:
+        return jsonify({
+            "error": "Invalid import_type. "
+                     "Must be 'single_thread' or 'separate_nodes'"
+        }), 400
+
+    try:
+        # Filter out replies if not included
+        if not include_replies:
+            tweets = [t for t in tweets if not t.get('is_reply', False)]
+
+        # Sort by created_at ascending
+        tweets_sorted = sorted(
+            tweets, key=lambda t: t.get('created_at', '')
+        )
+
+        nodes_created = 0
+        thread_count = 0
+
+        if import_type == 'single_thread':
+            parent_node = None
+
+            for tweet_data in tweets_sorted:
+                content = tweet_data.get('full_text', '')
+                token_count = tweet_data.get(
+                    'token_count', approximate_token_count(content)
+                )
+
+                node = Node(
+                    user_id=current_user.id,
+                    parent_id=parent_node.id if parent_node else None,
+                    node_type="user",
+                    content=content,
+                    token_count=token_count,
+                    privacy_level=privacy_level,
+                    ai_usage=ai_usage
+                )
+
+                db.session.add(node)
+                db.session.flush()
+
+                parent_node = node
+                nodes_created += 1
+
+            thread_count = 1
+
+        else:  # separate_nodes
+            for tweet_data in tweets_sorted:
+                content = tweet_data.get('full_text', '')
+                token_count = tweet_data.get(
+                    'token_count', approximate_token_count(content)
+                )
+
+                node = Node(
+                    user_id=current_user.id,
+                    parent_id=None,
+                    node_type="user",
+                    content=content,
+                    token_count=token_count,
+                    privacy_level=privacy_level,
+                    ai_usage=ai_usage
+                )
+
+                db.session.add(node)
+                nodes_created += 1
+
+            thread_count = len(tweets_sorted)
+
+        db.session.commit()
+
+        return jsonify({
+            "message": "Import successful",
+            "nodes_created": nodes_created,
+            "thread_count": thread_count
+        }), 201
+
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(
+            f"Error confirming Twitter import: {str(e)}"
+        )
+        return jsonify({
+            "error": "Failed to import tweets",
+            "details": str(e)
+        }), 500
