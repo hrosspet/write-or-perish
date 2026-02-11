@@ -464,8 +464,8 @@ const NodeForm = forwardRef(
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  disabled={isStreamingRecording}
-                  style={{ padding: '8px 16px', cursor: 'pointer' }}
+                  disabled={isStreamingRecording || aiUsage === 'none'}
+                  style={{ padding: '8px 16px', cursor: isStreamingRecording || aiUsage === 'none' ? 'not-allowed' : 'pointer', opacity: aiUsage === 'none' ? 0.35 : 1 }}
                 >
                   Upload
                 </button>

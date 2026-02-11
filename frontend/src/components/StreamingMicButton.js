@@ -196,6 +196,7 @@ export default function StreamingMicButton({
             gap: '6px',
             padding: '8px 16px',
             cursor: disabled || sessionState === 'initializing' || sessionState === 'finalizing' ? 'not-allowed' : 'pointer',
+            opacity: disabled ? 0.35 : 1,
           }}
         >
           {getButtonContent()}
