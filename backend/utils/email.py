@@ -100,7 +100,7 @@ def send_welcome_email(to_email, magic_link_url):
     <div style="font-family: 'Cormorant Garamond', Georgia, serif; font-size: 14px; font-weight: 300; text-transform: uppercase; letter-spacing: 0.3em; color: #736b5f; margin-bottom: 32px;">
       Loore
     </div>
-    <div style="font-size: 28px; color: #c4956a; opacity: 0.5; margin-bottom: 16px;">&#10022;</div>
+    <img src="https://loore.org/android-chrome-192x192.png" alt="Loore" width="48" height="48" style="display: block; margin-bottom: 16px; border-radius: 8px;" />
     <h2 style="font-family: 'Cormorant Garamond', Georgia, serif; font-weight: 300; font-size: 28px; color: #ede8dd; margin: 0 0 12px 0;">
       Welcome to <em style="color: #c4956a;">Loore</em>.
     </h2>
