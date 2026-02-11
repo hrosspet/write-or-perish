@@ -452,7 +452,7 @@ const NodeForm = forwardRef(
                     setLoading(false);
                     setIsStreamingRecording(false);
                   }}
-                  disabled={loading || uploadedFile}
+                  disabled={loading || uploadedFile || aiUsage === 'none'}
                 />
                 <input
                   ref={fileInputRef}

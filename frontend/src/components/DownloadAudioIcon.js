@@ -3,7 +3,7 @@ import { FaDownload, FaSpinner } from 'react-icons/fa';
 import api from '../api';
 import { useUser } from '../contexts/UserContext';
 
-const DownloadAudioIcon = ({ nodeId, isPublic }) => {
+const DownloadAudioIcon = ({ nodeId, isPublic, aiUsage }) => {
   const { user } = useUser();
   const [loading, setLoading] = useState(false);
 
@@ -11,6 +11,8 @@ const DownloadAudioIcon = ({ nodeId, isPublic }) => {
   if (!user || (!user.voice_mode_enabled && !isPublic)) {
     return null;
   }
+
+  const noAiAccess = aiUsage === 'none';
 
   const downloadBlob = (blob, filename) => {
     const url = URL.createObjectURL(blob);
@@ -32,7 +34,7 @@ const DownloadAudioIcon = ({ nodeId, isPublic }) => {
   };
 
   const handleDownload = async () => {
-    if (loading) return;
+    if (noAiAccess || loading) return;
     setLoading(true);
 
     try {
@@ -103,8 +105,9 @@ const DownloadAudioIcon = ({ nodeId, isPublic }) => {
   };
 
   return (
-    <button onClick={handleDownload} title="Download audio"
-      style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, marginLeft: '4px' }}>
+    <button onClick={handleDownload} title={noAiAccess ? 'Download disabled — No AI access' : 'Download audio'}
+      disabled={noAiAccess}
+      style={{ background: 'none', border: 'none', cursor: noAiAccess ? 'not-allowed' : 'pointer', padding: 0, marginLeft: '4px', opacity: noAiAccess ? 0.35 : 1 }}>
       {loading ? <FaSpinner className="spin" /> : <FaDownload />}
     </button>
   );

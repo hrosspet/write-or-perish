@@ -27,7 +27,7 @@ const extractMarkdownHeader = (content) => {
  * SpeakerIcon component fetches and plays audio for a node or profile.
  * Shows loading spinner, play/pause state.
  */
-const SpeakerIcon = ({ nodeId, profileId, content, isPublic }) => {
+const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage }) => {
   const { user } = useUser();
   const { loadAudio, loadAudioQueue, appendChunkToQueue, setGeneratingTTS, currentAudio, isPlaying } = useAudio();
   const [loading, setLoading] = useState(false);
@@ -150,8 +150,10 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic }) => {
     return null;
   }
 
+  const noAiAccess = nodeId != null && aiUsage === 'none';
+
   const handleClick = async () => {
-    if (loading || ttsTaskActive || sseActive) return;
+    if (noAiAccess || loading || ttsTaskActive || sseActive) return;
 
     try {
       // If we already have audio chunks cached, play them
@@ -292,8 +294,9 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic }) => {
   const isActive = loading || ttsTaskActive || sseActive;
 
   return (
-    <button onClick={handleClick} title={isActive ? 'Generating audio...' : 'Play audio'}
-        style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, marginLeft: '8px' }}>
+    <button onClick={handleClick} title={noAiAccess ? 'TTS disabled — No AI access' : isActive ? 'Generating audio...' : 'Play audio'}
+        disabled={noAiAccess}
+        style={{ background: 'none', border: 'none', cursor: noAiAccess ? 'not-allowed' : 'pointer', padding: 0, marginLeft: '8px', opacity: noAiAccess ? 0.35 : 1 }}>
       {isActive ? <FaSpinner className="spin" /> : <FaVolumeUp color={isCurrentlyPlaying ? '#61dafb' : 'inherit'} />}
     </button>
   );
