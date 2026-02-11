@@ -301,7 +301,7 @@ const NodeForm = forwardRef(
               setUploadedFile(null);
             }
           }}
-          rows={20}
+          rows={6}
           style={{
             width: "100%",
             backgroundColor: "var(--bg-input)",
@@ -313,9 +313,11 @@ const NodeForm = forwardRef(
             fontWeight: 300,
             color: "var(--text-primary)",
             lineHeight: 1.6,
-            minHeight: "250px",
+            height: "clamp(120px, 40vh, 400px)",
+            minHeight: "120px",
             boxSizing: "border-box",
             transition: "border-color 0.3s ease",
+            resize: "vertical",
           }}
           placeholder="What's present for you right now..."
           disabled={!editMode && uploadedFile}
