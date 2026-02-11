@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
+import { FaThumbtack } from "react-icons/fa";
 import NodeFooter from "./NodeFooter";
 import SpeakerIcon from "./SpeakerIcon";
 import DownloadAudioIcon from "./DownloadAudioIcon";
@@ -50,6 +51,7 @@ function NodeDetail() {
   const [selectedModel, setSelectedModel] = useState("gpt-5");
   const [llmTaskNodeId, setLlmTaskNodeId] = useState(null);
   const [quotes, setQuotes] = useState({});
+  const [pinLoading, setPinLoading] = useState(false);
   const highlightedNodeRef = useRef(null);
 
   // LLM completion polling - enabled automatically when llmTaskNodeId is set
@@ -142,6 +144,27 @@ function NodeDetail() {
     (node.node_type === "llm" && node.parent_user_id === currentUser.id)
   );
 
+  const canPin = isOwner && node.privacy_level !== "private";
+  const isPinned = !!node.pinned_at;
+
+  const handlePin = async () => {
+    if (pinLoading) return;
+    setPinLoading(true);
+    try {
+      if (isPinned) {
+        await api.delete(`/nodes/${id}/pin`);
+        setNode({ ...node, pinned_at: null });
+      } else {
+        const res = await api.post(`/nodes/${id}/pin`);
+        setNode({ ...node, pinned_at: res.data.pinned_at });
+      }
+    } catch (err) {
+      console.error("Error toggling pin:", err);
+      setError(err.response?.data?.error || "Error toggling pin.");
+    }
+    setPinLoading(false);
+  };
+
   // Define handleDelete: confirm deletion and delete via API.
   const handleDelete = () => {
     if (window.confirm("Are you sure you want to delete this node? This will orphan all children.")) {
@@ -218,6 +241,21 @@ function NodeDetail() {
     ? node.child_count
     : (node.children ? node.children.length : 0);
 
+  // Determine humanOwnerUsername for LLM nodes in NodeDetail
+  // node.parent_user_id is the human owner's user_id for LLM nodes
+  const humanOwnerUsername = node.node_type === "llm" && node.parent_user_id
+    ? (node.ancestors && node.ancestors.length > 0
+      ? (() => {
+          // Walk ancestors to find the human owner username
+          for (let i = node.ancestors.length - 1; i >= 0; i--) {
+            const a = node.ancestors[i];
+            if (a.node_type !== "llm") return a.username;
+          }
+          return null;
+        })()
+      : null)
+    : null;
+
   const highlightedNodeSection = (
     <div ref={highlightedNodeRef}>
       <hr style={{ borderColor: "var(--border)" }} />
@@ -233,10 +271,37 @@ function NodeDetail() {
           username={node.user.username}
           createdAt={node.created_at}
           childrenCount={highlightedChildrenCount}
-        />
+          humanOwnerUsername={humanOwnerUsername}
+          llmModel={node.llm_model}
+        >
+          <button
+            onClick={canPin ? handlePin : undefined}
+            disabled={!canPin || pinLoading}
+            title={
+              !isOwner ? "Only the owner can pin"
+              : node.privacy_level === "private" ? "Cannot pin a private node"
+              : isPinned ? "Unpin from profile"
+              : "Pin to profile"
+            }
+            style={{
+              background: "none",
+              border: "none",
+              cursor: canPin ? "pointer" : "not-allowed",
+              padding: 0,
+              opacity: canPin ? 1 : 0.35,
+              color: isPinned ? "var(--accent)" : "inherit",
+              display: "flex",
+              alignItems: "center",
+            }}
+          >
+            <FaThumbtack />
+          </button>
+          <SpeakerIcon nodeId={node.id} content={node.content} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} />
+          <DownloadAudioIcon nodeId={node.id} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} />
+        </NodeFooter>
         <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
           <button onClick={() => setShowChildFormOverlay(true)}>Add Text</button>
-          {node.ai_usage !== 'none' && (
+          {isOwner && node.ai_usage !== 'none' && (
             <>
               <button onClick={handleLLMResponse} disabled={!!llmTaskNodeId}>
                 {llmTaskNodeId && llmStatus === 'processing' && llmProgress > 0
@@ -256,8 +321,6 @@ function NodeDetail() {
           )}
           {isOwner && <button onClick={() => setShowEditOverlay(true)}>Edit</button>}
           {isOwner && <button onClick={handleDelete}>Delete</button>}
-          <SpeakerIcon nodeId={node.id} content={node.content} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} />
-          <DownloadAudioIcon nodeId={node.id} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} />
         </div>
       </div>
       <hr style={{ borderColor: "var(--border)" }} />

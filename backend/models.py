@@ -19,8 +19,9 @@ class User(db.Model, UserMixin):
     magic_link_expires_at = db.Column(db.DateTime, nullable=True)
     deactivated_at = db.Column(db.DateTime, nullable=True)
     
-    # Relationship to text nodes
-    nodes = db.relationship("Node", backref="user", lazy=True)
+    # Relationship to text nodes (explicit foreign_keys needed because Node has
+    # multiple FKs pointing to User: user_id and pinned_by)
+    nodes = db.relationship("Node", backref="user", lazy=True, foreign_keys="Node.user_id")
 
     # --- Voice‑Mode fields ---
     # Whether the user is an administrator.  Voice‑mode features are currently limited
@@ -119,9 +120,13 @@ class Node(db.Model):
     # Session ID for streaming upload (groups chunks together)
     streaming_session_id = db.Column(db.String(64), nullable=True)
 
+    # Pin-to-profile: surfaces any node on Dashboard & Feed
+    pinned_at = db.Column(db.DateTime, nullable=True)
+    pinned_by = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
+
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
+
     # Self–referential relationships…
     children = db.relationship("Node", backref=db.backref("parent", remote_side=[id]),
                                lazy=True, foreign_keys=[parent_id])

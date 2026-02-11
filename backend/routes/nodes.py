@@ -509,6 +509,10 @@ def update_node(node_id):
         if not validate_privacy_level(privacy_level):
             return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
         node.privacy_level = privacy_level
+        # Auto-unpin if node is made private
+        if privacy_level == "private" and node.pinned_at is not None:
+            node.pinned_at = None
+            node.pinned_by = None
 
     if "ai_usage" in data:
         ai_usage = data["ai_usage"]
@@ -582,7 +586,11 @@ def get_node(node_id):
         "parent_user_id": find_human_owner(node) if node.node_type == "llm" else (node.parent.user_id if node.parent else None),
         # Privacy settings
         "privacy_level": node.privacy_level,
-        "ai_usage": node.ai_usage
+        "ai_usage": node.ai_usage,
+        # Pin-to-profile
+        "pinned_at": node.pinned_at.isoformat() if node.pinned_at else None,
+        "llm_model": node.llm_model,
+        "has_audio": bool(node.audio_original_url or node.audio_tts_url),
     }
     return jsonify(node_data), 200
 
@@ -1790,6 +1798,64 @@ def get_streaming_status(node_id):
         "chunks": chunk_statuses,
         "content": node.get_content() if node.transcription_status == 'completed' else None
     })
+
+
+# ---------------------------------------------------------------------------
+# Pin / Unpin endpoints
+# ---------------------------------------------------------------------------
+
+
+@nodes_bp.route("/<int:node_id>/pin", methods=["POST"])
+@login_required
+def pin_node(node_id):
+    """Pin a node to the current user's profile (Dashboard + Feed)."""
+    node = Node.query.get_or_404(node_id)
+
+    # Determine human owner: for LLM nodes walk up the parent chain
+    if node.node_type == "llm":
+        human_owner_id = find_human_owner(node)
+    else:
+        human_owner_id = node.user_id
+
+    if human_owner_id != current_user.id:
+        return jsonify({"error": "Only the owner can pin this node"}), 403
+
+    if node.privacy_level == "private":
+        return jsonify({"error": "Cannot pin a private node"}), 400
+
+    if node.pinned_at is not None:
+        return jsonify({"error": "Node is already pinned"}), 400
+
+    node.pinned_at = datetime.utcnow()
+    node.pinned_by = current_user.id
+    db.session.commit()
+
+    return jsonify({
+        "message": "Node pinned",
+        "pinned_at": node.pinned_at.isoformat()
+    }), 200
+
+
+@nodes_bp.route("/<int:node_id>/pin", methods=["DELETE"])
+@login_required
+def unpin_node(node_id):
+    """Unpin a node from the current user's profile."""
+    node = Node.query.get_or_404(node_id)
+
+    # Determine human owner
+    if node.node_type == "llm":
+        human_owner_id = find_human_owner(node)
+    else:
+        human_owner_id = node.user_id
+
+    if human_owner_id != current_user.id:
+        return jsonify({"error": "Only the owner can unpin this node"}), 403
+
+    node.pinned_at = None
+    node.pinned_by = None
+    db.session.commit()
+
+    return jsonify({"message": "Node unpinned"}), 200
 
 
 @nodes_bp.route("/<int:node_id>", methods=["DELETE"])

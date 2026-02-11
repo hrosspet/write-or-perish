@@ -3,17 +3,23 @@ import { Link } from 'react-router-dom';
 import { FaRegCommentDots } from 'react-icons/fa';
 import { useUser } from '../contexts/UserContext';
 
-const NodeFooter = ({ username, createdAt, childrenCount }) => {
+const NodeFooter = ({ username, createdAt, childrenCount, humanOwnerUsername, llmModel, children }) => {
   const { user } = useUser();
-  // If the username passed to NodeFooter is the same as the logged-in user's username,
-  // use "/dashboard" for the link. Otherwise, use "/dashboard/username" for the public dashboard.
-  const linkUrl = user && user.username === username ? '/dashboard' : `/dashboard/${username}`;
+
+  // "via" display: show "humanOwner via model" for LLM nodes
+  const displayUsername = humanOwnerUsername && llmModel
+    ? `${humanOwnerUsername} via ${llmModel}`
+    : username;
+
+  // Link goes to human owner's dashboard for LLM nodes
+  const linkUsername = humanOwnerUsername || username;
+  const linkUrl = user && user.username === linkUsername ? '/dashboard' : `/dashboard/${linkUsername}`;
   const formattedDateTime = createdAt ? new Date(createdAt).toLocaleString() : "";
 
   return (
     <div style={footerStyle}>
       <Link to={linkUrl} style={{ color: "var(--text-muted)", textDecoration: "none", transition: "color 0.3s ease" }}>
-        {username}
+        {displayUsername}
       </Link>
       <span style={{ color: "var(--border)" }}>&middot;</span>
       <span>{formattedDateTime}</span>
@@ -23,6 +29,11 @@ const NodeFooter = ({ username, createdAt, childrenCount }) => {
           <FaRegCommentDots />
           <span>{childrenCount}</span>
         </>
+      )}
+      {children && (
+        <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "4px" }}>
+          {children}
+        </span>
       )}
     </div>
   );

@@ -40,9 +40,13 @@ Ensure:
 
 ### Local Code Verification
 
-**Frontend**: Run **both** of these from the `frontend/` directory before pushing:
-1. `npm run lint 2>&1 | tail -30` — catches ESLint errors that CI will fail on (e.g. `no-use-before-define`). The build step alone does NOT catch all lint errors.
-2. `npm run build 2>&1 | tail -30` — checks for compilation errors.
+**Backend**: Run from the repo root:
+1. `flake8 backend --count --select=E9,F63,F7,F82 --show-source --statistics` — **CI-blocking**: catches Python syntax errors and undefined names. Must pass with 0 errors.
+2. `flake8 backend --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics` — non-blocking warnings (style, complexity). CI runs this with `--exit-zero` so it never fails the build, but review the output.
+3. `cd backend && python -m pytest` — runs all backend tests.
+
+**Frontend**: Run from the `frontend/` directory:
+1. `npm run build 2>&1 | tail -30` — checks for compilation errors and ESLint warnings. The build will fail on errors and report warnings. Note: there is no separate `npm run lint` script configured; the CI skips it gracefully.
 
 **IMPORTANT**: Running `npm run build` changes the working directory to `frontend/`. Always use absolute paths or `cd` back to the repo root before running git commands, otherwise `git add` will fail with `pathspec did not match any files`.
 
