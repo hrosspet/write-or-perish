@@ -15,10 +15,14 @@ export default function WelcomePage({ onNewEntryClick }) {
         textAlign: "center", padding: "4rem 0 2rem",
       }}>
         <Fade>
-          <div style={{
-            fontFamily: "var(--serif)", fontSize: "2rem", color: "var(--accent)",
-            marginBottom: "1.5rem", opacity: 0.5,
-          }}>{"\u2726"}</div>
+          <img
+            src={process.env.PUBLIC_URL + "/loore-logo-transparent.svg"}
+            alt="Loore"
+            style={{
+              width: "2rem", height: "2rem",
+              marginBottom: "1.5rem", opacity: 0.5,
+            }}
+          />
         </Fade>
         <Fade delay={0.1}>
           <h1 style={{
