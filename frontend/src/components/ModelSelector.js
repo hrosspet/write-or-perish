@@ -46,8 +46,7 @@ const ModelSelector = ({ nodeId, selectedModel, onModelChange }) => {
       onChange={(e) => onModelChange(e.target.value)}
       disabled={loading}
       style={{
-        marginRight: '8px',
-        padding: '8px 12px',
+        padding: '8px 4px',
         borderRadius: '6px',
         border: '1px solid var(--border)',
         backgroundColor: 'var(--bg-input)',
@@ -56,7 +55,6 @@ const ModelSelector = ({ nodeId, selectedModel, onModelChange }) => {
         fontSize: '14px',
         fontFamily: 'var(--sans)',
         fontWeight: 300,
-        maxWidth: '150px',
       }}
     >
       {models.map((m) => (
