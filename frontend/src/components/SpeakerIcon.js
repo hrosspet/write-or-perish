@@ -29,7 +29,7 @@ const extractMarkdownHeader = (content) => {
  */
 const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage }) => {
   const { user } = useUser();
-  const { loadAudio, loadAudioQueue, appendChunkToQueue, setGeneratingTTS, currentAudio, isPlaying } = useAudio();
+  const { loadAudio, loadAudioQueue, appendChunkToQueue, warmUpAudio, setGeneratingTTS, currentAudio, isPlaying } = useAudio();
   const [loading, setLoading] = useState(false);
   const [audioSrc, setAudioSrc] = useState(null);
   const [audioChunks, setAudioChunks] = useState(null); // For chunked playback
@@ -253,6 +253,8 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage }) => {
           return;
         }
         // Start async TTS generation
+        // Warm up audio during user gesture so first SSE chunk can autoplay
+        warmUpAudio();
         await api.post(`${baseUrl}/tts`);
 
         if (isNode) {
