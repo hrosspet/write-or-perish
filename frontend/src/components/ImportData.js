@@ -41,6 +41,8 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
   const [twitterImportData, setTwitterImportData] = useState(null);
   const [includeReplies, setIncludeReplies] = useState(false);
 
+  const [showPicker, setShowPicker] = useState(false);
+
   // Close picker dialog on Escape
   useEffect(() => {
     if (!showPicker) return;
@@ -50,9 +52,6 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [showPicker]);
-
-  // Which picker to show: null, "markdown", or "twitter"
-  const [showPicker, setShowPicker] = useState(false);
 
   const handleImportFile = (event) => {
     const file = event.target.files[0];
