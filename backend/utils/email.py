@@ -27,11 +27,8 @@ def send_magic_link_email(to_email, magic_link_url):
 <html>
 <body style="font-family: 'Outfit', -apple-system, sans-serif; background: #0e0d0b; color: #ede8dd; padding: 40px 20px; margin: 0;">
   <div style="max-width: 460px; margin: 0 auto; background: #181714; border-radius: 10px; border: 1px solid #302c27; padding: 48px 40px;">
-    <div style="margin-bottom: 32px;">
-      <a href="https://loore.org" style="display: inline-flex; align-items: center; gap: 10px; text-decoration: none;">
-        <img src="https://loore.org/android-chrome-192x192.png" alt="Loore" width="22" height="22" style="border-radius: 4px;" />
-        <span style="font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif; font-size: 14px; font-weight: 300; text-transform: uppercase; letter-spacing: 0.3em; color: #736b5f;">Loore</span>
-      </a>
+    <div style="font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif; font-size: 14px; font-weight: 300; text-transform: uppercase; letter-spacing: 0.3em; color: #736b5f; margin-bottom: 32px;">
+      Loore
     </div>
     <h2 style="font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif; font-weight: 300; font-size: 28px; color: #ede8dd; margin: 0 0 12px 0;">
       Sign in
@@ -100,13 +97,9 @@ def send_welcome_email(to_email, magic_link_url):
 <html>
 <body style="font-family: 'Outfit', -apple-system, sans-serif; background: #0e0d0b; color: #ede8dd; padding: 40px 20px; margin: 0;">
   <div style="max-width: 460px; margin: 0 auto; background: #181714; border-radius: 10px; border: 1px solid #302c27; padding: 48px 40px;">
-    <div style="margin-bottom: 32px;">
-      <a href="https://loore.org" style="display: inline-flex; align-items: center; gap: 10px; text-decoration: none;">
-        <img src="https://loore.org/android-chrome-192x192.png" alt="Loore" width="22" height="22" style="border-radius: 4px;" />
-        <span style="font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif; font-size: 14px; font-weight: 300; text-transform: uppercase; letter-spacing: 0.3em; color: #736b5f;">Loore</span>
-      </a>
+    <div style="font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif; font-size: 14px; font-weight: 300; text-transform: uppercase; letter-spacing: 0.3em; color: #736b5f; margin-bottom: 32px;">
+      Loore
     </div>
-    <img src="https://loore.org/android-chrome-192x192.png" alt="Loore" width="48" height="48" style="display: block; margin-bottom: 16px; border-radius: 8px;" />
     <h2 style="font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif; font-weight: 300; font-size: 28px; color: #ede8dd; margin: 0 0 12px 0;">
       Welcome to <em style="color: #c4956a;">Loore</em>.
     </h2>
