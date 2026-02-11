@@ -37,7 +37,8 @@ def list_users():
             "accepted_terms_at": user.accepted_terms_at.isoformat() if user.accepted_terms_at else None,
             "approved": user.approved,
             "email": user.email,
-            "plan": user.plan
+            "plan": user.plan,
+            "deactivated_at": user.deactivated_at.isoformat() if user.deactivated_at else None
         })
     return jsonify({
         "users": user_list,
@@ -51,8 +52,8 @@ def toggle_user_status(user_id):
     user = User.query.get_or_404(user_id)
     user.approved = not user.approved  # Toggle the approved flag
     if not user.approved:
-        # Reset terms acceptance so user must re-accept on next login
-        user.accepted_terms_at = None
+        # Record deactivation time (terms acceptance fields are preserved for audit)
+        user.deactivated_at = datetime.utcnow()
     db.session.commit()
     return jsonify({"message": "User status updated", "approved": user.approved}), 200
 

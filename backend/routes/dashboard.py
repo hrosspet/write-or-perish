@@ -8,6 +8,16 @@ from backend.routes.terms import CURRENT_TERMS_VERSION
 
 dashboard_bp = Blueprint("dashboard_bp", __name__)
 
+
+def _terms_up_to_date(user):
+    if user.accepted_terms_version != CURRENT_TERMS_VERSION:
+        return False
+    if user.deactivated_at and (
+        not user.accepted_terms_at or user.deactivated_at > user.accepted_terms_at
+    ):
+        return False
+    return True
+
 def get_daily_tokens(user):
     today = date.today()
     tokens = db.session.query(db.func.sum(Node.distributed_tokens)).filter(
@@ -71,7 +81,7 @@ def get_dashboard():
             "username": current_user.username,
             "description": current_user.description,
             "accepted_terms_at": current_user.accepted_terms_at.isoformat() if current_user.accepted_terms_at else None,
-            "terms_up_to_date": current_user.accepted_terms_version == CURRENT_TERMS_VERSION,
+            "terms_up_to_date": _terms_up_to_date(current_user),
             "approved": current_user.approved,
             "email": current_user.email,
             "is_admin": current_user.is_admin,
@@ -180,7 +190,7 @@ def update_user():
                 "email": current_user.email,
                 "approved": current_user.approved,
                 "accepted_terms_at": current_user.accepted_terms_at.isoformat() if current_user.accepted_terms_at else None,
-                "terms_up_to_date": current_user.accepted_terms_version == CURRENT_TERMS_VERSION,
+                "terms_up_to_date": _terms_up_to_date(current_user),
                 "is_admin": current_user.is_admin,
                 "plan": current_user.plan,
                 "voice_mode_enabled": voice_mode_enabled

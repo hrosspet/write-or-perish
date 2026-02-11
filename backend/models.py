@@ -17,6 +17,7 @@ class User(db.Model, UserMixin):
     email = db.Column(db.String(128), nullable=True, unique=True)
     magic_link_token_hash = db.Column(db.String(128), nullable=True)
     magic_link_expires_at = db.Column(db.DateTime, nullable=True)
+    deactivated_at = db.Column(db.DateTime, nullable=True)
     
     # Relationship to text nodes
     nodes = db.relationship("Node", backref="user", lazy=True)
