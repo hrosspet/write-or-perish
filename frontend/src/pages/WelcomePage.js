@@ -133,22 +133,31 @@ export default function WelcomePage({ onNewEntryClick }) {
               Your lore doesn't start from zero.
             </p>
             <div style={{ position: "relative" }}>
-              <ImportData buttonStyle={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: "0.6rem",
-                fontFamily: "var(--sans)",
-                fontWeight: 400,
-                fontSize: "0.92rem",
-                letterSpacing: "0.05em",
-                padding: "12px 30px",
-                border: "1px solid var(--accent)",
-                background: "transparent",
-                color: "var(--accent)",
-                cursor: "pointer",
-                transition: "all 0.4s cubic-bezier(0.22,1,0.36,1)",
-                borderRadius: 0,
-              }} />
+              <ImportData
+                buttonLabel={<><span>Import data</span><span style={{ fontSize: "1rem" }}>&rarr;</span></>}
+                buttonStyle={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "0.6rem",
+                  fontFamily: "var(--sans)",
+                  fontWeight: 400,
+                  fontSize: "0.92rem",
+                  letterSpacing: "0.05em",
+                  padding: "12px 30px",
+                  border: "1px solid var(--accent)",
+                  background: "transparent",
+                  color: "var(--accent)",
+                  cursor: "pointer",
+                  transition: "all 0.4s cubic-bezier(0.22,1,0.36,1)",
+                  boxShadow: "none",
+                  position: "relative",
+                  borderRadius: 0,
+                }}
+                buttonHoverStyle={{
+                  background: "var(--accent-subtle)",
+                  boxShadow: "0 0 30px var(--accent-glow)",
+                }}
+              />
             </div>
           </div>
         </Fade>

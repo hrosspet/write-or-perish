@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
+import ReactDOM from "react-dom";
 import api from "../api";
 import PrivacySelector from "./PrivacySelector";
 
@@ -24,8 +25,9 @@ const cancelBtnStyle = {
   ...ghostBtnStyle,
 };
 
-export default function ImportData({ buttonStyle: customButtonStyle }) {
+export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel, buttonHoverStyle }) {
   const btnStyle = customButtonStyle || ghostBtnStyle;
+  const [hovered, setHovered] = useState(false);
   const [showImportDialog, setShowImportDialog] = useState(false);
   const [importFiles, setImportFiles] = useState(null);
   const [importType, setImportType] = useState("separate_nodes");
@@ -38,6 +40,16 @@ export default function ImportData({ buttonStyle: customButtonStyle }) {
   const [showTwitterImportDialog, setShowTwitterImportDialog] = useState(false);
   const [twitterImportData, setTwitterImportData] = useState(null);
   const [includeReplies, setIncludeReplies] = useState(false);
+
+  // Close picker dialog on Escape
+  useEffect(() => {
+    if (!showPicker) return;
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape") setShowPicker(false);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [showPicker]);
 
   // Which picker to show: null, "markdown", or "twitter"
   const [showPicker, setShowPicker] = useState(false);
@@ -160,19 +172,22 @@ export default function ImportData({ buttonStyle: customButtonStyle }) {
       {!showImportDialog && !showTwitterImportDialog && (
         <button
           onClick={() => setShowPicker(!showPicker)}
+          onMouseEnter={() => setHovered(true)}
+          onMouseLeave={() => setHovered(false)}
           disabled={importing}
           style={{
             ...btnStyle,
+            ...(hovered && buttonHoverStyle ? buttonHoverStyle : {}),
             cursor: importing ? "not-allowed" : "pointer",
             opacity: importing ? 0.6 : 1,
           }}
         >
-          {importing ? "Analyzing..." : "Import Data"}
+          {importing ? "Analyzing..." : (buttonLabel || "Import Data")}
         </button>
       )}
 
-      {/* Import type picker dialog */}
-      {showPicker && (
+      {/* Import type picker dialog - rendered via portal to escape overflow:hidden */}
+      {showPicker && ReactDOM.createPortal(
         <div
           onClick={() => setShowPicker(false)}
           style={{
@@ -254,7 +269,8 @@ export default function ImportData({ buttonStyle: customButtonStyle }) {
               </label>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* Markdown import confirmation dialog */}
