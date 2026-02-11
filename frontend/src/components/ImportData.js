@@ -24,7 +24,8 @@ const cancelBtnStyle = {
   ...ghostBtnStyle,
 };
 
-export default function ImportData() {
+export default function ImportData({ buttonStyle: customButtonStyle }) {
+  const btnStyle = customButtonStyle || ghostBtnStyle;
   const [showImportDialog, setShowImportDialog] = useState(false);
   const [importFiles, setImportFiles] = useState(null);
   const [importType, setImportType] = useState("separate_nodes");
@@ -157,33 +158,68 @@ export default function ImportData() {
 
       {/* Main Import Data button */}
       {!showImportDialog && !showTwitterImportDialog && (
-        <div style={{ position: "relative", display: "inline-block" }}>
-          <button
-            onClick={() => setShowPicker(!showPicker)}
-            disabled={importing}
+        <button
+          onClick={() => setShowPicker(!showPicker)}
+          disabled={importing}
+          style={{
+            ...btnStyle,
+            cursor: importing ? "not-allowed" : "pointer",
+            opacity: importing ? 0.6 : 1,
+          }}
+        >
+          {importing ? "Analyzing..." : "Import Data"}
+        </button>
+      )}
+
+      {/* Import type picker dialog */}
+      {showPicker && (
+        <div
+          onClick={() => setShowPicker(false)}
+          style={{
+            position: "fixed",
+            top: 0, left: 0, right: 0, bottom: 0,
+            backgroundColor: "rgba(5, 4, 3, 0.75)",
+            backdropFilter: "blur(10px)",
+            WebkitBackdropFilter: "blur(10px)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 2000,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
             style={{
-              ...ghostBtnStyle,
-              cursor: importing ? "not-allowed" : "pointer",
-              opacity: importing ? 0.6 : 1,
+              background: "var(--bg-card)",
+              border: "1px solid var(--border)",
+              borderRadius: "12px",
+              padding: "2rem",
+              minWidth: "300px",
+              maxWidth: "90vw",
+              boxShadow: "0 24px 80px rgba(0,0,0,0.5)",
             }}
           >
-            {importing ? "Analyzing..." : "Import Data"}
-          </button>
-
-          {showPicker && (
-            <div style={{
-              position: "absolute", top: "100%", left: "50%", transform: "translateX(-50%)",
-              marginTop: "8px",
-              background: "var(--bg-card)", border: "1px solid var(--border)",
-              borderRadius: "8px", padding: "8px 0",
-              zIndex: 10, minWidth: "220px",
-              boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
-            }}>
+            <h3 style={{
+              fontFamily: "var(--serif)",
+              fontWeight: 300,
+              fontSize: "1.2rem",
+              color: "var(--text-primary)",
+              margin: "0 0 1.2rem 0",
+              textAlign: "center",
+            }}>Import Data</h3>
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
               <label style={{
-                display: "block", padding: "10px 16px", cursor: "pointer",
-                fontFamily: "var(--sans)", fontSize: "0.88rem", fontWeight: 300,
+                display: "block",
+                padding: "14px 20px",
+                cursor: "pointer",
+                fontFamily: "var(--sans)",
+                fontSize: "0.92rem",
+                fontWeight: 300,
                 color: "var(--text-secondary)",
-                transition: "background 0.2s",
+                border: "1px solid var(--border)",
+                borderRadius: "8px",
+                textAlign: "center",
+                transition: "border-color 0.3s ease",
               }}>
                 Import Markdown (e.g. Obsidian)
                 <input
@@ -195,10 +231,17 @@ export default function ImportData() {
                 />
               </label>
               <label style={{
-                display: "block", padding: "10px 16px", cursor: "pointer",
-                fontFamily: "var(--sans)", fontSize: "0.88rem", fontWeight: 300,
+                display: "block",
+                padding: "14px 20px",
+                cursor: "pointer",
+                fontFamily: "var(--sans)",
+                fontSize: "0.92rem",
+                fontWeight: 300,
                 color: "var(--text-secondary)",
-                transition: "background 0.2s",
+                border: "1px solid var(--border)",
+                borderRadius: "8px",
+                textAlign: "center",
+                transition: "border-color 0.3s ease",
               }}>
                 Import Tweets
                 <input
@@ -210,7 +253,7 @@ export default function ImportData() {
                 />
               </label>
             </div>
-          )}
+          </div>
         </div>
       )}
 
