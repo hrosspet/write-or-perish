@@ -31,9 +31,12 @@ const NodeFooter = ({ username, createdAt, childrenCount, humanOwnerUsername, ll
         </>
       )}
       {children && (
-        <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "4px" }}>
-          {children}
-        </span>
+        <>
+          <span style={{ color: "var(--border)" }}>&middot;</span>
+          <span style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+            {children}
+          </span>
+        </>
       )}
     </div>
   );
