@@ -1,8 +1,14 @@
+import logging
+from datetime import datetime, timedelta
 from functools import wraps
-from flask import Blueprint, request, jsonify, abort
+from flask import Blueprint, request, jsonify, abort, current_app
 from flask_login import login_required, current_user
 from backend.models import User
 from backend.extensions import db
+from backend.utils.magic_link import generate_magic_link_token, hash_token
+from backend.utils.email import send_welcome_email
+
+logger = logging.getLogger(__name__)
 
 admin_bp = Blueprint("admin_bp", __name__)
 
@@ -109,3 +115,51 @@ def whitelist_user():
             "email": user.email
         }
     }), 201
+
+
+@admin_bp.route("/users/<int:user_id>/activate_and_welcome", methods=["POST"])
+@login_required
+@admin_required
+def activate_and_welcome(user_id):
+    user = User.query.get_or_404(user_id)
+
+    if not user.email:
+        return jsonify({"error": "User has no email address. Add one first."}), 400
+
+    # Approve the user
+    user.approved = True
+    db.session.commit()
+
+    # Generate magic link pointing to /welcome
+    try:
+        token = generate_magic_link_token(user.email, next_url="/welcome")
+        token_h = hash_token(token)
+
+        user.magic_link_token_hash = token_h
+        user.magic_link_expires_at = (
+            datetime.utcnow()
+            + timedelta(
+                seconds=current_app.config.get("MAGIC_LINK_EXPIRY_SECONDS", 900)
+            )
+        )
+        db.session.commit()
+
+        backend_url = request.host_url.rstrip("/")
+        magic_link_url = f"{backend_url}/auth/magic-link/verify?token={token}"
+
+        send_welcome_email(user.email, magic_link_url)
+    except Exception:
+        logger.exception(
+            f"Failed to send welcome email to user {user_id} ({user.email})"
+        )
+        return jsonify({
+            "message": "User approved but welcome email failed to send.",
+            "approved": True,
+            "email_sent": False,
+        }), 200
+
+    return jsonify({
+        "message": "User approved and welcome email sent.",
+        "approved": True,
+        "email_sent": True,
+    }), 200

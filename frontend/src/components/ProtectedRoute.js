@@ -21,7 +21,12 @@ function ProtectedRoute({ children }) {
     return <Navigate to={`/login?returnUrl=${returnUrl}`} replace />;
   }
 
-  // User is authenticated, render children
+  // If authenticated but not approved, redirect to alpha-thank-you
+  if (!user.approved) {
+    return <Navigate to="/alpha-thank-you" replace />;
+  }
+
+  // User is authenticated and approved, render children
   return children;
 }
 

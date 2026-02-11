@@ -7,10 +7,14 @@ import NavBar from "./components/NavBar";
 import NodeForm from "./components/NodeForm";
 import TermsModal from "./components/TermsModal";
 import AdminPanel from "./components/AdminPanel";
-import AlphaModal from "./components/AlphaModal";
 import NodeDetailWrapper from "./components/NodeDetailWrapper";
 import LoginPage from "./components/LoginPage";
 import ProtectedRoute from "./components/ProtectedRoute";
+import VisionPage from "./pages/VisionPage";
+import WhyLoorePage from "./pages/WhyLoorePage";
+import HowToPage from "./pages/HowToPage";
+import AlphaThankYouPage from "./pages/AlphaThankYouPage";
+import WelcomePage from "./pages/WelcomePage";
 import { useUser } from "./contexts/UserContext";
 import { AudioProvider } from "./contexts/AudioContext";
 
@@ -18,7 +22,6 @@ function App() {
   const [showNewEntry, setShowNewEntry] = useState(false);
   const nodeFormRef = useRef(null);
   const [showTerms, setShowTerms] = useState(false);
-  const [showAlpha, setShowAlpha] = useState(false);
   const { user, setUser } = useUser();
   const navigate = useNavigate();
 
@@ -30,14 +33,6 @@ function App() {
         setShowTerms(true);
       } else {
         setShowTerms(false);
-      }
-      // Also, if they have accepted terms but are not approved (and haven't provided an email),
-      // show the waiting-list modal.
-      // if (user.accepted_terms_at && user.approved === false && !user.email) {
-      if (user.terms_up_to_date && !user.approved) {
-        setShowAlpha(true);
-      } else {
-        setShowAlpha(false);
       }
     }
   }, [user]);
@@ -140,21 +135,25 @@ function App() {
           onAccepted={() => {
             setUser({ ...user, terms_up_to_date: true });
             setShowTerms(false);
+            // If user is not approved, redirect to alpha-thank-you page
+            if (!user.approved) {
+              navigate('/alpha-thank-you');
+            }
           }}
-        />
-      )}
-
-      {showAlpha && (
-        <AlphaModal
-        user={user}
-          onClose={() => setShowAlpha(false)}
-          onUpdate={(updatedUser) => setUser(updatedUser)}
         />
       )}
 
         <Routes>
           <Route path="/" element={<LandingPage />} />
           <Route path="/login" element={<LoginPage />} />
+          {/* Public about pages */}
+          <Route path="/vision" element={<VisionPage />} />
+          <Route path="/why-loore" element={<WhyLoorePage />} />
+          <Route path="/how-to" element={<HowToPage />} />
+          {/* Alpha thank you - public (for unapproved users) */}
+          <Route path="/alpha-thank-you" element={<AlphaThankYouPage />} />
+          {/* Welcome - protected (for newly approved users) */}
+          <Route path="/welcome" element={<ProtectedRoute><WelcomePage onNewEntryClick={() => setShowNewEntry(true)} /></ProtectedRoute>} />
           <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
           <Route path="/dashboard/:username" element={<Dashboard />} />
           <Route path="/feed" element={<ProtectedRoute><Feed /></ProtectedRoute>} />
