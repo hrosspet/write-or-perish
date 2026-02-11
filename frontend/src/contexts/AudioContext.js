@@ -43,6 +43,8 @@ export const AudioProvider = ({ children }) => {
   // For WebM files with continuous timestamps: track the starting timestamp offset of current chunk
   // (MediaRecorder with timeslice produces chunks where timestamps continue across chunks)
   const chunkTimestampOffsetRef = useRef(0);
+  // Pre-unlocked audio element for autoplay after async events (e.g. SSE chunk arrival)
+  const warmedUpAudioRef = useRef(null);
 
   // Calculate cumulative time based on chunk index and current position
   const calculateCumulativeTime = useCallback((chunkIndex, timeInChunk) => {
@@ -216,9 +218,16 @@ export const AudioProvider = ({ children }) => {
     // Update queue to contain chunks after current one
     audioQueueRef.current = urls.slice(chunkIndex + 1);
 
-    // Create new audio element
+    // Create new audio element (reuse warmed-up element if available to bypass autoplay restrictions)
     const chunkUrl = urls[chunkIndex];
-    const audio = new Audio(chunkUrl);
+    let audio;
+    if (warmedUpAudioRef.current) {
+      audio = warmedUpAudioRef.current;
+      warmedUpAudioRef.current = null;
+      audio.src = chunkUrl;
+    } else {
+      audio = new Audio(chunkUrl);
+    }
     audioRef.current = audio;
     audio.playbackRate = playbackRate;
 
@@ -543,6 +552,17 @@ export const AudioProvider = ({ children }) => {
     }
   }, [preloadChunkDurations, playChunkAtTime]);
 
+  // Call during a user gesture to unlock audio playback for later async use (e.g. SSE chunks)
+  const warmUpAudio = useCallback(() => {
+    const audio = new Audio();
+    // Play a tiny silent WAV to establish the gesture-unlocked audio element
+    audio.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
+    audio.play().then(() => {
+      audio.pause();
+      warmedUpAudioRef.current = audio;
+    }).catch(() => {});
+  }, []);
+
   const play = useCallback(async () => {
     if (audioRef.current && !isPlaying) {
       try {
@@ -740,6 +760,7 @@ export const AudioProvider = ({ children }) => {
     loadAudio,
     loadAudioQueue,
     appendChunkToQueue,
+    warmUpAudio,
     play,
     pause,
     stop,
