@@ -3,7 +3,7 @@ from flask_login import login_required, current_user
 from backend.models import Node, User, UserProfile
 from backend.extensions import db
 from datetime import date
-from backend.utils.privacy import accessible_nodes_filter
+from backend.utils.privacy import accessible_nodes_filter, find_human_owner
 from backend.routes.terms import CURRENT_TERMS_VERSION
 
 dashboard_bp = Blueprint("dashboard_bp", __name__)
@@ -50,6 +50,34 @@ def get_latest_profile(user):
     return None
 
 
+def _serialize_node_for_list(node):
+    """Serialize a node for dashboard/feed list views."""
+    content = node.get_content()
+    preview = content[:200] + ("..." if len(content) > 200 else "")
+
+    # Determine human owner username for LLM nodes
+    human_owner_username = None
+    if node.node_type == "llm":
+        human_owner_id = find_human_owner(node)
+        if human_owner_id:
+            human_owner = User.query.get(human_owner_id)
+            if human_owner:
+                human_owner_username = human_owner.username
+
+    return {
+        "id": node.id,
+        "preview": preview,
+        "node_type": node.node_type,
+        "child_count": len(node.children),
+        "created_at": node.created_at.isoformat(),
+        "pinned_at": node.pinned_at.isoformat() if node.pinned_at else None,
+        "username": node.user.username if node.user else "Unknown",
+        "human_owner_username": human_owner_username,
+        "llm_model": node.llm_model,
+        "has_audio": bool(node.audio_original_url or node.audio_tts_url),
+    }
+
+
 # Dashboard endpoint: only return top-level nodes (nodes with no parent)
 @dashboard_bp.route("/", methods=["GET"])
 @login_required
@@ -58,21 +86,17 @@ def get_dashboard():
     per_page = request.args.get("per_page", 20, type=int)
     per_page = min(per_page, 100)
 
+    # Pinned nodes for this user (separate from pagination)
+    pinned_nodes = Node.query.filter(
+        Node.pinned_by == current_user.id,
+        Node.pinned_at.isnot(None)
+    ).order_by(Node.pinned_at.desc()).all()
+    pinned_list = [_serialize_node_for_list(n) for n in pinned_nodes]
+
     query = Node.query.filter_by(user_id=current_user.id, parent_id=None).order_by(Node.created_at.desc())
     pagination = query.paginate(page=page, per_page=per_page, error_out=False)
 
-    nodes_list = []
-    for node in pagination.items:
-        content = node.get_content()
-        preview = content[:200] + ("..." if len(content) > 200 else "")
-        nodes_list.append({
-            "id": node.id,
-            "preview": preview,
-            "node_type": node.node_type,
-            "child_count": len(node.children),
-            "created_at": node.created_at.isoformat(),
-            "username": node.user.username
-        })
+    nodes_list = [_serialize_node_for_list(node) for node in pagination.items]
     # Determine if Voice Mode is enabled for this user (admin or paid plan)
     voice_mode_enabled = current_user.has_voice_mode
     dashboard = {
@@ -94,6 +118,7 @@ def get_dashboard():
             "global_tokens": get_global_tokens(),
             "target_daily_tokens": 1000000  # the 1M tokens/day collective goal
         },
+        "pinned_nodes": pinned_list,
         "nodes": nodes_list,
         "has_more": pagination.has_next,
         "page": page,
@@ -114,6 +139,14 @@ def get_public_dashboard(username):
     per_page = request.args.get("per_page", 20, type=int)
     per_page = min(per_page, 100)
 
+    # Pinned nodes for this user (filtered by accessibility)
+    pinned_nodes = Node.query.filter(
+        Node.pinned_by == user.id,
+        Node.pinned_at.isnot(None),
+        accessible_nodes_filter(Node, current_user.id)
+    ).order_by(Node.pinned_at.desc()).all()
+    pinned_list = [_serialize_node_for_list(n) for n in pinned_nodes]
+
     query = Node.query.filter(
         Node.user_id == user.id,
         Node.parent_id.is_(None),
@@ -121,18 +154,7 @@ def get_public_dashboard(username):
     ).order_by(Node.created_at.desc())
     pagination = query.paginate(page=page, per_page=per_page, error_out=False)
 
-    nodes_list = []
-    for node in pagination.items:
-        content = node.get_content()
-        preview = content[:200] + ("..." if len(content) > 200 else "")
-        nodes_list.append({
-            "id": node.id,
-            "preview": preview,
-            "node_type": node.node_type,
-            "child_count": len(node.children),
-            "created_at": node.created_at.isoformat(),
-            "username": node.user.username
-        })
+    nodes_list = [_serialize_node_for_list(node) for node in pagination.items]
 
     # Calculate token stats just as in the private dashboard.
     stats = {
@@ -149,6 +171,7 @@ def get_public_dashboard(username):
             "description": user.description
         },
         "stats": stats,
+        "pinned_nodes": pinned_list,
         "nodes": nodes_list,
         "has_more": pagination.has_next,
         "page": page,

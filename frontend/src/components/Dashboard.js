@@ -554,6 +554,40 @@ function Dashboard() {
       {/* Display the chart with totals */}
       {dashboardData.stats && <DashboardContent dashboardData={dashboardData} username={username} />}
 
+      {/* Pinned nodes section */}
+      {dashboardData.pinned_nodes && dashboardData.pinned_nodes.length > 0 && (
+        <>
+          <h3 style={{
+            fontFamily: "var(--serif)",
+            fontWeight: 300,
+            fontSize: "1.4rem",
+            color: "var(--text-primary)",
+            marginTop: "40px",
+            textAlign: "left"
+          }}>
+            Pinned
+          </h3>
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              maxWidth: "1000px",
+              alignItems: "flex-start"
+            }}
+          >
+            {dashboardData.pinned_nodes.map((node) => (
+              <Bubble
+                key={`pinned-${node.id}`}
+                node={node}
+                isHighlighted={true}
+                leftAlign={true}
+                onClick={() => navigate(`/node/${node.id}`)}
+              />
+            ))}
+          </div>
+        </>
+      )}
+
       {/* Graphical (bubble-style) view of top-level entries */}
       <h3 style={{
         fontFamily: "var(--serif)",

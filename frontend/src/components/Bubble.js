@@ -2,8 +2,9 @@ import React from 'react';
 import NodeFooter from './NodeFooter';
 
 const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => {
-  // Detect voice notes
-  const isVoiceNote = node.has_audio || (node.title && /^voice\s+note/i.test(node.title));
+  // Detect voice notes via backend-provided has_audio flag
+  const isVoiceNote = !!node.has_audio;
+  const isPinned = !!node.pinned_at;
 
   // Use full content if available; otherwise use preview.
   const text = node.content || node.preview || "";
@@ -31,6 +32,17 @@ const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => 
     maxWidth: "1000px",
     width: "calc(100% - 20px)",
     transition: "border-color 0.3s ease, box-shadow 0.3s ease, transform 0.3s ease",
+  };
+
+  const tagStyle = {
+    fontFamily: "var(--sans)",
+    fontSize: "0.65rem",
+    fontWeight: 500,
+    textTransform: "uppercase",
+    letterSpacing: "0.08em",
+    padding: "3px 8px",
+    borderRadius: "4px",
+    marginLeft: "8px",
   };
 
   return (
@@ -72,7 +84,7 @@ const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => 
           {body.length > 250 ? body.substring(0, 250) + "..." : body}
         </div>
       )}
-      {/* Footer row with optional tag + node footer */}
+      {/* Footer row with optional tags + node footer */}
       <div onClick={(e) => e.stopPropagation()} style={{
         display: "flex",
         alignItems: "center",
@@ -82,23 +94,29 @@ const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => 
           username={node.username}
           createdAt={node.created_at}
           childrenCount={childrenCount}
+          humanOwnerUsername={node.human_owner_username}
+          llmModel={node.llm_model}
         />
-        {isVoiceNote && (
-          <span style={{
-            fontFamily: "var(--sans)",
-            fontSize: "0.65rem",
-            fontWeight: 500,
-            textTransform: "uppercase",
-            letterSpacing: "0.08em",
-            color: "var(--accent-dim)",
-            backgroundColor: "var(--accent-subtle)",
-            padding: "3px 8px",
-            borderRadius: "4px",
-            marginLeft: "auto",
-          }}>
-            Voice Note
-          </span>
-        )}
+        <div style={{ display: "flex", alignItems: "center" }}>
+          {isPinned && (
+            <span style={{
+              ...tagStyle,
+              color: "var(--accent-dim)",
+              backgroundColor: "var(--accent-subtle)",
+            }}>
+              Pinned
+            </span>
+          )}
+          {isVoiceNote && (
+            <span style={{
+              ...tagStyle,
+              color: "var(--accent-dim)",
+              backgroundColor: "var(--accent-subtle)",
+            }}>
+              Voice Note
+            </span>
+          )}
+        </div>
       </div>
     </div>
   );
