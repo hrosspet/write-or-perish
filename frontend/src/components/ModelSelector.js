@@ -56,7 +56,7 @@ const ModelSelector = ({ nodeId, selectedModel, onModelChange }) => {
         fontSize: '14px',
         fontFamily: 'var(--sans)',
         fontWeight: 300,
-        maxWidth: '160px',
+        maxWidth: '150px',
       }}
     >
       {models.map((m) => (
