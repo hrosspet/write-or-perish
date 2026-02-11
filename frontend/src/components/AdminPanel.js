@@ -57,6 +57,20 @@ function AdminPanel() {
     }
   };
 
+  const activateAndWelcome = async (userId) => {
+    try {
+      const response = await api.post(`/admin/users/${userId}/activate_and_welcome`);
+      const msg = response.data.email_sent
+        ? "User approved and welcome email sent!"
+        : "User approved but email failed to send.";
+      alert(msg);
+      fetchUsers();
+    } catch (err) {
+      console.error(err);
+      setError(err.response?.data?.error || "Error activating user.");
+    }
+  };
+
   const handleWhitelistUser = async () => {
     if (!newHandle.trim()) {
       setNewHandleError("Handle is required.");
@@ -125,9 +139,20 @@ function AdminPanel() {
                 {u.email || "None"}
               </td>
               <td style={{ border: "1px solid #333", padding: "8px" }}>
-                <button onClick={() => toggleApproved(u.id)}>
-                  {u.approved ? "Deactivate" : "Activate"}
-                </button>{" "}
+                {!u.approved && u.email ? (
+                  <>
+                    <button onClick={() => activateAndWelcome(u.id)}>
+                      Activate &amp; Welcome
+                    </button>{" "}
+                    <button onClick={() => toggleApproved(u.id)}>
+                      Activate
+                    </button>
+                  </>
+                ) : (
+                  <button onClick={() => toggleApproved(u.id)}>
+                    {u.approved ? "Deactivate" : "Activate"}
+                  </button>
+                )}{" "}
                 <button onClick={() => updateEmail(u.id, u.email)}>
                   Update Email
                 </button>
