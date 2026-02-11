@@ -93,7 +93,7 @@ export default function HowToPage() {
             lineHeight: 1.8, color: "var(--text-secondary)", maxWidth: 480,
           }}>
             Loore is flexible enough to fit how you think. Here's what the
-            basics look like — and some workflows that the creator uses every day.
+            basics look like — and some workflows that are being used on Loore every day.
           </p>
         </Fade>
       </div>

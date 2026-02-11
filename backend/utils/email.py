@@ -90,9 +90,7 @@ def send_welcome_email(to_email, magic_link_url):
         "Welcome to Loore\n\n"
         "Your account has been approved! You're one of the first people here.\n\n"
         f"Click the link below to get started:\n{magic_link_url}\n\n"
-        "This link expires in 15 minutes and can only be used once.\n\n"
-        "There's no wrong way to do this. Write about today, talk about a dream, "
-        "process something that's been sitting in you. Loore will meet you wherever you are."
+        "This link can only be used once."
     )
 
     html_body = f"""\
@@ -120,11 +118,8 @@ def send_welcome_email(to_email, magic_link_url):
       Enter Loore
     </a>
     <div style="border-top: 1px solid #302c27; margin-top: 36px; padding-top: 20px;">
-      <p style="font-family: 'Cormorant Garamond', Georgia, serif; font-weight: 300; font-style: italic; font-size: 15px; color: #a89f91; margin: 0 0 12px 0; line-height: 1.5;">
-        There's no wrong way to do this.
-      </p>
       <p style="color: #736b5f; font-size: 13px; font-weight: 300; margin: 0 0 6px 0; line-height: 1.5;">
-        This link expires in 15 minutes and can only be used once.
+        This link can only be used once.
       </p>
     </div>
   </div>

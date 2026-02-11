@@ -130,17 +130,17 @@ def activate_and_welcome(user_id):
     user.approved = True
     db.session.commit()
 
-    # Generate magic link pointing to /welcome
+    # Generate magic link pointing to /welcome (30-day expiry)
+    welcome_max_age = 30 * 24 * 3600  # 30 days in seconds
     try:
-        token = generate_magic_link_token(user.email, next_url="/welcome")
+        token = generate_magic_link_token(
+            user.email, next_url="/welcome", max_age=welcome_max_age
+        )
         token_h = hash_token(token)
 
         user.magic_link_token_hash = token_h
         user.magic_link_expires_at = (
-            datetime.utcnow()
-            + timedelta(
-                seconds=current_app.config.get("MAGIC_LINK_EXPIRY_SECONDS", 900)
-            )
+            datetime.utcnow() + timedelta(seconds=welcome_max_age)
         )
         db.session.commit()
 
