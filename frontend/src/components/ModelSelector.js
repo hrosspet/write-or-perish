@@ -46,7 +46,7 @@ const ModelSelector = ({ nodeId, selectedModel, onModelChange }) => {
       onChange={(e) => onModelChange(e.target.value)}
       disabled={loading}
       style={{
-        padding: '8px 4px',
+        padding: '8px 4px 8px 10px',
         borderRadius: '6px',
         border: '1px solid var(--border)',
         backgroundColor: 'var(--bg-input)',
