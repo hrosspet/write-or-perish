@@ -1,6 +1,7 @@
 import React from "react";
 import { Link } from "react-router-dom";
 import Fade from "../utils/Fade";
+import CtaButton from "../components/CtaButton";
 
 export default function WhyLoorePage() {
   return (
@@ -225,16 +226,7 @@ export default function WhyLoorePage() {
         </Fade>
         <Fade delay={0.1}>
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "1.5rem" }}>
-            <Link to="/login?returnUrl=%2F" style={{
-              display: "inline-flex", alignItems: "center", gap: "0.6rem",
-              fontFamily: "var(--sans)", fontWeight: 400, fontSize: "0.92rem",
-              letterSpacing: "0.05em", padding: "12px 30px",
-              border: "1px solid var(--accent)", background: "transparent",
-              color: "var(--accent)", textDecoration: "none", cursor: "pointer",
-            }}>
-              <span>Join the Alpha</span>
-              <span style={{ fontSize: "1rem" }}>&rarr;</span>
-            </Link>
+            <CtaButton to="/login?returnUrl=%2F">Join the Alpha</CtaButton>
             <Link to="/vision" style={{
               display: "inline-flex", alignItems: "center", gap: "0.6rem",
               fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.92rem",

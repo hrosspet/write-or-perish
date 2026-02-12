@@ -1,11 +1,10 @@
-import React, { useState } from "react";
+import React from "react";
 import { Link } from "react-router-dom";
 import Fade from "../utils/Fade";
 import ImportData from "../components/ImportData";
+import CtaButton, { ctaButtonStyle, ctaButtonHoverStyle } from "../components/CtaButton";
 
 export default function WelcomePage({ onNewEntryClick }) {
-  const [promptHovered, setPromptHovered] = useState(false);
-
   return (
     <div style={{ padding: "0 2rem" }}>
       {/* Hero welcome */}
@@ -76,25 +75,7 @@ export default function WelcomePage({ onNewEntryClick }) {
               What brought you to Loore — and what are you hoping to
               find here?
             </p>
-            <button
-              onClick={onNewEntryClick}
-              onMouseEnter={() => setPromptHovered(true)}
-              onMouseLeave={() => setPromptHovered(false)}
-              style={{
-                display: "inline-flex", alignItems: "center", gap: "0.6rem",
-                fontFamily: "var(--sans)", fontWeight: 400, fontSize: "0.92rem",
-                letterSpacing: "0.05em", padding: "12px 30px",
-                border: "1px solid var(--accent)",
-                background: promptHovered ? "var(--accent-subtle)" : "transparent",
-                color: "var(--accent)", textDecoration: "none", cursor: "pointer",
-                transition: "all 0.4s cubic-bezier(0.22,1,0.36,1)",
-                boxShadow: promptHovered ? "0 0 30px var(--accent-glow)" : "none",
-                position: "relative",
-              }}
-            >
-              <span>Start writing</span>
-              <span style={{ fontSize: "1rem" }}>&rarr;</span>
-            </button>
+            <CtaButton onClick={onNewEntryClick}>Start writing</CtaButton>
             <p style={{
               fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.78rem",
               color: "var(--text-muted)", marginTop: "1rem", position: "relative",
@@ -138,29 +119,9 @@ export default function WelcomePage({ onNewEntryClick }) {
             </p>
             <div style={{ position: "relative" }}>
               <ImportData
-                buttonLabel={<><span>Import data</span><span style={{ fontSize: "1rem" }}>&rarr;</span></>}
-                buttonStyle={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: "0.6rem",
-                  fontFamily: "var(--sans)",
-                  fontWeight: 400,
-                  fontSize: "0.92rem",
-                  letterSpacing: "0.05em",
-                  padding: "12px 30px",
-                  border: "1px solid var(--accent)",
-                  background: "transparent",
-                  color: "var(--accent)",
-                  cursor: "pointer",
-                  transition: "all 0.4s cubic-bezier(0.22,1,0.36,1)",
-                  boxShadow: "none",
-                  position: "relative",
-                  borderRadius: 0,
-                }}
-                buttonHoverStyle={{
-                  background: "var(--accent-subtle)",
-                  boxShadow: "0 0 30px var(--accent-glow)",
-                }}
+                buttonLabel={<><span>Import data</span><span style={{ fontSize: "1.1rem" }}>&rarr;</span></>}
+                buttonStyle={ctaButtonStyle}
+                buttonHoverStyle={ctaButtonHoverStyle}
               />
             </div>
           </div>

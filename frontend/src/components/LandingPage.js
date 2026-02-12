@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
+import CtaButton from "./CtaButton";
 
 function useOnScreen(ref, threshold = 0.15) {
   const [visible, setVisible] = useState(false);
@@ -134,54 +135,6 @@ const styles = {
       margin-bottom: 2.8rem;
       opacity: 0;
       animation: loore-fade-down 1.2s cubic-bezier(0.22,1,0.36,1) 0.7s forwards;
-    }
-
-    .loore-cta {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.6rem;
-      font-family: var(--sans);
-      font-weight: 400;
-      font-size: 0.95rem;
-      letter-spacing: 0.06em;
-      padding: 14px 36px;
-      border: 1px solid var(--accent);
-      background: transparent;
-      color: var(--accent);
-      text-decoration: none;
-      cursor: pointer;
-      transition: all 0.4s cubic-bezier(0.22,1,0.36,1);
-      position: relative;
-      overflow: hidden;
-      opacity: 0;
-      animation: loore-fade-down 1.2s cubic-bezier(0.22,1,0.36,1) 0.9s forwards;
-    }
-
-    .loore-cta::before {
-      content: '';
-      position: absolute;
-      inset: 0;
-      background: var(--accent);
-      opacity: 0;
-      transition: opacity 0.4s ease;
-    }
-
-    .loore-cta:hover::before {
-      opacity: 0.1;
-    }
-
-    .loore-cta:hover {
-      box-shadow: 0 0 30px var(--accent-glow);
-      transform: translateY(-1px);
-    }
-
-    .loore-cta-arrow {
-      transition: transform 0.3s ease;
-      font-size: 1.1rem;
-    }
-
-    .loore-cta:hover .loore-cta-arrow {
-      transform: translateX(3px);
     }
 
     .loore-scroll-hint {
@@ -407,10 +360,12 @@ function LandingPage() {
             A tool for seeing the story you're actually living — and shaping it
             with intention.
           </p>
-          <a href="/login?returnUrl=%2F" className="loore-cta">
-            <span>Join the Alpha</span>
-            <span className="loore-cta-arrow">→</span>
-          </a>
+          <div style={{
+            opacity: 0,
+            animation: "loore-fade-down 1.2s cubic-bezier(0.22,1,0.36,1) 0.9s forwards",
+          }}>
+            <CtaButton href="/login?returnUrl=%2F">Join the Alpha</CtaButton>
+          </div>
           <div className="loore-scroll-hint">
             <div className="loore-scroll-line" />
           </div>
@@ -521,10 +476,7 @@ function LandingPage() {
             </p>
           </FadeSection>
           <FadeSection delay={0.15}>
-            <a href="/login?returnUrl=%2F" className="loore-cta">
-              <span>Begin your lore</span>
-              <span className="loore-cta-arrow">→</span>
-            </a>
+            <CtaButton href="/login?returnUrl=%2F">Begin your lore</CtaButton>
           </FadeSection>
           <FadeSection delay={0.25}>
             <a href="/why-loore" style={{

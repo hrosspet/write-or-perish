@@ -1,7 +1,7 @@
 import React, { useRef } from "react";
-import { Link } from "react-router-dom";
 import Fade from "../utils/Fade";
 import useOnScreen from "../utils/useOnScreen";
+import CtaButton from "../components/CtaButton";
 
 function FeatureStep({ number, title, accent, body, detail, soon }) {
   return (
@@ -250,16 +250,7 @@ export default function VisionPage() {
           </p>
         </Fade>
         <Fade delay={0.32}>
-          <Link to="/login?returnUrl=%2F" style={{
-            display: "inline-flex", alignItems: "center", gap: "0.6rem",
-            fontFamily: "var(--sans)", fontWeight: 400, fontSize: "0.95rem",
-            letterSpacing: "0.06em", padding: "14px 36px",
-            border: "1px solid var(--accent)", background: "transparent",
-            color: "var(--accent)", textDecoration: "none", cursor: "pointer",
-          }}>
-            <span>Join the Alpha</span>
-            <span style={{ fontSize: "1.1rem" }}>&rarr;</span>
-          </Link>
+          <CtaButton to="/login?returnUrl=%2F">Join the Alpha</CtaButton>
         </Fade>
       </div>
     </div>
