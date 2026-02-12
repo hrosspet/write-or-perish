@@ -57,7 +57,8 @@ def format_node_tree(
     user_id=None,
     created_before=None,
     embedded_quotes=None,
-    included_ids=None
+    included_ids=None,
+    ai_blocked_ids=None
 ):
     """
     Recursively format a node and its descendants into a human-readable tree structure
@@ -111,7 +112,8 @@ def format_node_tree(
         if embedded_quotes is not None:
             # Use smart resolution from ExportQuoteResolver
             content = resolve_quotes_for_export(
-                content, node.id, embedded_quotes, user_id
+                content, node.id, embedded_quotes, user_id,
+                ai_blocked_ids=ai_blocked_ids
             )
         elif user_id:
             # Fallback to simple resolution (depth 1)
@@ -150,7 +152,8 @@ def format_node_tree(
             user_id=user_id,
             created_before=created_before,
             embedded_quotes=embedded_quotes,
-            included_ids=included_ids
+            included_ids=included_ids,
+            ai_blocked_ids=ai_blocked_ids
         )
 
     return result
@@ -234,6 +237,7 @@ def build_user_export_content(user, max_tokens=None, filter_ai_usage=False, crea
     # Variables for smart quote resolution (used when max_tokens is specified)
     embedded_quotes = None
     included_ids = None
+    ai_blocked_ids = None
 
     # If max_tokens is specified, use ExportQuoteResolver for smart quote handling
     if max_tokens:
@@ -251,7 +255,10 @@ def build_user_export_content(user, max_tokens=None, filter_ai_usage=False, crea
         header_footer_tokens = 100
 
         # Create resolver with adjusted token budget
-        resolver = ExportQuoteResolver(user.id, max_tokens - header_footer_tokens)
+        resolver = ExportQuoteResolver(
+            user.id, max_tokens - header_footer_tokens,
+            filter_ai_usage=filter_ai_usage
+        )
 
         # Add all nodes to the resolver
         for node in all_nodes:
@@ -266,7 +273,7 @@ def build_user_export_content(user, max_tokens=None, filter_ai_usage=False, crea
         resolver.resolve()
 
         # Get the results
-        included_ids, embedded_quotes = resolver.get_resolution_result()
+        included_ids, embedded_quotes, ai_blocked_ids = resolver.get_resolution_result()
 
         # Filter top-level nodes to only those with content in the export
         top_level_nodes = [n for n in all_top_level_nodes if n.id in included_ids]
@@ -307,7 +314,8 @@ def build_user_export_content(user, max_tokens=None, filter_ai_usage=False, crea
             user_id=user.id,
             created_before=created_before,
             embedded_quotes=embedded_quotes,
-            included_ids=included_ids
+            included_ids=included_ids,
+            ai_blocked_ids=ai_blocked_ids
         )
         export_lines.append(thread_text)
 

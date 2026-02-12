@@ -213,7 +213,7 @@ class TestExportQuoteResolver:
         resolver.add_node(5, now - timedelta(hours=4), "E" * 100)  # 25 tokens
 
         resolver.resolve()
-        included_ids, _ = resolver.get_resolution_result()
+        included_ids, _, _ = resolver.get_resolution_result()
 
         # Should include ~4 nodes (100 tokens budget, 25 each)
         assert len(included_ids) == 4
@@ -235,7 +235,7 @@ class TestExportQuoteResolver:
         resolver.add_node(2, now - timedelta(hours=1), "B content")  # ~3 tokens
 
         resolver.resolve()
-        included_ids, embedded_quotes = resolver.get_resolution_result()
+        included_ids, embedded_quotes, _ = resolver.get_resolution_result()
 
         # Both nodes should be included
         assert 1 in included_ids
@@ -271,7 +271,7 @@ class TestExportQuoteResolver:
         resolver._get_node_metadata = mock_get_metadata
 
         resolver.resolve()
-        included_ids, embedded_quotes = resolver.get_resolution_result()
+        included_ids, embedded_quotes, _ = resolver.get_resolution_result()
 
         # Node 1 and 2 should be included initially
         assert 1 in included_ids
@@ -313,7 +313,7 @@ class TestExportQuoteResolver:
         resolver._get_node_metadata = mock_get_metadata
 
         resolver.resolve()
-        included_ids, embedded_quotes = resolver.get_resolution_result()
+        included_ids, embedded_quotes, _ = resolver.get_resolution_result()
 
         # All three nodes should be marked as included (content present)
         assert 1 in included_ids
@@ -324,10 +324,11 @@ class TestExportQuoteResolver:
         """Test resolver with no nodes."""
         resolver = ExportQuoteResolver(user_id=1, max_tokens=100)
         resolver.resolve()
-        included_ids, embedded_quotes = resolver.get_resolution_result()
+        included_ids, embedded_quotes, ai_blocked_ids = resolver.get_resolution_result()
 
         assert included_ids == set()
         assert embedded_quotes == {}
+        assert ai_blocked_ids == set()
 
 
 class TestResolveQuotesForExport:
@@ -449,3 +450,175 @@ class TestIntegration:
         assert 4 in resolved_ids
         assert "D final" in result
         assert "{quote:" not in result  # All placeholders resolved
+
+
+class TestAiUsageFiltering:
+    """Test ai_usage checks on quoted content."""
+
+    @patch('backend.utils.quotes.get_quote_data')
+    def test_resolve_quotes_blocks_ai_usage_none_for_llm(self, mock_get_quote_data):
+        """Test that for_llm=True blocks quotes with ai_usage='none'."""
+        mock_get_quote_data.return_value = {
+            10: {
+                "id": 10,
+                "content": "Secret content",
+                "username": "alice",
+                "user_id": 2,
+                "ai_usage": "none",
+            }
+        }
+
+        content = "See {quote:10} for details"
+        result, resolved_ids = resolve_quotes(content, user_id=1, for_llm=True)
+
+        assert "AI usage not permitted by author" in result
+        assert "Secret content" not in result
+        assert 10 not in resolved_ids
+
+    @patch('backend.utils.quotes.get_quote_data')
+    def test_resolve_quotes_allows_ai_usage_chat_for_llm(self, mock_get_quote_data):
+        """Test that for_llm=True allows quotes with ai_usage='chat'."""
+        mock_get_quote_data.return_value = {
+            10: {
+                "id": 10,
+                "content": "Public content",
+                "username": "alice",
+                "user_id": 2,
+                "ai_usage": "chat",
+            }
+        }
+
+        content = "See {quote:10}"
+        result, resolved_ids = resolve_quotes(content, user_id=1, for_llm=True)
+
+        assert "Public content" in result
+        assert 10 in resolved_ids
+
+    @patch('backend.utils.quotes.get_quote_data')
+    def test_resolve_quotes_allows_ai_usage_none_for_human(self, mock_get_quote_data):
+        """Test that for_llm=False does NOT block ai_usage='none' (human export)."""
+        mock_get_quote_data.return_value = {
+            10: {
+                "id": 10,
+                "content": "Secret content",
+                "username": "alice",
+                "user_id": 2,
+                "ai_usage": "none",
+            }
+        }
+
+        content = "See {quote:10}"
+        result, resolved_ids = resolve_quotes(content, user_id=1, for_llm=False)
+
+        assert "Secret content" in result
+        assert "AI usage not permitted" not in result
+        assert 10 in resolved_ids
+
+    @patch('backend.utils.quotes.get_quote_data')
+    def test_resolve_quotes_blocks_nested_ai_usage_none(self, mock_get_quote_data):
+        """Test that nested quotes with ai_usage='none' are also blocked."""
+        def mock_data(ids, user_id):
+            data = {
+                10: {
+                    "id": 10, "content": "A quotes {quote:20}",
+                    "username": "alice", "user_id": 1, "ai_usage": "chat",
+                },
+                20: {
+                    "id": 20, "content": "Secret nested content",
+                    "username": "bob", "user_id": 2, "ai_usage": "none",
+                },
+            }
+            return {id: data.get(id) for id in ids}
+
+        mock_get_quote_data.side_effect = mock_data
+
+        content = "{quote:10}"
+        result, resolved_ids = resolve_quotes(
+            content, user_id=1, for_llm=True, max_depth=3
+        )
+
+        assert 10 in resolved_ids
+        assert 20 not in resolved_ids
+        assert "A quotes" in result
+        assert "Secret nested content" not in result
+        assert "AI usage not permitted by author" in result
+
+    def test_export_resolver_blocks_ai_usage_none(self):
+        """Test ExportQuoteResolver with filter_ai_usage=True skips ai_usage='none'."""
+        resolver = ExportQuoteResolver(
+            user_id=1, max_tokens=200, filter_ai_usage=True
+        )
+
+        now = datetime.utcnow()
+        # Node 1 quotes external Node 99 (ai_usage='none')
+        resolver.add_node(1, now, "A says {quote:99}")
+
+        # Mock _get_node_metadata for the external node
+        original_get_metadata = resolver._get_node_metadata
+
+        def mock_get_metadata(node_id):
+            cached = original_get_metadata(node_id)
+            if cached is not None:
+                return cached
+            if node_id == 99:
+                # Simulate a node with ai_usage='none' by adding to blocked set
+                resolver._ai_blocked_ids.add(99)
+                return None
+            return None
+
+        resolver._get_node_metadata = mock_get_metadata
+
+        resolver.resolve()
+        included_ids, embedded_quotes, ai_blocked_ids = resolver.get_resolution_result()
+
+        assert 1 in included_ids
+        assert 99 not in included_ids
+        assert 99 in ai_blocked_ids
+        # Should NOT have embedded the content
+        assert 99 not in embedded_quotes.get(1, {})
+
+    def test_export_resolver_no_filter_returns_empty_blocked(self):
+        """Test ExportQuoteResolver without filter returns empty ai_blocked_ids."""
+        resolver = ExportQuoteResolver(user_id=1, max_tokens=200)
+
+        now = datetime.utcnow()
+        resolver.add_node(1, now, "Simple content")
+
+        resolver.resolve()
+        _, _, ai_blocked_ids = resolver.get_resolution_result()
+        assert ai_blocked_ids == set()
+
+    def test_resolve_quotes_for_export_blocks_ai_blocked_ids(self):
+        """Test resolve_quotes_for_export replaces blocked quotes."""
+        embedded_quotes = {
+            1: {10: "This should not appear"}
+        }
+        ai_blocked_ids = {10}
+
+        content = "See {quote:10}"
+        result = resolve_quotes_for_export(
+            content, node_id=1, embedded_quotes=embedded_quotes,
+            user_id=1, ai_blocked_ids=ai_blocked_ids
+        )
+
+        assert "AI usage not permitted by author" in result
+        assert "This should not appear" not in result
+
+    def test_resolve_quotes_for_export_no_blocked_ids(self):
+        """Test resolve_quotes_for_export works normally without blocked IDs."""
+        mock_node = MagicMock()
+        mock_node.user.username = "alice"
+        mock_models.Node.query.get.return_value = mock_node
+
+        embedded_quotes = {
+            1: {10: "Embedded content"}
+        }
+
+        content = "See {quote:10}"
+        result = resolve_quotes_for_export(
+            content, node_id=1, embedded_quotes=embedded_quotes,
+            user_id=1, ai_blocked_ids=None
+        )
+
+        assert "Embedded content" in result
+        assert "AI usage not permitted" not in result

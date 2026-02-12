@@ -68,6 +68,7 @@ def get_quote_data(node_ids: List[int], user_id: int) -> Dict[int, Optional[dict
                 "user_id": node.user_id,
                 "created_at": node.created_at.isoformat() if node.created_at else None,
                 "node_type": node.node_type,
+                "ai_usage": node.ai_usage,
             }
         else:
             result[node_id] = None
@@ -123,6 +124,10 @@ def resolve_quotes(
                 return f"[Quote #{node_id}: not accessible]"
             else:
                 return f"[Quote not accessible: node {node_id}]"
+
+        # AI usage check: block content from nodes that don't permit AI usage
+        if for_llm and data.get("ai_usage") == "none":
+            return f"[Quote #{node_id}: AI usage not permitted by author]"
 
         # Cycle detection
         if node_id in _seen_ids:
@@ -228,24 +233,29 @@ class ExportQuoteResolver:
         resolver.add_node(node_id, created_at, content, quote_ids)
         ...
         resolver.resolve()  # Runs the resolution algorithm
-        included_ids, embedded_quotes = resolver.get_resolution_result()
+        included_ids, embedded_quotes, ai_blocked_ids = resolver.get_resolution_result()
     """
 
-    def __init__(self, user_id: int, max_tokens: int):
+    def __init__(self, user_id: int, max_tokens: int, filter_ai_usage: bool = False):
         """
         Initialize the resolver.
 
         Args:
             user_id: User ID for access checks when fetching quoted content
             max_tokens: Maximum tokens allowed in the export
+            filter_ai_usage: If True, block nodes with ai_usage='none' from
+                            being resolved (their content won't be embedded)
         """
         self.user_id = user_id
         self.max_tokens = max_tokens
+        self.filter_ai_usage = filter_ai_usage
         self.entries: List[NodeEntry] = []
         self.included_count: int = 0
         self.included_ids: Set[int] = set()
         # Tracks node IDs whose content was embedded (separate from truncation)
         self._embedded_ids: Set[int] = set()
+        # Tracks node IDs blocked due to ai_usage='none'
+        self._ai_blocked_ids: Set[int] = set()
         # Maps node_id -> {quoted_node_id -> embedded_content} for final rendering
         self.embedded_quotes: Dict[int, Dict[int, str]] = {}
         # Cache of node metadata (tokens, quote_ids) to avoid repeated DB queries
@@ -333,6 +343,11 @@ class ExportQuoteResolver:
         if not node or not can_user_access_node(node, self.user_id):
             return None
 
+        # Block nodes with ai_usage='none' when filtering is enabled
+        if self.filter_ai_usage and node.ai_usage == 'none':
+            self._ai_blocked_ids.add(node_id)
+            return None
+
         content = node.get_content()
         metadata = {
             'tokens': approximate_token_count(content),
@@ -417,7 +432,7 @@ class ExportQuoteResolver:
         if iteration >= max_iterations:
             logger.warning(f"Quote resolution hit max iterations ({max_iterations})")
 
-    def get_resolution_result(self) -> Tuple[Set[int], Dict[int, Dict[int, str]]]:
+    def get_resolution_result(self) -> Tuple[Set[int], Dict[int, Dict[int, str]], Set[int]]:
         """
         Get the resolution result.
 
@@ -425,8 +440,9 @@ class ExportQuoteResolver:
             Tuple of:
             - Set of node IDs that should be included in the export
             - Dict mapping node_id -> {quoted_id -> content} for embedded quotes
+            - Set of node IDs blocked due to ai_usage='none'
         """
-        return self.included_ids, self.embedded_quotes
+        return self.included_ids, self.embedded_quotes, self._ai_blocked_ids
 
     def get_included_entries(self) -> List[NodeEntry]:
         """
@@ -443,6 +459,7 @@ def resolve_quotes_for_export(
     node_id: int,
     embedded_quotes: Dict[int, Dict[int, str]],
     user_id: int,
+    ai_blocked_ids: Optional[Set[int]] = None,
     _resolving: Optional[Set[int]] = None
 ) -> str:
     """
@@ -460,6 +477,8 @@ def resolve_quotes_for_export(
         embedded_quotes: Dict from ExportQuoteResolver mapping
                         node_id -> {quoted_id -> content}
         user_id: User ID for formatting
+        ai_blocked_ids: Optional set of node IDs blocked due to ai_usage='none'.
+                       Quotes referencing these nodes show a blocked message.
         _resolving: Internal - tracks IDs being resolved to prevent infinite loops
 
     Returns:
@@ -471,6 +490,9 @@ def resolve_quotes_for_export(
     if _resolving is None:
         _resolving = set()
 
+    if ai_blocked_ids is None:
+        ai_blocked_ids = set()
+
     node_embeds = embedded_quotes.get(node_id, {})
 
     def replace_quote(match):
@@ -479,6 +501,10 @@ def resolve_quotes_for_export(
         # Prevent infinite loops
         if quoted_id in _resolving:
             return f'[Circular reference: node #{quoted_id}]'
+
+        # Block content from nodes that don't permit AI usage
+        if quoted_id in ai_blocked_ids:
+            return f'[Quote #{quoted_id}: AI usage not permitted by author]'
 
         if quoted_id in node_embeds:
             # Embedded quote - include the content
@@ -492,6 +518,7 @@ def resolve_quotes_for_export(
                     node_id,  # Use same node_id to access same embeds dict
                     embedded_quotes,
                     user_id,
+                    ai_blocked_ids=ai_blocked_ids,
                     _resolving=new_resolving
                 )
 
