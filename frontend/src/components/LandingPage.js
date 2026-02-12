@@ -526,6 +526,23 @@ function LandingPage() {
               <span className="loore-cta-arrow">→</span>
             </a>
           </FadeSection>
+          <FadeSection delay={0.25}>
+            <a href="/why-loore" style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "0.6rem",
+              marginTop: "1.5rem",
+              fontFamily: "var(--sans)",
+              fontWeight: 300,
+              fontSize: "0.92rem",
+              padding: "12px 0",
+              color: "var(--text-muted)",
+              textDecoration: "none",
+              borderBottom: "1px solid var(--border)",
+            }}>
+              Why Loore &rarr;
+            </a>
+          </FadeSection>
         </div>
 
         <footer className="loore-footer">

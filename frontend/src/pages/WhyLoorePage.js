@@ -224,7 +224,7 @@ export default function WhyLoorePage() {
           </p>
         </Fade>
         <Fade delay={0.1}>
-          <div style={{ display: "flex", gap: "1.5rem", justifyContent: "center", flexWrap: "wrap" }}>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "1.5rem" }}>
             <Link to="/login?returnUrl=%2F" style={{
               display: "inline-flex", alignItems: "center", gap: "0.6rem",
               fontFamily: "var(--sans)", fontWeight: 400, fontSize: "0.92rem",
