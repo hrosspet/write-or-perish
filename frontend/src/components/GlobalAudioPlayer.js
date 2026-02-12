@@ -53,7 +53,6 @@ const GlobalAudioPlayer = () => {
       display: 'flex',
       alignItems: 'center',
       gap: '12px',
-      marginLeft: 'auto',
     }}>
       {/* Title */}
       <div style={{
