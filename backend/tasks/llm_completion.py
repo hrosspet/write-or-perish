@@ -8,7 +8,7 @@ from datetime import datetime
 from backend.celery_app import celery, flask_app
 from backend.models import Node, User, UserProfile, APICostLog
 from backend.extensions import db
-from backend.llm_providers import LLMProvider
+from backend.llm_providers import LLMProvider, PromptTooLongError
 from backend.utils.tokens import approximate_token_count, calculate_max_export_tokens
 from backend.utils.quotes import resolve_quotes, has_quotes
 from backend.utils.api_keys import determine_api_key_type, get_api_keys_for_usage
@@ -150,59 +150,6 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 max_export_tokens = calculate_max_export_tokens(model_id, reserved_tokens=conversation_tokens)
                 logger.info(f"Export token budget: model={model_id}, context_window={context_window}, conversation_tokens={conversation_tokens}, max_export_tokens={max_export_tokens}")
 
-                user = User.query.get(user_id)
-                if user and max_export_tokens > 0:
-                    # Use the timestamp of the node containing {user_export} as cutoff
-                    # to only include archive data created before that node
-                    created_before = export_node.created_at if export_node else None
-                    user_export_content = build_user_export_content(
-                        user,
-                        max_tokens=max_export_tokens,
-                        filter_ai_usage=True,
-                        created_before=created_before
-                    )
-                    logger.info(f"Built user export for {user_id}: {len(user_export_content or '')} chars, ~{approximate_token_count(user_export_content or '')} tokens, cutoff={created_before}")
-
-            messages = []
-            for node in node_chain:
-                author = node.user.username if node.user else "Unknown"
-                is_llm_node = node.node_type == "llm" or (node.llm_model is not None)
-                node_content = node.get_content()
-
-                if is_llm_node:
-                    role = "assistant"
-                    message_text = node_content
-                else:
-                    role = "user"
-                    message_text = f"author {author}: {node_content}"
-                    # Replace {user_export} placeholder if present
-                    if user_export_content and USER_EXPORT_PLACEHOLDER in message_text:
-                        message_text = message_text.replace(
-                            USER_EXPORT_PLACEHOLDER,
-                            user_export_content
-                        )
-                    # Replace {user_profile} placeholder if present
-                    if user_profile_content and USER_PROFILE_PLACEHOLDER in message_text:
-                        message_text = message_text.replace(
-                            USER_PROFILE_PLACEHOLDER,
-                            user_profile_content
-                        )
-                    # Resolve {quote:ID} placeholders if present
-                    if needs_quotes and has_quotes(message_text):
-                        message_text, resolved_ids = resolve_quotes(message_text, user_id, for_llm=True)
-                        if resolved_ids:
-                            logger.info(f"Resolved quotes for node IDs: {resolved_ids}")
-
-                messages.append({
-                    "role": role,
-                    "content": [{"type": "text", "text": message_text}]
-                })
-
-            # Step 3: Call LLM API
-            self.update_state(state='PROGRESS', meta={'progress': 40, 'status': 'Generating response'})
-            llm_node.llm_task_progress = 40
-            db.session.commit()
-
             # Determine which API key to use based on ai_usage settings
             key_type = determine_api_key_type(node_chain, logger=logger)
             api_keys = get_api_keys_for_usage(flask_app.config, key_type)
@@ -211,17 +158,87 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             provider = model_config["provider"]
             api_model = model_config["api_model"]
 
-            # Log total context being sent
-            total_content = "".join(m["content"][0]["text"] for m in messages if m.get("content"))
-            estimated_tokens = approximate_token_count(total_content)
-            logger.info(f"Calling LLM API: model_id={model_id}, api_model={api_model}, provider={provider}, key_type={key_type}, estimated_tokens={estimated_tokens}, total_chars={len(total_content)}")
-
             if provider == "anthropic" and not api_keys["anthropic"]:
                 raise ValueError("Anthropic API key is not configured.")
             elif provider == "openai" and not api_keys["openai"]:
                 raise ValueError("OpenAI API key is not configured.")
 
-            response = LLMProvider.get_completion(model_id, messages, api_keys)
+            MAX_RETRIES = 3
+            for attempt in range(MAX_RETRIES + 1):
+                if needs_export:
+                    user = User.query.get(user_id)
+                    if user and max_export_tokens > 0:
+                        # Use the timestamp of the node containing {user_export} as cutoff
+                        # to only include archive data created before that node
+                        created_before = export_node.created_at if export_node else None
+                        user_export_content = build_user_export_content(
+                            user,
+                            max_tokens=max_export_tokens,
+                            filter_ai_usage=True,
+                            created_before=created_before
+                        )
+                        logger.info(f"Built user export for {user_id}: {len(user_export_content or '')} chars, ~{approximate_token_count(user_export_content or '')} tokens, cutoff={created_before} (attempt {attempt + 1})")
+
+                messages = []
+                for node in node_chain:
+                    author = node.user.username if node.user else "Unknown"
+                    is_llm_node = node.node_type == "llm" or (node.llm_model is not None)
+                    node_content = node.get_content()
+
+                    if is_llm_node:
+                        role = "assistant"
+                        message_text = node_content
+                    else:
+                        role = "user"
+                        message_text = f"author {author}: {node_content}"
+                        # Replace {user_export} placeholder if present
+                        if user_export_content and USER_EXPORT_PLACEHOLDER in message_text:
+                            message_text = message_text.replace(
+                                USER_EXPORT_PLACEHOLDER,
+                                user_export_content
+                            )
+                        # Replace {user_profile} placeholder if present
+                        if user_profile_content and USER_PROFILE_PLACEHOLDER in message_text:
+                            message_text = message_text.replace(
+                                USER_PROFILE_PLACEHOLDER,
+                                user_profile_content
+                            )
+                        # Resolve {quote:ID} placeholders if present
+                        if needs_quotes and has_quotes(message_text):
+                            message_text, resolved_ids = resolve_quotes(message_text, user_id, for_llm=True)
+                            if resolved_ids:
+                                logger.info(f"Resolved quotes for node IDs: {resolved_ids}")
+
+                    messages.append({
+                        "role": role,
+                        "content": [{"type": "text", "text": message_text}]
+                    })
+
+                # Step 3: Call LLM API
+                self.update_state(state='PROGRESS', meta={'progress': 40, 'status': 'Generating response'})
+                llm_node.llm_task_progress = 40
+                db.session.commit()
+
+                # Log total context being sent
+                total_content = "".join(m["content"][0]["text"] for m in messages if m.get("content"))
+                estimated_tokens = approximate_token_count(total_content)
+                logger.info(f"Calling LLM API: model_id={model_id}, api_model={api_model}, provider={provider}, key_type={key_type}, estimated_tokens={estimated_tokens}, total_chars={len(total_content)}")
+
+                try:
+                    response = LLMProvider.get_completion(model_id, messages, api_keys)
+                    break  # Success
+                except PromptTooLongError as e:
+                    if attempt == MAX_RETRIES or not needs_export:
+                        # Can't reduce further or no export to shrink
+                        raise
+                    # Use the actual/max ratio from the API to shrink the export precisely
+                    reduction = e.max_tokens / e.actual_tokens * 0.95
+                    max_export_tokens = int(max_export_tokens * reduction)
+                    logger.warning(
+                        f"Prompt too long ({e.actual_tokens} > {e.max_tokens}), "
+                        f"retrying with max_export_tokens={max_export_tokens} "
+                        f"(attempt {attempt + 2}/{MAX_RETRIES + 1})"
+                    )
             llm_text = response["content"]
             total_tokens = response["total_tokens"]
             input_tokens = response.get("input_tokens", 0)

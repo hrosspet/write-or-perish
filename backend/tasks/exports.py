@@ -8,7 +8,7 @@ import os
 from backend.celery_app import celery, flask_app
 from backend.models import User, UserProfile, APICostLog
 from backend.extensions import db
-from backend.llm_providers import LLMProvider
+from backend.llm_providers import LLMProvider, PromptTooLongError
 from backend.utils.tokens import approximate_token_count, calculate_max_export_tokens
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import calculate_llm_cost_microdollars
@@ -72,43 +72,59 @@ def generate_user_profile(self, user_id: int, model_id: str):
 
             # Calculate max tokens for export based on model's context window
             prompt_tokens = approximate_token_count(prompt_template)
-            MAX_EXPORT_TOKENS = calculate_max_export_tokens(model_id, reserved_tokens=prompt_tokens)
-
-            # Filter by AI usage to only include nodes where ai_usage is 'chat' or 'train'
-            user_export = build_user_export_content(user, max_tokens=MAX_EXPORT_TOKENS, filter_ai_usage=True)
-
-            if not user_export:
-                raise ValueError("No writing found to analyze")
-
-            logger.info(f"User export built for user {user_id}, length: {len(user_export)} characters")
-
-            # Step 2: Build final prompt (45% progress)
-            self.update_state(state='PROGRESS', meta={'progress': 45, 'status': 'Preparing prompt'})
-
-            # Replace placeholder with user export
-            final_prompt = prompt_template.replace("{user_export}", user_export)
-
-            # Step 3: Build messages (50% progress)
-            self.update_state(state='PROGRESS', meta={'progress': 50, 'status': 'Building context'})
-
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": final_prompt
-                        }
-                    ]
-                }
-            ]
-
-            # Step 4: Call LLM API (60% -> 90% progress)
-            self.update_state(state='PROGRESS', meta={'progress': 60, 'status': 'Generating profile'})
+            max_export_tokens = calculate_max_export_tokens(model_id, reserved_tokens=prompt_tokens)
 
             api_keys = get_api_keys_for_usage(flask_app.config, 'chat')
 
-            response = LLMProvider.get_completion(model_id, messages, api_keys)
+            MAX_RETRIES = 3
+            for attempt in range(MAX_RETRIES + 1):
+                # Filter by AI usage to only include nodes where ai_usage is 'chat' or 'train'
+                user_export = build_user_export_content(user, max_tokens=max_export_tokens, filter_ai_usage=True)
+
+                if not user_export:
+                    raise ValueError("No writing found to analyze")
+
+                logger.info(f"User export built for user {user_id}, length: {len(user_export)} characters (attempt {attempt + 1})")
+
+                # Step 2: Build final prompt (45% progress)
+                self.update_state(state='PROGRESS', meta={'progress': 45, 'status': 'Preparing prompt'})
+
+                # Replace placeholder with user export
+                final_prompt = prompt_template.replace("{user_export}", user_export)
+
+                # Step 3: Build messages (50% progress)
+                self.update_state(state='PROGRESS', meta={'progress': 50, 'status': 'Building context'})
+
+                messages = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": final_prompt
+                            }
+                        ]
+                    }
+                ]
+
+                # Step 4: Call LLM API (60% -> 90% progress)
+                self.update_state(state='PROGRESS', meta={'progress': 60, 'status': 'Generating profile'})
+
+                try:
+                    response = LLMProvider.get_completion(model_id, messages, api_keys)
+                    break  # Success
+                except PromptTooLongError as e:
+                    if attempt == MAX_RETRIES:
+                        raise
+                    # Use the actual/max ratio from the API to shrink the export precisely
+                    reduction = e.max_tokens / e.actual_tokens * 0.95
+                    max_export_tokens = int(max_export_tokens * reduction)
+                    logger.warning(
+                        f"Prompt too long ({e.actual_tokens} > {e.max_tokens}), "
+                        f"retrying with max_export_tokens={max_export_tokens} "
+                        f"(attempt {attempt + 2}/{MAX_RETRIES + 1})"
+                    )
+
             profile_text = response["content"]
             total_tokens = response["total_tokens"]
             input_tokens = response.get("input_tokens", 0)

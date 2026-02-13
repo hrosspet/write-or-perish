@@ -5,12 +5,27 @@ This module provides a unified interface for calling different LLM providers
 (OpenAI and Anthropic) with automatic format conversion.
 """
 import logging
+import re
 
+import anthropic
+import openai
 from anthropic import Anthropic
 from openai import OpenAI
 from flask import current_app
 
 logger = logging.getLogger(__name__)
+
+
+class PromptTooLongError(Exception):
+    """Raised when the prompt exceeds the model's context window."""
+
+    def __init__(self, actual_tokens: int, max_tokens: int, original_error=None):
+        self.actual_tokens = actual_tokens
+        self.max_tokens = max_tokens
+        self.original_error = original_error
+        super().__init__(
+            f"Prompt too long: {actual_tokens} tokens > {max_tokens} maximum"
+        )
 
 
 class LLMProvider:
@@ -62,12 +77,25 @@ class LLMProvider:
             Dict with content and total_tokens
         """
         client = OpenAI(api_key=api_key)
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=1,
-            max_completion_tokens=10000,
-        )
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=1,
+                max_completion_tokens=10000,
+            )
+        except openai.BadRequestError as e:
+            error_msg = str(e)
+            # e.g. "maximum context length is 128000 tokens. However, your messages resulted in 130000 tokens"
+            match = re.search(
+                r'maximum context length is (\d+) tokens.*?resulted in (\d+) tokens',
+                error_msg
+            )
+            if match:
+                max_tok = int(match.group(1))
+                actual_tok = int(match.group(2))
+                raise PromptTooLongError(actual_tok, max_tok, e) from e
+            raise
         return {
             "content": response.choices[0].message.content,
             "total_tokens": response.usage.total_tokens,
@@ -127,12 +155,25 @@ class LLMProvider:
         total_input_chars = sum(len(m.get("content", "")) for m in anthropic_messages)
         logger.info(f"Anthropic API call: model={model}, num_messages={len(anthropic_messages)}, total_input_chars={total_input_chars}, max_tokens={max_tokens}")
 
-        response = client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            system=system_param,
-            messages=anthropic_messages
-        )
+        try:
+            response = client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                system=system_param,
+                messages=anthropic_messages
+            )
+        except anthropic.BadRequestError as e:
+            error_msg = str(e)
+            # e.g. "prompt is too long: 203565 tokens > 200000 maximum"
+            match = re.search(
+                r'prompt is too long: (\d+) tokens > (\d+) maximum',
+                error_msg
+            )
+            if match:
+                actual_tok = int(match.group(1))
+                max_tok = int(match.group(2))
+                raise PromptTooLongError(actual_tok, max_tok, e) from e
+            raise
 
         # Extract text content from response
         content = ""
