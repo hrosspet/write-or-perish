@@ -74,7 +74,7 @@ def _serialize_node_for_list(node):
         "username": node.user.username if node.user else "Unknown",
         "human_owner_username": human_owner_username,
         "llm_model": node.llm_model,
-        "has_audio": bool(node.audio_original_url or node.audio_tts_url),
+        "has_original_audio": bool(node.audio_original_url or node.streaming_transcription),
     }
 
 

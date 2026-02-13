@@ -590,7 +590,7 @@ def get_node(node_id):
         # Pin-to-profile
         "pinned_at": node.pinned_at.isoformat() if node.pinned_at else None,
         "llm_model": node.llm_model,
-        "has_audio": bool(node.audio_original_url or node.audio_tts_url),
+        "has_original_audio": bool(node.audio_original_url or node.streaming_transcription),
     }
     return jsonify(node_data), 200
 

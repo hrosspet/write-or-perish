@@ -2,8 +2,8 @@ import React from 'react';
 import NodeFooter from './NodeFooter';
 
 const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => {
-  // Detect voice notes via backend-provided has_audio flag
-  const isVoiceNote = !!node.has_audio;
+  // Detect voice notes via backend-provided has_original_audio flag
+  const isVoiceNote = !!node.has_original_audio;
   const isPinned = !!node.pinned_at;
 
   // Use full content if available; otherwise use preview.
