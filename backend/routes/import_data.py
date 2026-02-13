@@ -1,6 +1,6 @@
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
-from backend.models import Node
+from backend.models import Node, User
 from backend.extensions import db
 from datetime import datetime
 import zipfile
@@ -574,6 +574,15 @@ def confirm_claude_import():
         return jsonify({"error": "No conversations provided"}), 400
 
     try:
+        # Get or create the synthetic user for claude-web nodes
+        llm_user = User.query.filter_by(username="claude-web").first()
+        if not llm_user:
+            llm_user = User(
+                twitter_id="llm-claude-web", username="claude-web"
+            )
+            db.session.add(llm_user)
+            db.session.flush()
+
         nodes_created = 0
         thread_count = 0
 
@@ -620,7 +629,7 @@ def confirm_claude_import():
                         pass
 
                 node = Node(
-                    user_id=current_user.id,
+                    user_id=llm_user.id if is_assistant else current_user.id,
                     parent_id=parent_node.id if parent_node else None,
                     node_type="llm" if is_assistant else "user",
                     llm_model="claude-web" if is_assistant else None,

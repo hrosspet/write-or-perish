@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify, current_app
 from flask_login import login_required, current_user
-from backend.models import Node, NodeVersion
+from backend.models import Node, NodeVersion, User
 from backend.extensions import db
 from datetime import datetime
 from openai import OpenAI
@@ -328,7 +328,7 @@ def serialize_node_recursive(n, user_id=None):
         "created_at": n.created_at.isoformat(),
         "updated_at": n.updated_at.isoformat(),
         "username": n.user.username if n.user else "Unknown",
-        # You might also want to pass the descendant count along for display.
+        "llm_model": n.llm_model,
         "descendant_count": n._descendant_count,
         "children": [serialize_node_recursive(child, user_id) for child in sorted_children]
     }
@@ -556,6 +556,7 @@ def get_node(node_id):
             ancestors.insert(0, {
                 "id": current.id,
                 "username": current.user.username if current.user else "Unknown",
+                "llm_model": current.llm_model,
                 "preview": make_preview(current.get_content()),
                 "node_type": current.node_type,
                 "child_count": len(current.children),

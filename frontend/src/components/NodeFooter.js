@@ -6,9 +6,10 @@ import { useUser } from '../contexts/UserContext';
 const NodeFooter = ({ username, createdAt, childrenCount, humanOwnerUsername, llmModel, children }) => {
   const { user } = useUser();
 
-  // "via" display: show "humanOwner via model" for LLM nodes
-  const displayUsername = humanOwnerUsername && llmModel
-    ? `${humanOwnerUsername} via ${llmModel}`
+  // "via" display: show "humanOwner via model" for LLM nodes,
+  // or just the model name when human owner is not provided
+  const displayUsername = llmModel
+    ? (humanOwnerUsername ? `${humanOwnerUsername} via ${llmModel}` : llmModel)
     : username;
 
   // Link goes to human owner's dashboard for LLM nodes
