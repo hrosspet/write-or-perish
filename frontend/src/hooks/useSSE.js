@@ -419,15 +419,17 @@ export function useDraftTranscriptionSSE(sessionId, options = {}) {
 /**
  * useTTSStreamSSE - Specialized hook for streaming TTS playback updates.
  *
- * @param {number} nodeId - Node ID to subscribe to
+ * @param {number} entityId - Node or Profile ID to subscribe to
  * @param {Object} options
  * @param {boolean} options.enabled - Whether to connect
+ * @param {string} options.entityType - 'node' (default) or 'profile'
  * @param {Function} options.onChunkReady - Called when an audio chunk is ready
  * @param {Function} options.onAllComplete - Called when all chunks are done
  */
-export function useTTSStreamSSE(nodeId, options = {}) {
+export function useTTSStreamSSE(entityId, options = {}) {
   const {
     enabled = false,
+    entityType = 'node',
     onChunkReady = null,
     onAllComplete = null,
   } = options;
@@ -447,7 +449,10 @@ export function useTTSStreamSSE(nodeId, options = {}) {
 
   // Use REACT_APP_BACKEND_URL for SSE since EventSource doesn't go through CRA proxy
   const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
-  const url = nodeId ? `${backendUrl}/api/sse/nodes/${nodeId}/tts-stream` : null;
+  const ssePathSegment = entityType === 'profile'
+    ? `profiles/${entityId}`
+    : `nodes/${entityId}`;
+  const url = entityId ? `${backendUrl}/api/sse/${ssePathSegment}/tts-stream` : null;
 
   // Memoize eventHandlers to prevent unnecessary reconnections
   // Handlers use refs internally to always call latest callbacks

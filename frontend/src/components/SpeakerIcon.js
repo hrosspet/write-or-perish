@@ -47,7 +47,7 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage }) => {
   const baseTitle = isNode ? `Node ${id}` : `Profile ${id}`;
   const fullTitle = header ? `${baseTitle}: ${header}` : baseTitle;
 
-  // SSE streaming for TTS chunks - only for nodes
+  // SSE streaming for TTS chunks
   const handleChunkReady = useCallback((data) => {
     const chunkUrl = data.audio_url.startsWith('http')
       ? data.audio_url
@@ -61,14 +61,14 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage }) => {
       setLoading(false);
       loadAudioQueue(
         [chunkUrl],
-        { title: fullTitle, id, type: 'node' },
+        { title: fullTitle, id, type: isNode ? 'node' : 'profile' },
         chunkDuration != null ? [chunkDuration] : null
       );
     } else {
       // Subsequent chunks: append to the active queue
       appendChunkToQueue(chunkUrl, chunkDuration);
     }
-  }, [fullTitle, id, loadAudioQueue, appendChunkToQueue]);
+  }, [fullTitle, id, isNode, loadAudioQueue, appendChunkToQueue]);
 
   const handleAllComplete = useCallback((data) => {
     setSseActive(false);
@@ -84,8 +84,9 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage }) => {
     }
   }, [setGeneratingTTS]);
 
-  const { disconnect: disconnectSSE } = useTTSStreamSSE(isNode ? nodeId : null, {
+  const { disconnect: disconnectSSE } = useTTSStreamSSE(id, {
     enabled: sseActive,
+    entityType: isNode ? 'node' : 'profile',
     onChunkReady: handleChunkReady,
     onAllComplete: handleAllComplete,
   });
@@ -255,16 +256,11 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage }) => {
         // Start async TTS generation
         await api.post(`${baseUrl}/tts`);
 
-        if (isNode) {
-          // Use SSE for streaming playback (nodes only)
-          sseChunkCountRef.current = 0;
-          setSseActive(true);
-          setGeneratingTTS(true);
-          // loading stays true until first chunk arrives
-        } else {
-          // Fall back to polling for profiles
-          setTtsTaskActive(true);
-        }
+        // Use SSE for streaming playback (nodes and profiles)
+        sseChunkCountRef.current = 0;
+        setSseActive(true);
+        setGeneratingTTS(true);
+        // loading stays true until first chunk arrives
         return;
       }
 
