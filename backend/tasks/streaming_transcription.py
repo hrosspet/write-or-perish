@@ -14,12 +14,13 @@ import shutil
 from datetime import datetime
 
 from backend.celery_app import celery, flask_app
-from backend.models import Node, NodeTranscriptChunk, Draft
+from backend.models import Node, NodeTranscriptChunk, Draft, APICostLog
 from backend.extensions import db
-from backend.utils.audio_processing import compress_audio_if_needed
+from backend.utils.audio_processing import compress_audio_if_needed, get_audio_duration
 from backend.utils.webm_utils import fix_last_chunk_duration, is_ffmpeg_available
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.encryption import decrypt_file_to_temp
+from backend.utils.cost import calculate_audio_cost_microdollars
 
 logger = get_task_logger(__name__)
 
@@ -102,6 +103,9 @@ def transcribe_chunk(self, node_id: int, chunk_index: int, chunk_path: str):
             # Compress if needed (webm -> mp3 for better compatibility)
             processed_path = compress_audio_if_needed(file_path, logger)
 
+            # Measure audio duration for cost tracking
+            chunk_duration_sec = get_audio_duration(processed_path, logger)
+
             try:
                 # Transcribe the chunk
                 with open(processed_path, "rb") as audio_file:
@@ -136,10 +140,24 @@ def transcribe_chunk(self, node_id: int, chunk_index: int, chunk_path: str):
             chunk_record.set_text(transcript)
             chunk_record.status = 'completed'
             chunk_record.completed_at = datetime.utcnow()
+
+            # Log transcription cost
+            node = Node.query.get(node_id)
+            if node and chunk_duration_sec > 0:
+                transcription_cost = calculate_audio_cost_microdollars(
+                    "gpt-4o-transcribe", chunk_duration_sec
+                )
+                cost_log = APICostLog(
+                    user_id=node.user_id,
+                    model_id="gpt-4o-transcribe",
+                    request_type="transcription",
+                    audio_duration_seconds=chunk_duration_sec,
+                    cost_microdollars=transcription_cost,
+                )
+                db.session.add(cost_log)
             db.session.commit()
 
             # Update node's completed chunk count
-            node = Node.query.get(node_id)
             if node:
                 completed_count = NodeTranscriptChunk.query.filter_by(
                     node_id=node_id,
@@ -390,6 +408,9 @@ def transcribe_draft_chunk(self, session_id: str, chunk_index: int, chunk_path: 
             # Compress if needed (webm -> mp3 for better compatibility)
             processed_path = compress_audio_if_needed(file_path, logger)
 
+            # Measure audio duration for cost tracking
+            draft_chunk_duration_sec = get_audio_duration(processed_path, logger)
+
             try:
                 # Transcribe the chunk
                 with open(processed_path, "rb") as audio_file:
@@ -424,11 +445,27 @@ def transcribe_draft_chunk(self, session_id: str, chunk_index: int, chunk_path: 
             chunk_record.set_text(transcript)
             chunk_record.status = 'completed'
             chunk_record.completed_at = datetime.utcnow()
+
+            # Log transcription cost
+            draft = Draft.query.filter_by(session_id=session_id).first()
+            if draft and draft_chunk_duration_sec > 0:
+                transcription_cost = calculate_audio_cost_microdollars(
+                    "gpt-4o-transcribe", draft_chunk_duration_sec
+                )
+                cost_log = APICostLog(
+                    user_id=draft.user_id,
+                    model_id="gpt-4o-transcribe",
+                    request_type="transcription",
+                    audio_duration_seconds=draft_chunk_duration_sec,
+                    cost_microdollars=transcription_cost,
+                )
+                db.session.add(cost_log)
             db.session.commit()
 
             # Update draft content with the new chunk
             # We append to content in order, but need to handle out-of-order completion
-            draft = Draft.query.filter_by(session_id=session_id).first()
+            if not draft:
+                draft = Draft.query.filter_by(session_id=session_id).first()
             if draft:
                 # Get all completed chunks in order
                 completed_chunks = NodeTranscriptChunk.query.filter_by(

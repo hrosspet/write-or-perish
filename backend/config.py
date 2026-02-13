@@ -25,6 +25,13 @@ class Config:
     # Buffer for token estimation error (percentage of context window)
     PROFILE_CONTEXT_BUFFER_PERCENT = 0.14  # 14%
 
+    # Pricing version — bump and update date whenever prices change.
+    # Sources:
+    #   Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
+    #   OpenAI:    https://developers.openai.com/api/docs/pricing
+    PRICING_VERSION = "1"
+    PRICING_UPDATED_AT = "2026-02-13"
+
     # Supported models configuration (single source of truth for all model metadata)
     SUPPORTED_MODELS = {
         "gpt-5": {
@@ -32,43 +39,64 @@ class Config:
             "api_model": "gpt-5",
             "display_name": "GPT-5",
             "context_window": 128000,
+            "input_price_per_mtok": 1.25,
+            "output_price_per_mtok": 10.00,
         },
         "gpt-5.1": {
             "provider": "openai",
             "api_model": "gpt-5.1",
             "display_name": "GPT-5.1",
             "context_window": 272000,
+            "input_price_per_mtok": 1.25,
+            "output_price_per_mtok": 10.00,
         },
         "gpt-5.2": {
             "provider": "openai",
             "api_model": "gpt-5.2",
             "display_name": "GPT-5.2",
             "context_window": 272000,  # Temporarily 272k until OpenAI fixes their API limit (should be 400k)
+            "input_price_per_mtok": 1.75,
+            "output_price_per_mtok": 14.00,
         },
         "claude-sonnet-4.5": {
             "provider": "anthropic",
             "api_model": "claude-sonnet-4-5-20250929",
             "display_name": "Claude 4.5 Sonnet",
             "context_window": 200000,  # Temporarily 200k due to API tier limit (should be 1M with higher tier)
+            "input_price_per_mtok": 3.00,
+            "output_price_per_mtok": 15.00,
         },
         "claude-opus-4.5": {
             "provider": "anthropic",
             "api_model": "claude-opus-4-5-20251101",
             "display_name": "Claude 4.5 Opus",
             "context_window": 200000,  # Temporarily 200k due to API tier limit (should be 1M with higher tier)
+            "input_price_per_mtok": 5.00,
+            "output_price_per_mtok": 25.00,
         },
         "claude-opus-4.6": {
             "provider": "anthropic",
             "api_model": "claude-opus-4-6",
             "display_name": "Claude 4.6 Opus",
             "context_window": 200000,  # Temporarily 200k due to API tier limit (should be 1M with higher tier)
+            "input_price_per_mtok": 5.00,
+            "output_price_per_mtok": 25.00,
         },
         "claude-opus-3": {
             "provider": "anthropic",
             "api_model": "claude-3-opus-20240229",
             "display_name": "Claude 3 Opus",
             "context_window": 200000,
+            "input_price_per_mtok": 15.00,
+            "output_price_per_mtok": 75.00,
         },
+    }
+
+    # Audio model pricing (per-minute approximations; APIs don't return token counts)
+    # Version and date shared with PRICING_VERSION / PRICING_UPDATED_AT above.
+    AUDIO_PRICING = {
+        "gpt-4o-mini-tts": {"price_per_minute_usd": 0.015},
+        "gpt-4o-transcribe": {"price_per_minute_usd": 0.006},
     }
 
     # Magic link email authentication (SMTP)

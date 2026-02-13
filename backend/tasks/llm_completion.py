@@ -6,12 +6,13 @@ from celery.utils.log import get_task_logger
 from datetime import datetime
 
 from backend.celery_app import celery, flask_app
-from backend.models import Node, User, UserProfile
+from backend.models import Node, User, UserProfile, APICostLog
 from backend.extensions import db
 from backend.llm_providers import LLMProvider
 from backend.utils.tokens import approximate_token_count, calculate_max_export_tokens
 from backend.utils.quotes import resolve_quotes, has_quotes
 from backend.utils.api_keys import determine_api_key_type, get_api_keys_for_usage
+from backend.utils.cost import calculate_llm_cost_microdollars
 
 logger = get_task_logger(__name__)
 
@@ -223,22 +224,26 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             response = LLMProvider.get_completion(model_id, messages, api_keys)
             llm_text = response["content"]
             total_tokens = response["total_tokens"]
+            input_tokens = response.get("input_tokens", 0)
+            output_tokens = response.get("output_tokens", 0)
 
             logger.info(f"LLM response generated: {len(llm_text)} chars, {total_tokens} tokens")
 
-            # Step 4: Redistribute tokens
-            self.update_state(state='PROGRESS', meta={'progress': 90, 'status': 'Redistributing tokens'})
+            # Step 4: Log API cost
+            self.update_state(state='PROGRESS', meta={'progress': 90, 'status': 'Logging cost'})
             llm_node.llm_task_progress = 90
             db.session.commit()
 
-            contributing_nodes = [n for n in node_chain if n.node_type != "llm"]
-            if contributing_nodes and total_tokens:
-                total_weight = sum(approximate_token_count(n.get_content()) for n in contributing_nodes)
-                for n in contributing_nodes:
-                    weight = approximate_token_count(n.get_content())
-                    share = int(round(total_tokens * (weight / total_weight))) if total_weight > 0 else 0
-                    n.distributed_tokens += share
-                    db.session.add(n)
+            cost = calculate_llm_cost_microdollars(model_id, input_tokens, output_tokens)
+            cost_log = APICostLog(
+                user_id=user_id,
+                model_id=model_id,
+                request_type="conversation",
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost_microdollars=cost,
+            )
+            db.session.add(cost_log)
 
             # Step 5: Update the placeholder LLM node with the response
             self.update_state(state='PROGRESS', meta={'progress': 95, 'status': 'Finalizing'})

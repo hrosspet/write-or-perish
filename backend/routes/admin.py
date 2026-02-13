@@ -3,8 +3,9 @@ from datetime import datetime, timedelta
 from functools import wraps
 from flask import Blueprint, request, jsonify, abort, current_app
 from flask_login import login_required, current_user
-from backend.models import User
+from backend.models import User, APICostLog
 from backend.extensions import db
+from sqlalchemy import func
 from backend.utils.magic_link import generate_magic_link_token, hash_token
 from backend.utils.email import send_welcome_email
 
@@ -26,8 +27,17 @@ def admin_required(func):
 @admin_required
 def list_users():
     users = User.query.order_by(User.created_at.desc()).all()
+
+    # Aggregate total spending per user in a single query
+    spending_rows = db.session.query(
+        APICostLog.user_id,
+        func.sum(APICostLog.cost_microdollars).label("total_microdollars")
+    ).group_by(APICostLog.user_id).all()
+    spending_map = {row.user_id: row.total_microdollars for row in spending_rows}
+
     user_list = []
     for user in users:
+        total_microdollars = spending_map.get(user.id, 0) or 0
         user_list.append({
             "id": user.id,
             "twitter_id": user.twitter_id,
@@ -38,7 +48,8 @@ def list_users():
             "approved": user.approved,
             "email": user.email,
             "plan": user.plan,
-            "deactivated_at": user.deactivated_at.isoformat() if user.deactivated_at else None
+            "deactivated_at": user.deactivated_at.isoformat() if user.deactivated_at else None,
+            "total_spending_usd": total_microdollars / 1_000_000,
         })
     return jsonify({
         "users": user_list,

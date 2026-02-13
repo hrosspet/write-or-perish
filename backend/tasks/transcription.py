@@ -9,7 +9,7 @@ import os
 from datetime import datetime
 
 from backend.celery_app import celery, flask_app
-from backend.models import Node
+from backend.models import Node, APICostLog
 from backend.extensions import db
 from backend.utils.audio_processing import (
     compress_audio_if_needed,
@@ -20,6 +20,7 @@ from backend.utils.audio_processing import (
 )
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.encryption import decrypt_file_to_temp
+from backend.utils.cost import calculate_audio_cost_microdollars
 
 logger = get_task_logger(__name__)
 
@@ -206,6 +207,24 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
                     os.unlink(temp_decrypted)
                 except Exception as e:
                     logger.warning(f"Failed to delete temp decrypted file: {e}")
+
+            # Log transcription cost
+            # For chunked files where duration_sec is 0, estimate from chunk count
+            cost_duration = duration_sec
+            if cost_duration == 0 and needs_chunking:
+                cost_duration = len(chunk_paths) * 20 * 60  # ~20 min per chunk
+            if cost_duration > 0:
+                transcription_cost = calculate_audio_cost_microdollars(
+                    "gpt-4o-transcribe", cost_duration
+                )
+                cost_log = APICostLog(
+                    user_id=node.user_id,
+                    model_id="gpt-4o-transcribe",
+                    request_type="transcription",
+                    audio_duration_seconds=cost_duration,
+                    cost_microdollars=transcription_cost,
+                )
+                db.session.add(cost_log)
 
             # Step 4: Update node with transcript (100% progress)
             self.update_state(state='PROGRESS', meta={'progress': 100, 'status': 'Complete'})

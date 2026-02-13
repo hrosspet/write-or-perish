@@ -2,7 +2,6 @@ from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
 from backend.models import Node, User, UserProfile
 from backend.extensions import db
-from datetime import date
 from backend.utils.privacy import accessible_nodes_filter, find_human_owner
 from backend.routes.terms import CURRENT_TERMS_VERSION
 
@@ -17,24 +16,6 @@ def _terms_up_to_date(user):
     ):
         return False
     return True
-
-def get_daily_tokens(user):
-    today = date.today()
-    tokens = db.session.query(db.func.sum(Node.distributed_tokens)).filter(
-        Node.user_id == user.id,
-        db.func.date(Node.created_at) == today
-    ).scalar()
-    return tokens or 0
-
-def get_total_tokens(user):
-    tokens = db.session.query(db.func.sum(Node.distributed_tokens)).filter(
-        Node.user_id == user.id
-    ).scalar()
-    return tokens or 0
-
-def get_global_tokens():
-    tokens = db.session.query(db.func.sum(Node.distributed_tokens)).scalar()
-    return tokens or 0
 
 def get_latest_profile(user):
     """Get the most recent profile for a user, or None if no profile exists."""
@@ -112,12 +93,6 @@ def get_dashboard():
             "plan": current_user.plan,
             "voice_mode_enabled": voice_mode_enabled
         },
-        "stats": {
-            "daily_tokens": get_daily_tokens(current_user),
-            "total_tokens": get_total_tokens(current_user),
-            "global_tokens": get_global_tokens(),
-            "target_daily_tokens": 1000000  # the 1M tokens/day collective goal
-        },
         "pinned_nodes": pinned_list,
         "nodes": nodes_list,
         "has_more": pagination.has_next,
@@ -156,21 +131,12 @@ def get_public_dashboard(username):
 
     nodes_list = [_serialize_node_for_list(node) for node in pagination.items]
 
-    # Calculate token stats just as in the private dashboard.
-    stats = {
-        "daily_tokens": get_daily_tokens(user),
-        "total_tokens": get_total_tokens(user),
-        "global_tokens": get_global_tokens(),
-        "target_daily_tokens": 1000000  # the 1M tokens/day target
-    }
-
     dashboard = {
         "user": {
             "id": user.id,
             "username": user.username,
             "description": user.description
         },
-        "stats": stats,
         "pinned_nodes": pinned_list,
         "nodes": nodes_list,
         "has_more": pagination.has_next,
