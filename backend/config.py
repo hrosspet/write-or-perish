@@ -22,8 +22,8 @@ class Config:
     # Default model (for backward compatibility and fallback)
     DEFAULT_LLM_MODEL = os.environ.get("LLM_NAME", "claude-opus-4.6")
 
-    # Buffer for token estimation error (percentage of context window)
-    PROFILE_CONTEXT_BUFFER_PERCENT = 0.14  # 14%
+    # Safety factor for prompt-too-long retries (0.99 = aim for 99% of the limit)
+    RETRY_SAFETY_FACTOR = 0.99
 
     # Pricing version — bump and update date whenever prices change.
     # Sources:

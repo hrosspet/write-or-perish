@@ -9,7 +9,7 @@ from backend.celery_app import celery, flask_app
 from backend.models import Node, User, UserProfile, APICostLog
 from backend.extensions import db
 from backend.llm_providers import LLMProvider, PromptTooLongError
-from backend.utils.tokens import approximate_token_count, calculate_max_export_tokens
+from backend.utils.tokens import approximate_token_count, reduce_export_tokens
 from backend.utils.quotes import resolve_quotes, has_quotes
 from backend.utils.api_keys import determine_api_key_type, get_api_keys_for_usage
 from backend.utils.cost import calculate_llm_cost_microdollars
@@ -143,12 +143,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     logger.info(f"No profile with chat permission found for user {user_id}")
 
             if needs_export:
-                # Calculate token budget for export (same logic as profile generation)
-                from backend.utils.tokens import get_model_context_window
-                context_window = get_model_context_window(model_id)
-                conversation_tokens = sum(approximate_token_count(n.get_content() or "") for n in node_chain)
-                max_export_tokens = calculate_max_export_tokens(model_id, reserved_tokens=conversation_tokens)
-                logger.info(f"Export token budget: model={model_id}, context_window={context_window}, conversation_tokens={conversation_tokens}, max_export_tokens={max_export_tokens}")
+                max_export_tokens = None  # Send entire archive; let retry loop converge
 
             # Determine which API key to use based on ai_usage settings
             key_type = determine_api_key_type(node_chain, logger=logger)
@@ -167,7 +162,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             for attempt in range(MAX_RETRIES + 1):
                 if needs_export:
                     user = User.query.get(user_id)
-                    if user and max_export_tokens > 0:
+                    if user and max_export_tokens != 0:
                         # Use the timestamp of the node containing {user_export} as cutoff
                         # to only include archive data created before that node
                         created_before = export_node.created_at if export_node else None
@@ -229,11 +224,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     break  # Success
                 except PromptTooLongError as e:
                     if attempt == MAX_RETRIES or not needs_export:
-                        # Can't reduce further or no export to shrink
                         raise
-                    # Use the actual/max ratio from the API to shrink the export precisely
-                    reduction = e.max_tokens / e.actual_tokens * 0.95
-                    max_export_tokens = int(max_export_tokens * reduction)
+                    max_export_tokens = reduce_export_tokens(
+                        max_export_tokens, e.actual_tokens, e.max_tokens,
+                        export_content=user_export_content
+                    )
                     logger.warning(
                         f"Prompt too long ({e.actual_tokens} > {e.max_tokens}), "
                         f"retrying with max_export_tokens={max_export_tokens} "

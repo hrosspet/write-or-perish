@@ -32,33 +32,25 @@ def get_model_context_window(model_id: str) -> int:
     return 200000
 
 
-def calculate_max_export_tokens(
-    model_id: str,
-    reserved_tokens: int = 0,
-    buffer_percent: float = None
-) -> int:
+def reduce_export_tokens(max_export_tokens, actual_tokens, max_tokens,
+                         export_content=None):
     """
-    Calculate the maximum tokens available for user export content.
+    Calculate a reduced max_export_tokens after a PromptTooLongError.
 
-    This accounts for:
-    - Model's context window limit
-    - Reserved tokens (for conversation, prompts, etc.)
-    - Safety buffer (percentage of context window)
+    On first attempt (max_export_tokens is None), estimates from the actual
+    export content. On subsequent retries, scales down the existing budget.
 
     Args:
-        model_id: Model identifier
-        reserved_tokens: Tokens already used or reserved (conversation, prompt template, etc.)
-        buffer_percent: Override for buffer percentage (default from config)
+        max_export_tokens: Current budget (None on first attempt)
+        actual_tokens: Actual token count reported by the API
+        max_tokens: Maximum tokens allowed by the API
+        export_content: The export text (required when max_export_tokens is None)
 
     Returns:
-        Maximum tokens available for export content
+        Reduced max_export_tokens value
     """
-    context_window = get_model_context_window(model_id)
-
-    if buffer_percent is None:
-        buffer_percent = current_app.config.get("PROFILE_CONTEXT_BUFFER_PERCENT", 0.07)
-
-    buffer_tokens = int(context_window * buffer_percent)
-    max_tokens = context_window - reserved_tokens - buffer_tokens
-
-    return max(0, max_tokens)
+    safety_factor = current_app.config.get("RETRY_SAFETY_FACTOR", 0.99)
+    reduction = max_tokens / actual_tokens * safety_factor
+    if max_export_tokens is None:
+        return int(approximate_token_count(export_content) * reduction)
+    return int(max_export_tokens * reduction)

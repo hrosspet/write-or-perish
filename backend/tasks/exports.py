@@ -9,7 +9,7 @@ from backend.celery_app import celery, flask_app
 from backend.models import User, UserProfile, APICostLog
 from backend.extensions import db
 from backend.llm_providers import LLMProvider, PromptTooLongError
-from backend.utils.tokens import approximate_token_count
+from backend.utils.tokens import approximate_token_count, reduce_export_tokens
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import calculate_llm_cost_microdollars
 
@@ -83,7 +83,8 @@ def generate_user_profile(self, user_id: int, model_id: str):
                 if not user_export:
                     raise ValueError("No writing found to analyze")
 
-                logger.info(f"User export built for user {user_id}, length: {len(user_export)} characters (attempt {attempt + 1})")
+                export_tokens = approximate_token_count(user_export)
+                logger.info(f"User export built for user {user_id}, length: {len(user_export)} characters, ~{export_tokens} tokens (attempt {attempt + 1})")
 
                 # Step 2: Build final prompt (45% progress)
                 self.update_state(state='PROGRESS', meta={'progress': 45, 'status': 'Preparing prompt'})
@@ -115,12 +116,10 @@ def generate_user_profile(self, user_id: int, model_id: str):
                 except PromptTooLongError as e:
                     if attempt == MAX_RETRIES:
                         raise
-                    reduction = e.max_tokens / e.actual_tokens * 0.95
-                    if max_export_tokens is None:
-                        # First retry: estimate from actual export content
-                        max_export_tokens = int(approximate_token_count(user_export) * reduction)
-                    else:
-                        max_export_tokens = int(max_export_tokens * reduction)
+                    max_export_tokens = reduce_export_tokens(
+                        max_export_tokens, e.actual_tokens, e.max_tokens,
+                        export_content=user_export
+                    )
                     logger.warning(
                         f"Prompt too long ({e.actual_tokens} > {e.max_tokens}), "
                         f"retrying with max_export_tokens={max_export_tokens} "
