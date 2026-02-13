@@ -41,6 +41,9 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
   const [twitterImportData, setTwitterImportData] = useState(null);
   const [includeReplies, setIncludeReplies] = useState(false);
 
+  const [showClaudeImportDialog, setShowClaudeImportDialog] = useState(false);
+  const [claudeImportData, setClaudeImportData] = useState(null);
+
   const [showPicker, setShowPicker] = useState(false);
 
   // Close picker dialog on Escape
@@ -163,12 +166,66 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     setTwitterImportData(null);
   };
 
+  const handleClaudeImportFile = (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append("zip_file", file);
+
+    setImporting(true);
+    setShowPicker(false);
+    api.post("/import/claude/analyze", formData, {
+      headers: { "Content-Type": "multipart/form-data" }
+    })
+      .then((response) => {
+        setClaudeImportData(response.data);
+        setShowClaudeImportDialog(true);
+        setImporting(false);
+      })
+      .catch((err) => {
+        console.error("Error analyzing Claude import:", err);
+        setError(err.response?.data?.error || "Error analyzing Claude export. Please try again.");
+        setImporting(false);
+      });
+
+    event.target.value = "";
+  };
+
+  const handleConfirmClaudeImport = () => {
+    if (!claudeImportData) return;
+
+    setImporting(true);
+    api.post("/import/claude/confirm", {
+      conversations: claudeImportData.conversations,
+      privacy_level: importPrivacy,
+      ai_usage: importAiUsage
+    })
+      .then(() => {
+        setShowClaudeImportDialog(false);
+        setClaudeImportData(null);
+        setImporting(false);
+        setError("");
+        window.location.reload();
+      })
+      .catch((err) => {
+        console.error("Error importing Claude data:", err);
+        setError(err.response?.data?.error || "Error importing Claude data. Please try again.");
+        setImporting(false);
+      });
+  };
+
+  const handleCancelClaudeImport = () => {
+    setShowClaudeImportDialog(false);
+    setClaudeImportData(null);
+  };
+
   return (
     <div>
       {error && <div style={{ color: "var(--accent)", marginBottom: "0.8rem", fontSize: "0.88rem" }}>{error}</div>}
 
       {/* Main Import Data button */}
-      {!showImportDialog && !showTwitterImportDialog && (
+      {!showImportDialog && !showTwitterImportDialog && !showClaudeImportDialog && (
         <button
           onClick={() => setShowPicker(!showPicker)}
           onMouseEnter={() => setHovered(true)}
@@ -262,6 +319,28 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                   type="file"
                   accept=".zip"
                   onChange={handleTwitterImportFile}
+                  disabled={importing}
+                  style={{ display: "none" }}
+                />
+              </label>
+              <label style={{
+                display: "block",
+                padding: "14px 20px",
+                cursor: "pointer",
+                fontFamily: "var(--sans)",
+                fontSize: "0.92rem",
+                fontWeight: 300,
+                color: "var(--text-secondary)",
+                border: "1px solid var(--border)",
+                borderRadius: "8px",
+                textAlign: "center",
+                transition: "border-color 0.3s ease",
+              }}>
+                Import Claude
+                <input
+                  type="file"
+                  accept=".zip"
+                  onChange={handleClaudeImportFile}
                   disabled={importing}
                   style={{ display: "none" }}
                 />
@@ -381,6 +460,61 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
             </button>
             <button
               onClick={handleCancelImport}
+              disabled={importing}
+              style={{
+                ...cancelBtnStyle,
+                cursor: importing ? "not-allowed" : "pointer",
+                opacity: importing ? 0.6 : 1
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Claude import confirmation dialog */}
+      {showClaudeImportDialog && claudeImportData && (
+        <div style={{
+          marginTop: "20px",
+          padding: "2rem",
+          backgroundColor: "var(--bg-card)",
+          borderRadius: "10px",
+          border: "1px solid var(--border)"
+        }}>
+          <h3 style={{ fontFamily: "var(--serif)", fontWeight: 300, color: "var(--text-primary)", margin: "0 0 12px 0" }}>Confirm Claude Import</h3>
+          <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
+            Found <strong style={{ color: "var(--text-primary)" }}>{claudeImportData.total_conversations}</strong> conversation{claudeImportData.total_conversations !== 1 ? 's' : ''} with{" "}
+            <strong style={{ color: "var(--text-primary)" }}>{claudeImportData.total_messages}</strong> messages
+          </p>
+          <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
+            Estimated tokens: <strong style={{ color: "var(--text-primary)" }}>{claudeImportData.total_tokens.toLocaleString()}</strong>
+          </p>
+          <p style={{ color: "var(--text-muted)", fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.85rem" }}>
+            Each conversation will be imported as a separate thread.
+          </p>
+
+          <PrivacySelector
+            privacyLevel={importPrivacy}
+            aiUsage={importAiUsage}
+            onPrivacyChange={setImportPrivacy}
+            onAIUsageChange={setImportAiUsage}
+          />
+
+          <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
+            <button
+              onClick={handleConfirmClaudeImport}
+              disabled={importing}
+              style={{
+                ...primaryBtnStyle,
+                cursor: importing ? "not-allowed" : "pointer",
+                opacity: importing ? 0.6 : 1
+              }}
+            >
+              {importing ? "Importing..." : "Confirm Import"}
+            </button>
+            <button
+              onClick={handleCancelClaudeImport}
               disabled={importing}
               style={{
                 ...cancelBtnStyle,
