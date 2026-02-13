@@ -338,7 +338,7 @@ function Dashboard() {
               <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>Do you want to proceed?</p>
               <div style={{ display: "flex", gap: "10px", marginTop: "10px" }}>
                 <button onClick={handleConfirmProfileGeneration} style={primaryBtnStyle}>
-                  Yes, Generate Profile
+                  Yes, generate profile
                 </button>
                 <button onClick={handleCancelProfileGeneration} style={cancelBtnStyle}>
                   Cancel
