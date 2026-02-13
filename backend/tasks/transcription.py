@@ -210,7 +210,8 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
             # Step 4: Update node with transcript (100% progress)
             self.update_state(state='PROGRESS', meta={'progress': 100, 'status': 'Complete'})
 
-            if filename:
+            # Only add title for top-level nodes, not replies
+            if node.parent_id is None and filename:
                 header, _ = os.path.splitext(filename)
                 # For recordings made via the app, use date/time instead of "recording"
                 if header == "recording":

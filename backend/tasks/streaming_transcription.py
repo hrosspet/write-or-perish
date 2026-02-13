@@ -252,18 +252,27 @@ def finalize_streaming(self, node_id: int, session_id: str, total_chunks: int):
 
         full_transcript = "\n\n".join(transcripts)
 
-        # Format final content
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        if failed_chunks:
-            # Note any failed chunks in the content
-            failed_indices = [c.chunk_index for c in failed_chunks]
-            final_content = (
-                f"# {timestamp} Voice note\n\n"
-                f"*Note: Chunks {failed_indices} failed to transcribe*\n\n"
-                f"{full_transcript}"
-            )
+        # Format final content - only add title for top-level nodes
+        if node.parent_id is None:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if failed_chunks:
+                failed_indices = [c.chunk_index for c in failed_chunks]
+                final_content = (
+                    f"# {timestamp} Voice note\n\n"
+                    f"*Note: Chunks {failed_indices} failed to transcribe*\n\n"
+                    f"{full_transcript}"
+                )
+            else:
+                final_content = f"# {timestamp} Voice note\n\n{full_transcript}"
         else:
-            final_content = f"# {timestamp} Voice note\n\n{full_transcript}"
+            if failed_chunks:
+                failed_indices = [c.chunk_index for c in failed_chunks]
+                final_content = (
+                    f"*Note: Chunks {failed_indices} failed to transcribe*\n\n"
+                    f"{full_transcript}"
+                )
+            else:
+                final_content = full_transcript
 
         # Update node
         node.set_content(final_content)
@@ -546,18 +555,27 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int):
 
         full_transcript = "\n\n".join(transcripts)
 
-        # Format final content
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        if failed_chunks:
-            # Note any failed chunks in the content
-            failed_indices = [c.chunk_index for c in failed_chunks]
-            final_content = (
-                f"# {timestamp} Voice note\n\n"
-                f"*Note: Chunks {failed_indices} failed to transcribe*\n\n"
-                f"{full_transcript}"
-            )
+        # Format final content - only add title for top-level drafts
+        if draft.parent_id is None:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if failed_chunks:
+                failed_indices = [c.chunk_index for c in failed_chunks]
+                final_content = (
+                    f"# {timestamp} Voice note\n\n"
+                    f"*Note: Chunks {failed_indices} failed to transcribe*\n\n"
+                    f"{full_transcript}"
+                )
+            else:
+                final_content = f"# {timestamp} Voice note\n\n{full_transcript}"
         else:
-            final_content = f"# {timestamp} Voice note\n\n{full_transcript}"
+            if failed_chunks:
+                failed_indices = [c.chunk_index for c in failed_chunks]
+                final_content = (
+                    f"*Note: Chunks {failed_indices} failed to transcribe*\n\n"
+                    f"{full_transcript}"
+                )
+            else:
+                final_content = full_transcript
 
         # Fix the duration metadata of the last chunk (WebM files from MediaRecorder
         # often lack proper duration, which causes playback issues)
