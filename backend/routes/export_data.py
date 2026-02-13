@@ -2,7 +2,7 @@ from flask import Blueprint, jsonify, Response, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node, NodeVersion, UserProfile
 from backend.extensions import db
-from backend.utils.tokens import approximate_token_count, calculate_max_export_tokens
+from backend.utils.tokens import approximate_token_count, get_model_context_window
 from backend.utils.quotes import (
     resolve_quotes, has_quotes, ExportQuoteResolver, resolve_quotes_for_export
 )
@@ -411,13 +411,8 @@ def estimate_profile_tokens():
             "error": "Profile generation prompt template not found"
         }), 500
 
-    # Calculate max tokens for export based on model's context window
-    prompt_tokens = approximate_token_count(prompt_template)
-    MAX_EXPORT_TOKENS = calculate_max_export_tokens(model_id, reserved_tokens=prompt_tokens)
-
-    # Use the core export logic to get user's writing (with token limit)
-    # Filter by AI usage to only include nodes where ai_usage is 'chat' or 'train'
-    user_export = build_user_export_content(current_user, max_tokens=MAX_EXPORT_TOKENS, filter_ai_usage=True)
+    # Build full export (no token limit) — the task will retry if too long
+    user_export = build_user_export_content(current_user, max_tokens=None, filter_ai_usage=True)
 
     if not user_export:
         return jsonify({
@@ -430,8 +425,10 @@ def estimate_profile_tokens():
     # Replace the placeholder with actual user export
     final_prompt = prompt_template.replace("{user_export}", user_export)
 
-    # Estimate tokens
+    # Estimate tokens, capped at model's context window
     estimated_tokens = approximate_token_count(final_prompt)
+    context_window = get_model_context_window(model_id)
+    estimated_tokens = min(estimated_tokens, context_window)
 
     return jsonify({
         "estimated_tokens": estimated_tokens,
