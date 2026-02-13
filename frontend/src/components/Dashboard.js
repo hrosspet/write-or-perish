@@ -364,17 +364,22 @@ function Dashboard() {
                 margin: 0
               }}>Profile</h3>
               {!editingProfile && (
-                <button
-                  onClick={() => {
-                    setEditingProfile(true);
-                    setEditProfileContent(dashboardData.latest_profile?.content || "");
-                    setProfilePrivacyLevel(dashboardData.latest_profile?.privacy_level || "private");
-                    setProfileAiUsage(dashboardData.latest_profile?.ai_usage || "chat");
-                  }}
-                  style={ghostBtnStyle}
-                >
-                  Edit Profile
-                </button>
+                <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                  <button
+                    onClick={() => {
+                      setEditingProfile(true);
+                      setEditProfileContent(dashboardData.latest_profile?.content || "");
+                      setProfilePrivacyLevel(dashboardData.latest_profile?.privacy_level || "private");
+                      setProfileAiUsage(dashboardData.latest_profile?.ai_usage || "chat");
+                    }}
+                    style={ghostBtnStyle}
+                  >
+                    Edit Profile
+                  </button>
+                  {dashboardData.latest_profile && (
+                    <SpeakerIcon profileId={dashboardData.latest_profile.id} content={dashboardData.latest_profile.content} />
+                  )}
+                </div>
               )}
             </div>
             {dashboardData.latest_profile && (
@@ -540,7 +545,6 @@ function Dashboard() {
                 >
                   {dashboardData.latest_profile.content}
                 </ReactMarkdown>
-                <SpeakerIcon profileId={dashboardData.latest_profile.id} content={dashboardData.latest_profile.content} />
               </div>
             ) : (
               <p style={{ color: "var(--text-muted)", fontStyle: "italic", fontFamily: "var(--serif)" }}>
