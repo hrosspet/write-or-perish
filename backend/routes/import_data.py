@@ -402,6 +402,264 @@ def analyze_twitter_import():
         }), 500
 
 
+@import_bp.route("/import/claude/analyze", methods=["POST"])
+@login_required
+def analyze_claude_import():
+    """
+    Analyze a Claude data export zip file.
+
+    Expects:
+        - multipart/form-data with 'zip_file' field containing a Claude
+          data export (contains conversations.json)
+
+    Returns:
+        {
+            "conversations": [
+                {
+                    "name": "...",
+                    "created_at": "...",
+                    "messages": [
+                        {
+                            "text": "...",
+                            "sender": "human" | "assistant",
+                            "created_at": "..."
+                        }
+                    ],
+                    "message_count": N,
+                    "token_count": N
+                }
+            ],
+            "total_conversations": N,
+            "total_messages": N,
+            "total_tokens": N,
+            "total_size": N
+        }
+    """
+    if 'zip_file' not in request.files:
+        return jsonify({"error": "No zip_file provided"}), 400
+
+    zip_file = request.files['zip_file']
+
+    if zip_file.filename == '':
+        return jsonify({"error": "No file selected"}), 400
+
+    if not zip_file.filename.lower().endswith('.zip'):
+        return jsonify({"error": "File must be a .zip file"}), 400
+
+    try:
+        zip_bytes = io.BytesIO(zip_file.read())
+
+        conversations_json = None
+
+        with zipfile.ZipFile(zip_bytes, 'r') as zip_ref:
+            for name in zip_ref.namelist():
+                if name.endswith('conversations.json'):
+                    conversations_json = zip_ref.read(name).decode('utf-8')
+                    break
+
+        if conversations_json is None:
+            return jsonify({
+                "error": "Could not find conversations.json in the zip "
+                         "archive. Please upload a Claude data export."
+            }), 400
+
+        raw_conversations = json.loads(conversations_json)
+
+        conversations = []
+        total_messages = 0
+        total_tokens = 0
+        total_size = 0
+
+        for conv in raw_conversations:
+            chat_messages = conv.get('chat_messages', [])
+            messages = []
+
+            for msg in chat_messages:
+                text = (msg.get('text') or '').strip()
+                if not text:
+                    continue
+
+                sender = msg.get('sender', 'human')
+                created_at = msg.get('created_at', '')
+                token_count = approximate_token_count(text)
+
+                messages.append({
+                    "text": text,
+                    "sender": sender,
+                    "created_at": created_at,
+                    "token_count": token_count
+                })
+
+                total_tokens += token_count
+                total_size += len(text.encode('utf-8'))
+
+            if not messages:
+                continue
+
+            conv_token_count = sum(m['token_count'] for m in messages)
+
+            conversations.append({
+                "name": conv.get('name', ''),
+                "created_at": conv.get('created_at', ''),
+                "messages": messages,
+                "message_count": len(messages),
+                "token_count": conv_token_count
+            })
+
+            total_messages += len(messages)
+
+        if not conversations:
+            return jsonify({
+                "error": "No conversations with messages found in the "
+                         "export."
+            }), 400
+
+        return jsonify({
+            "conversations": conversations,
+            "total_conversations": len(conversations),
+            "total_messages": total_messages,
+            "total_tokens": total_tokens,
+            "total_size": total_size
+        }), 200
+
+    except zipfile.BadZipFile:
+        return jsonify({"error": "Invalid zip file"}), 400
+    except json.JSONDecodeError as e:
+        return jsonify({
+            "error": "Failed to parse conversations JSON",
+            "details": str(e)
+        }), 400
+    except Exception as e:
+        current_app.logger.error(
+            f"Error analyzing Claude import: {str(e)}"
+        )
+        return jsonify({
+            "error": "Failed to analyze Claude export",
+            "details": str(e)
+        }), 500
+
+
+@import_bp.route("/import/claude/confirm", methods=["POST"])
+@login_required
+def confirm_claude_import():
+    """
+    Create nodes from analyzed Claude conversation data.
+    Each conversation becomes a separate thread with messages chained
+    sequentially.
+
+    Request body:
+        {
+            "conversations": [...],
+            "privacy_level": "private",
+            "ai_usage": "none"
+        }
+
+    Returns:
+        {
+            "message": "Import successful",
+            "nodes_created": N,
+            "thread_count": N
+        }
+    """
+    data = request.get_json()
+
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+
+    conversations = data.get('conversations', [])
+    privacy_level = data.get('privacy_level', 'private')
+    ai_usage = data.get('ai_usage', 'none')
+
+    if not conversations:
+        return jsonify({"error": "No conversations provided"}), 400
+
+    try:
+        nodes_created = 0
+        thread_count = 0
+
+        # Sort conversations by created_at ascending
+        conversations_sorted = sorted(
+            conversations,
+            key=lambda c: c.get('created_at', '')
+        )
+
+        for conv in conversations_sorted:
+            messages = conv.get('messages', [])
+            conv_name = conv.get('name', '')
+
+            if not messages:
+                continue
+
+            parent_node = None
+
+            for i, msg in enumerate(messages):
+                text = msg.get('text', '')
+                sender = msg.get('sender', 'human')
+
+                if not text:
+                    continue
+
+                # Prepend conversation name as H1 to first message
+                if i == 0 and conv_name:
+                    node_content = f"# {conv_name}\n\n{text}"
+                else:
+                    node_content = text
+
+                is_assistant = sender == 'assistant'
+
+                # Parse original timestamp from Claude export
+                msg_created_at = None
+                raw_ts = msg.get('created_at', '')
+                if raw_ts:
+                    try:
+                        raw_ts = raw_ts.replace('Z', '+00:00')
+                        msg_created_at = datetime.fromisoformat(
+                            raw_ts
+                        ).replace(tzinfo=None)
+                    except (ValueError, TypeError):
+                        pass
+
+                node = Node(
+                    user_id=current_user.id,
+                    parent_id=parent_node.id if parent_node else None,
+                    node_type="llm" if is_assistant else "user",
+                    llm_model="claude-web" if is_assistant else None,
+                    content=node_content,
+                    token_count=approximate_token_count(node_content),
+                    privacy_level=privacy_level,
+                    ai_usage=ai_usage
+                )
+
+                if msg_created_at:
+                    node.created_at = msg_created_at
+
+                db.session.add(node)
+                db.session.flush()
+
+                parent_node = node
+                nodes_created += 1
+
+            thread_count += 1
+
+        db.session.commit()
+
+        return jsonify({
+            "message": "Import successful",
+            "nodes_created": nodes_created,
+            "thread_count": thread_count
+        }), 201
+
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(
+            f"Error confirming Claude import: {str(e)}"
+        )
+        return jsonify({
+            "error": "Failed to import Claude conversations",
+            "details": str(e)
+        }), 500
+
+
 @import_bp.route("/import/twitter/confirm", methods=["POST"])
 @login_required
 def confirm_twitter_import():
