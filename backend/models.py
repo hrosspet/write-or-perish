@@ -291,6 +291,21 @@ class NodeTranscriptChunk(db.Model):
         return decrypt_content(self.text)
 
 
+class APICostLog(db.Model):
+    __tablename__ = "api_cost_log"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
+    model_id = db.Column(db.String(64), nullable=False)
+    request_type = db.Column(db.String(32), nullable=False)
+    input_tokens = db.Column(db.Integer, nullable=True)
+    output_tokens = db.Column(db.Integer, nullable=True)
+    audio_duration_seconds = db.Column(db.Float, nullable=True)
+    cost_microdollars = db.Column(db.Integer, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+
+    user = db.relationship("User", backref="api_cost_logs")
+
+
 class TTSChunk(db.Model):
     """
     Stores individual TTS audio chunk URLs for streaming TTS playback.

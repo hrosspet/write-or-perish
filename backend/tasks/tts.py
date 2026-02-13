@@ -13,11 +13,12 @@ import os
 from datetime import datetime
 
 from backend.celery_app import celery, flask_app
-from backend.models import Node, UserProfile, TTSChunk
+from backend.models import Node, UserProfile, TTSChunk, APICostLog
 from backend.extensions import db
 from backend.utils.audio_processing import chunk_text, adaptive_chunk_text
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.encryption import encrypt_file
+from backend.utils.cost import calculate_audio_cost_microdollars
 
 logger = get_task_logger(__name__)
 
@@ -226,6 +227,25 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str):
                 # Encrypt the combined final file at rest
                 encrypt_file(str(final_path))
 
+            # Log TTS cost based on total audio duration
+            total_tts_duration = 0.0
+            tts_chunks_all = TTSChunk.query.filter_by(node_id=node.id).all()
+            for tc in tts_chunks_all:
+                if tc.duration:
+                    total_tts_duration += tc.duration
+            if total_tts_duration > 0:
+                tts_cost = calculate_audio_cost_microdollars(
+                    "gpt-4o-mini-tts", total_tts_duration
+                )
+                cost_log = APICostLog(
+                    user_id=node.user_id,
+                    model_id="gpt-4o-mini-tts",
+                    request_type="tts",
+                    audio_duration_seconds=total_tts_duration,
+                    cost_microdollars=tts_cost,
+                )
+                db.session.add(cost_log)
+
             # Step 4: Update node record (95% progress)
             self.update_state(state='PROGRESS', meta={'progress': 95, 'status': 'Finalizing'})
             node.tts_task_progress = 95
@@ -312,6 +332,8 @@ def generate_tts_audio_for_profile(self, profile_id: int, audio_storage_root: st
             chunks = chunk_text(text, max_chars=4096)
             logger.info(f"Text split into {len(chunks)} chunks for TTS for profile {profile_id}")
 
+            total_profile_tts_duration = 0.0
+
             if len(chunks) == 1:
                 self.update_state(state='PROGRESS', meta={'progress': 40, 'status': 'Generating audio'})
                 profile.tts_task_progress = 40
@@ -323,6 +345,10 @@ def generate_tts_audio_for_profile(self, profile_id: int, audio_storage_root: st
                     voice="alloy"
                 ) as resp:
                     resp.stream_to_file(final_path)
+
+                # Get duration before encrypting
+                segment = AudioSegment.from_file(str(final_path), format="mp3")
+                total_profile_tts_duration = len(segment) / 1000.0
 
                 # Encrypt the audio file at rest
                 encrypt_file(str(final_path))
@@ -352,6 +378,7 @@ def generate_tts_audio_for_profile(self, profile_id: int, audio_storage_root: st
                         resp.stream_to_file(part_path)
 
                     segment = AudioSegment.from_file(str(part_path), format="mp3")
+                    total_profile_tts_duration += len(segment) / 1000.0
                     audio_parts.append(segment)
 
                     # Encrypt or delete the part file
@@ -369,6 +396,20 @@ def generate_tts_audio_for_profile(self, profile_id: int, audio_storage_root: st
 
                 # Encrypt the combined final file at rest
                 encrypt_file(str(final_path))
+
+            # Log TTS cost
+            if total_profile_tts_duration > 0:
+                tts_cost = calculate_audio_cost_microdollars(
+                    "gpt-4o-mini-tts", total_profile_tts_duration
+                )
+                cost_log = APICostLog(
+                    user_id=profile.user_id,
+                    model_id="gpt-4o-mini-tts",
+                    request_type="tts",
+                    audio_duration_seconds=total_profile_tts_duration,
+                    cost_microdollars=tts_cost,
+                )
+                db.session.add(cost_log)
 
             self.update_state(state='PROGRESS', meta={'progress': 95, 'status': 'Finalizing'})
             profile.tts_task_progress = 95

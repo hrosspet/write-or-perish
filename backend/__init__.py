@@ -112,8 +112,6 @@ def create_app():
     from backend.routes.feed import feed_bp
     app.register_blueprint(feed_bp, url_prefix="/api")
 
-    from backend.routes.stats import stats_bp
-    app.register_blueprint(stats_bp, url_prefix="/api")
 
     from backend.routes.terms import terms_bp
     app.register_blueprint(terms_bp, url_prefix="/api/terms")

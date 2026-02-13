@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import api from "../api";
-import DashboardContent from "./DashboardContent";
+
 import Bubble from "./Bubble";
 import ModelSelector from "./ModelSelector";
 import SpeakerIcon from "./SpeakerIcon";
@@ -550,9 +550,6 @@ function Dashboard() {
           </div>
         </>
       )}
-
-      {/* Display the chart with totals */}
-      {dashboardData.stats && <DashboardContent dashboardData={dashboardData} username={username} />}
 
       {/* Pinned nodes section */}
       {dashboardData.pinned_nodes && dashboardData.pinned_nodes.length > 0 && (

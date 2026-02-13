@@ -70,7 +70,9 @@ class LLMProvider:
         )
         return {
             "content": response.choices[0].message.content,
-            "total_tokens": response.usage.total_tokens
+            "total_tokens": response.usage.total_tokens,
+            "input_tokens": response.usage.prompt_tokens,
+            "output_tokens": response.usage.completion_tokens,
         }
 
     @staticmethod
@@ -143,5 +145,7 @@ class LLMProvider:
 
         return {
             "content": content,
-            "total_tokens": total_tokens
+            "total_tokens": total_tokens,
+            "input_tokens": response.usage.input_tokens,
+            "output_tokens": response.usage.output_tokens,
         }

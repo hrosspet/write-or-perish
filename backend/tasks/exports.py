@@ -6,11 +6,12 @@ from celery.utils.log import get_task_logger
 import os
 
 from backend.celery_app import celery, flask_app
-from backend.models import User, UserProfile
+from backend.models import User, UserProfile, APICostLog
 from backend.extensions import db
 from backend.llm_providers import LLMProvider
 from backend.utils.tokens import approximate_token_count, calculate_max_export_tokens
 from backend.utils.api_keys import get_api_keys_for_usage
+from backend.utils.cost import calculate_llm_cost_microdollars
 
 logger = get_task_logger(__name__)
 
@@ -110,8 +111,22 @@ def generate_user_profile(self, user_id: int, model_id: str):
             response = LLMProvider.get_completion(model_id, messages, api_keys)
             profile_text = response["content"]
             total_tokens = response["total_tokens"]
+            input_tokens = response.get("input_tokens", 0)
+            output_tokens = response.get("output_tokens", 0)
 
             logger.info(f"Profile generated for user {user_id}: {len(profile_text)} characters, {total_tokens} tokens")
+
+            # Log API cost
+            cost = calculate_llm_cost_microdollars(model_id, input_tokens, output_tokens)
+            cost_log = APICostLog(
+                user_id=user.id,
+                model_id=model_id,
+                request_type="profile",
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost_microdollars=cost,
+            )
+            db.session.add(cost_log)
 
             # Step 5: Save to database (95% progress)
             self.update_state(state='PROGRESS', meta={'progress': 95, 'status': 'Saving profile'})

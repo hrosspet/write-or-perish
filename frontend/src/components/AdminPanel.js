@@ -114,6 +114,7 @@ function AdminPanel() {
             <th style={{ border: "1px solid #333", padding: "8px" }}>Approved</th>
             <th style={{ border: "1px solid #333", padding: "8px" }}>Plan</th>
             <th style={{ border: "1px solid #333", padding: "8px" }}>Email</th>
+            <th style={{ border: "1px solid #333", padding: "8px" }}>Spent</th>
             <th style={{ border: "1px solid #333", padding: "8px" }}>Actions</th>
           </tr>
         </thead>
@@ -137,6 +138,9 @@ function AdminPanel() {
               </td>
               <td style={{ border: "1px solid #333", padding: "8px" }}>
                 {u.email || "None"}
+              </td>
+              <td style={{ border: "1px solid #333", padding: "8px" }}>
+                ${(u.total_spending_usd || 0).toFixed(2)}
               </td>
               <td style={{ border: "1px solid #333", padding: "8px" }}>
                 {!u.approved && u.email ? (
