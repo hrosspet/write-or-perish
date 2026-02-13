@@ -313,8 +313,9 @@ class TTSChunk(db.Model):
     can be played immediately while subsequent chunks are still generating.
     """
     id = db.Column(db.Integer, primary_key=True)
-    # Which node this TTS chunk belongs to
-    node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=False)
+    # Which node or profile this TTS chunk belongs to (one must be set)
+    node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True)
+    profile_id = db.Column(db.Integer, db.ForeignKey("user_profile.id"), nullable=True)
     # Zero-based index of the chunk
     chunk_index = db.Column(db.Integer, nullable=False)
     # URL to the audio chunk file
@@ -326,10 +327,12 @@ class TTSChunk(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     completed_at = db.Column(db.DateTime, nullable=True)
 
-    # Relationship back to node
+    # Relationships
     node = db.relationship("Node", backref="tts_chunks")
+    profile = db.relationship("UserProfile", backref="tts_chunks")
 
-    # Unique constraint: one chunk per index per node
+    # Unique constraints: one chunk per index per node/profile
     __table_args__ = (
         db.UniqueConstraint('node_id', 'chunk_index', name='uq_node_tts_chunk_index'),
+        db.UniqueConstraint('profile_id', 'chunk_index', name='uq_profile_tts_chunk_index'),
     )
