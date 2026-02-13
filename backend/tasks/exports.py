@@ -9,7 +9,7 @@ from backend.celery_app import celery, flask_app
 from backend.models import User, UserProfile, APICostLog
 from backend.extensions import db
 from backend.llm_providers import LLMProvider, PromptTooLongError
-from backend.utils.tokens import approximate_token_count, calculate_max_export_tokens
+from backend.utils.tokens import approximate_token_count
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import calculate_llm_cost_microdollars
 
@@ -70,9 +70,8 @@ def generate_user_profile(self, user_id: int, model_id: str):
             except FileNotFoundError:
                 raise FileNotFoundError(f"Prompt template not found at {prompt_template_path}")
 
-            # Calculate max tokens for export based on model's context window
             prompt_tokens = approximate_token_count(prompt_template)
-            max_export_tokens = calculate_max_export_tokens(model_id, reserved_tokens=prompt_tokens)
+            max_export_tokens = None  # Send entire archive; let retry loop converge
 
             api_keys = get_api_keys_for_usage(flask_app.config, 'chat')
 
@@ -116,9 +115,12 @@ def generate_user_profile(self, user_id: int, model_id: str):
                 except PromptTooLongError as e:
                     if attempt == MAX_RETRIES:
                         raise
-                    # Use the actual/max ratio from the API to shrink the export precisely
                     reduction = e.max_tokens / e.actual_tokens * 0.95
-                    max_export_tokens = int(max_export_tokens * reduction)
+                    if max_export_tokens is None:
+                        # First retry: estimate from actual export content
+                        max_export_tokens = int(approximate_token_count(user_export) * reduction)
+                    else:
+                        max_export_tokens = int(max_export_tokens * reduction)
                     logger.warning(
                         f"Prompt too long ({e.actual_tokens} > {e.max_tokens}), "
                         f"retrying with max_export_tokens={max_export_tokens} "
