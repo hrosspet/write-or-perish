@@ -66,9 +66,10 @@ jobs:
               exit 1
             fi
 
-            if [ -n "$(git status --porcelain)" ]; then
-              echo "ERROR: VM repo has uncommitted changes:"
-              git status --short
+            if ! git diff --quiet || ! git diff --cached --quiet; then
+              echo "ERROR: VM repo has uncommitted changes to tracked files:"
+              git diff --name-only
+              git diff --cached --name-only
               echo "Fix: ssh to VM and stash or commit the changes"
               exit 1
             fi
