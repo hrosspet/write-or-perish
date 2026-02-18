@@ -22,6 +22,8 @@ services:
   backend:
     ports:
       - "127.0.0.1:5011:5010"
+    # Override gunicorn to 2 workers (saves ~150 MiB vs prod's 4 workers)
+    command: gunicorn --bind 0.0.0.0:5010 --workers 2 -k gevent --timeout 900 --access-logfile - --error-logfile - backend.app:app
     environment:
       - FLASK_ENV=staging
       - FRONTEND_URL=${FRONTEND_URL:-https://staging.loore.org}
