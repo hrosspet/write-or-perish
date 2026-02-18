@@ -37,6 +37,9 @@ jobs:
               up -d --build
             sleep 5
             docker compose -p wop-staging exec -T backend flask db upgrade
+
+            # Switch back to main so production deploys aren't blocked
+            git checkout main
           ENDSSH
 
       - name: Cleanup

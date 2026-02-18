@@ -58,13 +58,8 @@ jobs:
             set -e  # Exit immediately if any command fails
             cd /home/hrosspet/write-or-perish
 
-            # Safety checks: ensure repo is on main and clean
-            CURRENT_BRANCH=$(git branch --show-current)
-            if [ "$CURRENT_BRANCH" != "main" ]; then
-              echo "ERROR: VM repo is on branch '$CURRENT_BRANCH', expected 'main'."
-              echo "Fix: ssh to VM and run: git checkout main"
-              exit 1
-            fi
+            # Ensure repo is on main (staging deploy may have left it on another branch)
+            git checkout main
 
             if ! git diff --quiet || ! git diff --cached --quiet; then
               echo "ERROR: VM repo has uncommitted changes to tracked files:"
