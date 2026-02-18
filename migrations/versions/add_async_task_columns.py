@@ -36,24 +36,29 @@ def upgrade():
     op.add_column('node', sa.Column('tts_task_status', sa.String(20), nullable=True))
     op.add_column('node', sa.Column('tts_task_progress', sa.Integer, default=0))
 
-    # Backfill existing nodes
-    # Set transcription_status = 'completed' for nodes that have audio and non-placeholder content
-    op.execute("""
-        UPDATE node
-        SET transcription_status = 'completed'
-        WHERE audio_original_url IS NOT NULL
-        AND content != '[Voice note – transcription pending]'
-        AND content IS NOT NULL
-    """)
+    # Backfill existing nodes (only if audio_original_url column exists,
+    # which may not be the case on a fresh DB where this migration runs first)
+    conn = op.get_bind()
+    result = conn.execute(sa.text(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name = 'node' AND column_name = 'audio_original_url'"
+    ))
+    if result.fetchone():
+        op.execute("""
+            UPDATE node
+            SET transcription_status = 'completed'
+            WHERE audio_original_url IS NOT NULL
+            AND content != '[Voice note – transcription pending]'
+            AND content IS NOT NULL
+        """)
 
-    # Set transcription_status = 'failed' for stuck nodes
-    op.execute("""
-        UPDATE node
-        SET transcription_status = 'failed',
-            transcription_error = 'Legacy transcription failed or timeout'
-        WHERE audio_original_url IS NOT NULL
-        AND (content = '[Voice note – transcription pending]' OR content IS NULL)
-    """)
+        op.execute("""
+            UPDATE node
+            SET transcription_status = 'failed',
+                transcription_error = 'Legacy transcription failed or timeout'
+            WHERE audio_original_url IS NOT NULL
+            AND (content = '[Voice note – transcription pending]' OR content IS NULL)
+        """)
 
 
 def downgrade():
