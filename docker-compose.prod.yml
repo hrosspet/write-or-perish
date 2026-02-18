@@ -69,8 +69,6 @@ services:
 
   frontend:
     # Use production build
-    ports:
-      - "${FRONTEND_PORT:-3000}:80"
     build:
       context: ./frontend
       dockerfile: Dockerfile

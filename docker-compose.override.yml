@@ -9,6 +9,8 @@ services:
       context: ./backend
       dockerfile: Dockerfile.dev
     command: flask run --host=0.0.0.0 --port=5010 --reload
+    ports:
+      - "${BACKEND_PORT:-5010}:5010"
     environment:
       - FLASK_ENV=development
       - FLASK_DEBUG=1

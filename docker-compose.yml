@@ -48,8 +48,6 @@ services:
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
       - LLM_NAME=${LLM_NAME:-claude-opus-4.5}
       - FLASK_ENV=${FLASK_ENV:-production}
-    ports:
-      - "${BACKEND_PORT:-5010}:5010"
     depends_on:
       db:
         condition: service_healthy

@@ -31,7 +31,7 @@ services:
           memory: 512M
 
   celery:
-    command: celery -A celery_app.celery worker --loglevel=warning --concurrency=2
+    command: celery -A backend.celery_app.celery worker --loglevel=warning --concurrency=2
     deploy:
       resources:
         limits:
