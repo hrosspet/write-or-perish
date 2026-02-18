@@ -69,7 +69,7 @@ export FLASK_APP="$BACKEND_DIR/app.py"
 if [ -d "migrations" ]; then
     # Auto-generate migrations if models changed
     log "Checking for model changes..."
-    MIGRATION_OUTPUT=$(flask db migrate -m "auto-generated migration from deployment" 2>&1)
+    MIGRATION_OUTPUT=$(flask db migrate -m "auto-generated migration from deployment" 2>&1) || true
     echo "$MIGRATION_OUTPUT"
 
     if echo "$MIGRATION_OUTPUT" | grep -q "Generating"; then
