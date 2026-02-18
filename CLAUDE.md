@@ -23,8 +23,8 @@ The project uses GitHub Actions for CI/CD with direct deployment to production:
 
 - Develop locally on feature branches
 - Push to GitHub to trigger CI checks
-- **Merge to `main` = Deploy to production** (https://loore.org)
-- There is NO staging environment
+- **Merge to `staging` = Deploy to staging** (https://staging.loore.org) — Docker Compose on same VM
+- **Merge to `main` = Deploy to production** (https://loore.org) — systemd services
 
 ### Before Pushing to Main
 
@@ -58,7 +58,26 @@ The project uses **Flask-Migrate + Alembic**. Migrations are auto-generated and 
 - When adding/changing columns in `backend/models.py`, just change the model — the migration will be auto-generated on deploy.
 - Auto-generated migrations are committed back to git by the deploy script with `[skip ci]` tag.
 - Migration files live in `migrations/versions/`.
-- Dockerization (Makefile, docker-compose) exists but is **not yet in use**.
+### Local Docker Development
+
+The project can be run locally via Docker Compose. This mirrors the staging/production stack (PostgreSQL, Redis, Flask, Celery, React) without needing to install dependencies on the host.
+
+**Start dev environment**: `make dev` (or `make dev-build` to force rebuild)
+**Stop**: `make stop`
+**Logs**: `make logs`
+**Shell into backend**: `make shell`
+
+The dev stack runs:
+- Backend on `http://localhost:5010` (Flask dev server with hot reload)
+- Frontend on `http://localhost:3001` (React dev server with HMR)
+- PostgreSQL, Redis, and Celery are internal to the Docker network
+
+Source code is volume-mounted, so edits are reflected immediately without rebuilding.
+
+**Important Docker Compose notes**:
+- Ports are NOT defined in the base `docker-compose.yml` — they live only in the override files (`docker-compose.override.yml` for dev, `docker-compose.staging.yml` for staging). This prevents Docker Compose from concatenating port arrays across files.
+- Backend code is mounted at `/app/backend/` inside containers to match the project-root import layout (`from backend.X import Y`).
+- The `migrations/` directory is at the project root, outside the backend Docker build context. For staging, it's volume-mounted into the container.
 
 ### Production Environment
 
