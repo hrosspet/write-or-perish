@@ -25,6 +25,9 @@ services:
     environment:
       - FLASK_ENV=staging
       - FRONTEND_URL=${FRONTEND_URL:-https://staging.loore.org}
+    volumes:
+      # Mount migrations from repo root (not in Docker build context)
+      - ./migrations:/app/migrations
     deploy:
       resources:
         limits:

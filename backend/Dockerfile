@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libpq-dev \
     build-essential \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
@@ -23,6 +24,9 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copy application code into backend/ to match the project-root import layout
 # (from backend.X import Y requires backend/ to exist as a package)
 COPY . ./backend/
+
+# Flask CLI discovery (needed for flask db upgrade etc.)
+ENV FLASK_APP=backend.app
 
 # Create non-root user for security
 RUN useradd --create-home --shell /bin/bash appuser && \
