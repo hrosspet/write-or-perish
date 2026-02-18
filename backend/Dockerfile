@@ -28,6 +28,9 @@ COPY . ./backend/
 # Flask CLI discovery (needed for flask db upgrade etc.)
 ENV FLASK_APP=backend.app
 
+# Create data directory for volume mounts (must exist before chown)
+RUN mkdir -p /app/data
+
 # Create non-root user for security
 RUN useradd --create-home --shell /bin/bash appuser && \
     chown -R appuser:appuser /app
