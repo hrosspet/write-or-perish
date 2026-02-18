@@ -36,7 +36,7 @@ jobs:
               -p wop-staging \
               up -d --build
             sleep 5
-            docker compose -p wop-staging exec -T backend flask db upgrade
+            docker compose -p wop-staging exec -T backend flask init-db
 
             # Switch back to main so production deploys aren't blocked
             git checkout main

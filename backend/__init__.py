@@ -137,4 +137,8 @@ def create_app():
     from backend.routes.sse import sse_bp
     app.register_blueprint(sse_bp, url_prefix="/api/sse")
 
+    # Register CLI commands
+    from backend.init_db import init_db_command
+    app.cli.add_command(init_db_command)
+
     return app
