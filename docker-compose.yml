@@ -1,0 +1,98 @@
+# Docker Compose for Write or Perish
+# Base configuration - works for all environments
+# Use docker-compose.override.yml for development-specific settings
+
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-writeorperish}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-writeorperish}
+      POSTGRES_DB: ${POSTGRES_DB:-writeorperish}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-writeorperish}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis for Celery broker and result backend
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Flask Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      - SECRET_KEY=${SECRET_KEY}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-writeorperish}:${POSTGRES_PASSWORD:-writeorperish}@db:5432/${POSTGRES_DB:-writeorperish}
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - TWITTER_API_KEY=${TWITTER_API_KEY}
+      - TWITTER_API_SECRET=${TWITTER_API_SECRET}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
+      - LLM_NAME=${LLM_NAME:-claude-opus-4.5}
+      - FLASK_ENV=${FLASK_ENV:-production}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - media_data:/app/data
+    restart: unless-stopped
+
+  # Celery Worker for background tasks
+  celery:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A backend.celery_app.celery worker --loglevel=info --concurrency=2
+    environment:
+      - SECRET_KEY=${SECRET_KEY}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-writeorperish}:${POSTGRES_PASSWORD:-writeorperish}@db:5432/${POSTGRES_DB:-writeorperish}
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - LLM_NAME=${LLM_NAME:-claude-opus-4.5}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - media_data:/app/data
+    restart: unless-stopped
+
+  # React Frontend (production build served by nginx)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - REACT_APP_BACKEND_URL=${REACT_APP_BACKEND_URL:-http://localhost:5010}
+        - REACT_APP_API_URL=${REACT_APP_API_URL:-http://localhost:5010/api}
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  media_data:

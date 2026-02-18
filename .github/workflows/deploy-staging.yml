@@ -1,0 +1,50 @@
+name: Deploy to Staging
+
+on:
+  push:
+    branches: [staging]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy staging stack
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_USER: ${{ secrets.VM_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key $VM_USER@$VM_HOST << 'ENDSSH'
+            set -e
+            cd /home/hrosspet/write-or-perish
+            git fetch origin
+            git checkout staging
+            git pull origin staging
+            docker compose \
+              -f docker-compose.yml \
+              -f docker-compose.prod.yml \
+              -f docker-compose.staging.yml \
+              --env-file .env.staging \
+              -p wop-staging \
+              up -d --build
+            sleep 5
+            docker compose -p wop-staging exec -T backend flask db upgrade
+          ENDSSH
+
+      - name: Cleanup
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
+
+      - name: Result
+        run: |
+          [[ "${{ job.status }}" == "success" ]] \
+            && echo "✅ Staging deployed: https://staging.loore.org" \
+            || echo "❌ Staging deployment failed."

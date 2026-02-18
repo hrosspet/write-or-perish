@@ -1,0 +1,50 @@
+# Docker Compose Override for Development
+# This file is automatically loaded alongside docker-compose.yml
+# It adds development-specific features like hot reloading and debug mode
+
+services:
+  # Backend with hot reload
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    command: flask run --host=0.0.0.0 --port=5010 --reload
+    ports:
+      - "${BACKEND_PORT:-5010}:5010"
+    environment:
+      - FLASK_ENV=development
+      - FLASK_DEBUG=1
+    volumes:
+      # Mount source code for hot reloading (into backend/ to match project-root import layout)
+      - ./backend:/app/backend
+      # Persist media data
+      - media_data:/app/data
+
+  # Celery with auto-reload on code changes
+  celery:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    command: watchmedo auto-restart --directory=/app/backend --pattern="*.py" --recursive -- celery -A backend.celery_app.celery worker --loglevel=info --concurrency=2
+    volumes:
+      - ./backend:/app/backend
+      - media_data:/app/data
+
+  # Frontend with React dev server (hot module replacement)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    command: npm start
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+      - WATCHPACK_POLLING=true
+    ports:
+      - "${FRONTEND_PORT:-3001}:3000"
+    volumes:
+      # Mount source code for hot reloading
+      - ./frontend:/app
+      # Don't mount node_modules (use container's version)
+      - /app/node_modules
+    stdin_open: true
+    tty: true

@@ -11,6 +11,7 @@ venv/
 ENV/
 .venv/
 **.env*
+!.env.staging.example
 .flaskenv
 
 # Byte-compiled / optimized / DLL files

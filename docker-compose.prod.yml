@@ -1,0 +1,100 @@
+# Docker Compose for Production
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+services:
+  db:
+    # Production database settings
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    # Persist data with named volume
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  redis:
+    # Enable persistence
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  backend:
+    # Use production Dockerfile
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      - FLASK_ENV=production
+    # Production Gunicorn settings (gevent for SSE long-lived connections)
+    command: gunicorn --bind 0.0.0.0:5010 --workers 4 -k gevent --timeout 900 --access-logfile - --error-logfile - backend.app:app
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5010/api/dashboard"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+
+  celery:
+    # Use production Dockerfile
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A backend.celery_app.celery worker --loglevel=warning --concurrency=4
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+
+  frontend:
+    # Use production build
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - REACT_APP_BACKEND_URL=${REACT_APP_BACKEND_URL}
+        - REACT_APP_API_URL=${REACT_APP_API_URL}
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  # Optional: Nginx reverse proxy for production
+  nginx:
+    image: nginx:alpine
+    profiles:
+      - with-proxy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./configs/nginx-docker.conf:/etc/nginx/nginx.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+    depends_on:
+      - backend
+      - frontend
+    deploy:
+      resources:
+        limits:
+          memory: 128M

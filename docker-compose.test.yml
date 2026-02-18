@@ -1,0 +1,68 @@
+# Docker Compose for Testing (CI/CD)
+# Standalone test configuration - does not require base docker-compose.yml
+# Usage: docker compose -f docker-compose.test.yml up --build --abort-on-container-exit
+
+services:
+  db:
+    image: postgres:15-alpine
+    # Use tmpfs for faster test database (ephemeral)
+    tmpfs:
+      - /var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: writeorperish_test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    # Use tmpfs for faster Redis (ephemeral)
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    environment:
+      - DATABASE_URL=postgresql://test:test@db:5432/writeorperish_test
+      - FLASK_ENV=testing
+      - SECRET_KEY=test-secret-key-for-ci
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Override command to run tests
+    command: >
+      sh -c "
+        flask db upgrade &&
+        pytest --cov=. --cov-report=xml --cov-report=term-missing -v
+      "
+    volumes:
+      - ./backend:/app
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    environment:
+      - CI=true
+    # Override command to run tests
+    command: npm test -- --watchAll=false --passWithNoTests --coverage
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules

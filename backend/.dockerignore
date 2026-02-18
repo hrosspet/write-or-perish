@@ -1,0 +1,54 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info
+*.egg
+.eggs
+*.manifest
+*.spec
+
+# Virtual environments
+env/
+venv/
+ENV/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Logs
+*.log
+logs/
+
+# Local development
+.env
+.env.*
+!.env.example
+
+# Data files (handled by volumes)
+data/
+
+# Documentation
+docs/
+*.md
+!requirements.txt
+
+# Build artifacts
+dist/
+build/
