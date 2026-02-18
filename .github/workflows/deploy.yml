@@ -58,10 +58,26 @@ jobs:
             set -e  # Exit immediately if any command fails
             cd /home/hrosspet/write-or-perish
 
-            # Pull latest backend code
+            # Safety checks: ensure repo is on main and clean
+            CURRENT_BRANCH=$(git branch --show-current)
+            if [ "$CURRENT_BRANCH" != "main" ]; then
+              echo "ERROR: VM repo is on branch '$CURRENT_BRANCH', expected 'main'."
+              echo "Fix: ssh to VM and run: git checkout main"
+              exit 1
+            fi
+
+            if [ -n "$(git status --porcelain)" ]; then
+              echo "ERROR: VM repo has uncommitted changes:"
+              git status --short
+              echo "Fix: ssh to VM and stash or commit the changes"
+              exit 1
+            fi
+
+            # Pull latest backend code (fast-forward only to prevent merge commits)
             echo "Pulling latest code from main branch..."
-            git pull origin main || {
-              echo "ERROR: git pull failed. Check for untracked files or merge conflicts."
+            git pull --ff-only origin main || {
+              echo "ERROR: git pull --ff-only failed. The local main has diverged from origin."
+              echo "Fix: ssh to VM and run: git fetch origin && git reset --hard origin/main"
               exit 1
             }
 
