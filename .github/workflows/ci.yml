@@ -3,7 +3,10 @@ name: Continuous Integration
 on:
   push:
     branches:
-      - '**'  # Run on all branches
+      - '**'
+    branches-ignore:
+      - main      # deploy.yml re-runs tests before deploying
+      - staging   # already tested on feature branch before merge
   pull_request:
     branches:
       - '**'  # Run on PRs to all branches
