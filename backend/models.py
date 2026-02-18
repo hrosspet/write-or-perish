@@ -29,6 +29,9 @@ class User(db.Model, UserMixin):
     # databases created before this change.)
     is_admin = db.Column(db.Boolean, default=False, nullable=False)
 
+    # Craft mode toggle — shows power-user features in the nav overflow menu
+    craft_mode = db.Column(db.Boolean, default=False, nullable=False)
+
     # Subscription plan ("free", "alpha", "pro", etc.).
     plan = db.Column(db.String(16), nullable=False, default="alpha")
 
@@ -241,6 +244,25 @@ class UserProfile(db.Model):
 
     def get_content(self) -> str:
         """Get decrypted content."""
+        return decrypt_content(self.content)
+
+
+class UserTodo(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    generated_by = db.Column(db.String(64), nullable=False)
+    tokens_used = db.Column(db.Integer, nullable=False, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    privacy_level = db.Column(db.String(16), nullable=False, default="private")
+    ai_usage = db.Column(db.String(16), nullable=False, default="chat")
+
+    user = db.relationship("User", backref="todos")
+
+    def set_content(self, plaintext):
+        self.content = encrypt_content(plaintext)
+
+    def get_content(self):
         return decrypt_content(self.content)
 
 

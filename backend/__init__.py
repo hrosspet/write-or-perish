@@ -87,7 +87,7 @@ def create_app():
             return jsonify({"error": "Your account is not approved. Please wait for approval."}), 403
 
         # For HTML (or non-JSON) requests, redirect to the landing page with an alpha flag.
-        return redirect("/?alpha=1")
+        return redirect("/landing?alpha=1")
     # --------------------------------------------------------------------
 
     # Initialize Twitter blueprint.
@@ -124,6 +124,18 @@ def create_app():
 
     from backend.routes.drafts import drafts_bp
     app.register_blueprint(drafts_bp, url_prefix="/api/drafts")
+
+    from backend.routes.todo import todo_bp
+    app.register_blueprint(todo_bp, url_prefix="/api/todo")
+
+    from backend.routes.reflect import reflect_bp
+    app.register_blueprint(reflect_bp, url_prefix="/api/reflect")
+
+    from backend.routes.converse import converse_bp
+    app.register_blueprint(converse_bp, url_prefix="/api/converse")
+
+    from backend.routes.orient import orient_bp
+    app.register_blueprint(orient_bp, url_prefix="/api/orient")
 
     # --------------------------------------------------------------------
     # Voice‑mode media blueprint – serves audio files in dev & tests.
