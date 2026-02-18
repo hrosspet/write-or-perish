@@ -1,0 +1,2174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Loore — UX Prototype v2</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400;1,500&family=Outfit:wght@300;400;500&display=swap" rel="stylesheet" />
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg-deep: #0e0d0b;
+    --bg-surface: #181714;
+    --bg-card: #211f1b;
+    --bg-card-hover: #282520;
+    --bg-input: #151311;
+    --text-primary: #ede8dd;
+    --text-secondary: #a89f91;
+    --text-muted: #736b5f;
+    --accent: #c4956a;
+    --accent-dim: #a07a55;
+    --accent-glow: #c4956a40;
+    --accent-subtle: #c4956a15;
+    --border: #302c27;
+    --border-hover: #433e36;
+    --serif: 'Cormorant Garamond', Georgia, serif;
+    --sans: 'Outfit', system-ui, sans-serif;
+  }
+
+  body {
+    background: var(--bg-deep);
+    color: var(--text-primary);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+    min-height: 100vh;
+  }
+
+  /* ==========================================
+     PROTOTYPE TAB BAR
+     ========================================== */
+  .proto-tabs {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    z-index: 9000;
+    display: flex;
+    gap: 0;
+    background: #08070690;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-bottom: 1px solid var(--border);
+    font-family: var(--sans);
+  }
+
+  .proto-tab {
+    padding: 13px 20px;
+    font-size: 0.75rem;
+    font-weight: 400;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    cursor: pointer;
+    border: none;
+    background: none;
+    border-bottom: 2px solid transparent;
+    transition: all 0.3s ease;
+    white-space: nowrap;
+  }
+
+  .proto-tab:hover { color: var(--text-secondary); }
+  .proto-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  .proto-label {
+    margin-left: auto;
+    padding: 13px 20px;
+    font-size: 0.65rem;
+    font-weight: 400;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    opacity: 0.5;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .proto-label::before {
+    content: '';
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    opacity: 0.6;
+  }
+
+  /* ==========================================
+     SCREENS
+     ========================================== */
+  .screen { display: none; padding-top: 46px; min-height: 100vh; }
+  .screen.active { display: block; }
+
+  /* ==========================================
+     APP NAV BAR  —  matches existing screenshot
+     ========================================== */
+  .app-nav {
+    height: 56px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 2rem;
+    background: var(--bg-surface);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 46px;
+    z-index: 100;
+  }
+
+  .app-nav-left {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    text-decoration: none;
+    cursor: pointer;
+  }
+
+  .app-nav-logo-svg {
+    opacity: 0.55;
+    transition: opacity 0.3s;
+  }
+
+  .app-nav-left:hover .app-nav-logo-svg { opacity: 0.8; }
+
+  .app-nav-wordmark {
+    font-family: var(--serif);
+    font-weight: 300;
+    font-size: 0.85rem;
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    transition: color 0.3s;
+  }
+
+  .app-nav-left:hover .app-nav-wordmark { color: var(--text-primary); }
+
+  .app-nav-right {
+    display: flex;
+    gap: 1.8rem;
+    align-items: center;
+  }
+
+  .nav-link {
+    font-family: var(--sans);
+    font-weight: 300;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    text-decoration: none;
+    cursor: pointer;
+    transition: color 0.3s;
+    letter-spacing: 0.02em;
+  }
+
+  .nav-link:hover { color: var(--text-primary); }
+  .nav-link.active { color: var(--accent); }
+
+  /* Three-dot menu */
+  .dot-menu-wrap { position: relative; }
+
+  .dot-menu-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 8px 2px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    align-items: center;
+    opacity: 0.4;
+    transition: opacity 0.3s;
+  }
+
+  .dot-menu-btn:hover { opacity: 0.85; }
+
+  .dot-menu-btn span {
+    width: 3.5px;
+    height: 3.5px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    display: block;
+  }
+
+  .dot-menu-dropdown {
+    display: none;
+    position: absolute;
+    top: calc(100% + 10px);
+    right: 0;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    min-width: 200px;
+    box-shadow: 0 16px 56px rgba(0,0,0,0.55);
+    z-index: 200;
+    overflow: hidden;
+  }
+
+  .dot-menu-dropdown.open { display: block; }
+
+  .dot-menu-section {
+    padding: 6px 0;
+    border-bottom: 1px solid #1e1d1a;
+  }
+
+  .dot-menu-section:last-child { border-bottom: none; }
+
+  .dot-menu-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: 10px 16px;
+    font-family: var(--sans);
+    font-weight: 300;
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    background: none;
+    border: none;
+    text-align: left;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .dot-menu-item:hover {
+    background: var(--bg-card-hover);
+    color: var(--text-primary);
+  }
+
+  .dot-menu-hint {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    opacity: 0.6;
+  }
+
+  .dot-menu-toggle {
+    width: 32px;
+    height: 18px;
+    border-radius: 10px;
+    background: var(--border);
+    position: relative;
+    transition: background 0.3s;
+    flex-shrink: 0;
+  }
+
+  .dot-menu-toggle::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    transition: all 0.3s;
+  }
+
+  .dot-menu-toggle.on {
+    background: var(--accent-dim);
+  }
+
+  .dot-menu-toggle.on::after {
+    left: 16px;
+    background: var(--text-primary);
+  }
+
+  /* ==========================================
+     HOME SCREEN
+     ========================================== */
+  .home {
+    min-height: calc(100vh - 102px);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 3rem 2rem;
+    position: relative;
+  }
+
+  .home::before {
+    content: '';
+    position: absolute;
+    top: -20%;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 140%;
+    height: 70%;
+    background: radial-gradient(ellipse at center, #1a150f 0%, transparent 70%);
+    pointer-events: none;
+    opacity: 0.6;
+  }
+
+  .home-greeting {
+    font-family: var(--serif);
+    font-weight: 300;
+    font-size: clamp(1.1rem, 2.5vw, 1.35rem);
+    color: var(--text-muted);
+    margin-bottom: 0.6rem;
+    opacity: 0;
+    animation: fadeUp 0.8s ease 0.2s forwards;
+    position: relative;
+    z-index: 1;
+  }
+
+  .home-question {
+    font-family: var(--serif);
+    font-weight: 300;
+    font-size: clamp(1.8rem, 4.5vw, 2.8rem);
+    color: var(--text-primary);
+    margin-bottom: 4rem;
+    opacity: 0;
+    animation: fadeUp 0.8s ease 0.4s forwards;
+    position: relative;
+    z-index: 1;
+  }
+
+  .home-modes {
+    display: flex;
+    gap: 1.5rem;
+    position: relative;
+    z-index: 1;
+    max-width: 920px;
+    width: 100%;
+  }
+
+  @media (max-width: 740px) {
+    .home-modes { flex-direction: column; gap: 1rem; }
+  }
+
+  .mode-card {
+    flex: 1;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 2.2rem 1.8rem 2rem;
+    cursor: pointer;
+    transition: all 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+    position: relative;
+    overflow: hidden;
+    opacity: 0;
+    text-decoration: none;
+    display: block;
+  }
+
+  .mode-card:nth-child(1) { animation: fadeUp 0.7s ease 0.5s forwards; }
+  .mode-card:nth-child(2) { animation: fadeUp 0.7s ease 0.65s forwards; }
+  .mode-card:nth-child(3) { animation: fadeUp 0.7s ease 0.8s forwards; }
+
+  .mode-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    opacity: 0;
+    transition: opacity 0.4s;
+  }
+
+  .mode-card:hover {
+    border-color: var(--border-hover);
+    transform: translateY(-3px);
+    box-shadow: 0 12px 48px rgba(0,0,0,0.35), 0 0 40px var(--accent-glow);
+  }
+
+  .mode-card:hover::before { opacity: 0.5; }
+
+  .mode-icon {
+    width: 48px;
+    height: 48px;
+    margin-bottom: 1.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0.7;
+    transition: opacity 0.3s;
+  }
+
+  .mode-card:hover .mode-icon { opacity: 1; }
+
+  .mode-name {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 1.5rem;
+    color: var(--text-primary);
+    margin-bottom: 0.7rem;
+  }
+
+  .mode-desc {
+    font-family: var(--sans);
+    font-weight: 300;
+    font-size: 0.88rem;
+    color: var(--text-muted);
+    line-height: 1.65;
+  }
+
+  /* ==========================================
+     PROFILE SCREEN
+     ========================================== */
+  .profile-page {
+    max-width: 700px;
+    margin: 0 auto;
+    padding: 3rem 2rem 6rem;
+  }
+
+  .profile-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 0.5rem;
+  }
+
+  .profile-title {
+    font-family: var(--serif);
+    font-weight: 300;
+    font-size: 2rem;
+    color: var(--text-primary);
+    opacity: 0;
+    animation: fadeUp 0.5s ease 0.1s forwards;
+  }
+
+  .profile-version-wrap {
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+    opacity: 0;
+    animation: fadeUp 0.5s ease 0.2s forwards;
+  }
+
+  .version-badge {
+    font-family: var(--sans);
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    letter-spacing: 0.04em;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .version-badge-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #3a6;
+    opacity: 0.7;
+  }
+
+  .version-link {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    opacity: 0.5;
+    cursor: pointer;
+    transition: all 0.3s;
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+  }
+
+  .version-link:hover {
+    opacity: 1;
+    color: var(--text-secondary);
+    border-bottom-color: var(--border);
+  }
+
+  .profile-meta {
+    font-family: var(--sans);
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-bottom: 2.5rem;
+    opacity: 0;
+    animation: fadeUp 0.5s ease 0.15s forwards;
+  }
+
+  .profile-divider {
+    width: 40px;
+    height: 1px;
+    background: var(--accent);
+    opacity: 0.4;
+    margin-bottom: 2.5rem;
+    opacity: 0;
+    animation: fadeUp 0.5s ease 0.2s forwards;
+  }
+
+  .profile-section {
+    margin-bottom: 2.5rem;
+    opacity: 0;
+  }
+
+  .profile-section:nth-child(1) { animation: fadeUp 0.5s ease 0.25s forwards; }
+  .profile-section:nth-child(2) { animation: fadeUp 0.5s ease 0.35s forwards; }
+  .profile-section:nth-child(3) { animation: fadeUp 0.5s ease 0.45s forwards; }
+  .profile-section:nth-child(4) { animation: fadeUp 0.5s ease 0.55s forwards; }
+
+  .profile-section-heading {
+    font-family: var(--sans);
+    font-weight: 500;
+    font-size: 0.72rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--accent-dim);
+    margin-bottom: 1.2rem;
+    padding-bottom: 0.6rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .profile-body {
+    font-family: var(--sans);
+    font-weight: 300;
+    font-size: 0.93rem;
+    line-height: 1.8;
+    color: var(--text-secondary);
+  }
+
+  .profile-body strong {
+    font-weight: 400;
+    color: var(--text-primary);
+  }
+
+  .profile-item {
+    padding: 0.4rem 0;
+    padding-left: 1.1rem;
+    position: relative;
+  }
+
+  .profile-item::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0.95rem;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: var(--accent-dim);
+    opacity: 0.5;
+  }
+
+  /* ==========================================
+     TODO SCREEN
+     ========================================== */
+  .todo-page {
+    max-width: 660px;
+    margin: 0 auto;
+    padding: 3rem 2rem 6rem;
+  }
+
+  .todo-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 0.5rem;
+  }
+
+  .todo-title {
+    font-family: var(--serif);
+    font-weight: 300;
+    font-size: 2rem;
+    color: var(--text-primary);
+    opacity: 0;
+    animation: fadeUp 0.5s ease 0.1s forwards;
+  }
+
+  .todo-meta {
+    font-family: var(--sans);
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-bottom: 2.5rem;
+    opacity: 0;
+    animation: fadeUp 0.5s ease 0.15s forwards;
+  }
+
+  .todo-divider {
+    width: 40px;
+    height: 1px;
+    background: var(--accent);
+    opacity: 0.4;
+    margin-bottom: 2rem;
+    opacity: 0;
+    animation: fadeUp 0.5s ease 0.2s forwards;
+  }
+
+  .todo-group {
+    margin-bottom: 2.5rem;
+    opacity: 0;
+  }
+
+  .todo-group:nth-of-type(1) { animation: fadeUp 0.5s ease 0.25s forwards; }
+  .todo-group:nth-of-type(2) { animation: fadeUp 0.5s ease 0.35s forwards; }
+  .todo-group:nth-of-type(3) { animation: fadeUp 0.5s ease 0.45s forwards; }
+
+  .todo-group-label {
+    font-family: var(--sans);
+    font-weight: 500;
+    font-size: 0.72rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--accent-dim);
+    margin-bottom: 1rem;
+    padding-bottom: 0.6rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .todo-group-count {
+    font-weight: 300;
+    color: var(--text-muted);
+    font-size: 0.7rem;
+    letter-spacing: 0.05em;
+    text-transform: none;
+  }
+
+  .todo-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 11px 0;
+    border-bottom: 1px solid #1a1917;
+  }
+
+  .todo-item:last-child { border-bottom: none; }
+
+  .todo-check {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: 1.5px solid var(--border-hover);
+    flex-shrink: 0;
+    margin-top: 1px;
+    cursor: pointer;
+    transition: all 0.3s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+  }
+
+  .todo-check:hover { border-color: var(--accent-dim); }
+
+  .todo-check.done {
+    border-color: var(--accent-dim);
+    background: var(--accent-dim);
+  }
+
+  .todo-check.done::after {
+    content: '✓';
+    font-size: 0.6rem;
+    color: var(--bg-deep);
+    font-weight: 600;
+  }
+
+  .todo-item.done .todo-text { text-decoration: line-through; opacity: 0.35; }
+
+  .todo-text {
+    font-family: var(--sans);
+    font-weight: 300;
+    font-size: 0.92rem;
+    color: var(--text-secondary);
+    line-height: 1.5;
+    flex: 1;
+  }
+
+  .todo-date-added {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    opacity: 0.5;
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+
+  /* ==========================================
+     REFLECT SCREEN
+     ========================================== */
+  .reflect-state { display: none; }
+  .reflect-state.active { display: flex; }
+
+  .reflect-recording {
+    min-height: calc(100vh - 102px);
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 3rem 2rem;
+    position: relative;
+  }
+
+  .reflect-recording::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 50% 45%, #1f170e 0%, var(--bg-deep) 65%);
+    pointer-events: none;
+    opacity: 0;
+    animation: ambientGlow 0.8s ease forwards;
+  }
+
+  @keyframes ambientGlow { to { opacity: 0.7; } }
+
+  .reflect-prompt {
+    font-family: var(--serif);
+    font-weight: 300;
+    font-size: clamp(1.2rem, 2.5vw, 1.6rem);
+    color: var(--text-secondary);
+    margin-bottom: 4rem;
+    position: relative;
+    z-index: 1;
+    opacity: 0;
+    animation: fadeUp 0.6s ease 0.2s forwards;
+    font-style: italic;
+  }
+
+  .ecg-container {
+    position: relative;
+    width: 280px;
+    height: 168px;
+    margin-bottom: 3rem;
+    z-index: 1;
+    opacity: 0;
+    animation: fadeUp 0.6s ease 0.4s forwards;
+  }
+
+  .ecg-svg { width: 100%; height: 100%; }
+
+  .ecg-line, .ecg-glow {
+    stroke-dasharray: 500;
+    stroke-dashoffset: 500;
+    animation: drawLine 1.5s cubic-bezier(0.22, 1, 0.36, 1) 0.6s forwards;
+  }
+
+  @keyframes drawLine { to { stroke-dashoffset: 0; } }
+
+  .ecg-pulse {
+    opacity: 0;
+    animation: drawLine 1.5s cubic-bezier(0.22, 1, 0.36, 1) 0.6s forwards,
+               ecgBreathe 3s ease-in-out 2.1s infinite;
+  }
+
+  @keyframes ecgBreathe {
+    0%, 100% { opacity: 0.25; filter: drop-shadow(0 0 8px var(--accent-glow)); }
+    50% { opacity: 0.6; filter: drop-shadow(0 0 20px var(--accent)); }
+  }
+
+  .ecg-scanline {
+    position: absolute;
+    top: 0; left: 0;
+    width: 3px;
+    height: 100%;
+    background: linear-gradient(to bottom, transparent, var(--accent), transparent);
+    opacity: 0;
+    animation: ecgScan 3s ease-in-out 2.1s infinite;
+    border-radius: 2px;
+    filter: blur(1px);
+  }
+
+  @keyframes ecgScan {
+    0% { left: 0%; opacity: 0; }
+    5% { opacity: 0.5; }
+    50% { opacity: 0.3; }
+    95% { opacity: 0.5; }
+    100% { left: 100%; opacity: 0; }
+  }
+
+  .voice-wave {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    height: 40px;
+    margin-bottom: 2.5rem;
+    position: relative;
+    z-index: 1;
+    opacity: 0;
+    animation: fadeUp 0.5s ease 0.7s forwards;
+  }
+
+  .voice-bar {
+    width: 3px;
+    border-radius: 2px;
+    background: var(--accent);
+    opacity: 0.5;
+    animation: voiceBar 1.2s ease-in-out infinite;
+  }
+
+  @keyframes voiceBar {
+    0%, 100% { height: 8px; opacity: 0.3; }
+    50% { height: var(--h, 24px); opacity: 0.7; }
+  }
+
+  .reflect-timer {
+    font-family: var(--sans);
+    font-weight: 300;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    letter-spacing: 0.12em;
+    margin-bottom: 3rem;
+    position: relative;
+    z-index: 1;
+    opacity: 0;
+    animation: fadeUp 0.5s ease 0.9s forwards;
+  }
+
+  .reflect-stop {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    border: 2px solid var(--accent);
+    background: transparent;
+    cursor: pointer;
+    position: relative;
+    z-index: 1;
+    transition: all 0.3s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    animation: fadeUp 0.5s ease 1.1s forwards;
+  }
+
+  .reflect-stop:hover {
+    background: var(--accent-subtle);
+    box-shadow: 0 0 30px var(--accent-glow);
+  }
+
+  .reflect-stop-inner {
+    width: 18px;
+    height: 18px;
+    border-radius: 3px;
+    background: var(--accent);
+  }
+
+  /* Reflect response */
+  .reflect-response {
+    min-height: calc(100vh - 102px);
+    flex-direction: column;
+    padding: 3rem 2rem 6rem;
+    max-width: 680px;
+    margin: 0 auto;
+  }
+
+  .reflect-date {
+    font-family: var(--sans);
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-bottom: 2rem;
+    opacity: 0;
+    animation: fadeUp 0.5s ease 0.1s forwards;
+  }
+
+  .reflect-transcript {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 1.3rem;
+    line-height: 1.75;
+    color: var(--text-secondary);
+    margin-bottom: 2.5rem;
+    padding-bottom: 2.5rem;
+    border-bottom: 1px solid var(--border);
+    opacity: 0;
+    animation: fadeUp 0.6s ease 0.2s forwards;
+  }
+
+  .ai-label {
+    font-family: var(--sans);
+    font-size: 0.68rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    opacity: 0;
+    animation: fadeUp 0.5s ease 0.6s forwards;
+  }
+
+  .ai-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: aiPulse 2s ease infinite;
+  }
+
+  @keyframes aiPulse {
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 1; box-shadow: 0 0 8px var(--accent-glow); }
+  }
+
+  .ai-body {
+    font-family: var(--sans);
+    font-weight: 300;
+    font-size: 1rem;
+    line-height: 1.85;
+    color: var(--text-muted);
+  }
+
+  .ai-body p { margin-bottom: 1rem; opacity: 0; }
+  .ai-body p:nth-child(1) { animation: fadeUp 0.5s ease 0.8s forwards; }
+  .ai-body p:nth-child(2) { animation: fadeUp 0.5s ease 1.2s forwards; }
+  .ai-body p:nth-child(3) { animation: fadeUp 0.5s ease 1.6s forwards; }
+
+  .reflect-insight {
+    margin-top: 2rem;
+    padding: 1.2rem 1.4rem;
+    background: var(--accent-subtle);
+    border-left: 2px solid var(--accent-dim);
+    border-radius: 0 8px 8px 0;
+    opacity: 0;
+    animation: fadeUp 0.5s ease 2s forwards;
+  }
+
+  .reflect-insight-label {
+    font-size: 0.65rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--accent-dim);
+    margin-bottom: 0.5rem;
+  }
+
+  .reflect-insight-text {
+    font-family: var(--sans);
+    font-weight: 300;
+    font-size: 0.9rem;
+    line-height: 1.7;
+    color: var(--text-secondary);
+  }
+
+  .reflect-actions {
+    margin-top: 2.5rem;
+    display: flex;
+    gap: 0.8rem;
+    flex-wrap: wrap;
+    opacity: 0;
+    animation: fadeUp 0.5s ease 2.3s forwards;
+  }
+
+  .action-btn {
+    font-family: var(--sans);
+    font-weight: 400;
+    font-size: 0.78rem;
+    padding: 8px 18px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-muted);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.3s;
+  }
+
+  .action-btn:hover {
+    border-color: var(--border-hover);
+    color: var(--text-secondary);
+    background: rgba(255,255,255,0.02);
+  }
+
+  .action-btn.primary {
+    border-color: var(--accent-dim);
+    color: var(--accent);
+  }
+
+  .action-btn.primary:hover {
+    background: var(--accent-subtle);
+    box-shadow: 0 0 20px var(--accent-glow);
+  }
+
+  /* ==========================================
+     ORIENT SCREEN
+     ========================================== */
+  .orient-page {
+    max-width: 620px;
+    margin: 0 auto;
+    padding: 3rem 2rem 6rem;
+  }
+
+  .orient-header {
+    text-align: center;
+    margin-bottom: 3rem;
+    padding-bottom: 2rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .orient-date {
+    font-family: var(--sans);
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-bottom: 0.8rem;
+    opacity: 0;
+    animation: fadeUp 0.5s ease 0.1s forwards;
+  }
+
+  .orient-title {
+    font-family: var(--serif);
+    font-weight: 300;
+    font-size: 1.8rem;
+    color: var(--text-primary);
+    opacity: 0;
+    animation: fadeUp 0.5s ease 0.2s forwards;
+  }
+
+  .orient-sharing {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 1.05rem;
+    line-height: 1.75;
+    color: var(--text-secondary);
+    margin-bottom: 2.5rem;
+    padding-bottom: 2rem;
+    border-bottom: 1px solid var(--border);
+    font-style: italic;
+    opacity: 0;
+    animation: fadeUp 0.5s ease 0.3s forwards;
+  }
+
+  .orient-section-label {
+    font-size: 0.68rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--accent);
+    opacity: 0.6;
+    margin-bottom: 1.2rem;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .orient-tasks {
+    margin-bottom: 2.5rem;
+    opacity: 0;
+    animation: fadeUp 0.5s ease 0.5s forwards;
+  }
+
+  .orient-task {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 12px 0;
+    border-bottom: 1px solid #1e1d1a;
+  }
+
+  .orient-task:last-child { border-bottom: none; }
+
+  .orient-check {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: 1.5px solid var(--border-hover);
+    flex-shrink: 0;
+    margin-top: 2px;
+    cursor: pointer;
+    transition: all 0.3s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .orient-check:hover { border-color: var(--accent-dim); }
+
+  .orient-check.done {
+    border-color: var(--accent-dim);
+    background: var(--accent-dim);
+  }
+
+  .orient-check.done::after {
+    content: '✓';
+    font-size: 0.6rem;
+    color: var(--bg-deep);
+    font-weight: 600;
+  }
+
+  .orient-task.done .orient-task-text { text-decoration: line-through; opacity: 0.4; }
+
+  .orient-task-text {
+    font-family: var(--sans);
+    font-weight: 300;
+    font-size: 0.92rem;
+    color: var(--text-secondary);
+    line-height: 1.5;
+  }
+
+  .orient-task-new {
+    color: var(--accent);
+    font-size: 0.65rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-left: auto;
+    flex-shrink: 0;
+    opacity: 0.7;
+  }
+
+  .orient-full-list {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 1rem;
+    font-size: 0.8rem;
+    font-weight: 300;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: color 0.3s;
+    opacity: 0.6;
+  }
+
+  .orient-full-list:hover { color: var(--text-secondary); opacity: 1; }
+
+  .orient-priorities {
+    opacity: 0;
+    animation: fadeUp 0.5s ease 0.8s forwards;
+  }
+
+  .orient-priority {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px 16px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 8px;
+    cursor: grab;
+    transition: all 0.3s;
+  }
+
+  .orient-priority:hover {
+    border-color: var(--border-hover);
+    transform: translateX(4px);
+  }
+
+  .orient-priority-num {
+    font-family: var(--serif);
+    font-size: 1.4rem;
+    color: var(--accent-dim);
+    opacity: 0.6;
+    width: 24px;
+    text-align: center;
+  }
+
+  .orient-priority-text {
+    font-family: var(--sans);
+    font-weight: 300;
+    font-size: 0.92rem;
+    color: var(--text-primary);
+    line-height: 1.4;
+  }
+
+  .orient-priority-time {
+    margin-left: auto;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    flex-shrink: 0;
+  }
+
+  .orient-grip {
+    color: var(--text-muted);
+    opacity: 0.3;
+    font-size: 0.9rem;
+    letter-spacing: 2px;
+    flex-shrink: 0;
+  }
+
+  .orient-ai-note {
+    margin-top: 2rem;
+    font-family: var(--sans);
+    font-weight: 300;
+    font-size: 0.88rem;
+    line-height: 1.7;
+    color: var(--text-muted);
+    opacity: 0;
+    animation: fadeUp 0.5s ease 1.1s forwards;
+  }
+
+  .orient-ai-note em {
+    color: var(--text-secondary);
+    font-style: normal;
+  }
+
+  /* ==========================================
+     CONVERSE SCREEN
+     ========================================== */
+  .converse-page {
+    max-width: 680px;
+    margin: 0 auto;
+    padding: 0 2rem;
+    display: flex;
+    flex-direction: column;
+    min-height: calc(100vh - 102px);
+  }
+
+  .converse-messages {
+    flex: 1;
+    padding: 2rem 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+
+  .msg {
+    max-width: 88%;
+    opacity: 0;
+    animation: fadeUp 0.4s ease forwards;
+  }
+
+  .msg:nth-child(1) { animation-delay: 0.1s; }
+  .msg:nth-child(2) { animation-delay: 0.3s; }
+  .msg:nth-child(3) { animation-delay: 0.6s; }
+  .msg:nth-child(4) { animation-delay: 0.9s; }
+  .msg:nth-child(5) { animation-delay: 1.2s; }
+
+  .msg.user { align-self: flex-end; }
+  .msg.ai { align-self: flex-start; }
+
+  .msg-label {
+    font-size: 0.65rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+
+  .msg.user .msg-label { color: var(--text-muted); text-align: right; }
+  .msg.ai .msg-label { color: var(--accent-dim); opacity: 0.7; }
+
+  .msg-bubble {
+    padding: 14px 18px;
+    border-radius: 12px;
+    line-height: 1.7;
+    font-weight: 300;
+    font-size: 0.95rem;
+    position: relative;
+  }
+
+  .msg.user .msg-bubble {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    border-bottom-right-radius: 4px;
+  }
+
+  .msg.ai .msg-bubble {
+    background: transparent;
+    border: 1px solid #252320;
+    color: var(--text-muted);
+    border-bottom-left-radius: 4px;
+  }
+
+  .msg-context {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 8px;
+    font-size: 0.65rem;
+    color: var(--text-muted);
+    opacity: 0.4;
+    cursor: pointer;
+    transition: opacity 0.3s;
+  }
+
+  .msg-context:hover { opacity: 0.8; }
+
+  .msg-context-dot {
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: var(--accent-dim);
+  }
+
+  .converse-input-wrap {
+    position: sticky;
+    bottom: 0;
+    padding: 1rem 0 1.5rem;
+    background: linear-gradient(to top, var(--bg-deep) 60%, transparent);
+  }
+
+  .converse-input {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 6px 8px 6px 18px;
+    transition: border-color 0.3s, box-shadow 0.3s;
+  }
+
+  .converse-input:focus-within {
+    border-color: var(--accent-dim);
+    box-shadow: 0 0 0 2px var(--accent-glow);
+  }
+
+  .converse-input input {
+    flex: 1;
+    background: none;
+    border: none;
+    outline: none;
+    font-family: var(--sans);
+    font-weight: 300;
+    font-size: 0.92rem;
+    color: var(--text-primary);
+    padding: 10px 0;
+  }
+
+  .converse-input input::placeholder { color: var(--text-muted); }
+
+  .icon-btn {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    background: transparent;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.3s;
+    flex-shrink: 0;
+    color: var(--text-muted);
+  }
+
+  .icon-btn:hover {
+    border-color: var(--accent-dim);
+    color: var(--accent);
+  }
+
+  .icon-btn.send {
+    border: none;
+    background: var(--accent);
+    color: var(--bg-deep);
+  }
+
+  .icon-btn.send:hover {
+    box-shadow: 0 0 20px var(--accent-glow);
+    transform: scale(1.05);
+  }
+
+  /* ==========================================
+     VERSION HISTORY DRAWER (overlay)
+     ========================================== */
+  .version-drawer {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 8000;
+  }
+
+  .version-drawer.open { display: flex; }
+
+  .version-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(5,4,3,0.7);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+  }
+
+  .version-panel {
+    position: absolute;
+    top: 0; right: 0; bottom: 0;
+    width: 340px;
+    max-width: 90vw;
+    background: var(--bg-card);
+    border-left: 1px solid var(--border);
+    padding: 2rem 1.5rem;
+    overflow-y: auto;
+    box-shadow: -20px 0 60px rgba(0,0,0,0.4);
+  }
+
+  .version-panel-title {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 1.2rem;
+    color: var(--text-primary);
+    margin-bottom: 0.4rem;
+  }
+
+  .version-panel-sub {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-bottom: 2rem;
+  }
+
+  .version-entry {
+    padding: 12px 0;
+    border-bottom: 1px solid #1e1d1a;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .version-entry:hover { padding-left: 6px; }
+
+  .version-entry-current {
+    display: inline-block;
+    font-size: 0.6rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--accent-dim);
+    background: var(--accent-subtle);
+    padding: 2px 8px;
+    border-radius: 3px;
+    margin-left: 6px;
+    vertical-align: middle;
+  }
+
+  .version-entry-label {
+    font-family: var(--sans);
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    margin-bottom: 3px;
+  }
+
+  .version-entry-meta {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    opacity: 0.7;
+  }
+
+  .version-close {
+    position: absolute;
+    top: 1.5rem;
+    right: 1.5rem;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 1.3rem;
+    cursor: pointer;
+    transition: color 0.3s;
+    line-height: 1;
+  }
+
+  .version-close:hover { color: var(--text-primary); }
+
+  /* ==========================================
+     GLOBAL
+     ========================================== */
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(16px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .grain {
+    position: fixed;
+    inset: 0;
+    opacity: 0.025;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+    background-size: 200px;
+    pointer-events: none;
+    z-index: 9999;
+  }
+
+  @media (max-width: 640px) {
+    .app-nav { padding: 0 1.2rem; }
+    .app-nav-right { gap: 1.2rem; }
+    .profile-page, .todo-page { padding: 2rem 1.2rem 4rem; }
+    .reflect-response { padding: 2rem 1.2rem 4rem; }
+    .orient-page { padding: 2rem 1.2rem 4rem; }
+    .converse-page { padding: 0 1.2rem; }
+    .ecg-container { width: 220px; height: 132px; }
+    .version-panel { width: 300px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="grain"></div>
+
+<!-- Prototype tabs -->
+<div class="proto-tabs">
+  <button class="proto-tab active" onclick="showScreen('home')">Home</button>
+  <button class="proto-tab" onclick="showScreen('reflect')">Reflect</button>
+  <button class="proto-tab" onclick="showScreen('orient')">Orient</button>
+  <button class="proto-tab" onclick="showScreen('converse')">Converse</button>
+  <button class="proto-tab" onclick="showScreen('profile')">Profile</button>
+  <button class="proto-tab" onclick="showScreen('todo')">Todo</button>
+  <span class="proto-label">Prototype</span>
+</div>
+
+
+<!-- ======================== HOME ======================== -->
+<div id="home" class="screen active">
+  <nav class="app-nav">
+    <div class="app-nav-left" onclick="showScreen('home')">
+      <svg class="app-nav-logo-svg" width="28" height="17" viewBox="0 0 140 120" fill="none">
+        <path d="M 12,68 L 32,68 L 42,62 L 50,72 L 66,14 L 84,106 L 96,42 L 104,68 L 112,68 L 128,68"
+              stroke="#c4956a" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M 50,72 L 66,14 L 84,106 L 96,42"
+              stroke="#c4956a" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" opacity="0.45"/>
+      </svg>
+      <span class="app-nav-wordmark">Loore</span>
+    </div>
+    <div class="app-nav-right">
+      <span class="nav-link" onclick="showScreen('profile')">Profile</span>
+      <span class="nav-link" onclick="showScreen('todo')">Todo</span>
+      <span class="nav-link" onclick="showScreen('home')">Log</span>
+      <div class="dot-menu-wrap">
+        <button class="dot-menu-btn" onclick="toggleMenu(this)">
+          <span></span><span></span><span></span>
+        </button>
+        <div class="dot-menu-dropdown">
+          <div class="dot-menu-section">
+            <button class="dot-menu-item">
+              <span>Craft mode</span>
+              <div class="dot-menu-toggle" onclick="this.classList.toggle('on'); event.stopPropagation();"></div>
+            </button>
+          </div>
+          <div class="dot-menu-section">
+            <button class="dot-menu-item">Write new entry</button>
+            <button class="dot-menu-item">Import data</button>
+            <button class="dot-menu-item">Export data</button>
+          </div>
+          <div class="dot-menu-section">
+            <button class="dot-menu-item">
+              <span>Model</span>
+              <span class="dot-menu-hint">Claude 4.6 Opus</span>
+            </button>
+          </div>
+          <div class="dot-menu-section">
+            <button class="dot-menu-item">Logout</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <div class="home">
+    <div class="home-greeting">Good morning</div>
+    <h1 class="home-question">What are you here for?</h1>
+
+    <div class="home-modes">
+      <div class="mode-card" onclick="showScreen('reflect')">
+        <div class="mode-icon">
+          <svg width="42" height="28" viewBox="0 0 140 120" fill="none">
+            <path d="M 12,68 L 32,68 L 42,62 L 50,72 L 66,14 L 84,106 L 96,42 L 104,68 L 112,68 L 128,68"
+                  stroke="#c4956a" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M 50,72 L 66,14 L 84,106 L 96,42"
+                  stroke="#c4956a" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" opacity="0.45"/>
+          </svg>
+        </div>
+        <div class="mode-name">Reflect</div>
+        <div class="mode-desc">Speak what's present. Let it come back clearer.</div>
+      </div>
+
+      <div class="mode-card" onclick="showScreen('orient')">
+        <div class="mode-icon">
+          <svg width="42" height="42" viewBox="0 0 42 42" fill="none">
+            <circle cx="21" cy="21" r="16" stroke="#c4956a" stroke-width="1.2" opacity="0.3"/>
+            <circle cx="21" cy="21" r="8" stroke="#c4956a" stroke-width="1" opacity="0.2"/>
+            <line x1="21" y1="2" x2="21" y2="10" stroke="#c4956a" stroke-width="1.5" stroke-linecap="round" opacity="0.6"/>
+            <line x1="21" y1="32" x2="21" y2="40" stroke="#c4956a" stroke-width="1.5" stroke-linecap="round" opacity="0.3"/>
+            <line x1="2" y1="21" x2="10" y2="21" stroke="#c4956a" stroke-width="1.5" stroke-linecap="round" opacity="0.3"/>
+            <line x1="32" y1="21" x2="40" y2="21" stroke="#c4956a" stroke-width="1.5" stroke-linecap="round" opacity="0.3"/>
+            <circle cx="21" cy="21" r="2.5" fill="#c4956a" opacity="0.7"/>
+          </svg>
+        </div>
+        <div class="mode-name">Orient</div>
+        <div class="mode-desc">Ground your day. See what matters.</div>
+      </div>
+
+      <div class="mode-card" onclick="showScreen('converse')">
+        <div class="mode-icon">
+          <svg width="42" height="42" viewBox="0 0 42 42" fill="none">
+            <path d="M8 12 C8 9.8 9.8 8 12 8 L30 8 C32.2 8 34 9.8 34 12 L34 24 C34 26.2 32.2 28 30 28 L16 28 L10 33 L10 28 L12 28 C9.8 28 8 26.2 8 24 Z"
+                  stroke="#c4956a" stroke-width="1.2" opacity="0.4" fill="none"/>
+            <line x1="14" y1="15" x2="28" y2="15" stroke="#c4956a" stroke-width="1.2" stroke-linecap="round" opacity="0.3"/>
+            <line x1="14" y1="20" x2="23" y2="20" stroke="#c4956a" stroke-width="1.2" stroke-linecap="round" opacity="0.3"/>
+          </svg>
+        </div>
+        <div class="mode-name">Converse</div>
+        <div class="mode-desc">Ask anything. Think out loud.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ======================== PROFILE ======================== -->
+<div id="profile" class="screen">
+  <nav class="app-nav">
+    <div class="app-nav-left" onclick="showScreen('home')">
+      <svg class="app-nav-logo-svg" width="28" height="17" viewBox="0 0 140 120" fill="none">
+        <path d="M 12,68 L 32,68 L 42,62 L 50,72 L 66,14 L 84,106 L 96,42 L 104,68 L 112,68 L 128,68" stroke="#c4956a" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M 50,72 L 66,14 L 84,106 L 96,42" stroke="#c4956a" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" opacity="0.45"/>
+      </svg>
+      <span class="app-nav-wordmark">Loore</span>
+    </div>
+    <div class="app-nav-right">
+      <span class="nav-link active">Profile</span>
+      <span class="nav-link" onclick="showScreen('todo')">Todo</span>
+      <span class="nav-link" onclick="showScreen('home')">Log</span>
+      <div class="dot-menu-wrap">
+        <button class="dot-menu-btn" onclick="toggleMenu(this)"><span></span><span></span><span></span></button>
+        <div class="dot-menu-dropdown">
+          <div class="dot-menu-section"><button class="dot-menu-item"><span>Craft mode</span><div class="dot-menu-toggle" onclick="this.classList.toggle('on'); event.stopPropagation();"></div></button></div>
+          <div class="dot-menu-section"><button class="dot-menu-item">Write new entry</button><button class="dot-menu-item">Import data</button><button class="dot-menu-item">Export data</button></div>
+          <div class="dot-menu-section"><button class="dot-menu-item"><span>Model</span><span class="dot-menu-hint">Claude 4.6 Opus</span></button></div>
+          <div class="dot-menu-section"><button class="dot-menu-item">Logout</button></div>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <div class="profile-page">
+    <div class="profile-header">
+      <h1 class="profile-title">Profile</h1>
+      <div class="profile-version-wrap">
+        <div class="version-badge">
+          <div class="version-badge-dot"></div>
+          v12 · Feb 14, 2026
+        </div>
+        <span class="version-link" onclick="openVersionDrawer('profile')">history</span>
+      </div>
+    </div>
+    <div class="profile-meta">Generated from 245,587 tokens across 43 entries · Next update in 3 days</div>
+    <div class="profile-divider"></div>
+
+    <div class="profile-sections">
+      <div class="profile-section">
+        <div class="profile-section-heading">Identity Anchors</div>
+        <div class="profile-body">
+          <div class="profile-item"><strong>Male, 30s, Czech,</strong> based in <strong>Prague</strong> (Prague 6 / Divoká Šárka area). Married to <strong>Pája</strong>. Long-running marital repair arc.</div>
+          <div class="profile-item"><strong>Parent:</strong> son <strong>Herbert</strong> (born late 2024; ~14 months). Stepdaughter Julča.</div>
+          <div class="profile-item"><strong>Work identity:</strong> ML/AI background (Apple, GoodAI, ARC evals). Currently on parental leave, building Loore.</div>
+          <div class="profile-item"><strong>Self-identifiers:</strong> meditator (Vajrayāna), writer, builder. Drafting <em>"The Hyperstition Loop"</em>.</div>
+        </div>
+      </div>
+
+      <div class="profile-section">
+        <div class="profile-section-heading">Recurring Territories</div>
+        <div class="profile-body">
+          <div class="profile-item"><strong>Relationship + intimacy + repair:</strong> couples therapy, unmet recognition, boundaries, oscillation between hope and collapse.</div>
+          <div class="profile-item"><strong>Parenting logistics + exhaustion:</strong> Herbert's sleep, nursing, childcare division, joy in development but chronic lack of slack.</div>
+          <div class="profile-item"><strong>Work as calling vs compulsion:</strong> identity as builder, tension between balanced days and work sprints, fear of burnout.</div>
+          <div class="profile-item"><strong>Spirituality / ritual / phenomenology:</strong> cacao rituals, cold plunges, qigong, emptiness, hyperstition, mythic mode.</div>
+          <div class="profile-item"><strong>AI alignment & coordination:</strong> AI for human reasoning, post-AGI macrostrategy, memetics, "opposite of Moloch."</div>
+        </div>
+      </div>
+
+      <div class="profile-section">
+        <div class="profile-section-heading">Stated Struggles & Desires</div>
+        <div class="profile-body">
+          <div class="profile-item">Wants <strong>time for work</strong> — childcare/relationship chaos consumes bandwidth.</div>
+          <div class="profile-item">Wants to feel <strong>seen by Pája</strong> — appreciated for household/future contributions. Wants intimacy.</div>
+          <div class="profile-item">Recurring question: <strong>"What do I actually want?"</strong> in relationships, life structure, identity.</div>
+          <div class="profile-item">Struggles with <strong>boundary-setting:</strong> tendency to absorb, hold space, then withdraw or go numb.</div>
+        </div>
+      </div>
+
+      <div class="profile-section">
+        <div class="profile-section-heading">Patterns to Watch</div>
+        <div class="profile-body">
+          <div class="profile-item"><strong>Control-grip pattern:</strong> tightens grip when stakes rise. Named 3× this month with increasing precision.</div>
+          <div class="profile-item"><strong>Work-mode / presence-mode split:</strong> operates in distinct systems, loses ability to context-switch fluidly.</div>
+          <div class="profile-item"><strong>Overcommit mornings:</strong> consistently plans more than time allows, especially Mondays.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ======================== TODO ======================== -->
+<div id="todo" class="screen">
+  <nav class="app-nav">
+    <div class="app-nav-left" onclick="showScreen('home')">
+      <svg class="app-nav-logo-svg" width="28" height="17" viewBox="0 0 140 120" fill="none">
+        <path d="M 12,68 L 32,68 L 42,62 L 50,72 L 66,14 L 84,106 L 96,42 L 104,68 L 112,68 L 128,68" stroke="#c4956a" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M 50,72 L 66,14 L 84,106 L 96,42" stroke="#c4956a" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" opacity="0.45"/>
+      </svg>
+      <span class="app-nav-wordmark">Loore</span>
+    </div>
+    <div class="app-nav-right">
+      <span class="nav-link" onclick="showScreen('profile')">Profile</span>
+      <span class="nav-link active">Todo</span>
+      <span class="nav-link" onclick="showScreen('home')">Log</span>
+      <div class="dot-menu-wrap">
+        <button class="dot-menu-btn" onclick="toggleMenu(this)"><span></span><span></span><span></span></button>
+        <div class="dot-menu-dropdown">
+          <div class="dot-menu-section"><button class="dot-menu-item"><span>Craft mode</span><div class="dot-menu-toggle" onclick="this.classList.toggle('on'); event.stopPropagation();"></div></button></div>
+          <div class="dot-menu-section"><button class="dot-menu-item">Write new entry</button><button class="dot-menu-item">Import data</button><button class="dot-menu-item">Export data</button></div>
+          <div class="dot-menu-section"><button class="dot-menu-item"><span>Model</span><span class="dot-menu-hint">Claude 4.6 Opus</span></button></div>
+          <div class="dot-menu-section"><button class="dot-menu-item">Logout</button></div>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <div class="todo-page">
+    <div class="todo-header">
+      <h1 class="todo-title">Todo</h1>
+      <div class="profile-version-wrap">
+        <div class="version-badge">
+          <div class="version-badge-dot"></div>
+          v38 · today
+        </div>
+        <span class="version-link" onclick="openVersionDrawer('todo')">history</span>
+      </div>
+    </div>
+    <div class="todo-meta">Last updated by Orient session · 9:14 AM today</div>
+    <div class="todo-divider"></div>
+
+    <!-- Active — today -->
+    <div class="todo-group">
+      <div class="todo-group-label">
+        Today
+        <span class="todo-group-count">5 tasks</span>
+      </div>
+      <div class="todo-item">
+        <button class="todo-check"></button>
+        <span class="todo-text">Reply to investor email</span>
+        <span class="todo-date-added">today</span>
+      </div>
+      <div class="todo-item">
+        <button class="todo-check"></button>
+        <span class="todo-text">Finish landing page tweaks for alpha</span>
+        <span class="todo-date-added">Feb 16</span>
+      </div>
+      <div class="todo-item">
+        <button class="todo-check"></button>
+        <span class="todo-text">Fix favicon rendering on Safari</span>
+        <span class="todo-date-added">today</span>
+      </div>
+      <div class="todo-item">
+        <button class="todo-check"></button>
+        <span class="todo-text">Herbert's doctor appointment at 2pm</span>
+        <span class="todo-date-added">today</span>
+      </div>
+      <div class="todo-item">
+        <button class="todo-check"></button>
+        <span class="todo-text">Cook dinner</span>
+        <span class="todo-date-added">today</span>
+      </div>
+    </div>
+
+    <!-- Active — upcoming -->
+    <div class="todo-group">
+      <div class="todo-group-label">
+        Upcoming
+        <span class="todo-group-count">4 tasks</span>
+      </div>
+      <div class="todo-item">
+        <button class="todo-check"></button>
+        <span class="todo-text">Write alpha announcement for X</span>
+        <span class="todo-date-added">Feb 15</span>
+      </div>
+      <div class="todo-item">
+        <button class="todo-check"></button>
+        <span class="todo-text">Set up analytics / error tracking for alpha</span>
+        <span class="todo-date-added">Feb 14</span>
+      </div>
+      <div class="todo-item">
+        <button class="todo-check"></button>
+        <span class="todo-text">Schedule couples therapy — February session</span>
+        <span class="todo-date-added">Feb 10</span>
+      </div>
+      <div class="todo-item">
+        <button class="todo-check"></button>
+        <span class="todo-text">Draft "Hyperstition Loop" chapter 3 outline</span>
+        <span class="todo-date-added">Feb 8</span>
+      </div>
+    </div>
+
+    <!-- Completed -->
+    <div class="todo-group">
+      <div class="todo-group-label">
+        Completed recently
+        <span class="todo-group-count">3 tasks</span>
+      </div>
+      <div class="todo-item done">
+        <button class="todo-check done"></button>
+        <span class="todo-text">Rebrand mockups from Write or Perish → Loore</span>
+        <span class="todo-date-added">Feb 17</span>
+      </div>
+      <div class="todo-item done">
+        <button class="todo-check done"></button>
+        <span class="todo-text">Generate favicon and app icons</span>
+        <span class="todo-date-added">Feb 16</span>
+      </div>
+      <div class="todo-item done">
+        <button class="todo-check done"></button>
+        <span class="todo-text">Finalize landing page copy with AI closing CTA</span>
+        <span class="todo-date-added">Feb 15</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ======================== REFLECT ======================== -->
+<div id="reflect" class="screen">
+  <nav class="app-nav">
+    <div class="app-nav-left" onclick="showScreen('home')">
+      <svg class="app-nav-logo-svg" width="28" height="17" viewBox="0 0 140 120" fill="none">
+        <path d="M 12,68 L 32,68 L 42,62 L 50,72 L 66,14 L 84,106 L 96,42 L 104,68 L 112,68 L 128,68" stroke="#c4956a" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M 50,72 L 66,14 L 84,106 L 96,42" stroke="#c4956a" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" opacity="0.45"/>
+      </svg>
+      <span class="app-nav-wordmark">Loore</span>
+    </div>
+    <div class="app-nav-right">
+      <span class="nav-link" onclick="showScreen('profile')">Profile</span>
+      <span class="nav-link" onclick="showScreen('todo')">Todo</span>
+      <span class="nav-link" onclick="showScreen('home')">Log</span>
+      <div class="dot-menu-wrap">
+        <button class="dot-menu-btn" onclick="toggleMenu(this)"><span></span><span></span><span></span></button>
+        <div class="dot-menu-dropdown">
+          <div class="dot-menu-section"><button class="dot-menu-item"><span>Craft mode</span><div class="dot-menu-toggle" onclick="this.classList.toggle('on'); event.stopPropagation();"></div></button></div>
+          <div class="dot-menu-section"><button class="dot-menu-item">Write new entry</button><button class="dot-menu-item">Import data</button><button class="dot-menu-item">Export data</button></div>
+          <div class="dot-menu-section"><button class="dot-menu-item"><span>Model</span><span class="dot-menu-hint">Claude 4.6 Opus</span></button></div>
+          <div class="dot-menu-section"><button class="dot-menu-item">Logout</button></div>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Recording state -->
+  <div id="reflect-rec" class="reflect-state active reflect-recording">
+    <div class="reflect-prompt">Speak what's present…</div>
+    <div class="ecg-container">
+      <div class="ecg-scanline"></div>
+      <svg class="ecg-svg" viewBox="0 0 280 168" fill="none">
+        <path class="ecg-glow" d="M 24,81.6 L 64,81.6 L 84,74.4 L 100,86.4 L 132,16.8 L 168,127.2 L 192,50.4 L 208,81.6 L 224,81.6 L 256,81.6" stroke="#c4956a" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" opacity="0.15" filter="blur(4px)"/>
+        <path class="ecg-line" d="M 24,81.6 L 64,81.6 L 84,74.4 L 100,86.4 L 132,16.8 L 168,127.2 L 192,50.4 L 208,81.6 L 224,81.6 L 256,81.6" stroke="#c4956a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+        <path class="ecg-pulse" d="M 100,86.4 L 132,16.8 L 168,127.2 L 192,50.4" stroke="#c4956a" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <div class="voice-wave">
+      <div class="voice-bar" style="--h:12px;animation-delay:0s"></div>
+      <div class="voice-bar" style="--h:20px;animation-delay:.1s"></div>
+      <div class="voice-bar" style="--h:32px;animation-delay:.2s"></div>
+      <div class="voice-bar" style="--h:16px;animation-delay:.3s"></div>
+      <div class="voice-bar" style="--h:28px;animation-delay:.15s"></div>
+      <div class="voice-bar" style="--h:36px;animation-delay:.25s"></div>
+      <div class="voice-bar" style="--h:22px;animation-delay:.35s"></div>
+      <div class="voice-bar" style="--h:30px;animation-delay:.05s"></div>
+      <div class="voice-bar" style="--h:14px;animation-delay:.2s"></div>
+      <div class="voice-bar" style="--h:26px;animation-delay:.3s"></div>
+      <div class="voice-bar" style="--h:38px;animation-delay:.1s"></div>
+      <div class="voice-bar" style="--h:18px;animation-delay:.25s"></div>
+      <div class="voice-bar" style="--h:24px;animation-delay:.15s"></div>
+      <div class="voice-bar" style="--h:34px;animation-delay:.35s"></div>
+      <div class="voice-bar" style="--h:20px;animation-delay:.05s"></div>
+      <div class="voice-bar" style="--h:28px;animation-delay:.2s"></div>
+      <div class="voice-bar" style="--h:16px;animation-delay:.3s"></div>
+      <div class="voice-bar" style="--h:22px;animation-delay:.1s"></div>
+      <div class="voice-bar" style="--h:30px;animation-delay:.25s"></div>
+      <div class="voice-bar" style="--h:12px;animation-delay:.35s"></div>
+    </div>
+    <div class="reflect-timer">01:24</div>
+    <button class="reflect-stop" onclick="showReflectResponse()">
+      <div class="reflect-stop-inner"></div>
+    </button>
+  </div>
+
+  <!-- Response state -->
+  <div id="reflect-res" class="reflect-state reflect-response">
+    <div class="reflect-date">February 18, 2026 · Reflect</div>
+    <div class="reflect-transcript">
+      I keep reaching for control in situations where what I actually need is to trust the process. The pattern is clear now — every time something matters, I tighten my grip instead of opening my hands. With the launch coming up, I notice the same thing happening. I'm micromanaging every detail instead of trusting the work we've already done. And I can feel it bleeding into home too — Pája mentioned yesterday that I seem distant, and she's right. I'm not distant, I'm clenching.
+    </div>
+    <div class="ai-label"><div class="ai-dot"></div> Loore reflects</div>
+    <div class="ai-body">
+      <p>You've named this pattern three times this month, each time with more precision. The first entry described frustration with outcomes. Two weeks ago, you noticed it was about fear. Now you're naming the physical gesture itself — clenching, gripping. That's a real shift in resolution.</p>
+      <p>What's interesting is the bridge you're drawing between launch anxiety and distance from Pája. You've described before how work-mode and presence-mode feel like different operating systems. But this time you're catching the switch in real time — not after the fact. That's new.</p>
+      <p>The question you might sit with: what would it feel like to bring the same trust you're asking of yourself at work into the evenings at home? Not as another task, but as the same gesture — opening instead of gripping.</p>
+    </div>
+    <div class="reflect-insight">
+      <div class="reflect-insight-label">Pattern from your lore</div>
+      <div class="reflect-insight-text">This connects to a recurring theme in your profile: your tendency to absorb pressure inward rather than distributing it outward. You've mentioned wanting to break this pattern since November.
+        <span class="orient-full-list" onclick="showScreen('profile')" style="margin-top:0.5rem;">View in profile →</span>
+      </div>
+    </div>
+    <div class="reflect-actions">
+      <button class="action-btn primary" onclick="showScreen('home')">Continue reflecting</button>
+      <button class="action-btn">Save to log</button>
+      <button class="action-btn">Branch →</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- ======================== ORIENT ======================== -->
+<div id="orient" class="screen">
+  <nav class="app-nav">
+    <div class="app-nav-left" onclick="showScreen('home')">
+      <svg class="app-nav-logo-svg" width="28" height="17" viewBox="0 0 140 120" fill="none">
+        <path d="M 12,68 L 32,68 L 42,62 L 50,72 L 66,14 L 84,106 L 96,42 L 104,68 L 112,68 L 128,68" stroke="#c4956a" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M 50,72 L 66,14 L 84,106 L 96,42" stroke="#c4956a" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" opacity="0.45"/>
+      </svg>
+      <span class="app-nav-wordmark">Loore</span>
+    </div>
+    <div class="app-nav-right">
+      <span class="nav-link" onclick="showScreen('profile')">Profile</span>
+      <span class="nav-link" onclick="showScreen('todo')">Todo</span>
+      <span class="nav-link" onclick="showScreen('home')">Log</span>
+      <div class="dot-menu-wrap">
+        <button class="dot-menu-btn" onclick="toggleMenu(this)"><span></span><span></span><span></span></button>
+        <div class="dot-menu-dropdown">
+          <div class="dot-menu-section"><button class="dot-menu-item"><span>Craft mode</span><div class="dot-menu-toggle" onclick="this.classList.toggle('on'); event.stopPropagation();"></div></button></div>
+          <div class="dot-menu-section"><button class="dot-menu-item">Write new entry</button><button class="dot-menu-item">Import data</button><button class="dot-menu-item">Export data</button></div>
+          <div class="dot-menu-section"><button class="dot-menu-item"><span>Model</span><span class="dot-menu-hint">Claude 4.6 Opus</span></button></div>
+          <div class="dot-menu-section"><button class="dot-menu-item">Logout</button></div>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <div class="orient-page">
+    <div class="orient-header">
+      <div class="orient-date">Tuesday, February 18, 2026</div>
+      <h1 class="orient-title">Your day, oriented</h1>
+    </div>
+
+    <div class="orient-sharing">
+      "Alright, so today — Herbert has a doctor's appointment at 2pm, I need to finish the landing page tweaks before the alpha goes out, and I promised Pája I'd cook dinner tonight. Also I realized yesterday I never replied to that email from the investor. Oh and the icons script needs fixing, the favicon is rendering weird on Safari."
+    </div>
+
+    <div class="orient-tasks">
+      <div class="orient-section-label"><div class="ai-dot"></div> Updated from your sharing</div>
+      <div class="orient-task done">
+        <div class="orient-check done"></div>
+        <div class="orient-task-text">Rebrand mockups from Write or Perish → Loore</div>
+      </div>
+      <div class="orient-task done">
+        <div class="orient-check done"></div>
+        <div class="orient-task-text">Generate favicon and app icons</div>
+      </div>
+      <div class="orient-task">
+        <div class="orient-check"></div>
+        <div class="orient-task-text">Fix favicon rendering on Safari</div>
+        <span class="orient-task-new">new</span>
+      </div>
+      <div class="orient-task">
+        <div class="orient-check"></div>
+        <div class="orient-task-text">Finish landing page tweaks for alpha</div>
+      </div>
+      <div class="orient-task">
+        <div class="orient-check"></div>
+        <div class="orient-task-text">Reply to investor email</div>
+        <span class="orient-task-new">new</span>
+      </div>
+      <div class="orient-task">
+        <div class="orient-check"></div>
+        <div class="orient-task-text">Herbert's doctor appointment at 2pm</div>
+        <span class="orient-task-new">new</span>
+      </div>
+      <div class="orient-task">
+        <div class="orient-check"></div>
+        <div class="orient-task-text">Cook dinner</div>
+        <span class="orient-task-new">new</span>
+      </div>
+      <span class="orient-full-list" onclick="showScreen('todo')">View full todo list →</span>
+    </div>
+
+    <div class="orient-priorities">
+      <div class="orient-section-label"><div class="ai-dot"></div> Suggested priority order</div>
+      <div class="orient-priority">
+        <span class="orient-priority-num">1</span>
+        <span class="orient-priority-text">Reply to investor email</span>
+        <span class="orient-priority-time">15 min · high leverage</span>
+        <span class="orient-grip">⋮⋮</span>
+      </div>
+      <div class="orient-priority">
+        <span class="orient-priority-num">2</span>
+        <span class="orient-priority-text">Landing page tweaks → ship alpha</span>
+        <span class="orient-priority-time">~2 hrs · deep work</span>
+        <span class="orient-grip">⋮⋮</span>
+      </div>
+      <div class="orient-priority">
+        <span class="orient-priority-num">3</span>
+        <span class="orient-priority-text">Safari favicon fix</span>
+        <span class="orient-priority-time">30 min · bundled</span>
+        <span class="orient-grip">⋮⋮</span>
+      </div>
+      <div class="orient-priority">
+        <span class="orient-priority-num">4</span>
+        <span class="orient-priority-text">Herbert's appointment</span>
+        <span class="orient-priority-time">2:00 PM · fixed</span>
+        <span class="orient-grip">⋮⋮</span>
+      </div>
+      <div class="orient-priority">
+        <span class="orient-priority-num">5</span>
+        <span class="orient-priority-text">Cook dinner</span>
+        <span class="orient-priority-time">evening</span>
+        <span class="orient-grip">⋮⋮</span>
+      </div>
+
+      <div class="orient-ai-note">
+        <em>A note:</em> You have roughly 3.5 hours of focused work time before Herbert's appointment. The investor email is quick and has been pending — knocking it out first clears mental space. I've grouped the favicon fix right after the landing page since you'll already be in that codebase. You tend to overcommit on mornings like this — consider the dinner a hard boundary, not an afterthought.
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ======================== CONVERSE ======================== -->
+<div id="converse" class="screen">
+  <nav class="app-nav">
+    <div class="app-nav-left" onclick="showScreen('home')">
+      <svg class="app-nav-logo-svg" width="28" height="17" viewBox="0 0 140 120" fill="none">
+        <path d="M 12,68 L 32,68 L 42,62 L 50,72 L 66,14 L 84,106 L 96,42 L 104,68 L 112,68 L 128,68" stroke="#c4956a" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M 50,72 L 66,14 L 84,106 L 96,42" stroke="#c4956a" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" opacity="0.45"/>
+      </svg>
+      <span class="app-nav-wordmark">Loore</span>
+    </div>
+    <div class="app-nav-right">
+      <span class="nav-link" onclick="showScreen('profile')">Profile</span>
+      <span class="nav-link" onclick="showScreen('todo')">Todo</span>
+      <span class="nav-link" onclick="showScreen('home')">Log</span>
+      <div class="dot-menu-wrap">
+        <button class="dot-menu-btn" onclick="toggleMenu(this)"><span></span><span></span><span></span></button>
+        <div class="dot-menu-dropdown">
+          <div class="dot-menu-section"><button class="dot-menu-item"><span>Craft mode</span><div class="dot-menu-toggle" onclick="this.classList.toggle('on'); event.stopPropagation();"></div></button></div>
+          <div class="dot-menu-section"><button class="dot-menu-item">Write new entry</button><button class="dot-menu-item">Import data</button><button class="dot-menu-item">Export data</button></div>
+          <div class="dot-menu-section"><button class="dot-menu-item"><span>Model</span><span class="dot-menu-hint">Claude 4.6 Opus</span></button></div>
+          <div class="dot-menu-section"><button class="dot-menu-item">Logout</button></div>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <div class="converse-page">
+    <div class="converse-messages">
+      <div class="msg user">
+        <div class="msg-label">You</div>
+        <div class="msg-bubble">I've been thinking about the alpha launch. Part of me wants to keep polishing forever and part of me knows the whole point of Loore is about accepting imperfection and working with what's real. The irony isn't lost on me.</div>
+      </div>
+      <div class="msg ai">
+        <div class="msg-label">Loore</div>
+        <div class="msg-bubble">That's a beautiful irony to notice — you're building a tool for seeing patterns, and here you are living one. The perfectionism you're describing shows up in your lore quite a bit, usually right before something important ships. Last time was the rebrand decision in early February.
+          <br><br>What would "good enough to be real" look like for the alpha?
+        </div>
+        <div class="msg-context"><span class="msg-context-dot"></span> used profile + 3 entries · view context</div>
+      </div>
+      <div class="msg user">
+        <div class="msg-label">You</div>
+        <div class="msg-bubble">Honestly? The three workflows working. Reflect, Orient, Converse. If those feel right, the rest is iteration. The power user stuff can wait.</div>
+      </div>
+      <div class="msg ai">
+        <div class="msg-label">Loore</div>
+        <div class="msg-bubble">That's a clear line. And it maps well to what you wrote in November about the "minimum viable ritual" — not minimum viable product, but the smallest thing that's still sacred.
+          <br><br>The three workflows are the ritual. Everything else is the altar you can build over time. Ship the ritual.
+        </div>
+        <div class="msg-context"><span class="msg-context-dot"></span> used profile + 1 entry · view context</div>
+      </div>
+      <div class="msg user">
+        <div class="msg-label">You</div>
+        <div class="msg-bubble">Ship the ritual. Yeah. That's it.</div>
+      </div>
+    </div>
+
+    <div class="converse-input-wrap">
+      <div class="converse-input">
+        <input type="text" placeholder="Think out loud…" />
+        <button class="icon-btn">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <rect x="5.5" y="1" width="5" height="9" rx="2.5" stroke="currentColor" stroke-width="1.2"/>
+            <path d="M3 7.5 C3 10.26 5.24 12.5 8 12.5 C10.76 12.5 13 10.26 13 7.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+            <line x1="8" y1="12.5" x2="8" y2="15" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <button class="icon-btn send">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path d="M3 13 L3 9 L13 8 L3 7 L3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="currentColor" opacity="0.8"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ======================== VERSION HISTORY DRAWER ======================== -->
+<div id="version-drawer" class="version-drawer">
+  <div class="version-backdrop" onclick="closeVersionDrawer()"></div>
+  <div class="version-panel">
+    <button class="version-close" onclick="closeVersionDrawer()">×</button>
+    <h2 class="version-panel-title" id="version-drawer-title">Version History</h2>
+    <p class="version-panel-sub" id="version-drawer-sub">12 versions</p>
+
+    <div id="version-drawer-content">
+      <div class="version-entry">
+        <div class="version-entry-label">v12 <span class="version-entry-current">current</span></div>
+        <div class="version-entry-meta">Feb 14, 2026 · Auto-generated · 245k tokens</div>
+      </div>
+      <div class="version-entry">
+        <div class="version-entry-label">v11</div>
+        <div class="version-entry-meta">Feb 7, 2026 · Auto-generated · 228k tokens</div>
+      </div>
+      <div class="version-entry">
+        <div class="version-entry-label">v10</div>
+        <div class="version-entry-meta">Jan 31, 2026 · Auto-generated · 210k tokens</div>
+      </div>
+      <div class="version-entry">
+        <div class="version-entry-label">v9</div>
+        <div class="version-entry-meta">Jan 24, 2026 · Manual edit · 198k tokens</div>
+      </div>
+      <div class="version-entry">
+        <div class="version-entry-label">v8</div>
+        <div class="version-entry-meta">Jan 17, 2026 · Auto-generated · 182k tokens</div>
+      </div>
+      <div class="version-entry">
+        <div class="version-entry-label">v7</div>
+        <div class="version-entry-meta">Jan 10, 2026 · Auto-generated · 164k tokens</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<script>
+  // Screen switching
+  function showScreen(id) {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    document.querySelectorAll('.proto-tab').forEach(t => t.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+    document.querySelectorAll('.proto-tab').forEach(t => {
+      if (t.textContent.trim().toLowerCase() === id) t.classList.add('active');
+    });
+    if (id === 'reflect') {
+      document.getElementById('reflect-rec').classList.add('active');
+      document.getElementById('reflect-res').classList.remove('active');
+    }
+    closeAllMenus();
+    window.scrollTo(0, 0);
+  }
+
+  function showReflectResponse() {
+    document.getElementById('reflect-rec').classList.remove('active');
+    document.getElementById('reflect-res').classList.add('active');
+    window.scrollTo(0, 0);
+  }
+
+  // Three-dot menu
+  function toggleMenu(btn) {
+    const dd = btn.nextElementSibling;
+    const isOpen = dd.classList.contains('open');
+    closeAllMenus();
+    if (!isOpen) dd.classList.add('open');
+  }
+
+  function closeAllMenus() {
+    document.querySelectorAll('.dot-menu-dropdown').forEach(d => d.classList.remove('open'));
+  }
+
+  // Close menus on outside click
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.dot-menu-wrap')) closeAllMenus();
+  });
+
+  // Version drawer
+  function openVersionDrawer(type) {
+    const drawer = document.getElementById('version-drawer');
+    const title = document.getElementById('version-drawer-title');
+    const sub = document.getElementById('version-drawer-sub');
+
+    if (type === 'profile') {
+      title.textContent = 'Profile History';
+      sub.textContent = '12 versions · auto-updated weekly';
+    } else {
+      title.textContent = 'Todo History';
+      sub.textContent = '38 versions · updated per session';
+    }
+    drawer.classList.add('open');
+  }
+
+  function closeVersionDrawer() {
+    document.getElementById('version-drawer').classList.remove('open');
+  }
+</script>
+
+</body>
+</html>
