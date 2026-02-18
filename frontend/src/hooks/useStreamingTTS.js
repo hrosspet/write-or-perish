@@ -25,7 +25,7 @@ export function useStreamingTTS(nodeId, options = {}) {
 
   // State
   const [state, setState] = useState('idle'); // idle, generating, playing, paused, complete, error
-  const [progress, setProgress] = useState(0);
+  const [progress, setProgress] = useState(0); // eslint-disable-line no-unused-vars
   const [currentChunkIndex, setCurrentChunkIndex] = useState(0);
   const [totalChunks, setTotalChunks] = useState(0);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -42,7 +42,7 @@ export function useStreamingTTS(nodeId, options = {}) {
     audioChunks,
     isComplete: generationComplete,
     finalUrl,
-    getAudioQueue,
+    getAudioQueue, // eslint-disable-line no-unused-vars
     disconnect: disconnectSSE,
     reset: resetSSE,
   } = useTTSStreamSSE(nodeId, {
