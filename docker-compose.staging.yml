@@ -1,0 +1,50 @@
+# Docker Compose overrides for staging environment
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml --env-file .env.staging -p wop-staging up -d --build
+# Ports: backend on 5011, frontend on 8081 (avoids collision with production)
+
+services:
+  db:
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-staging}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-staging}
+      POSTGRES_DB: ${POSTGRES_DB:-writeorperish_staging}
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  redis:
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  backend:
+    ports:
+      - "127.0.0.1:5011:5010"
+    environment:
+      - FLASK_ENV=staging
+      - FRONTEND_URL=${FRONTEND_URL:-https://staging.loore.org}
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  celery:
+    command: celery -A celery_app.celery worker --loglevel=warning --concurrency=2
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  frontend:
+    ports:
+      - "127.0.0.1:8081:80"
+    build:
+      args:
+        - REACT_APP_BACKEND_URL=${REACT_APP_BACKEND_URL:-https://staging.loore.org}
+        - REACT_APP_API_URL=${REACT_APP_API_URL:-https://staging.loore.org/api}
+    deploy:
+      resources:
+        limits:
+          memory: 128M

@@ -1,0 +1,95 @@
+# Staging environment: staging.loore.org
+# Proxies to Docker Compose stack (project: wop-staging)
+#   Backend:  127.0.0.1:5011
+#   Frontend: 127.0.0.1:8081
+server {
+   server_name staging.loore.org;
+
+   # Allow large file uploads (200MB) - server-wide setting
+   client_max_body_size 200M;
+
+   # Proxy media requests through Flask for decryption of .enc files
+   location /media/ {
+     proxy_pass http://127.0.0.1:5011;
+     proxy_set_header Host $host;
+     proxy_set_header X-Real-IP $remote_addr;
+     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+     proxy_set_header X-Forwarded-Proto $scheme;
+     proxy_buffering off;
+     add_header Cache-Control "max-age=86400, public";
+   }
+
+   # Proxy backend authentication endpoints
+   location /auth/ {
+       proxy_pass http://127.0.0.1:5011;
+       proxy_set_header Host $host;
+       proxy_set_header X-Real-IP $remote_addr;
+       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+       proxy_set_header X-Forwarded-Proto $scheme;
+   }
+
+   # SSE (Server-Sent Events) endpoints - require special handling
+   location /api/sse/ {
+       proxy_pass http://127.0.0.1:5011;
+       proxy_set_header Host $host;
+       proxy_set_header X-Real-IP $remote_addr;
+       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+       proxy_set_header X-Forwarded-Proto $scheme;
+
+       # Critical SSE settings - disable buffering for real-time streaming
+       proxy_buffering off;
+       proxy_cache off;
+
+       # SSE connections can last up to 2 hours (for long recordings)
+       proxy_connect_timeout 60s;
+       proxy_send_timeout 7200s;
+       proxy_read_timeout 7200s;
+
+       # Ensure chunked encoding works properly
+       chunked_transfer_encoding on;
+
+       # Disable keepalive timeouts for long-lived connections
+       keepalive_timeout 0;
+   }
+
+   location /api/ {
+       proxy_pass http://127.0.0.1:5011;
+       proxy_set_header Host $host;
+       proxy_set_header X-Real-IP $remote_addr;
+       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+       proxy_set_header X-Forwarded-Proto $scheme;
+
+       proxy_connect_timeout 60s;
+       proxy_send_timeout 60s;
+       proxy_read_timeout 60s;
+
+       # Allow large audio file uploads (200MB)
+       client_max_body_size 200M;
+   }
+
+   # Everything else → staging frontend nginx container
+   location / {
+       proxy_pass http://127.0.0.1:8081;
+       proxy_set_header Host $host;
+       proxy_set_header X-Real-IP $remote_addr;
+       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+       proxy_set_header X-Forwarded-Proto $scheme;
+   }
+
+    listen 443 ssl; # managed by Certbot
+    ssl_certificate /etc/letsencrypt/live/staging.loore.org/fullchain.pem; # managed by Certbot
+    ssl_certificate_key /etc/letsencrypt/live/staging.loore.org/privkey.pem; # managed by Certbot
+    include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
+}
+
+# HTTP -> HTTPS redirect for staging.loore.org
+server {
+    if ($host = staging.loore.org) {
+        return 301 https://$host$request_uri;
+    } # managed by Certbot
+
+    listen 80;
+    server_name staging.loore.org;
+    return 404; # managed by Certbot
+}
