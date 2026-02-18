@@ -172,10 +172,10 @@ function NavBar({ onNewEntryClick }) {
         </div>
 
         <Link to="/dashboard" style={linkStyle("/dashboard")}>
-          Dashboard
+          Profile
         </Link>
         <Link to="/feed" style={linkStyle("/feed")}>
-          Feed
+          Log
         </Link>
 
         <Link
