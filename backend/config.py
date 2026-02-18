@@ -66,6 +66,14 @@ class Config:
             "input_price_per_mtok": 3.00,
             "output_price_per_mtok": 15.00,
         },
+        "claude-sonnet-4.6": {
+            "provider": "anthropic",
+            "api_model": "claude-sonnet-4-6",
+            "display_name": "Claude 4.6 Sonnet",
+            "context_window": 200000,
+            "input_price_per_mtok": 3.00,
+            "output_price_per_mtok": 15.00,
+        },
         "claude-opus-4.5": {
             "provider": "anthropic",
             "api_model": "claude-opus-4-5-20251101",
