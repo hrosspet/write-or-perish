@@ -1,10 +1,9 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { FaRegCompass, FaPlay, FaPause, FaUndo, FaRedo } from 'react-icons/fa';
+import { FaPlay, FaPause, FaUndo, FaRedo } from 'react-icons/fa';
 import { useStreamingTranscription } from '../hooks/useStreamingTranscription';
 import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
 import { useTTSStreamSSE } from '../hooks/useSSE';
 import { useAudio } from '../contexts/AudioContext';
-import ReactMarkdown from 'react-markdown';
 import api from '../api';
 
 function formatDuration(seconds) {
@@ -71,6 +70,68 @@ function Spinner() {
       `}</style>
     </svg>
   );
+}
+
+function CompassIcon({ size = 42, style = {} }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 42 42" fill="none" style={style}>
+      <circle cx="21" cy="21" r="16" stroke="#c4956a" strokeWidth="1.2" opacity="0.3"/>
+      <circle cx="21" cy="21" r="8" stroke="#c4956a" strokeWidth="1" opacity="0.2"/>
+      <line x1="21" y1="2" x2="21" y2="10" stroke="#c4956a" strokeWidth="1.5" strokeLinecap="round" opacity="0.6"/>
+      <line x1="21" y1="32" x2="21" y2="40" stroke="#c4956a" strokeWidth="1.5" strokeLinecap="round" opacity="0.3"/>
+      <line x1="2" y1="21" x2="10" y2="21" stroke="#c4956a" strokeWidth="1.5" strokeLinecap="round" opacity="0.3"/>
+      <line x1="32" y1="21" x2="40" y2="21" stroke="#c4956a" strokeWidth="1.5" strokeLinecap="round" opacity="0.3"/>
+      <circle cx="21" cy="21" r="2.5" fill="#c4956a" opacity="0.7"/>
+    </svg>
+  );
+}
+
+function AiDot() {
+  return (
+    <span style={{
+      display: 'inline-block',
+      width: '6px',
+      height: '6px',
+      borderRadius: '50%',
+      background: 'var(--accent)',
+      animation: 'aiDotPulse 2s ease infinite',
+    }}>
+      <style>{`
+        @keyframes aiDotPulse {
+          0%, 100% { opacity: 0.4; }
+          50% { opacity: 1; box-shadow: 0 0 8px var(--accent-glow); }
+        }
+      `}</style>
+    </span>
+  );
+}
+
+/**
+ * Parse markdown list items into an array of strings.
+ */
+function parseTodoItems(text) {
+  return text.split('\n')
+    .map(l => l.replace(/^[-*]\s*/, '').trim())
+    .filter(Boolean);
+}
+
+/**
+ * Parse numbered priority items. Returns [{text, hint}].
+ */
+function parsePriorityItems(text) {
+  return text.split('\n')
+    .filter(l => l.trim())
+    .map(l => {
+      const cleaned = l.replace(/^\d+[.)]\s*/, '').trim();
+      // Try to split on " — " or " - " for time hints
+      const dashMatch = cleaned.match(/^(.+?)\s*[—–]\s*(.+)$/);
+      if (dashMatch) return { text: dashMatch[1].trim(), hint: dashMatch[2].trim() };
+      // Try parenthetical hints
+      const parenMatch = cleaned.match(/^(.+?)\s*\(([^)]+)\)\s*$/);
+      if (parenMatch) return { text: parenMatch[1].trim(), hint: parenMatch[2].trim() };
+      return { text: cleaned, hint: '' };
+    })
+    .filter(item => item.text);
 }
 
 /**
@@ -377,15 +438,11 @@ export default function OrientPage() {
     transition: 'opacity 0.2s',
   });
 
-  const sectionHeadingStyle = {
-    fontFamily: 'var(--sans)', fontSize: '0.7rem', fontWeight: 500,
-    color: 'var(--accent)', textTransform: 'uppercase', letterSpacing: '0.08em',
-    borderBottom: '1px solid var(--border)', paddingBottom: '6px', marginBottom: '12px',
-  };
-
-  const sectionBodyStyle = {
-    fontFamily: 'var(--sans)', fontSize: '0.85rem', fontWeight: 300,
-    color: 'var(--text-secondary)', lineHeight: 1.6,
+  const sectionLabelStyle = {
+    fontSize: '0.68rem', letterSpacing: '0.18em', textTransform: 'uppercase',
+    color: 'var(--accent)', opacity: 0.6, marginBottom: '1.2rem',
+    display: 'flex', alignItems: 'center', gap: '8px',
+    fontFamily: 'var(--sans)',
   };
 
   // --- READY / RECORDING STATE ---
@@ -405,9 +462,8 @@ export default function OrientPage() {
 
         {/* Compass icon */}
         <div style={{ marginBottom: '32px', opacity: phase === 'recording' ? 1 : 0.5, transition: 'opacity 0.3s' }}>
-          <FaRegCompass
+          <CompassIcon
             size={48}
-            color="var(--accent)"
             style={{
               filter: phase === 'recording' ? 'drop-shadow(0 0 12px var(--accent-glow))' : 'none',
               animation: phase === 'recording' ? 'compassPulse 2s ease-in-out infinite' : 'none',
@@ -497,9 +553,8 @@ export default function OrientPage() {
       <div style={containerStyle}>
         {/* Compass pulsing */}
         <div style={{ marginBottom: '32px' }}>
-          <FaRegCompass
+          <CompassIcon
             size={48}
-            color="var(--accent)"
             style={{
               filter: 'drop-shadow(0 0 12px var(--accent-glow))',
               animation: 'compassPulse 2s ease-in-out infinite',
@@ -563,9 +618,8 @@ export default function OrientPage() {
     }}>
       {/* Compass — pulsing while playing */}
       <div style={{ marginBottom: '24px' }}>
-        <FaRegCompass
+        <CompassIcon
           size={48}
-          color="var(--accent)"
           style={{
             filter: audio.isPlaying ? 'drop-shadow(0 0 12px var(--accent-glow))' : 'none',
             animation: audio.isPlaying ? 'compassPulse 2s ease-in-out infinite' : 'none',
@@ -696,67 +750,121 @@ export default function OrientPage() {
 
       {/* Todo diff — shown during playback */}
       {hasSections && (
-        <div style={{ width: '100%', maxWidth: '500px', marginTop: '32px' }}>
-          {parsed.completed && (
-            <div style={{ marginBottom: '24px' }}>
-              <h3 style={sectionHeadingStyle}>Completed</h3>
-              <div style={{ ...sectionBodyStyle, opacity: 0.7 }}>
-                <ReactMarkdown>{parsed.completed}</ReactMarkdown>
+        <div style={{ width: '100%', maxWidth: '620px', marginTop: '32px' }}>
+
+          {/* Updated from your sharing */}
+          {(parsed.completed || parsed.newTasks) && (
+            <div style={{ marginBottom: '2.5rem' }}>
+              <div style={sectionLabelStyle}>
+                <AiDot /> Updated from your sharing
               </div>
+              {/* Completed tasks */}
+              {parsed.completed && parseTodoItems(parsed.completed).map((item, i) => (
+                <div key={`done-${i}`} style={{
+                  display: 'flex', alignItems: 'flex-start', gap: '12px',
+                  padding: '12px 0', borderBottom: '1px solid #1e1d1a',
+                }}>
+                  <div style={{
+                    width: '18px', height: '18px', borderRadius: '50%',
+                    border: '1.5px solid var(--accent-dim)', background: 'var(--accent-dim)',
+                    flexShrink: 0, marginTop: '2px',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: '0.6rem', color: 'var(--bg-deep)', fontWeight: 600,
+                  }}>
+                    ✓
+                  </div>
+                  <div style={{
+                    fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.92rem',
+                    color: 'var(--text-secondary)', lineHeight: 1.5,
+                    textDecoration: 'line-through', opacity: 0.4,
+                  }}>
+                    {item}
+                  </div>
+                </div>
+              ))}
+              {/* New/remaining tasks */}
+              {parsed.newTasks && parseTodoItems(parsed.newTasks).map((item, i) => (
+                <div key={`new-${i}`} style={{
+                  display: 'flex', alignItems: 'flex-start', gap: '12px',
+                  padding: '12px 0', borderBottom: '1px solid #1e1d1a',
+                }}>
+                  <div style={{
+                    width: '18px', height: '18px', borderRadius: '50%',
+                    border: '1.5px solid var(--border-hover)',
+                    flexShrink: 0, marginTop: '2px',
+                  }} />
+                  <div style={{
+                    fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.92rem',
+                    color: 'var(--text-secondary)', lineHeight: 1.5,
+                  }}>
+                    {item}
+                  </div>
+                </div>
+              ))}
             </div>
           )}
 
-          {parsed.newTasks && (
-            <div style={{ marginBottom: '24px' }}>
-              <h3 style={sectionHeadingStyle}>New Tasks</h3>
-              <div style={sectionBodyStyle}>
-                <ReactMarkdown>{parsed.newTasks}</ReactMarkdown>
-              </div>
-            </div>
-          )}
-
+          {/* Suggested priority order */}
           {parsed.priority && (
-            <div style={{ marginBottom: '24px' }}>
-              <h3 style={sectionHeadingStyle}>Priority Order</h3>
-              <div style={sectionBodyStyle}>
-                <ReactMarkdown>{parsed.priority}</ReactMarkdown>
+            <div style={{ marginBottom: '2.5rem' }}>
+              <div style={sectionLabelStyle}>
+                <AiDot /> Suggested priority order
               </div>
+              {parsePriorityItems(parsed.priority).map((item, i) => (
+                <div key={`pri-${i}`} style={{
+                  display: 'flex', alignItems: 'center', gap: '14px',
+                  padding: '14px 16px', background: 'var(--bg-card)',
+                  border: '1px solid var(--border)', borderRadius: '8px',
+                  marginBottom: '8px', transition: 'all 0.3s',
+                  cursor: 'default',
+                }}>
+                  <span style={{
+                    fontFamily: 'var(--serif)', fontSize: '1.4rem',
+                    color: 'var(--accent-dim)', opacity: 0.6,
+                    width: '24px', textAlign: 'center', flexShrink: 0,
+                  }}>
+                    {i + 1}
+                  </span>
+                  <span style={{
+                    fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.92rem',
+                    color: 'var(--text-primary)', lineHeight: 1.4, flex: 1,
+                  }}>
+                    {item.text}
+                  </span>
+                  {item.hint && (
+                    <span style={{
+                      fontSize: '0.75rem', color: 'var(--text-muted)', flexShrink: 0,
+                    }}>
+                      {item.hint}
+                    </span>
+                  )}
+                  <span style={{
+                    color: 'var(--text-muted)', opacity: 0.3,
+                    fontSize: '0.9rem', letterSpacing: '2px', flexShrink: 0,
+                  }}>
+                    ⋮⋮
+                  </span>
+                </div>
+              ))}
             </div>
           )}
 
+          {/* Personal note */}
           {parsed.note && (
             <div style={{
-              marginBottom: '24px',
-              padding: '16px 20px',
-              background: 'var(--accent-subtle)',
-              borderLeft: '3px solid var(--accent)',
-              borderRadius: '0 8px 8px 0',
+              marginTop: '2rem', fontFamily: 'var(--sans)', fontWeight: 300,
+              fontSize: '0.88rem', lineHeight: 1.7, color: 'var(--text-muted)',
             }}>
-              <div style={sectionBodyStyle}>
-                <ReactMarkdown>{parsed.note}</ReactMarkdown>
-              </div>
-            </div>
-          )}
-
-          {/* If no structured sections found, show raw response */}
-          {!hasSections && llmResponseRef.current && (
-            <div style={{
-              fontFamily: 'var(--sans)', fontSize: '0.9rem', fontWeight: 300,
-              color: 'var(--text-muted)', lineHeight: 1.7, marginBottom: '24px',
-            }}>
-              <ReactMarkdown>{llmResponseRef.current}</ReactMarkdown>
+              <span style={{ color: 'var(--text-secondary)' }}>A note: </span>
+              {parsed.note}
             </div>
           )}
 
           {/* Applied indicator */}
           {applied && (
             <p style={{
-              fontFamily: 'var(--sans)',
-              fontSize: '0.75rem',
-              fontWeight: 300,
-              color: '#4ade80',
-              textAlign: 'center',
-              marginBottom: '8px',
+              fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
+              color: '#4ade80', textAlign: 'center', marginTop: '16px',
             }}>
               Todo updated
             </p>
