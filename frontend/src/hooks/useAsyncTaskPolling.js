@@ -104,6 +104,11 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
     }
     setIsPolling(false);
 
+    // Reset stale state from previous endpoint before starting new polling
+    setStatus(null);
+    setData(null);
+    setProgress(0);
+
     // Start new polling if enabled and endpoint is set
     if (enabled && endpoint) {
       setIsPolling(true);

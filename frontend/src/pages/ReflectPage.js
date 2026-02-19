@@ -82,7 +82,7 @@ export default function ReflectPage() {
   const threadParentIdRef = useRef(null); // last LLM node — parent for next round
 
   // TTS state
-  const [ttsStarted, setTtsStarted] = useState(false);
+  const ttsTriggeredForNodeRef = useRef(null); // which LLM node TTS was triggered for
   const [ttsGenerating, setTtsGenerating] = useState(false);
   const firstChunkRef = useRef(true);
 
@@ -148,9 +148,10 @@ export default function ReflectPage() {
 
   // When LLM completes, trigger TTS
   useEffect(() => {
-    if (llmStatus === 'completed' && llmData?.content && !ttsStarted) {
+    if (!llmNodeId) return; // no node to process
+    if (llmStatus === 'completed' && llmData?.content && ttsTriggeredForNodeRef.current !== llmNodeId) {
+      ttsTriggeredForNodeRef.current = llmNodeId;
       threadParentIdRef.current = llmNodeId; // save as parent for next round
-      setTtsStarted(true);
       setTtsGenerating(true);
       firstChunkRef.current = true;
       api.post(`/nodes/${llmNodeId}/tts`).catch((err) => {
@@ -163,7 +164,7 @@ export default function ReflectPage() {
       setHasError(true);
       setPhase('ready');
     }
-  }, [llmStatus, llmData, ttsStarted, llmNodeId]);
+  }, [llmStatus, llmData, llmNodeId]);
 
   // Transition to playback when audio starts playing
   useEffect(() => {
@@ -198,7 +199,7 @@ export default function ReflectPage() {
     setPhase('ready');
     setLlmNodeId(null);
     // Keep threadParentIdRef — continues the conversation thread
-    setTtsStarted(false);
+
     setTtsGenerating(false);
 
     firstChunkRef.current = true;
@@ -213,7 +214,7 @@ export default function ReflectPage() {
     ttsSSE.reset();
     setPhase('ready');
     setLlmNodeId(null);
-    setTtsStarted(false);
+
     setTtsGenerating(false);
 
     firstChunkRef.current = true;
@@ -310,8 +311,8 @@ export default function ReflectPage() {
           `}</style>
         </div>
 
-        {/* Waveform */}
-        {phase === 'recording' && <WaveformBars />}
+        {/* Waveform — freeze when stopping */}
+        {phase === 'recording' && <WaveformBars animated={!isStopping} />}
 
         {/* Timer */}
         {phase === 'recording' && (
@@ -356,13 +357,12 @@ export default function ReflectPage() {
         {/* Stop button with visual feedback */}
         {phase === 'recording' && (
           <button
-            onClick={handleStop}
-            disabled={isStopping}
+            onClick={() => { if (!isStopping) handleStop(); }}
             style={{
               width: '72px', height: '72px', borderRadius: '50%',
               border: '2px solid var(--accent)',
               background: 'transparent',
-              cursor: isStopping ? 'not-allowed' : 'pointer',
+              cursor: 'pointer',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               transition: 'all 0.2s ease',
               opacity: isStopping ? 0.5 : 1,
@@ -483,7 +483,6 @@ export default function ReflectPage() {
         {audio.isPlaying ? (
           <button
             onClick={() => audio.pause()}
-            title="Pause"
             style={{
               ...controlButtonStyle(),
               width: '48px', height: '48px',
@@ -496,8 +495,15 @@ export default function ReflectPage() {
           </button>
         ) : (
           <button
-            onClick={() => audio.play()}
-            title="Play"
+            onClick={() => {
+              // If at end of audio, restart from beginning
+              if (audio.totalDuration > 0 && audio.cumulativeTime >= audio.totalDuration - 0.5) {
+                audio.seekToCumulativeTime(0);
+                setTimeout(() => audio.play(), 50);
+              } else {
+                audio.play();
+              }
+            }}
             style={{
               ...controlButtonStyle(),
               width: '48px', height: '48px',
