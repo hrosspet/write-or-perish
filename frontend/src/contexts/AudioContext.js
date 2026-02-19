@@ -29,6 +29,8 @@ export const AudioProvider = ({ children }) => {
     generatingTTSRef.current = value;
     _setGeneratingTTS(value);
   }, []);
+  // Web Audio API context — unlocked during user gesture to allow later autoplay on Safari
+  const webAudioCtxRef = useRef(null);
   // Track whether playback ended while waiting for more chunks
   const waitingForChunksRef = useRef(false);
   const audioRef = useRef(null);
@@ -722,6 +724,27 @@ export const AudioProvider = ({ children }) => {
     }
   }, [playbackRate]);
 
+  // Call during a user gesture (e.g. stop-recording click) to unlock audio on Safari.
+  // Safari requires AudioContext to be created/resumed during a gesture; once unlocked,
+  // subsequent HTMLAudioElement.play() calls are allowed even without a gesture.
+  const warmup = useCallback(() => {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    if (!webAudioCtxRef.current) {
+      webAudioCtxRef.current = new AC();
+    }
+    const ctx = webAudioCtxRef.current;
+    if (ctx.state === 'suspended') {
+      ctx.resume();
+    }
+    // Play a silent buffer to fully activate the audio pipeline
+    const buffer = ctx.createBuffer(1, 1, 22050);
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(ctx.destination);
+    source.start(0);
+  }, []);
+
   const value = {
     currentAudio,
     isPlaying,
@@ -748,6 +771,7 @@ export const AudioProvider = ({ children }) => {
     seek,
     seekToCumulativeTime,
     changePlaybackRate,
+    warmup,
   };
 
   return <AudioContext.Provider value={value}>{children}</AudioContext.Provider>;

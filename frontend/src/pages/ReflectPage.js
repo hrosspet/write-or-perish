@@ -282,6 +282,15 @@ export default function ReflectPage() {
     }
   }, [phase, audio.isPlaying]);
 
+  // Fallback: if audio warmup didn't fully unlock Safari and autoplay still fails,
+  // show results after 5s rather than staying stuck on "Reflecting..." forever
+  useEffect(() => {
+    if (phase === 'processing' && ttsGenerating) {
+      const timer = setTimeout(() => setPhase('playback'), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [phase, ttsGenerating]);
+
   // Clear error indicator after a few seconds
   useEffect(() => {
     if (hasError) {
@@ -298,8 +307,9 @@ export default function ReflectPage() {
 
   const handleStop = useCallback(() => {
     setIsStopping(true);
+    audio.warmup(); // Unlock audio on Safari during user gesture
     streaming.stopStreaming();
-  }, [streaming]);
+  }, [streaming, audio]);
 
   const handleContinue = useCallback(() => {
     audio.stop();

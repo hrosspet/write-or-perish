@@ -315,6 +315,15 @@ export default function OrientPage() {
     }
   }, [phase, audio.isPlaying]);
 
+  // Fallback: if audio warmup didn't fully unlock Safari and autoplay still fails,
+  // show results after 5s rather than staying stuck on "Orienting..." forever
+  useEffect(() => {
+    if (phase === 'processing' && parsedResponse) {
+      const timer = setTimeout(() => setPhase('playback'), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [phase, parsedResponse]);
+
   // Clear error indicator after a few seconds
   useEffect(() => {
     if (hasError) {
@@ -331,8 +340,9 @@ export default function OrientPage() {
 
   const handleStop = useCallback(() => {
     setIsStopping(true);
+    audio.warmup(); // Unlock audio on Safari during user gesture
     streaming.stopStreaming();
-  }, [streaming]);
+  }, [streaming, audio]);
 
   const handleContinue = useCallback(() => {
     audio.stop();
