@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - '**'
+      - '!main'
       - '!staging'
 
 jobs:
@@ -26,7 +27,7 @@ jobs:
 
   test-backend:
     needs: changes
-    if: github.ref_name == 'main' || needs.changes.outputs.backend == 'true'
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -64,7 +65,7 @@ jobs:
 
   test-frontend:
     needs: changes
-    if: github.ref_name == 'main' || needs.changes.outputs.frontend == 'true'
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -105,7 +106,7 @@ jobs:
 
   security-check:
     needs: changes
-    if: github.ref_name == 'main' || needs.changes.outputs.backend == 'true'
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
 
     steps:
