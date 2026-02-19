@@ -73,8 +73,8 @@ jobs:
             set -e
             cd /home/hrosspet/write-or-perish
             git fetch origin
-            git checkout staging
-            git pull origin staging
+            git checkout -f staging
+            git reset --hard origin/staging
 
             # Extract pre-built frontend to separate dir (not frontend/build which production uses)
             rm -rf frontend/build-staging
