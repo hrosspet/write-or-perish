@@ -113,9 +113,11 @@ jobs:
             mv -f docker-compose.override.yml.bak docker-compose.override.yml 2>/dev/null || true
 
             # Wait for backend to be healthy before DB operations
+            # NOTE: All docker compose exec calls use < /dev/null to prevent them
+            # from consuming the SSH heredoc stdin (which contains the rest of this script)
             echo "Waiting for backend to be ready..."
             for i in $(seq 1 60); do
-              if docker compose -p wop-staging exec -T backend curl -sf http://localhost:5010/api/dashboard > /dev/null 2>&1; then
+              if docker compose -p wop-staging exec -T backend curl -sf http://localhost:5010/api/dashboard < /dev/null > /dev/null 2>&1; then
                 echo "Backend ready after ${i}s"
                 break
               fi
@@ -129,17 +131,17 @@ jobs:
             echo "Resetting staging database..."
             docker compose -p wop-staging exec -T db \
               psql -U staging -d writeorperish_staging \
-              -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" || true
+              -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" < /dev/null || true
 
             echo "Running flask init-db..."
-            docker compose -p wop-staging exec -T backend flask init-db
+            docker compose -p wop-staging exec -T backend flask init-db < /dev/null
 
             echo "Seeding admin user..."
             docker compose -p wop-staging exec -T db \
               psql -U staging -d writeorperish_staging \
               -c "INSERT INTO \"user\" (username, approved, is_admin, created_at)
                   VALUES ('hrosspet', true, true, NOW())
-                  ON CONFLICT (username) DO UPDATE SET approved = true, is_admin = true;"
+                  ON CONFLICT (username) DO UPDATE SET approved = true, is_admin = true;" < /dev/null
             echo "Database setup complete."
 
             # Switch back to main so production deploys aren't blocked

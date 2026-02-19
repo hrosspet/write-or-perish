@@ -27,8 +27,9 @@ import { AudioProvider } from "./contexts/AudioContext";
 function RootRoute() {
   const { user, loading } = useUser();
   if (loading) return null;
-  if (user) return <HomePage />;
-  return <Navigate to="/landing" replace />;
+  if (!user) return <Navigate to="/landing" replace />;
+  if (!user.approved) return <Navigate to="/alpha-thank-you" replace />;
+  return <HomePage />;
 }
 
 function App() {
