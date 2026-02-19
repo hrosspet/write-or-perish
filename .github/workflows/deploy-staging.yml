@@ -82,6 +82,9 @@ jobs:
             tar -xzf frontend-build.tar.gz -C frontend/build-staging
             rm frontend-build.tar.gz
 
+            # Hide dev override so Docker Compose doesn't auto-load it
+            mv -f docker-compose.override.yml docker-compose.override.yml.bak 2>/dev/null || true
+
             # Build and start backend services only (backend, celery, db, redis)
             docker compose \
               -f docker-compose.yml \
@@ -92,13 +95,18 @@ jobs:
               up -d --build backend celery db redis
 
             # Start frontend with pre-built assets (no build, just nginx + volume mount)
+            # --force-recreate is required because rm -rf + mkdir above changes the
+            # directory inode, which breaks existing bind mounts in a running container
             docker compose \
               -f docker-compose.yml \
               -f docker-compose.prod.yml \
               -f docker-compose.staging.yml \
               --env-file .env.staging \
               -p wop-staging \
-              up -d --no-build frontend
+              up -d --force-recreate --no-build frontend
+
+            # Restore dev override
+            mv -f docker-compose.override.yml.bak docker-compose.override.yml 2>/dev/null || true
 
             sleep 5
             # Reset staging DB to match current models (staging data is ephemeral)

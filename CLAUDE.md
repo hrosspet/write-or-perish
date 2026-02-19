@@ -8,16 +8,28 @@ The project uses GitHub Actions for CI/CD with direct deployment to production:
 
 ### Workflow Overview
 
-1. **CI (`ci.yml`)** - Runs on ALL branches and PRs:
+1. **CI (`ci.yml`)** - Runs on PRs only (not on push):
+   - Uses `dorny/paths-filter` to skip unchanged areas (backend vs frontend)
    - Backend: Python linting (flake8), pytest tests
    - Frontend: npm lint, jest tests, production build
    - Security: bandit scan, dependency vulnerability check (safety)
 
-2. **Deploy (`deploy.yml`)** - Runs ONLY on pushes to `main`:
-   - Builds frontend with production URLs
+2. **Deploy to Production (`deploy.yml`)** - Runs ONLY on pushes to `main`:
+   - Runs backend + frontend tests first, then deploys
+   - Builds frontend with production URLs (`https://loore.org`)
    - Deploys to production VM via SSH
    - Pulls latest backend code on server
-   - Runs `deploy.sh` to restart services
+   - Runs `deploy.sh` to restart systemd services
+
+3. **Deploy to Staging (`deploy-staging.yml`)** - Runs on pushes to `staging` (+ manual dispatch):
+   - Builds frontend in GitHub Actions (not on VM — the VM runs out of memory during `npm ci`)
+   - Frontend is built with staging URLs (`https://staging.loore.org`) and uploaded as a tarball via SCP
+   - On the VM: `git reset --hard origin/staging`, extract frontend to `frontend/build-staging/`
+   - Staging runs as Docker Compose project `wop-staging` using three compose files: `docker-compose.yml` + `docker-compose.prod.yml` + `docker-compose.staging.yml` with `--env-file .env.staging`
+   - Frontend uses `nginx:alpine` image with pre-built assets volume-mounted (no Docker build)
+   - Staging DB is ephemeral: schema is dropped and recreated each deploy, then `flask init-db`
+   - After deploy, checks out `main` so production deploys aren't blocked
+   - **Known issue**: `docker-compose.override.yml` (dev config) may get auto-loaded by Docker Compose, overriding the staging config. The deploy script renames it temporarily during `docker compose up`.
 
 ### Development Workflow
 
@@ -82,7 +94,18 @@ Source code is volume-mounted, so edits are reflected immediately without rebuil
 ### Production Environment
 
 - URL: https://loore.org
-- Backend: Flask + Gunicorn
+- Backend: Flask + Gunicorn (systemd services)
 - Frontend: React (built and served via nginx)
 - Database: PostgreSQL
 - Task queue: Celery + Redis
+
+### Staging Environment
+
+- URL: https://staging.loore.org
+- Runs on the **same VM** as production, isolated via Docker Compose project name `wop-staging`
+- Ports: backend on `127.0.0.1:5011`, frontend on `127.0.0.1:8081` (avoids collision with production)
+- Docker Compose files: `docker-compose.yml` + `docker-compose.prod.yml` + `docker-compose.staging.yml`
+- Env file: `.env.staging` (not committed; `.env.staging.example` is committed)
+- Frontend: pre-built in CI, served by `nginx:alpine` from `frontend/build-staging/` (gitignored)
+- DB: `writeorperish_staging` — ephemeral, reset on each deploy
+- Resource limits are lower than production (512M backend, 128M frontend/redis, 256M db)
