@@ -82,15 +82,23 @@ jobs:
             tar -xzf frontend-build.tar.gz -C frontend/build
             rm frontend-build.tar.gz
 
-            # Start/rebuild containers
-            # Frontend uses nginx:alpine + volume mount (no build needed)
+            # Build and start backend services only (backend, celery, db, redis)
             docker compose \
               -f docker-compose.yml \
               -f docker-compose.prod.yml \
               -f docker-compose.staging.yml \
               --env-file .env.staging \
               -p wop-staging \
-              up -d --build
+              up -d --build backend celery db redis
+
+            # Start frontend with pre-built assets (no build, just nginx + volume mount)
+            docker compose \
+              -f docker-compose.yml \
+              -f docker-compose.prod.yml \
+              -f docker-compose.staging.yml \
+              --env-file .env.staging \
+              -p wop-staging \
+              up -d --no-build frontend
 
             sleep 5
             docker compose -p wop-staging exec -T backend flask init-db
