@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { FaPlay, FaPause, FaUndo, FaRedo } from 'react-icons/fa';
+import { FaRegCompass, FaPlay, FaPause, FaUndo, FaRedo } from 'react-icons/fa';
 import { useStreamingTranscription } from '../hooks/useStreamingTranscription';
 import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
 import { useTTSStreamSSE } from '../hooks/useSSE';
@@ -68,20 +68,6 @@ function Spinner() {
           to { transform: rotate(360deg); }
         }
       `}</style>
-    </svg>
-  );
-}
-
-function CompassIcon({ size = 42, style = {} }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 42 42" fill="none" style={style}>
-      <circle cx="21" cy="21" r="16" stroke="#c4956a" strokeWidth="1.2" opacity="0.3"/>
-      <circle cx="21" cy="21" r="8" stroke="#c4956a" strokeWidth="1" opacity="0.2"/>
-      <line x1="21" y1="2" x2="21" y2="10" stroke="#c4956a" strokeWidth="1.5" strokeLinecap="round" opacity="0.6"/>
-      <line x1="21" y1="32" x2="21" y2="40" stroke="#c4956a" strokeWidth="1.5" strokeLinecap="round" opacity="0.3"/>
-      <line x1="2" y1="21" x2="10" y2="21" stroke="#c4956a" strokeWidth="1.5" strokeLinecap="round" opacity="0.3"/>
-      <line x1="32" y1="21" x2="40" y2="21" stroke="#c4956a" strokeWidth="1.5" strokeLinecap="round" opacity="0.3"/>
-      <circle cx="21" cy="21" r="2.5" fill="#c4956a" opacity="0.7"/>
     </svg>
   );
 }
@@ -462,8 +448,9 @@ export default function OrientPage() {
 
         {/* Compass icon */}
         <div style={{ marginBottom: '32px', opacity: phase === 'recording' ? 1 : 0.5, transition: 'opacity 0.3s' }}>
-          <CompassIcon
+          <FaRegCompass
             size={48}
+            color="var(--accent)"
             style={{
               filter: phase === 'recording' ? 'drop-shadow(0 0 12px var(--accent-glow))' : 'none',
               animation: phase === 'recording' ? 'compassPulse 2s ease-in-out infinite' : 'none',
@@ -553,8 +540,9 @@ export default function OrientPage() {
       <div style={containerStyle}>
         {/* Compass pulsing */}
         <div style={{ marginBottom: '32px' }}>
-          <CompassIcon
+          <FaRegCompass
             size={48}
+            color="var(--accent)"
             style={{
               filter: 'drop-shadow(0 0 12px var(--accent-glow))',
               animation: 'compassPulse 2s ease-in-out infinite',
@@ -618,8 +606,9 @@ export default function OrientPage() {
     }}>
       {/* Compass — pulsing while playing */}
       <div style={{ marginBottom: '24px' }}>
-        <CompassIcon
+        <FaRegCompass
           size={48}
+          color="var(--accent)"
           style={{
             filter: audio.isPlaying ? 'drop-shadow(0 0 12px var(--accent-glow))' : 'none',
             animation: audio.isPlaying ? 'compassPulse 2s ease-in-out infinite' : 'none',

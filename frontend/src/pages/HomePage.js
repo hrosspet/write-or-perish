@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { FaRegCompass } from 'react-icons/fa';
 
 function useOnScreen(ref, threshold = 0.1) {
   const [isVisible, setIsVisible] = useState(false);
@@ -43,15 +44,7 @@ const cards = [
     title: "Orient",
     description: "Ground your day. See what matters.",
     icon: (
-      <svg width="28" height="28" viewBox="0 0 42 42" fill="none">
-        <circle cx="21" cy="21" r="16" stroke="#c4956a" strokeWidth="1.2" opacity="0.3"/>
-        <circle cx="21" cy="21" r="8" stroke="#c4956a" strokeWidth="1" opacity="0.2"/>
-        <line x1="21" y1="2" x2="21" y2="10" stroke="#c4956a" strokeWidth="1.5" strokeLinecap="round" opacity="0.6"/>
-        <line x1="21" y1="32" x2="21" y2="40" stroke="#c4956a" strokeWidth="1.5" strokeLinecap="round" opacity="0.3"/>
-        <line x1="2" y1="21" x2="10" y2="21" stroke="#c4956a" strokeWidth="1.5" strokeLinecap="round" opacity="0.3"/>
-        <line x1="32" y1="21" x2="40" y2="21" stroke="#c4956a" strokeWidth="1.5" strokeLinecap="round" opacity="0.3"/>
-        <circle cx="21" cy="21" r="2.5" fill="#c4956a" opacity="0.7"/>
-      </svg>
+      <FaRegCompass size={28} color="var(--accent)" style={{ opacity: 0.7 }} />
     ),
   },
   {
