@@ -101,6 +101,10 @@ jobs:
               up -d --no-build frontend
 
             sleep 5
+            # Reset staging DB to match current models (staging data is ephemeral)
+            docker compose -p wop-staging exec -T db \
+              psql -U staging -d writeorperish_staging \
+              -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" || true
             docker compose -p wop-staging exec -T backend flask init-db
 
             # Switch back to main so production deploys aren't blocked
