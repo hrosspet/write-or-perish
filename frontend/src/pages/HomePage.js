@@ -34,7 +34,7 @@ const cards = [
       <img
         src="/loore-logo-transparent.svg"
         alt=""
-        style={{ height: "28px", width: "auto", opacity: 0.7 }}
+        style={{ height: "42px", width: "auto" }}
       />
     ),
   },
@@ -44,7 +44,7 @@ const cards = [
     title: "Orient",
     description: "Ground your day. See what matters.",
     icon: (
-      <FaRegCompass size={28} color="var(--accent)" style={{ opacity: 0.7 }} />
+      <FaRegCompass size={42} color="var(--accent)" />
     ),
   },
   {
@@ -53,9 +53,11 @@ const cards = [
     title: "Converse",
     description: "Ask anything. Think out loud.",
     icon: (
-      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="1.5">
-        <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
-        <path d="M8 10h8M8 13h5" strokeLinecap="round" />
+      <svg width="42" height="42" viewBox="0 0 42 42" fill="none">
+        <path d="M8 12 C8 9.8 9.8 8 12 8 L30 8 C32.2 8 34 9.8 34 12 L34 24 C34 26.2 32.2 28 30 28 L16 28 L10 33 L10 28 L12 28 C9.8 28 8 26.2 8 24 Z"
+              stroke="#c4956a" strokeWidth="1.2" opacity="0.4" fill="none"/>
+        <line x1="14" y1="15" x2="28" y2="15" stroke="#c4956a" strokeWidth="1.2" strokeLinecap="round" opacity="0.3"/>
+        <line x1="14" y1="20" x2="23" y2="20" stroke="#c4956a" strokeWidth="1.2" strokeLinecap="round" opacity="0.3"/>
       </svg>
     ),
   },
@@ -75,14 +77,12 @@ function WorkflowCard({ card, delay }) {
       onMouseLeave={() => setHovered(false)}
       style={{
         flex: "1 1 200px",
-        maxWidth: "280px",
         background: "var(--bg-card)",
         border: `1px solid ${hovered ? 'var(--border-hover)' : 'var(--border)'}`,
         borderRadius: "12px",
-        padding: "28px 24px",
+        padding: "2.2rem 1.8rem 2rem",
         cursor: "pointer",
         position: "relative",
-        overflow: "hidden",
         transform: isVisible
           ? `translateY(${hovered ? '-3px' : '0'})`
           : 'translateY(20px)',
@@ -103,25 +103,29 @@ function WorkflowCard({ card, delay }) {
         transition: "opacity 0.4s ease",
       }} />
 
-      <div style={{ marginBottom: "16px" }}>
+      <div style={{
+        width: "48px", height: "48px", marginBottom: "1.5rem",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        opacity: hovered ? 1 : 0.7, transition: "opacity 0.3s",
+      }}>
         {card.icon}
       </div>
       <h3 style={{
         fontFamily: "var(--serif)",
-        fontSize: "1.2rem",
+        fontSize: "1.5rem",
         fontWeight: 400,
         color: "var(--text-primary)",
-        margin: "0 0 8px 0",
+        margin: "0 0 0.7rem 0",
       }}>
         {card.title}
       </h3>
       <p style={{
         fontFamily: "var(--sans)",
-        fontSize: "0.85rem",
+        fontSize: "0.88rem",
         fontWeight: 300,
         color: "var(--text-muted)",
         margin: 0,
-        lineHeight: 1.5,
+        lineHeight: 1.65,
       }}>
         {card.description}
       </p>
@@ -179,7 +183,7 @@ export default function HomePage() {
 
       <div style={{
         display: "flex",
-        gap: "20px",
+        gap: "1.5rem",
         flexWrap: "wrap",
         justifyContent: "center",
         maxWidth: "920px",
