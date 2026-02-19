@@ -196,7 +196,6 @@ export default function ReflectPage() {
     audio.stop();
     ttsSSE.disconnect();
     ttsSSE.reset();
-    setPhase('ready');
     setLlmNodeId(null);
     // Keep threadParentIdRef — continues the conversation thread
 
@@ -206,6 +205,9 @@ export default function ReflectPage() {
     transcriptRef.current = '';
     setHasError(false);
     streaming.cancelStreaming();
+    // Go straight to recording — skip the ready phase
+    setPhase('recording');
+    streaming.startStreaming();
   }, [audio, ttsSSE, streaming]);
 
   const handleCancelProcessing = useCallback(() => {
