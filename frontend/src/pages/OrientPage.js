@@ -107,6 +107,7 @@ export default function OrientPage() {
   const [parsedResponse, setParsedResponse] = useState(null);
   const transcriptRef = useRef('');
   const threadParentIdRef = useRef(null);
+  const lastUserNodeIdRef = useRef(null);
   const llmResponseRef = useRef('');
 
   // TTS state
@@ -135,8 +136,12 @@ export default function OrientPage() {
         if (threadParentIdRef.current) {
           payload.parent_id = threadParentIdRef.current;
         }
+        if (data.sessionId) {
+          payload.session_id = data.sessionId;
+        }
         const res = await api.post('/orient', payload);
         setLlmNodeId(res.data.llm_node_id);
+        lastUserNodeIdRef.current = res.data.user_node_id;
       } catch (err) {
         console.error('Orient API error:', err);
         setHasError(true);
@@ -299,10 +304,10 @@ export default function OrientPage() {
   }, [audio, ttsSSE, streaming]);
 
   const handleCancelProcessing = useCallback(() => {
-    // Save current LLM node as thread parent so next recording continues the thread
-    // (the cancelled LLM response will still complete async as a dead-end sibling)
-    if (llmNodeId) {
-      threadParentIdRef.current = llmNodeId;
+    // Parent next recording to the user node (not the LLM node).
+    // The cancelled LLM response completes async as a dead-end sibling.
+    if (lastUserNodeIdRef.current) {
+      threadParentIdRef.current = lastUserNodeIdRef.current;
     }
     audio.stop();
     ttsSSE.disconnect();
@@ -316,7 +321,7 @@ export default function OrientPage() {
     firstChunkRef.current = true;
     transcriptRef.current = '';
     streaming.cancelStreaming();
-  }, [audio, ttsSSE, streaming, llmNodeId]);
+  }, [audio, ttsSSE, streaming]);
 
   // Cleanup on unmount
   useEffect(() => {

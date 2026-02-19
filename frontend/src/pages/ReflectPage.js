@@ -80,6 +80,7 @@ export default function ReflectPage() {
   const [hasError, setHasError] = useState(false);
   const transcriptRef = useRef('');
   const threadParentIdRef = useRef(null); // last LLM node — parent for next round
+  const lastUserNodeIdRef = useRef(null); // last user node — parent when cancelling
 
   // TTS state
   const ttsTriggeredForNodeRef = useRef(null); // which LLM node TTS was triggered for
@@ -107,8 +108,12 @@ export default function ReflectPage() {
         if (threadParentIdRef.current) {
           payload.parent_id = threadParentIdRef.current;
         }
+        if (data.sessionId) {
+          payload.session_id = data.sessionId;
+        }
         const res = await api.post('/reflect', payload);
         setLlmNodeId(res.data.llm_node_id);
+        lastUserNodeIdRef.current = res.data.user_node_id;
       } catch (err) {
         console.error('Reflect API error:', err);
         setHasError(true);
@@ -211,10 +216,10 @@ export default function ReflectPage() {
   }, [audio, ttsSSE, streaming]);
 
   const handleCancelProcessing = useCallback(() => {
-    // Save current LLM node as thread parent so next recording continues the thread
-    // (the cancelled LLM response will still complete async as a dead-end sibling)
-    if (llmNodeId) {
-      threadParentIdRef.current = llmNodeId;
+    // Parent next recording to the user node (not the LLM node).
+    // The cancelled LLM response completes async as a dead-end sibling.
+    if (lastUserNodeIdRef.current) {
+      threadParentIdRef.current = lastUserNodeIdRef.current;
     }
     audio.stop();
     ttsSSE.disconnect();
@@ -227,7 +232,7 @@ export default function ReflectPage() {
     firstChunkRef.current = true;
     transcriptRef.current = '';
     streaming.cancelStreaming();
-  }, [audio, ttsSSE, streaming, llmNodeId]);
+  }, [audio, ttsSSE, streaming]);
 
   // Cleanup on unmount
   useEffect(() => {

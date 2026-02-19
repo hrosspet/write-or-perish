@@ -18,14 +18,18 @@ def _get_orient_prompt():
 def create_orient_session():
     """
     Start or continue an orient session.
-    Body: { content: string, model?: string, parent_id?: int }
+    Body: { content: string, model?: string, parent_id?: int,
+            session_id?: string }
     Without parent_id: creates system node (prompt) -> user node -> LLM node
     With parent_id: continues thread — user node parented to parent_id -> LLM node
+    session_id: optional streaming-transcription session whose audio
+                chunks should be attached to the user node.
     """
     data = request.get_json() or {}
     content = data.get("content")
     model_id = data.get("model")
     parent_id = data.get("parent_id")
+    session_id = data.get("session_id")
 
     if not content or not content.strip():
         return jsonify({"error": "Content is required"}), 400
@@ -69,6 +73,15 @@ def create_orient_session():
     user_node.set_content(content)
     db.session.add(user_node)
     db.session.flush()
+
+    # Attach original recording audio if session_id provided
+    if session_id:
+        from backend.utils.audio_storage import (
+            attach_streaming_audio_to_node,
+        )
+        attach_streaming_audio_to_node(
+            session_id, user_node, current_user.id
+        )
 
     # 3. Placeholder LLM node
     llm_user = User.query.filter_by(username=model_id).first()
