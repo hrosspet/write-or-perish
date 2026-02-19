@@ -224,6 +224,16 @@ export const AudioProvider = ({ children }) => {
     audioRef.current = audio;
     audio.playbackRate = playbackRate;
 
+    // Route through the unlocked Web AudioContext so Safari allows playback
+    if (webAudioCtxRef.current) {
+      try {
+        const source = webAudioCtxRef.current.createMediaElementSource(audio);
+        source.connect(webAudioCtxRef.current.destination);
+      } catch (e) {
+        // Ignore — falls back to default audio output
+      }
+    }
+
     // Detect if this is a WebM file with continuous timestamps
     // WebM files from MediaRecorder with timeslice have timestamps that continue
     // across chunks (chunk 0: 0-300s, chunk 1: 300-600s, etc.)
@@ -414,6 +424,16 @@ export const AudioProvider = ({ children }) => {
     // Create new audio element
     const audio = new Audio(audioData.url);
     audioRef.current = audio;
+
+    // Route through the unlocked Web AudioContext so Safari allows playback
+    if (webAudioCtxRef.current) {
+      try {
+        const source = webAudioCtxRef.current.createMediaElementSource(audio);
+        source.connect(webAudioCtxRef.current.destination);
+      } catch (e) {
+        // Ignore — falls back to default audio output
+      }
+    }
 
     // Set playback rate
     audio.playbackRate = playbackRate;
