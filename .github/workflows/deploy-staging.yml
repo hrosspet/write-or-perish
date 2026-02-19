@@ -6,10 +6,52 @@ on:
   workflow_dispatch:
 
 jobs:
+  build-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci --legacy-peer-deps
+
+      - name: Build frontend
+        working-directory: frontend
+        env:
+          REACT_APP_BACKEND_URL: https://staging.loore.org
+          REACT_APP_API_URL: https://staging.loore.org/api
+        run: npm run build
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build-staging
+          path: frontend/build
+
   deploy:
+    needs: [build-frontend]
     runs-on: ubuntu-latest
 
     steps:
+      - name: Download frontend build
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-build-staging
+          path: frontend-build
+
+      - name: Create deployment package
+        run: |
+          cd frontend-build
+          tar -czf ../frontend-build.tar.gz .
+
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
@@ -21,13 +63,27 @@ jobs:
         env:
           VM_HOST: ${{ secrets.VM_HOST }}
           VM_USER: ${{ secrets.VM_USER }}
+          PROJECT_PATH: /home/hrosspet/write-or-perish
         run: |
+          # Upload pre-built frontend
+          scp -i ~/.ssh/deploy_key frontend-build.tar.gz $VM_USER@$VM_HOST:$PROJECT_PATH/
+
+          # Deploy on VM
           ssh -i ~/.ssh/deploy_key $VM_USER@$VM_HOST << 'ENDSSH'
             set -e
             cd /home/hrosspet/write-or-perish
             git fetch origin
             git checkout staging
             git pull origin staging
+
+            # Extract pre-built frontend
+            rm -rf frontend/build
+            mkdir -p frontend/build
+            tar -xzf frontend-build.tar.gz -C frontend/build
+            rm frontend-build.tar.gz
+
+            # Start/rebuild containers
+            # Frontend uses nginx:alpine + volume mount (no build needed)
             docker compose \
               -f docker-compose.yml \
               -f docker-compose.prod.yml \
@@ -35,6 +91,7 @@ jobs:
               --env-file .env.staging \
               -p wop-staging \
               up -d --build
+
             sleep 5
             docker compose -p wop-staging exec -T backend flask init-db
 
@@ -44,7 +101,7 @@ jobs:
 
       - name: Cleanup
         if: always()
-        run: rm -f ~/.ssh/deploy_key
+        run: rm -f ~/.ssh/deploy_key frontend-build.tar.gz
 
       - name: Result
         run: |
