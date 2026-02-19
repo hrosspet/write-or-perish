@@ -830,8 +830,8 @@ export default function OrientPage() {
                   </span>
                   <span style={{
                     fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.92rem',
-                    color: 'var(--text-primary)', lineHeight: 1.4, flex: '1 1 0',
-                    minWidth: 0, overflowWrap: 'break-word',
+                    color: 'var(--text-primary)', lineHeight: 1.4, flex: '1 1 auto',
+                    minWidth: '40%', overflowWrap: 'break-word',
                   }}>
                     {item.text}
                   </span>
