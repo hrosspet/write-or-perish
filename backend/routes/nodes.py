@@ -1032,8 +1032,9 @@ def get_transcription_status(node_id):
     """Get the current transcription status for a node."""
     node = Node.query.get_or_404(node_id)
 
-    # Check ownership
-    if node.user_id != current_user.id and not getattr(current_user, "is_admin", False):
+    # Check ownership (can_user_access_node handles LLM nodes by walking
+    # up the parent chain to find the human owner)
+    if not can_user_access_node(node) and not getattr(current_user, "is_admin", False):
         return jsonify({"error": "Unauthorized"}), 403
 
     # Get task status from Celery if still processing
@@ -1072,8 +1073,9 @@ def get_llm_status(node_id):
     """Get the current LLM completion status for a node."""
     node = Node.query.get_or_404(node_id)
 
-    # Check ownership
-    if node.user_id != current_user.id and not getattr(current_user, "is_admin", False):
+    # Check ownership (can_user_access_node handles LLM nodes by walking
+    # up the parent chain to find the human owner)
+    if not can_user_access_node(node) and not getattr(current_user, "is_admin", False):
         return jsonify({"error": "Unauthorized"}), 403
 
     # Get task status from Celery if still processing
@@ -1113,6 +1115,10 @@ def get_llm_status(node_id):
         "task_info": task_info
     }
 
+    # Include content when completed (needed by ReflectPage polling)
+    if node.llm_task_status == 'completed':
+        response_data["content"] = node.get_content()
+
     if created_node:
         response_data["node"] = created_node
 
@@ -1125,8 +1131,9 @@ def get_tts_status(node_id):
     """Get the current TTS generation status for a node."""
     node = Node.query.get_or_404(node_id)
 
-    # Check ownership
-    if node.user_id != current_user.id and not getattr(current_user, "is_admin", False):
+    # Check ownership (can_user_access_node handles LLM nodes by walking
+    # up the parent chain to find the human owner)
+    if not can_user_access_node(node) and not getattr(current_user, "is_admin", False):
         return jsonify({"error": "Unauthorized"}), 403
 
     # Get task status from Celery if still processing
