@@ -58,6 +58,110 @@ function PulsingDot({ color = 'var(--accent)' }) {
   );
 }
 
+const ECG_PATH = "M 24,81.6 L 64,81.6 L 84,74.4 L 100,86.4 L 132,16.8 L 168,127.2 L 192,50.4 L 208,81.6 L 224,81.6 L 256,81.6";
+const ECG_PULSE_PATH = "M 100,86.4 L 132,16.8 L 168,127.2 L 192,50.4";
+
+function EcgAnimation({ active = true, showScanline = true, dim = false }) {
+  return (
+    <div style={{
+      position: 'relative',
+      width: '280px',
+      height: '168px',
+      marginBottom: '2rem',
+      opacity: dim ? 0.4 : 1,
+      transition: 'opacity 0.4s ease',
+    }}>
+      {showScanline && active && (
+        <div style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          width: '3px',
+          height: '100%',
+          background: 'linear-gradient(to bottom, transparent, var(--accent), transparent)',
+          borderRadius: '2px',
+          filter: 'blur(1px)',
+          animation: 'ecgScan 3s ease-in-out 2.1s infinite',
+          opacity: 0,
+        }} />
+      )}
+      <svg width="100%" height="100%" viewBox="0 0 280 168" fill="none">
+        {/* Glow layer */}
+        <path
+          d={ECG_PATH}
+          stroke="#c4956a"
+          strokeWidth="8"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          opacity="0.15"
+          filter="url(#ecgBlur)"
+          style={active ? {
+            strokeDasharray: 500,
+            strokeDashoffset: 500,
+            animation: 'ecgDrawLine 1.5s cubic-bezier(0.22, 1, 0.36, 1) 0.6s forwards',
+          } : {
+            strokeDasharray: 'none',
+            opacity: 0.1,
+          }}
+        />
+        {/* Main line */}
+        <path
+          d={ECG_PATH}
+          stroke="#c4956a"
+          strokeWidth="3"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          style={active ? {
+            strokeDasharray: 500,
+            strokeDashoffset: 500,
+            animation: 'ecgDrawLine 1.5s cubic-bezier(0.22, 1, 0.36, 1) 0.6s forwards',
+          } : {
+            strokeDasharray: 'none',
+          }}
+        />
+        {/* Pulse (peak) with breathing */}
+        <path
+          d={ECG_PULSE_PATH}
+          stroke="#c4956a"
+          strokeWidth="5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          style={active ? {
+            opacity: 0,
+            strokeDasharray: 500,
+            strokeDashoffset: 500,
+            animation: 'ecgDrawLine 1.5s cubic-bezier(0.22, 1, 0.36, 1) 0.6s forwards, ecgBreathe 3s ease-in-out 2.1s infinite',
+          } : {
+            opacity: 0.2,
+            strokeDasharray: 'none',
+          }}
+        />
+        <defs>
+          <filter id="ecgBlur">
+            <feGaussianBlur stdDeviation="4" />
+          </filter>
+        </defs>
+      </svg>
+      <style>{`
+        @keyframes ecgDrawLine {
+          to { stroke-dashoffset: 0; }
+        }
+        @keyframes ecgBreathe {
+          0%, 100% { opacity: 0.25; filter: drop-shadow(0 0 8px var(--accent-glow)); }
+          50% { opacity: 0.6; filter: drop-shadow(0 0 20px var(--accent)); }
+        }
+        @keyframes ecgScan {
+          0% { left: 0%; opacity: 0; }
+          5% { opacity: 0.5; }
+          50% { opacity: 0.3; }
+          95% { opacity: 0.5; }
+          100% { left: 100%; opacity: 0; }
+        }
+      `}</style>
+    </div>
+  );
+}
+
 function Spinner() {
   return (
     <svg width="20" height="20" viewBox="0 0 20 20" style={{ animation: 'spin 1s linear infinite' }}>
@@ -295,7 +399,7 @@ export default function ReflectPage() {
         <p style={{
           fontFamily: 'var(--serif)',
           fontStyle: 'italic',
-          fontSize: '1.1rem',
+          fontSize: 'clamp(1.2rem, 2.5vw, 1.6rem)',
           fontWeight: 300,
           color: 'var(--text-muted)',
           marginBottom: '40px',
@@ -303,25 +407,13 @@ export default function ReflectPage() {
           Speak what's present...
         </p>
 
-        {/* Logo */}
-        <div style={{ marginBottom: '32px', opacity: phase === 'recording' ? 1 : 0.5, transition: 'opacity 0.3s' }}>
-          <img
-            src="/loore-logo-transparent.svg"
-            alt=""
-            style={{
-              height: '48px',
-              width: 'auto',
-              filter: phase === 'recording' ? 'drop-shadow(0 0 12px var(--accent-glow))' : 'none',
-              animation: phase === 'recording' ? 'ecgPulse 2s ease-in-out infinite' : 'none',
-            }}
-          />
-          <style>{`
-            @keyframes ecgPulse {
-              0%, 100% { opacity: 0.7; transform: scale(1); }
-              50% { opacity: 1; transform: scale(1.05); }
-            }
-          `}</style>
-        </div>
+        {/* ECG Animation */}
+        <EcgAnimation
+          key={phase}
+          active={phase === 'recording'}
+          dim={phase === 'ready'}
+          showScanline={phase === 'recording'}
+        />
 
         {/* Waveform — freeze when stopping */}
         {phase === 'recording' && <WaveformBars animated={!isStopping} />}
@@ -397,25 +489,8 @@ export default function ReflectPage() {
   if (phase === 'processing') {
     return (
       <div style={containerStyle}>
-        {/* Logo pulsing */}
-        <div style={{ marginBottom: '32px' }}>
-          <img
-            src="/loore-logo-transparent.svg"
-            alt=""
-            style={{
-              height: '48px',
-              width: 'auto',
-              filter: 'drop-shadow(0 0 12px var(--accent-glow))',
-              animation: 'ecgPulse 2s ease-in-out infinite',
-            }}
-          />
-          <style>{`
-            @keyframes ecgPulse {
-              0%, 100% { opacity: 0.7; transform: scale(1); }
-              50% { opacity: 1; transform: scale(1.05); }
-            }
-          `}</style>
-        </div>
+        {/* ECG Animation — breathing while processing */}
+        <EcgAnimation active={true} showScanline={false} />
 
         <PulsingDot />
         <p style={{
@@ -455,27 +530,12 @@ export default function ReflectPage() {
   // --- PLAYBACK STATE ---
   return (
     <div style={containerStyle}>
-      {/* Logo — pulsing while playing */}
-      <div style={{ marginBottom: '24px' }}>
-        <img
-          src="/loore-logo-transparent.svg"
-          alt=""
-          style={{
-            height: '48px',
-            width: 'auto',
-            filter: audio.isPlaying ? 'drop-shadow(0 0 12px var(--accent-glow))' : 'none',
-            animation: audio.isPlaying ? 'ecgPulse 2s ease-in-out infinite' : 'none',
-            opacity: audio.isPlaying ? 1 : 0.5,
-            transition: 'opacity 0.3s, filter 0.3s',
-          }}
-        />
-        <style>{`
-          @keyframes ecgPulse {
-            0%, 100% { opacity: 0.7; transform: scale(1); }
-            50% { opacity: 1; transform: scale(1.05); }
-          }
-        `}</style>
-      </div>
+      {/* ECG Animation — breathes while playing */}
+      <EcgAnimation
+        active={audio.isPlaying}
+        dim={!audio.isPlaying}
+        showScanline={false}
+      />
 
       {/* Waveform bars — animated while playing */}
       <div style={{ marginBottom: '24px' }}>

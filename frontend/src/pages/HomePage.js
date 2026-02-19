@@ -92,7 +92,7 @@ function WorkflowCard({ card, delay }) {
           : 'translateY(20px)',
         opacity: isVisible ? 1 : 0,
         transition: `all 0.5s ease ${delay}ms, transform 0.2s ease, border-color 0.2s ease`,
-        boxShadow: hovered ? '0 8px 32px rgba(0,0,0,0.3)' : 'none',
+        boxShadow: hovered ? '0 12px 48px rgba(0,0,0,0.35), 0 0 40px var(--accent-glow)' : 'none',
       }}
     >
       {/* Accent top line */}
@@ -101,10 +101,10 @@ function WorkflowCard({ card, delay }) {
         top: 0,
         left: 0,
         right: 0,
-        height: "2px",
-        background: "var(--accent)",
-        opacity: hovered ? 1 : 0,
-        transition: "opacity 0.2s ease",
+        height: "1px",
+        background: "linear-gradient(90deg, transparent, var(--accent), transparent)",
+        opacity: hovered ? 0.5 : 0,
+        transition: "opacity 0.4s ease",
       }} />
 
       <div style={{ marginBottom: "16px" }}>
@@ -153,7 +153,7 @@ export default function HomePage() {
         ref={greetingRef}
         style={{
           fontFamily: "var(--serif)",
-          fontSize: "1.1rem",
+          fontSize: "clamp(1.1rem, 2.5vw, 1.35rem)",
           fontWeight: 300,
           color: "var(--text-muted)",
           margin: "0 0 12px 0",
@@ -169,7 +169,7 @@ export default function HomePage() {
         ref={questionRef}
         style={{
           fontFamily: "var(--serif)",
-          fontSize: "clamp(1.6rem, 4vw, 2.4rem)",
+          fontSize: "clamp(1.8rem, 4.5vw, 2.8rem)",
           fontWeight: 300,
           color: "var(--text-primary)",
           margin: "0 0 48px 0",
