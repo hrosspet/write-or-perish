@@ -1,8 +1,9 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { FaPlay, FaPause, FaUndo, FaRedo } from 'react-icons/fa';
 import { useStreamingTranscription } from '../hooks/useStreamingTranscription';
 import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
-import { useStreamingTTS } from '../hooks/useStreamingTTS';
+import { useTTSStreamSSE } from '../hooks/useSSE';
+import { useAudio } from '../contexts/AudioContext';
 import api from '../api';
 
 function formatDuration(seconds) {
@@ -11,7 +12,7 @@ function formatDuration(seconds) {
   return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
 }
 
-function WaveformBars() {
+function WaveformBars({ animated = true }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: '3px', height: '32px', justifyContent: 'center' }}>
       {Array.from({ length: 24 }).map((_, i) => (
@@ -22,7 +23,8 @@ function WaveformBars() {
             background: 'var(--accent)',
             borderRadius: '1px',
             opacity: 0.6,
-            animation: `waveBar 1.2s ease-in-out ${i * 0.05}s infinite alternate`,
+            animation: animated ? `waveBar 1.2s ease-in-out ${i * 0.05}s infinite alternate` : 'none',
+            height: animated ? undefined : '4px',
           }}
         />
       ))}
@@ -36,14 +38,14 @@ function WaveformBars() {
   );
 }
 
-function PulsingDot() {
+function PulsingDot({ color = 'var(--accent)' }) {
   return (
     <span style={{
       display: 'inline-block',
       width: '8px',
       height: '8px',
       borderRadius: '50%',
-      background: 'var(--accent)',
+      background: color,
       animation: 'pulseDot 1.5s ease-in-out infinite',
     }}>
       <style>{`
@@ -56,35 +58,57 @@ function PulsingDot() {
   );
 }
 
+function Spinner() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 20 20" style={{ animation: 'spin 1s linear infinite' }}>
+      <circle cx="10" cy="10" r="8" fill="none" stroke="var(--accent)" strokeWidth="2" strokeDasharray="40 20" strokeLinecap="round" />
+      <style>{`
+        @keyframes spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+      `}</style>
+    </svg>
+  );
+}
+
 export default function ReflectPage() {
-  const navigate = useNavigate();
-  const [phase, setPhase] = useState('ready'); // ready, recording, processing, response
-  const [transcript, setTranscript] = useState('');
+  const audio = useAudio();
+  const [phase, setPhase] = useState('ready'); // ready, recording, processing, playback
   const [llmNodeId, setLlmNodeId] = useState(null);
-  const [llmResponse, setLlmResponse] = useState('');
+  const [isStopping, setIsStopping] = useState(false);
+  const [hasError, setHasError] = useState(false);
   const transcriptRef = useRef('');
+
+  // TTS state
+  const [ttsStarted, setTtsStarted] = useState(false);
+  const [ttsGenerating, setTtsGenerating] = useState(false);
+  const [ttsComplete, setTtsComplete] = useState(false);
+  const firstChunkRef = useRef(true);
 
   // Streaming transcription
   const streaming = useStreamingTranscription({
     privacyLevel: 'private',
     aiUsage: 'chat',
     onTranscriptUpdate: (text) => {
-      setTranscript(text);
       transcriptRef.current = text;
     },
     onComplete: async (data) => {
+      setIsStopping(false);
       setPhase('processing');
       const finalTranscript = data.content || transcriptRef.current;
-      setTranscript(finalTranscript);
-      if (finalTranscript.trim()) {
-        try {
-          const res = await api.post('/reflect', { content: finalTranscript });
-          setLlmNodeId(res.data.llm_node_id);
-        } catch (err) {
-          console.error('Reflect API error:', err);
-          setPhase('response');
-          setLlmResponse('Something went wrong. Please try again.');
-        }
+      if (!finalTranscript.trim()) {
+        // Empty recording — go back to ready
+        setPhase('ready');
+        return;
+      }
+      try {
+        const res = await api.post('/reflect', { content: finalTranscript });
+        setLlmNodeId(res.data.llm_node_id);
+      } catch (err) {
+        console.error('Reflect API error:', err);
+        setHasError(true);
+        setPhase('ready');
       }
     },
   });
@@ -95,67 +119,169 @@ export default function ReflectPage() {
     { enabled: !!llmNodeId && phase === 'processing', interval: 1500 }
   );
 
-  // When LLM completes, show response
+  // TTS SSE subscription
+  const ttsSSE = useTTSStreamSSE(llmNodeId, {
+    enabled: ttsGenerating,
+    onChunkReady: (data) => {
+      if (firstChunkRef.current) {
+        firstChunkRef.current = false;
+        audio.loadAudioQueue(
+          [data.audio_url],
+          { title: 'Reflection', url: data.audio_url },
+          [data.duration]
+        );
+        audio.setGeneratingTTS(true);
+      } else {
+        audio.appendChunkToQueue(data.audio_url, data.duration);
+      }
+    },
+    onAllComplete: () => {
+      setTtsGenerating(false);
+      setTtsComplete(true);
+      audio.setGeneratingTTS(false);
+    },
+  });
+
+  // When LLM completes, trigger TTS
   useEffect(() => {
-    if (llmStatus === 'completed' && llmData?.content) {
-      setLlmResponse(llmData.content);
-      setPhase('response');
+    if (llmStatus === 'completed' && llmData?.content && !ttsStarted) {
+      setTtsStarted(true);
+      setTtsGenerating(true);
+      firstChunkRef.current = true;
+      api.post(`/nodes/${llmNodeId}/tts`).catch((err) => {
+        console.error('TTS trigger error:', err);
+        setHasError(true);
+        setTtsGenerating(false);
+        setPhase('ready');
+      });
     } else if (llmStatus === 'failed') {
-      setLlmResponse('AI response failed. Please try again.');
-      setPhase('response');
+      setHasError(true);
+      setPhase('ready');
     }
-  }, [llmStatus, llmData]);
+  }, [llmStatus, llmData, ttsStarted, llmNodeId]);
 
-  // Streaming TTS — auto-play when response arrives
-  const tts = useStreamingTTS(
-    phase === 'response' && llmNodeId ? llmNodeId : null,
-    { autoPlay: true }
-  );
-
-  // Start TTS when response arrives
-  const ttsStartedRef = useRef(false);
+  // Transition to playback when audio starts playing
   useEffect(() => {
-    if (phase === 'response' && llmNodeId && llmResponse && !ttsStartedRef.current) {
-      ttsStartedRef.current = true;
-      tts.startTTS();
+    if (phase === 'processing' && audio.isPlaying) {
+      setPhase('playback');
     }
-  }, [phase, llmNodeId, llmResponse]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [phase, audio.isPlaying]);
+
+  // Clear error indicator after a few seconds
+  useEffect(() => {
+    if (hasError) {
+      const timer = setTimeout(() => setHasError(false), 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [hasError]);
 
   const handleStart = useCallback(() => {
     setPhase('recording');
-    ttsStartedRef.current = false;
+    setHasError(false);
     streaming.startStreaming();
   }, [streaming]);
 
   const handleStop = useCallback(() => {
+    setIsStopping(true);
     streaming.stopStreaming();
   }, [streaming]);
 
   const handleContinue = useCallback(() => {
+    audio.stop();
+    ttsSSE.disconnect();
+    ttsSSE.reset();
     setPhase('ready');
-    setTranscript('');
-    setLlmResponse('');
     setLlmNodeId(null);
-    ttsStartedRef.current = false;
+    setTtsStarted(false);
+    setTtsGenerating(false);
+    setTtsComplete(false);
+    firstChunkRef.current = true;
+    transcriptRef.current = '';
+    setHasError(false);
     streaming.cancelStreaming();
-  }, [streaming]);
+  }, [audio, ttsSSE, streaming]);
 
-  const today = new Date().toLocaleDateString('en-US', {
-    weekday: 'long', month: 'long', day: 'numeric', year: 'numeric',
+  const handleCancelProcessing = useCallback(() => {
+    audio.stop();
+    ttsSSE.disconnect();
+    ttsSSE.reset();
+    setPhase('ready');
+    setLlmNodeId(null);
+    setTtsStarted(false);
+    setTtsGenerating(false);
+    setTtsComplete(false);
+    firstChunkRef.current = true;
+    transcriptRef.current = '';
+    streaming.cancelStreaming();
+  }, [audio, ttsSSE, streaming]);
+
+  const handleReplay = useCallback(() => {
+    audio.seekToCumulativeTime(0);
+    // Small delay to let seek complete, then play
+    setTimeout(() => audio.play(), 50);
+  }, [audio]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      audio.stop();
+      ttsSSE.disconnect();
+      streaming.cancelStreaming();
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Playback sub-state derived from audio context
+  const playbackFinished = phase === 'playback' && !audio.isPlaying && ttsComplete && audio.cumulativeTime >= audio.totalDuration - 0.5;
+
+  // Progress bar helpers
+  const displayTime = audio.cumulativeTime || 0;
+  const displayDuration = audio.totalDuration || 0;
+
+  const formatTime = (seconds) => {
+    if (isNaN(seconds) || !isFinite(seconds)) return '0:00';
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  const handleSeek = (e) => {
+    if (!displayDuration || displayDuration <= 0) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const percentage = Math.max(0, Math.min(1, x / rect.width));
+    const newTime = percentage * displayDuration;
+    if (isFinite(newTime)) {
+      audio.seekToCumulativeTime(newTime);
+    }
+  };
+
+  const containerStyle = {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 'calc(100vh - 120px)',
+    padding: '40px 24px',
+    background: 'radial-gradient(ellipse at 50% 40%, rgba(196,149,106,0.06) 0%, transparent 70%)',
+  };
+
+  const controlButtonStyle = (active = true) => ({
+    background: 'none',
+    border: 'none',
+    color: active ? 'var(--accent)' : 'var(--text-muted)',
+    cursor: active ? 'pointer' : 'default',
+    fontSize: '18px',
+    padding: '8px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    transition: 'opacity 0.2s',
   });
 
-  // --- RECORDING STATE ---
+  // --- READY / RECORDING STATE ---
   if (phase === 'ready' || phase === 'recording') {
     return (
-      <div style={{
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        minHeight: 'calc(100vh - 120px)',
-        padding: '40px 24px',
-        background: 'radial-gradient(ellipse at 50% 40%, rgba(196,149,106,0.06) 0%, transparent 70%)',
-      }}>
+      <div style={containerStyle}>
         <p style={{
           fontFamily: 'var(--serif)',
           fontStyle: 'italic',
@@ -167,7 +293,7 @@ export default function ReflectPage() {
           Speak what's present...
         </p>
 
-        {/* ECG Logo */}
+        {/* Logo */}
         <div style={{ marginBottom: '32px', opacity: phase === 'recording' ? 1 : 0.5, transition: 'opacity 0.3s' }}>
           <img
             src="/loore-logo-transparent.svg"
@@ -204,7 +330,14 @@ export default function ReflectPage() {
           </p>
         )}
 
-        {/* Start/Stop button */}
+        {/* Error indicator */}
+        {hasError && phase === 'ready' && (
+          <div style={{ marginBottom: '16px' }}>
+            <PulsingDot color="var(--error, #e74c3c)" />
+          </div>
+        )}
+
+        {/* Start button */}
         {phase === 'ready' && (
           <button
             onClick={handleStart}
@@ -223,38 +356,29 @@ export default function ReflectPage() {
           </button>
         )}
 
+        {/* Stop button with visual feedback */}
         {phase === 'recording' && (
           <button
             onClick={handleStop}
+            disabled={isStopping}
             style={{
               width: '72px', height: '72px', borderRadius: '50%',
               border: '2px solid var(--accent)',
               background: 'transparent',
-              cursor: 'pointer',
+              cursor: isStopping ? 'not-allowed' : 'pointer',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               transition: 'all 0.2s ease',
+              opacity: isStopping ? 0.5 : 1,
             }}
           >
-            <svg width="20" height="20" viewBox="0 0 20 20" fill="var(--accent)">
-              <rect x="3" y="3" width="14" height="14" rx="2" />
-            </svg>
+            {isStopping ? (
+              <Spinner />
+            ) : (
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="var(--accent)">
+                <rect x="3" y="3" width="14" height="14" rx="2" />
+              </svg>
+            )}
           </button>
-        )}
-
-        {/* Transcript preview */}
-        {phase === 'recording' && transcript && (
-          <p style={{
-            fontFamily: 'var(--serif)',
-            fontSize: '0.85rem',
-            fontWeight: 300,
-            color: 'var(--text-muted)',
-            maxWidth: '500px',
-            textAlign: 'center',
-            marginTop: '24px',
-            opacity: 0.7,
-          }}>
-            {transcript.length > 200 ? '...' + transcript.slice(-200) : transcript}
-          </p>
         )}
       </div>
     );
@@ -263,14 +387,27 @@ export default function ReflectPage() {
   // --- PROCESSING STATE ---
   if (phase === 'processing') {
     return (
-      <div style={{
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        minHeight: 'calc(100vh - 120px)',
-        padding: '40px 24px',
-      }}>
+      <div style={containerStyle}>
+        {/* Logo pulsing */}
+        <div style={{ marginBottom: '32px' }}>
+          <img
+            src="/loore-logo-transparent.svg"
+            alt=""
+            style={{
+              height: '48px',
+              width: 'auto',
+              filter: 'drop-shadow(0 0 12px var(--accent-glow))',
+              animation: 'ecgPulse 2s ease-in-out infinite',
+            }}
+          />
+          <style>{`
+            @keyframes ecgPulse {
+              0%, 100% { opacity: 0.7; transform: scale(1); }
+              50% { opacity: 1; transform: scale(1.05); }
+            }
+          `}</style>
+        </div>
+
         <PulsingDot />
         <p style={{
           fontFamily: 'var(--sans)',
@@ -281,140 +418,201 @@ export default function ReflectPage() {
         }}>
           Reflecting...
         </p>
+
+        {/* Cancel button */}
+        <button
+          onClick={handleCancelProcessing}
+          style={{
+            background: 'none',
+            border: 'none',
+            color: 'var(--text-muted)',
+            cursor: 'pointer',
+            fontSize: '0.8rem',
+            fontFamily: 'var(--sans)',
+            marginTop: '32px',
+            opacity: 0.5,
+            transition: 'opacity 0.2s',
+            padding: '8px 16px',
+          }}
+          onMouseEnter={(e) => e.target.style.opacity = '0.8'}
+          onMouseLeave={(e) => e.target.style.opacity = '0.5'}
+        >
+          ✕
+        </button>
       </div>
     );
   }
 
-  // --- RESPONSE STATE ---
+  // --- PLAYBACK STATE ---
   return (
-    <div style={{
-      maxWidth: '700px',
-      margin: '0 auto',
-      padding: '60px 24px',
-    }}>
-      {/* Date header */}
-      <p style={{
-        fontFamily: 'var(--sans)',
-        fontSize: '0.7rem',
-        fontWeight: 400,
-        color: 'var(--text-muted)',
-        textTransform: 'uppercase',
-        letterSpacing: '0.08em',
-        marginBottom: '24px',
-      }}>
-        {today}
-      </p>
-
-      {/* User's transcript */}
-      <div style={{
-        fontFamily: 'var(--serif)',
-        fontSize: '1.05rem',
-        fontWeight: 300,
-        color: 'var(--text-secondary)',
-        lineHeight: 1.7,
-        marginBottom: '24px',
-      }}>
-        {transcript}
-      </div>
-
-      {/* Divider */}
-      <div style={{ height: '1px', background: 'var(--border)', marginBottom: '24px' }} />
-
-      {/* AI response label */}
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: '8px',
-        marginBottom: '16px',
-      }}>
-        <PulsingDot />
-        <span style={{
-          fontFamily: 'var(--sans)',
-          fontSize: '0.75rem',
-          fontWeight: 400,
-          color: 'var(--text-muted)',
-          textTransform: 'uppercase',
-          letterSpacing: '0.06em',
-        }}>
-          Loore reflects
-        </span>
-      </div>
-
-      {/* AI response */}
-      <div style={{
-        fontFamily: 'var(--sans)',
-        fontSize: '0.9rem',
-        fontWeight: 300,
-        color: 'var(--text-muted)',
-        lineHeight: 1.7,
-        marginBottom: '40px',
-      }}>
-        {llmResponse.split('\n\n').map((p, i) => (
-          <p key={i} style={{
-            marginBottom: '12px',
-            opacity: 1,
-            animation: `fadeUp 0.4s ease ${i * 0.15}s both`,
-          }}>
-            {p}
-          </p>
-        ))}
+    <div style={containerStyle}>
+      {/* Logo — pulsing while playing */}
+      <div style={{ marginBottom: '24px' }}>
+        <img
+          src="/loore-logo-transparent.svg"
+          alt=""
+          style={{
+            height: '48px',
+            width: 'auto',
+            filter: audio.isPlaying ? 'drop-shadow(0 0 12px var(--accent-glow))' : 'none',
+            animation: audio.isPlaying ? 'ecgPulse 2s ease-in-out infinite' : 'none',
+            opacity: audio.isPlaying ? 1 : 0.5,
+            transition: 'opacity 0.3s, filter 0.3s',
+          }}
+        />
         <style>{`
-          @keyframes fadeUp {
-            from { opacity: 0; transform: translateY(8px); }
-            to { opacity: 1; transform: translateY(0); }
+          @keyframes ecgPulse {
+            0%, 100% { opacity: 0.7; transform: scale(1); }
+            50% { opacity: 1; transform: scale(1.05); }
           }
         `}</style>
       </div>
 
-      {/* Action buttons */}
-      <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
-        <button
-          onClick={handleContinue}
-          style={{
-            padding: '10px 24px',
-            background: 'var(--accent)',
-            border: 'none',
-            borderRadius: '6px',
-            color: 'var(--bg-deep)',
-            fontFamily: 'var(--sans)',
-            fontSize: '0.85rem',
-            fontWeight: 400,
-            cursor: 'pointer',
-          }}
-        >
-          Continue reflecting
-        </button>
-        <button
-          onClick={() => navigate('/log')}
-          style={{
-            padding: '10px 24px',
-            background: 'none',
-            border: '1px solid var(--border)',
-            borderRadius: '6px',
-            color: 'var(--text-muted)',
-            fontFamily: 'var(--sans)',
-            fontSize: '0.85rem',
-            cursor: 'pointer',
-          }}
-        >
-          View in log
-        </button>
-        <button
-          onClick={() => navigate('/')}
-          style={{
-            padding: '10px 24px',
-            background: 'none',
-            border: '1px solid var(--border)',
-            borderRadius: '6px',
-            color: 'var(--text-muted)',
-            fontFamily: 'var(--sans)',
-            fontSize: '0.85rem',
-            cursor: 'pointer',
-          }}
-        >
-          Back to home
-        </button>
+      {/* Waveform bars — animated while playing */}
+      <div style={{ marginBottom: '24px' }}>
+        <WaveformBars animated={audio.isPlaying} />
       </div>
+
+      {/* Audio controls */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '16px', marginBottom: '16px' }}>
+        <button
+          onClick={() => audio.skipBackward()}
+          title="Skip back 10s"
+          style={controlButtonStyle()}
+        >
+          <FaUndo />
+        </button>
+
+        {audio.isPlaying ? (
+          <button
+            onClick={() => audio.pause()}
+            title="Pause"
+            style={{
+              ...controlButtonStyle(),
+              width: '48px', height: '48px',
+              borderRadius: '50%',
+              border: '2px solid var(--accent)',
+              fontSize: '20px',
+            }}
+          >
+            <FaPause />
+          </button>
+        ) : (
+          <button
+            onClick={() => audio.play()}
+            title="Play"
+            style={{
+              ...controlButtonStyle(),
+              width: '48px', height: '48px',
+              borderRadius: '50%',
+              border: '2px solid var(--accent)',
+              fontSize: '20px',
+            }}
+          >
+            <FaPlay style={{ marginLeft: '2px' }} />
+          </button>
+        )}
+
+        <button
+          onClick={() => audio.skipForward()}
+          title="Skip forward 10s"
+          style={controlButtonStyle()}
+        >
+          <FaRedo />
+        </button>
+
+        {playbackFinished && (
+          <button
+            onClick={handleReplay}
+            title="Replay"
+            style={{
+              ...controlButtonStyle(),
+              fontSize: '14px',
+              opacity: 0.7,
+            }}
+          >
+            <FaUndo />
+          </button>
+        )}
+      </div>
+
+      {/* Progress bar */}
+      <div style={{ width: '100%', maxWidth: '300px', marginBottom: '8px' }}>
+        <div
+          onClick={handleSeek}
+          style={{
+            width: '100%',
+            height: '6px',
+            backgroundColor: 'var(--bg-card, rgba(255,255,255,0.05))',
+            borderRadius: '3px',
+            cursor: 'pointer',
+            position: 'relative',
+            overflow: 'hidden',
+          }}
+        >
+          <div
+            style={{
+              height: '100%',
+              width: `${displayDuration > 0 ? (displayTime / displayDuration) * 100 : 0}%`,
+              backgroundColor: 'var(--accent)',
+              borderRadius: '3px',
+              transition: 'width 0.1s linear',
+            }}
+          />
+        </div>
+
+        {/* Time display */}
+        <div style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          marginTop: '4px',
+          color: 'var(--text-muted)',
+          fontSize: '0.75rem',
+          fontFamily: 'var(--sans)',
+          fontWeight: 300,
+        }}>
+          <span>{formatTime(displayTime)}</span>
+          <span>
+            {formatTime(displayDuration)}
+            {audio.generatingTTS && (
+              <span
+                style={{
+                  fontSize: '9px',
+                  color: 'var(--accent)',
+                  marginLeft: '4px',
+                  animation: 'pulseDot 1.5s ease-in-out infinite',
+                }}
+              >
+                ●
+              </span>
+            )}
+          </span>
+        </div>
+      </div>
+
+      {/* Spacer */}
+      <div style={{ height: '48px' }} />
+
+      {/* Record button to start next recording */}
+      <button
+        onClick={handleContinue}
+        title="Continue reflecting"
+        style={{
+          width: '56px', height: '56px', borderRadius: '50%',
+          border: '2px solid var(--accent)',
+          background: 'transparent',
+          cursor: 'pointer',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          transition: 'all 0.2s ease',
+          opacity: 0.7,
+        }}
+        onMouseEnter={(e) => e.currentTarget.style.opacity = '1'}
+        onMouseLeave={(e) => e.currentTarget.style.opacity = '0.7'}
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="var(--accent)">
+          <circle cx="12" cy="12" r="8" />
+        </svg>
+      </button>
     </div>
   );
 }
