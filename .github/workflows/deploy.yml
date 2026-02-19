@@ -6,6 +6,10 @@ on:
       - main
   workflow_dispatch:  # Allows manual triggering from GitHub UI
 
+concurrency:
+  group: vm-deploy
+  cancel-in-progress: false
+
 jobs:
   test-backend:
     runs-on: ubuntu-latest

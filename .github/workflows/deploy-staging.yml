@@ -5,6 +5,10 @@ on:
     branches: [staging]
   workflow_dispatch:
 
+concurrency:
+  group: vm-deploy
+  cancel-in-progress: false
+
 jobs:
   build-frontend:
     runs-on: ubuntu-latest
