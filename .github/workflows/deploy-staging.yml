@@ -139,8 +139,8 @@ jobs:
             echo "Seeding admin user..."
             docker compose -p wop-staging exec -T db \
               psql -U staging -d writeorperish_staging \
-              -c "INSERT INTO \"user\" (username, approved, is_admin, created_at)
-                  VALUES ('hrosspet', true, true, NOW())
+              -c "INSERT INTO \"user\" (username, approved, is_admin, craft_mode, created_at)
+                  VALUES ('hrosspet', true, true, false, NOW())
                   ON CONFLICT (username) DO UPDATE SET approved = true, is_admin = true;" < /dev/null
             echo "Database setup complete."
 
