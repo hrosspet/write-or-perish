@@ -119,6 +119,13 @@ jobs:
               -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" || true
             docker compose -p wop-staging exec -T backend flask init-db
 
+            # Seed staging admin user (DB is ephemeral, so this runs every deploy)
+            docker compose -p wop-staging exec -T db \
+              psql -U staging -d writeorperish_staging \
+              -c "INSERT INTO \"user\" (username, approved, is_admin, created_at)
+                  VALUES ('hrosspet', true, true, NOW())
+                  ON CONFLICT (username) DO UPDATE SET approved = true, is_admin = true;"
+
             # Switch back to main so production deploys aren't blocked
             git checkout main
           ENDSSH
