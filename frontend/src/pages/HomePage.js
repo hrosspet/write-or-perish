@@ -52,6 +52,7 @@ const cards = [
     path: "/converse",
     title: "Converse",
     description: "Ask anything. Think out loud.",
+    disabled: true,
     icon: (
       <svg width="42" height="42" viewBox="0 0 42 42" fill="none">
         <path d="M8 12 C8 9.8 9.8 8 12 8 L30 8 C32.2 8 34 9.8 34 12 L34 24 C34 26.2 32.2 28 30 28 L16 28 L10 33 L10 28 L12 28 C9.8 28 8 26.2 8 24 Z"
@@ -77,28 +78,31 @@ function WorkflowCard({ card, delay }) {
     }
   }, [isVisible, hasAnimated, delay]);
 
+  const disabled = card.disabled;
+
   return (
     <div
       ref={ref}
-      onClick={() => navigate(card.path)}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
+      onClick={() => !disabled && navigate(card.path)}
+      onMouseEnter={() => !disabled && setHovered(true)}
+      onMouseLeave={() => !disabled && setHovered(false)}
       style={{
         flex: "1 1 200px",
         background: "var(--bg-card)",
         border: `1px solid ${hovered ? 'var(--border-hover)' : 'var(--border)'}`,
         borderRadius: "12px",
         padding: "2.2rem 1.8rem 2rem",
-        cursor: "pointer",
+        cursor: disabled ? "default" : "pointer",
         position: "relative",
         transform: isVisible
           ? `translateY(${hovered ? '-3px' : '0'})`
           : 'translateY(20px)',
-        opacity: isVisible ? 1 : 0,
+        opacity: isVisible ? (disabled ? 0.4 : 1) : 0,
         transition: hasAnimated
           ? 'all 0.4s cubic-bezier(0.22, 1, 0.36, 1)'
           : `opacity 0.5s ease ${delay}ms, transform 0.5s ease ${delay}ms`,
         boxShadow: hovered ? '0 12px 48px rgba(0,0,0,0.35), 0 0 40px var(--accent-glow)' : 'none',
+        pointerEvents: disabled ? 'none' : 'auto',
       }}
     >
       {/* Accent top line */}
@@ -126,8 +130,19 @@ function WorkflowCard({ card, delay }) {
         fontWeight: 400,
         color: "var(--text-primary)",
         margin: "0 0 0.7rem 0",
+        display: "flex",
+        alignItems: "center",
+        gap: "0.6rem",
       }}>
         {card.title}
+        {disabled && <span style={{
+          fontFamily: "var(--sans)",
+          fontSize: "0.65rem",
+          fontWeight: 400,
+          color: "var(--text-muted)",
+          letterSpacing: "0.05em",
+          textTransform: "uppercase",
+        }}>Coming soon</span>}
       </h3>
       <p style={{
         fontFamily: "var(--sans)",

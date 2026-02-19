@@ -131,8 +131,9 @@ def create_app():
     from backend.routes.reflect import reflect_bp
     app.register_blueprint(reflect_bp, url_prefix="/api/reflect")
 
-    from backend.routes.converse import converse_bp
-    app.register_blueprint(converse_bp, url_prefix="/api/converse")
+    # Converse disabled for now
+    # from backend.routes.converse import converse_bp
+    # app.register_blueprint(converse_bp, url_prefix="/api/converse")
 
     from backend.routes.orient import orient_bp
     app.register_blueprint(orient_bp, url_prefix="/api/orient")
