@@ -31,6 +31,8 @@ export const AudioProvider = ({ children }) => {
   }, []);
   // Web Audio API context — unlocked during user gesture to allow later autoplay on Safari
   const webAudioCtxRef = useRef(null);
+  // Gesture-activated Audio element for Safari autoplay
+  const warmedAudioRef = useRef(null);
   // Track whether playback ended while waiting for more chunks
   const waitingForChunksRef = useRef(false);
   const audioRef = useRef(null);
@@ -218,21 +220,19 @@ export const AudioProvider = ({ children }) => {
     // Update queue to contain chunks after current one
     audioQueueRef.current = urls.slice(chunkIndex + 1);
 
-    // Create new audio element
+    // Create or reuse audio element.
+    // Reuse the gesture-activated element from warmup() so Safari allows play().
     const chunkUrl = urls[chunkIndex];
-    const audio = new Audio(chunkUrl);
+    let audio;
+    if (warmedAudioRef.current) {
+      audio = warmedAudioRef.current;
+      warmedAudioRef.current = null;
+      audio.src = chunkUrl;
+    } else {
+      audio = new Audio(chunkUrl);
+    }
     audioRef.current = audio;
     audio.playbackRate = playbackRate;
-
-    // Route through the unlocked Web AudioContext so Safari allows playback
-    if (webAudioCtxRef.current) {
-      try {
-        const source = webAudioCtxRef.current.createMediaElementSource(audio);
-        source.connect(webAudioCtxRef.current.destination);
-      } catch (e) {
-        // Ignore — falls back to default audio output
-      }
-    }
 
     // Detect if this is a WebM file with continuous timestamps
     // WebM files from MediaRecorder with timeslice have timestamps that continue
@@ -421,19 +421,16 @@ export const AudioProvider = ({ children }) => {
     setLoading(true);
     setCurrentAudio(audioData);
 
-    // Create new audio element
-    const audio = new Audio(audioData.url);
-    audioRef.current = audio;
-
-    // Route through the unlocked Web AudioContext so Safari allows playback
-    if (webAudioCtxRef.current) {
-      try {
-        const source = webAudioCtxRef.current.createMediaElementSource(audio);
-        source.connect(webAudioCtxRef.current.destination);
-      } catch (e) {
-        // Ignore — falls back to default audio output
-      }
+    // Create or reuse audio element (gesture-activated for Safari autoplay)
+    let audio;
+    if (warmedAudioRef.current) {
+      audio = warmedAudioRef.current;
+      warmedAudioRef.current = null;
+      audio.src = audioData.url;
+    } else {
+      audio = new Audio(audioData.url);
     }
+    audioRef.current = audio;
 
     // Set playback rate
     audio.playbackRate = playbackRate;
@@ -757,12 +754,21 @@ export const AudioProvider = ({ children }) => {
     if (ctx.state === 'suspended') {
       ctx.resume();
     }
-    // Play a silent buffer to fully activate the audio pipeline
+    // Play a silent buffer to fully activate the Web Audio pipeline
     const buffer = ctx.createBuffer(1, 1, 22050);
     const source = ctx.createBufferSource();
     source.buffer = buffer;
     source.connect(ctx.destination);
     source.start(0);
+
+    // Also pre-activate an HTMLAudioElement during this gesture.
+    // Safari tracks per-element activation — reusing this element later bypasses autoplay.
+    const silentWav = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
+    const el = new Audio(silentWav);
+    el.play().then(() => {
+      el.pause();
+      warmedAudioRef.current = el;
+    }).catch(() => {});
   }, []);
 
   const value = {
