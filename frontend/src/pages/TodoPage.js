@@ -53,37 +53,40 @@ function toggleCheckbox(content, itemText, currentChecked) {
 
 function TodoItem({ item, onToggle }) {
   return (
-    <label style={{
-      display: 'flex',
-      alignItems: 'flex-start',
-      gap: '10px',
-      padding: '8px 0',
-      cursor: 'pointer',
-      opacity: item.checked ? 0.5 : 1,
-    }}>
-      <input
-        type="checkbox"
-        checked={item.checked}
-        onChange={() => onToggle(item)}
-        style={{
-          marginTop: '3px',
-          accentColor: 'var(--accent)',
-          width: '16px',
-          height: '16px',
-          cursor: 'pointer',
-        }}
-      />
+    <div
+      onClick={() => onToggle(item)}
+      style={{
+        display: 'flex',
+        alignItems: 'flex-start',
+        gap: '12px',
+        padding: '12px 0',
+        borderBottom: '1px solid #1e1d1a',
+        cursor: 'pointer',
+      }}
+    >
+      <div style={{
+        width: '18px', height: '18px', borderRadius: '50%',
+        border: `1.5px solid ${item.checked ? 'var(--accent-dim)' : 'var(--border-hover)'}`,
+        background: item.checked ? 'var(--accent-dim)' : 'none',
+        flexShrink: 0, marginTop: '2px',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontSize: '0.6rem', color: 'var(--bg-deep)', fontWeight: 600,
+        transition: 'all 0.3s',
+      }}>
+        {item.checked && '✓'}
+      </div>
       <span style={{
         fontFamily: 'var(--sans)',
-        fontSize: '0.9rem',
+        fontSize: '0.92rem',
         fontWeight: 300,
-        color: item.checked ? 'var(--text-muted)' : 'var(--text-secondary)',
+        color: 'var(--text-secondary)',
         textDecoration: item.checked ? 'line-through' : 'none',
+        opacity: item.checked ? 0.4 : 1,
         lineHeight: 1.5,
       }}>
         {item.text}
       </span>
-    </label>
+    </div>
   );
 }
 
@@ -369,23 +372,22 @@ export default function TodoPage() {
       {todo && !editing && (
         <div>
           {sections.map((section, i) => (
-            <div key={i} style={{ marginBottom: '28px' }}>
-              <h3 style={{
-                fontFamily: 'var(--sans)',
-                fontSize: '0.7rem',
-                fontWeight: 500,
-                color: 'var(--accent)',
-                textTransform: 'uppercase',
-                letterSpacing: '0.08em',
-                borderBottom: '1px solid var(--border)',
-                paddingBottom: '6px',
-                marginBottom: '8px',
-                display: 'flex',
-                justifyContent: 'space-between',
+            <div key={i} style={{ marginBottom: '2.5rem' }}>
+              <div style={{
+                fontSize: '0.68rem', letterSpacing: '0.18em', textTransform: 'uppercase',
+                color: 'var(--accent)', opacity: 0.6, marginBottom: '1.2rem',
+                display: 'flex', alignItems: 'center', gap: '8px',
+                fontFamily: 'var(--sans)', fontWeight: 500,
               }}>
                 <span>{section.title}</span>
-                <span style={{ color: 'var(--text-muted)', fontWeight: 300 }}>{section.items.length}</span>
-              </h3>
+                <span style={{
+                  color: 'var(--text-muted)', fontWeight: 300,
+                  fontSize: '0.65rem', letterSpacing: '0.05em',
+                  textTransform: 'none',
+                }}>
+                  {section.items.length}
+                </span>
+              </div>
               {section.items.map((item, j) => (
                 <TodoItem key={j} item={item} onToggle={handleToggle} />
               ))}
