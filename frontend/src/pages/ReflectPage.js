@@ -76,10 +76,10 @@ export default function ReflectPage() {
   const audio = useAudio();
   const [phase, setPhase] = useState('ready'); // ready, recording, processing, playback
   const [llmNodeId, setLlmNodeId] = useState(null);
-  const [threadParentId, setThreadParentId] = useState(null); // last LLM node — parent for next round
   const [isStopping, setIsStopping] = useState(false);
   const [hasError, setHasError] = useState(false);
   const transcriptRef = useRef('');
+  const threadParentIdRef = useRef(null); // last LLM node — parent for next round
 
   // TTS state
   const [ttsStarted, setTtsStarted] = useState(false);
@@ -104,8 +104,8 @@ export default function ReflectPage() {
       }
       try {
         const payload = { content: finalTranscript };
-        if (threadParentId) {
-          payload.parent_id = threadParentId;
+        if (threadParentIdRef.current) {
+          payload.parent_id = threadParentIdRef.current;
         }
         const res = await api.post('/reflect', payload);
         setLlmNodeId(res.data.llm_node_id);
@@ -149,7 +149,7 @@ export default function ReflectPage() {
   // When LLM completes, trigger TTS
   useEffect(() => {
     if (llmStatus === 'completed' && llmData?.content && !ttsStarted) {
-      setThreadParentId(llmNodeId); // save as parent for next round
+      threadParentIdRef.current = llmNodeId; // save as parent for next round
       setTtsStarted(true);
       setTtsGenerating(true);
       firstChunkRef.current = true;
@@ -197,7 +197,7 @@ export default function ReflectPage() {
     ttsSSE.reset();
     setPhase('ready');
     setLlmNodeId(null);
-    // Keep threadParentId — continues the conversation thread
+    // Keep threadParentIdRef — continues the conversation thread
     setTtsStarted(false);
     setTtsGenerating(false);
 
