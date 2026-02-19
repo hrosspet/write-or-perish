@@ -52,6 +52,8 @@ export function useStreamingMediaRecorder({
   const chunkIndexRef = useRef(0);
   const durationIntervalRef = useRef(null);
   const webmHeaderRef = useRef(null); // Store WebM header from first chunk
+  const stopResolveRef = useRef(null); // Resolve fn for the stop promise
+  const dataAvailableFiredRef = useRef(false); // Track if ondataavailable ran during stop
 
   // Clean up on unmount
   useEffect(() => {
@@ -117,6 +119,9 @@ export function useStreamingMediaRecorder({
         const recorderState = recorderRef.current?.state || 'unknown';
         console.log(`[StreamingRecorder] ondataavailable fired: size=${e.data?.size || 0}, recorderState=${recorderState}, timeSinceStart=${Date.now() - startTimeRef.current}ms`);
 
+        // Flag set synchronously so onstop knows we ran (before any await)
+        dataAvailableFiredRef.current = true;
+
         if (e.data && e.data.size > 0) {
           chunksRef.current.push(e.data);
 
@@ -154,6 +159,13 @@ export function useStreamingMediaRecorder({
         } else {
           console.warn(`[StreamingRecorder] ondataavailable with empty data: size=${e.data?.size}, recorderState=${recorderState}`);
         }
+
+        // If we're stopping, the final chunk has been processed and upload enqueued.
+        // Resolve the stop promise so stopStreaming knows it's safe to finalize.
+        if (stopResolveRef.current) {
+          stopResolveRef.current();
+          stopResolveRef.current = null;
+        }
       };
 
       mediaRecorder.onstop = () => {
@@ -176,6 +188,16 @@ export function useStreamingMediaRecorder({
 
         // Stop all tracks
         stream.getTracks().forEach(track => track.stop());
+
+        // Fallback: if ondataavailable didn't fire (no data to emit),
+        // resolve the stop promise here so stopStreaming doesn't hang.
+        // When ondataavailable DID fire, it resolves the promise itself
+        // after its async work completes — so we skip this.
+        if (stopResolveRef.current && !dataAvailableFiredRef.current) {
+          console.log('[StreamingRecorder] onstop resolving stop promise (no ondataavailable)');
+          stopResolveRef.current();
+          stopResolveRef.current = null;
+        }
       };
 
       mediaRecorder.onerror = (e) => {
@@ -208,11 +230,19 @@ export function useStreamingMediaRecorder({
   const stopRecording = useCallback(() => {
     if (recorderRef.current && recorderRef.current.state === 'recording') {
       console.log(`[StreamingRecorder] stopRecording called: chunksRef.length=${chunksRef.current.length}, chunkIndex=${chunkIndexRef.current}`);
-      // stop() fires a final ondataavailable with all remaining data, then onstop.
-      // Do NOT call requestData() before stop() — it creates a race condition
-      // where the final chunk's ondataavailable may not fire reliably.
-      recorderRef.current.stop();
+      // Returns a promise that resolves when the final ondataavailable handler
+      // has completed (including onChunkReady which enqueues the upload).
+      // This lets stopStreaming await it instead of guessing with a timeout.
+      return new Promise((resolve) => {
+        dataAvailableFiredRef.current = false;
+        stopResolveRef.current = resolve;
+        // stop() fires a final ondataavailable with all remaining data, then onstop.
+        // Do NOT call requestData() before stop() — it creates a race condition
+        // where the final chunk's ondataavailable may not fire reliably.
+        recorderRef.current.stop();
+      });
     }
+    return Promise.resolve();
   }, []);
 
   // Get the current chunk count (for finalization)

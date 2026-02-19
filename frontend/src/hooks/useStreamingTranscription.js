@@ -321,17 +321,14 @@ export function useStreamingTranscription(options = {}) {
   const stopStreaming = useCallback(async () => {
     console.log(`[StreamingTranscription] stopStreaming called: session=${sessionIdRef.current}, pendingUploads=${pendingUploadsRef.current.length}`);
 
-    // Stop recording first — this triggers a final ondataavailable with remaining audio
-    stopMediaRecorder();
     setSessionState('finalizing');
 
-    // Wait for the final ondataavailable event to fire and push to chunksRef.
-    // The event is async (queued in the event loop after stop()), so we need
-    // to yield control back to the event loop before reading the chunk count.
-    await new Promise(resolve => setTimeout(resolve, 100));
+    // Stop recording and wait for the final ondataavailable handler to complete.
+    // This guarantees the final chunk has been emitted and its upload enqueued
+    // in pendingUploadsRef before we proceed.
+    await stopMediaRecorder();
 
     // Now wait for ALL pending uploads to complete (including the final chunk's upload)
-    // This replaces the old blind 500ms timeout with an actual guarantee.
     const uploadsToWait = [...pendingUploadsRef.current];
     console.log(`[StreamingTranscription] Waiting for ${uploadsToWait.length} pending uploads to complete...`);
     await Promise.allSettled(uploadsToWait);
