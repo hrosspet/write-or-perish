@@ -17,13 +17,15 @@ def _get_reflect_prompt():
 @login_required
 def create_reflect_session():
     """
-    Start a reflect session.
-    Body: { content: string, model?: string }
-    Creates: system node (prompt) -> user node (transcript) -> placeholder LLM node
+    Start or continue a reflect session.
+    Body: { content: string, model?: string, parent_id?: int }
+    Without parent_id: creates system node (prompt) -> user node -> LLM node
+    With parent_id: continues thread — user node parented to parent_id -> LLM node
     """
     data = request.get_json() or {}
     content = data.get("content")
     model_id = data.get("model")
+    parent_id = data.get("parent_id")
 
     if not content or not content.strip():
         return jsonify({"error": "Content is required"}), 400
@@ -36,22 +38,30 @@ def create_reflect_session():
     if model_id not in current_app.config["SUPPORTED_MODELS"]:
         return jsonify({"error": f"Unsupported model: {model_id}"}), 400
 
-    # 1. Create system node with reflect prompt
-    system_node = Node(
-        user_id=current_user.id,
-        parent_id=None,
-        node_type="user",
-        privacy_level="private",
-        ai_usage="chat",
-    )
-    system_node.set_content(_get_reflect_prompt())
-    db.session.add(system_node)
-    db.session.flush()
+    if parent_id:
+        # Continue an existing thread — parent the user node to the given node
+        parent_node = Node.query.get(parent_id)
+        if not parent_node:
+            return jsonify({"error": "Parent node not found"}), 404
+        user_parent_id = parent_id
+    else:
+        # New thread — create system node with reflect prompt
+        system_node = Node(
+            user_id=current_user.id,
+            parent_id=None,
+            node_type="user",
+            privacy_level="private",
+            ai_usage="chat",
+        )
+        system_node.set_content(_get_reflect_prompt())
+        db.session.add(system_node)
+        db.session.flush()
+        user_parent_id = system_node.id
 
-    # 2. Create user node with transcribed content
+    # Create user node with transcribed content
     user_node = Node(
         user_id=current_user.id,
-        parent_id=system_node.id,
+        parent_id=user_parent_id,
         node_type="user",
         privacy_level="private",
         ai_usage="chat",
@@ -90,12 +100,12 @@ def create_reflect_session():
     db.session.commit()
 
     current_app.logger.info(
-        f"Reflect session created: system={system_node.id}, "
+        f"Reflect session: parent={user_parent_id}, "
         f"user={user_node.id}, llm={llm_node.id}, task={task.id}"
     )
 
     return jsonify({
-        "session_node_id": system_node.id,
+        "parent_id": user_parent_id,
         "user_node_id": user_node.id,
         "llm_node_id": llm_node.id,
         "task_id": task.id,

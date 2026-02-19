@@ -164,7 +164,7 @@ function NavBar({ onNewEntryClick }) {
       </Link>
 
       <div style={{ display: "flex", alignItems: "center", gap: "clamp(0.8rem, 2vw, 1.8rem)" }}>
-        <GlobalAudioPlayer />
+        {currentPath !== '/reflect' && <GlobalAudioPlayer />}
 
         {/* About dropdown */}
         <div ref={aboutRef} style={{ position: "relative" }}>

@@ -76,6 +76,7 @@ export default function ReflectPage() {
   const audio = useAudio();
   const [phase, setPhase] = useState('ready'); // ready, recording, processing, playback
   const [llmNodeId, setLlmNodeId] = useState(null);
+  const [threadParentId, setThreadParentId] = useState(null); // last LLM node — parent for next round
   const [isStopping, setIsStopping] = useState(false);
   const [hasError, setHasError] = useState(false);
   const transcriptRef = useRef('');
@@ -83,7 +84,6 @@ export default function ReflectPage() {
   // TTS state
   const [ttsStarted, setTtsStarted] = useState(false);
   const [ttsGenerating, setTtsGenerating] = useState(false);
-  const [ttsComplete, setTtsComplete] = useState(false);
   const firstChunkRef = useRef(true);
 
   // Streaming transcription
@@ -103,7 +103,11 @@ export default function ReflectPage() {
         return;
       }
       try {
-        const res = await api.post('/reflect', { content: finalTranscript });
+        const payload = { content: finalTranscript };
+        if (threadParentId) {
+          payload.parent_id = threadParentId;
+        }
+        const res = await api.post('/reflect', payload);
         setLlmNodeId(res.data.llm_node_id);
       } catch (err) {
         console.error('Reflect API error:', err);
@@ -137,7 +141,7 @@ export default function ReflectPage() {
     },
     onAllComplete: () => {
       setTtsGenerating(false);
-      setTtsComplete(true);
+
       audio.setGeneratingTTS(false);
     },
   });
@@ -145,6 +149,7 @@ export default function ReflectPage() {
   // When LLM completes, trigger TTS
   useEffect(() => {
     if (llmStatus === 'completed' && llmData?.content && !ttsStarted) {
+      setThreadParentId(llmNodeId); // save as parent for next round
       setTtsStarted(true);
       setTtsGenerating(true);
       firstChunkRef.current = true;
@@ -192,9 +197,10 @@ export default function ReflectPage() {
     ttsSSE.reset();
     setPhase('ready');
     setLlmNodeId(null);
+    // Keep threadParentId — continues the conversation thread
     setTtsStarted(false);
     setTtsGenerating(false);
-    setTtsComplete(false);
+
     firstChunkRef.current = true;
     transcriptRef.current = '';
     setHasError(false);
@@ -209,17 +215,11 @@ export default function ReflectPage() {
     setLlmNodeId(null);
     setTtsStarted(false);
     setTtsGenerating(false);
-    setTtsComplete(false);
+
     firstChunkRef.current = true;
     transcriptRef.current = '';
     streaming.cancelStreaming();
   }, [audio, ttsSSE, streaming]);
-
-  const handleReplay = useCallback(() => {
-    audio.seekToCumulativeTime(0);
-    // Small delay to let seek complete, then play
-    setTimeout(() => audio.play(), 50);
-  }, [audio]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -229,9 +229,6 @@ export default function ReflectPage() {
       streaming.cancelStreaming();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Playback sub-state derived from audio context
-  const playbackFinished = phase === 'playback' && !audio.isPlaying && ttsComplete && audio.cumulativeTime >= audio.totalDuration - 0.5;
 
   // Progress bar helpers
   const displayTime = audio.cumulativeTime || 0;
@@ -520,20 +517,6 @@ export default function ReflectPage() {
         >
           <FaRedo />
         </button>
-
-        {playbackFinished && (
-          <button
-            onClick={handleReplay}
-            title="Replay"
-            style={{
-              ...controlButtonStyle(),
-              fontSize: '14px',
-              opacity: 0.7,
-            }}
-          >
-            <FaUndo />
-          </button>
-        )}
       </div>
 
       {/* Progress bar */}
