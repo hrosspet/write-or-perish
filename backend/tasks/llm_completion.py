@@ -225,16 +225,16 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 user_export_content
                             )
                         # Replace {user_profile} placeholder if present
-                        if user_profile_content and USER_PROFILE_PLACEHOLDER in message_text:
+                        if USER_PROFILE_PLACEHOLDER in message_text:
                             message_text = message_text.replace(
                                 USER_PROFILE_PLACEHOLDER,
-                                user_profile_content
+                                user_profile_content or ""
                             )
                         # Replace {user_todo} placeholder if present
-                        if user_todo_content and USER_TODO_PLACEHOLDER in message_text:
+                        if USER_TODO_PLACEHOLDER in message_text:
                             message_text = message_text.replace(
                                 USER_TODO_PLACEHOLDER,
-                                user_todo_content
+                                user_todo_content or ""
                             )
                         # Resolve {quote:ID} placeholders if present
                         if needs_quotes and has_quotes(message_text):

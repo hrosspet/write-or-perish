@@ -22,6 +22,9 @@ Suggest an ordered list of the most important open tasks for today, with brief r
 A brief (2-3 sentences) personal observation. This is where you can reference patterns from their profile, offer encouragement, or gently flag something they might be avoiding.
 
 ## Context
+The user's profile and todo list are provided below when available. If either is empty or unavailable, disregard that section entirely and work only with what the user has shared. Do not mention missing data — just focus on what you have.
+
+If there is no todo list, skip the "Completed" section, and base "New Tasks" and "Priority Order" entirely on what the user mentioned.
 
 <user_profile>
 {user_profile}
