@@ -95,9 +95,13 @@ function AiDot() {
 /**
  * Parse markdown list items into an array of strings.
  */
+function stripInlineMarkdown(text) {
+  return text.replace(/\*\*(.+?)\*\*/g, '$1').replace(/__(.+?)__/g, '$1');
+}
+
 function parseTodoItems(text) {
   return text.split('\n')
-    .map(l => l.replace(/^[-*]\s*/, '').trim())
+    .map(l => stripInlineMarkdown(l.replace(/^[-*]\s*/, '').trim()))
     .filter(Boolean);
 }
 
@@ -111,11 +115,11 @@ function parsePriorityItems(text) {
       const cleaned = l.replace(/^\d+[.)]\s*/, '').trim();
       // Try to split on " — " or " - " for time hints
       const dashMatch = cleaned.match(/^(.+?)\s*[—–]\s*(.+)$/);
-      if (dashMatch) return { text: dashMatch[1].trim(), hint: dashMatch[2].trim() };
+      if (dashMatch) return { text: stripInlineMarkdown(dashMatch[1].trim()), hint: dashMatch[2].trim() };
       // Try parenthetical hints
       const parenMatch = cleaned.match(/^(.+?)\s*\(([^)]+)\)\s*$/);
-      if (parenMatch) return { text: parenMatch[1].trim(), hint: parenMatch[2].trim() };
-      return { text: cleaned, hint: '' };
+      if (parenMatch) return { text: stripInlineMarkdown(parenMatch[1].trim()), hint: parenMatch[2].trim() };
+      return { text: stripInlineMarkdown(cleaned), hint: '' };
     })
     .filter(item => item.text);
 }
@@ -805,7 +809,7 @@ export default function OrientPage() {
                   padding: '14px 16px', background: 'var(--bg-card)',
                   border: '1px solid var(--border)', borderRadius: '8px',
                   marginBottom: '8px', transition: 'all 0.3s',
-                  cursor: 'default',
+                  cursor: 'default', overflow: 'hidden',
                 }}>
                   <span style={{
                     fontFamily: 'var(--serif)', fontSize: '1.4rem',
@@ -816,13 +820,15 @@ export default function OrientPage() {
                   </span>
                   <span style={{
                     fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.92rem',
-                    color: 'var(--text-primary)', lineHeight: 1.4, flex: 1,
+                    color: 'var(--text-primary)', lineHeight: 1.4, flex: '1 1 0',
+                    minWidth: 0, overflowWrap: 'break-word',
                   }}>
                     {item.text}
                   </span>
                   {item.hint && (
                     <span style={{
-                      fontSize: '0.75rem', color: 'var(--text-muted)', flexShrink: 0,
+                      fontSize: '0.75rem', color: 'var(--text-muted)',
+                      flex: '0 1 auto', minWidth: 0, overflowWrap: 'break-word',
                     }}>
                       {item.hint}
                     </span>
