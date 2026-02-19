@@ -219,7 +219,7 @@ function NavBar({ onNewEntryClick }) {
 
         {!user && (
           <Link
-            to={`/login?returnUrl=${encodeURIComponent(location.pathname + location.search)}`}
+            to="/login?returnUrl=%2F"
             style={linkStyle("/login")}
           >
             Login
