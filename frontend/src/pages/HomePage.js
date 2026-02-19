@@ -68,6 +68,14 @@ function WorkflowCard({ card, delay }) {
   const isVisible = useOnScreen(ref);
   const navigate = useNavigate();
   const [hovered, setHovered] = useState(false);
+  const [hasAnimated, setHasAnimated] = useState(false);
+
+  useEffect(() => {
+    if (isVisible && !hasAnimated) {
+      const timer = setTimeout(() => setHasAnimated(true), delay + 600);
+      return () => clearTimeout(timer);
+    }
+  }, [isVisible, hasAnimated, delay]);
 
   return (
     <div
@@ -87,7 +95,9 @@ function WorkflowCard({ card, delay }) {
           ? `translateY(${hovered ? '-3px' : '0'})`
           : 'translateY(20px)',
         opacity: isVisible ? 1 : 0,
-        transition: `all 0.5s ease ${delay}ms, transform 0.2s ease, border-color 0.2s ease`,
+        transition: hasAnimated
+          ? 'all 0.4s cubic-bezier(0.22, 1, 0.36, 1)'
+          : `opacity 0.5s ease ${delay}ms, transform 0.5s ease ${delay}ms`,
         boxShadow: hovered ? '0 12px 48px rgba(0,0,0,0.35), 0 0 40px var(--accent-glow)' : 'none',
       }}
     >
