@@ -299,6 +299,11 @@ export default function OrientPage() {
   }, [audio, ttsSSE, streaming]);
 
   const handleCancelProcessing = useCallback(() => {
+    // Save current LLM node as thread parent so next recording continues the thread
+    // (the cancelled LLM response will still complete async as a dead-end sibling)
+    if (llmNodeId) {
+      threadParentIdRef.current = llmNodeId;
+    }
     audio.stop();
     ttsSSE.disconnect();
     ttsSSE.reset();
@@ -311,7 +316,7 @@ export default function OrientPage() {
     firstChunkRef.current = true;
     transcriptRef.current = '';
     streaming.cancelStreaming();
-  }, [audio, ttsSSE, streaming]);
+  }, [audio, ttsSSE, streaming, llmNodeId]);
 
   // Cleanup on unmount
   useEffect(() => {
