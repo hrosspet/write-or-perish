@@ -76,10 +76,10 @@ jobs:
             git checkout staging
             git pull origin staging
 
-            # Extract pre-built frontend
-            rm -rf frontend/build
-            mkdir -p frontend/build
-            tar -xzf frontend-build.tar.gz -C frontend/build
+            # Extract pre-built frontend to separate dir (not frontend/build which production uses)
+            rm -rf frontend/build-staging
+            mkdir -p frontend/build-staging
+            tar -xzf frontend-build.tar.gz -C frontend/build-staging
             rm frontend-build.tar.gz
 
             # Build and start backend services only (backend, celery, db, redis)

@@ -48,7 +48,7 @@ services:
     ports:
       - "127.0.0.1:8081:80"
     volumes:
-      - ./frontend/build:/usr/share/nginx/html:ro
+      - ./frontend/build-staging:/usr/share/nginx/html:ro
       - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     deploy:
       resources:

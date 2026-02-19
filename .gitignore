@@ -52,4 +52,5 @@ kms-credentials.json
 deployment.log
 gunicorn.pid
 frontend-build.tar.gz
+frontend/build-staging/
 logs/
