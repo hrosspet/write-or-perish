@@ -1,9 +1,10 @@
 name: Continuous Integration
 
 on:
-  pull_request:
+  push:
     branches:
-      - '**'  # Run CI when a PR is opened or updated
+      - '**'
+      - '!staging'
 
 jobs:
   changes:
@@ -25,7 +26,7 @@ jobs:
 
   test-backend:
     needs: changes
-    if: needs.changes.outputs.backend == 'true'
+    if: github.ref_name == 'main' || needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -63,7 +64,7 @@ jobs:
 
   test-frontend:
     needs: changes
-    if: needs.changes.outputs.frontend == 'true'
+    if: github.ref_name == 'main' || needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -104,7 +105,7 @@ jobs:
 
   security-check:
     needs: changes
-    if: needs.changes.outputs.backend == 'true'
+    if: github.ref_name == 'main' || needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
 
     steps:
