@@ -1,8 +1,9 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { FaRegCompass, FaPlay, FaPause, FaUndo, FaRedo } from 'react-icons/fa';
 import { useStreamingTranscription } from '../hooks/useStreamingTranscription';
 import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
-import { useStreamingTTS } from '../hooks/useStreamingTTS';
+import { useTTSStreamSSE } from '../hooks/useSSE';
+import { useAudio } from '../contexts/AudioContext';
 import ReactMarkdown from 'react-markdown';
 import api from '../api';
 
@@ -12,7 +13,7 @@ function formatDuration(seconds) {
   return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
 }
 
-function WaveformBars() {
+function WaveformBars({ animated = true }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: '3px', height: '32px', justifyContent: 'center' }}>
       {Array.from({ length: 24 }).map((_, i) => (
@@ -23,7 +24,8 @@ function WaveformBars() {
             background: 'var(--accent)',
             borderRadius: '1px',
             opacity: 0.6,
-            animation: `waveBarOrient 1.2s ease-in-out ${i * 0.05}s infinite alternate`,
+            animation: animated ? `waveBarOrient 1.2s ease-in-out ${i * 0.05}s infinite alternate` : 'none',
+            height: animated ? undefined : '4px',
           }}
         />
       ))}
@@ -37,14 +39,14 @@ function WaveformBars() {
   );
 }
 
-function PulsingDot() {
+function PulsingDot({ color = 'var(--accent)' }) {
   return (
     <span style={{
       display: 'inline-block',
       width: '8px',
       height: '8px',
       borderRadius: '50%',
-      background: 'var(--accent)',
+      background: color,
       animation: 'pulseDotOrient 1.5s ease-in-out infinite',
     }}>
       <style>{`
@@ -54,6 +56,20 @@ function PulsingDot() {
         }
       `}</style>
     </span>
+  );
+}
+
+function Spinner() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 20 20" style={{ animation: 'spinOrient 1s linear infinite' }}>
+      <circle cx="10" cy="10" r="8" fill="none" stroke="var(--accent)" strokeWidth="2" strokeDasharray="40 20" strokeLinecap="round" />
+      <style>{`
+        @keyframes spinOrient {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+      `}</style>
+    </svg>
   );
 }
 
@@ -82,35 +98,49 @@ function parseOrientResponse(text) {
 }
 
 export default function OrientPage() {
-  const navigate = useNavigate();
-  const [phase, setPhase] = useState('ready'); // ready, recording, processing, response
-  const [transcript, setTranscript] = useState('');
+  const audio = useAudio();
+  const [phase, setPhase] = useState('ready'); // ready, recording, processing, playback
   const [llmNodeId, setLlmNodeId] = useState(null);
-  const [llmResponse, setLlmResponse] = useState('');
+  const [isStopping, setIsStopping] = useState(false);
+  const [hasError, setHasError] = useState(false);
   const [applied, setApplied] = useState(false);
+  const [parsedResponse, setParsedResponse] = useState(null);
   const transcriptRef = useRef('');
+  const threadParentIdRef = useRef(null);
+  const llmResponseRef = useRef('');
+
+  // TTS state
+  const ttsTriggeredForNodeRef = useRef(null);
+  const applyTriggeredForNodeRef = useRef(null);
+  const [ttsGenerating, setTtsGenerating] = useState(false);
+  const firstChunkRef = useRef(true);
 
   // Streaming transcription
   const streaming = useStreamingTranscription({
     privacyLevel: 'private',
     aiUsage: 'chat',
     onTranscriptUpdate: (text) => {
-      setTranscript(text);
       transcriptRef.current = text;
     },
     onComplete: async (data) => {
+      setIsStopping(false);
       setPhase('processing');
       const finalTranscript = data.content || transcriptRef.current;
-      setTranscript(finalTranscript);
-      if (finalTranscript.trim()) {
-        try {
-          const res = await api.post('/orient', { content: finalTranscript });
-          setLlmNodeId(res.data.llm_node_id);
-        } catch (err) {
-          console.error('Orient API error:', err);
-          setPhase('response');
-          setLlmResponse('Something went wrong. Please try again.');
+      if (!finalTranscript.trim()) {
+        setPhase('ready');
+        return;
+      }
+      try {
+        const payload = { content: finalTranscript };
+        if (threadParentIdRef.current) {
+          payload.parent_id = threadParentIdRef.current;
         }
+        const res = await api.post('/orient', payload);
+        setLlmNodeId(res.data.llm_node_id);
+      } catch (err) {
+        console.error('Orient API error:', err);
+        setHasError(true);
+        setPhase('ready');
       }
     },
   });
@@ -121,50 +151,36 @@ export default function OrientPage() {
     { enabled: !!llmNodeId && phase === 'processing', interval: 1500 }
   );
 
-  useEffect(() => {
-    if (llmStatus === 'completed' && llmData?.content) {
-      setLlmResponse(llmData.content);
-      setPhase('response');
-    } else if (llmStatus === 'failed') {
-      setLlmResponse('AI response failed. Please try again.');
-      setPhase('response');
-    }
-  }, [llmStatus, llmData]);
+  // TTS SSE subscription
+  const ttsSSE = useTTSStreamSSE(llmNodeId, {
+    enabled: ttsGenerating,
+    onChunkReady: (data) => {
+      if (firstChunkRef.current) {
+        firstChunkRef.current = false;
+        audio.loadAudioQueue(
+          [data.audio_url],
+          { title: 'Orient', url: data.audio_url },
+          [data.duration]
+        );
+        audio.setGeneratingTTS(true);
+      } else {
+        audio.appendChunkToQueue(data.audio_url, data.duration);
+      }
+    },
+    onAllComplete: () => {
+      setTtsGenerating(false);
+      audio.setGeneratingTTS(false);
+    },
+  });
 
-  // Streaming TTS
-  const tts = useStreamingTTS(
-    phase === 'response' && llmNodeId ? llmNodeId : null,
-    { autoPlay: true }
-  );
+  // Build todo content from parsed response and apply
+  const handleApplyTodo = useCallback(async (nodeId) => {
+    const text = llmResponseRef.current;
+    if (!text || !nodeId) return;
 
-  const ttsStartedRef = useRef(false);
-  useEffect(() => {
-    if (phase === 'response' && llmNodeId && llmResponse && !ttsStartedRef.current) {
-      ttsStartedRef.current = true;
-      tts.startTTS();
-    }
-  }, [phase, llmNodeId, llmResponse]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleStart = useCallback(() => {
-    setPhase('recording');
-    ttsStartedRef.current = false;
-    setApplied(false);
-    streaming.startStreaming();
-  }, [streaming]);
-
-  const handleStop = useCallback(() => {
-    streaming.stopStreaming();
-  }, [streaming]);
-
-  const handleApplyTodo = async () => {
-    if (!llmNodeId || applied) return;
-    // Build an updated todo from the AI response
-    // For now, send the structured suggestions as the new todo content
-    const parsed = parseOrientResponse(llmResponse);
+    const parsed = parseOrientResponse(text);
     let updatedContent = '';
 
-    // Build updated markdown — this is a simplified version
-    // In production, this would merge with the existing todo more intelligently
     if (parsed.priority) {
       updatedContent += `## Today\n\n`;
       const lines = parsed.priority.split('\n').filter(l => l.trim());
@@ -191,46 +207,181 @@ export default function OrientPage() {
     }
 
     if (!updatedContent.trim()) {
-      // Fallback — just save the AI response as-is
-      updatedContent = llmResponse;
+      updatedContent = text;
     }
 
     try {
-      await api.post(`/orient/${llmNodeId}/apply-todo`, {
+      await api.post(`/orient/${nodeId}/apply-todo`, {
         updated_content: updatedContent,
       });
       setApplied(true);
     } catch (err) {
       console.error('Failed to apply todo:', err);
     }
-  };
+  }, []);
 
-  const handleNewSession = useCallback(() => {
-    setPhase('ready');
-    setTranscript('');
-    setLlmResponse('');
-    setLlmNodeId(null);
-    setApplied(false);
-    ttsStartedRef.current = false;
-    streaming.cancelStreaming();
+  // When LLM completes, trigger TTS and auto-apply todo
+  useEffect(() => {
+    if (!llmNodeId) return;
+    if (llmStatus === 'completed' && llmData?.content && ttsTriggeredForNodeRef.current !== llmNodeId) {
+      ttsTriggeredForNodeRef.current = llmNodeId;
+      threadParentIdRef.current = llmNodeId;
+
+      // Store response and parse it
+      llmResponseRef.current = llmData.content;
+      setParsedResponse(parseOrientResponse(llmData.content));
+
+      // Trigger TTS
+      setTtsGenerating(true);
+      firstChunkRef.current = true;
+      api.post(`/nodes/${llmNodeId}/tts`).catch((err) => {
+        console.error('TTS trigger error:', err);
+        setHasError(true);
+        setTtsGenerating(false);
+        setPhase('ready');
+      });
+
+      // Auto-apply todo
+      if (applyTriggeredForNodeRef.current !== llmNodeId) {
+        applyTriggeredForNodeRef.current = llmNodeId;
+        handleApplyTodo(llmNodeId);
+      }
+    } else if (llmStatus === 'failed') {
+      setHasError(true);
+      setPhase('ready');
+    }
+  }, [llmStatus, llmData, llmNodeId, handleApplyTodo]);
+
+  // Transition to playback when audio starts playing
+  useEffect(() => {
+    if (phase === 'processing' && audio.isPlaying) {
+      setPhase('playback');
+    }
+  }, [phase, audio.isPlaying]);
+
+  // Clear error indicator after a few seconds
+  useEffect(() => {
+    if (hasError) {
+      const timer = setTimeout(() => setHasError(false), 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [hasError]);
+
+  const handleStart = useCallback(() => {
+    setPhase('recording');
+    setHasError(false);
+    streaming.startStreaming();
   }, [streaming]);
 
-  const today = new Date().toLocaleDateString('en-US', {
-    weekday: 'long', month: 'long', day: 'numeric', year: 'numeric',
+  const handleStop = useCallback(() => {
+    setIsStopping(true);
+    streaming.stopStreaming();
+  }, [streaming]);
+
+  const handleContinue = useCallback(() => {
+    audio.stop();
+    ttsSSE.disconnect();
+    ttsSSE.reset();
+    setLlmNodeId(null);
+    // Keep threadParentIdRef — continues the conversation thread
+
+    setTtsGenerating(false);
+    setApplied(false);
+    setParsedResponse(null);
+    llmResponseRef.current = '';
+    firstChunkRef.current = true;
+    transcriptRef.current = '';
+    setHasError(false);
+    streaming.cancelStreaming();
+    // Go straight to recording — skip the ready phase
+    setPhase('recording');
+    streaming.startStreaming();
+  }, [audio, ttsSSE, streaming]);
+
+  const handleCancelProcessing = useCallback(() => {
+    audio.stop();
+    ttsSSE.disconnect();
+    ttsSSE.reset();
+    setPhase('ready');
+    setLlmNodeId(null);
+    setTtsGenerating(false);
+    setApplied(false);
+    setParsedResponse(null);
+    llmResponseRef.current = '';
+    firstChunkRef.current = true;
+    transcriptRef.current = '';
+    streaming.cancelStreaming();
+  }, [audio, ttsSSE, streaming]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      audio.stop();
+      ttsSSE.disconnect();
+      streaming.cancelStreaming();
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Progress bar helpers
+  const displayTime = audio.cumulativeTime || 0;
+  const displayDuration = audio.totalDuration || 0;
+
+  const formatTime = (seconds) => {
+    if (isNaN(seconds) || !isFinite(seconds)) return '0:00';
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  const handleSeek = (e) => {
+    if (!displayDuration || displayDuration <= 0) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const percentage = Math.max(0, Math.min(1, x / rect.width));
+    const newTime = percentage * displayDuration;
+    if (isFinite(newTime)) {
+      audio.seekToCumulativeTime(newTime);
+    }
+  };
+
+  const containerStyle = {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 'calc(100vh - 120px)',
+    padding: '40px 24px',
+    background: 'radial-gradient(ellipse at 50% 40%, rgba(196,149,106,0.06) 0%, transparent 70%)',
+  };
+
+  const controlButtonStyle = (active = true) => ({
+    background: 'none',
+    border: 'none',
+    color: active ? 'var(--accent)' : 'var(--text-muted)',
+    cursor: active ? 'pointer' : 'default',
+    fontSize: '18px',
+    padding: '8px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    transition: 'opacity 0.2s',
   });
 
-  // --- RECORDING STATE ---
+  const sectionHeadingStyle = {
+    fontFamily: 'var(--sans)', fontSize: '0.7rem', fontWeight: 500,
+    color: 'var(--accent)', textTransform: 'uppercase', letterSpacing: '0.08em',
+    borderBottom: '1px solid var(--border)', paddingBottom: '6px', marginBottom: '12px',
+  };
+
+  const sectionBodyStyle = {
+    fontFamily: 'var(--sans)', fontSize: '0.85rem', fontWeight: 300,
+    color: 'var(--text-secondary)', lineHeight: 1.6,
+  };
+
+  // --- READY / RECORDING STATE ---
   if (phase === 'ready' || phase === 'recording') {
     return (
-      <div style={{
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        minHeight: 'calc(100vh - 120px)',
-        padding: '40px 24px',
-        background: 'radial-gradient(ellipse at 50% 40%, rgba(196,149,106,0.06) 0%, transparent 70%)',
-      }}>
+      <div style={containerStyle}>
         <p style={{
           fontFamily: 'var(--serif)',
           fontStyle: 'italic',
@@ -244,15 +395,14 @@ export default function OrientPage() {
 
         {/* Compass icon */}
         <div style={{ marginBottom: '32px', opacity: phase === 'recording' ? 1 : 0.5, transition: 'opacity 0.3s' }}>
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="1.5"
+          <FaRegCompass
+            size={48}
+            color="var(--accent)"
             style={{
               filter: phase === 'recording' ? 'drop-shadow(0 0 12px var(--accent-glow))' : 'none',
               animation: phase === 'recording' ? 'compassPulse 2s ease-in-out infinite' : 'none',
-            }}>
-            <circle cx="12" cy="12" r="10" />
-            <path d="M12 2v4M12 18v4M2 12h4M18 12h4" />
-            <path d="M14.5 9.5L12 12l-2.5-2.5" fill="var(--accent)" stroke="none" />
-          </svg>
+            }}
+          />
           <style>{`
             @keyframes compassPulse {
               0%, 100% { opacity: 0.7; transform: scale(1); }
@@ -261,8 +411,10 @@ export default function OrientPage() {
           `}</style>
         </div>
 
-        {phase === 'recording' && <WaveformBars />}
+        {/* Waveform — freeze when stopping */}
+        {phase === 'recording' && <WaveformBars animated={!isStopping} />}
 
+        {/* Timer */}
         {phase === 'recording' && (
           <p style={{
             fontFamily: 'var(--sans)',
@@ -276,6 +428,14 @@ export default function OrientPage() {
           </p>
         )}
 
+        {/* Error indicator */}
+        {hasError && phase === 'ready' && (
+          <div style={{ marginBottom: '16px' }}>
+            <PulsingDot color="var(--error, #e74c3c)" />
+          </div>
+        )}
+
+        {/* Start button */}
         {phase === 'ready' && (
           <button
             onClick={handleStart}
@@ -285,6 +445,7 @@ export default function OrientPage() {
               background: 'transparent',
               cursor: 'pointer',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
+              transition: 'all 0.2s ease',
             }}
           >
             <svg width="24" height="24" viewBox="0 0 24 24" fill="var(--accent)">
@@ -293,36 +454,28 @@ export default function OrientPage() {
           </button>
         )}
 
+        {/* Stop button with visual feedback */}
         {phase === 'recording' && (
           <button
-            onClick={handleStop}
+            onClick={() => { if (!isStopping) handleStop(); }}
             style={{
               width: '72px', height: '72px', borderRadius: '50%',
               border: '2px solid var(--accent)',
               background: 'transparent',
               cursor: 'pointer',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
+              transition: 'all 0.2s ease',
+              opacity: isStopping ? 0.5 : 1,
             }}
           >
-            <svg width="20" height="20" viewBox="0 0 20 20" fill="var(--accent)">
-              <rect x="3" y="3" width="14" height="14" rx="2" />
-            </svg>
+            {isStopping ? (
+              <Spinner />
+            ) : (
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="var(--accent)">
+                <rect x="3" y="3" width="14" height="14" rx="2" />
+              </svg>
+            )}
           </button>
-        )}
-
-        {phase === 'recording' && transcript && (
-          <p style={{
-            fontFamily: 'var(--serif)',
-            fontSize: '0.85rem',
-            fontWeight: 300,
-            color: 'var(--text-muted)',
-            maxWidth: '500px',
-            textAlign: 'center',
-            marginTop: '24px',
-            opacity: 0.7,
-          }}>
-            {transcript.length > 200 ? '...' + transcript.slice(-200) : transcript}
-          </p>
         )}
       </div>
     );
@@ -331,13 +484,25 @@ export default function OrientPage() {
   // --- PROCESSING STATE ---
   if (phase === 'processing') {
     return (
-      <div style={{
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        minHeight: 'calc(100vh - 120px)',
-      }}>
+      <div style={containerStyle}>
+        {/* Compass pulsing */}
+        <div style={{ marginBottom: '32px' }}>
+          <FaRegCompass
+            size={48}
+            color="var(--accent)"
+            style={{
+              filter: 'drop-shadow(0 0 12px var(--accent-glow))',
+              animation: 'compassPulse 2s ease-in-out infinite',
+            }}
+          />
+          <style>{`
+            @keyframes compassPulse {
+              0%, 100% { opacity: 0.7; transform: scale(1); }
+              50% { opacity: 1; transform: scale(1.05); }
+            }
+          `}</style>
+        </div>
+
         <PulsingDot />
         <p style={{
           fontFamily: 'var(--sans)',
@@ -346,203 +511,272 @@ export default function OrientPage() {
           color: 'var(--text-muted)',
           marginTop: '16px',
         }}>
-          Orienting your day...
+          Orienting...
         </p>
+
+        {/* Cancel button */}
+        <button
+          onClick={handleCancelProcessing}
+          style={{
+            background: 'none',
+            border: 'none',
+            color: 'var(--text-muted)',
+            cursor: 'pointer',
+            fontSize: '0.8rem',
+            fontFamily: 'var(--sans)',
+            marginTop: '32px',
+            opacity: 0.5,
+            transition: 'opacity 0.2s',
+            padding: '8px 16px',
+          }}
+          onMouseEnter={(e) => e.target.style.opacity = '0.8'}
+          onMouseLeave={(e) => e.target.style.opacity = '0.5'}
+        >
+          ✕
+        </button>
       </div>
     );
   }
 
-  // --- RESPONSE STATE ---
-  const parsed = parseOrientResponse(llmResponse);
+  // --- PLAYBACK STATE ---
+  const parsed = parsedResponse || {};
+  const hasSections = parsed.completed || parsed.newTasks || parsed.priority || parsed.note;
 
   return (
-    <div style={{ maxWidth: '700px', margin: '0 auto', padding: '60px 24px' }}>
-      {/* Date header */}
-      <p style={{
-        fontFamily: 'var(--sans)',
-        fontSize: '0.7rem',
-        fontWeight: 400,
-        color: 'var(--text-muted)',
-        textTransform: 'uppercase',
-        letterSpacing: '0.08em',
-        marginBottom: '8px',
-        textAlign: 'center',
-      }}>
-        {today}
-      </p>
-
-      <h2 style={{
-        fontFamily: 'var(--serif)',
-        fontSize: '1.5rem',
-        fontWeight: 300,
-        color: 'var(--text-primary)',
-        textAlign: 'center',
-        marginBottom: '24px',
-      }}>
-        Your day, oriented
-      </h2>
-
-      {/* User's sharing */}
-      <div style={{
-        fontFamily: 'var(--serif)',
-        fontStyle: 'italic',
-        fontSize: '0.95rem',
-        fontWeight: 300,
-        color: 'var(--text-secondary)',
-        lineHeight: 1.7,
-        marginBottom: '32px',
-        padding: '16px',
-        borderLeft: '2px solid var(--border)',
-      }}>
-        {transcript}
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      minHeight: 'calc(100vh - 120px)',
+      padding: '40px 24px',
+      background: 'radial-gradient(ellipse at 50% 40%, rgba(196,149,106,0.06) 0%, transparent 70%)',
+    }}>
+      {/* Compass — pulsing while playing */}
+      <div style={{ marginBottom: '24px' }}>
+        <FaRegCompass
+          size={48}
+          color="var(--accent)"
+          style={{
+            filter: audio.isPlaying ? 'drop-shadow(0 0 12px var(--accent-glow))' : 'none',
+            animation: audio.isPlaying ? 'compassPulse 2s ease-in-out infinite' : 'none',
+            opacity: audio.isPlaying ? 1 : 0.5,
+            transition: 'opacity 0.3s, filter 0.3s',
+          }}
+        />
+        <style>{`
+          @keyframes compassPulse {
+            0%, 100% { opacity: 0.7; transform: scale(1); }
+            50% { opacity: 1; transform: scale(1.05); }
+          }
+        `}</style>
       </div>
 
-      {/* AI Response sections */}
-      {parsed.completed && (
-        <div style={{ marginBottom: '24px' }}>
-          <h3 style={{
-            fontFamily: 'var(--sans)', fontSize: '0.7rem', fontWeight: 500,
-            color: 'var(--accent)', textTransform: 'uppercase', letterSpacing: '0.08em',
-            borderBottom: '1px solid var(--border)', paddingBottom: '6px', marginBottom: '12px',
-          }}>
-            Completed
-          </h3>
-          <div style={{ fontFamily: 'var(--sans)', fontSize: '0.85rem', fontWeight: 300, color: 'var(--text-muted)', lineHeight: 1.6, opacity: 0.7 }}>
-            <ReactMarkdown>{parsed.completed}</ReactMarkdown>
-          </div>
-        </div>
-      )}
+      {/* Waveform bars — animated while playing */}
+      <div style={{ marginBottom: '24px' }}>
+        <WaveformBars animated={audio.isPlaying} />
+      </div>
 
-      {parsed.newTasks && (
-        <div style={{ marginBottom: '24px' }}>
-          <h3 style={{
-            fontFamily: 'var(--sans)', fontSize: '0.7rem', fontWeight: 500,
-            color: 'var(--accent)', textTransform: 'uppercase', letterSpacing: '0.08em',
-            borderBottom: '1px solid var(--border)', paddingBottom: '6px', marginBottom: '12px',
-          }}>
-            New Tasks
-          </h3>
-          <div style={{ fontFamily: 'var(--sans)', fontSize: '0.85rem', fontWeight: 300, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-            <ReactMarkdown>{parsed.newTasks}</ReactMarkdown>
-          </div>
-        </div>
-      )}
+      {/* Audio controls */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '16px', marginBottom: '16px' }}>
+        <button
+          onClick={() => audio.skipBackward()}
+          title="Skip back 10s"
+          style={controlButtonStyle()}
+        >
+          <FaUndo />
+        </button>
 
-      {parsed.priority && (
-        <div style={{ marginBottom: '24px' }}>
-          <h3 style={{
-            fontFamily: 'var(--sans)', fontSize: '0.7rem', fontWeight: 500,
-            color: 'var(--accent)', textTransform: 'uppercase', letterSpacing: '0.08em',
-            borderBottom: '1px solid var(--border)', paddingBottom: '6px', marginBottom: '12px',
-          }}>
-            Suggested Priority
-          </h3>
-          <div style={{ fontFamily: 'var(--sans)', fontSize: '0.85rem', fontWeight: 300, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-            <ReactMarkdown>{parsed.priority}</ReactMarkdown>
-          </div>
-        </div>
-      )}
-
-      {parsed.note && (
-        <div style={{
-          marginBottom: '32px',
-          padding: '16px 20px',
-          background: 'var(--accent-subtle)',
-          borderLeft: '3px solid var(--accent)',
-          borderRadius: '0 8px 8px 0',
-        }}>
-          <div style={{ fontFamily: 'var(--sans)', fontSize: '0.85rem', fontWeight: 300, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-            <ReactMarkdown>{parsed.note}</ReactMarkdown>
-          </div>
-        </div>
-      )}
-
-      {/* If no structured sections found, show raw response */}
-      {!parsed.completed && !parsed.newTasks && !parsed.priority && !parsed.note && llmResponse && (
-        <div style={{
-          fontFamily: 'var(--sans)', fontSize: '0.9rem', fontWeight: 300,
-          color: 'var(--text-muted)', lineHeight: 1.7, marginBottom: '32px',
-        }}>
-          <ReactMarkdown>{llmResponse}</ReactMarkdown>
-        </div>
-      )}
-
-      {/* Action buttons */}
-      <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
-        {!applied ? (
+        {audio.isPlaying ? (
           <button
-            onClick={handleApplyTodo}
+            onClick={() => audio.pause()}
             style={{
-              padding: '10px 24px',
-              background: 'var(--accent)',
-              border: 'none',
-              borderRadius: '6px',
-              color: 'var(--bg-deep)',
-              fontFamily: 'var(--sans)',
-              fontSize: '0.85rem',
-              fontWeight: 400,
-              cursor: 'pointer',
+              ...controlButtonStyle(),
+              width: '48px', height: '48px',
+              borderRadius: '50%',
+              border: '2px solid var(--accent)',
+              fontSize: '20px',
             }}
           >
-            Apply changes to todo
+            <FaPause />
           </button>
         ) : (
-          <span style={{
-            padding: '10px 24px',
-            fontFamily: 'var(--sans)',
-            fontSize: '0.85rem',
-            fontWeight: 300,
-            color: '#4ade80',
-          }}>
-            Changes applied
-          </span>
+          <button
+            onClick={() => {
+              if (audio.totalDuration > 0 && audio.cumulativeTime >= audio.totalDuration - 0.5) {
+                audio.seekToCumulativeTime(0);
+                setTimeout(() => audio.play(), 50);
+              } else {
+                audio.play();
+              }
+            }}
+            style={{
+              ...controlButtonStyle(),
+              width: '48px', height: '48px',
+              borderRadius: '50%',
+              border: '2px solid var(--accent)',
+              fontSize: '20px',
+            }}
+          >
+            <FaPlay style={{ marginLeft: '2px' }} />
+          </button>
         )}
+
         <button
-          onClick={() => navigate('/todo')}
-          style={{
-            padding: '10px 24px',
-            background: 'none',
-            border: '1px solid var(--border)',
-            borderRadius: '6px',
-            color: 'var(--text-muted)',
-            fontFamily: 'var(--sans)',
-            fontSize: '0.85rem',
-            cursor: 'pointer',
-          }}
+          onClick={() => audio.skipForward()}
+          title="Skip forward 10s"
+          style={controlButtonStyle()}
         >
-          View todo list
-        </button>
-        <button
-          onClick={handleNewSession}
-          style={{
-            padding: '10px 24px',
-            background: 'none',
-            border: '1px solid var(--border)',
-            borderRadius: '6px',
-            color: 'var(--text-muted)',
-            fontFamily: 'var(--sans)',
-            fontSize: '0.85rem',
-            cursor: 'pointer',
-          }}
-        >
-          Orient again
-        </button>
-        <button
-          onClick={() => navigate('/')}
-          style={{
-            padding: '10px 24px',
-            background: 'none',
-            border: '1px solid var(--border)',
-            borderRadius: '6px',
-            color: 'var(--text-muted)',
-            fontFamily: 'var(--sans)',
-            fontSize: '0.85rem',
-            cursor: 'pointer',
-          }}
-        >
-          Back to home
+          <FaRedo />
         </button>
       </div>
+
+      {/* Progress bar */}
+      <div style={{ width: '100%', maxWidth: '300px', marginBottom: '8px' }}>
+        <div
+          onClick={handleSeek}
+          style={{
+            width: '100%',
+            height: '6px',
+            backgroundColor: 'var(--bg-card, rgba(255,255,255,0.05))',
+            borderRadius: '3px',
+            cursor: 'pointer',
+            position: 'relative',
+            overflow: 'hidden',
+          }}
+        >
+          <div
+            style={{
+              height: '100%',
+              width: `${displayDuration > 0 ? (displayTime / displayDuration) * 100 : 0}%`,
+              backgroundColor: 'var(--accent)',
+              borderRadius: '3px',
+              transition: 'width 0.1s linear',
+            }}
+          />
+        </div>
+
+        {/* Time display */}
+        <div style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          marginTop: '4px',
+          color: 'var(--text-muted)',
+          fontSize: '0.75rem',
+          fontFamily: 'var(--sans)',
+          fontWeight: 300,
+        }}>
+          <span>{formatTime(displayTime)}</span>
+          <span>
+            {formatTime(displayDuration)}
+            {audio.generatingTTS && (
+              <span
+                style={{
+                  fontSize: '9px',
+                  color: 'var(--accent)',
+                  marginLeft: '4px',
+                  animation: 'pulseDotOrient 1.5s ease-in-out infinite',
+                }}
+              >
+                ●
+              </span>
+            )}
+          </span>
+        </div>
+      </div>
+
+      {/* Todo diff — shown during playback */}
+      {hasSections && (
+        <div style={{ width: '100%', maxWidth: '500px', marginTop: '32px' }}>
+          {parsed.completed && (
+            <div style={{ marginBottom: '24px' }}>
+              <h3 style={sectionHeadingStyle}>Completed</h3>
+              <div style={{ ...sectionBodyStyle, opacity: 0.7 }}>
+                <ReactMarkdown>{parsed.completed}</ReactMarkdown>
+              </div>
+            </div>
+          )}
+
+          {parsed.newTasks && (
+            <div style={{ marginBottom: '24px' }}>
+              <h3 style={sectionHeadingStyle}>New Tasks</h3>
+              <div style={sectionBodyStyle}>
+                <ReactMarkdown>{parsed.newTasks}</ReactMarkdown>
+              </div>
+            </div>
+          )}
+
+          {parsed.priority && (
+            <div style={{ marginBottom: '24px' }}>
+              <h3 style={sectionHeadingStyle}>Priority Order</h3>
+              <div style={sectionBodyStyle}>
+                <ReactMarkdown>{parsed.priority}</ReactMarkdown>
+              </div>
+            </div>
+          )}
+
+          {parsed.note && (
+            <div style={{
+              marginBottom: '24px',
+              padding: '16px 20px',
+              background: 'var(--accent-subtle)',
+              borderLeft: '3px solid var(--accent)',
+              borderRadius: '0 8px 8px 0',
+            }}>
+              <div style={sectionBodyStyle}>
+                <ReactMarkdown>{parsed.note}</ReactMarkdown>
+              </div>
+            </div>
+          )}
+
+          {/* If no structured sections found, show raw response */}
+          {!hasSections && llmResponseRef.current && (
+            <div style={{
+              fontFamily: 'var(--sans)', fontSize: '0.9rem', fontWeight: 300,
+              color: 'var(--text-muted)', lineHeight: 1.7, marginBottom: '24px',
+            }}>
+              <ReactMarkdown>{llmResponseRef.current}</ReactMarkdown>
+            </div>
+          )}
+
+          {/* Applied indicator */}
+          {applied && (
+            <p style={{
+              fontFamily: 'var(--sans)',
+              fontSize: '0.75rem',
+              fontWeight: 300,
+              color: '#4ade80',
+              textAlign: 'center',
+              marginBottom: '8px',
+            }}>
+              Todo updated
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Spacer */}
+      <div style={{ height: '32px' }} />
+
+      {/* Record button to continue conversation */}
+      <button
+        onClick={handleContinue}
+        title="Continue orienting"
+        style={{
+          width: '56px', height: '56px', borderRadius: '50%',
+          border: '2px solid var(--accent)',
+          background: 'transparent',
+          cursor: 'pointer',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          transition: 'all 0.2s ease',
+          opacity: 0.7,
+        }}
+        onMouseEnter={(e) => e.currentTarget.style.opacity = '1'}
+        onMouseLeave={(e) => e.currentTarget.style.opacity = '0.7'}
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="var(--accent)">
+          <circle cx="12" cy="12" r="8" />
+        </svg>
+      </button>
     </div>
   );
 }
