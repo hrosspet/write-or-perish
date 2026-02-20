@@ -44,6 +44,9 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
   const [showClaudeImportDialog, setShowClaudeImportDialog] = useState(false);
   const [claudeImportData, setClaudeImportData] = useState(null);
 
+  const [showChatGPTImportDialog, setShowChatGPTImportDialog] = useState(false);
+  const [chatGPTImportData, setChatGPTImportData] = useState(null);
+
   const [showPicker, setShowPicker] = useState(false);
 
   // Close picker dialog on Escape
@@ -229,12 +232,69 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     setClaudeImportData(null);
   };
 
+  const handleChatGPTImportFile = (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append("zip_file", file);
+
+    setImporting(true);
+    setShowPicker(false);
+    api.post("/import/chatgpt/analyze", formData, {
+      headers: { "Content-Type": "multipart/form-data" }
+    })
+      .then((response) => {
+        setChatGPTImportData(response.data);
+        setShowChatGPTImportDialog(true);
+        setImporting(false);
+      })
+      .catch((err) => {
+        console.error("Error analyzing ChatGPT import:", err);
+        setError(err.response?.data?.error || "Error analyzing ChatGPT export. Please try again.");
+        setImporting(false);
+      });
+
+    event.target.value = "";
+  };
+
+  const handleConfirmChatGPTImport = () => {
+    if (!chatGPTImportData) return;
+
+    setImporting(true);
+    api.post("/import/chatgpt/confirm", {
+      conversations: chatGPTImportData.conversations,
+      privacy_level: importPrivacy,
+      ai_usage: importAiUsage
+    })
+      .then((response) => {
+        setShowChatGPTImportDialog(false);
+        setChatGPTImportData(null);
+        setImporting(false);
+        setError("");
+        if (response.data.profile_update_task_id && onProfileUpdateStarted) {
+          onProfileUpdateStarted(response.data.profile_update_task_id);
+        }
+        window.location.reload();
+      })
+      .catch((err) => {
+        console.error("Error importing ChatGPT data:", err);
+        setError(err.response?.data?.error || "Error importing ChatGPT data. Please try again.");
+        setImporting(false);
+      });
+  };
+
+  const handleCancelChatGPTImport = () => {
+    setShowChatGPTImportDialog(false);
+    setChatGPTImportData(null);
+  };
+
   return (
     <div>
       {error && <div style={{ color: "var(--accent)", marginBottom: "0.8rem", fontSize: "0.88rem" }}>{error}</div>}
 
       {/* Main Import Data button */}
-      {!showImportDialog && !showTwitterImportDialog && !showClaudeImportDialog && (
+      {!showImportDialog && !showTwitterImportDialog && !showClaudeImportDialog && !showChatGPTImportDialog && (
         <button
           onClick={() => setShowPicker(!showPicker)}
           onMouseEnter={() => setHovered(true)}
@@ -301,6 +361,50 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                 textAlign: "center",
                 transition: "border-color 0.3s ease",
               }}>
+                Import Claude
+                <input
+                  type="file"
+                  accept=".zip"
+                  onChange={handleClaudeImportFile}
+                  disabled={importing}
+                  style={{ display: "none" }}
+                />
+              </label>
+              <label style={{
+                display: "block",
+                padding: "14px 20px",
+                cursor: "pointer",
+                fontFamily: "var(--sans)",
+                fontSize: "0.92rem",
+                fontWeight: 300,
+                color: "var(--text-secondary)",
+                border: "1px solid var(--border)",
+                borderRadius: "8px",
+                textAlign: "center",
+                transition: "border-color 0.3s ease",
+              }}>
+                Import ChatGPT
+                <input
+                  type="file"
+                  accept=".zip"
+                  onChange={handleChatGPTImportFile}
+                  disabled={importing}
+                  style={{ display: "none" }}
+                />
+              </label>
+              <label style={{
+                display: "block",
+                padding: "14px 20px",
+                cursor: "pointer",
+                fontFamily: "var(--sans)",
+                fontSize: "0.92rem",
+                fontWeight: 300,
+                color: "var(--text-secondary)",
+                border: "1px solid var(--border)",
+                borderRadius: "8px",
+                textAlign: "center",
+                transition: "border-color 0.3s ease",
+              }}>
                 Import Markdown (e.g. Obsidian)
                 <input
                   type="file"
@@ -328,28 +432,6 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                   type="file"
                   accept=".zip"
                   onChange={handleTwitterImportFile}
-                  disabled={importing}
-                  style={{ display: "none" }}
-                />
-              </label>
-              <label style={{
-                display: "block",
-                padding: "14px 20px",
-                cursor: "pointer",
-                fontFamily: "var(--sans)",
-                fontSize: "0.92rem",
-                fontWeight: 300,
-                color: "var(--text-secondary)",
-                border: "1px solid var(--border)",
-                borderRadius: "8px",
-                textAlign: "center",
-                transition: "border-color 0.3s ease",
-              }}>
-                Import Claude
-                <input
-                  type="file"
-                  accept=".zip"
-                  onChange={handleClaudeImportFile}
                   disabled={importing}
                   style={{ display: "none" }}
                 />
@@ -524,6 +606,61 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
             </button>
             <button
               onClick={handleCancelClaudeImport}
+              disabled={importing}
+              style={{
+                ...cancelBtnStyle,
+                cursor: importing ? "not-allowed" : "pointer",
+                opacity: importing ? 0.6 : 1
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ChatGPT import confirmation dialog */}
+      {showChatGPTImportDialog && chatGPTImportData && (
+        <div style={{
+          marginTop: "20px",
+          padding: "2rem",
+          backgroundColor: "var(--bg-card)",
+          borderRadius: "10px",
+          border: "1px solid var(--border)"
+        }}>
+          <h3 style={{ fontFamily: "var(--serif)", fontWeight: 300, color: "var(--text-primary)", margin: "0 0 12px 0" }}>Confirm ChatGPT Import</h3>
+          <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
+            Found <strong style={{ color: "var(--text-primary)" }}>{chatGPTImportData.total_conversations}</strong> conversation{chatGPTImportData.total_conversations !== 1 ? 's' : ''} with{" "}
+            <strong style={{ color: "var(--text-primary)" }}>{chatGPTImportData.total_messages}</strong> messages
+          </p>
+          <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
+            Estimated tokens: <strong style={{ color: "var(--text-primary)" }}>{chatGPTImportData.total_tokens.toLocaleString()}</strong>
+          </p>
+          <p style={{ color: "var(--text-muted)", fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.85rem" }}>
+            Each conversation will be imported as a separate thread.
+          </p>
+
+          <PrivacySelector
+            privacyLevel={importPrivacy}
+            aiUsage={importAiUsage}
+            onPrivacyChange={setImportPrivacy}
+            onAIUsageChange={setImportAiUsage}
+          />
+
+          <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
+            <button
+              onClick={handleConfirmChatGPTImport}
+              disabled={importing}
+              style={{
+                ...primaryBtnStyle,
+                cursor: importing ? "not-allowed" : "pointer",
+                opacity: importing ? 0.6 : 1
+              }}
+            >
+              {importing ? "Importing..." : "Confirm Import"}
+            </button>
+            <button
+              onClick={handleCancelChatGPTImport}
               disabled={importing}
               style={{
                 ...cancelBtnStyle,
