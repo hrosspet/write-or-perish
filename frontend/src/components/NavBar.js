@@ -315,7 +315,7 @@ function NavBar({ onNewEntryClick }) {
             {overflowOpen && (
               <div style={dropdownStyle}>
                 {/* Always visible */}
-                <Link to="/node/import" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
+                <Link to="/import" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
                   Import data
                 </Link>
 
