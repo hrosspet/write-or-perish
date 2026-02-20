@@ -44,17 +44,32 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   const startSilentAudio = useCallback(() => {
     if (!isIOS) return;
     try {
-      const el = new Audio('/silence.wav');
-      el.loop = true;
-      el.play().catch(() => {}); // May fail without gesture — that's OK
-      silentAudioRef.current = el;
+      // Generate an infinite silent audio stream via Web Audio API.
+      // Using a stream (no finite duration) prevents iOS from showing
+      // a cycling progress bar on the lock screen.
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const oscillator = ctx.createOscillator();
+      const gain = ctx.createGain();
+      const dest = ctx.createMediaStreamDestination();
+      gain.gain.value = 0;
+      oscillator.connect(gain);
+      gain.connect(dest);
+      oscillator.start();
+
+      const el = new Audio();
+      el.srcObject = dest.stream;
+      el.play().catch(() => {});
+      silentAudioRef.current = { el, ctx, oscillator };
     } catch (_) { /* audio not available */ }
   }, []);
 
   const stopSilentAudio = useCallback(() => {
     if (silentAudioRef.current) {
-      silentAudioRef.current.pause();
-      silentAudioRef.current.src = '';
+      const { el, ctx, oscillator } = silentAudioRef.current;
+      el.pause();
+      el.srcObject = null;
+      try { oscillator.stop(); } catch (_) {}
+      ctx.close().catch(() => {});
       silentAudioRef.current = null;
     }
   }, []);

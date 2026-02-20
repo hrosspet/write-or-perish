@@ -66,9 +66,6 @@ export function useMediaSession({
 
       ms.playbackState = isPaused ? 'paused' : 'playing';
 
-      // Override the silent audio's 2-second progress bar with a static position
-      try { ms.setPositionState({ duration: 86400, position: 0, playbackRate: 0 }); } catch (_) {}
-
       // Update title with elapsed duration every second
       const updateTitle = () => {
         const time = formatTime(elapsedRef.current);
