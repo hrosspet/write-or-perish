@@ -241,7 +241,7 @@ def build_user_export_content(
         query = query.filter(Node.created_at < created_before)
 
     if created_after:
-        query = query.filter(Node.created_at >= created_after)
+        query = query.filter(Node.created_at > created_after)
 
     all_top_level_nodes = query.order_by(Node.created_at.desc()).all()
 
@@ -264,7 +264,7 @@ def build_user_export_content(
 
         # Filter by created_after at the node level too
         if created_after:
-            all_nodes = [n for n in all_nodes if n.created_at >= created_after]
+            all_nodes = [n for n in all_nodes if n.created_at > created_after]
 
         # Sort: chronological (oldest first) for iterative building,
         # or reverse-chronological (newest first) for normal truncation
@@ -279,7 +279,8 @@ def build_user_export_content(
         # Create resolver with adjusted token budget
         resolver = ExportQuoteResolver(
             user.id, max_tokens - header_footer_tokens,
-            filter_ai_usage=filter_ai_usage
+            filter_ai_usage=filter_ai_usage,
+            chronological=chronological_order
         )
 
         # Add all nodes to the resolver
@@ -352,7 +353,20 @@ def build_user_export_content(
     if return_metadata:
         # Determine latest node timestamp and node count from included nodes
         if included_ids is not None:
-            meta_nodes = [n for n in all_nodes if n.id in included_ids]
+            if chronological_order:
+                # When chronological, use only directly-selected entries
+                # (not embedded dependencies) to avoid inflating the cutoff
+                # with timestamps from newer nodes that were pulled in as
+                # quote dependencies.
+                included_entries = resolver.get_included_entries()
+                meta_nodes = [
+                    n for n in all_nodes
+                    if any(e.node_id == n.id for e in included_entries)
+                ]
+            else:
+                meta_nodes = [
+                    n for n in all_nodes if n.id in included_ids
+                ]
         else:
             meta_nodes = []
             for top_node in top_level_nodes:
@@ -361,7 +375,7 @@ def build_user_export_content(
                 ))
             if created_after:
                 meta_nodes = [
-                    n for n in meta_nodes if n.created_at >= created_after
+                    n for n in meta_nodes if n.created_at > created_after
                 ]
         latest_ts = max(
             (n.created_at for n in meta_nodes), default=None

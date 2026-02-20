@@ -320,6 +320,92 @@ class TestExportQuoteResolver:
         assert 2 in included_ids  # Embedded into node 1
         assert 3 in included_ids  # Inherited from node 2's quotes, also embedded
 
+    def test_chronological_sort_order(self):
+        """Test that chronological=True selects oldest nodes first."""
+        resolver = ExportQuoteResolver(
+            user_id=1, max_tokens=100, chronological=True
+        )
+
+        now = datetime.utcnow()
+        # Add 5 nodes, each ~25 tokens; budget fits 4
+        resolver.add_node(1, now, "A" * 100)  # newest
+        resolver.add_node(2, now - timedelta(hours=1), "B" * 100)
+        resolver.add_node(3, now - timedelta(hours=2), "C" * 100)
+        resolver.add_node(4, now - timedelta(hours=3), "D" * 100)
+        resolver.add_node(5, now - timedelta(hours=4), "E" * 100)  # oldest
+
+        resolver.resolve()
+        included_ids, _, _ = resolver.get_resolution_result()
+
+        # With chronological=True, oldest nodes get priority
+        assert 5 in included_ids  # oldest — should be included
+        assert 4 in included_ids
+        assert 3 in included_ids
+        assert 2 in included_ids
+        # newest node should be excluded (doesn't fit)
+        assert 1 not in included_ids
+
+    def test_default_sort_unchanged(self):
+        """Test that default (no chronological) keeps newest-first ordering."""
+        resolver = ExportQuoteResolver(user_id=1, max_tokens=100)
+
+        now = datetime.utcnow()
+        resolver.add_node(1, now, "A" * 100)
+        resolver.add_node(2, now - timedelta(hours=1), "B" * 100)
+        resolver.add_node(3, now - timedelta(hours=2), "C" * 100)
+        resolver.add_node(4, now - timedelta(hours=3), "D" * 100)
+        resolver.add_node(5, now - timedelta(hours=4), "E" * 100)
+
+        resolver.resolve()
+        included_ids, _, _ = resolver.get_resolution_result()
+
+        # Default: newest nodes get priority
+        assert 1 in included_ids
+        assert 2 in included_ids
+        assert 3 in included_ids
+        assert 4 in included_ids
+        assert 5 not in included_ids
+
+    def test_chronological_get_included_entries(self):
+        """Test that get_included_entries() excludes embedded dependency nodes."""
+        resolver = ExportQuoteResolver(
+            user_id=1, max_tokens=200, chronological=True
+        )
+
+        now = datetime.utcnow()
+        # Node 5 (oldest) quotes Node 1 (newest, which may not be in budget)
+        resolver.add_node(5, now - timedelta(hours=4), "Old says {quote:99}")
+        resolver.add_node(4, now - timedelta(hours=3), "D" * 40)
+        resolver.add_node(3, now - timedelta(hours=2), "C" * 40)
+
+        # Mock _get_node_metadata for quoted node 99 (external)
+        def mock_get_metadata(node_id):
+            if node_id in resolver._node_cache:
+                return resolver._node_cache[node_id]
+            if node_id == 99:
+                return {
+                    'tokens': 10,
+                    'quote_ids': [],
+                    'content': 'External content',
+                    'username': 'external'
+                }
+            return None
+
+        resolver._get_node_metadata = mock_get_metadata
+
+        resolver.resolve()
+        included_ids, _, _ = resolver.get_resolution_result()
+        included_entries = resolver.get_included_entries()
+        entry_ids = {e.node_id for e in included_entries}
+
+        # Node 99 should be in included_ids (embedded) but NOT in entries
+        assert 99 in included_ids
+        assert 99 not in entry_ids
+
+        # Directly-selected nodes should be in both
+        assert 5 in included_ids
+        assert 5 in entry_ids
+
     def test_empty_resolver(self):
         """Test resolver with no nodes."""
         resolver = ExportQuoteResolver(user_id=1, max_tokens=100)

@@ -236,7 +236,9 @@ class ExportQuoteResolver:
         included_ids, embedded_quotes, ai_blocked_ids = resolver.get_resolution_result()
     """
 
-    def __init__(self, user_id: int, max_tokens: int, filter_ai_usage: bool = False):
+    def __init__(self, user_id: int, max_tokens: int,
+                 filter_ai_usage: bool = False,
+                 chronological: bool = False):
         """
         Initialize the resolver.
 
@@ -245,10 +247,13 @@ class ExportQuoteResolver:
             max_tokens: Maximum tokens allowed in the export
             filter_ai_usage: If True, block nodes with ai_usage='none' from
                             being resolved (their content won't be embedded)
+            chronological: If True, sort oldest-first (for iterative profile
+                          building). Default is newest-first.
         """
         self.user_id = user_id
         self.max_tokens = max_tokens
         self.filter_ai_usage = filter_ai_usage
+        self.chronological = chronological
         self.entries: List[NodeEntry] = []
         self.included_count: int = 0
         self.included_ids: Set[int] = set()
@@ -303,7 +308,8 @@ class ExportQuoteResolver:
         """
         Recalculate which entries fit within max_tokens.
 
-        Entries are kept in order (assumed to be sorted newest-first),
+        Entries are kept in order (sorted by the configured sort order:
+        newest-first by default, or oldest-first when chronological=True),
         and we include as many as fit within the budget.
 
         Note: Preserves _embedded_ids - nodes whose content was embedded
@@ -370,8 +376,12 @@ class ExportQuoteResolver:
            - Otherwise: embed the quoted content and re-truncate
         4. Repeat until a full pass with no embeddings
         """
-        # Sort entries by created_at descending (newest first)
-        self.entries.sort(key=lambda e: e.created_at, reverse=True)
+        # Sort entries by created_at (newest-first by default,
+        # oldest-first when chronological=True)
+        self.entries.sort(
+            key=lambda e: e.created_at,
+            reverse=not self.chronological
+        )
 
         # Initial truncation
         self._truncate()

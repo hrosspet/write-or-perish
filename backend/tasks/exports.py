@@ -281,6 +281,7 @@ def update_user_profile(self, user_id: int, model_id: str,
         user.profile_generation_task_id = self.request.id
         db.session.commit()
 
+        success = False
         try:
             if model_id not in flask_app.config["SUPPORTED_MODELS"]:
                 raise ValueError(f"Unsupported model: {model_id}")
@@ -301,6 +302,7 @@ def update_user_profile(self, user_id: int, model_id: str,
                     max_output_tokens, api_keys
                 )
 
+            success = True
             return result
 
         except Exception as e:
@@ -310,11 +312,12 @@ def update_user_profile(self, user_id: int, model_id: str,
             )
             raise
         finally:
-            # Clear concurrency guard and full-regen flag
+            # Clear concurrency guard; only clear full-regen flag on success
             user = User.query.get(user_id)
             if user:
                 user.profile_generation_task_id = None
-                user.profile_needs_full_regen = False
+                if success:
+                    user.profile_needs_full_regen = False
                 db.session.commit()
 
 
