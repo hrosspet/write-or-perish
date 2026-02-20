@@ -581,7 +581,12 @@ export const AudioProvider = ({ children }) => {
   const stop = useCallback(() => {
     if (audioRef.current) {
       audioRef.current.pause();
-      audioRef.current.currentTime = 0;
+      // Fully release the audio element so the browser drops the audio session.
+      // A paused element with loaded media can hold the Bluetooth A2DP profile,
+      // preventing a clean switch to HFP when the mic is requested next.
+      audioRef.current.removeAttribute('src');
+      audioRef.current.load();
+      audioRef.current = null;
       setCurrentTime(0);
       setCumulativeTime(0);
       setIsPlaying(false);

@@ -330,18 +330,9 @@ export default function ReflectPage() {
     transcriptRef.current = '';
     setHasError(false);
     streaming.cancelStreaming();
-    // On iOS with Bluetooth, audio.stop() releases A2DP and getUserMedia()
-    // (inside startStreaming) requests HFP. A small delay lets the BT profile
-    // switch settle before requesting the mic, reducing hangups.
-    const startRecording = () => {
-      setPhase('recording');
-      streaming.startStreaming();
-    };
-    if (isIOS) {
-      setTimeout(startRecording, 300);
-    } else {
-      startRecording();
-    }
+    // Go straight to recording — skip the ready phase
+    setPhase('recording');
+    streaming.startStreaming();
   }, [audio, ttsSSE, streaming]);
 
   const handleCancelProcessing = useCallback(() => {
