@@ -156,19 +156,17 @@ export default function PromptDetailPage() {
             }} />
             v{prompt.version_number} &middot; {formatDate(prompt.created_at)}
           </button>
-          {prompt.id && (
-            <button
-              onClick={handleOpenHistory}
-              style={{
-                background: 'none', border: 'none', cursor: 'pointer', padding: 0,
-                fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
-                color: 'var(--text-muted)', opacity: 0.7,
-                textDecoration: 'underline',
-              }}
-            >
-              history
-            </button>
-          )}
+          <button
+            onClick={handleOpenHistory}
+            style={{
+              background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+              fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
+              color: 'var(--text-muted)', opacity: 0.7,
+              textDecoration: 'underline',
+            }}
+          >
+            history
+          </button>
         </div>
       </div>
 
