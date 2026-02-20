@@ -244,6 +244,10 @@ export default function ReflectPage() {
           [data.duration]
         );
         audio.setGeneratingTTS(true);
+        // Show playback UI as soon as first chunk arrives.
+        // Autoplay may or may not work (iOS blocks it); the playback UI
+        // has a play button the user can tap if autoplay was blocked.
+        setPhase('playback');
       } else {
         audio.appendChunkToQueue(data.audio_url, data.duration);
       }
@@ -275,21 +279,15 @@ export default function ReflectPage() {
     }
   }, [llmStatus, llmData, llmNodeId]);
 
-  // Transition to playback when audio starts playing
+  // Safety net: if stuck on "Reflecting..." for 15s (e.g. SSE never delivers
+  // chunks), transition to playback anyway. The normal path transitions via
+  // onChunkReady above; this only fires if something goes wrong.
   useEffect(() => {
-    if (phase === 'processing' && audio.isPlaying) {
-      setPhase('playback');
-    }
-  }, [phase, audio.isPlaying]);
-
-  // Fallback: if audio warmup didn't fully unlock Safari and autoplay still fails,
-  // show results after 5s rather than staying stuck on "Reflecting..." forever
-  useEffect(() => {
-    if (phase === 'processing' && ttsGenerating) {
-      const timer = setTimeout(() => setPhase('playback'), 5000);
+    if (phase === 'processing') {
+      const timer = setTimeout(() => setPhase('playback'), 15000);
       return () => clearTimeout(timer);
     }
-  }, [phase, ttsGenerating]);
+  }, [phase]);
 
   // Clear error indicator after a few seconds
   useEffect(() => {
