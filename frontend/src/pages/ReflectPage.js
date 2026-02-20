@@ -176,6 +176,11 @@ function Spinner() {
   );
 }
 
+// iOS devices can't autoplay audio regardless of warmup, and playing silent audio
+// while the mic stream is active crashes Bluetooth headphones on multi-device setups.
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
 export default function ReflectPage() {
   const audio = useAudio();
   const [phase, setPhase] = useState('ready'); // ready, recording, processing, playback
@@ -305,7 +310,10 @@ export default function ReflectPage() {
 
   const handleStop = useCallback(() => {
     setIsStopping(true);
-    audio.warmup(); // Unlock audio on Safari during user gesture
+    // Unlock audio on desktop Safari/Chrome during user gesture.
+    // Skip on iOS — autoplay is blocked there regardless, and the silent audio
+    // playback conflicts with active Bluetooth mic streams (crashes headphones).
+    if (!isIOS) audio.warmup();
     streaming.stopStreaming();
   }, [streaming, audio]);
 
@@ -324,7 +332,14 @@ export default function ReflectPage() {
     streaming.cancelStreaming();
     // Go straight to recording — skip the ready phase
     setPhase('recording');
-    streaming.startStreaming();
+    // On iOS with Bluetooth, audio.stop() releases A2DP and getUserMedia()
+    // (inside startStreaming) requests HFP. A small delay lets the BT profile
+    // switch settle before requesting the mic, reducing hangups.
+    if (isIOS) {
+      setTimeout(() => streaming.startStreaming(), 300);
+    } else {
+      streaming.startStreaming();
+    }
   }, [audio, ttsSSE, streaming]);
 
   const handleCancelProcessing = useCallback(() => {
