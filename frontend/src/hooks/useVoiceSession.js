@@ -3,6 +3,7 @@ import { useStreamingTranscription } from './useStreamingTranscription';
 import { useAsyncTaskPolling } from './useAsyncTaskPolling';
 import { useTTSStreamSSE } from './useSSE';
 import { useAudio } from '../contexts/AudioContext';
+import { useMediaSession } from './useMediaSession';
 import api from '../api';
 
 // iOS devices can't autoplay audio regardless of warmup, and playing silent audio
@@ -35,6 +36,32 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   const ttsTriggeredForNodeRef = useRef(null);
   const [ttsGenerating, setTtsGenerating] = useState(false);
   const firstChunkRef = useRef(true);
+
+  // Silent audio loop for iOS lock-screen controls during recording.
+  // Playing audio is required for Media Session API to activate on iOS.
+  const silentAudioRef = useRef(null);
+
+  const startSilentAudio = useCallback(() => {
+    if (!isIOS) return;
+    try {
+      // Tiny silent WAV (44 bytes header + 1 sample)
+      // Base64-encoded minimal WAV: 1 channel, 8000 Hz, 8-bit, ~1 sample
+      const silentWav = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAABCxAgAEABAAZGF0YQAAAAA=';
+      const el = new Audio(silentWav);
+      el.loop = true;
+      el.volume = 0.01; // Near-silent
+      el.play().catch(() => {}); // May fail without gesture — that's OK
+      silentAudioRef.current = el;
+    } catch (_) { /* audio not available */ }
+  }, []);
+
+  const stopSilentAudio = useCallback(() => {
+    if (silentAudioRef.current) {
+      silentAudioRef.current.pause();
+      silentAudioRef.current.src = '';
+      silentAudioRef.current = null;
+    }
+  }, []);
 
   // Stable ref for onLLMComplete to avoid effect re-runs
   const onLLMCompleteRef = useRef(onLLMComplete);
@@ -88,6 +115,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     onChunkReady: (data) => {
       if (firstChunkRef.current) {
         firstChunkRef.current = false;
+        stopSilentAudio(); // Real audio takes over
         audio.loadAudioQueue(
           [data.audio_url],
           { title: ttsTitle, url: data.audio_url },
@@ -155,17 +183,19 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   const handleStart = useCallback(() => {
     setPhase('recording');
     setHasError(false);
+    startSilentAudio(); // User gesture context — activates iOS lock screen controls
     streaming.startStreaming();
-  }, [streaming]);
+  }, [streaming, startSilentAudio]);
 
   const handleStop = useCallback(() => {
     setIsStopping(true);
+    stopSilentAudio();
     // Unlock audio on desktop Safari/Chrome during user gesture.
     // Skip on iOS — autoplay is blocked there regardless, and the silent audio
     // playback conflicts with active Bluetooth mic streams (crashes headphones).
     if (!isIOS) audio.warmup();
     streaming.stopStreaming();
-  }, [streaming, audio]);
+  }, [streaming, audio, stopSilentAudio]);
 
   const handleContinue = useCallback((extraReset) => {
     audio.stop();
@@ -182,8 +212,9 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     streaming.cancelStreaming();
     // Go straight to recording — skip the ready phase
     setPhase('recording');
+    startSilentAudio(); // User gesture context
     streaming.startStreaming();
-  }, [audio, ttsSSE, streaming]);
+  }, [audio, ttsSSE, streaming, startSilentAudio]);
 
   const handleCancelProcessing = useCallback((extraReset) => {
     // Parent next recording to the user node (not the LLM node).
@@ -191,6 +222,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     if (lastUserNodeIdRef.current) {
       threadParentIdRef.current = lastUserNodeIdRef.current;
     }
+    stopSilentAudio();
     audio.stop();
     ttsSSE.disconnect();
     ttsSSE.reset();
@@ -201,11 +233,31 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     transcriptRef.current = '';
     if (extraReset) extraReset();
     streaming.cancelStreaming();
-  }, [audio, ttsSSE, streaming]);
+  }, [audio, ttsSSE, streaming, stopSilentAudio]);
+
+  const handlePauseRecording = useCallback(() => {
+    streaming.pauseRecording();
+  }, [streaming]);
+
+  const handleResumeRecording = useCallback(() => {
+    streaming.resumeRecording();
+  }, [streaming]);
+
+  // iOS lock screen controls
+  useMediaSession({
+    phase,
+    isPaused: streaming.isPaused,
+    handlePauseRecording,
+    handleResumeRecording,
+    handleStop,
+    handleCancelProcessing,
+    ttsTitle,
+  });
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      stopSilentAudio();
       audio.stop();
       ttsSSE.disconnect();
       streaming.cancelStreaming();
@@ -215,6 +267,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   return {
     phase,
     isStopping,
+    isPaused: streaming.isPaused,
     hasError,
     llmData,
     streaming,
@@ -222,6 +275,8 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     ttsGenerating,
     handleStart,
     handleStop,
+    handlePauseRecording,
+    handleResumeRecording,
     handleContinue,
     handleCancelProcessing,
   };

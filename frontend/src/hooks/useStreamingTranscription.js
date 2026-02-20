@@ -160,6 +160,8 @@ export function useStreamingTranscription(options = {}) {
     error: recorderError,
     startRecording: startMediaRecorder,
     stopRecording: stopMediaRecorder,
+    pauseRecording,
+    resumeRecording,
     resetRecording: resetMediaRecorder,
     getTotalChunks,
     getPartialBlob,
@@ -416,6 +418,7 @@ export function useStreamingTranscription(options = {}) {
 
     // Connection status
     isRecording: recorderStatus === 'recording',
+    isPaused: recorderStatus === 'paused',
     isSSEConnected: sseConnected,
     isOffline,
 
@@ -426,6 +429,8 @@ export function useStreamingTranscription(options = {}) {
     // Actions
     startStreaming,
     stopStreaming,
+    pauseRecording,
+    resumeRecording,
     saveAsNode,
     cancelStreaming,
     getPartialBlob,
