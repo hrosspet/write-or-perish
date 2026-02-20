@@ -383,13 +383,17 @@ def _do_incremental_update(self, user, model_id, previous_profile_id,
         self, model_id, prompt, user.id, api_keys, progress_base=50
     )
 
+    # Use actual input tokens from LLM response for accurate tracking
+    actual_input_tokens = response.get("input_tokens", new_data_tokens)
+    actual_total_source = prev_source_tokens + actual_input_tokens
+
     self.update_state(state='PROGRESS', meta={
         'progress': 90, 'status': 'Saving updated profile'
     })
 
     new_profile = _save_profile(
         user, model_id, response["content"], response,
-        source_tokens_used=total_source,
+        source_tokens_used=actual_total_source,
         source_data_cutoff=latest_ts,
         generation_type="update",
         parent_profile_id=prev_profile.id,
@@ -397,7 +401,7 @@ def _do_incremental_update(self, user, model_id, previous_profile_id,
 
     logger.info(
         f"Incremental profile update for user {user.id}: "
-        f"profile {new_profile.id}, +{new_data_tokens} tokens"
+        f"profile {new_profile.id}, +{actual_input_tokens} tokens"
     )
 
     return {
@@ -462,13 +466,18 @@ def _single_pass_generation(self, user, model_id, gen_template,
         self, model_id, prompt, user.id, api_keys, progress_base=40
     )
 
+    # Use actual input tokens from LLM response for accurate tracking
+    actual_source_tokens = response.get(
+        "input_tokens", export_result["token_count"]
+    )
+
     self.update_state(state='PROGRESS', meta={
         'progress': 90, 'status': 'Saving profile'
     })
 
     new_profile = _save_profile(
         user, model_id, response["content"], response,
-        source_tokens_used=export_result["token_count"],
+        source_tokens_used=actual_source_tokens,
         source_data_cutoff=export_result["latest_node_created_at"],
         generation_type="initial",
     )
@@ -519,17 +528,19 @@ def _iterative_generation(self, user, model_id, gen_template, budget,
         if not chunk or not chunk.get("content"):
             break
 
-        chunk_tokens = chunk["token_count"]
+        chunk_tokens_est = chunk["token_count"]
         latest_ts = chunk["latest_node_created_at"]
-        cumulative_source_tokens += chunk_tokens
 
         if current_profile is None:
             # First chunk: use generation template
             prompt = gen_template.replace("{user_export}", chunk["content"])
         else:
             # Subsequent chunks: use update template
+            # Use estimates for prompt placeholders (guidance for LLM)
             ratio_pct = round(
-                chunk_tokens / max(cumulative_source_tokens, 1) * 100, 1
+                chunk_tokens_est / max(
+                    cumulative_source_tokens + chunk_tokens_est, 1
+                ) * 100, 1
             )
             prompt = update_template.replace(
                 "{existing_profile}", current_profile
@@ -537,10 +548,10 @@ def _iterative_generation(self, user, model_id, gen_template, budget,
             prompt = prompt.replace("{new_data}", chunk["content"])
             prompt = prompt.replace(
                 "{source_tokens_past}",
-                str(cumulative_source_tokens - chunk_tokens)
+                str(cumulative_source_tokens)
             )
             prompt = prompt.replace(
-                "{source_tokens_new}", str(chunk_tokens)
+                "{source_tokens_new}", str(chunk_tokens_est)
             )
             prompt = prompt.replace("{ratio_percent}", str(ratio_pct))
 
@@ -548,6 +559,12 @@ def _iterative_generation(self, user, model_id, gen_template, budget,
             self, model_id, prompt, user.id, api_keys,
             progress_base=progress
         )
+
+        # Use actual input tokens from LLM response for accurate tracking
+        actual_chunk_tokens = response.get(
+            "input_tokens", chunk_tokens_est
+        )
+        cumulative_source_tokens += actual_chunk_tokens
 
         # Determine generation type for intermediate vs final
         gen_type = "iterative"
