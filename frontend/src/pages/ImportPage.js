@@ -17,7 +17,7 @@ export default function ImportPage() {
       }}>
         Import Data
       </h2>
-      <ImportData />
+      <ImportData inline />
     </div>
   );
 }

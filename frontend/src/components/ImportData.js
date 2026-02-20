@@ -25,7 +25,7 @@ const cancelBtnStyle = {
   ...ghostBtnStyle,
 };
 
-export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel, buttonHoverStyle, onProfileUpdateStarted }) {
+export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel, buttonHoverStyle, onProfileUpdateStarted, inline }) {
   const btnStyle = customButtonStyle || ghostBtnStyle;
   const [hovered, setHovered] = useState(false);
   const [showImportDialog, setShowImportDialog] = useState(false);
@@ -293,154 +293,113 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     <div>
       {error && <div style={{ color: "var(--accent)", marginBottom: "0.8rem", fontSize: "0.88rem" }}>{error}</div>}
 
-      {/* Main Import Data button */}
-      {!showImportDialog && !showTwitterImportDialog && !showClaudeImportDialog && !showChatGPTImportDialog && (
-        <button
-          onClick={() => setShowPicker(!showPicker)}
-          onMouseEnter={() => setHovered(true)}
-          onMouseLeave={() => setHovered(false)}
-          disabled={importing}
-          style={{
-            ...btnStyle,
-            ...(hovered && buttonHoverStyle ? buttonHoverStyle : {}),
-            cursor: importing ? "not-allowed" : "pointer",
-            opacity: importing ? 0.6 : 1,
-          }}
-        >
-          {importing ? "Analyzing..." : (buttonLabel || "Import Data")}
-        </button>
-      )}
+      {/* Shared import option labels */}
+      {(() => {
+        const importLabelStyle = {
+          display: "block",
+          padding: "14px 20px",
+          cursor: importing ? "not-allowed" : "pointer",
+          fontFamily: "var(--sans)",
+          fontSize: "0.92rem",
+          fontWeight: 300,
+          color: "var(--text-secondary)",
+          border: "1px solid var(--border)",
+          borderRadius: "8px",
+          textAlign: "center",
+          transition: "border-color 0.3s ease",
+          opacity: importing ? 0.6 : 1,
+        };
 
-      {/* Import type picker dialog - rendered via portal to escape overflow:hidden */}
-      {showPicker && ReactDOM.createPortal(
-        <div
-          onClick={() => setShowPicker(false)}
-          style={{
-            position: "fixed",
-            top: 0, left: 0, right: 0, bottom: 0,
-            backgroundColor: "rgba(5, 4, 3, 0.75)",
-            backdropFilter: "blur(10px)",
-            WebkitBackdropFilter: "blur(10px)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 2000,
-          }}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              background: "var(--bg-card)",
-              border: "1px solid var(--border)",
-              borderRadius: "12px",
-              padding: "2rem",
-              minWidth: "300px",
-              maxWidth: "90vw",
-              boxShadow: "0 24px 80px rgba(0,0,0,0.5)",
-            }}
-          >
-            <h3 style={{
-              fontFamily: "var(--serif)",
-              fontWeight: 300,
-              fontSize: "1.2rem",
-              color: "var(--text-primary)",
-              margin: "0 0 1.2rem 0",
-              textAlign: "center",
-            }}>Import Data</h3>
-            <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
-              <label style={{
-                display: "block",
-                padding: "14px 20px",
-                cursor: "pointer",
-                fontFamily: "var(--sans)",
-                fontSize: "0.92rem",
-                fontWeight: 300,
-                color: "var(--text-secondary)",
-                border: "1px solid var(--border)",
-                borderRadius: "8px",
-                textAlign: "center",
-                transition: "border-color 0.3s ease",
-              }}>
-                Import Claude
-                <input
-                  type="file"
-                  accept=".zip"
-                  onChange={handleClaudeImportFile}
-                  disabled={importing}
-                  style={{ display: "none" }}
-                />
-              </label>
-              <label style={{
-                display: "block",
-                padding: "14px 20px",
-                cursor: "pointer",
-                fontFamily: "var(--sans)",
-                fontSize: "0.92rem",
-                fontWeight: 300,
-                color: "var(--text-secondary)",
-                border: "1px solid var(--border)",
-                borderRadius: "8px",
-                textAlign: "center",
-                transition: "border-color 0.3s ease",
-              }}>
-                Import ChatGPT
-                <input
-                  type="file"
-                  accept=".zip"
-                  onChange={handleChatGPTImportFile}
-                  disabled={importing}
-                  style={{ display: "none" }}
-                />
-              </label>
-              <label style={{
-                display: "block",
-                padding: "14px 20px",
-                cursor: "pointer",
-                fontFamily: "var(--sans)",
-                fontSize: "0.92rem",
-                fontWeight: 300,
-                color: "var(--text-secondary)",
-                border: "1px solid var(--border)",
-                borderRadius: "8px",
-                textAlign: "center",
-                transition: "border-color 0.3s ease",
-              }}>
-                Import Markdown (e.g. Obsidian)
-                <input
-                  type="file"
-                  accept=".zip"
-                  onChange={handleImportFile}
-                  disabled={importing}
-                  style={{ display: "none" }}
-                />
-              </label>
-              <label style={{
-                display: "block",
-                padding: "14px 20px",
-                cursor: "pointer",
-                fontFamily: "var(--sans)",
-                fontSize: "0.92rem",
-                fontWeight: 300,
-                color: "var(--text-secondary)",
-                border: "1px solid var(--border)",
-                borderRadius: "8px",
-                textAlign: "center",
-                transition: "border-color 0.3s ease",
-              }}>
-                Import Tweets
-                <input
-                  type="file"
-                  accept=".zip"
-                  onChange={handleTwitterImportFile}
-                  disabled={importing}
-                  style={{ display: "none" }}
-                />
-              </label>
-            </div>
+        const importOptions = (
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+            <label style={importLabelStyle}>
+              Import Claude
+              <input type="file" accept=".zip" onChange={handleClaudeImportFile} disabled={importing} style={{ display: "none" }} />
+            </label>
+            <label style={importLabelStyle}>
+              Import ChatGPT
+              <input type="file" accept=".zip" onChange={handleChatGPTImportFile} disabled={importing} style={{ display: "none" }} />
+            </label>
+            <label style={importLabelStyle}>
+              Import Markdown (e.g. Obsidian)
+              <input type="file" accept=".zip" onChange={handleImportFile} disabled={importing} style={{ display: "none" }} />
+            </label>
+            <label style={importLabelStyle}>
+              Import Tweets
+              <input type="file" accept=".zip" onChange={handleTwitterImportFile} disabled={importing} style={{ display: "none" }} />
+            </label>
           </div>
-        </div>,
-        document.body
-      )}
+        );
+
+        if (inline) {
+          // Render import options directly on the page
+          return importOptions;
+        }
+
+        return (
+          <>
+            {/* Main Import Data button */}
+            {!showImportDialog && !showTwitterImportDialog && !showClaudeImportDialog && !showChatGPTImportDialog && (
+              <button
+                onClick={() => setShowPicker(!showPicker)}
+                onMouseEnter={() => setHovered(true)}
+                onMouseLeave={() => setHovered(false)}
+                disabled={importing}
+                style={{
+                  ...btnStyle,
+                  ...(hovered && buttonHoverStyle ? buttonHoverStyle : {}),
+                  cursor: importing ? "not-allowed" : "pointer",
+                  opacity: importing ? 0.6 : 1,
+                }}
+              >
+                {importing ? "Analyzing..." : (buttonLabel || "Import Data")}
+              </button>
+            )}
+
+            {/* Import type picker dialog - rendered via portal to escape overflow:hidden */}
+            {showPicker && ReactDOM.createPortal(
+              <div
+                onClick={() => setShowPicker(false)}
+                style={{
+                  position: "fixed",
+                  top: 0, left: 0, right: 0, bottom: 0,
+                  backgroundColor: "rgba(5, 4, 3, 0.75)",
+                  backdropFilter: "blur(10px)",
+                  WebkitBackdropFilter: "blur(10px)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  zIndex: 2000,
+                }}
+              >
+                <div
+                  onClick={(e) => e.stopPropagation()}
+                  style={{
+                    background: "var(--bg-card)",
+                    border: "1px solid var(--border)",
+                    borderRadius: "12px",
+                    padding: "2rem",
+                    minWidth: "300px",
+                    maxWidth: "90vw",
+                    boxShadow: "0 24px 80px rgba(0,0,0,0.5)",
+                  }}
+                >
+                  <h3 style={{
+                    fontFamily: "var(--serif)",
+                    fontWeight: 300,
+                    fontSize: "1.2rem",
+                    color: "var(--text-primary)",
+                    margin: "0 0 1.2rem 0",
+                    textAlign: "center",
+                  }}>Import Data</h3>
+                  {importOptions}
+                </div>
+              </div>,
+              document.body
+            )}
+          </>
+        );
+      })()}
 
       {/* Markdown import confirmation dialog */}
       {showImportDialog && importFiles && (
