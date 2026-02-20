@@ -9,8 +9,8 @@ const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
  * Only activates on iOS (desktop browsers don't need it — playback controls
  * are auto-provided by the browser for <audio> elements).
  *
- * During recording: shows pause/resume + stop (via nexttrack).
- * During processing: shows cancel (via nexttrack).
+ * During recording: shows pause/resume + stop on the lock screen.
+ * During processing: shows stop (cancel) on the lock screen.
  * During playback/ready: clears handlers so the browser manages audio natively.
  */
 export function useMediaSession({
@@ -59,43 +59,37 @@ export function useMediaSession({
     const clear = (action) => {
       try { ms.setActionHandler(action, null); } catch (_) { /* unsupported */ }
     };
+    const allActions = ['play', 'pause', 'stop', 'nexttrack', 'previoustrack',
+      'seekbackward', 'seekforward', 'seekto'];
 
     if (phase === 'recording') {
       ms.setActionHandler('play', () => handleResumeRecording());
       ms.setActionHandler('pause', () => handlePauseRecording());
-      // "nexttrack" shows as a forward-skip button — we use it for stop
-      ms.setActionHandler('nexttrack', () => handleStop());
-      // Clear seek handlers so the nexttrack button is visible
+      ms.setActionHandler('stop', () => handleStop());
+      clear('nexttrack');
+      clear('previoustrack');
       clear('seekbackward');
       clear('seekforward');
       clear('seekto');
-      clear('previoustrack');
 
-      // Playback state
       ms.playbackState = isPaused ? 'paused' : 'playing';
     } else if (phase === 'processing') {
       clear('play');
       clear('pause');
-      ms.setActionHandler('nexttrack', () => handleCancelProcessing());
+      ms.setActionHandler('stop', () => handleCancelProcessing());
+      clear('nexttrack');
+      clear('previoustrack');
       clear('seekbackward');
       clear('seekforward');
       clear('seekto');
-      clear('previoustrack');
       ms.playbackState = 'playing';
     } else {
       // playback / ready — let browser defaults work
-      clear('play');
-      clear('pause');
-      clear('nexttrack');
-      clear('seekbackward');
-      clear('seekforward');
-      clear('seekto');
-      clear('previoustrack');
+      allActions.forEach(clear);
     }
 
     // -- Position state (recording only) --
     if (phase === 'recording') {
-      // Update position every second so the lock screen shows elapsed time
       const updatePosition = () => {
         try {
           ms.setPositionState({

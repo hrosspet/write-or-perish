@@ -44,12 +44,8 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   const startSilentAudio = useCallback(() => {
     if (!isIOS) return;
     try {
-      // Tiny silent WAV (44 bytes header + 1 sample)
-      // Base64-encoded minimal WAV: 1 channel, 8000 Hz, 8-bit, ~1 sample
-      const silentWav = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAABCxAgAEABAAZGF0YQAAAAA=';
-      const el = new Audio(silentWav);
+      const el = new Audio('/silence.wav');
       el.loop = true;
-      el.volume = 0.01; // Near-silent
       el.play().catch(() => {}); // May fail without gesture — that's OK
       silentAudioRef.current = el;
     } catch (_) { /* audio not available */ }
