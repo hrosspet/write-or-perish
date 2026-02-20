@@ -7,6 +7,13 @@ from backend.utils.prompts import PROMPT_DEFAULTS, load_default_prompt
 prompts_bp = Blueprint("prompts", __name__)
 
 
+def _edit_count(prompt_key):
+    """Number of user edits (DB rows) for this prompt."""
+    return UserPrompt.query.filter_by(
+        user_id=current_user.id, prompt_key=prompt_key
+    ).count()
+
+
 def _serialize_prompt(prompt, version_number):
     return {
         "id": prompt.id,
@@ -30,15 +37,12 @@ def list_prompts():
         ).order_by(UserPrompt.created_at.desc()).first()
 
         if latest:
-            version_count = UserPrompt.query.filter_by(
-                user_id=current_user.id, prompt_key=key
-            ).count()
             content = latest.get_content()
             prompts.append({
                 "prompt_key": key,
                 "title": meta['title'],
                 "preview": content[:150] if content else "",
-                "version_number": version_count,
+                "version_number": _edit_count(key),
                 "generated_by": latest.generated_by,
                 "created_at": latest.created_at.isoformat(),
             })
@@ -48,7 +52,7 @@ def list_prompts():
                 "prompt_key": key,
                 "title": meta['title'],
                 "preview": content[:150] if content else "",
-                "version_number": 1,
+                "version_number": 0,
                 "generated_by": "default",
                 "created_at": None,
             })
@@ -69,11 +73,8 @@ def get_prompt(prompt_key):
     ).order_by(UserPrompt.created_at.desc()).first()
 
     if latest:
-        version_count = UserPrompt.query.filter_by(
-            user_id=current_user.id, prompt_key=prompt_key
-        ).count()
         return jsonify({
-            "prompt": _serialize_prompt(latest, version_count)
+            "prompt": _serialize_prompt(latest, _edit_count(prompt_key))
         }), 200
     else:
         content = load_default_prompt(prompt_key)
@@ -85,7 +86,7 @@ def get_prompt(prompt_key):
                 "content": content,
                 "generated_by": "default",
                 "created_at": None,
-                "version_number": 1,
+                "version_number": 0,
             }
         }), 200
 
@@ -114,19 +115,15 @@ def update_prompt(prompt_key):
     db.session.add(prompt)
     db.session.commit()
 
-    version_count = UserPrompt.query.filter_by(
-        user_id=current_user.id, prompt_key=prompt_key
-    ).count()
-
     return jsonify({
-        "prompt": _serialize_prompt(prompt, version_count)
+        "prompt": _serialize_prompt(prompt, _edit_count(prompt_key))
     }), 200
 
 
 @prompts_bp.route("/<prompt_key>/versions", methods=["GET"])
 @login_required
 def get_prompt_versions(prompt_key):
-    """List all versions for a specific prompt."""
+    """List all versions for a specific prompt, including the file default."""
     if prompt_key not in PROMPT_DEFAULTS:
         return jsonify({"error": "Unknown prompt key"}), 404
 
@@ -144,7 +141,33 @@ def get_prompt_versions(prompt_key):
             "version_number": total - i,
         })
 
+    # Append the file default as v0
+    versions.append({
+        "id": "default",
+        "generated_by": "default",
+        "created_at": None,
+        "version_number": 0,
+    })
+
     return jsonify({"versions": versions}), 200
+
+
+@prompts_bp.route("/<prompt_key>/default", methods=["GET"])
+@login_required
+def get_default_prompt(prompt_key):
+    """Get the original file default content for a prompt."""
+    if prompt_key not in PROMPT_DEFAULTS:
+        return jsonify({"error": "Unknown prompt key"}), 404
+
+    content = load_default_prompt(prompt_key)
+    return jsonify({
+        "prompt": {
+            "id": "default",
+            "content": content,
+            "generated_by": "default",
+            "created_at": None,
+        }
+    }), 200
 
 
 @prompts_bp.route("/<prompt_key>/versions/<int:version_id>", methods=["GET"])
@@ -193,10 +216,33 @@ def revert_prompt(prompt_key, version_id):
     db.session.add(new_prompt)
     db.session.commit()
 
-    version_count = UserPrompt.query.filter_by(
-        user_id=current_user.id, prompt_key=prompt_key
-    ).count()
+    return jsonify({
+        "prompt": _serialize_prompt(new_prompt, _edit_count(prompt_key))
+    }), 200
+
+
+@prompts_bp.route("/<prompt_key>/revert-to-default", methods=["POST"])
+@login_required
+def revert_to_default(prompt_key):
+    """Create a new version from the file default."""
+    if prompt_key not in PROMPT_DEFAULTS:
+        return jsonify({"error": "Unknown prompt key"}), 404
+
+    content = load_default_prompt(prompt_key)
+    if not content:
+        return jsonify({"error": "Default prompt not found"}), 404
+
+    meta = PROMPT_DEFAULTS[prompt_key]
+    new_prompt = UserPrompt(
+        user_id=current_user.id,
+        prompt_key=prompt_key,
+        title=meta['title'],
+        generated_by="revert",
+    )
+    new_prompt.set_content(content)
+    db.session.add(new_prompt)
+    db.session.commit()
 
     return jsonify({
-        "prompt": _serialize_prompt(new_prompt, version_count)
+        "prompt": _serialize_prompt(new_prompt, _edit_count(prompt_key))
     }), 200

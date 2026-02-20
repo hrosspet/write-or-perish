@@ -61,8 +61,13 @@ export default function PromptDetailPage() {
     setSelectedVersionId(id);
     setVersionContent(null);
     try {
-      const res = await api.get(`/prompts/${promptKey}/versions/${id}`);
-      setVersionContent(res.data.prompt.content);
+      if (id === 'default') {
+        const res = await api.get(`/prompts/${promptKey}/default`);
+        setVersionContent(res.data.prompt.content);
+      } else {
+        const res = await api.get(`/prompts/${promptKey}/versions/${id}`);
+        setVersionContent(res.data.prompt.content);
+      }
     } catch (err) {
       console.error('Failed to load version:', err);
     }
@@ -70,7 +75,10 @@ export default function PromptDetailPage() {
 
   const handleRevert = async (id) => {
     try {
-      const res = await api.post(`/prompts/${promptKey}/revert/${id}`);
+      const endpoint = id === 'default'
+        ? `/prompts/${promptKey}/revert-to-default`
+        : `/prompts/${promptKey}/revert/${id}`;
+      const res = await api.post(endpoint);
       setPrompt(res.data.prompt);
       setEditContent(res.data.prompt.content);
       setDrawerOpen(false);
