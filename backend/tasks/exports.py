@@ -589,11 +589,13 @@ def _iterative_generation(self, user, model_id, gen_template, budget,
             break
 
         # Check if there's more data after this cutoff
-        remaining = build_user_export_content(
-            user, max_tokens=1, filter_ai_usage=True,
-            created_after=current_cutoff, return_metadata=True
-        )
-        if not remaining or remaining.get("node_count", 0) == 0:
+        from backend.models import Node
+        has_more = Node.query.filter(
+            Node.user_id == user.id,
+            Node.created_at > current_cutoff,
+            Node.ai_usage.in_(['chat', 'train'])
+        ).first() is not None
+        if not has_more:
             break
 
     # Mark the final profile as "initial" (the iterative process is done)
