@@ -38,6 +38,9 @@ class User(db.Model, UserMixin):
     # Concurrency guard: Celery task ID of in-flight profile generation
     profile_generation_task_id = db.Column(db.String(255), nullable=True)
 
+    # Flag: next profile generation should be a full regen (not incremental)
+    profile_needs_full_regen = db.Column(db.Boolean, nullable=False, default=False)
+
     # All valid subscription plans (single source of truth).
     ALLOWED_PLANS = {"free", "alpha", "pro"}
 

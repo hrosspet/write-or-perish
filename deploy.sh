@@ -180,6 +180,33 @@ else
     error "Celery service file not found at $CELERY_SERVICE_SOURCE"
 fi
 
+# Install/update Celery beat service
+log "Installing Celery beat service..."
+CELERY_BEAT_SERVICE_SOURCE="$PROJECT_DIR/write-or-perish-celery-beat.service"
+CELERY_BEAT_SERVICE_TARGET="/etc/systemd/system/write-or-perish-celery-beat.service"
+
+if [ -f "$CELERY_BEAT_SERVICE_SOURCE" ]; then
+    # Check if service file has changed
+    if ! sudo diff -q "$CELERY_BEAT_SERVICE_SOURCE" "$CELERY_BEAT_SERVICE_TARGET" >/dev/null 2>&1; then
+        log "Celery beat service file has changed, updating..."
+
+        # Copy new service file
+        sudo cp "$CELERY_BEAT_SERVICE_SOURCE" "$CELERY_BEAT_SERVICE_TARGET" || error "Failed to copy Celery beat service file"
+
+        # Reload systemd daemon
+        sudo systemctl daemon-reload || error "Failed to reload systemd daemon"
+
+        log "Celery beat service file updated"
+    else
+        log "Celery beat service file unchanged"
+    fi
+
+    # Enable Celery beat service
+    sudo systemctl enable write-or-perish-celery-beat || warn "Failed to enable Celery beat service"
+else
+    warn "Celery beat service file not found at $CELERY_BEAT_SERVICE_SOURCE"
+fi
+
 # Update Nginx configuration if changed
 NGINX_CONFIG_SOURCE="$PROJECT_DIR/configs/nginx.txt"
 NGINX_CONFIG_TARGET="/etc/nginx/sites-available/write-or-perish"
@@ -217,14 +244,25 @@ fi
 log "Restarting Celery worker service..."
 sudo systemctl restart write-or-perish-celery || error "Failed to restart Celery service"
 
-# Wait for Celery to start
+# Restart Celery beat service
+log "Restarting Celery beat service..."
+sudo systemctl restart write-or-perish-celery-beat || error "Failed to restart Celery beat service"
+
+# Wait for Celery services to start
 sleep 3
 
-# Check if Celery service is running
+# Check if Celery worker service is running
 if sudo systemctl is-active --quiet write-or-perish-celery; then
     log "Celery worker service restarted successfully"
 else
     error "Celery worker service failed to start"
+fi
+
+# Check if Celery beat service is running
+if sudo systemctl is-active --quiet write-or-perish-celery-beat; then
+    log "Celery beat service restarted successfully"
+else
+    error "Celery beat service failed to start"
 fi
 
 # Restart Gunicorn service
@@ -254,5 +292,6 @@ log ""
 log "Service status:"
 sudo systemctl is-active write-or-perish && log "  ✓ Gunicorn (write-or-perish)" || warn "  ✗ Gunicorn not running"
 sudo systemctl is-active write-or-perish-celery && log "  ✓ Celery (write-or-perish-celery)" || warn "  ✗ Celery not running"
+sudo systemctl is-active write-or-perish-celery-beat && log "  ✓ Celery Beat (write-or-perish-celery-beat)" || warn "  ✗ Celery Beat not running"
 sudo systemctl is-active redis-server && log "  ✓ Redis (redis-server)" || warn "  ✗ Redis not running"
 log ""

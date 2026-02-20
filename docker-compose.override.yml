@@ -30,6 +30,16 @@ services:
       - ./backend:/app/backend
       - media_data:/app/data
 
+  # Celery Beat with auto-reload on code changes
+  celery-beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    command: watchmedo auto-restart --directory=/app/backend --pattern="*.py" --recursive -- celery -A backend.celery_app.celery beat --loglevel=info
+    volumes:
+      - ./backend:/app/backend
+      - media_data:/app/data
+
   # Frontend with React dev server (hot module replacement)
   frontend:
     build:

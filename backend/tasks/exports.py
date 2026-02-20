@@ -311,10 +311,11 @@ def update_user_profile(self, user_id: int, model_id: str,
             )
             raise
         finally:
-            # Clear concurrency guard
+            # Clear concurrency guard and full-regen flag
             user = User.query.get(user_id)
             if user:
                 user.profile_generation_task_id = None
+                user.profile_needs_full_regen = False
                 db.session.commit()
 
 
@@ -618,7 +619,8 @@ def _iterative_generation(self, user, model_id, gen_template, budget,
     }
 
 
-def maybe_trigger_profile_update(user_id, model_id=None):
+def maybe_trigger_profile_update(user_id, model_id=None,
+                                  force_full_regen=False):
     """
     Check concurrency guard and dispatch update_user_profile if safe.
     Returns the task_id or None if skipped.
@@ -651,7 +653,9 @@ def maybe_trigger_profile_update(user_id, model_id=None):
         user_id=user_id
     ).order_by(UserProfile.created_at.desc()).first()
 
-    prev_id = latest_profile.id if latest_profile else None
+    prev_id = None if force_full_regen else (
+        latest_profile.id if latest_profile else None
+    )
 
     task = update_user_profile.delay(user_id, model_id, prev_id)
     user.profile_generation_task_id = task.id
@@ -659,6 +663,7 @@ def maybe_trigger_profile_update(user_id, model_id=None):
 
     logger.info(
         f"Dispatched profile update task {task.id} for user {user_id}"
+        f" (force_full_regen={force_full_regen})"
     )
     return task.id
 
@@ -666,12 +671,20 @@ def maybe_trigger_profile_update(user_id, model_id=None):
 def maybe_trigger_incremental_profile_update(user):
     """
     Check if enough new writing has accumulated to trigger an
-    incremental profile update. Called after node creation.
+    incremental profile update. Called periodically by Celery beat.
     """
     from datetime import datetime, timedelta
+    from backend.models import Node
 
     # Only for paid plans
     if (user.plan or "free") not in User.VOICE_MODE_PLANS:
+        return None
+
+    # User must have been inactive for at least 30 minutes
+    last_node = Node.query.filter_by(user_id=user.id) \
+        .order_by(Node.created_at.desc()).first()
+    MIN_INACTIVITY = timedelta(minutes=30)
+    if last_node and (datetime.utcnow() - last_node.created_at) < MIN_INACTIVITY:
         return None
 
     # Find latest profile
@@ -690,12 +703,11 @@ def maybe_trigger_incremental_profile_update(user):
         cutoff = latest_profile.source_data_cutoff
         if cutoff:
             from sqlalchemy import func
-            from backend.models import Node
             new_tokens = db.session.query(
                 func.coalesce(func.sum(Node.token_count), 0)
             ).filter(
                 Node.user_id == user.id,
-                Node.created_at >= cutoff,
+                Node.updated_at >= cutoff,
                 Node.ai_usage.in_(['chat', 'train']),
                 Node.token_count.isnot(None)
             ).scalar()
@@ -704,7 +716,6 @@ def maybe_trigger_incremental_profile_update(user):
     else:
         # No profile exists: check total eligible tokens
         from sqlalchemy import func
-        from backend.models import Node
         new_tokens = db.session.query(
             func.coalesce(func.sum(Node.token_count), 0)
         ).filter(
@@ -714,9 +725,28 @@ def maybe_trigger_incremental_profile_update(user):
         ).scalar()
 
     if new_tokens >= THRESHOLD_TOKENS:
-        return maybe_trigger_profile_update(user.id)
+        force = user.profile_needs_full_regen
+        return maybe_trigger_profile_update(
+            user.id, force_full_regen=force
+        )
 
     return None
+
+
+@celery.task
+def check_pending_profile_updates():
+    """Periodic task: check all eligible users for pending profile updates."""
+    with flask_app.app_context():
+        users = User.query.filter(
+            User.plan.in_(list(User.VOICE_MODE_PLANS))
+        ).all()
+        for user in users:
+            try:
+                maybe_trigger_incremental_profile_update(user)
+            except Exception as e:
+                logger.warning(
+                    f"Profile update check failed for user {user.id}: {e}"
+                )
 
 
 @celery.task(bind=True)

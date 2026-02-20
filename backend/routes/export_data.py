@@ -544,7 +544,18 @@ def update_profile():
         user_id=current_user.id
     ).order_by(UserProfile.created_at.desc()).first()
 
-    prev_id = latest_profile.id if latest_profile else None
+    # Determine if full regen is needed
+    needs_full_regen = False
+    if latest_profile:
+        if current_user.profile_needs_full_regen:
+            needs_full_regen = True
+        elif latest_profile.source_data_cutoff is None:
+            # Old profile without cutoff metadata — must regenerate
+            needs_full_regen = True
+
+    prev_id = None if needs_full_regen else (
+        latest_profile.id if latest_profile else None
+    )
     is_update = prev_id is not None
 
     task = update_user_profile.delay(current_user.id, model_id, prev_id)
