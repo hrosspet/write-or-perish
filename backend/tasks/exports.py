@@ -59,17 +59,9 @@ def generate_user_profile(self, user_id: int, model_id: str):
             # Step 1: Load prompt template and calculate token budget
             self.update_state(state='PROGRESS', meta={'progress': 10, 'status': 'Gathering writing samples'})
 
-            prompt_template_path = os.path.join(
-                flask_app.root_path,
-                "prompts",
-                "profile_generation.txt"
+            prompt_template = _load_prompt(
+                "profile_generation.txt", user_id=user_id
             )
-
-            try:
-                with open(prompt_template_path, "r", encoding="utf-8") as f:
-                    prompt_template = f.read()
-            except FileNotFoundError:
-                raise FileNotFoundError(f"Prompt template not found at {prompt_template_path}")
 
             prompt_tokens = approximate_token_count(prompt_template)
             max_export_tokens = None  # Send entire archive; let retry loop converge
@@ -177,8 +169,15 @@ def generate_user_profile(self, user_id: int, model_id: str):
             raise
 
 
-def _load_prompt(name):
-    """Load a prompt template by name from the prompts directory."""
+def _load_prompt(name, user_id=None):
+    """Load a prompt template by name, checking user overrides first."""
+    if user_id:
+        from backend.utils.prompts import get_user_prompt
+        # Derive prompt_key from filename (e.g. "profile_generation.txt" -> "profile_generation")
+        prompt_key = name.rsplit('.', 1)[0] if '.' in name else name
+        content = get_user_prompt(user_id, prompt_key)
+        if content:
+            return content
     path = os.path.join(flask_app.root_path, "prompts", name)
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
@@ -334,7 +333,7 @@ def _do_incremental_update(self, user, model_id, previous_profile_id,
     cutoff = prev_profile.source_data_cutoff
 
     # Calculate budget for new data
-    update_template = _load_prompt("profile_update.txt")
+    update_template = _load_prompt("profile_update.txt", user_id=user.id)
     overhead = (approximate_token_count(update_template)
                 + approximate_token_count(existing_content)
                 + max_output_tokens + 500)
@@ -421,7 +420,7 @@ def _do_initial_generation(self, user, model_id, context_window,
         'progress': 10, 'status': 'Gathering writing samples'
     })
 
-    gen_template = _load_prompt("profile_generation.txt")
+    gen_template = _load_prompt("profile_generation.txt", user_id=user.id)
     prompt_tokens = approximate_token_count(gen_template)
     budget = max(
         context_window // 2 - prompt_tokens - max_output_tokens - 500,
@@ -505,7 +504,7 @@ def _iterative_generation(self, user, model_id, gen_template, budget,
         f"budget={budget} tokens per chunk"
     )
 
-    update_template = _load_prompt("profile_update.txt")
+    update_template = _load_prompt("profile_update.txt", user_id=user.id)
     current_profile = None
     current_profile_id = None
     cumulative_source_tokens = 0

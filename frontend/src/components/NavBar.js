@@ -164,7 +164,7 @@ function NavBar({ onNewEntryClick }) {
     border: "1px solid var(--border)",
     borderRadius: "8px",
     padding: "6px 0",
-    minWidth: "180px",
+    minWidth: "220px",
     boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
     zIndex: 1001,
   };
@@ -329,6 +329,9 @@ function NavBar({ onNewEntryClick }) {
                     <Link to="/export" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
                       Export data
                     </Link>
+                    <Link to="/prompts" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
+                      Prompts
+                    </Link>
                     <div style={{ ...dropdownItemStyle, cursor: "default", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                       <span>Model</span>
                       <span style={{ fontSize: "0.75rem" }}>
@@ -344,7 +347,7 @@ function NavBar({ onNewEntryClick }) {
                       disabled={generatingProfile || !!profileTaskId}
                       style={{
                         ...dropdownItemStyle,
-                        color: (generatingProfile || profileTaskId) ? "var(--text-muted)" : "var(--accent)",
+                        color: "var(--text-muted)",
                         cursor: (generatingProfile || profileTaskId) ? "not-allowed" : "pointer",
                         opacity: (generatingProfile || profileTaskId) ? 0.6 : 1,
                       }}

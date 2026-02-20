@@ -2,15 +2,13 @@ from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node, User
 from backend.extensions import db
-from pathlib import Path
+from backend.utils.prompts import get_user_prompt
 
 reflect_bp = Blueprint("reflect", __name__)
 
-PROMPT_PATH = Path(__file__).parent.parent / "prompts" / "reflect.txt"
-
 
 def _get_reflect_prompt():
-    return PROMPT_PATH.read_text(encoding="utf-8")
+    return get_user_prompt(current_user.id, 'reflect')
 
 
 @reflect_bp.route("/", methods=["POST"])

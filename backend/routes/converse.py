@@ -2,15 +2,13 @@ from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node, User
 from backend.extensions import db
-from pathlib import Path
+from backend.utils.prompts import get_user_prompt
 
 converse_bp = Blueprint("converse", __name__)
 
-PROMPT_PATH = Path(__file__).parent.parent / "prompts" / "converse.txt"
-
 
 def _get_converse_prompt():
-    return PROMPT_PATH.read_text(encoding="utf-8")
+    return get_user_prompt(current_user.id, 'converse')
 
 
 def _get_last_node_in_chain(system_node):
