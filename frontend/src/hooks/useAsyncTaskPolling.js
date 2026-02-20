@@ -45,8 +45,10 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
     }
     try {
       // Use shorter timeout for status polling (10 seconds instead of 60)
+      // Add Cache-Control header to prevent Safari from caching polling responses
       const response = await api.get(endpoint, {
-        timeout: 10000
+        timeout: 10000,
+        headers: { 'Cache-Control': 'no-cache' }
       });
       const result = response.data;
 
@@ -103,6 +105,11 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
       timeoutRef.current = null;
     }
     setIsPolling(false);
+
+    // Reset stale state from previous endpoint before starting new polling
+    setStatus(null);
+    setData(null);
+    setProgress(0);
 
     // Start new polling if enabled and endpoint is set
     if (enabled && endpoint) {

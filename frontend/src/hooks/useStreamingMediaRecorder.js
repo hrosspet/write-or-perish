@@ -38,7 +38,7 @@ export function useStreamingMediaRecorder({
   chunkIntervalMs = 5 * 60 * 1000, // 5 minutes default
   onChunkReady = null, // Callback when a chunk is ready: (blob, chunkIndex) => void
 } = {}) {
-  const [status, setStatus] = useState('idle'); // 'idle' | 'recording' | 'recorded'
+  const [status, setStatus] = useState('idle'); // 'idle' | 'recording' | 'paused' | 'recorded'
   const [mediaBlob, setMediaBlob] = useState(null); // Final combined blob
   const [mediaUrl, setMediaUrl] = useState('');
   const [duration, setDuration] = useState(0);
@@ -54,6 +54,8 @@ export function useStreamingMediaRecorder({
   const webmHeaderRef = useRef(null); // Store WebM header from first chunk
   const stopResolveRef = useRef(null); // Resolve fn for the stop promise
   const dataAvailableFiredRef = useRef(false); // Track if ondataavailable ran during stop
+  const pausedAtRef = useRef(null); // Timestamp when paused
+  const totalPausedMsRef = useRef(0); // Accumulated paused duration
 
   // Clean up on unmount
   useEffect(() => {
@@ -88,6 +90,8 @@ export function useStreamingMediaRecorder({
     chunksRef.current = [];
     chunkIndexRef.current = 0;
     webmHeaderRef.current = null;
+    pausedAtRef.current = null;
+    totalPausedMsRef.current = 0;
     setMediaBlob(null);
     setMediaUrl('');
     setDuration(0);
@@ -176,7 +180,7 @@ export function useStreamingMediaRecorder({
         setMediaBlob(blob);
         setMediaUrl(url);
 
-        const ms = Date.now() - startTimeRef.current;
+        const ms = Date.now() - startTimeRef.current - totalPausedMsRef.current;
         setDuration(ms / 1000);
         setStatus('recorded');
 
@@ -207,16 +211,19 @@ export function useStreamingMediaRecorder({
       };
 
       startTimeRef.current = Date.now();
+      totalPausedMsRef.current = 0;
+      pausedAtRef.current = null;
 
       // Start recording with timeslice for chunked output
       // The timeslice parameter makes ondataavailable fire at the specified interval
       mediaRecorder.start(chunkIntervalMs);
       setStatus('recording');
 
-      // Start duration tracking
+      // Start duration tracking (subtracts paused time from elapsed)
       durationIntervalRef.current = setInterval(() => {
-        if (startTimeRef.current) {
-          setDuration((Date.now() - startTimeRef.current) / 1000);
+        if (startTimeRef.current && !pausedAtRef.current) {
+          const elapsed = Date.now() - startTimeRef.current - totalPausedMsRef.current;
+          setDuration(elapsed / 1000);
         }
       }, 1000);
 
@@ -227,8 +234,34 @@ export function useStreamingMediaRecorder({
     }
   }, [resetRecording, chunkIntervalMs, onChunkReady]);
 
-  const stopRecording = useCallback(() => {
+  const pauseRecording = useCallback(() => {
     if (recorderRef.current && recorderRef.current.state === 'recording') {
+      recorderRef.current.pause();
+      pausedAtRef.current = Date.now();
+      setStatus('paused');
+    }
+  }, []);
+
+  const resumeRecording = useCallback(() => {
+    if (recorderRef.current && recorderRef.current.state === 'paused') {
+      // Accumulate the time spent paused
+      if (pausedAtRef.current) {
+        totalPausedMsRef.current += Date.now() - pausedAtRef.current;
+        pausedAtRef.current = null;
+      }
+      recorderRef.current.resume();
+      setStatus('recording');
+    }
+  }, []);
+
+  const stopRecording = useCallback(() => {
+    const state = recorderRef.current?.state;
+    if (recorderRef.current && (state === 'recording' || state === 'paused')) {
+      // If paused, accumulate final pause duration before stopping
+      if (state === 'paused' && pausedAtRef.current) {
+        totalPausedMsRef.current += Date.now() - pausedAtRef.current;
+        pausedAtRef.current = null;
+      }
       console.log(`[StreamingRecorder] stopRecording called: chunksRef.length=${chunksRef.current.length}, chunkIndex=${chunkIndexRef.current}`);
       // Returns a promise that resolves when the final ondataavailable handler
       // has completed (including onChunkReady which enqueues the upload).
@@ -265,6 +298,8 @@ export function useStreamingMediaRecorder({
     error,
     startRecording,
     stopRecording,
+    pauseRecording,
+    resumeRecording,
     resetRecording,
     getTotalChunks,
     getPartialBlob,

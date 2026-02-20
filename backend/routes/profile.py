@@ -20,6 +20,48 @@ profile_bp = Blueprint("profile", __name__)
 AUDIO_STORAGE_ROOT = "data/audio"
 
 
+@profile_bp.route("/versions", methods=["GET"])
+@login_required
+def get_profile_versions():
+    """List all profile versions for the current user."""
+    profiles = UserProfile.query.filter_by(
+        user_id=current_user.id
+    ).order_by(UserProfile.created_at.desc()).all()
+
+    versions = []
+    total = len(profiles)
+    for i, profile in enumerate(profiles):
+        versions.append({
+            "id": profile.id,
+            "generated_by": profile.generated_by,
+            "tokens_used": profile.tokens_used,
+            "created_at": profile.created_at.isoformat(),
+            "version_number": total - i,
+        })
+
+    return jsonify({"versions": versions}), 200
+
+
+@profile_bp.route("/versions/<int:version_id>", methods=["GET"])
+@login_required
+def get_profile_version(version_id):
+    """Get a specific profile version's content."""
+    profile = UserProfile.query.get_or_404(version_id)
+
+    if profile.user_id != current_user.id:
+        return jsonify({"error": "Unauthorized"}), 403
+
+    return jsonify({
+        "profile": {
+            "id": profile.id,
+            "content": profile.get_content(),
+            "generated_by": profile.generated_by,
+            "tokens_used": profile.tokens_used,
+            "created_at": profile.created_at.isoformat(),
+        }
+    }), 200
+
+
 @profile_bp.route("/<int:profile_id>/audio", methods=["GET"])
 @login_required
 def get_audio(profile_id):

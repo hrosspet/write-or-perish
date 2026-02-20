@@ -2,22 +2,55 @@ import React, { useState, useRef, useEffect } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { useUser } from "../contexts/UserContext";
 import GlobalAudioPlayer from "./GlobalAudioPlayer";
+import api from "../api";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
 const aboutPaths = ["/why-loore", "/vision", "/how-to"];
 
 function NavBar({ onNewEntryClick }) {
-  const { user } = useUser();
+  const { user, setUser } = useUser();
   const location = useLocation();
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [overflowOpen, setOverflowOpen] = useState(false);
   const aboutRef = useRef(null);
+  const overflowRef = useRef(null);
+
+  // Craft mode state — read from user object or localStorage fallback
+  const [craftMode, setCraftMode] = useState(() => {
+    if (user && user.craft_mode !== undefined) return user.craft_mode;
+    return localStorage.getItem('loore_craft_mode') === 'true';
+  });
+
+  // Sync craft mode when user loads
+  useEffect(() => {
+    if (user && user.craft_mode !== undefined) {
+      setCraftMode(user.craft_mode);
+    }
+  }, [user]);
+
+  const toggleCraftMode = async () => {
+    const newValue = !craftMode;
+    setCraftMode(newValue);
+    localStorage.setItem('loore_craft_mode', String(newValue));
+
+    // Try to persist to backend if the user has craft_mode field
+    if (user) {
+      try {
+        const response = await api.put('/dashboard/user', { craft_mode: newValue });
+        if (response.data.user) {
+          setUser(response.data.user);
+        }
+      } catch (e) {
+        // Silently fall back to localStorage — backend may not support craft_mode yet
+      }
+    }
+  };
 
   // When "Write" is clicked:
-  // If no user is logged in, redirect to login page with return URL.
-  // Otherwise, proceed to open the entry modal.
   const handleWriteClick = (e) => {
     e.preventDefault();
+    setOverflowOpen(false);
     if (!user) {
       const returnUrl = encodeURIComponent(location.pathname + location.search);
       window.location.href = `/login?returnUrl=${returnUrl}`;
@@ -29,21 +62,25 @@ function NavBar({ onNewEntryClick }) {
   const currentPath = location.pathname;
   const isAboutPage = aboutPaths.includes(currentPath);
 
-  // Close dropdown on click outside
+  // Close dropdowns on click outside
   useEffect(() => {
-    if (!aboutOpen) return;
+    if (!aboutOpen && !overflowOpen) return;
     const handleClickOutside = (e) => {
-      if (aboutRef.current && !aboutRef.current.contains(e.target)) {
+      if (aboutOpen && aboutRef.current && !aboutRef.current.contains(e.target)) {
         setAboutOpen(false);
+      }
+      if (overflowOpen && overflowRef.current && !overflowRef.current.contains(e.target)) {
+        setOverflowOpen(false);
       }
     };
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [aboutOpen]);
+  }, [aboutOpen, overflowOpen]);
 
-  // Close dropdown on navigation
+  // Close dropdowns on navigation
   useEffect(() => {
     setAboutOpen(false);
+    setOverflowOpen(false);
   }, [currentPath]);
 
   const linkStyle = (path) => ({
@@ -55,6 +92,36 @@ function NavBar({ onNewEntryClick }) {
     letterSpacing: "0.02em",
     transition: "color 0.3s ease",
   });
+
+  const dropdownStyle = {
+    position: "absolute",
+    top: "100%",
+    right: 0,
+    marginTop: "12px",
+    background: "var(--bg-card)",
+    border: "1px solid var(--border)",
+    borderRadius: "8px",
+    padding: "6px 0",
+    minWidth: "180px",
+    boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
+    zIndex: 1001,
+  };
+
+  const dropdownItemStyle = {
+    display: "block",
+    padding: "10px 16px",
+    fontFamily: "var(--sans)",
+    fontWeight: 300,
+    fontSize: "0.85rem",
+    color: "var(--text-muted)",
+    textDecoration: "none",
+    cursor: "pointer",
+    background: "none",
+    border: "none",
+    width: "100%",
+    textAlign: "left",
+    transition: "color 0.2s ease",
+  };
 
   return (
     <nav
@@ -97,7 +164,7 @@ function NavBar({ onNewEntryClick }) {
       </Link>
 
       <div style={{ display: "flex", alignItems: "center", gap: "clamp(0.8rem, 2vw, 1.8rem)" }}>
-        <GlobalAudioPlayer />
+        {currentPath !== '/reflect' && currentPath !== '/orient' && <GlobalAudioPlayer />}
 
         {/* About dropdown */}
         <div ref={aboutRef} style={{ position: "relative" }}>
@@ -115,104 +182,143 @@ function NavBar({ onNewEntryClick }) {
               border: "none",
               cursor: "pointer",
               padding: 0,
+              display: "flex",
+              alignItems: "center",
+              gap: "3px",
             }}
           >
             About
+            <svg width="8" height="8" viewBox="0 0 8 8" fill="currentColor" style={{ opacity: 0.6 }}>
+              <path d="M1 2.5L4 5.5L7 2.5" stroke="currentColor" strokeWidth="1.2" fill="none" />
+            </svg>
           </button>
           {aboutOpen && (
-            <div style={{
-              position: "absolute",
-              top: "100%",
-              left: "50%",
-              transform: "translateX(-50%)",
-              marginTop: "12px",
-              background: "var(--bg-card)",
-              border: "1px solid var(--border)",
-              borderRadius: "8px",
-              padding: "6px 0",
-              minWidth: "140px",
-              boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
-              zIndex: 1001,
-            }}>
-              <Link
-                to="/why-loore"
-                style={{
-                  display: "block",
-                  padding: "10px 16px",
-                  ...linkStyle("/why-loore"),
-                  fontSize: "0.85rem",
-                }}
-              >
+            <div style={{ ...dropdownStyle, left: "50%", right: "auto", transform: "translateX(-50%)" }}>
+              <Link to="/why-loore" style={{ ...dropdownItemStyle, color: currentPath === "/why-loore" ? "var(--accent)" : "var(--text-muted)" }}>
                 Why Loore
               </Link>
-              <Link
-                to="/vision"
-                style={{
-                  display: "block",
-                  padding: "10px 16px",
-                  ...linkStyle("/vision"),
-                  fontSize: "0.85rem",
-                }}
-              >
+              <Link to="/vision" style={{ ...dropdownItemStyle, color: currentPath === "/vision" ? "var(--accent)" : "var(--text-muted)" }}>
                 Vision
               </Link>
-              <Link
-                to="/how-to"
-                style={{
-                  display: "block",
-                  padding: "10px 16px",
-                  ...linkStyle("/how-to"),
-                  fontSize: "0.85rem",
-                }}
-              >
+              <Link to="/how-to" style={{ ...dropdownItemStyle, color: currentPath === "/how-to" ? "var(--accent)" : "var(--text-muted)" }}>
                 How To
               </Link>
             </div>
           )}
         </div>
 
-        <Link to="/dashboard" style={linkStyle("/dashboard")}>
+        <Link to="/profile" style={linkStyle("/profile")}>
           Profile
         </Link>
-        <Link to="/feed" style={linkStyle("/feed")}>
+        <Link to="/todo" style={linkStyle("/todo")}>
+          Todo
+        </Link>
+        <Link to="/log" style={linkStyle("/log")}>
           Log
         </Link>
 
-        <Link
-          to="#"
-          onClick={handleWriteClick}
-          style={linkStyle("")}
-        >
-          Write
-        </Link>
-
-        {user && user.is_admin && (
-          <Link
-            to="/admin"
-            style={linkStyle("/admin")}
-          >
-            Admin
-          </Link>
-        )}
-
         {!user && (
           <Link
-            to={`/login?returnUrl=${encodeURIComponent(location.pathname + location.search)}`}
+            to="/login?returnUrl=%2F"
             style={linkStyle("/login")}
           >
             Login
           </Link>
         )}
 
+        {/* Three-dot overflow menu */}
         {user && (
-          <a
-            href={`${backendUrl}/auth/logout`}
-            style={linkStyle("")}
-          >
-            Logout
-          </a>
-        )}
+          <div ref={overflowRef} style={{ position: "relative" }}>
+            <button
+              onClick={() => setOverflowOpen(!overflowOpen)}
+              style={{
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                padding: "4px",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                gap: "3px",
+                opacity: 0.5,
+                transition: "opacity 0.2s ease",
+              }}
+              onMouseEnter={(e) => e.currentTarget.style.opacity = '0.8'}
+              onMouseLeave={(e) => e.currentTarget.style.opacity = '0.5'}
+            >
+              <span style={{ width: "3px", height: "3px", borderRadius: "50%", background: "var(--text-muted)" }} />
+              <span style={{ width: "3px", height: "3px", borderRadius: "50%", background: "var(--text-muted)" }} />
+              <span style={{ width: "3px", height: "3px", borderRadius: "50%", background: "var(--text-muted)" }} />
+            </button>
+            {overflowOpen && (
+              <div style={dropdownStyle}>
+                {/* Always visible */}
+                <Link to="/node/import" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
+                  Import data
+                </Link>
 
+                {/* Craft mode items */}
+                {craftMode && (
+                  <>
+                    <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
+                    <button onClick={handleWriteClick} style={dropdownItemStyle}>
+                      Write new entry
+                    </button>
+                    <Link to="/export" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
+                      Export data
+                    </Link>
+                    <div style={{ ...dropdownItemStyle, cursor: "default", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span>Model</span>
+                      <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", opacity: 0.7 }}>
+                        Claude 4.5 Sonnet
+                      </span>
+                    </div>
+                  </>
+                )}
+
+                {/* Bottom section */}
+                <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
+
+                {user.is_admin && (
+                  <Link to="/admin" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
+                    Admin
+                  </Link>
+                )}
+
+                {/* Craft mode toggle */}
+                <button
+                  onClick={toggleCraftMode}
+                  style={{ ...dropdownItemStyle, display: "flex", justifyContent: "space-between", alignItems: "center" }}
+                >
+                  <span>Craft mode</span>
+                  <div style={{
+                    width: "32px",
+                    height: "18px",
+                    borderRadius: "9px",
+                    background: craftMode ? "var(--accent)" : "var(--border)",
+                    position: "relative",
+                    transition: "background 0.2s ease",
+                  }}>
+                    <div style={{
+                      width: "14px",
+                      height: "14px",
+                      borderRadius: "50%",
+                      background: "var(--text-primary)",
+                      position: "absolute",
+                      top: "2px",
+                      left: craftMode ? "16px" : "2px",
+                      transition: "left 0.2s ease",
+                    }} />
+                  </div>
+                </button>
+
+                <a href={`${backendUrl}/auth/logout`} style={dropdownItemStyle}>
+                  Logout
+                </a>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </nav>
   );

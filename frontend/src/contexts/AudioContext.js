@@ -29,6 +29,10 @@ export const AudioProvider = ({ children }) => {
     generatingTTSRef.current = value;
     _setGeneratingTTS(value);
   }, []);
+  // Web Audio API context — unlocked during user gesture to allow later autoplay on Safari
+  const webAudioCtxRef = useRef(null);
+  // Gesture-activated Audio element for Safari autoplay
+  const warmedAudioRef = useRef(null);
   // Track whether playback ended while waiting for more chunks
   const waitingForChunksRef = useRef(false);
   const audioRef = useRef(null);
@@ -216,9 +220,17 @@ export const AudioProvider = ({ children }) => {
     // Update queue to contain chunks after current one
     audioQueueRef.current = urls.slice(chunkIndex + 1);
 
-    // Create new audio element
+    // Create or reuse audio element.
+    // Reuse the gesture-activated element from warmup() so Safari allows play().
     const chunkUrl = urls[chunkIndex];
-    const audio = new Audio(chunkUrl);
+    let audio;
+    if (warmedAudioRef.current) {
+      audio = warmedAudioRef.current;
+      warmedAudioRef.current = null;
+      audio.src = chunkUrl;
+    } else {
+      audio = new Audio(chunkUrl);
+    }
     audioRef.current = audio;
     audio.playbackRate = playbackRate;
 
@@ -409,8 +421,15 @@ export const AudioProvider = ({ children }) => {
     setLoading(true);
     setCurrentAudio(audioData);
 
-    // Create new audio element
-    const audio = new Audio(audioData.url);
+    // Create or reuse audio element (gesture-activated for Safari autoplay)
+    let audio;
+    if (warmedAudioRef.current) {
+      audio = warmedAudioRef.current;
+      warmedAudioRef.current = null;
+      audio.src = audioData.url;
+    } else {
+      audio = new Audio(audioData.url);
+    }
     audioRef.current = audio;
 
     // Set playback rate
@@ -562,7 +581,12 @@ export const AudioProvider = ({ children }) => {
   const stop = useCallback(() => {
     if (audioRef.current) {
       audioRef.current.pause();
-      audioRef.current.currentTime = 0;
+      // Fully release the audio element so the browser drops the audio session.
+      // A paused element with loaded media can hold the Bluetooth A2DP profile,
+      // preventing a clean switch to HFP when the mic is requested next.
+      audioRef.current.removeAttribute('src');
+      audioRef.current.load();
+      audioRef.current = null;
       setCurrentTime(0);
       setCumulativeTime(0);
       setIsPlaying(false);
@@ -722,6 +746,36 @@ export const AudioProvider = ({ children }) => {
     }
   }, [playbackRate]);
 
+  // Call during a user gesture (e.g. stop-recording click) to unlock audio on Safari.
+  // Safari requires AudioContext to be created/resumed during a gesture; once unlocked,
+  // subsequent HTMLAudioElement.play() calls are allowed even without a gesture.
+  const warmup = useCallback(() => {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    if (!webAudioCtxRef.current) {
+      webAudioCtxRef.current = new AC();
+    }
+    const ctx = webAudioCtxRef.current;
+    if (ctx.state === 'suspended') {
+      ctx.resume();
+    }
+    // Play a silent buffer to fully activate the Web Audio pipeline
+    const buffer = ctx.createBuffer(1, 1, 22050);
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(ctx.destination);
+    source.start(0);
+
+    // Also pre-activate an HTMLAudioElement during this gesture.
+    // Safari tracks per-element activation — reusing this element later bypasses autoplay.
+    const silentWav = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
+    const el = new Audio(silentWav);
+    el.play().then(() => {
+      el.pause();
+      warmedAudioRef.current = el;
+    }).catch(() => {});
+  }, []);
+
   const value = {
     currentAudio,
     isPlaying,
@@ -748,6 +802,7 @@ export const AudioProvider = ({ children }) => {
     seek,
     seekToCumulativeTime,
     changePlaybackRate,
+    warmup,
   };
 
   return <AudioContext.Provider value={value}>{children}</AudioContext.Provider>;

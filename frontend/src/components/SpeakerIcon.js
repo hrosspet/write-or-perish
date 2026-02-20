@@ -29,7 +29,7 @@ const extractMarkdownHeader = (content) => {
  */
 const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage }) => {
   const { user } = useUser();
-  const { loadAudio, loadAudioQueue, appendChunkToQueue, setGeneratingTTS, currentAudio, isPlaying } = useAudio();
+  const { loadAudio, loadAudioQueue, appendChunkToQueue, setGeneratingTTS, currentAudio, isPlaying, warmup } = useAudio();
   const [loading, setLoading] = useState(false);
   const [audioSrc, setAudioSrc] = useState(null);
   const [audioChunks, setAudioChunks] = useState(null); // For chunked playback
@@ -155,6 +155,7 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage }) => {
 
   const handleClick = async () => {
     if (noAiAccess || loading || ttsTaskActive || sseActive) return;
+    warmup(); // Unlock audio on Safari during user gesture
 
     try {
       // If we already have audio chunks cached, play them

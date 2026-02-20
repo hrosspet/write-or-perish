@@ -91,7 +91,8 @@ def get_dashboard():
             "email": current_user.email,
             "is_admin": current_user.is_admin,
             "plan": current_user.plan,
-            "voice_mode_enabled": voice_mode_enabled
+            "voice_mode_enabled": voice_mode_enabled,
+            "craft_mode": current_user.craft_mode
         },
         "pinned_nodes": pinned_list,
         "nodes": nodes_list,
@@ -166,6 +167,9 @@ def update_user():
     if new_email is not None:
         current_user.email = new_email
 
+    if "craft_mode" in data:
+        current_user.craft_mode = bool(data["craft_mode"])
+
     try:
         db.session.commit()
         # Include voice mode feature flag and user plan in the response
@@ -182,7 +186,8 @@ def update_user():
                 "terms_up_to_date": _terms_up_to_date(current_user),
                 "is_admin": current_user.is_admin,
                 "plan": current_user.plan,
-                "voice_mode_enabled": voice_mode_enabled
+                "voice_mode_enabled": voice_mode_enabled,
+                "craft_mode": current_user.craft_mode
             }
         }), 200
     except Exception as e:

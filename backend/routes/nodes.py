@@ -1032,8 +1032,9 @@ def get_transcription_status(node_id):
     """Get the current transcription status for a node."""
     node = Node.query.get_or_404(node_id)
 
-    # Check ownership
-    if node.user_id != current_user.id and not getattr(current_user, "is_admin", False):
+    # Check ownership (can_user_access_node handles LLM nodes by walking
+    # up the parent chain to find the human owner)
+    if not can_user_access_node(node) and not getattr(current_user, "is_admin", False):
         return jsonify({"error": "Unauthorized"}), 403
 
     # Get task status from Celery if still processing
@@ -1054,7 +1055,7 @@ def get_transcription_status(node_id):
             current_app.logger.warning(f"Failed to check Celery task status: {e}")
             # Don't fail the request - just return DB status without real-time info
 
-    return jsonify({
+    response = jsonify({
         "node_id": node.id,
         "status": node.transcription_status,
         "progress": node.transcription_progress or 0,
@@ -1064,6 +1065,8 @@ def get_transcription_status(node_id):
         "content": node.get_content() if node.transcription_status == 'completed' else None,
         "task_info": task_info  # Real-time progress from Celery
     })
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    return response
 
 
 @nodes_bp.route("/<int:node_id>/llm-status", methods=["GET"])
@@ -1072,8 +1075,9 @@ def get_llm_status(node_id):
     """Get the current LLM completion status for a node."""
     node = Node.query.get_or_404(node_id)
 
-    # Check ownership
-    if node.user_id != current_user.id and not getattr(current_user, "is_admin", False):
+    # Check ownership (can_user_access_node handles LLM nodes by walking
+    # up the parent chain to find the human owner)
+    if not can_user_access_node(node) and not getattr(current_user, "is_admin", False):
         return jsonify({"error": "Unauthorized"}), 403
 
     # Get task status from Celery if still processing
@@ -1113,10 +1117,16 @@ def get_llm_status(node_id):
         "task_info": task_info
     }
 
+    # Include content when completed (needed by ReflectPage polling)
+    if node.llm_task_status == 'completed':
+        response_data["content"] = node.get_content()
+
     if created_node:
         response_data["node"] = created_node
 
-    return jsonify(response_data)
+    response = jsonify(response_data)
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    return response
 
 
 @nodes_bp.route("/<int:node_id>/tts-status", methods=["GET"])
@@ -1125,8 +1135,9 @@ def get_tts_status(node_id):
     """Get the current TTS generation status for a node."""
     node = Node.query.get_or_404(node_id)
 
-    # Check ownership
-    if node.user_id != current_user.id and not getattr(current_user, "is_admin", False):
+    # Check ownership (can_user_access_node handles LLM nodes by walking
+    # up the parent chain to find the human owner)
+    if not can_user_access_node(node) and not getattr(current_user, "is_admin", False):
         return jsonify({"error": "Unauthorized"}), 403
 
     # Get task status from Celery if still processing
@@ -1160,7 +1171,9 @@ def get_tts_status(node_id):
             "audio_tts_url": node.audio_tts_url
         }
 
-    return jsonify(response_data)
+    response = jsonify(response_data)
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -1788,7 +1801,7 @@ def get_streaming_status(node_id):
     completed_count = sum(1 for c in chunks if c.status == 'completed')
     failed_count = sum(1 for c in chunks if c.status == 'failed')
 
-    return jsonify({
+    response = jsonify({
         "node_id": node_id,
         "session_id": node.streaming_session_id,
         "transcription_status": node.transcription_status,
@@ -1799,6 +1812,8 @@ def get_streaming_status(node_id):
         "chunks": chunk_statuses,
         "content": node.get_content() if node.transcription_status == 'completed' else None
     })
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    return response
 
 
 # ---------------------------------------------------------------------------

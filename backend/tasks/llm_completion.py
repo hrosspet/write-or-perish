@@ -6,7 +6,7 @@ from celery.utils.log import get_task_logger
 from datetime import datetime
 
 from backend.celery_app import celery, flask_app
-from backend.models import Node, User, UserProfile, APICostLog
+from backend.models import Node, User, UserProfile, UserTodo, APICostLog
 from backend.extensions import db
 from backend.llm_providers import LLMProvider, PromptTooLongError
 from backend.utils.tokens import approximate_token_count, reduce_export_tokens
@@ -20,6 +20,8 @@ logger = get_task_logger(__name__)
 USER_EXPORT_PLACEHOLDER = "{user_export}"
 # Placeholder for injecting user's AI-generated profile into messages
 USER_PROFILE_PLACEHOLDER = "{user_profile}"
+# Placeholder for injecting user's todo list into messages
+USER_TODO_PLACEHOLDER = "{user_todo}"
 
 
 def build_user_export_content(user, max_tokens=None, filter_ai_usage=False, created_before=None):
@@ -41,6 +43,22 @@ def get_user_profile_content(user_id):
 
     if profile and profile.ai_usage == "chat":
         return profile.content
+    return None
+
+
+def get_user_todo_content(user_id):
+    """
+    Get the most recent user todo content if AI usage is permitted.
+
+    Returns the todo content if ai_usage is 'chat',
+    otherwise returns None.
+    """
+    todo = UserTodo.query.filter_by(user_id=user_id).order_by(
+        UserTodo.created_at.desc()
+    ).first()
+
+    if todo and todo.ai_usage == "chat":
+        return todo.content
     return None
 
 
@@ -127,6 +145,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             )
             user_profile_content = None
 
+            # Check if any node contains the {user_todo} placeholder
+            needs_todo = any(
+                USER_TODO_PLACEHOLDER in node.get_content()
+                for node in node_chain if node.get_content()
+            )
+            user_todo_content = None
+
             # Check if any node contains {quote:ID} placeholders
             needs_quotes = any(
                 has_quotes(node.get_content())
@@ -141,6 +166,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     logger.info(f"Retrieved user profile for {user_id}: {len(user_profile_content)} chars")
                 else:
                     logger.info(f"No profile with chat permission found for user {user_id}")
+
+            if needs_todo:
+                user_todo_content = get_user_todo_content(user_id)
+                if user_todo_content:
+                    logger.info(f"Retrieved user todo for {user_id}: {len(user_todo_content)} chars")
+                else:
+                    logger.info(f"No todo with chat permission found for user {user_id}")
 
             if needs_export:
                 max_export_tokens = None  # Send entire archive; let retry loop converge
@@ -193,10 +225,16 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 user_export_content
                             )
                         # Replace {user_profile} placeholder if present
-                        if user_profile_content and USER_PROFILE_PLACEHOLDER in message_text:
+                        if USER_PROFILE_PLACEHOLDER in message_text:
                             message_text = message_text.replace(
                                 USER_PROFILE_PLACEHOLDER,
-                                user_profile_content
+                                user_profile_content or ""
+                            )
+                        # Replace {user_todo} placeholder if present
+                        if USER_TODO_PLACEHOLDER in message_text:
+                            message_text = message_text.replace(
+                                USER_TODO_PLACEHOLDER,
+                                user_todo_content or ""
                             )
                         # Resolve {quote:ID} placeholders if present
                         if needs_quotes and has_quotes(message_text):

@@ -15,8 +15,22 @@ import WhyLoorePage from "./pages/WhyLoorePage";
 import HowToPage from "./pages/HowToPage";
 import AlphaThankYouPage from "./pages/AlphaThankYouPage";
 import WelcomePage from "./pages/WelcomePage";
+import HomePage from "./pages/HomePage";
+import ReflectPage from "./pages/ReflectPage";
+import OrientPage from "./pages/OrientPage";
+import ConversePage from "./pages/ConversePage";
+import ProfilePage from "./pages/ProfilePage";
+import TodoPage from "./pages/TodoPage";
 import { useUser } from "./contexts/UserContext";
 import { AudioProvider } from "./contexts/AudioContext";
+
+function RootRoute() {
+  const { user, loading } = useUser();
+  if (loading) return null;
+  if (!user) return <Navigate to="/landing" replace />;
+  if (!user.approved) return <Navigate to="/alpha-thank-you" replace />;
+  return <HomePage />;
+}
 
 function App() {
   const [showNewEntry, setShowNewEntry] = useState(false);
@@ -144,7 +158,8 @@ function App() {
       )}
 
         <Routes>
-          <Route path="/" element={<LandingPage />} />
+          <Route path="/" element={<RootRoute />} />
+          <Route path="/landing" element={<LandingPage />} />
           <Route path="/login" element={<LoginPage />} />
           {/* Public about pages */}
           <Route path="/vision" element={<VisionPage />} />
@@ -154,9 +169,20 @@ function App() {
           <Route path="/alpha-thank-you" element={<AlphaThankYouPage />} />
           {/* Welcome - protected (for newly approved users) */}
           <Route path="/welcome" element={<ProtectedRoute><WelcomePage onNewEntryClick={() => setShowNewEntry(true)} /></ProtectedRoute>} />
-          <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
+          {/* New workflow routes */}
+          <Route path="/reflect" element={<ProtectedRoute><ReflectPage /></ProtectedRoute>} />
+          <Route path="/orient" element={<ProtectedRoute><OrientPage /></ProtectedRoute>} />
+          <Route path="/converse" element={<ProtectedRoute><ConversePage /></ProtectedRoute>} />
+          {/* Profile and Todo */}
+          <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
+          <Route path="/todo" element={<ProtectedRoute><TodoPage /></ProtectedRoute>} />
+          {/* Log (renamed from feed) */}
+          <Route path="/log" element={<ProtectedRoute><Feed /></ProtectedRoute>} />
+          {/* Backward compatibility redirects */}
+          <Route path="/feed" element={<Navigate to="/log" replace />} />
+          <Route path="/dashboard" element={<Navigate to="/profile" replace />} />
+          {/* Public profile view */}
           <Route path="/dashboard/:username" element={<Dashboard />} />
-          <Route path="/feed" element={<ProtectedRoute><Feed /></ProtectedRoute>} />
           <Route path="/node/:id" element={<ProtectedRoute><NodeDetailWrapper /></ProtectedRoute>} />
           <Route path="/admin" element={<ProtectedRoute><AdminPanel /></ProtectedRoute>} />
           <Route path="*" element={<Navigate to="/" replace />} />
