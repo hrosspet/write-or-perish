@@ -138,6 +138,9 @@ def create_app():
     from backend.routes.orient import orient_bp
     app.register_blueprint(orient_bp, url_prefix="/api/orient")
 
+    from backend.routes.prompts import prompts_bp
+    app.register_blueprint(prompts_bp, url_prefix="/api/prompts")
+
     # --------------------------------------------------------------------
     # Voice‑mode media blueprint – serves audio files in dev & tests.
     # --------------------------------------------------------------------

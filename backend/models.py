@@ -286,6 +286,24 @@ class UserTodo(db.Model):
         return decrypt_content(self.content)
 
 
+class UserPrompt(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    prompt_key = db.Column(db.String(64), nullable=False)
+    title = db.Column(db.String(128), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    generated_by = db.Column(db.String(64), nullable=False, default="default")
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    user = db.relationship("User", backref="prompts")
+
+    def set_content(self, plaintext):
+        self.content = encrypt_content(plaintext)
+
+    def get_content(self):
+        return decrypt_content(self.content)
+
+
 class NodeTranscriptChunk(db.Model):
     """
     Stores individual transcript chunks for streaming transcription.
