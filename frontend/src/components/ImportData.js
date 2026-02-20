@@ -25,7 +25,7 @@ const cancelBtnStyle = {
   ...ghostBtnStyle,
 };
 
-export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel, buttonHoverStyle }) {
+export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel, buttonHoverStyle, onProfileUpdateStarted }) {
   const btnStyle = customButtonStyle || ghostBtnStyle;
   const [hovered, setHovered] = useState(false);
   const [showImportDialog, setShowImportDialog] = useState(false);
@@ -91,11 +91,14 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
       privacy_level: importPrivacy,
       ai_usage: importAiUsage
     })
-      .then(() => {
+      .then((response) => {
         setShowImportDialog(false);
         setImportFiles(null);
         setImporting(false);
         setError("");
+        if (response.data.profile_update_task_id && onProfileUpdateStarted) {
+          onProfileUpdateStarted(response.data.profile_update_task_id);
+        }
         window.location.reload();
       })
       .catch((err) => {
@@ -147,11 +150,14 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
       privacy_level: importPrivacy,
       ai_usage: importAiUsage
     })
-      .then(() => {
+      .then((response) => {
         setShowTwitterImportDialog(false);
         setTwitterImportData(null);
         setImporting(false);
         setError("");
+        if (response.data.profile_update_task_id && onProfileUpdateStarted) {
+          onProfileUpdateStarted(response.data.profile_update_task_id);
+        }
         window.location.reload();
       })
       .catch((err) => {
@@ -201,11 +207,14 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
       privacy_level: importPrivacy,
       ai_usage: importAiUsage
     })
-      .then(() => {
+      .then((response) => {
         setShowClaudeImportDialog(false);
         setClaudeImportData(null);
         setImporting(false);
         setError("");
+        if (response.data.profile_update_task_id && onProfileUpdateStarted) {
+          onProfileUpdateStarted(response.data.profile_update_task_id);
+        }
         window.location.reload();
       })
       .catch((err) => {

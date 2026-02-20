@@ -195,7 +195,11 @@ def _collect_all_nodes_in_tree(node, filter_ai_usage=False, created_before=None,
     return result
 
 
-def build_user_export_content(user, max_tokens=None, filter_ai_usage=False, created_before=None):
+def build_user_export_content(
+    user, max_tokens=None, filter_ai_usage=False,
+    created_before=None, created_after=None,
+    chronological_order=False, return_metadata=False
+):
     """
     Core export logic: Build a human-readable text export of all threads for a given user.
 
@@ -209,11 +213,18 @@ def build_user_export_content(user, max_tokens=None, filter_ai_usage=False, crea
         filter_ai_usage: If True, only include nodes where ai_usage is 'chat' or 'train'.
                         Use True for AI profile generation, False for user data export.
         created_before: Optional datetime. If provided, only includes threads (and nodes within
-                       threads) created before this timestamp. Used when {user_export} is detected
-                       in a node to only include archive data up to that point.
+                       threads) created before this timestamp.
+        created_after: Optional datetime. If provided, only includes nodes created at or
+                      after this timestamp. Used for incremental profile updates.
+        chronological_order: If True and max_tokens is set, select oldest nodes first
+                           (for iterative profile building).
+        return_metadata: If True, return a dict with content, token_count,
+                        latest_node_created_at, and node_count instead of just the string.
 
     Returns:
-        str: Formatted export content, or None if no threads found
+        str or dict: Formatted export content (or None if no threads found).
+                    If return_metadata=True, returns dict with keys:
+                    content, token_count, latest_node_created_at, node_count
     """
     # Get all top-level nodes (threads) created by the user, ordered by most recent first
     query = Node.query.filter_by(
@@ -228,6 +239,9 @@ def build_user_export_content(user, max_tokens=None, filter_ai_usage=False, crea
     # Filter by creation timestamp if specified (for {user_export} context limiting)
     if created_before:
         query = query.filter(Node.created_at < created_before)
+
+    if created_after:
+        query = query.filter(Node.created_at >= created_after)
 
     all_top_level_nodes = query.order_by(Node.created_at.desc()).all()
 
@@ -248,8 +262,16 @@ def build_user_export_content(user, max_tokens=None, filter_ai_usage=False, crea
                 top_node, filter_ai_usage, created_before
             ))
 
-        # Sort by created_at descending (newest first)
-        all_nodes.sort(key=lambda n: n.created_at, reverse=True)
+        # Filter by created_after at the node level too
+        if created_after:
+            all_nodes = [n for n in all_nodes if n.created_at >= created_after]
+
+        # Sort: chronological (oldest first) for iterative building,
+        # or reverse-chronological (newest first) for normal truncation
+        all_nodes.sort(
+            key=lambda n: n.created_at,
+            reverse=not chronological_order
+        )
 
         # Reserve tokens for header and footer
         header_footer_tokens = 100
@@ -325,7 +347,33 @@ def build_user_export_content(user, max_tokens=None, filter_ai_usage=False, crea
     # Add footer
     export_lines.append("*End of Export*")
 
-    return "\n".join(export_lines)
+    content = "\n".join(export_lines)
+
+    if return_metadata:
+        # Determine latest node timestamp and node count from included nodes
+        if included_ids is not None:
+            meta_nodes = [n for n in all_nodes if n.id in included_ids]
+        else:
+            meta_nodes = []
+            for top_node in top_level_nodes:
+                meta_nodes.extend(_collect_all_nodes_in_tree(
+                    top_node, filter_ai_usage, created_before
+                ))
+            if created_after:
+                meta_nodes = [
+                    n for n in meta_nodes if n.created_at >= created_after
+                ]
+        latest_ts = max(
+            (n.created_at for n in meta_nodes), default=None
+        )
+        return {
+            "content": content,
+            "token_count": approximate_token_count(content),
+            "latest_node_created_at": latest_ts,
+            "node_count": len(meta_nodes),
+        }
+
+    return content
 
 @export_bp.route("/export/threads", methods=["GET"])
 @login_required
@@ -435,6 +483,88 @@ def estimate_profile_tokens():
         "model": model_id,
         "has_content": True
     }), 200
+
+@export_bp.route("/export/update_profile", methods=["POST"])
+@login_required
+def update_profile():
+    """
+    Unified endpoint for initial profile generation and incremental updates.
+
+    Finds the latest profile; if one exists, dispatches an incremental update.
+    Otherwise dispatches initial generation (possibly iterative).
+
+    Request body:
+        { "model": "claude-opus-4.6" }  (optional)
+
+    Returns:
+        { "task_id": "...", "status": "pending", "is_update": bool }
+    """
+    from backend.tasks.exports import update_user_profile
+
+    data = request.get_json() or {}
+    model_id = data.get("model")
+
+    if not model_id:
+        model_id = current_app.config.get(
+            "DEFAULT_LLM_MODEL", "claude-opus-4.6"
+        )
+
+    if model_id not in current_app.config["SUPPORTED_MODELS"]:
+        return jsonify({
+            "error": f"Unsupported model: {model_id}",
+            "supported_models": list(
+                current_app.config["SUPPORTED_MODELS"].keys()
+            )
+        }), 400
+
+    # Check concurrency guard
+    if current_user.profile_generation_task_id:
+        from backend.celery_app import celery as _celery
+        existing = _celery.AsyncResult(
+            current_user.profile_generation_task_id
+        )
+        if existing.state in ('PENDING', 'STARTED', 'PROGRESS'):
+            return jsonify({
+                "task_id": current_user.profile_generation_task_id,
+                "status": "already_running",
+                "is_update": False,
+            }), 200
+
+    # Quick check for any writing
+    has_threads = Node.query.filter_by(
+        user_id=current_user.id, parent_id=None
+    ).first() is not None
+    if not has_threads:
+        return jsonify({
+            "error": "No writing found to analyze."
+        }), 400
+
+    # Find latest profile
+    latest_profile = UserProfile.query.filter_by(
+        user_id=current_user.id
+    ).order_by(UserProfile.created_at.desc()).first()
+
+    prev_id = latest_profile.id if latest_profile else None
+    is_update = prev_id is not None
+
+    task = update_user_profile.delay(current_user.id, model_id, prev_id)
+
+    # Set concurrency guard
+    from backend.extensions import db as _db
+    current_user.profile_generation_task_id = task.id
+    _db.session.commit()
+
+    current_app.logger.info(
+        f"Enqueued profile {'update' if is_update else 'generation'} "
+        f"task {task.id} for user {current_user.id}"
+    )
+
+    return jsonify({
+        "task_id": task.id,
+        "status": "pending",
+        "is_update": is_update,
+    }), 202
+
 
 @export_bp.route("/export/generate_profile", methods=["POST"])
 @login_required

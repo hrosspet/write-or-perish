@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { useUser } from "../contexts/UserContext";
 import GlobalAudioPlayer from "./GlobalAudioPlayer";
+import ModelSelector from "./ModelSelector";
 import api from "../api";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL;
@@ -21,6 +22,13 @@ function NavBar({ onNewEntryClick }) {
     if (user && user.craft_mode !== undefined) return user.craft_mode;
     return localStorage.getItem('loore_craft_mode') === 'true';
   });
+
+  // Profile generation state (craft mode)
+  const [selectedModel, setSelectedModel] = useState(null);
+  const [generatingProfile, setGeneratingProfile] = useState(false);
+  const [profileTaskId, setProfileTaskId] = useState(null);
+  const [profileProgress, setProfileProgress] = useState(0);
+  const pollRef = useRef(null);
 
   // Sync craft mode when user loads
   useEffect(() => {
@@ -46,6 +54,60 @@ function NavBar({ onNewEntryClick }) {
       }
     }
   };
+
+  // Fetch default model once
+  useEffect(() => {
+    if (user && !selectedModel) {
+      api.get("/nodes/default-model")
+        .then(r => setSelectedModel(r.data.suggested_model))
+        .catch(() => setSelectedModel("claude-opus-4.6"));
+    }
+  }, [user, selectedModel]);
+
+  // Profile generation handler
+  const handleGenerateProfile = async () => {
+    if (generatingProfile || profileTaskId) return;
+    setGeneratingProfile(true);
+    try {
+      const res = await api.post("/export/update_profile", { model: selectedModel });
+      if (res.data.status === "already_running") {
+        setProfileTaskId(res.data.task_id);
+      } else {
+        setProfileTaskId(res.data.task_id);
+      }
+    } catch (err) {
+      console.error("Profile generation error:", err);
+      setGeneratingProfile(false);
+    }
+  };
+
+  // Poll profile task status
+  useEffect(() => {
+    if (!profileTaskId) return;
+    const poll = async () => {
+      try {
+        const res = await api.get(`/export/profile-status/${profileTaskId}`, {
+          timeout: 10000, headers: { 'Cache-Control': 'no-cache' }
+        });
+        const { status, progress } = res.data;
+        setProfileProgress(progress || 0);
+        if (status === 'completed' || status === 'failed') {
+          setGeneratingProfile(false);
+          setProfileTaskId(null);
+          setProfileProgress(0);
+          if (status === 'completed') {
+            // Reload page to show new profile
+            window.location.reload();
+          }
+        }
+      } catch (err) {
+        console.error("Profile poll error:", err);
+      }
+    };
+    poll();
+    pollRef.current = setInterval(poll, 3000);
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, [profileTaskId]);
 
   // When "Write" is clicked:
   const handleWriteClick = (e) => {
@@ -269,10 +331,30 @@ function NavBar({ onNewEntryClick }) {
                     </Link>
                     <div style={{ ...dropdownItemStyle, cursor: "default", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                       <span>Model</span>
-                      <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", opacity: 0.7 }}>
-                        Claude 4.5 Sonnet
+                      <span style={{ fontSize: "0.75rem" }}>
+                        <ModelSelector
+                          nodeId={null}
+                          selectedModel={selectedModel}
+                          onModelChange={setSelectedModel}
+                        />
                       </span>
                     </div>
+                    <button
+                      onClick={() => { setOverflowOpen(false); handleGenerateProfile(); }}
+                      disabled={generatingProfile || !!profileTaskId}
+                      style={{
+                        ...dropdownItemStyle,
+                        color: (generatingProfile || profileTaskId) ? "var(--text-muted)" : "var(--accent)",
+                        cursor: (generatingProfile || profileTaskId) ? "not-allowed" : "pointer",
+                        opacity: (generatingProfile || profileTaskId) ? 0.6 : 1,
+                      }}
+                    >
+                      {profileTaskId
+                        ? `Generating... ${profileProgress}%`
+                        : generatingProfile
+                        ? "Starting..."
+                        : "Generate Profile"}
+                    </button>
                   </>
                 )}
 

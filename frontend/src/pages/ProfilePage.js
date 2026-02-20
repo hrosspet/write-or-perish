@@ -151,7 +151,13 @@ export default function ProfilePage() {
           margin: '0 0 16px 0',
           opacity: 0.7,
         }}>
-          Generated from {profile.tokens_used?.toLocaleString() || 0} tokens &middot; {profile.generated_by}
+          {profile.source_tokens_used
+            ? `Built from ~${profile.source_tokens_used.toLocaleString()} tokens of writing`
+            : `Generated from ${profile.tokens_used?.toLocaleString() || 0} tokens`}
+          {' '}&middot; {profile.generated_by}
+          {profile.source_data_cutoff && (
+            <> &middot; Data through {new Date(profile.source_data_cutoff).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</>
+          )}
         </p>
       )}
 

@@ -33,11 +33,13 @@ export default function VersionHistoryDrawer({
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   };
 
-  const generatedByLabel = (g) => {
+  const generatedByLabel = (g, genType) => {
     if (g === 'user' || g === 'manual') return 'Manual edit';
     if (g === 'revert') return 'Reverted';
     if (g === 'orient_session') return 'Orient session';
     if (g === 'import') return 'Imported';
+    if (genType === 'update') return `Auto-updated (${g})`;
+    if (genType === 'iterative') return `Iterative build (${g})`;
     return `Auto-generated (${g})`;
   };
 
@@ -152,7 +154,10 @@ export default function VersionHistoryDrawer({
                     color: 'var(--text-muted)',
                     marginTop: '2px',
                   }}>
-                    {formatDate(v.created_at)} &middot; {generatedByLabel(v.generated_by)}
+                    {formatDate(v.created_at)} &middot; {generatedByLabel(v.generated_by, v.generation_type)}
+                    {v.source_tokens_used > 0 && (
+                      <> &middot; ~{v.source_tokens_used.toLocaleString()} source tokens</>
+                    )}
                   </div>
                 </div>
               </button>

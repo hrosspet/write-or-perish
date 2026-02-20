@@ -255,10 +255,34 @@ def confirm_import():
         # Commit all nodes
         db.session.commit()
 
+        # Auto-trigger profile update if enough tokens imported
+        profile_update_task_id = None
+        total_imported_tokens = sum(
+            approximate_token_count(f.get('content', ''))
+            for f in files_sorted
+        )
+        if (total_imported_tokens >= 10000
+                and ai_usage in ('chat', 'train')):
+            try:
+                from backend.tasks.exports import (
+                    maybe_trigger_profile_update
+                )
+                user_obj = User.query.get(current_user.id)
+                if (user_obj and (user_obj.plan or "free")
+                        in User.VOICE_MODE_PLANS):
+                    profile_update_task_id = (
+                        maybe_trigger_profile_update(current_user.id)
+                    )
+            except Exception as e:
+                current_app.logger.warning(
+                    f"Auto-trigger profile update failed: {e}"
+                )
+
         return jsonify({
             "message": "Import successful",
             "nodes_created": nodes_created,
-            "thread_count": thread_count
+            "thread_count": thread_count,
+            "profile_update_task_id": profile_update_task_id,
         }), 201
 
     except Exception as e:
@@ -652,10 +676,36 @@ def confirm_claude_import():
 
         db.session.commit()
 
+        # Auto-trigger profile update if enough tokens imported
+        profile_update_task_id = None
+        total_imported_tokens = sum(
+            approximate_token_count(msg.get('text', ''))
+            for conv in conversations_sorted
+            for msg in conv.get('messages', [])
+            if msg.get('text')
+        )
+        if (total_imported_tokens >= 10000
+                and ai_usage in ('chat', 'train')):
+            try:
+                from backend.tasks.exports import (
+                    maybe_trigger_profile_update
+                )
+                user_obj = User.query.get(current_user.id)
+                if (user_obj and (user_obj.plan or "free")
+                        in User.VOICE_MODE_PLANS):
+                    profile_update_task_id = (
+                        maybe_trigger_profile_update(current_user.id)
+                    )
+            except Exception as e:
+                current_app.logger.warning(
+                    f"Auto-trigger profile update failed: {e}"
+                )
+
         return jsonify({
             "message": "Import successful",
             "nodes_created": nodes_created,
-            "thread_count": thread_count
+            "thread_count": thread_count,
+            "profile_update_task_id": profile_update_task_id,
         }), 201
 
     except Exception as e:
@@ -775,10 +825,36 @@ def confirm_twitter_import():
 
         db.session.commit()
 
+        # Auto-trigger profile update if enough tokens imported
+        profile_update_task_id = None
+        total_imported_tokens = sum(
+            t.get('token_count', approximate_token_count(
+                t.get('full_text', '')
+            ))
+            for t in tweets_sorted
+        )
+        if (total_imported_tokens >= 10000
+                and ai_usage in ('chat', 'train')):
+            try:
+                from backend.tasks.exports import (
+                    maybe_trigger_profile_update
+                )
+                user_obj = User.query.get(current_user.id)
+                if (user_obj and (user_obj.plan or "free")
+                        in User.VOICE_MODE_PLANS):
+                    profile_update_task_id = (
+                        maybe_trigger_profile_update(current_user.id)
+                    )
+            except Exception as e:
+                current_app.logger.warning(
+                    f"Auto-trigger profile update failed: {e}"
+                )
+
         return jsonify({
             "message": "Import successful",
             "nodes_created": nodes_created,
-            "thread_count": thread_count
+            "thread_count": thread_count,
+            "profile_update_task_id": profile_update_task_id,
         }), 201
 
     except Exception as e:
