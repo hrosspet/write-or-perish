@@ -63,6 +63,14 @@ if [[ "$CURRENT_REMOTE" == https://* ]]; then
     log "Git remote updated to: $SSH_REMOTE"
 fi
 
+# Stop application services before migrations to avoid lock contention.
+# ALTER TABLE requires ACCESS EXCLUSIVE lock which blocks on active connections.
+log "Stopping application services before migrations..."
+sudo systemctl stop write-or-perish-celery-beat 2>/dev/null || true
+sudo systemctl stop write-or-perish-celery 2>/dev/null || true
+sudo systemctl stop write-or-perish 2>/dev/null || true
+sleep 2
+
 # Run database migrations
 log "Running database migrations..."
 export FLASK_APP="$BACKEND_DIR/app.py"
