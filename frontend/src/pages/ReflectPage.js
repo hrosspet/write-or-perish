@@ -1,10 +1,6 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React from 'react';
 import { FaPlay, FaPause, FaUndo, FaRedo } from 'react-icons/fa';
-import { useStreamingTranscription } from '../hooks/useStreamingTranscription';
-import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
-import { useTTSStreamSSE } from '../hooks/useSSE';
-import { useAudio } from '../contexts/AudioContext';
-import api from '../api';
+import { useVoiceSession } from '../hooks/useVoiceSession';
 
 function formatDuration(seconds) {
   const mins = Math.floor(seconds / 60);
@@ -176,192 +172,14 @@ function Spinner() {
   );
 }
 
-// iOS devices can't autoplay audio regardless of warmup, and playing silent audio
-// while the mic stream is active crashes Bluetooth headphones on multi-device setups.
-const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-
 export default function ReflectPage() {
-  const audio = useAudio();
-  const [phase, setPhase] = useState('ready'); // ready, recording, processing, playback
-  const [llmNodeId, setLlmNodeId] = useState(null);
-  const [isStopping, setIsStopping] = useState(false);
-  const [hasError, setHasError] = useState(false);
-  const transcriptRef = useRef('');
-  const threadParentIdRef = useRef(null); // last LLM node — parent for next round
-  const lastUserNodeIdRef = useRef(null); // last user node — parent when cancelling
-
-  // TTS state
-  const ttsTriggeredForNodeRef = useRef(null); // which LLM node TTS was triggered for
-  const [ttsGenerating, setTtsGenerating] = useState(false);
-  const firstChunkRef = useRef(true);
-
-  // Streaming transcription
-  const streaming = useStreamingTranscription({
-    privacyLevel: 'private',
-    aiUsage: 'chat',
-    onTranscriptUpdate: (text) => {
-      transcriptRef.current = text;
-    },
-    onComplete: async (data) => {
-      setIsStopping(false);
-      setPhase('processing');
-      const finalTranscript = data.content || transcriptRef.current;
-      if (!finalTranscript.trim()) {
-        // Empty recording — go back to ready
-        setPhase('ready');
-        return;
-      }
-      try {
-        const payload = { content: finalTranscript };
-        if (threadParentIdRef.current) {
-          payload.parent_id = threadParentIdRef.current;
-        }
-        if (data.sessionId) {
-          payload.session_id = data.sessionId;
-        }
-        const res = await api.post('/reflect', payload);
-        setLlmNodeId(res.data.llm_node_id);
-        lastUserNodeIdRef.current = res.data.user_node_id;
-      } catch (err) {
-        console.error('Reflect API error:', err);
-        setHasError(true);
-        setPhase('ready');
-      }
-    },
+  const {
+    phase, isStopping, hasError, streaming, audio, handleStart, handleStop,
+    handleContinue, handleCancelProcessing,
+  } = useVoiceSession({
+    apiEndpoint: '/reflect',
+    ttsTitle: 'Reflection',
   });
-
-  // Poll LLM completion
-  const { data: llmData, status: llmStatus } = useAsyncTaskPolling(
-    llmNodeId ? `/nodes/${llmNodeId}/llm-status` : null,
-    { enabled: !!llmNodeId && phase === 'processing', interval: 1500 }
-  );
-
-  // TTS SSE subscription
-  const ttsSSE = useTTSStreamSSE(llmNodeId, {
-    enabled: ttsGenerating,
-    onChunkReady: (data) => {
-      if (firstChunkRef.current) {
-        firstChunkRef.current = false;
-        audio.loadAudioQueue(
-          [data.audio_url],
-          { title: 'Reflection', url: data.audio_url },
-          [data.duration]
-        );
-        audio.setGeneratingTTS(true);
-        // Show playback UI as soon as first chunk arrives.
-        // Autoplay may or may not work (iOS blocks it); the playback UI
-        // has a play button the user can tap if autoplay was blocked.
-        setPhase('playback');
-      } else {
-        audio.appendChunkToQueue(data.audio_url, data.duration);
-      }
-    },
-    onAllComplete: () => {
-      setTtsGenerating(false);
-
-      audio.setGeneratingTTS(false);
-    },
-  });
-
-  // When LLM completes, trigger TTS
-  useEffect(() => {
-    if (!llmNodeId) return; // no node to process
-    if (llmStatus === 'completed' && llmData?.content && ttsTriggeredForNodeRef.current !== llmNodeId) {
-      ttsTriggeredForNodeRef.current = llmNodeId;
-      threadParentIdRef.current = llmNodeId; // save as parent for next round
-      setTtsGenerating(true);
-      firstChunkRef.current = true;
-      api.post(`/nodes/${llmNodeId}/tts`).catch((err) => {
-        console.error('TTS trigger error:', err);
-        setHasError(true);
-        setTtsGenerating(false);
-        setPhase('ready');
-      });
-    } else if (llmStatus === 'failed') {
-      setHasError(true);
-      setPhase('ready');
-    }
-  }, [llmStatus, llmData, llmNodeId]);
-
-  // Safety net: if stuck on "Reflecting..." for 15s (e.g. SSE never delivers
-  // chunks), transition to playback anyway. The normal path transitions via
-  // onChunkReady above; this only fires if something goes wrong.
-  useEffect(() => {
-    if (phase === 'processing') {
-      const timer = setTimeout(() => setPhase('playback'), 15000);
-      return () => clearTimeout(timer);
-    }
-  }, [phase]);
-
-  // Clear error indicator after a few seconds
-  useEffect(() => {
-    if (hasError) {
-      const timer = setTimeout(() => setHasError(false), 3000);
-      return () => clearTimeout(timer);
-    }
-  }, [hasError]);
-
-  const handleStart = useCallback(() => {
-    setPhase('recording');
-    setHasError(false);
-    streaming.startStreaming();
-  }, [streaming]);
-
-  const handleStop = useCallback(() => {
-    setIsStopping(true);
-    // Unlock audio on desktop Safari/Chrome during user gesture.
-    // Skip on iOS — autoplay is blocked there regardless, and the silent audio
-    // playback conflicts with active Bluetooth mic streams (crashes headphones).
-    if (!isIOS) audio.warmup();
-    streaming.stopStreaming();
-  }, [streaming, audio]);
-
-  const handleContinue = useCallback(() => {
-    audio.stop();
-    ttsSSE.disconnect();
-    ttsSSE.reset();
-    setLlmNodeId(null);
-    // Keep threadParentIdRef — continues the conversation thread
-
-    setTtsGenerating(false);
-
-    firstChunkRef.current = true;
-    transcriptRef.current = '';
-    setHasError(false);
-    streaming.cancelStreaming();
-    // Go straight to recording — skip the ready phase
-    setPhase('recording');
-    streaming.startStreaming();
-  }, [audio, ttsSSE, streaming]);
-
-  const handleCancelProcessing = useCallback(() => {
-    // Parent next recording to the user node (not the LLM node).
-    // The cancelled LLM response completes async as a dead-end sibling.
-    if (lastUserNodeIdRef.current) {
-      threadParentIdRef.current = lastUserNodeIdRef.current;
-    }
-    audio.stop();
-    ttsSSE.disconnect();
-    ttsSSE.reset();
-    setPhase('ready');
-    setLlmNodeId(null);
-
-    setTtsGenerating(false);
-
-    firstChunkRef.current = true;
-    transcriptRef.current = '';
-    streaming.cancelStreaming();
-  }, [audio, ttsSSE, streaming]);
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      audio.stop();
-      ttsSSE.disconnect();
-      streaming.cancelStreaming();
-    };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Progress bar helpers
   const displayTime = audio.cumulativeTime || 0;
@@ -672,7 +490,7 @@ export default function ReflectPage() {
 
       {/* Record button to start next recording */}
       <button
-        onClick={handleContinue}
+        onClick={() => handleContinue()}
         title="Continue reflecting"
         style={{
           width: '56px', height: '56px', borderRadius: '50%',

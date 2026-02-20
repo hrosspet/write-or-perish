@@ -1,9 +1,6 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import { FaRegCompass, FaPlay, FaPause, FaUndo, FaRedo } from 'react-icons/fa';
-import { useStreamingTranscription } from '../hooks/useStreamingTranscription';
-import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
-import { useTTSStreamSSE } from '../hooks/useSSE';
-import { useAudio } from '../contexts/AudioContext';
+import { useVoiceSession } from '../hooks/useVoiceSession';
 import api from '../api';
 
 function formatDuration(seconds) {
@@ -149,89 +146,12 @@ function parseOrientResponse(text) {
 }
 
 export default function OrientPage() {
-  const audio = useAudio();
-  const [phase, setPhase] = useState('ready'); // ready, recording, processing, playback
-  const [llmNodeId, setLlmNodeId] = useState(null);
-  const [isStopping, setIsStopping] = useState(false);
-  const [hasError, setHasError] = useState(false);
   const [applied, setApplied] = useState(false);
   const [parsedResponse, setParsedResponse] = useState(null);
-  const transcriptRef = useRef('');
-  const threadParentIdRef = useRef(null);
-  const lastUserNodeIdRef = useRef(null);
-  const llmResponseRef = useRef('');
-
-  // TTS state
-  const ttsTriggeredForNodeRef = useRef(null);
   const applyTriggeredForNodeRef = useRef(null);
-  const [ttsGenerating, setTtsGenerating] = useState(false);
-  const firstChunkRef = useRef(true);
-
-  // Streaming transcription
-  const streaming = useStreamingTranscription({
-    privacyLevel: 'private',
-    aiUsage: 'chat',
-    onTranscriptUpdate: (text) => {
-      transcriptRef.current = text;
-    },
-    onComplete: async (data) => {
-      setIsStopping(false);
-      setPhase('processing');
-      const finalTranscript = data.content || transcriptRef.current;
-      if (!finalTranscript.trim()) {
-        setPhase('ready');
-        return;
-      }
-      try {
-        const payload = { content: finalTranscript };
-        if (threadParentIdRef.current) {
-          payload.parent_id = threadParentIdRef.current;
-        }
-        if (data.sessionId) {
-          payload.session_id = data.sessionId;
-        }
-        const res = await api.post('/orient', payload);
-        setLlmNodeId(res.data.llm_node_id);
-        lastUserNodeIdRef.current = res.data.user_node_id;
-      } catch (err) {
-        console.error('Orient API error:', err);
-        setHasError(true);
-        setPhase('ready');
-      }
-    },
-  });
-
-  // Poll LLM completion
-  const { data: llmData, status: llmStatus } = useAsyncTaskPolling(
-    llmNodeId ? `/nodes/${llmNodeId}/llm-status` : null,
-    { enabled: !!llmNodeId && phase === 'processing', interval: 1500 }
-  );
-
-  // TTS SSE subscription
-  const ttsSSE = useTTSStreamSSE(llmNodeId, {
-    enabled: ttsGenerating,
-    onChunkReady: (data) => {
-      if (firstChunkRef.current) {
-        firstChunkRef.current = false;
-        audio.loadAudioQueue(
-          [data.audio_url],
-          { title: 'Orient', url: data.audio_url },
-          [data.duration]
-        );
-        audio.setGeneratingTTS(true);
-      } else {
-        audio.appendChunkToQueue(data.audio_url, data.duration);
-      }
-    },
-    onAllComplete: () => {
-      setTtsGenerating(false);
-      audio.setGeneratingTTS(false);
-    },
-  });
 
   // Build todo content from parsed response and apply
-  const handleApplyTodo = useCallback(async (nodeId) => {
-    const text = llmResponseRef.current;
+  const handleApplyTodo = useCallback(async (nodeId, text) => {
     if (!text || !nodeId) return;
 
     const parsed = parseOrientResponse(text);
@@ -276,122 +196,26 @@ export default function OrientPage() {
     }
   }, []);
 
-  // When LLM completes, trigger TTS and auto-apply todo
-  useEffect(() => {
-    if (!llmNodeId) return;
-    if (llmStatus === 'completed' && llmData?.content && ttsTriggeredForNodeRef.current !== llmNodeId) {
-      ttsTriggeredForNodeRef.current = llmNodeId;
-      threadParentIdRef.current = llmNodeId;
-
-      // Store response and parse it
-      llmResponseRef.current = llmData.content;
-      setParsedResponse(parseOrientResponse(llmData.content));
-
-      // Trigger TTS
-      setTtsGenerating(true);
-      firstChunkRef.current = true;
-      api.post(`/nodes/${llmNodeId}/tts`).catch((err) => {
-        console.error('TTS trigger error:', err);
-        setHasError(true);
-        setTtsGenerating(false);
-        setPhase('ready');
-      });
-
+  const {
+    phase, isStopping, hasError, streaming, audio, handleStart, handleStop,
+    handleContinue, handleCancelProcessing,
+  } = useVoiceSession({
+    apiEndpoint: '/orient',
+    ttsTitle: 'Orient',
+    onLLMComplete: (nodeId, content) => {
+      setParsedResponse(parseOrientResponse(content));
       // Auto-apply todo
-      if (applyTriggeredForNodeRef.current !== llmNodeId) {
-        applyTriggeredForNodeRef.current = llmNodeId;
-        handleApplyTodo(llmNodeId);
+      if (applyTriggeredForNodeRef.current !== nodeId) {
+        applyTriggeredForNodeRef.current = nodeId;
+        handleApplyTodo(nodeId, content);
       }
-    } else if (llmStatus === 'failed') {
-      setHasError(true);
-      setPhase('ready');
-    }
-  }, [llmStatus, llmData, llmNodeId, handleApplyTodo]);
+    },
+  });
 
-  // Transition to playback when audio starts playing
-  useEffect(() => {
-    if (phase === 'processing' && audio.isPlaying) {
-      setPhase('playback');
-    }
-  }, [phase, audio.isPlaying]);
-
-  // Fallback: if audio warmup didn't fully unlock Safari and autoplay still fails,
-  // show results after 5s rather than staying stuck on "Orienting..." forever
-  useEffect(() => {
-    if (phase === 'processing' && parsedResponse) {
-      const timer = setTimeout(() => setPhase('playback'), 5000);
-      return () => clearTimeout(timer);
-    }
-  }, [phase, parsedResponse]);
-
-  // Clear error indicator after a few seconds
-  useEffect(() => {
-    if (hasError) {
-      const timer = setTimeout(() => setHasError(false), 3000);
-      return () => clearTimeout(timer);
-    }
-  }, [hasError]);
-
-  const handleStart = useCallback(() => {
-    setPhase('recording');
-    setHasError(false);
-    streaming.startStreaming();
-  }, [streaming]);
-
-  const handleStop = useCallback(() => {
-    setIsStopping(true);
-    audio.warmup(); // Unlock audio on Safari during user gesture
-    streaming.stopStreaming();
-  }, [streaming, audio]);
-
-  const handleContinue = useCallback(() => {
-    audio.stop();
-    ttsSSE.disconnect();
-    ttsSSE.reset();
-    setLlmNodeId(null);
-    // Keep threadParentIdRef — continues the conversation thread
-
-    setTtsGenerating(false);
+  const orientReset = useCallback(() => {
     setApplied(false);
     setParsedResponse(null);
-    llmResponseRef.current = '';
-    firstChunkRef.current = true;
-    transcriptRef.current = '';
-    setHasError(false);
-    streaming.cancelStreaming();
-    // Go straight to recording — skip the ready phase
-    setPhase('recording');
-    streaming.startStreaming();
-  }, [audio, ttsSSE, streaming]);
-
-  const handleCancelProcessing = useCallback(() => {
-    // Parent next recording to the user node (not the LLM node).
-    // The cancelled LLM response completes async as a dead-end sibling.
-    if (lastUserNodeIdRef.current) {
-      threadParentIdRef.current = lastUserNodeIdRef.current;
-    }
-    audio.stop();
-    ttsSSE.disconnect();
-    ttsSSE.reset();
-    setPhase('ready');
-    setLlmNodeId(null);
-    setTtsGenerating(false);
-    setApplied(false);
-    setParsedResponse(null);
-    llmResponseRef.current = '';
-    firstChunkRef.current = true;
-    transcriptRef.current = '';
-    streaming.cancelStreaming();
-  }, [audio, ttsSSE, streaming]);
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      audio.stop();
-      ttsSSE.disconnect();
-      streaming.cancelStreaming();
-    };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   // Progress bar helpers
   const displayTime = audio.cumulativeTime || 0;
@@ -583,7 +407,7 @@ export default function OrientPage() {
 
         {/* Cancel button */}
         <button
-          onClick={handleCancelProcessing}
+          onClick={() => handleCancelProcessing(orientReset)}
           style={{
             background: 'none',
             border: 'none',
@@ -882,7 +706,7 @@ export default function OrientPage() {
 
       {/* Record button to continue conversation */}
       <button
-        onClick={handleContinue}
+        onClick={() => handleContinue(orientReset)}
         title="Continue orienting"
         style={{
           width: '56px', height: '56px', borderRadius: '50%',
