@@ -1,0 +1,23 @@
+[Unit]
+Description=Write or Perish Celery Beat Scheduler
+After=network.target redis-server.service postgresql.service
+Requires=redis-server.service
+
+[Service]
+Type=forking
+User=hrosspet
+Group=hrosspet
+WorkingDirectory=/home/hrosspet/write-or-perish
+EnvironmentFile=/home/hrosspet/write-or-perish/.env.production
+PIDFile=/home/hrosspet/write-or-perish/celery-beat.pid
+
+ExecStart=/bin/bash -c 'source ~/miniconda3/etc/profile.d/conda.sh && conda activate write-or-perish && celery -A backend.celery_app:celery beat --loglevel=info --logfile=/home/hrosspet/write-or-perish/logs/celery-beat.log --pidfile=/home/hrosspet/write-or-perish/celery-beat.pid --detach'
+
+ExecReload=/bin/kill -s HUP $MAINPID
+ExecStop=/bin/kill -s TERM $MAINPID
+
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target

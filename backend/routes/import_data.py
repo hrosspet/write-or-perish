@@ -1,6 +1,6 @@
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
-from backend.models import Node, User
+from backend.models import Node, User, UserProfile
 from backend.extensions import db
 from datetime import datetime
 import zipfile
@@ -204,6 +204,15 @@ def confirm_import():
                 else:
                     node_content = content
 
+                # Parse original timestamp from zip metadata
+                node_created_at = None
+                raw_ts = file_data.get('modified_at', '')
+                if raw_ts:
+                    try:
+                        node_created_at = datetime.fromisoformat(raw_ts)
+                    except (ValueError, TypeError):
+                        pass
+
                 # Create node
                 node = Node(
                     user_id=current_user.id,
@@ -214,6 +223,9 @@ def confirm_import():
                     privacy_level=privacy_level,
                     ai_usage=ai_usage
                 )
+
+                if node_created_at:
+                    node.created_at = node_created_at
 
                 db.session.add(node)
                 db.session.flush()  # Get the node ID
@@ -236,6 +248,15 @@ def confirm_import():
                 else:
                     node_content = content
 
+                # Parse original timestamp from zip metadata
+                node_created_at = None
+                raw_ts = file_data.get('modified_at', '')
+                if raw_ts:
+                    try:
+                        node_created_at = datetime.fromisoformat(raw_ts)
+                    except (ValueError, TypeError):
+                        pass
+
                 # Create top-level node (parent_id=None)
                 node = Node(
                     user_id=current_user.id,
@@ -247,6 +268,9 @@ def confirm_import():
                     ai_usage=ai_usage
                 )
 
+                if node_created_at:
+                    node.created_at = node_created_at
+
                 db.session.add(node)
                 nodes_created += 1
 
@@ -255,10 +279,60 @@ def confirm_import():
         # Commit all nodes
         db.session.commit()
 
+        # Determine if imported data predates the current profile cutoff
+        profile_update_task_id = None
+        if ai_usage in ('chat', 'train'):
+            try:
+                user_obj = User.query.get(current_user.id)
+                if (user_obj and (user_obj.plan or "free")
+                        in User.VOICE_MODE_PLANS):
+                    latest_profile = UserProfile.query.filter_by(
+                        user_id=current_user.id
+                    ).order_by(UserProfile.created_at.desc()).first()
+                    cutoff = (latest_profile.source_data_cutoff
+                              if latest_profile else None)
+
+                    needs_full_regen = False
+                    if cutoff:
+                        for f in files_sorted:
+                            raw_ts = f.get('modified_at', '')
+                            if raw_ts:
+                                try:
+                                    ts = datetime.fromisoformat(raw_ts)
+                                    if ts < cutoff:
+                                        needs_full_regen = True
+                                        break
+                                except (ValueError, TypeError):
+                                    pass
+
+                    if needs_full_regen:
+                        user_obj.profile_needs_full_regen = True
+                        db.session.commit()
+
+                    total_imported_tokens = sum(
+                        approximate_token_count(f.get('content', ''))
+                        for f in files_sorted
+                    )
+                    if total_imported_tokens >= 10000:
+                        from backend.tasks.exports import (
+                            maybe_trigger_profile_update
+                        )
+                        profile_update_task_id = (
+                            maybe_trigger_profile_update(
+                                current_user.id,
+                                force_full_regen=needs_full_regen,
+                            )
+                        )
+            except Exception as e:
+                current_app.logger.warning(
+                    f"Auto-trigger profile update failed: {e}"
+                )
+
         return jsonify({
             "message": "Import successful",
             "nodes_created": nodes_created,
-            "thread_count": thread_count
+            "thread_count": thread_count,
+            "profile_update_task_id": profile_update_task_id,
         }), 201
 
     except Exception as e:
@@ -652,10 +726,70 @@ def confirm_claude_import():
 
         db.session.commit()
 
+        # Determine if imported data predates the current profile cutoff
+        profile_update_task_id = None
+        if ai_usage in ('chat', 'train'):
+            try:
+                user_obj = User.query.get(current_user.id)
+                if (user_obj and (user_obj.plan or "free")
+                        in User.VOICE_MODE_PLANS):
+                    latest_profile = UserProfile.query.filter_by(
+                        user_id=current_user.id
+                    ).order_by(UserProfile.created_at.desc()).first()
+                    cutoff = (latest_profile.source_data_cutoff
+                              if latest_profile else None)
+
+                    needs_full_regen = False
+                    if cutoff:
+                        for conv in conversations_sorted:
+                            for msg in conv.get('messages', []):
+                                raw_ts = msg.get('created_at', '')
+                                if raw_ts:
+                                    try:
+                                        raw_ts = raw_ts.replace(
+                                            'Z', '+00:00'
+                                        )
+                                        ts = datetime.fromisoformat(
+                                            raw_ts
+                                        ).replace(tzinfo=None)
+                                        if ts < cutoff:
+                                            needs_full_regen = True
+                                            break
+                                    except (ValueError, TypeError):
+                                        pass
+                            if needs_full_regen:
+                                break
+
+                    if needs_full_regen:
+                        user_obj.profile_needs_full_regen = True
+                        db.session.commit()
+
+                    total_imported_tokens = sum(
+                        approximate_token_count(msg.get('text', ''))
+                        for conv in conversations_sorted
+                        for msg in conv.get('messages', [])
+                        if msg.get('text')
+                    )
+                    if total_imported_tokens >= 10000:
+                        from backend.tasks.exports import (
+                            maybe_trigger_profile_update
+                        )
+                        profile_update_task_id = (
+                            maybe_trigger_profile_update(
+                                current_user.id,
+                                force_full_regen=needs_full_regen,
+                            )
+                        )
+            except Exception as e:
+                current_app.logger.warning(
+                    f"Auto-trigger profile update failed: {e}"
+                )
+
         return jsonify({
             "message": "Import successful",
             "nodes_created": nodes_created,
-            "thread_count": thread_count
+            "thread_count": thread_count,
+            "profile_update_task_id": profile_update_task_id,
         }), 201
 
     except Exception as e:
@@ -733,6 +867,17 @@ def confirm_twitter_import():
                     'token_count', approximate_token_count(content)
                 )
 
+                # Parse original Twitter timestamp
+                tweet_created_at = None
+                raw_ts = tweet_data.get('created_at', '')
+                if raw_ts:
+                    try:
+                        tweet_created_at = datetime.strptime(
+                            raw_ts, "%a %b %d %H:%M:%S %z %Y"
+                        ).replace(tzinfo=None)
+                    except (ValueError, TypeError):
+                        pass
+
                 node = Node(
                     user_id=current_user.id,
                     parent_id=parent_node.id if parent_node else None,
@@ -742,6 +887,9 @@ def confirm_twitter_import():
                     privacy_level=privacy_level,
                     ai_usage=ai_usage
                 )
+
+                if tweet_created_at:
+                    node.created_at = tweet_created_at
 
                 db.session.add(node)
                 db.session.flush()
@@ -758,6 +906,17 @@ def confirm_twitter_import():
                     'token_count', approximate_token_count(content)
                 )
 
+                # Parse original Twitter timestamp
+                tweet_created_at = None
+                raw_ts = tweet_data.get('created_at', '')
+                if raw_ts:
+                    try:
+                        tweet_created_at = datetime.strptime(
+                            raw_ts, "%a %b %d %H:%M:%S %z %Y"
+                        ).replace(tzinfo=None)
+                    except (ValueError, TypeError):
+                        pass
+
                 node = Node(
                     user_id=current_user.id,
                     parent_id=None,
@@ -768,6 +927,9 @@ def confirm_twitter_import():
                     ai_usage=ai_usage
                 )
 
+                if tweet_created_at:
+                    node.created_at = tweet_created_at
+
                 db.session.add(node)
                 nodes_created += 1
 
@@ -775,10 +937,65 @@ def confirm_twitter_import():
 
         db.session.commit()
 
+        # Determine if imported data predates the current profile cutoff
+        profile_update_task_id = None
+        if ai_usage in ('chat', 'train'):
+            try:
+                user_obj = User.query.get(current_user.id)
+                if (user_obj and (user_obj.plan or "free")
+                        in User.VOICE_MODE_PLANS):
+                    latest_profile = UserProfile.query.filter_by(
+                        user_id=current_user.id
+                    ).order_by(UserProfile.created_at.desc()).first()
+                    cutoff = (latest_profile.source_data_cutoff
+                              if latest_profile else None)
+
+                    needs_full_regen = False
+                    if cutoff:
+                        for t in tweets_sorted:
+                            raw_ts = t.get('created_at', '')
+                            if raw_ts:
+                                try:
+                                    ts = datetime.strptime(
+                                        raw_ts,
+                                        "%a %b %d %H:%M:%S %z %Y"
+                                    ).replace(tzinfo=None)
+                                    if ts < cutoff:
+                                        needs_full_regen = True
+                                        break
+                                except (ValueError, TypeError):
+                                    pass
+
+                    if needs_full_regen:
+                        user_obj.profile_needs_full_regen = True
+                        db.session.commit()
+
+                    total_imported_tokens = sum(
+                        t.get('token_count', approximate_token_count(
+                            t.get('full_text', '')
+                        ))
+                        for t in tweets_sorted
+                    )
+                    if total_imported_tokens >= 10000:
+                        from backend.tasks.exports import (
+                            maybe_trigger_profile_update
+                        )
+                        profile_update_task_id = (
+                            maybe_trigger_profile_update(
+                                current_user.id,
+                                force_full_regen=needs_full_regen,
+                            )
+                        )
+            except Exception as e:
+                current_app.logger.warning(
+                    f"Auto-trigger profile update failed: {e}"
+                )
+
         return jsonify({
             "message": "Import successful",
             "nodes_created": nodes_created,
-            "thread_count": thread_count
+            "thread_count": thread_count,
+            "profile_update_task_id": profile_update_task_id,
         }), 201
 
     except Exception as e:
@@ -788,5 +1005,388 @@ def confirm_twitter_import():
         )
         return jsonify({
             "error": "Failed to import tweets",
+            "details": str(e)
+        }), 500
+
+
+def _linearize_chatgpt_messages(mapping):
+    """
+    Walk the ChatGPT conversation graph from root to leaf
+    following the first child at each step (main thread).
+    Returns a list of message dicts with text, role, created_at, model.
+    """
+    # Find the root node (no parent)
+    root_id = None
+    for node_id, entry in mapping.items():
+        if not entry.get('parent'):
+            root_id = node_id
+            break
+
+    if not root_id:
+        return []
+
+    messages = []
+    current = root_id
+    visited = set()
+
+    while current and current not in visited:
+        visited.add(current)
+        entry = mapping.get(current)
+        if not entry:
+            break
+
+        msg = entry.get('message')
+        if msg:
+            role = msg.get('author', {}).get('role', '')
+            if role in ('user', 'assistant'):
+                parts = msg.get('content', {}).get('parts', [])
+                text = '\n'.join(
+                    str(p) for p in parts if isinstance(p, str)
+                ).strip()
+                if text:
+                    create_time = msg.get('create_time')
+                    model = (
+                        msg.get('metadata', {}).get(
+                            'model_slug', ''
+                        )
+                    )
+
+                    msg_created_at = None
+                    if create_time:
+                        try:
+                            msg_created_at = datetime.utcfromtimestamp(
+                                float(create_time)
+                            ).isoformat()
+                        except (ValueError, TypeError, OSError):
+                            pass
+
+                    messages.append({
+                        "text": text,
+                        "role": role,
+                        "created_at": msg_created_at or '',
+                        "model": model,
+                    })
+
+        children = entry.get('children', [])
+        current = children[0] if children else None
+
+    return messages
+
+
+@import_bp.route("/import/chatgpt/analyze", methods=["POST"])
+@login_required
+def analyze_chatgpt_import():
+    """
+    Analyze a ChatGPT data export zip file.
+
+    Expects:
+        - multipart/form-data with 'zip_file' field containing a ChatGPT
+          data export (contains conversations.json)
+
+    Returns:
+        {
+            "conversations": [...],
+            "total_conversations": N,
+            "total_messages": N,
+            "total_tokens": N,
+            "total_size": N
+        }
+    """
+    if 'zip_file' not in request.files:
+        return jsonify({"error": "No zip_file provided"}), 400
+
+    zip_file = request.files['zip_file']
+
+    if zip_file.filename == '':
+        return jsonify({"error": "No file selected"}), 400
+
+    if not zip_file.filename.lower().endswith('.zip'):
+        return jsonify({"error": "File must be a .zip file"}), 400
+
+    try:
+        zip_bytes = io.BytesIO(zip_file.read())
+
+        conversations_json = None
+
+        with zipfile.ZipFile(zip_bytes, 'r') as zip_ref:
+            for name in zip_ref.namelist():
+                if name.endswith('conversations.json'):
+                    conversations_json = zip_ref.read(name).decode('utf-8')
+                    break
+
+        if conversations_json is None:
+            return jsonify({
+                "error": "Could not find conversations.json in the zip "
+                         "archive. Please upload a ChatGPT data export."
+            }), 400
+
+        raw_conversations = json.loads(conversations_json)
+
+        conversations = []
+        total_messages = 0
+        total_tokens = 0
+        total_size = 0
+
+        for conv in raw_conversations:
+            mapping = conv.get('mapping', {})
+            if not mapping:
+                continue
+
+            messages = _linearize_chatgpt_messages(mapping)
+
+            if not messages:
+                continue
+
+            conv_token_count = 0
+            for msg in messages:
+                token_count = approximate_token_count(msg['text'])
+                msg['token_count'] = token_count
+                conv_token_count += token_count
+                total_size += len(msg['text'].encode('utf-8'))
+
+            conv_created_at = ''
+            create_time = conv.get('create_time')
+            if create_time:
+                try:
+                    conv_created_at = datetime.utcfromtimestamp(
+                        float(create_time)
+                    ).isoformat()
+                except (ValueError, TypeError, OSError):
+                    pass
+
+            default_model = conv.get('default_model_slug', '')
+
+            conversations.append({
+                "name": conv.get('title', ''),
+                "created_at": conv_created_at,
+                "default_model": default_model,
+                "messages": messages,
+                "message_count": len(messages),
+                "token_count": conv_token_count,
+            })
+
+            total_messages += len(messages)
+            total_tokens += conv_token_count
+
+        if not conversations:
+            return jsonify({
+                "error": "No conversations with messages found in the "
+                         "export."
+            }), 400
+
+        return jsonify({
+            "conversations": conversations,
+            "total_conversations": len(conversations),
+            "total_messages": total_messages,
+            "total_tokens": total_tokens,
+            "total_size": total_size,
+        }), 200
+
+    except zipfile.BadZipFile:
+        return jsonify({"error": "Invalid zip file"}), 400
+    except json.JSONDecodeError as e:
+        return jsonify({
+            "error": "Failed to parse conversations JSON",
+            "details": str(e)
+        }), 400
+    except Exception as e:
+        current_app.logger.error(
+            f"Error analyzing ChatGPT import: {str(e)}"
+        )
+        return jsonify({
+            "error": "Failed to analyze ChatGPT export",
+            "details": str(e)
+        }), 500
+
+
+@import_bp.route("/import/chatgpt/confirm", methods=["POST"])
+@login_required
+def confirm_chatgpt_import():
+    """
+    Create nodes from analyzed ChatGPT conversation data.
+    Each conversation becomes a separate thread with messages chained
+    sequentially.
+
+    Request body:
+        {
+            "conversations": [...],
+            "privacy_level": "private",
+            "ai_usage": "none"
+        }
+
+    Returns:
+        {
+            "message": "Import successful",
+            "nodes_created": N,
+            "thread_count": N
+        }
+    """
+    data = request.get_json()
+
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+
+    conversations = data.get('conversations', [])
+    privacy_level = data.get('privacy_level', 'private')
+    ai_usage = data.get('ai_usage', 'none')
+
+    if not conversations:
+        return jsonify({"error": "No conversations provided"}), 400
+
+    try:
+        # Get or create the synthetic user for chatgpt nodes
+        llm_user = User.query.filter_by(username="chatgpt").first()
+        if not llm_user:
+            llm_user = User(
+                twitter_id="llm-chatgpt", username="chatgpt"
+            )
+            db.session.add(llm_user)
+            db.session.flush()
+
+        nodes_created = 0
+        thread_count = 0
+
+        # Sort conversations by created_at ascending
+        conversations_sorted = sorted(
+            conversations,
+            key=lambda c: c.get('created_at', '')
+        )
+
+        for conv in conversations_sorted:
+            messages = conv.get('messages', [])
+            conv_name = conv.get('name', '')
+
+            if not messages:
+                continue
+
+            parent_node = None
+
+            for i, msg in enumerate(messages):
+                text = msg.get('text', '')
+                role = msg.get('role', 'user')
+
+                if not text:
+                    continue
+
+                # Prepend conversation name as H1 to first message
+                if i == 0 and conv_name:
+                    node_content = f"# {conv_name}\n\n{text}"
+                else:
+                    node_content = text
+
+                is_assistant = role == 'assistant'
+
+                # Parse original timestamp
+                msg_created_at = None
+                raw_ts = msg.get('created_at', '')
+                if raw_ts:
+                    try:
+                        msg_created_at = datetime.fromisoformat(
+                            raw_ts
+                        )
+                    except (ValueError, TypeError):
+                        pass
+
+                # Get model slug for assistant messages
+                model_slug = msg.get('model', '') if is_assistant else None
+
+                node = Node(
+                    user_id=(
+                        llm_user.id if is_assistant else current_user.id
+                    ),
+                    parent_id=parent_node.id if parent_node else None,
+                    node_type="llm" if is_assistant else "user",
+                    llm_model=model_slug or (
+                        "chatgpt" if is_assistant else None
+                    ),
+                    content=node_content,
+                    token_count=approximate_token_count(node_content),
+                    privacy_level=privacy_level,
+                    ai_usage=ai_usage
+                )
+
+                if msg_created_at:
+                    node.created_at = msg_created_at
+
+                db.session.add(node)
+                db.session.flush()
+
+                parent_node = node
+                nodes_created += 1
+
+            thread_count += 1
+
+        db.session.commit()
+
+        # Determine if imported data predates the current profile cutoff
+        profile_update_task_id = None
+        if ai_usage in ('chat', 'train'):
+            try:
+                user_obj = User.query.get(current_user.id)
+                if (user_obj and (user_obj.plan or "free")
+                        in User.VOICE_MODE_PLANS):
+                    latest_profile = UserProfile.query.filter_by(
+                        user_id=current_user.id
+                    ).order_by(UserProfile.created_at.desc()).first()
+                    cutoff = (latest_profile.source_data_cutoff
+                              if latest_profile else None)
+
+                    needs_full_regen = False
+                    if cutoff:
+                        for conv in conversations_sorted:
+                            for msg in conv.get('messages', []):
+                                raw_ts = msg.get('created_at', '')
+                                if raw_ts:
+                                    try:
+                                        ts = datetime.fromisoformat(
+                                            raw_ts
+                                        )
+                                        if ts < cutoff:
+                                            needs_full_regen = True
+                                            break
+                                    except (ValueError, TypeError):
+                                        pass
+                            if needs_full_regen:
+                                break
+
+                    if needs_full_regen:
+                        user_obj.profile_needs_full_regen = True
+                        db.session.commit()
+
+                    total_imported_tokens = sum(
+                        approximate_token_count(msg.get('text', ''))
+                        for conv in conversations_sorted
+                        for msg in conv.get('messages', [])
+                        if msg.get('text')
+                    )
+                    if total_imported_tokens >= 10000:
+                        from backend.tasks.exports import (
+                            maybe_trigger_profile_update
+                        )
+                        profile_update_task_id = (
+                            maybe_trigger_profile_update(
+                                current_user.id,
+                                force_full_regen=needs_full_regen,
+                            )
+                        )
+            except Exception as e:
+                current_app.logger.warning(
+                    f"Auto-trigger profile update failed: {e}"
+                )
+
+        return jsonify({
+            "message": "Import successful",
+            "nodes_created": nodes_created,
+            "thread_count": thread_count,
+            "profile_update_task_id": profile_update_task_id,
+        }), 201
+
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(
+            f"Error confirming ChatGPT import: {str(e)}"
+        )
+        return jsonify({
+            "error": "Failed to import ChatGPT conversations",
             "details": str(e)
         }), 500

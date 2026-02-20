@@ -25,8 +25,6 @@ function Dashboard() {
   // For AI profile generation
   const [selectedModel, setSelectedModel] = useState(null);
   const [generatingProfile, setGeneratingProfile] = useState(false);
-  const [showProfileConfirmation, setShowProfileConfirmation] = useState(false);
-  const [estimatedTokens, setEstimatedTokens] = useState(0);
   const [profileTaskId, setProfileTaskId] = useState(null);
 
   const [hasMoreNodes, setHasMoreNodes] = useState(false);
@@ -148,26 +146,8 @@ function Dashboard() {
   };
 
   const handleGenerateProfile = () => {
-    // First, estimate the tokens
     setGeneratingProfile(true);
-    api.post("/export/estimate_profile_tokens", { model: selectedModel })
-      .then((response) => {
-        setEstimatedTokens(response.data.estimated_tokens);
-        setShowProfileConfirmation(true);
-        setGeneratingProfile(false);
-      })
-      .catch((err) => {
-        console.error("Error estimating tokens:", err);
-        setError(err.response?.data?.error || "Error estimating tokens. Please try again.");
-        setGeneratingProfile(false);
-      });
-  };
-
-  const handleConfirmProfileGeneration = () => {
-    setShowProfileConfirmation(false);
-    setGeneratingProfile(true);
-
-    api.post("/export/generate_profile", { model: selectedModel })
+    api.post("/export/update_profile", { model: selectedModel })
       .then((response) => {
         setProfileTaskId(response.data.task_id);
       })
@@ -177,6 +157,7 @@ function Dashboard() {
         setGeneratingProfile(false);
       });
   };
+
 
   // Polling for profile generation status
   const {
@@ -205,10 +186,6 @@ function Dashboard() {
       setProfileTaskId(null);
     }
   }, [profileStatus, profileData, profileError]);
-
-  const handleCancelProfileGeneration = () => {
-    setShowProfileConfirmation(false);
-  };
 
   const fetchMoreNodes = useCallback((nextPage) => {
     setLoadingMoreNodes(true);
@@ -289,63 +266,41 @@ function Dashboard() {
       {!username && (
         <>
           <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", flexWrap: "wrap", marginBottom: "2.5rem" }}>
-            <button onClick={handleExportData} style={ghostBtnStyle}>
-              Export Data
-            </button>
-            <ImportData />
-            <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-              <ModelSelector
-                nodeId={null}
-                selectedModel={selectedModel}
-                onModelChange={setSelectedModel}
-              />
-              <button
-                onClick={handleGenerateProfile}
-                disabled={generatingProfile || !!profileTaskId}
-                style={{
-                  ...primaryBtnStyle,
-                  cursor: (generatingProfile || profileTaskId) ? "not-allowed" : "pointer",
-                  opacity: (generatingProfile || profileTaskId) ? 0.6 : 1
-                }}
-              >
-                {profileTaskId && profileStatus === 'progress' && profileProgress > 0
-                  ? `Generating... ${profileProgress}%`
-                  : profileTaskId && profileStatus === 'pending'
-                  ? "Starting..."
-                  : profileTaskId
-                  ? `Generating... ${profileProgress}%`
-                  : generatingProfile
-                  ? "Estimating..."
-                  : "Generate Profile"}
+            {user.craft_mode && (
+              <button onClick={handleExportData} style={ghostBtnStyle}>
+                Export Data
               </button>
-            </div>
-          </div>
-
-          {/* Token confirmation dialog */}
-          {showProfileConfirmation && (
-            <div style={{
-              marginTop: "20px",
-              padding: "2rem",
-              backgroundColor: "var(--bg-card)",
-              borderRadius: "10px",
-              border: "1px solid var(--border)"
-            }}>
-              <h3 style={{ fontFamily: "var(--serif)", fontWeight: 300, color: "var(--text-primary)", margin: "0 0 12px 0" }}>Confirm Profile Generation</h3>
-              <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
-                This will use approximately <strong style={{ color: "var(--text-primary)" }}>{estimatedTokens.toLocaleString()}</strong> tokens
-                to analyze all your writing and generate a profile using <strong style={{ color: "var(--text-primary)" }}>{selectedModel}</strong>.
-              </p>
-              <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>Do you want to proceed?</p>
-              <div style={{ display: "flex", gap: "10px", marginTop: "10px" }}>
-                <button onClick={handleConfirmProfileGeneration} style={primaryBtnStyle}>
-                  Yes, generate profile
-                </button>
-                <button onClick={handleCancelProfileGeneration} style={cancelBtnStyle}>
-                  Cancel
+            )}
+            <ImportData onProfileUpdateStarted={(taskId) => setProfileTaskId(taskId)} />
+            {user.craft_mode && (
+              <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                <ModelSelector
+                  nodeId={null}
+                  selectedModel={selectedModel}
+                  onModelChange={setSelectedModel}
+                />
+                <button
+                  onClick={handleGenerateProfile}
+                  disabled={generatingProfile || !!profileTaskId}
+                  style={{
+                    ...primaryBtnStyle,
+                    cursor: (generatingProfile || profileTaskId) ? "not-allowed" : "pointer",
+                    opacity: (generatingProfile || profileTaskId) ? 0.6 : 1
+                  }}
+                >
+                  {profileTaskId && profileStatus === 'progress' && profileProgress > 0
+                    ? `Generating... ${profileProgress}%`
+                    : profileTaskId && profileStatus === 'pending'
+                    ? "Starting..."
+                    : profileTaskId
+                    ? `Generating... ${profileProgress}%`
+                    : generatingProfile
+                    ? "Estimating..."
+                    : "Generate Profile"}
                 </button>
               </div>
-            </div>
-          )}
+            )}
+          </div>
 
           {/* Display unified profile */}
           <div style={{

@@ -28,6 +28,12 @@ celery.conf.update(
     worker_prefetch_multiplier=1,  # Process one task at a time
     worker_max_tasks_per_child=50,  # Restart worker after 50 tasks (prevent memory leaks)
     result_expires=86400,  # Keep results for 24 hours
+    beat_schedule={
+        'check-profile-updates': {
+            'task': 'backend.tasks.exports.check_pending_profile_updates',
+            'schedule': 3600.0,  # every hour
+        },
+    },
 )
 
 # Import tasks to register them with Celery

@@ -21,6 +21,7 @@ import OrientPage from "./pages/OrientPage";
 import ConversePage from "./pages/ConversePage";
 import ProfilePage from "./pages/ProfilePage";
 import TodoPage from "./pages/TodoPage";
+import ImportPage from "./pages/ImportPage";
 import { useUser } from "./contexts/UserContext";
 import { AudioProvider } from "./contexts/AudioContext";
 
@@ -183,6 +184,7 @@ function App() {
           <Route path="/dashboard" element={<Navigate to="/profile" replace />} />
           {/* Public profile view */}
           <Route path="/dashboard/:username" element={<Dashboard />} />
+          <Route path="/import" element={<ProtectedRoute><ImportPage /></ProtectedRoute>} />
           <Route path="/node/:id" element={<ProtectedRoute><NodeDetailWrapper /></ProtectedRoute>} />
           <Route path="/admin" element={<ProtectedRoute><AdminPanel /></ProtectedRoute>} />
           <Route path="*" element={<Navigate to="/" replace />} />

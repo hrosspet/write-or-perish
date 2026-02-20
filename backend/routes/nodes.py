@@ -462,11 +462,16 @@ def create_node():
     if not validate_ai_usage(ai_usage):
         return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
 
+    # Calculate token count before encryption
+    from backend.utils.tokens import approximate_token_count as _atc
+    token_count = _atc(content)
+
     node = Node(
         user_id=current_user.id,
         parent_id=parent_id,
         node_type=node_type,
         linked_node_id=linked_node_id,
+        token_count=token_count,
         privacy_level=privacy_level,
         ai_usage=ai_usage
     )
@@ -477,6 +482,7 @@ def create_node():
     except Exception:
         db.session.rollback()
         return jsonify({"error": "DB error creating node"}), 500
+
     return jsonify({
         "id": node.id,
         "content": node.get_content(),

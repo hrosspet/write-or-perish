@@ -35,6 +35,12 @@ class User(db.Model, UserMixin):
     # Subscription plan ("free", "alpha", "pro", etc.).
     plan = db.Column(db.String(16), nullable=False, default="alpha")
 
+    # Concurrency guard: Celery task ID of in-flight profile generation
+    profile_generation_task_id = db.Column(db.String(255), nullable=True)
+
+    # Flag: next profile generation should be a full regen (not incremental)
+    profile_needs_full_regen = db.Column(db.Boolean, nullable=False, default=False)
+
     # All valid subscription plans (single source of truth).
     ALLOWED_PLANS = {"free", "alpha", "pro"}
 
@@ -229,6 +235,17 @@ class UserProfile(db.Model):
     # Default for profiles is 'chat' (AI can use for responses)
     ai_usage = db.Column(db.String(16), nullable=False, default="chat")
 
+    # Cumulative source data tokens the profile is based on
+    source_tokens_used = db.Column(db.Integer, nullable=True, default=0)
+    # Timestamp cursor: created_at of last included Node
+    source_data_cutoff = db.Column(db.DateTime, nullable=True)
+    # Distinguishes initial, update, iterative, and user edits
+    generation_type = db.Column(db.String(16), nullable=True, default="initial")
+    # Links to previous profile version used as input (chain tracing)
+    parent_profile_id = db.Column(
+        db.Integer, db.ForeignKey("user_profile.id"), nullable=True
+    )
+
     # --- Voice‑Mode fields ---
     audio_tts_url = db.Column(db.String, nullable=True)
     tts_task_id = db.Column(db.String(255), nullable=True)
@@ -237,6 +254,9 @@ class UserProfile(db.Model):
 
     # Relationship back to user
     user = db.relationship("User", backref="profiles")
+    parent_profile = db.relationship(
+        "UserProfile", remote_side="UserProfile.id", uselist=False
+    )
 
     def set_content(self, plaintext: str):
         """Set content with encryption."""
