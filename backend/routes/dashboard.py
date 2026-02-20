@@ -26,7 +26,13 @@ def get_latest_profile(user):
             "content": profile.get_content(),
             "generated_by": profile.generated_by,
             "tokens_used": profile.tokens_used,
-            "created_at": profile.created_at.isoformat()
+            "created_at": profile.created_at.isoformat(),
+            "source_tokens_used": profile.source_tokens_used,
+            "source_data_cutoff": (
+                profile.source_data_cutoff.isoformat()
+                if profile.source_data_cutoff else None
+            ),
+            "generation_type": profile.generation_type,
         }
     return None
 

@@ -462,11 +462,16 @@ def create_node():
     if not validate_ai_usage(ai_usage):
         return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
 
+    # Calculate token count before encryption
+    from backend.utils.tokens import approximate_token_count as _atc
+    token_count = _atc(content)
+
     node = Node(
         user_id=current_user.id,
         parent_id=parent_id,
         node_type=node_type,
         linked_node_id=linked_node_id,
+        token_count=token_count,
         privacy_level=privacy_level,
         ai_usage=ai_usage
     )
@@ -477,6 +482,19 @@ def create_node():
     except Exception:
         db.session.rollback()
         return jsonify({"error": "DB error creating node"}), 500
+
+    # Fire-and-forget: check if enough new writing to trigger profile update
+    if ai_usage in ('chat', 'train'):
+        try:
+            from backend.tasks.exports import (
+                maybe_trigger_incremental_profile_update
+            )
+            maybe_trigger_incremental_profile_update(current_user)
+        except Exception as e:
+            current_app.logger.debug(
+                f"Profile update check skipped: {e}"
+            )
+
     return jsonify({
         "id": node.id,
         "content": node.get_content(),

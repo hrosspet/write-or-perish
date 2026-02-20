@@ -37,6 +37,12 @@ def get_profile_versions():
             "tokens_used": profile.tokens_used,
             "created_at": profile.created_at.isoformat(),
             "version_number": total - i,
+            "source_tokens_used": profile.source_tokens_used,
+            "source_data_cutoff": (
+                profile.source_data_cutoff.isoformat()
+                if profile.source_data_cutoff else None
+            ),
+            "generation_type": profile.generation_type,
         })
 
     return jsonify({"versions": versions}), 200
