@@ -329,6 +329,9 @@ function NavBar({ onNewEntryClick }) {
                     <Link to="/export" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
                       Export data
                     </Link>
+                    <Link to="/prompts" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
+                      Prompts
+                    </Link>
                     <div style={{ ...dropdownItemStyle, cursor: "default", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                       <span>Model</span>
                       <span style={{ fontSize: "0.75rem" }}>

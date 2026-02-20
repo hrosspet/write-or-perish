@@ -2,15 +2,13 @@ from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node, User, UserTodo
 from backend.extensions import db
-from pathlib import Path
+from backend.utils.prompts import get_user_prompt
 
 orient_bp = Blueprint("orient", __name__)
 
-PROMPT_PATH = Path(__file__).parent.parent / "prompts" / "orient.txt"
-
 
 def _get_orient_prompt():
-    return PROMPT_PATH.read_text(encoding="utf-8")
+    return get_user_prompt(current_user.id, 'orient')
 
 
 @orient_bp.route("/", methods=["POST"])
