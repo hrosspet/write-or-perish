@@ -483,18 +483,6 @@ def create_node():
         db.session.rollback()
         return jsonify({"error": "DB error creating node"}), 500
 
-    # Fire-and-forget: check if enough new writing to trigger profile update
-    if ai_usage in ('chat', 'train'):
-        try:
-            from backend.tasks.exports import (
-                maybe_trigger_incremental_profile_update
-            )
-            maybe_trigger_incremental_profile_update(current_user)
-        except Exception as e:
-            current_app.logger.debug(
-                f"Profile update check skipped: {e}"
-            )
-
     return jsonify({
         "id": node.id,
         "content": node.get_content(),

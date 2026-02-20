@@ -100,6 +100,25 @@ services:
       - media_data:/app/data
     restart: unless-stopped
 
+  # Celery Beat scheduler for periodic tasks
+  celery-beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A backend.celery_app.celery beat --loglevel=info
+    environment:
+      - SECRET_KEY=${SECRET_KEY}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-writeorperish}:${POSTGRES_PASSWORD:-writeorperish}@db:5432/${POSTGRES_DB:-writeorperish}
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - LLM_NAME=${LLM_NAME:-claude-opus-4.5}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
   # React Frontend (production build served by nginx)
   frontend:
     build:

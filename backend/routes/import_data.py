@@ -1,6 +1,6 @@
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
-from backend.models import Node, User
+from backend.models import Node, User, UserProfile
 from backend.extensions import db
 from datetime import datetime
 import zipfile
@@ -255,24 +255,50 @@ def confirm_import():
         # Commit all nodes
         db.session.commit()
 
-        # Auto-trigger profile update if enough tokens imported
+        # Determine if imported data predates the current profile cutoff
         profile_update_task_id = None
-        total_imported_tokens = sum(
-            approximate_token_count(f.get('content', ''))
-            for f in files_sorted
-        )
-        if (total_imported_tokens >= 10000
-                and ai_usage in ('chat', 'train')):
+        if ai_usage in ('chat', 'train'):
             try:
-                from backend.tasks.exports import (
-                    maybe_trigger_profile_update
-                )
                 user_obj = User.query.get(current_user.id)
                 if (user_obj and (user_obj.plan or "free")
                         in User.VOICE_MODE_PLANS):
-                    profile_update_task_id = (
-                        maybe_trigger_profile_update(current_user.id)
+                    latest_profile = UserProfile.query.filter_by(
+                        user_id=current_user.id
+                    ).order_by(UserProfile.created_at.desc()).first()
+                    cutoff = (latest_profile.source_data_cutoff
+                              if latest_profile else None)
+
+                    needs_full_regen = False
+                    if cutoff:
+                        for f in files_sorted:
+                            raw_ts = f.get('modified_at', '')
+                            if raw_ts:
+                                try:
+                                    ts = datetime.fromisoformat(raw_ts)
+                                    if ts < cutoff:
+                                        needs_full_regen = True
+                                        break
+                                except (ValueError, TypeError):
+                                    pass
+
+                    if needs_full_regen:
+                        user_obj.profile_needs_full_regen = True
+                        db.session.commit()
+
+                    total_imported_tokens = sum(
+                        approximate_token_count(f.get('content', ''))
+                        for f in files_sorted
                     )
+                    if total_imported_tokens >= 10000:
+                        from backend.tasks.exports import (
+                            maybe_trigger_profile_update
+                        )
+                        profile_update_task_id = (
+                            maybe_trigger_profile_update(
+                                current_user.id,
+                                force_full_regen=needs_full_regen,
+                            )
+                        )
             except Exception as e:
                 current_app.logger.warning(
                     f"Auto-trigger profile update failed: {e}"
@@ -676,26 +702,60 @@ def confirm_claude_import():
 
         db.session.commit()
 
-        # Auto-trigger profile update if enough tokens imported
+        # Determine if imported data predates the current profile cutoff
         profile_update_task_id = None
-        total_imported_tokens = sum(
-            approximate_token_count(msg.get('text', ''))
-            for conv in conversations_sorted
-            for msg in conv.get('messages', [])
-            if msg.get('text')
-        )
-        if (total_imported_tokens >= 10000
-                and ai_usage in ('chat', 'train')):
+        if ai_usage in ('chat', 'train'):
             try:
-                from backend.tasks.exports import (
-                    maybe_trigger_profile_update
-                )
                 user_obj = User.query.get(current_user.id)
                 if (user_obj and (user_obj.plan or "free")
                         in User.VOICE_MODE_PLANS):
-                    profile_update_task_id = (
-                        maybe_trigger_profile_update(current_user.id)
+                    latest_profile = UserProfile.query.filter_by(
+                        user_id=current_user.id
+                    ).order_by(UserProfile.created_at.desc()).first()
+                    cutoff = (latest_profile.source_data_cutoff
+                              if latest_profile else None)
+
+                    needs_full_regen = False
+                    if cutoff:
+                        for conv in conversations_sorted:
+                            for msg in conv.get('messages', []):
+                                raw_ts = msg.get('created_at', '')
+                                if raw_ts:
+                                    try:
+                                        raw_ts = raw_ts.replace(
+                                            'Z', '+00:00'
+                                        )
+                                        ts = datetime.fromisoformat(
+                                            raw_ts
+                                        ).replace(tzinfo=None)
+                                        if ts < cutoff:
+                                            needs_full_regen = True
+                                            break
+                                    except (ValueError, TypeError):
+                                        pass
+                            if needs_full_regen:
+                                break
+
+                    if needs_full_regen:
+                        user_obj.profile_needs_full_regen = True
+                        db.session.commit()
+
+                    total_imported_tokens = sum(
+                        approximate_token_count(msg.get('text', ''))
+                        for conv in conversations_sorted
+                        for msg in conv.get('messages', [])
+                        if msg.get('text')
                     )
+                    if total_imported_tokens >= 10000:
+                        from backend.tasks.exports import (
+                            maybe_trigger_profile_update
+                        )
+                        profile_update_task_id = (
+                            maybe_trigger_profile_update(
+                                current_user.id,
+                                force_full_regen=needs_full_regen,
+                            )
+                        )
             except Exception as e:
                 current_app.logger.warning(
                     f"Auto-trigger profile update failed: {e}"
@@ -825,26 +885,55 @@ def confirm_twitter_import():
 
         db.session.commit()
 
-        # Auto-trigger profile update if enough tokens imported
+        # Determine if imported data predates the current profile cutoff
         profile_update_task_id = None
-        total_imported_tokens = sum(
-            t.get('token_count', approximate_token_count(
-                t.get('full_text', '')
-            ))
-            for t in tweets_sorted
-        )
-        if (total_imported_tokens >= 10000
-                and ai_usage in ('chat', 'train')):
+        if ai_usage in ('chat', 'train'):
             try:
-                from backend.tasks.exports import (
-                    maybe_trigger_profile_update
-                )
                 user_obj = User.query.get(current_user.id)
                 if (user_obj and (user_obj.plan or "free")
                         in User.VOICE_MODE_PLANS):
-                    profile_update_task_id = (
-                        maybe_trigger_profile_update(current_user.id)
+                    latest_profile = UserProfile.query.filter_by(
+                        user_id=current_user.id
+                    ).order_by(UserProfile.created_at.desc()).first()
+                    cutoff = (latest_profile.source_data_cutoff
+                              if latest_profile else None)
+
+                    needs_full_regen = False
+                    if cutoff:
+                        for t in tweets_sorted:
+                            raw_ts = t.get('created_at', '')
+                            if raw_ts:
+                                try:
+                                    ts = datetime.strptime(
+                                        raw_ts,
+                                        "%a %b %d %H:%M:%S %z %Y"
+                                    ).replace(tzinfo=None)
+                                    if ts < cutoff:
+                                        needs_full_regen = True
+                                        break
+                                except (ValueError, TypeError):
+                                    pass
+
+                    if needs_full_regen:
+                        user_obj.profile_needs_full_regen = True
+                        db.session.commit()
+
+                    total_imported_tokens = sum(
+                        t.get('token_count', approximate_token_count(
+                            t.get('full_text', '')
+                        ))
+                        for t in tweets_sorted
                     )
+                    if total_imported_tokens >= 10000:
+                        from backend.tasks.exports import (
+                            maybe_trigger_profile_update
+                        )
+                        profile_update_task_id = (
+                            maybe_trigger_profile_update(
+                                current_user.id,
+                                force_full_regen=needs_full_regen,
+                            )
+                        )
             except Exception as e:
                 current_app.logger.warning(
                     f"Auto-trigger profile update failed: {e}"
