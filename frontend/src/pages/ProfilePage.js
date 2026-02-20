@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import api from '../api';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
+import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
 
 export default function ProfilePage() {
   const [profile, setProfile] = useState(null);
@@ -16,6 +17,34 @@ export default function ProfilePage() {
   const [versions, setVersions] = useState([]);
   const [selectedVersionId, setSelectedVersionId] = useState(null);
   const [versionContent, setVersionContent] = useState(null);
+
+  // Profile generation progress — read task ID from localStorage
+  const [generationTaskId, setGenerationTaskId] = useState(
+    () => localStorage.getItem('loore_profile_task_id')
+  );
+  const [failMessage, setFailMessage] = useState('');
+
+  const pollingEndpoint = generationTaskId
+    ? `/export/profile-status/${generationTaskId}` : null;
+
+  const { status: genStatus, progress: genProgress, data: genData } = useAsyncTaskPolling(
+    pollingEndpoint,
+    { interval: 3000, enabled: !!generationTaskId }
+  );
+
+  // React to polling status changes
+  useEffect(() => {
+    if (genStatus === 'completed') {
+      localStorage.removeItem('loore_profile_task_id');
+      setGenerationTaskId(null);
+      fetchProfile();
+    } else if (genStatus === 'failed') {
+      localStorage.removeItem('loore_profile_task_id');
+      setGenerationTaskId(null);
+      setFailMessage('Generation failed');
+      setTimeout(() => setFailMessage(''), 5000);
+    }
+  }, [genStatus]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fetchProfile = useCallback(async () => {
     try {
@@ -138,6 +167,21 @@ export default function ProfilePage() {
               history
             </button>
           </div>
+        )}
+
+        {/* Generation progress indicator */}
+        {(generationTaskId || failMessage) && (
+          <span style={{
+            fontFamily: 'var(--sans)',
+            fontSize: '0.85rem',
+            fontWeight: 300,
+            color: failMessage ? 'var(--text-muted)' : 'var(--accent)',
+            animation: generationTaskId ? 'pulse 2s ease-in-out infinite' : 'none',
+          }}>
+            {failMessage || (genData?.message
+              ? `${genData.message}${genProgress ? ` \u00b7 ${genProgress}%` : ''}`
+              : 'Generating...')}
+          </span>
         )}
       </div>
 

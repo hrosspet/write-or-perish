@@ -74,7 +74,7 @@ function Feed() {
           fontSize: "2rem",
           marginBottom: "0.8rem",
         }}>
-          Feed
+          Log
         </h2>
         <div style={{
           width: "40px",

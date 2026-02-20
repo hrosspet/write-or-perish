@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useUser } from "../contexts/UserContext";
 import GlobalAudioPlayer from "./GlobalAudioPlayer";
 import ModelSelector from "./ModelSelector";
@@ -12,6 +12,7 @@ const aboutPaths = ["/why-loore", "/vision", "/how-to"];
 function NavBar({ onNewEntryClick }) {
   const { user, setUser } = useUser();
   const location = useLocation();
+  const navigate = useNavigate();
   const [aboutOpen, setAboutOpen] = useState(false);
   const [overflowOpen, setOverflowOpen] = useState(false);
   const aboutRef = useRef(null);
@@ -23,17 +24,24 @@ function NavBar({ onNewEntryClick }) {
     return localStorage.getItem('loore_craft_mode') === 'true';
   });
 
-  // Profile generation state (craft mode)
-  const [selectedModel, setSelectedModel] = useState(null);
-  const [generatingProfile, setGeneratingProfile] = useState(false);
-  const [profileTaskId, setProfileTaskId] = useState(null);
-  const [profileProgress, setProfileProgress] = useState(0);
-  const pollRef = useRef(null);
+  // Model selection — read from user preference, localStorage fallback, or null
+  const [selectedModel, setSelectedModel] = useState(() => {
+    if (user && user.preferred_model) return user.preferred_model;
+    return localStorage.getItem('loore_selected_model') || null;
+  });
 
-  // Sync craft mode when user loads
+  // Profile generation state (craft mode)
+  const [generatingProfile, setGeneratingProfile] = useState(() => {
+    return !!localStorage.getItem('loore_profile_task_id');
+  });
+
+  // Sync craft mode and model preference when user loads
   useEffect(() => {
     if (user && user.craft_mode !== undefined) {
       setCraftMode(user.craft_mode);
+    }
+    if (user && user.preferred_model) {
+      setSelectedModel(user.preferred_model);
     }
   }, [user]);
 
@@ -55,59 +63,50 @@ function NavBar({ onNewEntryClick }) {
     }
   };
 
-  // Fetch default model once
+  // Fetch default model only if no user preference or localStorage value exists
   useEffect(() => {
     if (user && !selectedModel) {
-      api.get("/nodes/default-model")
-        .then(r => setSelectedModel(r.data.suggested_model))
-        .catch(() => setSelectedModel("claude-opus-4.6"));
+      const stored = localStorage.getItem('loore_selected_model');
+      if (stored) {
+        setSelectedModel(stored);
+      } else {
+        api.get("/nodes/default-model")
+          .then(r => setSelectedModel(r.data.suggested_model))
+          .catch(() => setSelectedModel("claude-opus-4.6"));
+      }
     }
   }, [user, selectedModel]);
 
-  // Profile generation handler
+  // Handle model selection change — persist to localStorage + backend
+  const handleModelChange = async (model) => {
+    setSelectedModel(model);
+    localStorage.setItem('loore_selected_model', model);
+    if (user) {
+      try {
+        const response = await api.put('/dashboard/user', { preferred_model: model });
+        if (response.data.user) {
+          setUser(response.data.user);
+        }
+      } catch (e) {
+        // Silently fall back to localStorage
+      }
+    }
+  };
+
+  // Profile generation handler — navigate to /profile after starting
   const handleGenerateProfile = async () => {
-    if (generatingProfile || profileTaskId) return;
+    if (generatingProfile) return;
     setGeneratingProfile(true);
     try {
       const res = await api.post("/export/update_profile", { model: selectedModel });
-      if (res.data.status === "already_running") {
-        setProfileTaskId(res.data.task_id);
-      } else {
-        setProfileTaskId(res.data.task_id);
-      }
+      localStorage.setItem('loore_profile_task_id', res.data.task_id);
+      setOverflowOpen(false);
+      navigate('/profile');
     } catch (err) {
       console.error("Profile generation error:", err);
       setGeneratingProfile(false);
     }
   };
-
-  // Poll profile task status
-  useEffect(() => {
-    if (!profileTaskId) return;
-    const poll = async () => {
-      try {
-        const res = await api.get(`/export/profile-status/${profileTaskId}`, {
-          timeout: 10000, headers: { 'Cache-Control': 'no-cache' }
-        });
-        const { status, progress } = res.data;
-        setProfileProgress(progress || 0);
-        if (status === 'completed' || status === 'failed') {
-          setGeneratingProfile(false);
-          setProfileTaskId(null);
-          setProfileProgress(0);
-          if (status === 'completed') {
-            // Reload page to show new profile
-            window.location.reload();
-          }
-        }
-      } catch (err) {
-        console.error("Profile poll error:", err);
-      }
-    };
-    poll();
-    pollRef.current = setInterval(poll, 3000);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [profileTaskId]);
 
   // When "Write" is clicked:
   const handleWriteClick = (e) => {
@@ -338,25 +337,21 @@ function NavBar({ onNewEntryClick }) {
                         <ModelSelector
                           nodeId={null}
                           selectedModel={selectedModel}
-                          onModelChange={setSelectedModel}
+                          onModelChange={handleModelChange}
                         />
                       </span>
                     </div>
                     <button
-                      onClick={() => { setOverflowOpen(false); handleGenerateProfile(); }}
-                      disabled={generatingProfile || !!profileTaskId}
+                      onClick={handleGenerateProfile}
+                      disabled={generatingProfile}
                       style={{
                         ...dropdownItemStyle,
                         color: "var(--text-muted)",
-                        cursor: (generatingProfile || profileTaskId) ? "not-allowed" : "pointer",
-                        opacity: (generatingProfile || profileTaskId) ? 0.6 : 1,
+                        cursor: generatingProfile ? "not-allowed" : "pointer",
+                        opacity: generatingProfile ? 0.6 : 1,
                       }}
                     >
-                      {profileTaskId
-                        ? `Generating... ${profileProgress}%`
-                        : generatingProfile
-                        ? "Starting..."
-                        : "Generate Profile"}
+                      {generatingProfile ? "Starting..." : "Generate Profile"}
                     </button>
                   </>
                 )}

@@ -98,7 +98,8 @@ def get_dashboard():
             "is_admin": current_user.is_admin,
             "plan": current_user.plan,
             "voice_mode_enabled": voice_mode_enabled,
-            "craft_mode": current_user.craft_mode
+            "craft_mode": current_user.craft_mode,
+            "preferred_model": current_user.preferred_model
         },
         "pinned_nodes": pinned_list,
         "nodes": nodes_list,
@@ -176,6 +177,9 @@ def update_user():
     if "craft_mode" in data:
         current_user.craft_mode = bool(data["craft_mode"])
 
+    if "preferred_model" in data:
+        current_user.preferred_model = data["preferred_model"]
+
     try:
         db.session.commit()
         # Include voice mode feature flag and user plan in the response
@@ -193,7 +197,8 @@ def update_user():
                 "is_admin": current_user.is_admin,
                 "plan": current_user.plan,
                 "voice_mode_enabled": voice_mode_enabled,
-                "craft_mode": current_user.craft_mode
+                "craft_mode": current_user.craft_mode,
+                "preferred_model": current_user.preferred_model
             }
         }), 200
     except Exception as e:

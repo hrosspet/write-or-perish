@@ -32,6 +32,9 @@ class User(db.Model, UserMixin):
     # Craft mode toggle — shows power-user features in the nav overflow menu
     craft_mode = db.Column(db.Boolean, default=False, nullable=False)
 
+    # Preferred AI model for craft-mode operations
+    preferred_model = db.Column(db.String(64), nullable=True)
+
     # Subscription plan ("free", "alpha", "pro", etc.).
     plan = db.Column(db.String(16), nullable=False, default="alpha")
 
