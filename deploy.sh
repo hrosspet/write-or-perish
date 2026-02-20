@@ -93,7 +93,7 @@ if [ -d "migrations" ]; then
     fi
 
     # Apply migrations
-    flask db upgrade || warn "Database migration failed or no migrations to apply"
+    flask db upgrade || error "Database migration failed"
 else
     warn "No migrations directory found, skipping migrations"
 fi
