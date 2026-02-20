@@ -32,13 +32,22 @@ export function useMediaSession({
   const intervalRef = useRef(null);
   const elapsedRef = useRef(0);
 
+  // Store callbacks in refs so the effect doesn't re-run when they change.
+  // (The parent recreates these on every render due to unstable `streaming` object.)
+  const handlersRef = useRef({});
+  handlersRef.current = {
+    handlePauseRecording,
+    handleResumeRecording,
+    handleStop,
+    handleCancelProcessing,
+  };
+
   useEffect(() => {
     if (!isIOS || !('mediaSession' in navigator)) return;
 
     const ms = navigator.mediaSession;
     const artwork = [{ src: '/apple-touch-icon.png', sizes: '180x180', type: 'image/png' }];
 
-    // -- Action handlers --
     const clear = (action) => {
       try { ms.setActionHandler(action, null); } catch (_) { /* unsupported */ }
     };
@@ -46,10 +55,9 @@ export function useMediaSession({
       'seekbackward', 'seekforward', 'seekto'];
 
     if (phase === 'recording') {
-      ms.setActionHandler('play', () => handleResumeRecording());
-      ms.setActionHandler('pause', () => handlePauseRecording());
-      // iOS has no dedicated stop button — use next-track (forward skip) instead
-      ms.setActionHandler('nexttrack', () => handleStop());
+      ms.setActionHandler('play', () => handlersRef.current.handleResumeRecording());
+      ms.setActionHandler('pause', () => handlersRef.current.handlePauseRecording());
+      ms.setActionHandler('nexttrack', () => handlersRef.current.handleStop());
       clear('stop');
       clear('previoustrack');
       clear('seekbackward');
@@ -57,6 +65,9 @@ export function useMediaSession({
       clear('seekto');
 
       ms.playbackState = isPaused ? 'paused' : 'playing';
+
+      // Override the silent audio's 2-second progress bar with a static position
+      try { ms.setPositionState({ duration: 86400, position: 0, playbackRate: 0 }); } catch (_) {}
 
       // Update title with elapsed duration every second
       const updateTitle = () => {
@@ -79,7 +90,7 @@ export function useMediaSession({
       });
       clear('play');
       clear('pause');
-      ms.setActionHandler('nexttrack', () => handleCancelProcessing());
+      ms.setActionHandler('nexttrack', () => handlersRef.current.handleCancelProcessing());
       clear('stop');
       clear('previoustrack');
       clear('seekbackward');
@@ -107,5 +118,5 @@ export function useMediaSession({
         intervalRef.current = null;
       }
     };
-  }, [phase, isPaused, handlePauseRecording, handleResumeRecording, handleStop, handleCancelProcessing, ttsTitle]);
+  }, [phase, isPaused, ttsTitle]);
 }
