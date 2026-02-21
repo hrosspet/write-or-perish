@@ -517,11 +517,17 @@ def update_profile():
 
     data = request.get_json() or {}
     model_id = data.get("model")
+    force_full_regen = data.get("force_full_regen", False)
 
     if not model_id:
         model_id = current_app.config.get(
             "DEFAULT_LLM_MODEL", "claude-opus-4.6"
         )
+
+    if force_full_regen:
+        from backend.extensions import db as _db_flag
+        current_user.profile_needs_full_regen = True
+        _db_flag.session.commit()
 
     if model_id not in current_app.config["SUPPORTED_MODELS"]:
         return jsonify({

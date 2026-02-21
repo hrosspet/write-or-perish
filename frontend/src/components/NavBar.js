@@ -113,7 +113,7 @@ function NavBar({ onNewEntryClick }) {
     if (generatingProfile) return;
     setGeneratingProfile(true);
     try {
-      const res = await api.post("/export/update_profile", { model: selectedModel });
+      const res = await api.post("/export/update_profile", { model: selectedModel, force_full_regen: true });
       localStorage.setItem('loore_profile_task_id', res.data.task_id);
       window.dispatchEvent(new CustomEvent('loore_profile_started', {
         detail: { taskId: res.data.task_id }
@@ -369,7 +369,7 @@ function NavBar({ onNewEntryClick }) {
                         opacity: generatingProfile ? 0.6 : 1,
                       }}
                     >
-                      {generatingProfile ? "Generating profile..." : "Generate Profile"}
+                      {generatingProfile ? "Generating profile..." : "(Re-)Generate Profile"}
                     </button>
                   </>
                 )}
