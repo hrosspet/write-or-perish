@@ -2,9 +2,12 @@ import React, { useState, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import api from '../api';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
+import SpeakerIcon from '../components/SpeakerIcon';
 import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
+import { useUser } from '../contexts/UserContext';
 
 export default function ProfilePage() {
+  const { user } = useUser();
   const [profile, setProfile] = useState(null);
   const [versionNumber, setVersionNumber] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -18,11 +21,20 @@ export default function ProfilePage() {
   const [selectedVersionId, setSelectedVersionId] = useState(null);
   const [versionContent, setVersionContent] = useState(null);
 
-  // Profile generation progress — read task ID from localStorage
+  // Profile generation progress — read from localStorage or backend user
   const [generationTaskId, setGenerationTaskId] = useState(
     () => localStorage.getItem('loore_profile_task_id')
   );
   const [failMessage, setFailMessage] = useState('');
+
+  // Pick up task ID from backend if localStorage doesn't have it (cross-browser)
+  useEffect(() => {
+    if (!generationTaskId && user && user.profile_generation_task_id) {
+      const backendTaskId = user.profile_generation_task_id;
+      localStorage.setItem('loore_profile_task_id', backendTaskId);
+      setGenerationTaskId(backendTaskId);
+    }
+  }, [user, generationTaskId]);
 
   const pollingEndpoint = generationTaskId
     ? `/export/profile-status/${generationTaskId}` : null;
@@ -37,10 +49,12 @@ export default function ProfilePage() {
     if (genStatus === 'completed') {
       localStorage.removeItem('loore_profile_task_id');
       setGenerationTaskId(null);
+      window.dispatchEvent(new Event('loore_profile_done'));
       fetchProfile();
     } else if (genStatus === 'failed') {
       localStorage.removeItem('loore_profile_task_id');
       setGenerationTaskId(null);
+      window.dispatchEvent(new Event('loore_profile_done'));
       setFailMessage('Generation failed');
       setTimeout(() => setFailMessage(''), 5000);
     }
@@ -137,6 +151,15 @@ export default function ProfilePage() {
         </h1>
 
         {profile && (
+          <SpeakerIcon
+            profileId={profile.id}
+            content={profile.content}
+            isPublic={profile.privacy_level === 'public'}
+            aiUsage={profile.ai_usage}
+          />
+        )}
+
+        {profile && (
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
             <button
               onClick={() => {
@@ -179,8 +202,8 @@ export default function ProfilePage() {
             animation: generationTaskId ? 'pulse 2s ease-in-out infinite' : 'none',
           }}>
             {failMessage || (genData?.message
-              ? `${genData.message}${genProgress ? ` \u00b7 ${genProgress}%` : ''}`
-              : 'Generating...')}
+              ? `${genData.message} \u00b7 ${genProgress || 0}%`
+              : 'Starting generation...')}
           </span>
         )}
       </div>
