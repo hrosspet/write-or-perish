@@ -99,7 +99,8 @@ def get_dashboard():
             "plan": current_user.plan,
             "voice_mode_enabled": voice_mode_enabled,
             "craft_mode": current_user.craft_mode,
-            "preferred_model": current_user.preferred_model
+            "preferred_model": current_user.preferred_model,
+            "profile_generation_task_id": current_user.profile_generation_task_id
         },
         "pinned_nodes": pinned_list,
         "nodes": nodes_list,
@@ -198,7 +199,8 @@ def update_user():
                 "plan": current_user.plan,
                 "voice_mode_enabled": voice_mode_enabled,
                 "craft_mode": current_user.craft_mode,
-                "preferred_model": current_user.preferred_model
+                "preferred_model": current_user.preferred_model,
+                "profile_generation_task_id": current_user.profile_generation_task_id
             }
         }), 200
     except Exception as e:

@@ -36,6 +36,16 @@ export default function ProfilePage() {
     }
   }, [user, generationTaskId]);
 
+  // Listen for generation started from NavBar (handles already-mounted case)
+  useEffect(() => {
+    const handler = (e) => {
+      const taskId = e.detail?.taskId;
+      if (taskId) setGenerationTaskId(taskId);
+    };
+    window.addEventListener('loore_profile_started', handler);
+    return () => window.removeEventListener('loore_profile_started', handler);
+  }, []);
+
   const pollingEndpoint = generationTaskId
     ? `/export/profile-status/${generationTaskId}` : null;
 

@@ -184,7 +184,8 @@ def _load_prompt(name, user_id=None):
 
 
 def _call_llm_with_retries(self, model_id, prompt_text, user_id,
-                            api_keys, progress_base=50):
+                            api_keys, progress_base=50,
+                            status_label='Generating profile'):
     """Call LLM with retry logic for prompt-too-long errors.
 
     Returns (response_dict, profile_text, input_tokens, output_tokens).
@@ -198,7 +199,7 @@ def _call_llm_with_retries(self, model_id, prompt_text, user_id,
 
         self.update_state(state='PROGRESS', meta={
             'progress': progress_base + 10,
-            'status': 'Generating profile'
+            'status': status_label
         })
 
         try:
@@ -567,7 +568,8 @@ def _iterative_generation(self, user, model_id, gen_template, budget,
 
         response = _call_llm_with_retries(
             self, model_id, prompt, user.id, api_keys,
-            progress_base=progress
+            progress_base=progress,
+            status_label=f'Generating profile: Chunk {chunk_num}'
         )
 
         # Use actual input tokens from LLM response for accurate tracking
