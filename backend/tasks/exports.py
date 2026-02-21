@@ -337,6 +337,10 @@ def _do_incremental_update(self, user, model_id, previous_profile_id,
 
     # Calculate budget for new data
     update_template = _load_prompt("profile_update.txt", user_id=user.id)
+    gen_template = _load_prompt("profile_generation.txt", user_id=user.id)
+    update_template = update_template.replace(
+        "{profile_generation_prompt}", gen_template
+    )
     overhead = (approximate_token_count(update_template)
                 + approximate_token_count(existing_content)
                 + max_output_tokens + 500)
@@ -508,6 +512,9 @@ def _iterative_generation(self, user, model_id, gen_template, budget,
     )
 
     update_template = _load_prompt("profile_update.txt", user_id=user.id)
+    update_template = update_template.replace(
+        "{profile_generation_prompt}", gen_template
+    )
     current_profile = None
     current_profile_id = None
     cumulative_source_tokens = 0

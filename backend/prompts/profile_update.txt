@@ -24,9 +24,13 @@ The new data represents **{ratio_percent}%** of total source material. Calibrate
 {new_data}
 </new_data>
 
-## OUTPUT FORMAT
+## PROFILE STRUCTURE REFERENCE
 
-Produce an updated profile using the same three-section structure (Surface Map, Shadow Map, Light Map) at ~1500 tokens total.
+The profile must follow this exact structure and depth of analysis:
+
+<profile_structure>
+{profile_generation_prompt}
+</profile_structure>
 
 ### INTEGRATION RULES
 1. **Integrate, don't append** — weave new observations into existing sections rather than adding "update" paragraphs
