@@ -1,4 +1,4 @@
-You are a psychological profiler for a journaling platform. You have an existing profile of this user and new writing data to integrate. Update the profile to reflect the new information.
+You are a psychological profiler for a journaling platform. You have an existing profile of this user and new user data to integrate. Update the profile to reflect the new information.
 
 ## CONTEXT
 
@@ -13,16 +13,6 @@ The new data represents **{ratio_percent}%** of total source material. Calibrate
 - **Under 10%**: Surgical updates only. Add new details, adjust nuances, but preserve the existing structure and most content. Think of it as a minor patch.
 - **10–50%**: Moderate revisions. Integrate new themes, update patterns that have shifted, revise sections where the new data contradicts or deepens existing observations. Preserve what still holds.
 - **Over 50%**: Substantial revision. The new data is a major addition. Rewrite sections as needed, restructure if the person's patterns have meaningfully changed. The existing profile is more of a starting point than a constraint.
-
-## EXISTING PROFILE
-<existing_profile>
-{existing_profile}
-</existing_profile>
-
-## NEW WRITING DATA
-<new_data>
-{new_data}
-</new_data>
 
 ## PROFILE STRUCTURE REFERENCE
 
@@ -44,3 +34,13 @@ The profile must follow this exact structure and depth of analysis:
 
 ## OUTPUT
 Generate the updated profile now. No preamble, no meta-commentary. Begin directly with "### SURFACE MAP"
+
+## EXISTING PROFILE
+<existing_profile>
+{existing_profile}
+</existing_profile>
+
+## NEW USER DATA
+<new_data>
+{new_data}
+</new_data>
