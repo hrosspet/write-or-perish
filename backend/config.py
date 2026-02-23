@@ -1,4 +1,5 @@
 import os
+from datetime import timedelta
 
 class Config:
     SECRET_KEY = os.environ.get("SECRET_KEY", "this-should-be-changed")
@@ -134,3 +135,4 @@ class Config:
     SESSION_COOKIE_SAMESITE = "Lax"  # Critical for session cookies to work
     REMEMBER_COOKIE_SECURE = True
     REMEMBER_COOKIE_SAMESITE = "Lax"
+    REMEMBER_COOKIE_DURATION = timedelta(days=30)

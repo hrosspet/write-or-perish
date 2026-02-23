@@ -74,7 +74,7 @@ def login():
             db.session.add(user)
             db.session.commit()
 
-    login_user(user)
+    login_user(user, remember=True)
     flash("Logged in successfully!", "success")
 
     # Redirect to stored next_url if available, otherwise dashboard
@@ -162,7 +162,7 @@ def magic_link_verify():
         db.session.add(user)
         db.session.commit()
 
-    login_user(user)
+    login_user(user, remember=True)
 
     if next_url and is_safe_redirect_url(next_url):
         return redirect(f"{frontend_url}{next_url}")
