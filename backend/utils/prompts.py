@@ -10,6 +10,9 @@ PROMPT_DEFAULTS = {
     'profile_update': {
         'title': 'Profile Update', 'file': 'profile_update.txt',
     },
+    'profile_integration': {
+        'title': 'Profile Integration', 'file': 'profile_integration.txt',
+    },
     'narrative_detection': {
         'title': 'Narrative Detection', 'file': 'narrative_detection.txt',
     },

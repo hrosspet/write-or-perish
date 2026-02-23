@@ -297,6 +297,14 @@ def update_user_profile(self, user_id: int, model_id: str,
                     self, user, model_id, previous_profile_id,
                     context_window, max_output_tokens, api_keys
                 )
+                # Auto re-integrate over the full chain
+                if result and result.get('profile_id'):
+                    integration_result = _do_integration(
+                        self, user, model_id,
+                        result['profile_id'], api_keys
+                    )
+                    if integration_result:
+                        result = integration_result
             else:
                 result = _do_initial_generation(
                     self, user, model_id, context_window,
@@ -507,6 +515,139 @@ def _single_pass_generation(self, user, model_id, gen_template,
     }
 
 
+def _collect_iterative_chain(last_profile_id):
+    """Walk parent_profile_id backwards to collect the full iterative chain.
+
+    Includes profiles with generation_type in ("iterative", "update",
+    "initial") — "initial" for backwards compat with users whose last
+    iterative profile was already re-typed by the old code.
+
+    Returns list in chronological order (oldest first).
+    """
+    chain = []
+    seen = set()
+    current_id = last_profile_id
+
+    while current_id and current_id not in seen:
+        seen.add(current_id)
+        profile = UserProfile.query.get(current_id)
+        if not profile:
+            break
+        if profile.generation_type not in (
+            "iterative", "update", "initial"
+        ):
+            break
+        chain.append(profile)
+        current_id = profile.parent_profile_id
+
+    chain.reverse()  # chronological: oldest first
+    return chain
+
+
+def _calculate_months_span(first_profile, last_profile):
+    """Months between source_data_cutoff of first and last profiles."""
+    first_ts = getattr(first_profile, 'source_data_cutoff', None)
+    last_ts = getattr(last_profile, 'source_data_cutoff', None)
+    if not first_ts or not last_ts:
+        return 1
+    delta = last_ts - first_ts
+    return max(1, round(delta.days / 30.44))
+
+
+def _do_integration(self, user, model_id, last_iterative_profile_id,
+                    api_keys):
+    """Integrate all iterative profile versions into a single unified profile.
+
+    Collects the full iterative chain, sends each version as a separate
+    user message, and asks the LLM to produce a unified profile.
+
+    Returns a result dict like other generation functions, or None if
+    integration is not needed (< 2 versions in chain).
+    """
+    chain = _collect_iterative_chain(last_iterative_profile_id)
+    if len(chain) < 2:
+        return None
+
+    n_months = _calculate_months_span(chain[0], chain[-1])
+
+    # Load integration prompt template and fill placeholders
+    integration_template = _load_prompt(
+        "profile_integration.txt", user_id=user.id
+    )
+    gen_template = _load_prompt(
+        "profile_generation.txt", user_id=user.id
+    )
+    integration_prompt = integration_template.replace(
+        "{N_MONTHS}", str(n_months)
+    )
+    integration_prompt = integration_prompt.replace(
+        "{profile_generation_prompt}", gen_template
+    )
+
+    # Build messages — each profile as a separate user message
+    messages = []
+    for i, profile in enumerate(chain, 1):
+        content = profile.get_content()
+        cutoff = profile.source_data_cutoff
+        date_str = cutoff.strftime("%Y-%m-%d") if cutoff else "unknown"
+
+        # For first profile, date_from is approximate
+        if i == 1:
+            date_from = "start"
+        else:
+            prev_cutoff = chain[i - 2].source_data_cutoff
+            date_from = prev_cutoff.strftime(
+                "%Y-%m-%d"
+            ) if prev_cutoff else "unknown"
+
+        messages.append({
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": (
+                    f"Profile No. {i}\n"
+                    f"- {date_from} to {date_str}\n\n"
+                    f"{content}"
+                )
+            }]
+        })
+
+    # Append integration prompt as final user message
+    messages.append({
+        "role": "user",
+        "content": [{"type": "text", "text": integration_prompt}]
+    })
+
+    self.update_state(state='PROGRESS', meta={
+        'progress': 90, 'status': 'Integrating profile versions'
+    })
+
+    response = LLMProvider.get_completion(model_id, messages, api_keys)
+
+    last_profile = chain[-1]
+    new_profile = _save_profile(
+        user, model_id, response["content"], response,
+        source_tokens_used=last_profile.source_tokens_used,
+        source_data_cutoff=last_profile.source_data_cutoff,
+        generation_type="integration",
+        parent_profile_id=last_profile.id,
+    )
+
+    logger.info(
+        f"Profile integration for user {user.id}: "
+        f"{len(chain)} versions -> profile {new_profile.id}"
+    )
+
+    return {
+        'user_id': user.id,
+        'profile_id': new_profile.id,
+        'status': 'completed',
+        'total_tokens': response["total_tokens"],
+        'profile_length': len(response["content"]),
+        'versions_integrated': len(chain),
+    }
+
+
 def _iterative_generation(self, user, model_id, gen_template, budget,
                           context_window, max_output_tokens, api_keys):
     """Iterative profile building: process data in chronological chunks."""
@@ -613,12 +754,13 @@ def _iterative_generation(self, user, model_id, gen_template, budget,
         if not has_more:
             break
 
-    # Mark the final profile as "initial" (the iterative process is done)
-    if current_profile_id:
-        final = UserProfile.query.get(current_profile_id)
-        if final:
-            final.generation_type = "initial"
-            db.session.commit()
+    # Run integration over the iterative chain
+    if current_profile_id and chunk_num > 1:
+        integration_result = _do_integration(
+            self, user, model_id, current_profile_id, api_keys
+        )
+        if integration_result:
+            return integration_result
 
     self.update_state(state='PROGRESS', meta={
         'progress': 95, 'status': 'Finalizing'
@@ -667,9 +809,10 @@ def maybe_trigger_profile_update(user_id, model_id=None,
             "DEFAULT_LLM_MODEL", "claude-opus-4.6"
         )
 
-    # Find latest profile
-    latest_profile = UserProfile.query.filter_by(
-        user_id=user_id
+    # Find latest non-integration profile
+    latest_profile = UserProfile.query.filter(
+        UserProfile.user_id == user_id,
+        UserProfile.generation_type != 'integration'
     ).order_by(UserProfile.created_at.desc()).first()
 
     prev_id = None if force_full_regen else (
@@ -685,6 +828,49 @@ def maybe_trigger_profile_update(user_id, model_id=None,
         f" (force_full_regen={force_full_regen})"
     )
     return task.id
+
+
+@celery.task(base=ProfileGenerationTask, bind=True)
+def integrate_user_profile(self, user_id: int, model_id: str,
+                           last_iterative_profile_id: int):
+    """Standalone task for manual profile integration."""
+    logger.info(
+        f"Starting profile integration for user {user_id}, "
+        f"model {model_id}, profile {last_iterative_profile_id}"
+    )
+
+    with flask_app.app_context():
+        user = User.query.get(user_id)
+        if not user:
+            raise ValueError(f"User {user_id} not found")
+
+        user.profile_generation_task_id = self.request.id
+        db.session.commit()
+
+        try:
+            api_keys = get_api_keys_for_usage(flask_app.config, 'chat')
+            result = _do_integration(
+                self, user, model_id,
+                last_iterative_profile_id, api_keys
+            )
+            if not result:
+                return {
+                    'user_id': user_id,
+                    'status': 'completed',
+                    'message': 'Not enough versions to integrate',
+                }
+            return result
+        except Exception as e:
+            logger.error(
+                f"Profile integration error for user {user_id}: {e}",
+                exc_info=True
+            )
+            raise
+        finally:
+            user = User.query.get(user_id)
+            if user:
+                user.profile_generation_task_id = None
+                db.session.commit()
 
 
 def maybe_trigger_incremental_profile_update(user):
@@ -706,12 +892,13 @@ def maybe_trigger_incremental_profile_update(user):
     if last_node and (datetime.utcnow() - last_node.created_at) < MIN_INACTIVITY:
         return None
 
-    # Find latest profile
-    latest_profile = UserProfile.query.filter_by(
-        user_id=user.id
+    # Find latest non-integration profile
+    latest_profile = UserProfile.query.filter(
+        UserProfile.user_id == user.id,
+        UserProfile.generation_type != 'integration'
     ).order_by(UserProfile.created_at.desc()).first()
 
-    THRESHOLD_TOKENS = 10000
+    THRESHOLD_TOKENS = 100000
     MIN_INTERVAL = timedelta(hours=1)
 
     if latest_profile:

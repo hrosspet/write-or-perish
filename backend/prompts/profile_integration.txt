@@ -1,0 +1,5 @@
+The above is a series of profile updates created over the course of ~{N_MONTHS} months. Each update is generated based on 80k - 110k tokens worth of personal sharing. Please, unify these updates into a single current user profile. Keep the same length - surface map / shadow map / light map - around 500 tokens each. Such profile creation will necessarily involve lossy compression. Keep the most important datapoints and try to capture the trajectory of the evolution, explicit or implicit, present in the data. Skip outdated datapoints, unless they seem important for the evolution. In that case, mark them as outdated / overcome.
+
+Keep the structure the same as the original profiles, described here:
+
+{profile_generation_prompt}

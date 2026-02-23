@@ -40,6 +40,7 @@ export default function VersionHistoryDrawer({
     if (g === 'import') return 'Imported';
     if (genType === 'update') return `Auto-updated (${g})`;
     if (genType === 'iterative') return `Iterative build (${g})`;
+    if (genType === 'integration') return `Integrated profile (${g})`;
     return `Auto-generated (${g})`;
   };
 

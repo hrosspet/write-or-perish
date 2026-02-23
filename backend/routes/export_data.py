@@ -559,9 +559,10 @@ def update_profile():
             "error": "No writing found to analyze."
         }), 400
 
-    # Find latest profile
-    latest_profile = UserProfile.query.filter_by(
-        user_id=current_user.id
+    # Find latest non-integration profile
+    latest_profile = UserProfile.query.filter(
+        UserProfile.user_id == current_user.id,
+        UserProfile.generation_type != 'integration'
     ).order_by(UserProfile.created_at.desc()).first()
 
     # Determine if full regen is needed
@@ -594,6 +595,76 @@ def update_profile():
         "task_id": task.id,
         "status": "pending",
         "is_update": is_update,
+    }), 202
+
+
+@export_bp.route("/export/integrate_profile", methods=["POST"])
+@login_required
+def integrate_profile():
+    """
+    Manually trigger profile integration: collect all iterative/update
+    profile versions and integrate them into a single unified profile.
+
+    Request body:
+        { "model": "claude-opus-4.6" }  (optional)
+
+    Returns:
+        { "task_id": "...", "status": "pending" }
+    """
+    from backend.tasks.exports import integrate_user_profile
+
+    data = request.get_json() or {}
+    model_id = data.get("model")
+    if not model_id:
+        model_id = current_app.config.get(
+            "DEFAULT_LLM_MODEL", "claude-opus-4.6"
+        )
+
+    if model_id not in current_app.config["SUPPORTED_MODELS"]:
+        return jsonify({
+            "error": f"Unsupported model: {model_id}",
+            "supported_models": list(
+                current_app.config["SUPPORTED_MODELS"].keys()
+            )
+        }), 400
+
+    # Check concurrency guard
+    if current_user.profile_generation_task_id:
+        from backend.celery_app import celery as _celery
+        existing = _celery.AsyncResult(
+            current_user.profile_generation_task_id
+        )
+        if existing.state in ('PENDING', 'STARTED', 'PROGRESS'):
+            return jsonify({
+                "task_id": current_user.profile_generation_task_id,
+                "status": "already_running",
+            }), 200
+
+    # Find latest non-integration profile that has iterative parents
+    latest_profile = UserProfile.query.filter(
+        UserProfile.user_id == current_user.id,
+        UserProfile.generation_type != 'integration'
+    ).order_by(UserProfile.created_at.desc()).first()
+
+    if not latest_profile:
+        return jsonify({"error": "No profile found to integrate."}), 400
+
+    task = integrate_user_profile.delay(
+        current_user.id, model_id, latest_profile.id
+    )
+
+    from backend.extensions import db as _db
+    current_user.profile_generation_task_id = task.id
+    _db.session.commit()
+
+    current_app.logger.info(
+        f"Enqueued profile integration task {task.id} "
+        f"for user {current_user.id}"
+    )
+
+    return jsonify({
+        "task_id": task.id,
+        "status": "pending",
     }), 202
 
 
