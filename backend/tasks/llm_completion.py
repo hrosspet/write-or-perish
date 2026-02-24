@@ -42,7 +42,7 @@ def get_user_profile_content(user_id):
     ).first()
 
     if profile and profile.ai_usage == "chat":
-        return profile.content
+        return profile.get_content()
     return None
 
 
@@ -58,7 +58,7 @@ def get_user_todo_content(user_id):
     ).first()
 
     if todo and todo.ai_usage == "chat":
-        return todo.content
+        return todo.get_content()
     return None
 
 
