@@ -296,6 +296,7 @@ class UserPrompt(db.Model):
     title = db.Column(db.String(128), nullable=False)
     content = db.Column(db.Text, nullable=False)
     generated_by = db.Column(db.String(64), nullable=False, default="default")
+    based_on_default_hash = db.Column(db.String(64), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     user = db.relationship("User", backref="prompts")

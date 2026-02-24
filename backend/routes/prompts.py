@@ -2,7 +2,9 @@ from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
 from backend.models import UserPrompt
 from backend.extensions import db
-from backend.utils.prompts import PROMPT_DEFAULTS, load_default_prompt
+from backend.utils.prompts import (
+    PROMPT_DEFAULTS, load_default_prompt, default_prompt_hash,
+)
 
 prompts_bp = Blueprint("prompts", __name__)
 
@@ -14,6 +16,21 @@ def _edit_count(prompt_key):
     ).count()
 
 
+def _is_default_updated(prompt):
+    """Check whether the file default has changed since this row was created.
+
+    Returns True when the user should be notified (customised or reverted rows
+    whose underlying default has moved on).  Returns False for ``generated_by
+    == "default"`` rows because those are auto-upgraded transparently.
+    """
+    if prompt.generated_by == "default":
+        return False
+    current = default_prompt_hash(prompt.prompt_key)
+    if current is None:
+        return False
+    return prompt.based_on_default_hash != current
+
+
 def _serialize_prompt(prompt, version_number):
     return {
         "id": prompt.id,
@@ -23,6 +40,7 @@ def _serialize_prompt(prompt, version_number):
         "generated_by": prompt.generated_by,
         "created_at": prompt.created_at.isoformat(),
         "version_number": version_number,
+        "default_updated": _is_default_updated(prompt),
     }
 
 
@@ -45,6 +63,7 @@ def list_prompts():
                 "version_number": _edit_count(key),
                 "generated_by": latest.generated_by,
                 "created_at": latest.created_at.isoformat(),
+                "default_updated": _is_default_updated(latest),
             })
         else:
             content = load_default_prompt(key)
@@ -55,6 +74,7 @@ def list_prompts():
                 "version_number": 0,
                 "generated_by": "default",
                 "created_at": None,
+                "default_updated": False,
             })
 
     return jsonify({"prompts": prompts}), 200
@@ -87,6 +107,7 @@ def get_prompt(prompt_key):
                 "generated_by": "default",
                 "created_at": None,
                 "version_number": 0,
+                "default_updated": False,
             }
         }), 200
 
@@ -110,6 +131,7 @@ def update_prompt(prompt_key):
         prompt_key=prompt_key,
         title=meta['title'],
         generated_by="user",
+        based_on_default_hash=default_prompt_hash(prompt_key),
     )
     prompt.set_content(content)
     db.session.add(prompt)
@@ -211,6 +233,7 @@ def revert_prompt(prompt_key, version_id):
         prompt_key=prompt_key,
         title=meta['title'],
         generated_by="revert",
+        based_on_default_hash=default_prompt_hash(prompt_key),
     )
     new_prompt.content = old_prompt.content
     db.session.add(new_prompt)
@@ -237,7 +260,8 @@ def revert_to_default(prompt_key):
         user_id=current_user.id,
         prompt_key=prompt_key,
         title=meta['title'],
-        generated_by="revert",
+        generated_by="default",
+        based_on_default_hash=default_prompt_hash(prompt_key),
     )
     new_prompt.set_content(content)
     db.session.add(new_prompt)
@@ -245,4 +269,30 @@ def revert_to_default(prompt_key):
 
     return jsonify({
         "prompt": _serialize_prompt(new_prompt, _edit_count(prompt_key))
+    }), 200
+
+
+@prompts_bp.route("/<prompt_key>/acknowledge-default", methods=["POST"])
+@login_required
+def acknowledge_default(prompt_key):
+    """Dismiss the 'default updated' notification.
+
+    Updates the stored hash on the latest DB row so the user won't be
+    notified again until the next file-default change.
+    """
+    if prompt_key not in PROMPT_DEFAULTS:
+        return jsonify({"error": "Unknown prompt key"}), 404
+
+    latest = UserPrompt.query.filter_by(
+        user_id=current_user.id, prompt_key=prompt_key
+    ).order_by(UserPrompt.created_at.desc()).first()
+
+    if not latest:
+        return jsonify({"error": "No prompt to acknowledge"}), 404
+
+    latest.based_on_default_hash = default_prompt_hash(prompt_key)
+    db.session.commit()
+
+    return jsonify({
+        "prompt": _serialize_prompt(latest, _edit_count(prompt_key))
     }), 200

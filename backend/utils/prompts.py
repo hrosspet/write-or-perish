@@ -1,3 +1,4 @@
+import hashlib
 import os
 
 PROMPT_DEFAULTS = {
@@ -37,12 +38,29 @@ def load_default_prompt(prompt_key):
         return f.read()
 
 
+def default_prompt_hash(prompt_key):
+    """Return SHA-256 hex digest of the file default for *prompt_key*."""
+    content = load_default_prompt(prompt_key)
+    if not content:
+        return None
+    return hashlib.sha256(content.encode()).hexdigest()
+
+
 def get_user_prompt(user_id, prompt_key):
-    """Get user's active prompt for a feature, or load the file default."""
+    """Get user's active prompt for a feature, or load the file default.
+
+    If the latest DB row was created via "default" (i.e. the user accepted the
+    default without customising) and the file default has since changed, return
+    the updated file default instead of the stale DB content.
+    """
     from backend.models import UserPrompt
     prompt = UserPrompt.query.filter_by(
         user_id=user_id, prompt_key=prompt_key
     ).order_by(UserPrompt.created_at.desc()).first()
     if prompt:
+        if prompt.generated_by == "default":
+            current_hash = default_prompt_hash(prompt_key)
+            if current_hash and prompt.based_on_default_hash != current_hash:
+                return load_default_prompt(prompt_key)
         return prompt.get_content()
     return load_default_prompt(prompt_key)

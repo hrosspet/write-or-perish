@@ -85,8 +85,24 @@ export default function PromptsPage() {
                 fontSize: '0.95rem',
                 fontWeight: 400,
                 color: 'var(--text-primary)',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '6px',
               }}>
                 {p.title}
+                {p.default_updated && (
+                  <span
+                    title="Default prompt has been updated"
+                    style={{
+                      width: '6px',
+                      height: '6px',
+                      borderRadius: '50%',
+                      background: 'var(--accent, #4ade80)',
+                      display: 'inline-block',
+                      flexShrink: 0,
+                    }}
+                  />
+                )}
               </span>
               <span style={{
                 fontFamily: 'var(--sans)',

@@ -17,6 +17,11 @@ export default function PromptDetailPage() {
   const [selectedVersionId, setSelectedVersionId] = useState(null);
   const [versionContent, setVersionContent] = useState(null);
 
+  // Default-updated banner state
+  const [showNewDefault, setShowNewDefault] = useState(false);
+  const [newDefaultContent, setNewDefaultContent] = useState(null);
+  const [dismissing, setDismissing] = useState(false);
+
   const fetchPrompt = useCallback(async () => {
     try {
       const res = await api.get(`/prompts/${promptKey}`);
@@ -87,6 +92,41 @@ export default function PromptDetailPage() {
     } catch (err) {
       console.error('Failed to revert:', err);
     }
+  };
+
+  const handleViewNewDefault = async () => {
+    try {
+      const res = await api.get(`/prompts/${promptKey}/default`);
+      setNewDefaultContent(res.data.prompt.content);
+      setShowNewDefault(true);
+    } catch (err) {
+      console.error('Failed to load new default:', err);
+    }
+  };
+
+  const handleAcceptNewDefault = async () => {
+    try {
+      const res = await api.post(`/prompts/${promptKey}/revert-to-default`);
+      setPrompt(res.data.prompt);
+      setEditContent(res.data.prompt.content);
+      setShowNewDefault(false);
+      setNewDefaultContent(null);
+    } catch (err) {
+      console.error('Failed to accept new default:', err);
+    }
+  };
+
+  const handleDismissDefault = async () => {
+    setDismissing(true);
+    try {
+      const res = await api.post(`/prompts/${promptKey}/acknowledge-default`);
+      setPrompt(res.data.prompt);
+      setShowNewDefault(false);
+      setNewDefaultContent(null);
+    } catch (err) {
+      console.error('Failed to dismiss notification:', err);
+    }
+    setDismissing(false);
   };
 
   const formatDate = (iso) => {
@@ -193,6 +233,80 @@ export default function PromptDetailPage() {
 
       {/* Accent divider */}
       <div style={{ height: '1px', background: 'var(--accent-dim)', opacity: 0.3, marginBottom: '24px' }} />
+
+      {/* Default updated banner */}
+      {prompt.default_updated && (
+        <div style={{
+          background: 'var(--accent-subtle, rgba(74, 222, 128, 0.08))',
+          border: '1px solid var(--accent-dim, rgba(74, 222, 128, 0.2))',
+          borderRadius: '8px',
+          padding: '14px 18px',
+          marginBottom: '20px',
+        }}>
+          <p style={{
+            fontFamily: 'var(--sans)',
+            fontSize: '0.8rem',
+            fontWeight: 400,
+            color: 'var(--text-secondary)',
+            margin: '0 0 10px 0',
+          }}>
+            The default prompt has been updated.
+          </p>
+          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+            <button
+              onClick={handleViewNewDefault}
+              style={{
+                background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+                fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 400,
+                color: 'var(--accent)', textDecoration: 'underline',
+              }}
+            >
+              View new default
+            </button>
+            <button
+              onClick={handleAcceptNewDefault}
+              style={{
+                background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+                fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 400,
+                color: 'var(--accent)', textDecoration: 'underline',
+              }}
+            >
+              Accept new default
+            </button>
+            <button
+              onClick={handleDismissDefault}
+              disabled={dismissing}
+              style={{
+                background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+                fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 400,
+                color: 'var(--text-muted)', textDecoration: 'underline',
+                opacity: dismissing ? 0.5 : 0.7,
+              }}
+            >
+              Dismiss
+            </button>
+          </div>
+          {showNewDefault && newDefaultContent && (
+            <pre style={{
+              fontFamily: 'var(--sans)',
+              fontSize: '0.8rem',
+              fontWeight: 300,
+              color: 'var(--text-secondary)',
+              lineHeight: 1.6,
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+              marginTop: '12px',
+              padding: '12px',
+              background: 'var(--bg-input, rgba(0,0,0,0.15))',
+              borderRadius: '6px',
+              maxHeight: '300px',
+              overflow: 'auto',
+            }}>
+              {newDefaultContent}
+            </pre>
+          )}
+        </div>
+      )}
 
       {/* Edit mode */}
       {editing && (
