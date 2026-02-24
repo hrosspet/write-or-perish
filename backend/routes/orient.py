@@ -3,12 +3,17 @@ from flask_login import login_required, current_user
 from backend.models import Node, User, UserTodo
 from backend.extensions import db
 from backend.utils.prompts import get_user_prompt
+from backend.routes.reflect import (
+    _ancestors_have_prompt, _is_llm_node, _create_llm_placeholder,
+)
 
 orient_bp = Blueprint("orient", __name__)
 
+PROMPT_KEY = 'orient'
+
 
 def _get_orient_prompt():
-    return get_user_prompt(current_user.id, 'orient')
+    return get_user_prompt(current_user.id, PROMPT_KEY)
 
 
 @orient_bp.route("/", methods=["POST"])
@@ -121,6 +126,83 @@ def create_orient_session():
         "llm_node_id": llm_node.id,
         "task_id": task.id,
     }), 202
+
+
+@orient_bp.route("/from-node/<int:node_id>", methods=["POST"])
+@login_required
+def create_orient_from_node(node_id):
+    """Start or resume an orient session from an existing node's thread."""
+    node = Node.query.get(node_id)
+    if not node:
+        return jsonify({"error": "Node not found"}), 404
+    if node.user_id != current_user.id:
+        parent = Node.query.get(node.parent_id) if node.parent_id else None
+        if not parent or parent.user_id != current_user.id:
+            return jsonify({"error": "Unauthorized"}), 403
+
+    data = request.get_json() or {}
+    model_id = data.get("model")
+    if not model_id:
+        model_id = current_app.config.get(
+            "DEFAULT_LLM_MODEL", "claude-opus-4.5"
+        )
+    if model_id not in current_app.config["SUPPORTED_MODELS"]:
+        return jsonify({"error": f"Unsupported model: {model_id}"}), 400
+
+    has_prompt = _ancestors_have_prompt(node, current_user.id, PROMPT_KEY)
+    is_llm = _is_llm_node(node)
+
+    if has_prompt and not is_llm:
+        llm_node = _create_llm_placeholder(
+            node.id, model_id, current_user.id
+        )
+        return jsonify({
+            "mode": "processing",
+            "llm_node_id": llm_node.id,
+        }), 202
+
+    if has_prompt and is_llm:
+        return jsonify({
+            "mode": "recording",
+            "parent_id": node.id,
+        }), 200
+
+    if not has_prompt and not is_llm:
+        system_node = Node(
+            user_id=current_user.id,
+            parent_id=node.id,
+            node_type="user",
+            privacy_level="private",
+            ai_usage="chat",
+        )
+        system_node.set_content(_get_orient_prompt())
+        db.session.add(system_node)
+        db.session.flush()
+
+        llm_node = _create_llm_placeholder(
+            system_node.id, model_id, current_user.id
+        )
+        return jsonify({
+            "mode": "processing",
+            "llm_node_id": llm_node.id,
+        }), 202
+
+    # not has_prompt and is_llm
+    system_node = Node(
+        user_id=current_user.id,
+        parent_id=node.id,
+        node_type="user",
+        privacy_level="private",
+        ai_usage="chat",
+    )
+    system_node.set_content(_get_orient_prompt())
+    db.session.add(system_node)
+    db.session.commit()
+
+    return jsonify({
+        "mode": "recording",
+        "parent_id": system_node.id,
+    }), 200
 
 
 @orient_bp.route("/<int:llm_node_id>/apply-todo", methods=["POST"])

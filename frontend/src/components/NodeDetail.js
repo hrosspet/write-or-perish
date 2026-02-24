@@ -52,6 +52,8 @@ function NodeDetail() {
   const [llmTaskNodeId, setLlmTaskNodeId] = useState(null);
   const [quotes, setQuotes] = useState({});
   const [pinLoading, setPinLoading] = useState(false);
+  const [reflectLoading, setReflectLoading] = useState(false);
+  const [orientLoading, setOrientLoading] = useState(false);
   const highlightedNodeRef = useRef(null);
 
   // LLM completion polling - enabled automatically when llmTaskNodeId is set
@@ -207,6 +209,27 @@ function NodeDetail() {
       });
   };
 
+  const handleSessionFromNode = (sessionType) => {
+    const setLoading = sessionType === 'reflect' ? setReflectLoading : setOrientLoading;
+    setLoading(true);
+    setError("");
+    api
+      .post(`/${sessionType}/from-node/${id}`, { model: selectedModel })
+      .then((response) => {
+        const { mode, llm_node_id, parent_id } = response.data;
+        if (mode === "processing") {
+          navigate(`/${sessionType}?resume=${llm_node_id}`);
+        } else {
+          navigate(`/${sessionType}?parent=${parent_id}`);
+        }
+      })
+      .catch((err) => {
+        console.error(err);
+        setError(err.response?.data?.error || `Error starting ${sessionType} session.`);
+        setLoading(false);
+      });
+  };
+
   // Ancestors section rendered as a list of bubbles.
   const ancestorsSection = (
     <div style={{ display: "flex", flexDirection: "column", marginBottom: "10px" }}>
@@ -311,6 +334,12 @@ function NodeDetail() {
                   : llmTaskNodeId
                   ? "Generating..."
                   : "LLM Response"}
+              </button>
+              <button onClick={() => handleSessionFromNode('reflect')} disabled={reflectLoading}>
+                {reflectLoading ? "Starting..." : "Reflect"}
+              </button>
+              <button onClick={() => handleSessionFromNode('orient')} disabled={orientLoading}>
+                {orientLoading ? "Starting..." : "Orient"}
               </button>
               <ModelSelector
                 nodeId={node.id}

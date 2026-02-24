@@ -22,14 +22,22 @@ const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
  * @param {string} options.ttsTitle - Label for the audio player ('Reflection', 'Orient')
  * @param {Function} options.onLLMComplete - Called with (nodeId, content) when LLM response is ready
  */
-export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete }) {
+/**
+ * @param {Object} options
+ * @param {string} options.apiEndpoint - API path to post transcripts to ('/reflect', '/orient')
+ * @param {string} options.ttsTitle - Label for the audio player ('Reflection', 'Orient')
+ * @param {Function} options.onLLMComplete - Called with (nodeId, content) when LLM response is ready
+ * @param {number|null} options.initialLlmNodeId - Resume in processing phase, polling this LLM node
+ * @param {number|null} options.initialParentId - Resume in ready phase with thread parent pre-set
+ */
+export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete, initialLlmNodeId = null, initialParentId = null }) {
   const audio = useAudio();
-  const [phase, setPhase] = useState('ready'); // ready, recording, processing, playback
-  const [llmNodeId, setLlmNodeId] = useState(null);
+  const [phase, setPhase] = useState(initialLlmNodeId ? 'processing' : 'ready');
+  const [llmNodeId, setLlmNodeId] = useState(initialLlmNodeId);
   const [isStopping, setIsStopping] = useState(false);
   const [hasError, setHasError] = useState(false);
   const transcriptRef = useRef('');
-  const threadParentIdRef = useRef(null);
+  const threadParentIdRef = useRef(initialParentId);
   const lastUserNodeIdRef = useRef(null);
 
   // TTS state

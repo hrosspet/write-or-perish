@@ -1,4 +1,5 @@
 import React from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { FaPlay, FaPause, FaUndo, FaRedo } from 'react-icons/fa';
 import { useVoiceSession } from '../hooks/useVoiceSession';
 
@@ -173,12 +174,18 @@ function Spinner() {
 }
 
 export default function ReflectPage() {
+  const [searchParams] = useSearchParams();
+  const resumeId = searchParams.get('resume');
+  const parentId = searchParams.get('parent');
+
   const {
     phase, isStopping, hasError, streaming, audio, handleStart, handleStop,
     handleContinue, handleCancelProcessing,
   } = useVoiceSession({
     apiEndpoint: '/reflect',
     ttsTitle: 'Reflection',
+    initialLlmNodeId: resumeId ? Number(resumeId) : null,
+    initialParentId: parentId ? Number(parentId) : null,
   });
 
   // Progress bar helpers

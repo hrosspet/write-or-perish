@@ -1,4 +1,5 @@
 import React, { useState, useCallback, useRef } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { FaRegCompass, FaPlay, FaPause, FaUndo, FaRedo } from 'react-icons/fa';
 import { useVoiceSession } from '../hooks/useVoiceSession';
 import api from '../api';
@@ -146,6 +147,10 @@ function parseOrientResponse(text) {
 }
 
 export default function OrientPage() {
+  const [searchParams] = useSearchParams();
+  const resumeId = searchParams.get('resume');
+  const parentId = searchParams.get('parent');
+
   const [applied, setApplied] = useState(false);
   const [parsedResponse, setParsedResponse] = useState(null);
   const applyTriggeredForNodeRef = useRef(null);
@@ -202,6 +207,8 @@ export default function OrientPage() {
   } = useVoiceSession({
     apiEndpoint: '/orient',
     ttsTitle: 'Orient',
+    initialLlmNodeId: resumeId ? Number(resumeId) : null,
+    initialParentId: parentId ? Number(parentId) : null,
     onLLMComplete: (nodeId, content) => {
       setParsedResponse(parseOrientResponse(content));
       // Auto-apply todo
