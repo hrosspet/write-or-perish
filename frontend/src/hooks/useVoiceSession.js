@@ -125,10 +125,13 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     },
   });
 
-  // Poll LLM completion
+  // Poll LLM completion (don't gate on phase — the 15s safety-net timeout
+  // changes phase to 'playback' which would kill polling before slow LLM
+  // responses arrive; polling self-stops on completed/failed status, and
+  // is disabled when llmNodeId is cleared on cancel/continue)
   const { data: llmData, status: llmStatus } = useAsyncTaskPolling(
     llmNodeId ? `/nodes/${llmNodeId}/llm-status` : null,
-    { enabled: !!llmNodeId && phase === 'processing', interval: 1500 }
+    { enabled: !!llmNodeId, interval: 1500 }
   );
 
   // TTS SSE subscription
