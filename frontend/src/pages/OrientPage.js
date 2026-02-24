@@ -201,6 +201,8 @@ export default function OrientPage() {
     }
   }, []);
 
+  const selectedModel = localStorage.getItem('loore_selected_model') || null;
+
   const {
     phase, isStopping, hasError, streaming, audio, handleStart, handleStop,
     handleContinue, handleCancelProcessing,
@@ -209,6 +211,7 @@ export default function OrientPage() {
     ttsTitle: 'Orient',
     initialLlmNodeId: resumeId ? Number(resumeId) : null,
     initialParentId: parentId ? Number(parentId) : null,
+    model: selectedModel,
     onLLMComplete: (nodeId, content) => {
       setParsedResponse(parseOrientResponse(content));
       // Auto-apply todo

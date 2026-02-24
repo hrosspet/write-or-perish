@@ -30,7 +30,7 @@ const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
  * @param {number|null} options.initialLlmNodeId - Resume in processing phase, polling this LLM node
  * @param {number|null} options.initialParentId - Resume in ready phase with thread parent pre-set
  */
-export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete, initialLlmNodeId = null, initialParentId = null }) {
+export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete, initialLlmNodeId = null, initialParentId = null, model = null }) {
   const audio = useAudio();
   const [phase, setPhase] = useState(initialLlmNodeId ? 'processing' : 'ready');
   const [llmNodeId, setLlmNodeId] = useState(initialLlmNodeId);
@@ -105,6 +105,9 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       }
       try {
         const payload = { content: finalTranscript };
+        if (model) {
+          payload.model = model;
+        }
         if (threadParentIdRef.current) {
           payload.parent_id = threadParentIdRef.current;
         }

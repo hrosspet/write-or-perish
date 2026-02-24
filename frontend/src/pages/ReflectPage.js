@@ -178,6 +178,8 @@ export default function ReflectPage() {
   const resumeId = searchParams.get('resume');
   const parentId = searchParams.get('parent');
 
+  const selectedModel = localStorage.getItem('loore_selected_model') || null;
+
   const {
     phase, isStopping, hasError, streaming, audio, handleStart, handleStop,
     handleContinue, handleCancelProcessing,
@@ -186,6 +188,7 @@ export default function ReflectPage() {
     ttsTitle: 'Reflection',
     initialLlmNodeId: resumeId ? Number(resumeId) : null,
     initialParentId: parentId ? Number(parentId) : null,
+    model: selectedModel,
   });
 
   // Progress bar helpers
