@@ -118,7 +118,7 @@ def generate_tts(profile_id):
     profile.tts_task_progress = 0
     db.session.commit()
 
-    task = generate_tts_audio_for_profile.delay(profile.id, str(AUDIO_STORAGE_ROOT))
+    task = generate_tts_audio_for_profile.delay(profile.id, str(AUDIO_STORAGE_ROOT), requesting_user_id=current_user.id)
 
     profile.tts_task_id = task.id
     db.session.commit()

@@ -1011,7 +1011,7 @@ def generate_tts(node_id):
     db.session.commit()
 
     # Enqueue task
-    task = generate_tts_audio.delay(node.id, str(AUDIO_STORAGE_ROOT))
+    task = generate_tts_audio.delay(node.id, str(AUDIO_STORAGE_ROOT), requesting_user_id=current_user.id)
 
     # Store task ID
     node.tts_task_id = task.id

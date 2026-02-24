@@ -58,7 +58,8 @@ class ProfileTTSTask(Task):
 
 
 def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
-                         chunk_fk_attr, entity_label):
+                         chunk_fk_attr, entity_label,
+                         requesting_user_id=None):
     """
     Shared TTS generation logic for both nodes and profiles.
 
@@ -215,7 +216,7 @@ def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
             "gpt-4o-mini-tts", total_duration
         )
         cost_log = APICostLog(
-            user_id=entity.user_id,
+            user_id=requesting_user_id or entity.user_id,
             model_id="gpt-4o-mini-tts",
             request_type="tts",
             audio_duration_seconds=total_duration,
@@ -235,13 +236,15 @@ def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
 
 
 @celery.task(base=TTSTask, bind=True)
-def generate_tts_audio(self, node_id: int, audio_storage_root: str):
+def generate_tts_audio(self, node_id: int, audio_storage_root: str,
+                       requesting_user_id: int = None):
     """
     Asynchronously generate TTS audio for a node.
 
     Args:
         node_id: Database ID of the node
         audio_storage_root: Root directory for audio storage
+        requesting_user_id: ID of the user who requested TTS (for cost attribution)
     """
     logger.info(f"Starting TTS generation task for node {node_id}")
 
@@ -280,7 +283,8 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str):
 
             url = _generate_tts_chunks(
                 self, node, text, target_dir, audio_storage_root,
-                'node_id', f"node {node_id}"
+                'node_id', f"node {node_id}",
+                requesting_user_id=requesting_user_id
             )
 
             node.audio_tts_url = url
@@ -308,13 +312,15 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str):
 
 @celery.task(base=ProfileTTSTask, bind=True)
 def generate_tts_audio_for_profile(self, profile_id: int,
-                                   audio_storage_root: str):
+                                   audio_storage_root: str,
+                                   requesting_user_id: int = None):
     """
     Asynchronously generate TTS audio for a user profile.
 
     Args:
         profile_id: Database ID of the user profile
         audio_storage_root: Root directory for audio storage
+        requesting_user_id: ID of the user who requested TTS (for cost attribution)
     """
     logger.info(f"Starting TTS generation task for profile {profile_id}")
 
@@ -352,7 +358,8 @@ def generate_tts_audio_for_profile(self, profile_id: int,
 
             url = _generate_tts_chunks(
                 self, profile, text, target_dir, audio_storage_root,
-                'profile_id', f"profile {profile_id}"
+                'profile_id', f"profile {profile_id}",
+                requesting_user_id=requesting_user_id
             )
 
             profile.audio_tts_url = url
