@@ -1,0 +1,9 @@
+Now apply the changes you just described to the user's full todo list.
+
+Rules:
+- Items you identified as completed that were on the todo list: change `- [ ]` to `- [x]`
+- Items you identified as completed that were NOT on the todo list: add them as `- [x]` in an appropriate section
+- New tasks you identified: add them as `- [ ]` in an appropriate section
+- Keep ALL existing items not mentioned in your update — do not remove anything
+- Preserve the original structure, sections, and formatting
+- Return ONLY the complete updated todo list — no commentary

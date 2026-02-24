@@ -155,46 +155,11 @@ export default function OrientPage() {
   const [parsedResponse, setParsedResponse] = useState(null);
   const applyTriggeredForNodeRef = useRef(null);
 
-  // Build todo content from parsed response and apply
-  const handleApplyTodo = useCallback(async (nodeId, text) => {
-    if (!text || !nodeId) return;
-
-    const parsed = parseOrientResponse(text);
-    let updatedContent = '';
-
-    if (parsed.priority) {
-      updatedContent += `## Today\n\n`;
-      const lines = parsed.priority.split('\n').filter(l => l.trim());
-      for (const line of lines) {
-        const cleaned = line.replace(/^\d+[.)]\s*/, '').trim();
-        if (cleaned) updatedContent += `- [ ] ${cleaned}\n`;
-      }
-    }
-    if (parsed.newTasks) {
-      updatedContent += `\n## Upcoming\n\n`;
-      const lines = parsed.newTasks.split('\n').filter(l => l.trim());
-      for (const line of lines) {
-        const cleaned = line.replace(/^[-*]\s*/, '').trim();
-        if (cleaned) updatedContent += `- [ ] ${cleaned}\n`;
-      }
-    }
-    if (parsed.completed) {
-      updatedContent += `\n## Completed recently\n\n`;
-      const lines = parsed.completed.split('\n').filter(l => l.trim());
-      for (const line of lines) {
-        const cleaned = line.replace(/^[-*]\s*/, '').trim();
-        if (cleaned) updatedContent += `- [x] ${cleaned}\n`;
-      }
-    }
-
-    if (!updatedContent.trim()) {
-      updatedContent = text;
-    }
-
+  // Trigger backend to merge Orient update into the full todo
+  const handleApplyTodo = useCallback(async (nodeId) => {
+    if (!nodeId) return;
     try {
-      await api.post(`/orient/${nodeId}/apply-todo`, {
-        updated_content: updatedContent,
-      });
+      await api.post(`/orient/${nodeId}/apply-todo`);
       setApplied(true);
     } catch (err) {
       console.error('Failed to apply todo:', err);
@@ -214,10 +179,10 @@ export default function OrientPage() {
     model: selectedModel,
     onLLMComplete: (nodeId, content) => {
       setParsedResponse(parseOrientResponse(content));
-      // Auto-apply todo
+      // Auto-trigger todo merge
       if (applyTriggeredForNodeRef.current !== nodeId) {
         applyTriggeredForNodeRef.current = nodeId;
-        handleApplyTodo(nodeId, content);
+        handleApplyTodo(nodeId);
       }
     },
   });

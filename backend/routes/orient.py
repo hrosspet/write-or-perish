@@ -1,6 +1,6 @@
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
-from backend.models import Node, User, UserTodo
+from backend.models import Node, User
 from backend.extensions import db
 from backend.utils.prompts import get_user_prompt
 from backend.routes.reflect import (
@@ -210,15 +210,9 @@ def create_orient_from_node(node_id):
 def apply_todo(llm_node_id):
     """
     Apply orient AI suggestions to the todo list.
-    Body: { updated_content: string }
-    Creates a new UserTodo version with generated_by='orient_session'.
+    Kicks off a Celery task that merges the Orient update into the user's
+    full todo via a second LLM call, then saves the result.
     """
-    data = request.get_json() or {}
-    updated_content = data.get("updated_content")
-
-    if not updated_content or not updated_content.strip():
-        return jsonify({"error": "Updated content is required"}), 400
-
     # Verify the LLM node exists and belongs to user's session
     llm_node = Node.query.get_or_404(llm_node_id)
     # Walk up to find the system node owner
@@ -228,26 +222,7 @@ def apply_todo(llm_node_id):
     if not parent or parent.user_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
 
-    # Create new todo version
-    todo = UserTodo(
-        user_id=current_user.id,
-        generated_by="orient_session",
-        tokens_used=0,
-    )
-    todo.set_content(updated_content)
-    db.session.add(todo)
-    db.session.commit()
+    from backend.tasks.orient_todo import apply_orient_todo
+    task = apply_orient_todo.delay(llm_node_id, current_user.id)
 
-    version_count = UserTodo.query.filter_by(
-        user_id=current_user.id
-    ).count()
-
-    return jsonify({
-        "todo": {
-            "id": todo.id,
-            "content": todo.get_content(),
-            "generated_by": todo.generated_by,
-            "created_at": todo.created_at.isoformat(),
-            "version_number": version_count,
-        }
-    }), 200
+    return jsonify({"task_id": task.id}), 202
