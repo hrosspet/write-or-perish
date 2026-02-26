@@ -177,10 +177,11 @@ export default function OrientPage() {
     initialLlmNodeId: resumeId ? Number(resumeId) : null,
     initialParentId: parentId ? Number(parentId) : null,
     model: selectedModel,
-    onLLMComplete: (nodeId, content) => {
+    onLLMComplete: (nodeId, content, isResume) => {
       setParsedResponse(parseOrientResponse(content));
-      // Auto-trigger todo merge
-      if (applyTriggeredForNodeRef.current !== nodeId) {
+      // Auto-trigger todo merge (skip on initial resume — the replayed node
+      // may be from a different workflow like Reflect)
+      if (!isResume && applyTriggeredForNodeRef.current !== nodeId) {
         applyTriggeredForNodeRef.current = nodeId;
         handleApplyTodo(nodeId);
       }

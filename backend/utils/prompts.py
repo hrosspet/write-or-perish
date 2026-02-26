@@ -21,6 +21,10 @@ PROMPT_DEFAULTS = {
         'title': 'Letter from the Future',
         'file': 'letter_from_the_future.txt',
     },
+    'orient_apply_todo': {
+        'title': 'Orient: Apply to Todo',
+        'file': 'orient_apply_todo.txt',
+    },
 }
 
 PROMPTS_DIR = os.path.join(

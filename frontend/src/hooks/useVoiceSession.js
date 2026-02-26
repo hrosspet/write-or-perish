@@ -197,6 +197,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     if (llmStatus === 'completed' && llmData?.content && ttsTriggeredForNodeRef.current !== llmNodeId && llmData.node_id === llmNodeId) {
       console.log('[VoiceSession] TTS trigger:', { llmNodeId, pollNodeId: llmData.node_id, contentPreview: llmData.content?.substring(0, 50) });
       ttsTriggeredForNodeRef.current = llmNodeId;
+      const wasInitialResume = initialResumeRef.current;
       if (initialResumeRef.current) {
         initialResumeRef.current = false;
         // Keep threadParentIdRef from initialParentId for the resumed playback
@@ -213,7 +214,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
 
       // Let the page handle workflow-specific logic (e.g. parsing, auto-apply)
       if (onLLMCompleteRef.current) {
-        onLLMCompleteRef.current(llmNodeId, llmData.content);
+        onLLMCompleteRef.current(llmNodeId, llmData.content, wasInitialResume);
       }
 
       firstChunkRef.current = true;

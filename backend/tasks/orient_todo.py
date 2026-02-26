@@ -6,24 +6,15 @@ this task chains a second LLM call that merges the update into the user's
 full todo. The merge prompt and LLM response are added as nodes in the
 conversation tree so the whole flow is visible in the Log.
 """
-import os
 from celery import chain as celery_chain
 from celery.utils.log import get_task_logger
 
 from backend.celery_app import celery, flask_app
 from backend.models import Node, User, UserTodo
 from backend.extensions import db
+from backend.utils.prompts import get_user_prompt
 
 logger = get_task_logger(__name__)
-
-PROMPT_FILE = os.path.join(
-    os.path.dirname(__file__), '..', 'prompts', 'orient_apply_todo.txt'
-)
-
-
-def _get_merge_prompt():
-    with open(PROMPT_FILE, 'r') as f:
-        return f.read()
 
 
 @celery.task(bind=True)
@@ -52,7 +43,9 @@ def apply_orient_todo(self, llm_node_id: int, user_id: int):
             privacy_level="private",
             ai_usage="chat",
         )
-        merge_prompt_node.set_content(_get_merge_prompt())
+        merge_prompt_node.set_content(
+            get_user_prompt(user_id, 'orient_apply_todo')
+        )
         db.session.add(merge_prompt_node)
         db.session.flush()
 
