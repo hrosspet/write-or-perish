@@ -41,6 +41,30 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   const lastUserNodeIdRef = useRef(null);
   const initialResumeRef = useRef(initialLlmNodeId != null);
 
+  // Keep URL params in sync so a page refresh resumes correctly
+  useEffect(() => {
+    const url = new URL(window.location);
+    if (llmNodeId) {
+      url.searchParams.set('resume', String(llmNodeId));
+      // Use the future threadParentId value: for initial resume it stays as
+      // initialParentId; for subsequent turns it will become llmNodeId.
+      const parentForUrl = initialResumeRef.current
+        ? threadParentIdRef.current
+        : llmNodeId;
+      if (parentForUrl != null) {
+        url.searchParams.set('parent', String(parentForUrl));
+      }
+    } else {
+      url.searchParams.delete('resume');
+      if (threadParentIdRef.current != null) {
+        url.searchParams.set('parent', String(threadParentIdRef.current));
+      } else {
+        url.searchParams.delete('parent');
+      }
+    }
+    window.history.replaceState({}, '', url);
+  }, [llmNodeId]);
+
   // TTS state
   const ttsTriggeredForNodeRef = useRef(null);
   const [ttsGenerating, setTtsGenerating] = useState(false);
@@ -179,6 +203,13 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       } else {
         threadParentIdRef.current = llmNodeId;
       }
+
+      // Sync URL parent after threadParentIdRef update
+      const url = new URL(window.location);
+      if (threadParentIdRef.current != null) {
+        url.searchParams.set('parent', String(threadParentIdRef.current));
+      }
+      window.history.replaceState({}, '', url);
 
       // Let the page handle workflow-specific logic (e.g. parsing, auto-apply)
       if (onLLMCompleteRef.current) {
