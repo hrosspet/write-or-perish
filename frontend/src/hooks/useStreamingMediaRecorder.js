@@ -236,6 +236,10 @@ export function useStreamingMediaRecorder({
 
   const pauseRecording = useCallback(() => {
     if (recorderRef.current && recorderRef.current.state === 'recording') {
+      // Flush buffered audio as a chunk before pausing, so it gets uploaded
+      // and transcribed into the draft. Protects against tab kills during
+      // long pauses — the audio is safe on the server even if the tab dies.
+      recorderRef.current.requestData();
       recorderRef.current.pause();
       pausedAtRef.current = Date.now();
       setStatus('paused');
