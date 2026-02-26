@@ -103,9 +103,10 @@ def create_reflect_from_node(node_id):
         }), 202
 
     if has_prompt and is_llm:
-        # LLM node with existing prompt: go to recording
+        # LLM node with existing prompt: play back its TTS first
         return jsonify({
-            "mode": "recording",
+            "mode": "processing",
+            "llm_node_id": node.id,
             "parent_id": node.id,
         }), 200
 
@@ -131,7 +132,7 @@ def create_reflect_from_node(node_id):
         }), 202
 
     # not has_prompt and is_llm
-    # LLM node, no prompt: create system prompt as child → recording
+    # LLM node, no prompt: create system prompt as child, then play back TTS
     system_node = Node(
         user_id=current_user.id,
         parent_id=node.id,
@@ -144,7 +145,8 @@ def create_reflect_from_node(node_id):
     db.session.commit()
 
     return jsonify({
-        "mode": "recording",
+        "mode": "processing",
+        "llm_node_id": node.id,
         "parent_id": system_node.id,
     }), 200
 

@@ -183,8 +183,8 @@ class TestReflectFromNodeMatrix:
         assert llm_node.parent_id == user_node.id
         assert llm_node.node_type == "llm"
 
-    def test_prompt_present_llm_node_returns_recording(self, app):
-        """LLM node in a thread with prompt → recording mode."""
+    def test_prompt_present_llm_node_returns_processing(self, app):
+        """LLM node in a thread with prompt → processing mode (TTS playback)."""
         client = app.test_client()
 
         alice = _make_user("alice")
@@ -209,7 +209,8 @@ class TestReflectFromNodeMatrix:
 
         assert resp.status_code == 200
         data = resp.get_json()
-        assert data["mode"] == "recording"
+        assert data["mode"] == "processing"
+        assert data["llm_node_id"] == llm_node.id
         assert data["parent_id"] == llm_node.id
 
     def test_no_prompt_user_node_creates_system_prompt_and_processing(
@@ -243,10 +244,10 @@ class TestReflectFromNodeMatrix:
         prompt_text = get_user_prompt(alice.id, "reflect")
         assert system_node.get_content() == prompt_text
 
-    def test_no_prompt_llm_node_creates_system_prompt_and_recording(
+    def test_no_prompt_llm_node_creates_system_prompt_and_processing(
         self, app
     ):
-        """LLM node with no prompt → system prompt child → recording."""
+        """LLM node with no prompt → system prompt child → processing (TTS)."""
         client = app.test_client()
 
         alice = _make_user("alice")
@@ -267,7 +268,8 @@ class TestReflectFromNodeMatrix:
 
         assert resp.status_code == 200
         data = resp.get_json()
-        assert data["mode"] == "recording"
+        assert data["mode"] == "processing"
+        assert data["llm_node_id"] == llm_node.id
 
         # Verify system prompt was created as child of llm_node
         system_node = Node.query.get(data["parent_id"])
@@ -426,7 +428,7 @@ class TestOrientFromNodeMatrix:
         assert data["mode"] == "processing"
         assert "llm_node_id" in data
 
-    def test_prompt_present_llm_node_returns_recording(self, app):
+    def test_prompt_present_llm_node_returns_processing(self, app):
         client = app.test_client()
 
         alice = _make_user("alice")
@@ -450,7 +452,8 @@ class TestOrientFromNodeMatrix:
 
         assert resp.status_code == 200
         data = resp.get_json()
-        assert data["mode"] == "recording"
+        assert data["mode"] == "processing"
+        assert data["llm_node_id"] == llm_node.id
         assert data["parent_id"] == llm_node.id
 
     def test_no_prompt_user_node_creates_system_prompt_and_processing(
@@ -480,7 +483,7 @@ class TestOrientFromNodeMatrix:
         orient_prompt = get_user_prompt(alice.id, "orient")
         assert system_node.get_content() == orient_prompt
 
-    def test_no_prompt_llm_node_creates_system_prompt_and_recording(
+    def test_no_prompt_llm_node_creates_system_prompt_and_processing(
         self, app
     ):
         client = app.test_client()
@@ -501,7 +504,8 @@ class TestOrientFromNodeMatrix:
 
         assert resp.status_code == 200
         data = resp.get_json()
-        assert data["mode"] == "recording"
+        assert data["mode"] == "processing"
+        assert data["llm_node_id"] == llm_node.id
 
         system_node = Node.query.get(data["parent_id"])
         from backend.utils.prompts import get_user_prompt

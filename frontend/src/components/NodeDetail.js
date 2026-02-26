@@ -218,7 +218,9 @@ function NodeDetail() {
       .then((response) => {
         const { mode, llm_node_id, parent_id } = response.data;
         if (mode === "processing") {
-          navigate(`/${sessionType}?resume=${llm_node_id}`);
+          let url = `/${sessionType}?resume=${llm_node_id}`;
+          if (parent_id) url += `&parent=${parent_id}`;
+          navigate(url);
         } else {
           navigate(`/${sessionType}?parent=${parent_id}`);
         }
