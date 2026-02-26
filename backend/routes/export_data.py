@@ -539,11 +539,12 @@ def update_profile():
 
     # Check concurrency guard
     if current_user.profile_generation_task_id:
-        from backend.celery_app import celery as _celery
-        existing = _celery.AsyncResult(
-            current_user.profile_generation_task_id
-        )
-        if existing.state in ('PENDING', 'STARTED', 'PROGRESS'):
+        from backend.tasks.exports import _is_task_stale
+        if _is_task_stale(current_user):
+            current_user.profile_generation_task_id = None
+            current_user.profile_generation_task_dispatched_at = None
+            db.session.commit()
+        else:
             return jsonify({
                 "task_id": current_user.profile_generation_task_id,
                 "status": "already_running",
@@ -584,6 +585,7 @@ def update_profile():
     # Set concurrency guard
     from backend.extensions import db as _db
     current_user.profile_generation_task_id = task.id
+    current_user.profile_generation_task_dispatched_at = datetime.utcnow()
     _db.session.commit()
 
     current_app.logger.info(
@@ -630,11 +632,12 @@ def integrate_profile():
 
     # Check concurrency guard
     if current_user.profile_generation_task_id:
-        from backend.celery_app import celery as _celery
-        existing = _celery.AsyncResult(
-            current_user.profile_generation_task_id
-        )
-        if existing.state in ('PENDING', 'STARTED', 'PROGRESS'):
+        from backend.tasks.exports import _is_task_stale
+        if _is_task_stale(current_user):
+            current_user.profile_generation_task_id = None
+            current_user.profile_generation_task_dispatched_at = None
+            db.session.commit()
+        else:
             return jsonify({
                 "task_id": current_user.profile_generation_task_id,
                 "status": "already_running",
@@ -655,6 +658,7 @@ def integrate_profile():
 
     from backend.extensions import db as _db
     current_user.profile_generation_task_id = task.id
+    current_user.profile_generation_task_dispatched_at = datetime.utcnow()
     _db.session.commit()
 
     current_app.logger.info(

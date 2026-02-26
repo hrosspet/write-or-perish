@@ -1,6 +1,7 @@
 """
 Celery tasks for asynchronous data export operations.
 """
+from datetime import datetime
 from celery import Task
 from celery.utils.log import get_task_logger
 import os
@@ -14,6 +15,37 @@ from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import calculate_llm_cost_microdollars
 
 logger = get_task_logger(__name__)
+
+
+def _is_task_stale(user):
+    """Check if the user's profile generation task is stale (lost or timed out).
+
+    Returns True if the guard should be cleared, False if the task is
+    legitimately running.
+    """
+    if not user.profile_generation_task_id:
+        return False
+
+    from backend.celery_app import celery as _celery
+    task = _celery.AsyncResult(user.profile_generation_task_id)
+
+    if task.state in ('SUCCESS', 'FAILURE', 'REVOKED'):
+        return True  # Finished — guard is stale
+
+    dispatched_at = user.profile_generation_task_dispatched_at
+    if not dispatched_at:
+        return True  # No timestamp = legacy guard, treat as stale
+
+    from datetime import datetime, timedelta
+    age = datetime.utcnow() - dispatched_at
+
+    if task.state == 'PENDING' and age > timedelta(minutes=15):
+        return True  # PENDING for 15+ min = likely lost
+
+    if task.state in ('STARTED', 'PROGRESS') and age > timedelta(hours=1):
+        return True  # Running for 1+ hour = timed out
+
+    return False
 
 
 # Import from export_data module
@@ -280,6 +312,7 @@ def update_user_profile(self, user_id: int, model_id: str,
 
         # Set concurrency guard
         user.profile_generation_task_id = self.request.id
+        user.profile_generation_task_dispatched_at = datetime.utcnow()
         db.session.commit()
 
         success = False
@@ -325,6 +358,7 @@ def update_user_profile(self, user_id: int, model_id: str,
             user = User.query.get(user_id)
             if user:
                 user.profile_generation_task_id = None
+                user.profile_generation_task_dispatched_at = None
                 if success:
                     user.profile_needs_full_regen = False
                 db.session.commit()
@@ -792,16 +826,19 @@ def maybe_trigger_profile_update(user_id, model_id=None,
 
     # Check concurrency guard
     if user.profile_generation_task_id:
-        from backend.celery_app import celery as _celery
-        task = _celery.AsyncResult(user.profile_generation_task_id)
-        if task.state in ('PENDING', 'STARTED', 'PROGRESS'):
+        if not _is_task_stale(user):
             logger.info(
                 f"Skipping profile update for user {user_id}: "
                 f"task {user.profile_generation_task_id} in progress"
             )
             return None
         # Clear stale guard
+        logger.info(
+            f"Clearing stale profile task guard for user {user_id}: "
+            f"task {user.profile_generation_task_id}"
+        )
         user.profile_generation_task_id = None
+        user.profile_generation_task_dispatched_at = None
         db.session.commit()
 
     if model_id is None:
@@ -822,6 +859,7 @@ def maybe_trigger_profile_update(user_id, model_id=None,
 
     task = update_user_profile.delay(user_id, model_id, prev_id)
     user.profile_generation_task_id = task.id
+    user.profile_generation_task_dispatched_at = datetime.utcnow()
     db.session.commit()
 
     logger.info(
@@ -846,6 +884,7 @@ def integrate_user_profile(self, user_id: int, model_id: str,
             raise ValueError(f"User {user_id} not found")
 
         user.profile_generation_task_id = self.request.id
+        user.profile_generation_task_dispatched_at = datetime.utcnow()
         db.session.commit()
 
         try:
@@ -871,6 +910,7 @@ def integrate_user_profile(self, user_id: int, model_id: str,
             user = User.query.get(user_id)
             if user:
                 user.profile_generation_task_id = None
+                user.profile_generation_task_dispatched_at = None
                 db.session.commit()
 
 
