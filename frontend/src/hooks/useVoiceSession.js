@@ -98,6 +98,9 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     onComplete: async (data) => {
       setIsStopping(false);
       setPhase('processing');
+      // Clear any stale audio from previous pages (e.g. SpeakerIcon in Log)
+      // so it can't play if new TTS chunks fail to arrive.
+      audio.stop();
       const finalTranscript = data.content || transcriptRef.current;
       if (!finalTranscript.trim()) {
         setPhase('ready');
@@ -115,6 +118,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
           payload.session_id = data.sessionId;
         }
         const res = await api.post(apiEndpoint, payload);
+        console.log('[VoiceSession] API response:', { llm_node_id: res.data.llm_node_id, user_node_id: res.data.user_node_id, parent_id: payload.parent_id });
         setLlmNodeId(res.data.llm_node_id);
         lastUserNodeIdRef.current = res.data.user_node_id;
       } catch (err) {
@@ -138,6 +142,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   const ttsSSE = useTTSStreamSSE(llmNodeId, {
     enabled: ttsGenerating,
     onChunkReady: (data) => {
+      console.log('[VoiceSession] TTS chunk ready:', { audio_url: data.audio_url, chunk_index: data.chunk_index, firstChunk: firstChunkRef.current });
       if (firstChunkRef.current) {
         firstChunkRef.current = false;
         stopSilentAudio(); // Real audio takes over
@@ -164,7 +169,8 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   // When LLM completes, trigger TTS (and notify the page)
   useEffect(() => {
     if (!llmNodeId) return;
-    if (llmStatus === 'completed' && llmData?.content && ttsTriggeredForNodeRef.current !== llmNodeId) {
+    if (llmStatus === 'completed' && llmData?.content && ttsTriggeredForNodeRef.current !== llmNodeId && llmData.node_id === llmNodeId) {
+      console.log('[VoiceSession] TTS trigger:', { llmNodeId, pollNodeId: llmData.node_id, contentPreview: llmData.content?.substring(0, 50) });
       ttsTriggeredForNodeRef.current = llmNodeId;
       threadParentIdRef.current = llmNodeId;
 
@@ -173,9 +179,23 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         onLLMCompleteRef.current(llmNodeId, llmData.content);
       }
 
-      setTtsGenerating(true);
       firstChunkRef.current = true;
-      api.post(`/nodes/${llmNodeId}/tts`).catch((err) => {
+      // Await the TTS POST before enabling SSE to avoid the race where
+      // the EventSource connects before tts_task_status is set to 'pending'.
+      api.post(`/nodes/${llmNodeId}/tts`).then((res) => {
+        if (res.status === 200 && res.data.tts_url) {
+          // TTS was already generated — load directly, skip SSE
+          const ttsUrl = res.data.tts_url.startsWith('http')
+            ? res.data.tts_url
+            : `${process.env.REACT_APP_BACKEND_URL || ''}${res.data.tts_url}`;
+          stopSilentAudio();
+          audio.loadAudio({ url: ttsUrl, title: ttsTitle });
+          setPhase('playback');
+        } else {
+          // TTS generation started (202) — enable SSE now that backend is ready
+          setTtsGenerating(true);
+        }
+      }).catch((err) => {
         console.error('TTS trigger error:', err);
         setHasError(true);
         setTtsGenerating(false);
@@ -185,7 +205,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       setHasError(true);
       setPhase('ready');
     }
-  }, [llmStatus, llmData, llmNodeId]);
+  }, [llmStatus, llmData, llmNodeId, audio, ttsTitle, stopSilentAudio]);
 
   // Safety net: if stuck on "processing" for 15s (e.g. SSE never delivers
   // chunks), transition to playback anyway. The normal path transitions via
@@ -227,6 +247,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     ttsSSE.disconnect();
     ttsSSE.reset();
     setLlmNodeId(null);
+    ttsTriggeredForNodeRef.current = null;
     // Keep threadParentIdRef — continues the conversation thread
 
     setTtsGenerating(false);

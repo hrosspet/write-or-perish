@@ -454,6 +454,13 @@ export function useTTSStreamSSE(entityId, options = {}) {
     : `nodes/${entityId}`;
   const url = entityId ? `${backendUrl}/api/sse/${ssePathSegment}/tts-stream` : null;
 
+  // Debug: log SSE URL changes
+  const prevUrlRef = useRef(null);
+  if (url !== prevUrlRef.current) {
+    console.log('[TTS-SSE] URL changed:', { entityId, url, enabled, prevUrl: prevUrlRef.current });
+    prevUrlRef.current = url;
+  }
+
   // Memoize eventHandlers to prevent unnecessary reconnections
   // Handlers use refs internally to always call latest callbacks
   const eventHandlers = useMemo(() => ({

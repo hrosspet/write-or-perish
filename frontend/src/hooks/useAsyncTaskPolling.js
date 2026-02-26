@@ -25,6 +25,9 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
 
   const intervalRef = useRef(null);
   const timeoutRef = useRef(null);
+  // Track current endpoint to discard stale in-flight responses
+  const currentEndpointRef = useRef(endpoint);
+  currentEndpointRef.current = endpoint;
 
   const stopPolling = useCallback(() => {
     if (intervalRef.current) {
@@ -43,6 +46,8 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
       console.error('Cannot poll: endpoint is null or undefined');
       return;
     }
+    // Capture the endpoint at call time to detect stale responses
+    const requestEndpoint = endpoint;
     try {
       // Use shorter timeout for status polling (10 seconds instead of 60)
       // Add Cache-Control header to prevent Safari from caching polling responses
@@ -50,6 +55,12 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
         timeout: 10000,
         headers: { 'Cache-Control': 'no-cache' }
       });
+
+      // Discard response if endpoint changed while request was in flight
+      if (currentEndpointRef.current !== requestEndpoint) {
+        return;
+      }
+
       const result = response.data;
 
       setStatus(result.status);
