@@ -1,4 +1,4 @@
-import re
+import unicodedata
 from datetime import datetime
 
 from flask import Blueprint, jsonify, request
@@ -10,14 +10,28 @@ from backend.extensions import db
 search_bp = Blueprint("search_bp", __name__)
 
 
+def _strip_diacritics(text):
+    """Remove diacritics/accents: 'štědrá' -> 'stedra', 'café' -> 'cafe'."""
+    nfkd = unicodedata.normalize('NFKD', text)
+    return ''.join(c for c in nfkd if unicodedata.category(c) != 'Mn')
+
+
 def _snippet(text, keyword, context_chars=80):
-    """Return a snippet around the first keyword match with <mark> highlighting."""
-    lower = text.lower()
-    kw_lower = keyword.lower()
-    idx = lower.find(kw_lower)
+    """Return a snippet around the first keyword match with <mark> highlighting.
+
+    Matches are found diacritics-insensitively but the original text is
+    preserved in the output, with matching spans wrapped in <mark> tags.
+    """
+    stripped = _strip_diacritics(text).lower()
+    kw_stripped = _strip_diacritics(keyword).lower()
+    idx = stripped.find(kw_stripped)
     if idx == -1:
         return text[:200] + ("..." if len(text) > 200 else "")
 
+    # idx/len refer to positions in the stripped string, which is
+    # char-for-char the same length as the original (NFKD + remove Mn
+    # only drops combining marks that don't occupy a position in the
+    # original), so we can slice the original text at the same offsets.
     start = max(0, idx - context_chars)
     end = min(len(text), idx + len(keyword) + context_chars)
     fragment = text[start:end]
@@ -25,14 +39,22 @@ def _snippet(text, keyword, context_chars=80):
     prefix = "..." if start > 0 else ""
     suffix = "..." if end < len(text) else ""
 
-    # Highlight all occurrences in the fragment (case-insensitive)
-    highlighted = re.sub(
-        re.escape(keyword),
-        lambda m: f"<mark>{m.group(0)}</mark>",
-        fragment,
-        flags=re.IGNORECASE,
-    )
-    return prefix + highlighted + suffix
+    # Build a regex from the stripped keyword that matches each character
+    # with or without its diacritics in the original text.
+    fragment_stripped = _strip_diacritics(fragment).lower()
+    highlighted = []
+    i = 0
+    while i < len(fragment):
+        match_start = fragment_stripped.find(kw_stripped, i)
+        if match_start == -1:
+            highlighted.append(fragment[i:])
+            break
+        highlighted.append(fragment[i:match_start])
+        match_end = match_start + len(kw_stripped)
+        highlighted.append(f"<mark>{fragment[match_start:match_end]}</mark>")
+        i = match_end
+
+    return prefix + ''.join(highlighted) + suffix
 
 
 @search_bp.route("/search", methods=["GET"])
@@ -107,11 +129,13 @@ def search():
         })
 
     # Keyword search: decrypt all matching nodes, filter in-memory
+    # Diacritics-insensitive: "stedra" matches "štědrá"
+    q_normalized = _strip_diacritics(q).lower()
     all_nodes = query.all()
     matches = []
     for node in all_nodes:
         content = node.get_content()
-        if q.lower() in content.lower():
+        if q_normalized in _strip_diacritics(content).lower():
             matches.append((node, content))
 
     total = len(matches)
