@@ -1,8 +1,9 @@
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
-from backend.models import Node, User
+from backend.models import Node
 from backend.extensions import db
 from backend.utils.prompts import get_user_prompt
+from backend.utils.llm_nodes import create_llm_placeholder
 
 converse_bp = Blueprint("converse", __name__)
 
@@ -61,6 +62,7 @@ def start_conversation():
     # 1. System node with converse prompt
     system_node = Node(
         user_id=current_user.id,
+        human_owner_id=current_user.id,
         parent_id=None,
         node_type="user",
         privacy_level="private",
@@ -73,6 +75,7 @@ def start_conversation():
     # 2. User message node
     user_node = Node(
         user_id=current_user.id,
+        human_owner_id=current_user.id,
         parent_id=system_node.id,
         node_type="user",
         privacy_level="private",
@@ -82,40 +85,16 @@ def start_conversation():
     db.session.add(user_node)
     db.session.flush()
 
-    # 3. Placeholder LLM node
-    llm_user = User.query.filter_by(username=model_id).first()
-    if not llm_user:
-        llm_user = User(twitter_id=f"llm-{model_id}", username=model_id)
-        db.session.add(llm_user)
-        db.session.flush()
-
-    llm_node = Node(
-        user_id=llm_user.id,
-        parent_id=user_node.id,
-        node_type="llm",
-        llm_model=model_id,
-        llm_task_status="pending",
-        privacy_level="private",
-        ai_usage="chat",
+    # 3. Placeholder LLM node and enqueue task
+    llm_node, task_id = create_llm_placeholder(
+        user_node.id, model_id, current_user.id
     )
-    llm_node.set_content("[LLM response generation pending...]")
-    db.session.add(llm_node)
-    db.session.commit()
-
-    # 4. Enqueue LLM completion
-    from backend.tasks.llm_completion import generate_llm_response
-
-    task = generate_llm_response.delay(
-        user_node.id, llm_node.id, model_id, current_user.id
-    )
-    llm_node.llm_task_id = task.id
-    db.session.commit()
 
     return jsonify({
         "conversation_id": system_node.id,
         "user_node_id": user_node.id,
         "llm_node_id": llm_node.id,
-        "task_id": task.id,
+        "task_id": task_id,
     }), 202
 
 
@@ -151,6 +130,7 @@ def add_message(conversation_id):
     # Create user message node
     user_node = Node(
         user_id=current_user.id,
+        human_owner_id=current_user.id,
         parent_id=last_node.id,
         node_type="user",
         privacy_level="private",
@@ -160,39 +140,15 @@ def add_message(conversation_id):
     db.session.add(user_node)
     db.session.flush()
 
-    # Create placeholder LLM node
-    llm_user = User.query.filter_by(username=model_id).first()
-    if not llm_user:
-        llm_user = User(twitter_id=f"llm-{model_id}", username=model_id)
-        db.session.add(llm_user)
-        db.session.flush()
-
-    llm_node = Node(
-        user_id=llm_user.id,
-        parent_id=user_node.id,
-        node_type="llm",
-        llm_model=model_id,
-        llm_task_status="pending",
-        privacy_level="private",
-        ai_usage="chat",
+    # Create placeholder LLM node and enqueue task
+    llm_node, task_id = create_llm_placeholder(
+        user_node.id, model_id, current_user.id
     )
-    llm_node.set_content("[LLM response generation pending...]")
-    db.session.add(llm_node)
-    db.session.commit()
-
-    # Enqueue LLM completion
-    from backend.tasks.llm_completion import generate_llm_response
-
-    task = generate_llm_response.delay(
-        user_node.id, llm_node.id, model_id, current_user.id
-    )
-    llm_node.llm_task_id = task.id
-    db.session.commit()
 
     return jsonify({
         "user_node_id": user_node.id,
         "llm_node_id": llm_node.id,
-        "task_id": task.id,
+        "task_id": task_id,
     }), 202
 
 

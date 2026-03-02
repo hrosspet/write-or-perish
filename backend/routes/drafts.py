@@ -513,6 +513,7 @@ def save_streaming_as_node(session_id):
     # Create the node
     node = Node(
         user_id=current_user.id,
+        human_owner_id=current_user.id,
         parent_id=draft.parent_id,
         node_type="user",
         privacy_level=draft.privacy_level or "private",

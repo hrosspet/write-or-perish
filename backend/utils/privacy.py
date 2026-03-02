@@ -96,14 +96,9 @@ def can_user_access_node(node, user_id: Optional[int] = None) -> bool:
     if node.user_id == user_id:
         return True
 
-    # For LLM nodes: check if the user is the human owner (may be multiple levels up)
-    # This allows users to access AI responses they requested, even in chains
-    # like Human → LLM → LLM where the immediate parent is also an LLM
-    node_type = getattr(node, 'node_type', 'user')
-    if node_type == "llm":
-        human_owner_id = find_human_owner(node)
-        if human_owner_id == user_id:
-            return True
+    # Check denormalized human_owner_id (covers LLM nodes and all others)
+    if getattr(node, 'human_owner_id', None) and node.human_owner_id == user_id:
+        return True
 
     # Check privacy level
     privacy_level = getattr(node, 'privacy_level', PrivacyLevel.PRIVATE)
@@ -131,6 +126,7 @@ def accessible_nodes_filter(node_model, user_id: int):
     """
     return or_(
         node_model.user_id == user_id,
+        node_model.human_owner_id == user_id,
         node_model.privacy_level == PrivacyLevel.PUBLIC,
         # TODO: add circles membership subquery when circles feature is built
     )
@@ -157,16 +153,10 @@ def can_user_edit_node(node, user_id: Optional[int] = None) -> bool:
             return False
         user_id = current_user.id
 
-    # Check if user is the owner
-    is_owner = node.user_id == user_id
-
-    # Check if user is the human owner (first non-LLM ancestor)
-    is_human_owner = (
-        node.node_type == "llm" and
-        find_human_owner(node) == user_id
+    return (
+        node.user_id == user_id
+        or (getattr(node, 'human_owner_id', None) and node.human_owner_id == user_id)
     )
-
-    return is_owner or is_human_owner
 
 
 def can_ai_use_node_for_chat(node) -> bool:

@@ -132,9 +132,10 @@ def _make_user(username, **kwargs):
 
 
 def _make_node(user, parent_id=None, content="hello", node_type="user",
-               llm_model=None, ai_usage="chat"):
+               llm_model=None, ai_usage="chat", human_owner=None):
     n = Node(
         user_id=user.id,
+        human_owner_id=(human_owner or user).id,
         parent_id=parent_id,
         node_type=node_type,
         llm_model=llm_model,

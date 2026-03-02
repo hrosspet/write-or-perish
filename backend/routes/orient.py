@@ -1,8 +1,9 @@
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
-from backend.models import Node, User
+from backend.models import Node
 from backend.extensions import db
 from backend.utils.prompts import get_user_prompt
+from backend.utils.llm_nodes import create_llm_placeholder
 from backend.routes.reflect import (
     _ancestors_have_prompt, _is_llm_node, _create_llm_placeholder,
 )
@@ -55,6 +56,7 @@ def create_orient_session():
         # New thread — create system node with orient prompt
         system_node = Node(
             user_id=current_user.id,
+            human_owner_id=current_user.id,
             parent_id=None,
             node_type="user",
             privacy_level="private",
@@ -68,6 +70,7 @@ def create_orient_session():
     # User node with transcription
     user_node = Node(
         user_id=current_user.id,
+        human_owner_id=current_user.id,
         parent_id=user_parent_id,
         node_type="user",
         privacy_level="private",
@@ -86,45 +89,21 @@ def create_orient_session():
             session_id, user_node, current_user.id
         )
 
-    # 3. Placeholder LLM node
-    llm_user = User.query.filter_by(username=model_id).first()
-    if not llm_user:
-        llm_user = User(twitter_id=f"llm-{model_id}", username=model_id)
-        db.session.add(llm_user)
-        db.session.flush()
-
-    llm_node = Node(
-        user_id=llm_user.id,
-        parent_id=user_node.id,
-        node_type="llm",
-        llm_model=model_id,
-        llm_task_status="pending",
-        privacy_level="private",
-        ai_usage="chat",
+    # 3. Placeholder LLM node and enqueue task
+    llm_node, task_id = create_llm_placeholder(
+        user_node.id, model_id, current_user.id
     )
-    llm_node.set_content("[LLM response generation pending...]")
-    db.session.add(llm_node)
-    db.session.commit()
-
-    # 4. Enqueue LLM completion
-    from backend.tasks.llm_completion import generate_llm_response
-
-    task = generate_llm_response.delay(
-        user_node.id, llm_node.id, model_id, current_user.id
-    )
-    llm_node.llm_task_id = task.id
-    db.session.commit()
 
     current_app.logger.info(
         f"Orient session: parent={user_parent_id}, "
-        f"user={user_node.id}, llm={llm_node.id}, task={task.id}"
+        f"user={user_node.id}, llm={llm_node.id}, task={task_id}"
     )
 
     return jsonify({
         "parent_id": user_parent_id,
         "user_node_id": user_node.id,
         "llm_node_id": llm_node.id,
-        "task_id": task.id,
+        "task_id": task_id,
     }), 202
 
 
@@ -172,6 +151,7 @@ def create_orient_from_node(node_id):
     if not has_prompt and not is_llm:
         system_node = Node(
             user_id=current_user.id,
+            human_owner_id=current_user.id,
             parent_id=node.id,
             node_type="user",
             privacy_level="private",
@@ -193,6 +173,7 @@ def create_orient_from_node(node_id):
     # LLM node, no prompt: create system prompt as child, then play back TTS
     system_node = Node(
         user_id=current_user.id,
+        human_owner_id=current_user.id,
         parent_id=node.id,
         node_type="user",
         privacy_level="private",

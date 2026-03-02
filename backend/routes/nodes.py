@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify, current_app
 from flask_login import login_required, current_user
-from backend.models import Node, NodeVersion, User
+from backend.models import Node, NodeVersion
 from backend.extensions import db
 from datetime import datetime
 from openai import OpenAI
@@ -18,7 +18,6 @@ from backend.utils.privacy import (
     get_default_privacy_settings,
     can_user_access_node,
     can_user_edit_node,
-    find_human_owner,
     PrivacyLevel,
     AIUsage
 )
@@ -26,6 +25,7 @@ from backend.utils.quotes import find_quote_ids, get_quote_data, has_quotes
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.webm_utils import get_webm_duration
 from backend.utils.encryption import encrypt_file, decrypt_file_to_temp
+from backend.utils.llm_nodes import create_llm_placeholder
 
 # ---------------------------------------------------------------------------
 # Voice‑Mode helpers
@@ -396,6 +396,7 @@ def create_node():
 
         node = Node(
             user_id=current_user.id,
+            human_owner_id=current_user.id,
             parent_id=parent_id,
             node_type=node_type,
             transcription_status='pending',  # Set initial status
@@ -468,6 +469,7 @@ def create_node():
 
     node = Node(
         user_id=current_user.id,
+        human_owner_id=current_user.id,
         parent_id=parent_id,
         node_type=node_type,
         linked_node_id=linked_node_id,
@@ -589,8 +591,7 @@ def get_node(node_id):
             "username": node.user.username,
         },
         # Include human owner ID for LLM nodes (so frontend can check edit/delete permission)
-        # For chains like Human → LLM → LLM, this returns the human's user_id
-        "parent_user_id": find_human_owner(node) if node.node_type == "llm" else (node.parent.user_id if node.parent else None),
+        "parent_user_id": node.human_owner_id if node.node_type == "llm" else (node.parent.user_id if node.parent else None),
         # Privacy settings
         "privacy_level": node.privacy_level,
         "ai_usage": node.ai_usage,
@@ -724,7 +725,6 @@ def get_suggested_model(node_id):
 @login_required
 def request_llm_response(node_id):
     from backend.llm_providers import LLMProvider
-    from backend.models import User
 
     parent_node = Node.query.get_or_404(node_id)
 
@@ -743,49 +743,21 @@ def request_llm_response(node_id):
             "supported_models": list(current_app.config["SUPPORTED_MODELS"].keys())
         }), 400
 
-    # Enqueue async LLM completion task
-    from backend.tasks.llm_completion import generate_llm_response
-
-    # Create a placeholder LLM node before starting the async task.
-    # This allows us to return the new node's ID to the frontend immediately,
-    # which can then poll the status of this new node.
-
-    # 1. Get or create the user for the LLM
-    llm_user = User.query.filter_by(username=model_id).first()
-    if not llm_user:
-        llm_user = User(twitter_id=f"llm-{model_id}", username=model_id)
-        db.session.add(llm_user)
-        db.session.commit()
-
-    # 2. Create the placeholder node
+    # Create placeholder LLM node and enqueue task
     # AI nodes inherit privacy settings from their parent node
-    llm_node = Node(
-        user_id=llm_user.id,
-        parent_id=parent_node.id,
-        node_type="llm",
-        llm_model=model_id,
-        llm_task_status='pending',
+    llm_node, task_id = create_llm_placeholder(
+        parent_node.id, model_id, current_user.id,
         privacy_level=parent_node.privacy_level,
-        ai_usage=parent_node.ai_usage
+        ai_usage=parent_node.ai_usage,
     )
-    llm_node.set_content("[LLM response generation pending...]")
-    db.session.add(llm_node)
-    db.session.commit()
 
-    # 3. Enqueue the task, passing both parent and new node IDs
-    task = generate_llm_response.delay(parent_node.id, llm_node.id, model_id, current_user.id)
-
-    # 4. Store task ID on the new node
-    llm_node.llm_task_id = task.id
-    db.session.commit()
-
-    current_app.logger.info(f"Enqueued LLM completion task {task.id} for parent node {parent_node.id}, new node {llm_node.id}")
+    current_app.logger.info(f"Enqueued LLM completion task {task_id} for parent node {parent_node.id}, new node {llm_node.id}")
 
     return jsonify({
         "message": "LLM response generation started",
-        "task_id": task.id,
+        "task_id": task_id,
         "status": "pending",
-        "node_id": llm_node.id  # Return the ID of the new node
+        "node_id": llm_node.id
     }), 202
 
 
@@ -805,6 +777,7 @@ def add_linked_node(node_id):
         return jsonify({"error": "Linked node not found"}), 404
     new_node = Node(
         user_id=current_user.id,
+        human_owner_id=current_user.id,
         parent_id=parent_node.id,
         node_type="link",
         linked_node_id=linked_node_id
@@ -1241,6 +1214,7 @@ def init_chunked_upload():
     placeholder_text = "[Voice note – upload in progress]"
     node = Node(
         user_id=current_user.id,
+        human_owner_id=current_user.id,
         parent_id=parent_id,
         node_type=node_type,
         transcription_status='pending',
@@ -1563,6 +1537,7 @@ def init_streaming_transcription():
     placeholder_text = "[Voice note – streaming transcription in progress]"
     node = Node(
         user_id=current_user.id,
+        human_owner_id=current_user.id,
         parent_id=parent_id,
         node_type=node_type,
         transcription_status='processing',
@@ -1833,13 +1808,8 @@ def pin_node(node_id):
     """Pin a node to the current user's profile (Dashboard + Feed)."""
     node = Node.query.get_or_404(node_id)
 
-    # Determine human owner: for LLM nodes walk up the parent chain
-    if node.node_type == "llm":
-        human_owner_id = find_human_owner(node)
-    else:
-        human_owner_id = node.user_id
-
-    if human_owner_id != current_user.id:
+    owner_id = node.human_owner_id or node.user_id
+    if owner_id != current_user.id:
         return jsonify({"error": "Only the owner can pin this node"}), 403
 
     if node.privacy_level == "private":
@@ -1864,13 +1834,8 @@ def unpin_node(node_id):
     """Unpin a node from the current user's profile."""
     node = Node.query.get_or_404(node_id)
 
-    # Determine human owner
-    if node.node_type == "llm":
-        human_owner_id = find_human_owner(node)
-    else:
-        human_owner_id = node.user_id
-
-    if human_owner_id != current_user.id:
+    owner_id = node.human_owner_id or node.user_id
+    if owner_id != current_user.id:
         return jsonify({"error": "Only the owner can unpin this node"}), 403
 
     node.pinned_at = None

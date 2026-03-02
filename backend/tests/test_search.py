@@ -109,13 +109,13 @@ def data(app):
 
     # Alice's nodes: one in December, one in January
     dec_node = Node(
-        user_id=alice.id,
+        user_id=alice.id, human_owner_id=alice.id,
         content="My December reflection on winter solstice",
         privacy_level="private", node_type="user",
         created_at=datetime(2025, 12, 15),
     )
     jan_node = Node(
-        user_id=alice.id,
+        user_id=alice.id, human_owner_id=alice.id,
         content="January new year resolutions and plans",
         privacy_level="private", node_type="user",
         created_at=datetime(2026, 1, 10),
@@ -125,7 +125,7 @@ def data(app):
 
     # LLM reply to Alice's dec_node (owned by bot, parented to Alice's node)
     llm_reply = Node(
-        user_id=llm_bot.id,
+        user_id=llm_bot.id, human_owner_id=alice.id,
         parent_id=dec_node.id,
         content="LLM response about winter traditions",
         privacy_level="private", node_type="llm",
@@ -137,7 +137,7 @@ def data(app):
 
     # Second-level LLM reply (Human → LLM → LLM chain)
     llm_reply2 = Node(
-        user_id=llm_bot.id,
+        user_id=llm_bot.id, human_owner_id=alice.id,
         parent_id=llm_reply.id,
         content="Deeper LLM winter follow-up",
         privacy_level="private", node_type="llm",
@@ -147,7 +147,7 @@ def data(app):
 
     # Bob's node (should never appear in Alice's search)
     bob_node = Node(
-        user_id=bob.id,
+        user_id=bob.id, human_owner_id=bob.id,
         content="Bob's December winter thoughts",
         privacy_level="public", node_type="user",
         created_at=datetime(2025, 12, 18),
@@ -157,7 +157,7 @@ def data(app):
 
     # Bob's LLM reply (should not appear in Alice's search)
     bob_llm = Node(
-        user_id=llm_bot.id,
+        user_id=llm_bot.id, human_owner_id=bob.id,
         parent_id=bob_node.id,
         content="LLM response about Bob's winter",
         privacy_level="private", node_type="llm",

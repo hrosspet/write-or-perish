@@ -120,19 +120,23 @@ def data(app):
     _db.session.flush()
 
     alice_public = Node(
-        user_id=alice.id, content="Alice public post",
+        user_id=alice.id, human_owner_id=alice.id,
+        content="Alice public post",
         privacy_level="public", node_type="user",
     )
     alice_private = Node(
-        user_id=alice.id, content="Alice private post",
+        user_id=alice.id, human_owner_id=alice.id,
+        content="Alice private post",
         privacy_level="private", node_type="user",
     )
     bob_public = Node(
-        user_id=bob.id, content="Bob public post",
+        user_id=bob.id, human_owner_id=bob.id,
+        content="Bob public post",
         privacy_level="public", node_type="user",
     )
     bob_private = Node(
-        user_id=bob.id, content="Bob private post",
+        user_id=bob.id, human_owner_id=bob.id,
+        content="Bob private post",
         privacy_level="private", node_type="user",
     )
 

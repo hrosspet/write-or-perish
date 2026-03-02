@@ -156,7 +156,8 @@ def create_app():
     app.register_blueprint(sse_bp, url_prefix="/api/sse")
 
     # Register CLI commands
-    from backend.init_db import init_db_command
+    from backend.init_db import init_db_command, backfill_human_owner_command
     app.cli.add_command(init_db_command)
+    app.cli.add_command(backfill_human_owner_command)
 
     return app

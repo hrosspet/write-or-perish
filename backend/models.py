@@ -66,6 +66,7 @@ class Node(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     parent_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True)
+    human_owner_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
     linked_node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True)
     node_type = db.Column(db.String(16), nullable=False, default="user")
     # Model used to generate this node (only populated for node_type='llm')

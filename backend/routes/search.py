@@ -6,7 +6,6 @@ from flask_login import login_required, current_user
 from sqlalchemy import or_
 from backend.models import Node, User
 from backend.extensions import db
-from backend.utils.privacy import can_user_access_node
 
 search_bp = Blueprint("search_bp", __name__)
 
@@ -50,31 +49,11 @@ def search():
     if not q and not date_from and not date_to:
         return jsonify({"error": "Provide at least a keyword (q) or date range (from/to)."}), 400
 
-    # Base query: user's own nodes + LLM nodes they have access to.
-    # LLM nodes are owned by bot users but accessible to the human who
-    # triggered them (determined by parent-chain traversal up to the
-    # first human author).  We over-fetch at SQL level by including all
-    # LLM children/grandchildren of the user's nodes, then verify each
-    # non-owned node with can_user_access_node() in Python.
-    user_node_ids = (
-        db.session.query(Node.id)
-        .filter(Node.user_id == current_user.id)
-    )
-    # Level 1: direct LLM children of user's nodes
-    lvl1_ids = (
-        db.session.query(Node.id)
-        .filter(Node.parent_id.in_(user_node_ids))
-    )
-    # Level 2: LLM grandchildren (Human → LLM → LLM chains)
-    lvl2_ids = (
-        db.session.query(Node.id)
-        .filter(Node.parent_id.in_(lvl1_ids))
-    )
+    # Base query: user's own nodes + nodes where they are the human owner
     query = Node.query.filter(
         or_(
             Node.user_id == current_user.id,
-            Node.id.in_(lvl1_ids),
-            Node.id.in_(lvl2_ids),
+            Node.human_owner_id == current_user.id,
         )
     )
 
@@ -98,22 +77,12 @@ def search():
 
     query = query.order_by(Node.created_at.desc())
 
-    # Fetch all candidates and verify access.  The SQL over-fetches
-    # (includes all children/grandchildren of user's nodes, not just
-    # LLM ones), so we confirm each non-owned node with the authoritative
-    # can_user_access_node() check.
-    all_nodes = query.all()
-    accessible = [
-        n for n in all_nodes
-        if n.user_id == current_user.id
-        or can_user_access_node(n, current_user.id)
-    ]
-
     if not q:
-        # No keyword — paginate the accessible list, decrypt only the page
-        total = len(accessible)
+        # No keyword — paginate at SQL level
+        all_nodes = query.all()
+        total = len(all_nodes)
         start = (page - 1) * per_page
-        page_nodes = accessible[start:start + per_page]
+        page_nodes = all_nodes[start:start + per_page]
         results = []
         for node in page_nodes:
             content = node.get_content()
@@ -137,9 +106,10 @@ def search():
             "search_type": "keyword",
         })
 
-    # Keyword search: decrypt all accessible nodes, filter in-memory
+    # Keyword search: decrypt all matching nodes, filter in-memory
+    all_nodes = query.all()
     matches = []
-    for node in accessible:
+    for node in all_nodes:
         content = node.get_content()
         if q.lower() in content.lower():
             matches.append((node, content))

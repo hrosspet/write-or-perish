@@ -216,6 +216,7 @@ def confirm_import():
                 # Create node
                 node = Node(
                     user_id=current_user.id,
+                    human_owner_id=current_user.id,
                     parent_id=parent_node.id if parent_node else None,
                     node_type="user",
                     content=node_content,
@@ -260,6 +261,7 @@ def confirm_import():
                 # Create top-level node (parent_id=None)
                 node = Node(
                     user_id=current_user.id,
+                    human_owner_id=current_user.id,
                     parent_id=None,
                     node_type="user",
                     content=node_content,
@@ -704,6 +706,7 @@ def confirm_claude_import():
 
                 node = Node(
                     user_id=llm_user.id if is_assistant else current_user.id,
+                    human_owner_id=current_user.id,
                     parent_id=parent_node.id if parent_node else None,
                     node_type="llm" if is_assistant else "user",
                     llm_model="claude-web" if is_assistant else None,
@@ -880,6 +883,7 @@ def confirm_twitter_import():
 
                 node = Node(
                     user_id=current_user.id,
+                    human_owner_id=current_user.id,
                     parent_id=parent_node.id if parent_node else None,
                     node_type="user",
                     content=content,
@@ -919,6 +923,7 @@ def confirm_twitter_import():
 
                 node = Node(
                     user_id=current_user.id,
+                    human_owner_id=current_user.id,
                     parent_id=None,
                     node_type="user",
                     content=content,
@@ -1294,6 +1299,7 @@ def confirm_chatgpt_import():
                     user_id=(
                         llm_user.id if is_assistant else current_user.id
                     ),
+                    human_owner_id=current_user.id,
                     parent_id=parent_node.id if parent_node else None,
                     node_type="llm" if is_assistant else "user",
                     llm_model=model_slug or (

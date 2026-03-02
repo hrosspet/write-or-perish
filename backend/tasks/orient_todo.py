@@ -10,9 +10,10 @@ from celery import chain as celery_chain
 from celery.utils.log import get_task_logger
 
 from backend.celery_app import celery, flask_app
-from backend.models import Node, User, UserTodo
+from backend.models import Node, UserTodo
 from backend.extensions import db
 from backend.utils.prompts import get_user_prompt
+from backend.utils.llm_nodes import create_llm_placeholder
 
 logger = get_task_logger(__name__)
 
@@ -38,6 +39,7 @@ def apply_orient_todo(self, llm_node_id: int, user_id: int):
         # User node with merge prompt, parented to the orient LLM response
         merge_prompt_node = Node(
             user_id=user_id,
+            human_owner_id=user_id,
             parent_id=llm_node_id,
             node_type="user",
             privacy_level="private",
@@ -49,27 +51,12 @@ def apply_orient_todo(self, llm_node_id: int, user_id: int):
         db.session.add(merge_prompt_node)
         db.session.flush()
 
-        # LLM placeholder for the merged todo
-        llm_user = User.query.filter_by(username=merge_model).first()
-        if not llm_user:
-            llm_user = User(
-                twitter_id=f"llm-{merge_model}", username=merge_model
-            )
-            db.session.add(llm_user)
-            db.session.flush()
-
-        merge_llm_node = Node(
-            user_id=llm_user.id,
-            parent_id=merge_prompt_node.id,
-            node_type="llm",
-            llm_model=merge_model,
-            llm_task_status="pending",
-            privacy_level="private",
-            ai_usage="chat",
+        # LLM placeholder for the merged todo (don't enqueue — we chain manually)
+        merge_llm_node, _ = create_llm_placeholder(
+            merge_prompt_node.id, merge_model, user_id,
+            placeholder_text="[Merging todo...]",
+            enqueue=False,
         )
-        merge_llm_node.set_content("[Merging todo...]")
-        db.session.add(merge_llm_node)
-        db.session.commit()
 
         logger.info(
             f"Created merge nodes: prompt={merge_prompt_node.id}, "

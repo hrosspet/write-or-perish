@@ -2,7 +2,7 @@ from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
 from backend.models import Node, User, UserProfile
 from backend.extensions import db
-from backend.utils.privacy import accessible_nodes_filter, find_human_owner
+from backend.utils.privacy import accessible_nodes_filter
 from backend.routes.terms import CURRENT_TERMS_VERSION
 
 dashboard_bp = Blueprint("dashboard_bp", __name__)
@@ -44,12 +44,10 @@ def _serialize_node_for_list(node):
 
     # Determine human owner username for LLM nodes
     human_owner_username = None
-    if node.node_type == "llm":
-        human_owner_id = find_human_owner(node)
-        if human_owner_id:
-            human_owner = User.query.get(human_owner_id)
-            if human_owner:
-                human_owner_username = human_owner.username
+    if node.node_type == "llm" and node.human_owner_id:
+        human_owner = User.query.get(node.human_owner_id)
+        if human_owner:
+            human_owner_username = human_owner.username
 
     return {
         "id": node.id,

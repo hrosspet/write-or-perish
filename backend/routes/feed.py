@@ -2,7 +2,7 @@ from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
 from backend.models import Node, User
 from backend.extensions import db
-from backend.utils.privacy import accessible_nodes_filter, find_human_owner
+from backend.utils.privacy import accessible_nodes_filter
 from sqlalchemy import or_, func
 
 feed_bp = Blueprint("feed_bp", __name__)
@@ -32,12 +32,10 @@ def get_feed():
     for node in pagination.items:
         # Determine human owner username for LLM nodes
         human_owner_username = None
-        if node.node_type == "llm":
-            human_owner_id = find_human_owner(node)
-            if human_owner_id:
-                human_owner = User.query.get(human_owner_id)
-                if human_owner:
-                    human_owner_username = human_owner.username
+        if node.node_type == "llm" and node.human_owner_id:
+            human_owner = User.query.get(node.human_owner_id)
+            if human_owner:
+                human_owner_username = human_owner.username
 
         nodes_list.append({
             "id": node.id,

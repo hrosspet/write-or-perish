@@ -50,3 +50,34 @@ def _run_upgrade():
     """Run pending migrations."""
     from flask_migrate import upgrade
     upgrade()
+
+
+@click.command("backfill-human-owner")
+@with_appcontext
+def backfill_human_owner_command():
+    """Backfill human_owner_id on all nodes. Idempotent."""
+    from backend.extensions import db
+    from backend.models import Node
+    from backend.utils.privacy import find_human_owner
+
+    # Bulk update non-LLM nodes: human_owner_id = user_id
+    count = Node.query.filter(
+        Node.node_type != "llm",
+        Node.human_owner_id.is_(None),
+    ).update({Node.human_owner_id: Node.user_id}, synchronize_session=False)
+    db.session.commit()
+    click.echo(f"Set human_owner_id on {count} non-LLM nodes.")
+
+    # LLM nodes: walk parent chain
+    llm_nodes = Node.query.filter(
+        Node.node_type == "llm",
+        Node.human_owner_id.is_(None),
+    ).all()
+    updated = 0
+    for node in llm_nodes:
+        owner_id = find_human_owner(node)
+        if owner_id:
+            node.human_owner_id = owner_id
+            updated += 1
+    db.session.commit()
+    click.echo(f"Set human_owner_id on {updated} LLM nodes ({len(llm_nodes)} total).")
