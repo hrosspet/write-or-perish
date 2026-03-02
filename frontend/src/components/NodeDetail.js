@@ -135,8 +135,12 @@ function NodeDetail() {
   if (error) return <div style={{ color: "var(--accent)", padding: "20px" }}>{error}</div>;
   if (!node) return <div style={{ color: "var(--text-muted)", padding: "20px" }}>No node found.</div>;
 
-  const handleBubbleClick = (nodeId) => {
-    navigate(`/node/${nodeId}`);
+  const handleBubbleClick = (nodeId, e) => {
+    if (e && (e.metaKey || e.ctrlKey)) {
+      window.open(`/node/${nodeId}`, '_blank');
+    } else {
+      navigate(`/node/${nodeId}`);
+    }
   };
 
   // For user-typed nodes: owner must match current user

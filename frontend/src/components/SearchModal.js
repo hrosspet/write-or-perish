@@ -70,9 +70,13 @@ function SearchModal({ onClose }) {
     return () => window.removeEventListener('keydown', handleKey);
   }, [onClose]);
 
-  const handleResultClick = (id) => {
-    onClose();
-    navigate(`/node/${id}`);
+  const handleResultClick = (id, e) => {
+    if (e && (e.metaKey || e.ctrlKey)) {
+      window.open(`/node/${id}`, '_blank');
+    } else {
+      onClose();
+      navigate(`/node/${id}`);
+    }
   };
 
   const formatDate = (iso) => {
@@ -251,7 +255,7 @@ function SearchModal({ onClose }) {
           {!loading && results.map((r) => (
             <div
               key={r.id}
-              onClick={() => handleResultClick(r.id)}
+              onClick={(e) => handleResultClick(r.id, e)}
               style={{
                 padding: '12px 20px',
                 cursor: 'pointer',

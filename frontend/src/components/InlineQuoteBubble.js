@@ -21,7 +21,7 @@ const InlineQuoteBubble = ({ quote, onClick }) => {
   const truncatedText = text.length > 250 ? text.substring(0, 250) + "..." : text;
 
   return (
-    <div style={bubbleStyle} onClick={() => onClick(quote.id)}>
+    <div style={bubbleStyle} onClick={(e) => onClick(quote.id, e)}>
       <div style={quoteHeaderStyle}>
         Quoted from @{quote.username}
       </div>

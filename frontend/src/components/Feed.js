@@ -57,8 +57,12 @@ function Feed() {
     return () => window.removeEventListener("scroll", handleScroll);
   }, [hasMore, loading, loadingMore, page, fetchPage]);
 
-  const handleBubbleClick = (nodeId) => {
-    navigate(`/node/${nodeId}`);
+  const handleBubbleClick = (nodeId, e) => {
+    if (e && (e.metaKey || e.ctrlKey)) {
+      window.open(`/node/${nodeId}`, '_blank');
+    } else {
+      navigate(`/node/${nodeId}`);
+    }
   };
 
   if (loading) return <div style={{ padding: "20px", color: "var(--text-muted)" }}>Loading feed...</div>;

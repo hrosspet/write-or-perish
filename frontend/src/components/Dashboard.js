@@ -537,7 +537,13 @@ function Dashboard() {
                 node={node}
                 isHighlighted={true}
                 leftAlign={true}
-                onClick={() => navigate(`/node/${node.id}`)}
+                onClick={(id, e) => {
+                  if (e && (e.metaKey || e.ctrlKey)) {
+                    window.open(`/node/${node.id}`, '_blank');
+                  } else {
+                    navigate(`/node/${node.id}`);
+                  }
+                }}
               />
             ))}
           </div>
@@ -569,7 +575,13 @@ function Dashboard() {
             node={node}
             isHighlighted={true}
             leftAlign={true}
-            onClick={() => navigate(`/node/${node.id}`)}
+            onClick={(id, e) => {
+              if (e && (e.metaKey || e.ctrlKey)) {
+                window.open(`/node/${node.id}`, '_blank');
+              } else {
+                navigate(`/node/${node.id}`);
+              }
+            }}
           />
         ))}
       </div>
