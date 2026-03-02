@@ -24,6 +24,7 @@ import TodoPage from "./pages/TodoPage";
 import ImportPage from "./pages/ImportPage";
 import PromptsPage from "./pages/PromptsPage";
 import PromptDetailPage from "./pages/PromptDetailPage";
+import SearchModal from "./components/SearchModal";
 import { useUser } from "./contexts/UserContext";
 import { AudioProvider } from "./contexts/AudioContext";
 
@@ -37,6 +38,7 @@ function RootRoute() {
 
 function App() {
   const [showNewEntry, setShowNewEntry] = useState(false);
+  const [showSearch, setShowSearch] = useState(false);
   const nodeFormRef = useRef(null);
   const [showTerms, setShowTerms] = useState(false);
   const { user, setUser } = useUser();
@@ -72,6 +74,18 @@ function App() {
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, [showNewEntry]);
+
+  // Cmd+K / Ctrl+K to open search
+  useEffect(() => {
+    const handleSearchShortcut = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        setShowSearch((prev) => !prev);
+      }
+    };
+    window.addEventListener('keydown', handleSearchShortcut);
+    return () => window.removeEventListener('keydown', handleSearchShortcut);
+  }, []);
 
   return (
     <AudioProvider>
@@ -145,6 +159,8 @@ function App() {
           </div>
         </div>
       )}
+
+      {showSearch && <SearchModal onClose={() => setShowSearch(false)} />}
 
       {/* Render the Terms Modal if the user hasn't accepted the terms yet */}
       {showTerms && (
