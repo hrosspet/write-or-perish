@@ -71,6 +71,7 @@ def create_reflect_from_node(node_id):
             "mode": "processing",
             "llm_node_id": llm_node.id,
             "parent_id": llm_node.id,
+            "fresh": True,
         }), 202
 
     if has_prompt and is_llm:
@@ -103,6 +104,7 @@ def create_reflect_from_node(node_id):
             "mode": "processing",
             "llm_node_id": llm_node.id,
             "parent_id": llm_node.id,
+            "fresh": True,
         }), 202
 
     # not has_prompt and is_llm

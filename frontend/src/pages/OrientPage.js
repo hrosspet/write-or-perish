@@ -150,6 +150,7 @@ export default function OrientPage() {
   const [searchParams] = useSearchParams();
   const resumeId = searchParams.get('resume');
   const parentId = searchParams.get('parent');
+  const isFreshFromNode = searchParams.get('fresh') === '1';
 
   const [applied, setApplied] = useState(false);
   const [parsedResponse, setParsedResponse] = useState(null);
@@ -179,9 +180,10 @@ export default function OrientPage() {
     model: selectedModel,
     onLLMComplete: (nodeId, content, isResume) => {
       setParsedResponse(parseOrientResponse(content));
-      // Auto-trigger todo merge (skip on initial resume — the replayed node
-      // may be from a different workflow like Reflect)
-      if (!isResume && applyTriggeredForNodeRef.current !== nodeId) {
+      // Auto-trigger todo merge. Skip on initial resume (replayed node may
+      // be from a different workflow), unless it's a fresh from-node LLM.
+      const shouldApply = !isResume || isFreshFromNode;
+      if (shouldApply && applyTriggeredForNodeRef.current !== nodeId) {
         applyTriggeredForNodeRef.current = nodeId;
         handleApplyTodo(nodeId);
       }
