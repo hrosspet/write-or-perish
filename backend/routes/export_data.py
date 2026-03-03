@@ -366,7 +366,7 @@ def build_user_export_content(
 
     # Build the export content using Markdown format
     export_lines = []
-    export_lines.append("# Write or Perish - Thread Export")
+    export_lines.append("# Loore - Thread Export")
     export_lines.append("")
     export_lines.append(f"**User:** {user.username}")
     export_lines.append(f"**Export Date:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")

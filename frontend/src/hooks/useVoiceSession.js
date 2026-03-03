@@ -114,9 +114,12 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   }, [onLLMComplete]);
 
   // Streaming transcription
+  // Derive label from apiEndpoint: '/reflect' → 'Reflect', '/orient' → 'Orient'
+  const workflowLabel = apiEndpoint ? apiEndpoint.replace('/', '').charAt(0).toUpperCase() + apiEndpoint.replace('/', '').slice(1) : null;
   const streaming = useStreamingTranscription({
     privacyLevel: 'private',
     aiUsage: 'chat',
+    label: workflowLabel,
     onTranscriptUpdate: (text) => {
       transcriptRef.current = text;
     },

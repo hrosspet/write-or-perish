@@ -403,6 +403,7 @@ def finalize_streaming(session_id):
 
     data = request.get_json() or {}
     total_chunks = data.get("total_chunks")
+    label = data.get("label")  # e.g. "Reflect", "Orient"
 
     if total_chunks is None:
         return jsonify({"error": "Missing total_chunks"}), 400
@@ -417,7 +418,8 @@ def finalize_streaming(session_id):
 
     task = finalize_draft_streaming.delay(
         session_id=session_id,
-        total_chunks=total_chunks
+        total_chunks=total_chunks,
+        label=label,
     )
 
     # Log chunk status at time of finalize request

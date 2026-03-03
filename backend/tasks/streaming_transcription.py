@@ -517,7 +517,8 @@ class DraftFinalizationTask(Task):
 
 
 @celery.task(base=DraftFinalizationTask, bind=True)
-def finalize_draft_streaming(self, session_id: str, total_chunks: int):
+def finalize_draft_streaming(self, session_id: str, total_chunks: int,
+                             label: str = None):
     """
     Finalize streaming transcription for a draft.
 
@@ -528,6 +529,8 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int):
     Args:
         session_id: UUID of the streaming session
         total_chunks: Total number of chunks expected
+        label: Optional title label (e.g. "Reflect", "Orient").
+               Defaults to "Voice note" when None.
     """
     logger.info(f"Finalizing draft streaming for session {session_id}, {total_chunks} chunks")
 
@@ -593,17 +596,18 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int):
         full_transcript = "\n\n".join(transcripts)
 
         # Format final content - only add title for top-level drafts
+        title_label = label or "Voice note"
         if draft.parent_id is None:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             if failed_chunks:
                 failed_indices = [c.chunk_index for c in failed_chunks]
                 final_content = (
-                    f"# {timestamp} Voice note\n\n"
+                    f"# {timestamp} {title_label}\n\n"
                     f"*Note: Chunks {failed_indices} failed to transcribe*\n\n"
                     f"{full_transcript}"
                 )
             else:
-                final_content = f"# {timestamp} Voice note\n\n{full_transcript}"
+                final_content = f"# {timestamp} {title_label}\n\n{full_transcript}"
         else:
             if failed_chunks:
                 failed_indices = [c.chunk_index for c in failed_chunks]

@@ -62,6 +62,7 @@ export function useStreamingTranscription(options = {}) {
     privacyLevel = 'private',
     aiUsage = 'none',
     chunkIntervalMs = 5 * 60 * 1000, // 5 minutes
+    label = null, // e.g. "Reflect", "Orient" — used as title instead of "Voice note"
     onTranscriptUpdate = null,
     onComplete = null,
     onError = null,
@@ -341,9 +342,10 @@ export function useStreamingTranscription(options = {}) {
 
     try {
       // Call finalize endpoint
-      await api.post(`/drafts/streaming/${sessionIdRef.current}/finalize`, {
-        total_chunks: totalChunks,
-      }, {
+      const finalizePayload = { total_chunks: totalChunks };
+      if (label) finalizePayload.label = label;
+      await api.post(`/drafts/streaming/${sessionIdRef.current}/finalize`,
+        finalizePayload, {
         timeout: 120000, // 2 minutes for finalize (just queues the task)
       });
 
