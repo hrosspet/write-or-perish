@@ -2,14 +2,12 @@ from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node
 from backend.extensions import db
-from backend.utils.prompts import get_user_prompt
+from backend.utils.prompts import get_user_prompt_record
 from backend.utils.llm_nodes import create_llm_placeholder
 
 converse_bp = Blueprint("converse", __name__)
 
-
-def _get_converse_prompt():
-    return get_user_prompt(current_user.id, 'converse')
+PROMPT_KEY = 'converse'
 
 
 def _get_last_node_in_chain(system_node):
@@ -60,6 +58,7 @@ def start_conversation():
         return jsonify({"error": f"Unsupported model: {model_id}"}), 400
 
     # 1. System node with converse prompt
+    prompt_record = get_user_prompt_record(current_user.id, PROMPT_KEY)
     system_node = Node(
         user_id=current_user.id,
         human_owner_id=current_user.id,
@@ -67,8 +66,8 @@ def start_conversation():
         node_type="user",
         privacy_level="private",
         ai_usage="chat",
+        user_prompt_id=prompt_record.id,
     )
-    system_node.set_content(_get_converse_prompt())
     db.session.add(system_node)
     db.session.flush()
 

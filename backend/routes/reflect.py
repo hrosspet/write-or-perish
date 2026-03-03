@@ -2,7 +2,7 @@ from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node
 from backend.extensions import db
-from backend.utils.prompts import get_user_prompt
+from backend.utils.prompts import get_user_prompt_record
 from backend.utils.llm_nodes import create_llm_placeholder
 
 reflect_bp = Blueprint("reflect", __name__)
@@ -10,22 +10,14 @@ reflect_bp = Blueprint("reflect", __name__)
 PROMPT_KEY = 'reflect'
 
 
-def _get_reflect_prompt():
-    return get_user_prompt(current_user.id, PROMPT_KEY)
-
-
 def _ancestors_have_prompt(node, user_id, prompt_key):
-    """Walk up all ancestors and check if any node's content matches the prompt."""
-    prompt_content = get_user_prompt(user_id, prompt_key)
-    if not prompt_content:
-        return False
+    """Walk up ancestors and check if any node links to a UserPrompt with this key."""
     current = node
     while current:
-        try:
-            if current.get_content() == prompt_content:
-                return True
-        except Exception:
-            pass
+        if (current.user_prompt_id is not None
+                and current.user_prompt
+                and current.user_prompt.prompt_key == prompt_key):
+            return True
         if current.parent_id:
             current = Node.query.get(current.parent_id)
         else:
@@ -78,6 +70,8 @@ def create_reflect_from_node(node_id):
         return jsonify({
             "mode": "processing",
             "llm_node_id": llm_node.id,
+            "parent_id": llm_node.id,
+            "fresh": True,
         }), 202
 
     if has_prompt and is_llm:
@@ -90,6 +84,7 @@ def create_reflect_from_node(node_id):
 
     if not has_prompt and not is_llm:
         # User node, no prompt: create system prompt as child, then LLM child
+        prompt_record = get_user_prompt_record(current_user.id, PROMPT_KEY)
         system_node = Node(
             user_id=current_user.id,
             human_owner_id=current_user.id,
@@ -97,8 +92,8 @@ def create_reflect_from_node(node_id):
             node_type="user",
             privacy_level="private",
             ai_usage="chat",
+            user_prompt_id=prompt_record.id,
         )
-        system_node.set_content(_get_reflect_prompt())
         db.session.add(system_node)
         db.session.flush()
 
@@ -108,10 +103,13 @@ def create_reflect_from_node(node_id):
         return jsonify({
             "mode": "processing",
             "llm_node_id": llm_node.id,
+            "parent_id": llm_node.id,
+            "fresh": True,
         }), 202
 
     # not has_prompt and is_llm
     # LLM node, no prompt: create system prompt as child, then play back TTS
+    prompt_record = get_user_prompt_record(current_user.id, PROMPT_KEY)
     system_node = Node(
         user_id=current_user.id,
         human_owner_id=current_user.id,
@@ -119,8 +117,8 @@ def create_reflect_from_node(node_id):
         node_type="user",
         privacy_level="private",
         ai_usage="chat",
+        user_prompt_id=prompt_record.id,
     )
-    system_node.set_content(_get_reflect_prompt())
     db.session.add(system_node)
     db.session.commit()
 
@@ -168,6 +166,7 @@ def create_reflect_session():
         user_parent_id = parent_id
     else:
         # New thread — create system node with reflect prompt
+        prompt_record = get_user_prompt_record(current_user.id, PROMPT_KEY)
         system_node = Node(
             user_id=current_user.id,
             human_owner_id=current_user.id,
@@ -175,8 +174,8 @@ def create_reflect_session():
             node_type="user",
             privacy_level="private",
             ai_usage="chat",
+            user_prompt_id=prompt_record.id,
         )
-        system_node.set_content(_get_reflect_prompt())
         db.session.add(system_node)
         db.session.flush()
         user_parent_id = system_node.id

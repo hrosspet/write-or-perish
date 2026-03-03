@@ -209,6 +209,7 @@ class NodeEntry:
     embedded_tokens: int = 0  # Additional tokens from embedded quote content
     quote_ids: List[int] = field(default_factory=list)  # Unresolved quote targets
     is_top_level: bool = True  # Whether this is a top-level entry vs embedded
+    user_prompt_id: Optional[int] = None  # System prompt reference
 
     @property
     def total_tokens(self) -> int:
@@ -265,13 +266,20 @@ class ExportQuoteResolver:
         self.embedded_quotes: Dict[int, Dict[int, str]] = {}
         # Cache of node metadata (tokens, quote_ids) to avoid repeated DB queries
         self._node_cache: Dict[int, dict] = {}
+        # System prompt tracking
+        self._prompt_tokens: Dict[int, int] = {}  # user_prompt_id → token cost
+        self._prompt_contents: Dict[int, str] = {}  # user_prompt_id → content
+        self.referenced_prompt_ids: Set[int] = set()  # final result
 
     def add_node(
         self,
         node_id: int,
         created_at: 'datetime',
         content: str,
-        token_count: Optional[int] = None
+        token_count: Optional[int] = None,
+        user_prompt_id: Optional[int] = None,
+        prompt_content: Optional[str] = None,
+        prompt_label: Optional[str] = None
     ):
         """
         Add a node to the export.
@@ -281,25 +289,41 @@ class ExportQuoteResolver:
             created_at: When the node was created (for sorting)
             content: The node's content (used to extract quote IDs and estimate tokens)
             token_count: Optional pre-computed token count
+            user_prompt_id: Optional system prompt FK
+            prompt_content: Full prompt content (for preamble)
+            prompt_label: Label like "Reflect v3" (for reference text)
         """
         from backend.utils.tokens import approximate_token_count
 
-        if token_count is None:
-            token_count = approximate_token_count(content)
+        if user_prompt_id is not None:
+            # System prompt node: base_tokens is just the reference line
+            ref_text = f"[System Prompt: {prompt_label or 'Prompt'}]"
+            base_tokens = approximate_token_count(ref_text)
+            # Cache prompt content/tokens if not already cached
+            if user_prompt_id not in self._prompt_tokens and prompt_content:
+                self._prompt_tokens[user_prompt_id] = approximate_token_count(
+                    prompt_content
+                )
+                self._prompt_contents[user_prompt_id] = prompt_content
+        else:
+            if token_count is None:
+                token_count = approximate_token_count(content)
+            base_tokens = token_count
 
         quote_ids = find_quote_ids(content)
 
         entry = NodeEntry(
             node_id=node_id,
             created_at=created_at,
-            base_tokens=token_count,
-            quote_ids=quote_ids
+            base_tokens=base_tokens,
+            quote_ids=quote_ids,
+            user_prompt_id=user_prompt_id,
         )
         self.entries.append(entry)
 
         # Cache for later use
         self._node_cache[node_id] = {
-            'tokens': token_count,
+            'tokens': base_tokens,
             'quote_ids': quote_ids,
             'content': content
         }
@@ -315,6 +339,10 @@ class ExportQuoteResolver:
         Note: Preserves _embedded_ids - nodes whose content was embedded
         are always considered "included" even if they're not in the
         truncated entry list.
+
+        Also accounts for prompt preamble overhead: each unique
+        user_prompt_id referenced by included entries adds its full
+        content token cost once.
         """
         total = 0
         self.included_count = 0
@@ -325,11 +353,42 @@ class ExportQuoteResolver:
             entry_tokens = entry.total_tokens
             if total + entry_tokens > self.max_tokens:
                 self.included_count = i
-                return
+                break
             total += entry_tokens
             self.included_ids.add(entry.node_id)
+        else:
+            self.included_count = len(self.entries)
 
-        self.included_count = len(self.entries)
+        # Account for prompt preamble overhead
+        if self._prompt_tokens:
+            while self.included_count > 0:
+                entry_total = sum(
+                    e.total_tokens
+                    for e in self.entries[:self.included_count]
+                )
+                referenced = {
+                    e.user_prompt_id
+                    for e in self.entries[:self.included_count]
+                    if e.user_prompt_id is not None
+                }
+                prompt_overhead = sum(
+                    self._prompt_tokens.get(pid, 0) for pid in referenced
+                )
+                if entry_total + prompt_overhead <= self.max_tokens:
+                    break
+                self.included_count -= 1
+
+            # Rebuild included_ids after prompt-aware truncation
+            self.included_ids = set(self._embedded_ids)
+            for entry in self.entries[:self.included_count]:
+                self.included_ids.add(entry.node_id)
+
+        # Compute final referenced prompt IDs
+        self.referenced_prompt_ids = {
+            e.user_prompt_id
+            for e in self.entries[:self.included_count]
+            if e.user_prompt_id is not None
+        }
 
     def _get_node_metadata(self, node_id: int) -> Optional[dict]:
         """
@@ -453,6 +512,18 @@ class ExportQuoteResolver:
             - Set of node IDs blocked due to ai_usage='none'
         """
         return self.included_ids, self.embedded_quotes, self._ai_blocked_ids
+
+    def get_prompt_preamble(self) -> str:
+        """Build a preamble section listing all referenced system prompts."""
+        if not self.referenced_prompt_ids:
+            return ""
+        lines = ["## System Prompts Referenced\n"]
+        for pid in sorted(self.referenced_prompt_ids):
+            content = self._prompt_contents.get(pid, "")
+            lines.append(f"### Prompt (ref #{pid})\n")
+            lines.append(content)
+            lines.append("\n")
+        return "\n".join(lines)
 
     def get_included_entries(self) -> List[NodeEntry]:
         """

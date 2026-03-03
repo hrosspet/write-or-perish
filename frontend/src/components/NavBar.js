@@ -343,9 +343,21 @@ function NavBar({ onNewEntryClick }) {
                     <button onClick={handleWriteClick} style={dropdownItemStyle}>
                       Write new entry
                     </button>
-                    <Link to="/export" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
+                    <button onClick={() => {
+                      setOverflowOpen(false);
+                      api.get("/export/threads", { responseType: "blob" })
+                        .then((res) => {
+                          const url = window.URL.createObjectURL(new Blob([res.data]));
+                          const a = document.createElement("a");
+                          a.href = url;
+                          a.download = `loore-export-${new Date().toISOString().slice(0, 10)}.txt`;
+                          a.click();
+                          window.URL.revokeObjectURL(url);
+                        })
+                        .catch((err) => console.error("Export failed:", err));
+                    }} style={dropdownItemStyle}>
                       Export data
-                    </Link>
+                    </button>
                     <Link to="/prompts" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
                       Prompts
                     </Link>

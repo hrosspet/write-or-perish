@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify, current_app
 from flask_login import login_required, current_user
-from backend.models import Node, NodeVersion
+from backend.models import Node, NodeVersion, UserPrompt
 from backend.extensions import db
 from datetime import datetime
 from openai import OpenAI
@@ -301,6 +301,35 @@ def compute_descendant_counts(node):
     return total
 
 
+def _prompt_version_number(prompt):
+    """Count how many UserPrompt rows with the same user_id and prompt_key
+    have created_at <= this prompt's created_at."""
+    return UserPrompt.query.filter(
+        UserPrompt.user_id == prompt.user_id,
+        UserPrompt.prompt_key == prompt.prompt_key,
+        UserPrompt.created_at <= prompt.created_at,
+    ).count()
+
+
+def _system_prompt_fields(n):
+    """Return system prompt serialization fields for a node."""
+    if n.user_prompt_id is not None and n.user_prompt:
+        return {
+            "is_system_prompt": True,
+            "prompt_title": n.user_prompt.title,
+            "prompt_key": n.user_prompt.prompt_key,
+            "user_prompt_id": n.user_prompt_id,
+            "prompt_version_number": _prompt_version_number(n.user_prompt),
+        }
+    return {
+        "is_system_prompt": n.user_prompt_id is not None,
+        "prompt_title": None,
+        "prompt_key": None,
+        "user_prompt_id": n.user_prompt_id,
+        "prompt_version_number": None,
+    }
+
+
 def serialize_node_recursive(n, user_id=None):
     """Recursively serialize a node and its accessible children.
 
@@ -320,7 +349,7 @@ def serialize_node_recursive(n, user_id=None):
     # Sort the accessible children using the cached _descendant_count
     sorted_children = sorted(accessible_children, key=lambda child: child._descendant_count, reverse=True)
 
-    return {
+    data = {
         "id": n.id,
         "content": n.get_content(),
         "node_type": n.node_type,
@@ -332,6 +361,8 @@ def serialize_node_recursive(n, user_id=None):
         "descendant_count": n._descendant_count,
         "children": [serialize_node_recursive(child, user_id) for child in sorted_children]
     }
+    data.update(_system_prompt_fields(n))
+    return data
 
 
 def approximate_token_count(text):
@@ -561,7 +592,7 @@ def get_node(node_id):
     while current:
         # Only include ancestor if user has access
         if can_user_access_node(current, current_user.id):
-            ancestors.insert(0, {
+            ancestor_data = {
                 "id": current.id,
                 "username": current.user.username if current.user else "Unknown",
                 "llm_model": current.llm_model,
@@ -569,7 +600,9 @@ def get_node(node_id):
                 "node_type": current.node_type,
                 "child_count": len(current.children),
                 "created_at": current.created_at.isoformat()
-            })
+            }
+            ancestor_data.update(_system_prompt_fields(current))
+            ancestors.insert(0, ancestor_data)
         current = current.parent
 
     # Filter children by privacy and serialize
@@ -600,6 +633,7 @@ def get_node(node_id):
         "llm_model": node.llm_model,
         "has_original_audio": bool(node.audio_original_url or node.streaming_transcription),
     }
+    node_data.update(_system_prompt_fields(node))
     return jsonify(node_data), 200
 
 # Resolve {quote:ID} placeholders in a node's content for frontend rendering.

@@ -2,7 +2,7 @@ from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node
 from backend.extensions import db
-from backend.utils.prompts import get_user_prompt
+from backend.utils.prompts import get_user_prompt_record
 from backend.utils.llm_nodes import create_llm_placeholder
 from backend.routes.reflect import (
     _ancestors_have_prompt, _is_llm_node, _create_llm_placeholder,
@@ -11,10 +11,6 @@ from backend.routes.reflect import (
 orient_bp = Blueprint("orient", __name__)
 
 PROMPT_KEY = 'orient'
-
-
-def _get_orient_prompt():
-    return get_user_prompt(current_user.id, PROMPT_KEY)
 
 
 @orient_bp.route("/", methods=["POST"])
@@ -54,6 +50,7 @@ def create_orient_session():
         user_parent_id = parent_id
     else:
         # New thread — create system node with orient prompt
+        prompt_record = get_user_prompt_record(current_user.id, PROMPT_KEY)
         system_node = Node(
             user_id=current_user.id,
             human_owner_id=current_user.id,
@@ -61,8 +58,8 @@ def create_orient_session():
             node_type="user",
             privacy_level="private",
             ai_usage="chat",
+            user_prompt_id=prompt_record.id,
         )
-        system_node.set_content(_get_orient_prompt())
         db.session.add(system_node)
         db.session.flush()
         user_parent_id = system_node.id
@@ -138,6 +135,8 @@ def create_orient_from_node(node_id):
         return jsonify({
             "mode": "processing",
             "llm_node_id": llm_node.id,
+            "parent_id": llm_node.id,
+            "fresh": True,
         }), 202
 
     if has_prompt and is_llm:
@@ -149,6 +148,7 @@ def create_orient_from_node(node_id):
         }), 200
 
     if not has_prompt and not is_llm:
+        prompt_record = get_user_prompt_record(current_user.id, PROMPT_KEY)
         system_node = Node(
             user_id=current_user.id,
             human_owner_id=current_user.id,
@@ -156,8 +156,8 @@ def create_orient_from_node(node_id):
             node_type="user",
             privacy_level="private",
             ai_usage="chat",
+            user_prompt_id=prompt_record.id,
         )
-        system_node.set_content(_get_orient_prompt())
         db.session.add(system_node)
         db.session.flush()
 
@@ -167,10 +167,13 @@ def create_orient_from_node(node_id):
         return jsonify({
             "mode": "processing",
             "llm_node_id": llm_node.id,
+            "parent_id": llm_node.id,
+            "fresh": True,
         }), 202
 
     # not has_prompt and is_llm
     # LLM node, no prompt: create system prompt as child, then play back TTS
+    prompt_record = get_user_prompt_record(current_user.id, PROMPT_KEY)
     system_node = Node(
         user_id=current_user.id,
         human_owner_id=current_user.id,
@@ -178,8 +181,8 @@ def create_orient_from_node(node_id):
         node_type="user",
         privacy_level="private",
         ai_usage="chat",
+        user_prompt_id=prompt_record.id,
     )
-    system_node.set_content(_get_orient_prompt())
     db.session.add(system_node)
     db.session.commit()
 

@@ -50,6 +50,58 @@ def default_prompt_hash(prompt_key):
     return hashlib.sha256(content.encode()).hexdigest()
 
 
+def get_user_prompt_record(user_id, prompt_key):
+    """Get the UserPrompt ORM row for a feature, creating from default if needed.
+
+    Returns the exact version row (for FK assignment). If the latest DB row
+    was created via "default" and the file default has since changed, creates
+    a new row with the updated content.
+    """
+    from backend.models import UserPrompt
+    from backend.extensions import db
+
+    prompt = UserPrompt.query.filter_by(
+        user_id=user_id, prompt_key=prompt_key
+    ).order_by(UserPrompt.created_at.desc()).first()
+
+    if prompt:
+        if prompt.generated_by == "default":
+            current_hash = default_prompt_hash(prompt_key)
+            if current_hash and prompt.based_on_default_hash != current_hash:
+                # File default changed — create a new row with updated content
+                meta = PROMPT_DEFAULTS.get(prompt_key, {})
+                new_content = load_default_prompt(prompt_key)
+                new_prompt = UserPrompt(
+                    user_id=user_id,
+                    prompt_key=prompt_key,
+                    title=meta.get('title', prompt_key),
+                    generated_by="default",
+                    based_on_default_hash=current_hash,
+                )
+                new_prompt.set_content(new_content)
+                db.session.add(new_prompt)
+                db.session.flush()
+                return new_prompt
+        return prompt
+
+    # No DB row — create one from the file default
+    content = load_default_prompt(prompt_key)
+    if not content:
+        return None
+    meta = PROMPT_DEFAULTS.get(prompt_key, {})
+    new_prompt = UserPrompt(
+        user_id=user_id,
+        prompt_key=prompt_key,
+        title=meta.get('title', prompt_key),
+        generated_by="default",
+        based_on_default_hash=default_prompt_hash(prompt_key),
+    )
+    new_prompt.set_content(content)
+    db.session.add(new_prompt)
+    db.session.flush()
+    return new_prompt
+
+
 def get_user_prompt(user_id, prompt_key):
     """Get user's active prompt for a feature, or load the file default.
 

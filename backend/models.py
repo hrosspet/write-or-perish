@@ -68,10 +68,15 @@ class Node(db.Model):
     parent_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True)
     human_owner_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
     linked_node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True)
+    user_prompt_id = db.Column(
+        db.Integer,
+        db.ForeignKey("user_prompt.id", ondelete="SET NULL"),
+        nullable=True
+    )
     node_type = db.Column(db.String(16), nullable=False, default="user")
     # Model used to generate this node (only populated for node_type='llm')
     llm_model = db.Column(db.String(64), nullable=True)
-    content = db.Column(db.Text, nullable=False)
+    content = db.Column(db.Text, nullable=True)
     token_count = db.Column(db.Integer, nullable=True)
     # NEW: distributed_tokens will hold the portion of an LLM response allocated to this node's author.
     distributed_tokens = db.Column(db.Integer, nullable=False, default=0)
@@ -147,13 +152,26 @@ class Node(db.Model):
                                lazy=True, foreign_keys=[parent_id])
     linked_children = db.relationship("Node", backref=db.backref("linked_parent", remote_side=[id]),
                                       lazy=True, foreign_keys=[linked_node_id])
+    user_prompt = db.relationship("UserPrompt", foreign_keys=[user_prompt_id])
+
+    @property
+    def is_system_prompt(self):
+        return self.user_prompt_id is not None
 
     def set_content(self, plaintext: str):
         """Set content with encryption."""
         self.content = encrypt_content(plaintext)
 
     def get_content(self) -> str:
-        """Get decrypted content."""
+        """Get decrypted content. Resolves from linked UserPrompt if set."""
+        if self.user_prompt_id is not None:
+            if self.user_prompt:
+                return self.user_prompt.get_content()
+            from backend.models import UserPrompt
+            prompt = UserPrompt.query.get(self.user_prompt_id)
+            return prompt.get_content() if prompt else ""
+        if self.content is None:
+            return ""
         return decrypt_content(self.content)
 
 class NodeVersion(db.Model):

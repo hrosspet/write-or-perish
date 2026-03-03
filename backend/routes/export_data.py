@@ -106,6 +106,43 @@ def format_node_tree(
     # Build the node text - no content indentation for token efficiency
     result = f"{header_prefix} [{index_path}] {node_type_display} ({author}) - {timestamp}\n"
 
+    # System prompt nodes: emit reference instead of full content
+    if node.user_prompt_id is not None and node.user_prompt:
+        prompt = node.user_prompt
+        from backend.models import UserPrompt
+        version_num = UserPrompt.query.filter(
+            UserPrompt.user_id == prompt.user_id,
+            UserPrompt.prompt_key == prompt.prompt_key,
+            UserPrompt.created_at <= prompt.created_at,
+        ).count()
+        result += f"[System Prompt: {prompt.title} v{version_num} (ref #{prompt.id})]\n\n"
+
+        # Process children
+        children = node.children
+        if filter_ai_usage:
+            children = [c for c in children if c.ai_usage in ['chat', 'train']]
+        if created_before:
+            children = [c for c in children if c.created_at < created_before]
+        if included_ids is not None:
+            children = [c for c in children if c.id in included_ids]
+        children = sorted(children, key=lambda c: c.created_at)
+
+        for i, child in enumerate(children):
+            child_index = f"{index_path}.{i+1}"
+            if len(children) > 1 and i > 0:
+                result += "---\n**BRANCH**\n---\n\n"
+            result += format_node_tree(
+                child, index_path=child_index,
+                processed_nodes=processed_nodes,
+                filter_ai_usage=filter_ai_usage,
+                user_id=user_id,
+                created_before=created_before,
+                embedded_quotes=embedded_quotes,
+                included_ids=included_ids,
+                ai_blocked_ids=ai_blocked_ids
+            )
+        return result
+
     # Resolve {quote:ID} placeholders in content
     content = node.get_content()
     if has_quotes(content):
@@ -252,6 +289,7 @@ def build_user_export_content(
     embedded_quotes = None
     included_ids = None
     ai_blocked_ids = None
+    resolver = None
 
     # If max_tokens is specified, use ExportQuoteResolver for smart quote handling
     if max_tokens:
@@ -286,11 +324,28 @@ def build_user_export_content(
         # Add all nodes to the resolver
         for node in all_nodes:
             content = node.get_content()
-            resolver.add_node(
-                node_id=node.id,
-                created_at=node.created_at,
-                content=content
-            )
+            if node.user_prompt_id is not None and node.user_prompt:
+                prompt = node.user_prompt
+                from backend.models import UserPrompt as _UP
+                version_num = _UP.query.filter(
+                    _UP.user_id == prompt.user_id,
+                    _UP.prompt_key == prompt.prompt_key,
+                    _UP.created_at <= prompt.created_at,
+                ).count()
+                resolver.add_node(
+                    node_id=node.id,
+                    created_at=node.created_at,
+                    content=content,
+                    user_prompt_id=node.user_prompt_id,
+                    prompt_content=content,
+                    prompt_label=f"{prompt.title} v{version_num}",
+                )
+            else:
+                resolver.add_node(
+                    node_id=node.id,
+                    created_at=node.created_at,
+                    content=content
+                )
 
         # Run the resolution algorithm
         resolver.resolve()
@@ -322,6 +377,48 @@ def build_user_export_content(
     export_lines.append("")
     export_lines.append("---")
     export_lines.append("")
+
+    # Emit system prompt preamble if any prompts are referenced
+    if resolver is not None:
+        preamble = resolver.get_prompt_preamble()
+        if preamble:
+            export_lines.append(preamble)
+            export_lines.append("---")
+            export_lines.append("")
+    elif not max_tokens:
+        # Full export: collect all unique prompt versions
+        prompt_versions = {}
+        for top_node in top_level_nodes:
+            tree_nodes = _collect_all_nodes_in_tree(
+                top_node, filter_ai_usage, created_before
+            )
+            for n in tree_nodes:
+                if n.user_prompt_id is not None and n.user_prompt:
+                    pid = n.user_prompt_id
+                    if pid not in prompt_versions:
+                        prompt = n.user_prompt
+                        from backend.models import UserPrompt as _UP2
+                        vnum = _UP2.query.filter(
+                            _UP2.user_id == prompt.user_id,
+                            _UP2.prompt_key == prompt.prompt_key,
+                            _UP2.created_at <= prompt.created_at,
+                        ).count()
+                        prompt_versions[pid] = {
+                            "title": prompt.title,
+                            "version": vnum,
+                            "content": n.get_content(),
+                        }
+        if prompt_versions:
+            export_lines.append("## System Prompts Referenced\n")
+            for pid in sorted(prompt_versions):
+                pv = prompt_versions[pid]
+                export_lines.append(
+                    f"### {pv['title']} v{pv['version']} (ref #{pid})\n"
+                )
+                export_lines.append(pv["content"])
+                export_lines.append("")
+            export_lines.append("---")
+            export_lines.append("")
 
     # Process each thread
     for thread_num, node in enumerate(top_level_nodes, 1):

@@ -5,6 +5,7 @@ const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => 
   // Detect voice notes via backend-provided has_original_audio flag
   const isVoiceNote = !!node.has_original_audio;
   const isPinned = !!node.pinned_at;
+  const promptKey = node.prompt_key || null;
 
   // Use full content if available; otherwise use preview.
   const text = node.content || node.preview || "";
@@ -107,7 +108,15 @@ const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => 
               Pinned
             </span>
           )}
-          {isVoiceNote && (
+          {promptKey ? (
+            <span style={{
+              ...tagStyle,
+              color: "var(--accent-dim)",
+              backgroundColor: "var(--accent-subtle)",
+            }}>
+              {promptKey.charAt(0).toUpperCase() + promptKey.slice(1)}
+            </span>
+          ) : isVoiceNote ? (
             <span style={{
               ...tagStyle,
               color: "var(--accent-dim)",
@@ -115,7 +124,7 @@ const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => 
             }}>
               Voice Note
             </span>
-          )}
+          ) : null}
         </div>
       </div>
     </div>

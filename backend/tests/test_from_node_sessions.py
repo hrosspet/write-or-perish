@@ -55,7 +55,7 @@ for _mod in [k for k in list(sys.modules)
 
 import flask_login as _real_flask_login          # noqa: E402
 from backend.extensions import db as _db         # noqa: E402
-from backend.models import User, Node            # noqa: E402
+from backend.models import User, Node, UserPrompt  # noqa: E402
 import backend.models as _real_backend_models    # noqa: E402
 
 # Re-register task mock after force-import loop
@@ -148,6 +148,24 @@ def _make_node(user, parent_id=None, content="hello", node_type="user",
     return n
 
 
+def _make_prompt_node(user, prompt_key, parent_id=None):
+    """Create a system prompt node linked via user_prompt_id."""
+    from backend.utils.prompts import get_user_prompt_record
+    record = get_user_prompt_record(user.id, prompt_key)
+    n = Node(
+        user_id=user.id,
+        human_owner_id=user.id,
+        parent_id=parent_id,
+        node_type="user",
+        privacy_level="private",
+        ai_usage="chat",
+        user_prompt_id=record.id,
+    )
+    _db.session.add(n)
+    _db.session.flush()
+    return n
+
+
 # ── Tests: Reflect from-node ─────────────────────────────────────────────
 
 class TestReflectFromNodeMatrix:
@@ -158,11 +176,9 @@ class TestReflectFromNodeMatrix:
         client = app.test_client()
 
         alice = _make_user("alice")
-        from backend.utils.prompts import get_user_prompt
-        prompt_text = get_user_prompt(alice.id, "reflect")
 
         # Build chain: prompt_node → user_node
-        prompt_node = _make_node(alice, content=prompt_text)
+        prompt_node = _make_prompt_node(alice, "reflect")
         user_node = _make_node(alice, parent_id=prompt_node.id,
                                content="my thoughts")
         _db.session.commit()
@@ -190,11 +206,9 @@ class TestReflectFromNodeMatrix:
 
         alice = _make_user("alice")
         llm_user = _make_user("gpt-5", twitter_id="llm-gpt-5")
-        from backend.utils.prompts import get_user_prompt
-        prompt_text = get_user_prompt(alice.id, "reflect")
 
         # Build chain: prompt_node → user_node → llm_node
-        prompt_node = _make_node(alice, content=prompt_text)
+        prompt_node = _make_prompt_node(alice, "reflect")
         user_node = _make_node(alice, parent_id=prompt_node.id,
                                content="my thoughts")
         llm_node = _make_node(llm_user, parent_id=user_node.id,
@@ -240,10 +254,10 @@ class TestReflectFromNodeMatrix:
         system_node = Node.query.get(llm_node.parent_id)
         assert system_node.parent_id == user_node.id
         assert system_node.node_type == "user"
-
-        from backend.utils.prompts import get_user_prompt
-        prompt_text = get_user_prompt(alice.id, "reflect")
-        assert system_node.get_content() == prompt_text
+        assert system_node.user_prompt_id is not None
+        assert system_node.content is None
+        linked_prompt = UserPrompt.query.get(system_node.user_prompt_id)
+        assert linked_prompt.prompt_key == "reflect"
 
     def test_no_prompt_llm_node_creates_system_prompt_and_processing(
         self, app
@@ -275,10 +289,10 @@ class TestReflectFromNodeMatrix:
         # Verify system prompt was created as child of llm_node
         system_node = Node.query.get(data["parent_id"])
         assert system_node.parent_id == llm_node.id
-
-        from backend.utils.prompts import get_user_prompt
-        prompt_text = get_user_prompt(alice.id, "reflect")
-        assert system_node.get_content() == prompt_text
+        assert system_node.user_prompt_id is not None
+        assert system_node.content is None
+        linked_prompt = UserPrompt.query.get(system_node.user_prompt_id)
+        assert linked_prompt.prompt_key == "reflect"
 
 
 class TestReflectFromNodeAncestorWalking:
@@ -289,11 +303,9 @@ class TestReflectFromNodeAncestorWalking:
         client = app.test_client()
 
         alice = _make_user("alice")
-        from backend.utils.prompts import get_user_prompt
-        prompt_text = get_user_prompt(alice.id, "reflect")
 
         # Deep chain: prompt → n1 → n2 → n3
-        prompt_node = _make_node(alice, content=prompt_text)
+        prompt_node = _make_prompt_node(alice, "reflect")
         n1 = _make_node(alice, parent_id=prompt_node.id, content="a")
         n2 = _make_node(alice, parent_id=n1.id, content="b")
         n3 = _make_node(alice, parent_id=n2.id, content="c")
@@ -314,13 +326,11 @@ class TestReflectFromNodeAncestorWalking:
         client = app.test_client()
 
         alice = _make_user("alice")
-        from backend.utils.prompts import get_user_prompt
-        prompt_text = get_user_prompt(alice.id, "reflect")
 
         # Chain: regular → prompt → user_node
         regular = _make_node(alice, content="original text")
-        prompt_node = _make_node(alice, parent_id=regular.id,
-                                 content=prompt_text)
+        prompt_node = _make_prompt_node(alice, "reflect",
+                                        parent_id=regular.id)
         user_node = _make_node(alice, parent_id=prompt_node.id,
                                content="reflecting")
         _db.session.commit()
@@ -410,10 +420,8 @@ class TestOrientFromNodeMatrix:
         client = app.test_client()
 
         alice = _make_user("alice")
-        from backend.utils.prompts import get_user_prompt
-        prompt_text = get_user_prompt(alice.id, "orient")
 
-        prompt_node = _make_node(alice, content=prompt_text)
+        prompt_node = _make_prompt_node(alice, "orient")
         user_node = _make_node(alice, parent_id=prompt_node.id,
                                content="my priorities")
         _db.session.commit()
@@ -434,10 +442,8 @@ class TestOrientFromNodeMatrix:
 
         alice = _make_user("alice")
         llm_user = _make_user("gpt-5", twitter_id="llm-gpt-5")
-        from backend.utils.prompts import get_user_prompt
-        prompt_text = get_user_prompt(alice.id, "orient")
 
-        prompt_node = _make_node(alice, content=prompt_text)
+        prompt_node = _make_prompt_node(alice, "orient")
         user_node = _make_node(alice, parent_id=prompt_node.id,
                                content="my priorities")
         llm_node = _make_node(llm_user, parent_id=user_node.id,
@@ -479,10 +485,10 @@ class TestOrientFromNodeMatrix:
         # Verify system prompt is the orient prompt
         llm_node = Node.query.get(data["llm_node_id"])
         system_node = Node.query.get(llm_node.parent_id)
-
-        from backend.utils.prompts import get_user_prompt
-        orient_prompt = get_user_prompt(alice.id, "orient")
-        assert system_node.get_content() == orient_prompt
+        assert system_node.user_prompt_id is not None
+        assert system_node.content is None
+        linked_prompt = UserPrompt.query.get(system_node.user_prompt_id)
+        assert linked_prompt.prompt_key == "orient"
 
     def test_no_prompt_llm_node_creates_system_prompt_and_processing(
         self, app
@@ -509,6 +515,7 @@ class TestOrientFromNodeMatrix:
         assert data["llm_node_id"] == llm_node.id
 
         system_node = Node.query.get(data["parent_id"])
-        from backend.utils.prompts import get_user_prompt
-        orient_prompt = get_user_prompt(alice.id, "orient")
-        assert system_node.get_content() == orient_prompt
+        assert system_node.user_prompt_id is not None
+        assert system_node.content is None
+        linked_prompt = UserPrompt.query.get(system_node.user_prompt_id)
+        assert linked_prompt.prompt_key == "orient"
