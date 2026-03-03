@@ -708,3 +708,143 @@ class TestAiUsageFiltering:
 
         assert "Embedded content" in result
         assert "AI usage not permitted" not in result
+
+
+class TestExportPromptResolver:
+    """Test ExportQuoteResolver with system prompt references."""
+
+    def test_basic_prompt_overhead(self):
+        """Prompt preamble tokens reduce budget for regular nodes."""
+        resolver = ExportQuoteResolver(user_id=1, max_tokens=100)
+
+        now = datetime.utcnow()
+        # System prompt node with large prompt content
+        resolver.add_node(
+            1, now, "",
+            user_prompt_id=42,
+            prompt_content="P" * 200,  # ~50 tokens preamble
+            prompt_label="Reflect v1",
+        )
+        # Regular nodes ~25 tokens each
+        resolver.add_node(2, now - timedelta(hours=1), "B" * 100)
+        resolver.add_node(3, now - timedelta(hours=2), "C" * 100)
+        resolver.add_node(4, now - timedelta(hours=3), "D" * 100)
+
+        resolver.resolve()
+        included_ids, _, _ = resolver.get_resolution_result()
+
+        # Prompt ref node is tiny (~5 tokens) but preamble costs ~50,
+        # so fewer regular nodes fit.
+        assert 1 in included_ids
+        assert 42 in resolver.referenced_prompt_ids
+
+    def test_prompt_pushed_out_by_truncation(self):
+        """When a prompt node is truncated out, its prompt_id leaves referenced set."""
+        resolver = ExportQuoteResolver(user_id=1, max_tokens=60)
+
+        now = datetime.utcnow()
+        # Regular node takes most of the budget
+        resolver.add_node(1, now, "A" * 200)  # ~50 tokens
+        # Prompt node is older, gets pushed out
+        resolver.add_node(
+            2, now - timedelta(hours=1), "",
+            user_prompt_id=42,
+            prompt_content="P" * 100,
+            prompt_label="Reflect v1",
+        )
+
+        resolver.resolve()
+        included_ids, _, _ = resolver.get_resolution_result()
+
+        assert 1 in included_ids
+        assert 2 not in included_ids
+        assert 42 not in resolver.referenced_prompt_ids
+
+    def test_multiple_prompt_versions(self):
+        """Different prompt versions tracked independently."""
+        resolver = ExportQuoteResolver(user_id=1, max_tokens=200)
+
+        now = datetime.utcnow()
+        resolver.add_node(
+            1, now, "",
+            user_prompt_id=10,
+            prompt_content="Prompt A" * 5,
+            prompt_label="Reflect v1",
+        )
+        resolver.add_node(
+            2, now - timedelta(hours=1), "",
+            user_prompt_id=20,
+            prompt_content="Prompt B" * 5,
+            prompt_label="Orient v1",
+        )
+        resolver.add_node(3, now - timedelta(hours=2), "Regular" * 10)
+
+        resolver.resolve()
+        included_ids, _, _ = resolver.get_resolution_result()
+
+        assert 1 in included_ids
+        assert 2 in included_ids
+        assert 10 in resolver.referenced_prompt_ids
+        assert 20 in resolver.referenced_prompt_ids
+
+    def test_prompt_overhead_causes_cascade(self):
+        """Prompt preamble pushes out nodes, removing a prompt reference."""
+        # Budget fits 2 regular nodes OR 1 regular + 1 prompt (with overhead)
+        resolver = ExportQuoteResolver(user_id=1, max_tokens=55)
+
+        now = datetime.utcnow()
+        # Regular node ~25 tokens
+        resolver.add_node(1, now, "A" * 100)
+        # Second regular node ~25 tokens (total 50, fits)
+        resolver.add_node(2, now - timedelta(hours=1), "B" * 100)
+        # Prompt node — tiny base but 40-token preamble
+        resolver.add_node(
+            3, now - timedelta(hours=2), "",
+            user_prompt_id=42,
+            prompt_content="P" * 160,  # ~40 token overhead
+            prompt_label="Reflect v1",
+        )
+
+        resolver.resolve()
+        included_ids, _, _ = resolver.get_resolution_result()
+
+        # Node 3 should be truncated out (budget can't fit its overhead)
+        assert 1 in included_ids
+        assert 2 in included_ids
+        assert 3 not in included_ids
+        assert 42 not in resolver.referenced_prompt_ids
+
+    def test_no_prompt_nodes_unchanged(self):
+        """Existing behavior unchanged when no nodes have user_prompt_id."""
+        resolver = ExportQuoteResolver(user_id=1, max_tokens=100)
+
+        now = datetime.utcnow()
+        resolver.add_node(1, now, "A" * 100)
+        resolver.add_node(2, now - timedelta(hours=1), "B" * 100)
+
+        resolver.resolve()
+        included_ids, _, _ = resolver.get_resolution_result()
+
+        assert 1 in included_ids
+        assert 2 in included_ids
+        assert resolver.referenced_prompt_ids == set()
+
+    def test_get_prompt_preamble(self):
+        """Preamble text is correctly built from referenced prompts."""
+        resolver = ExportQuoteResolver(user_id=1, max_tokens=500)
+
+        now = datetime.utcnow()
+        resolver.add_node(
+            1, now, "",
+            user_prompt_id=42,
+            prompt_content="You are a reflective writing coach.",
+            prompt_label="Reflect v1",
+        )
+        resolver.add_node(2, now - timedelta(hours=1), "User text")
+
+        resolver.resolve()
+        preamble = resolver.get_prompt_preamble()
+
+        assert "System Prompts Referenced" in preamble
+        assert "reflective writing coach" in preamble
+        assert "ref #42" in preamble

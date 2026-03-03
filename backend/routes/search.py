@@ -72,11 +72,13 @@ def search():
         return jsonify({"error": "Provide at least a keyword (q) or date range (from/to)."}), 400
 
     # Base query: user's own nodes + nodes where they are the human owner
+    # Exclude system prompt nodes (content resolved from UserPrompt)
     query = Node.query.filter(
         or_(
             Node.user_id == current_user.id,
             Node.human_owner_id == current_user.id,
-        )
+        ),
+        Node.user_prompt_id.is_(None),
     )
 
     # Date filters (SQL-level, fast)

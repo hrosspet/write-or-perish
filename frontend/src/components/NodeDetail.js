@@ -289,6 +289,17 @@ function NodeDetail() {
     <div ref={highlightedNodeRef}>
       <hr style={{ borderColor: "var(--border)" }} />
       <div style={highlightedTextStyle}>
+        {node.is_system_prompt && node.prompt_title && (
+          <div style={{
+            fontFamily: "var(--sans)",
+            fontSize: "0.8rem",
+            fontWeight: 300,
+            color: "var(--text-muted)",
+            marginBottom: "0.6rem",
+          }}>
+            {node.prompt_title}{node.prompt_version_number ? ` v${node.prompt_version_number}` : ''}
+          </div>
+        )}
         <QuotedContent
           content={node.content}
           quotes={quotes}

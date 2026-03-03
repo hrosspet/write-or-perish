@@ -30,24 +30,34 @@ def get_feed():
 
     nodes_list = []
     for node in pagination.items:
+        # If this is a system prompt root, skip to the first child
+        display_node = node
+        prompt_key = None
+        if node.user_prompt_id is not None:
+            prompt_key = node.user_prompt.prompt_key if node.user_prompt else None
+            first_child = Node.query.filter_by(parent_id=node.id).order_by(Node.created_at.asc()).first()
+            if first_child:
+                display_node = first_child
+
         # Determine human owner username for LLM nodes
         human_owner_username = None
-        if node.node_type == "llm" and node.human_owner_id:
-            human_owner = User.query.get(node.human_owner_id)
+        if display_node.node_type == "llm" and display_node.human_owner_id:
+            human_owner = User.query.get(display_node.human_owner_id)
             if human_owner:
                 human_owner_username = human_owner.username
 
         nodes_list.append({
-            "id": node.id,
-            "preview": make_preview(node.get_content()),
-            "node_type": node.node_type,
+            "id": display_node.id,
+            "preview": make_preview(display_node.get_content()),
+            "node_type": display_node.node_type,
             "child_count": len(node.children),
-            "created_at": node.created_at.isoformat(),
+            "created_at": display_node.created_at.isoformat(),
             "pinned_at": node.pinned_at.isoformat() if node.pinned_at else None,
             "username": node.user.username if node.user else "Unknown",
             "human_owner_username": human_owner_username,
-            "llm_model": node.llm_model,
-            "has_original_audio": bool(node.audio_original_url or node.streaming_transcription),
+            "llm_model": display_node.llm_model,
+            "has_original_audio": bool(display_node.audio_original_url or display_node.streaming_transcription),
+            "prompt_key": prompt_key,
         })
 
     return jsonify({
