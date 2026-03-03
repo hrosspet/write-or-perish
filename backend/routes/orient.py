@@ -135,6 +135,7 @@ def create_orient_from_node(node_id):
         return jsonify({
             "mode": "processing",
             "llm_node_id": llm_node.id,
+            "parent_id": llm_node.id,
         }), 202
 
     if has_prompt and is_llm:
@@ -165,6 +166,7 @@ def create_orient_from_node(node_id):
         return jsonify({
             "mode": "processing",
             "llm_node_id": llm_node.id,
+            "parent_id": llm_node.id,
         }), 202
 
     # not has_prompt and is_llm
