@@ -361,7 +361,7 @@ export function useStreamingTranscription(options = {}) {
         onError(err);
       }
     }
-  }, [stopMediaRecorder, getTotalChunks, onError]);
+  }, [stopMediaRecorder, getTotalChunks, onError, label]);
 
   // Save the streaming draft as a node
   const saveAsNode = useCallback(async (editedContent = null) => {
