@@ -10,9 +10,12 @@ function SearchModal({ onClose }) {
   const [results, setResults] = useState([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
+  const [page, setPage] = useState(1);
   const inputRef = useRef(null);
   const debounceRef = useRef(null);
+  const loadMoreRef = useRef(null);
   const navigate = useNavigate();
 
   // Auto-focus input on mount
@@ -26,17 +29,20 @@ function SearchModal({ onClose }) {
       setResults([]);
       setTotal(0);
       setHasSearched(false);
+      setPage(1);
       return;
     }
 
     setLoading(true);
     setHasSearched(true);
+    setPage(1);
     try {
       const params = {};
       if (trimmed) params.q = trimmed;
       if (from) params.from = from;
       if (to) params.to = to;
       params.per_page = 20;
+      params.page = 1;
 
       const res = await api.get('/search', { params });
       setResults(res.data.results);
@@ -51,6 +57,43 @@ function SearchModal({ onClose }) {
       setLoading(false);
     }
   }, []);
+
+  const loadMore = useCallback(async () => {
+    const nextPage = page + 1;
+    setLoadingMore(true);
+    try {
+      const params = { per_page: 20, page: nextPage };
+      const trimmed = query.trim();
+      if (trimmed) params.q = trimmed;
+      if (dateFrom) params.from = dateFrom;
+      if (dateTo) params.to = dateTo;
+
+      const res = await api.get('/search', { params });
+      setResults((prev) => [...prev, ...res.data.results]);
+      setTotal(res.data.total);
+      setPage(nextPage);
+    } catch (err) {
+      console.error('Load more error:', err);
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [page, query, dateFrom, dateTo]);
+
+  // Auto-load more when the button scrolls into view
+  useEffect(() => {
+    const el = loadMoreRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting && !loadingMore) {
+          loadMore();
+        }
+      },
+      { threshold: 0.5 }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [loadMore, loadingMore]);
 
   // Debounced search on query change
   useEffect(() => {
@@ -308,8 +351,23 @@ function SearchModal({ onClose }) {
           ))}
 
           {!loading && hasSearched && total > results.length && (
-            <div style={{ padding: '12px 20px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '13px' }}>
-              Showing {results.length} of {total} results
+            <div ref={loadMoreRef} style={{ padding: '12px 20px', textAlign: 'center' }}>
+              <button
+                onClick={loadMore}
+                disabled={loadingMore}
+                style={{
+                  background: 'transparent',
+                  border: '1px solid var(--border)',
+                  borderRadius: '6px',
+                  padding: '6px 16px',
+                  fontSize: '13px',
+                  color: 'var(--text-secondary)',
+                  cursor: loadingMore ? 'default' : 'pointer',
+                  fontFamily: 'var(--sans)',
+                }}
+              >
+                {loadingMore ? 'Loading...' : `Show more (${results.length} of ${total})`}
+              </button>
             </div>
           )}
         </div>
