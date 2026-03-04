@@ -26,13 +26,21 @@ Write or Perish evolves from journaling app to **distributed intelligence networ
 **Purpose:** Capture thoughts with zero friction.
 
 **Current State:**
-- Text + voice input
+- Text + voice input with tab-kill resumability for voice workflows
 - Tree-structured conversations with LLMs
-- Multi-model support (GPT, Claude)
-- Async processing for transcription, LLM, TTS
+- Multi-model support (GPT-4o, GPT-4o-mini, Claude Sonnet 4.6, Claude Opus 4.6)
+- Async processing for transcription, LLM, TTS (with SSE streaming for TTS)
 - Version history
+- **Reflect/Orient workflows** - Structured voice-first interaction modes for self-reflection and goal-setting with LLM-generated todos (#70). Converse workflow implemented but untested and currently disabled.
+- **Iterative profile generation** - AI-powered analysis of user's full writing archive, with automatic profile updates after new entries (#71)
+- **System prompt management** - Prompts page for viewing and editing AI system prompts (#72), with FK-linked prompt nodes (#73)
+- **Cmd+K keyword search** - Global search with date filtering, diacritics-insensitive matching, and infinite scroll pagination
+- **Claude data export import** - Import conversation history from Claude (#64)
+- **Dollar-cost tracking** - Per-user API cost tracking via APICostLog (#61)
+- **Pin-to-profile** - Pin selected nodes to user profile (#60)
+- **Cmd+Click** to open nodes in new tab across all previews
 
-**Status:** ✅ Production-ready, actively used
+**Status:** ✅ Production-ready, actively used, significantly expanded beyond basic journaling
 
 ---
 

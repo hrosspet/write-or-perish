@@ -25,13 +25,21 @@ These technical capabilities are production-ready and form the foundation:
 
 ### Core Features
 - **Asynchronous processing via Celery** - Long-running tasks (transcription, LLM, TTS) run in background with polling
-- **Multi-model LLM provider abstraction** - Unified interface for OpenAI and Anthropic (including Claude Opus 4.6) with centralized model config and automatic routing
-- **User profile generation system** - AI-powered analysis of user's writing to create personalized profiles
+- **Multi-model LLM provider abstraction** - Unified interface for OpenAI and Anthropic (GPT-4o, GPT-4o-mini, Claude Sonnet 4.6, Claude Opus 4.6) with centralized model config, automatic routing, and shared LLM factory
+- **Iterative profile generation with automatic updates** - AI-powered analysis of user's full writing archive in chunks, with automatic profile regeneration after new entries and profile integration step (#71)
+- **Reflect/Orient workflow pages** - Structured voice-first interaction modes: Reflect (self-reflection), Orient (goal-setting with LLM-generated todos and todo merge) (#70). Converse (open conversation) implemented but untested and currently disabled. Includes tab-kill resumability via URL param sync, audio chunk flushing on pause, and TTS resume from Log.
+- **System prompt management** - Prompts page for viewing and editing AI system prompts (#72). System prompt nodes linked via FK instead of duplicating content (#73). Default prompt propagation to existing users.
+- **Cmd+K keyword search** - Global search with date filtering, diacritics-insensitive matching, and infinite scroll pagination
 - **OAuth authentication flow** - Twitter login with approval/whitelist system
-- **Tree-structured node system** - Hierarchical content organization with parent/child relationships
+- **Tree-structured node system** - Hierarchical content organization with parent/child relationships, denormalized `human_owner_id` for efficient access control
 - **Version history tracking** - Edit history for nodes with timestamps for audit trails
 - **Chunked file upload** - Handle large audio files (>10MB) by splitting into chunks and server-side assembly
 - **Audio transcription pipeline** - Convert speech to text with file compression and chunk splitting for large files
+- **TTS with SSE streaming** - Text-to-speech via Server-Sent Events instead of polling (#67), with correct cost attribution to requesting user
+- **Claude data export import** - Import conversation history from Claude export files (#64)
+- **Dollar-cost tracking** - Per-user API cost tracking via APICostLog model, replacing token-based tracking (#61)
+- **Pin-to-profile** - Pin selected nodes to user profile page (#60)
+- **Cmd+Click navigation** - Open nodes in new tab across all previews
 
 ### User Plan Tiers
 
@@ -56,13 +64,16 @@ Users have a `plan` column (string, max 16 chars) on the User model. The plan co
 ### UI/UX
 - **Warm literary design system** - Complete UI redesign across all app pages with cohesive dark theme (#56)
 - **Responsive mobile design** - Mobile-optimized modals, button wrapping, and spacing
-- **Typography system** - Sans-serif (Outfit) for body/readability, refined font weights and contrast
+- **Typography system** - Cormorant Garamond (serif headings), Outfit (sans body text), refined font weights and contrast
 - **Loore branding** - Full rebrand with custom icons, waveform logo, and literary-themed landing page
+- **Welcome & onboarding flow** - Public about pages, alpha thank-you page, welcome page with admin welcome flow (#59)
+- **Renamed navigation** - Dashboard → Profile, Feed → Log for clearer semantics
 
 ### CI/CD & DevOps
-- **GitHub Actions CI pipeline** - Automated testing on all branches and PRs with backend tests, frontend tests, linting, and security scans
-- **Path-based CI optimization** - Skip unrelated jobs based on changed file paths for faster CI runs
-- **Automated deployment pipeline** - Push to main triggers frontend build and SSH deployment to production VM
+- **GitHub Actions CI pipeline** - Automated testing on PRs with backend tests, frontend tests, linting, and security scans (path-filtered to skip unchanged areas)
+- **Automated deployment pipeline** - Push to main triggers tests + frontend build + SSH deployment to production VM. Concurrency group prevents simultaneous deploys.
+- **Staging environment** - Docker Compose on same VM as production, isolated via project name `wop-staging`. Frontend pre-built in CI (VM runs out of memory). Ephemeral DB reset on each deploy. (#68, #69)
+- **Local Docker Compose development** - One-command setup (`make dev`) for full stack: PostgreSQL, Redis, Celery, Flask backend (hot reload), React frontend (HMR). Volume-mounted source code for live editing.
 - **Security scanning** - Bandit for Python security issues and Safety for vulnerable dependencies run on every commit
 - **Code quality checks** - Flake8 linting for backend and frontend lint checks catch issues early
 
@@ -178,7 +189,7 @@ Users have a `plan` column (string, max 16 chars) on the User model. The plan co
 
 ### Development Velocity Infrastructure
 
-**Local development Docker Compose setup** - One-command setup for PostgreSQL, Redis, Celery, backend, and frontend for new developer onboarding
+✅ **Local development Docker Compose setup** - COMPLETED: One-command setup (`make dev`) for PostgreSQL, Redis, Celery, backend, and frontend (#68, #69). Staging environment also deployed via Docker Compose on same VM.
 
 **Database migration testing** - Automated checks that migrations run cleanly forward/backward without data loss
 
@@ -186,7 +197,7 @@ Users have a `plan` column (string, max 16 chars) on the User model. The plan co
 
 **Component storybook for frontend** - Isolated UI component development and testing without needing full app context
 
-**Hot reload for both backend and frontend** - File changes automatically restart servers for instant feedback during development
+✅ **Hot reload for both backend and frontend** - COMPLETED: Docker Compose dev setup includes Flask dev server with auto-reload and React dev server with HMR. Volume-mounted source code.
 
 **Logging infrastructure with structured logs** - JSON-formatted logs with request IDs for debugging production issues quickly
 
@@ -292,7 +303,7 @@ Users have a `plan` column (string, max 16 chars) on the User model. The plan co
 
 **User preference learning system** - Track accept/reject patterns across all AI suggestions to personalize recommendations, shareability thresholds, and match criteria
 
-**Cost tracking and quota management** - Monitor LLM API usage per user per feature to enforce tier limits and optimize model selection (haiku vs sonnet)
+🟡 **Cost tracking and quota management** - PARTIALLY DONE: Dollar-cost tracking per user via APICostLog model (#61). Still needed: per-feature breakdown, tier enforcement, and quota limits.
 
 **Analytics and insight dashboard** - Track usage patterns, feature adoption, flywheel metrics (journal→download→upload→market→journal cycle time) for product iteration
 
@@ -387,7 +398,7 @@ Based on current project state, dependencies, and strategic value, here's the re
 1. **Backend testing framework with pytest** - Set up pytest, conftest.py, test database fixtures (CI already configured to run pytest)
 2. **Frontend testing framework with Jest/React Testing Library** - Write actual component tests (Jest already runs in CI with placeholder test)
 3. **Test coverage reporting in CI** - Add coverage.py and jest coverage reports to existing CI pipeline
-4. **Local development Docker Compose setup** - Docker compose file for full local stack (PostgreSQL, Redis, Celery, backend, frontend)
+4. ✅ **Local development Docker Compose setup** - COMPLETED: Docker Compose with full local stack (PostgreSQL, Redis, Celery, backend, frontend), Makefile shortcuts, staging environment (#68, #69)
 5. **Logging infrastructure with structured logs** - Add JSON logging with request IDs for debugging
 6. **Error monitoring with Sentry** - Integrate Sentry for both backend and frontend error tracking
 7. **Health check endpoints** - `/health` and `/ready` for monitoring and load balancer health checks
@@ -743,9 +754,16 @@ This roadmap prioritizes **privacy & encryption first** (Phase -1), then **found
 4. ✅ **COMPLETED:** Magic link email authentication (replaces Twitter-only login)
 5. ✅ **COMPLETED:** Full UI redesign with warm literary design system
 6. ✅ **COMPLETED:** User plan tier standardization with admin management
-7. Update user-facing docs with clear privacy promise
-8. Set up Phase 0: Testing infrastructure alongside encryption work
-9. Iterate based on learnings at each phase
+7. ✅ **COMPLETED:** Docker Compose local development + staging environment (#68, #69)
+8. ✅ **COMPLETED:** Reflect/Orient workflow pages (#70) (Converse implemented but untested/disabled)
+9. ✅ **COMPLETED:** Iterative profile generation with automatic updates (#71)
+10. ✅ **COMPLETED:** System prompt management (Prompts page) (#72, #73)
+11. ✅ **COMPLETED:** Cmd+K keyword search with date filtering and infinite scroll
+12. ✅ **COMPLETED:** Dollar-cost tracking via APICostLog (#61)
+13. ✅ **COMPLETED:** Claude data export import (#64)
+14. **NOW:** Sentry integration + health check endpoints (Phase 0 items)
+15. **NEXT:** Testing infrastructure (Phase 0) + alpha documentation
+16. Iterate based on learnings at each phase
 
 This is ambitious but achievable. Each phase delivers value, and the foundation work (especially privacy) ensures sustainable velocity and user trust throughout.
 

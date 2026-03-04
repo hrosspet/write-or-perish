@@ -48,6 +48,15 @@ Ensure:
 ### Git Commit Rules
 
 - **NEVER amend commits** unless explicitly instructed by the user. We work on `main` and cannot force push.
+
+### Design Docs Maintenance
+
+After implementing a feature, update the status in these design docs:
+- `docs/FOUR-FEATURE-ECOSYSTEM.md` — Feature 1 current state, or relevant feature section
+- `docs/TECHNICAL-ROADMAP.md` — "Current State: Already Built", phase checklists, and "Next Steps"
+- `docs/ACCELERATED-DEVELOPMENT-ROADMAP.md` — "Already Done", phase items, and "Next Actions"
+
+Mark completed items with ✅. For unplanned features, add new numbered entries (e.g. A.10, A.11) following the existing pattern.
 - Always create new commits for fixes and changes.
 
 ### Local Code Verification

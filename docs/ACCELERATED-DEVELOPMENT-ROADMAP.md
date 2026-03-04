@@ -29,7 +29,16 @@
 - **User plan tiers** - Standardized (free/alpha/pro) with admin dashboard management and migration scripts
 - **Multi-model LLM updates** - Claude Opus 4.6 support, centralized model config
 - **CI/CD pipeline** - GitHub Actions runs tests, deploys to production, path-based job skipping
-- **Docker setup** - Files exist but unverified/incomplete
+- **Docker Compose local dev + staging** - Verified and working: `make dev` for full local stack, staging environment on same VM via Docker Compose (#68, #69)
+- **Reflect/Orient workflows** - Structured voice-first interaction modes with tab-kill resumability, LLM-generated todos, todo merge (#70). Converse implemented but untested and currently disabled.
+- **Iterative profile generation** - AI-powered analysis of full writing archive in chunks, with automatic profile updates after new entries (#71)
+- **System prompt management** - Prompts page for viewing/editing AI system prompts, FK-linked prompt nodes (#72, #73)
+- **Cmd+K keyword search** - Global search with date filtering, diacritics-insensitive matching, infinite scroll pagination
+- **Dollar-cost tracking** - Per-user API cost tracking via APICostLog, replacing token-based tracking (#61)
+- **Claude data export import** - Import conversation history from Claude (#64)
+- **Pin-to-profile** - Pin selected nodes to user profile (#60)
+- **Welcome & onboarding flow** - Public about pages, alpha thank-you page, welcome page with admin welcome flow (#59)
+- **TTS SSE streaming** - Text-to-speech via Server-Sent Events instead of polling (#67)
 - **Backend tests** - Privacy-related tests only (~3 test files)
 - **Frontend tests** - Placeholder only
 - **Terms of service** - Acceptance tracking with admin reset on account deactivation
@@ -39,7 +48,7 @@
 - ⚠️ **A.3 Alpha Documentation** - In progress: privacy promise docs, user guide, known limitations
 
 ### Development Velocity Blockers
-- Docker setup unverified (may not work out of box)
+- ~~Docker setup unverified~~ ✅ Resolved: Docker Compose verified and working (#68, #69)
 - Minimal test coverage (risky for parallel development)
 - No API documentation (frontend/backend disconnect risk)
 
@@ -139,6 +148,59 @@
 
 **Status:** Implemented. All existing users migrated to alpha plan. Admin dashboard has plan dropdown. Feature gating via `User.has_voice_mode` and plan-based decorators.
 
+### A.10 Reflect/Orient Workflows ✅ COMPLETE (Unplanned)
+
+**What:** Structured voice-first interaction modes for the app (#70).
+
+**Status:** Implemented. Two active workflow pages:
+- **Reflect** — Self-reflection with guided prompts, voice recording, and LLM feedback
+- **Orient** — Goal-setting with LLM-generated todos, todo merge step, and actionable next steps
+- **Converse** — Open conversation mode with LLMs (implemented but untested and currently disabled)
+- Tab-kill resumability via URL param sync and audio chunk flushing on pause
+- TTS playback resume from Log page
+- Voice notes labeled as Reflect/Orient in the Log
+
+### A.11 Iterative Profile Generation ✅ COMPLETE (Unplanned)
+
+**What:** AI-powered profile generation from user's full writing archive (#71).
+
+**Status:** Implemented. Key features:
+- Processes full archive in chunks (handles large archives without token limits)
+- Automatic profile updates triggered after new journal entries
+- Profile integration step: unifies iterative versions into single coherent profile
+- Retry logic with reduced export size for prompt-too-long errors
+- Profile TTS via SSE streaming (#67)
+
+### A.12 System Prompt Management ✅ COMPLETE (Unplanned)
+
+**What:** Admin/user-facing page for viewing and editing AI system prompts (#72).
+
+**Status:** Implemented. System prompt nodes linked via FK instead of duplicating content (#73). Default system prompt updates propagated to existing users.
+
+### A.13 Cmd+K Keyword Search ✅ COMPLETE (Unplanned)
+
+**What:** Global keyword search with date filtering.
+
+**Status:** Implemented. Includes diacritics-insensitive matching, infinite scroll pagination for results, and Cmd+Click to open nodes in new tab.
+
+### A.14 Dollar-Cost Tracking ✅ COMPLETE (Unplanned)
+
+**What:** Per-user API cost tracking replacing token-based tracking (#61).
+
+**Status:** Implemented via APICostLog model. Tracks dollar costs per API call per user.
+
+### A.15 Claude Data Import ✅ COMPLETE (Unplanned)
+
+**What:** Import conversation history from Claude data export files (#64).
+
+**Status:** Implemented. Uses synthetic user for assistant nodes. Includes one-time cleanup script for re-import.
+
+### A.16 Welcome & Onboarding Flow ✅ COMPLETE (Unplanned)
+
+**What:** Public about pages, alpha thank-you page, welcome page, and admin welcome flow (#59).
+
+**Status:** Implemented. Admin can trigger welcome emails, welcome link expiry extended to 30 days.
+
 ### A.9 License & Legal Compliance (Beta Blocker)
 
 **What:** Address legal and compliance gaps in the terms of service before moving beyond the alpha circle.
@@ -174,25 +236,17 @@
 
 **Goal:** Make development fast, safe, and easy to parallelize.
 
-### B.1 Docker Verification and Fixes
+### B.1 Docker Verification and Fixes ✅ COMPLETE
 
 **What:** Verify Docker setup works end-to-end, fix any issues.
 
-**Why first in this phase:** Docker is the foundation for consistent development environments. If it doesn't work, every developer wastes time on environment issues.
-
-**Current state:** Files exist (`docker-compose.yml`, Dockerfiles, Makefile) but appear unverified.
-
-**Tasks:**
-1. Run `make dev` and verify all services start
-2. Verify hot reload works (backend + frontend)
-3. Test `make test` actually runs tests
-4. Verify database migrations work in Docker
-5. Document any required `.env` configuration
-6. Fix any issues found
-
-**Scope:** DevOps configuration.
-
-**Why this enables parallel development:** Once Docker works, any AI agent session can reference the same environment setup. More importantly, YOU can quickly spin up/tear down test environments, and the CI pipeline has a consistent reference.
+**Status:** Implemented (#68, #69). Docker Compose fully verified and working:
+- `make dev` starts full local stack (PostgreSQL, Redis, Celery, Flask, React)
+- Hot reload works for both backend (Flask dev server) and frontend (React HMR)
+- Database migrations work in Docker
+- Staging environment deployed on same VM via Docker Compose with separate ports
+- Frontend built in CI for staging (VM runs out of memory during `npm ci`)
+- Multiple deploy fixes resolved (permission errors, frontend build conflicts, DB schema resets)
 
 ### B.2 Backend Test Coverage Expansion
 
@@ -563,10 +617,18 @@ claude  # "Working on Intention Market feature..."
 4. ✅ **COMPLETED:** A.6 (Full UI redesign)
 5. ✅ **COMPLETED:** A.7 (Magic link email authentication)
 6. ✅ **COMPLETED:** A.8 (User plan tier standardization)
-7. **NOW:** A.2 (Sentry integration) + A.3 (Alpha docs)
-8. **NEXT:** A.9 (License & legal compliance for beta) - code items can parallel with Phase B
-9. **THEN:** Phase B (Docker + tests) - all items can run parallel
-10. **THEN:** Phase C infrastructure, leading to Phase D parallelization
+7. ✅ **COMPLETED:** A.10 (Reflect/Orient workflows; Converse implemented but disabled)
+8. ✅ **COMPLETED:** A.11 (Iterative profile generation)
+9. ✅ **COMPLETED:** A.12 (System prompt management)
+10. ✅ **COMPLETED:** A.13 (Cmd+K keyword search)
+11. ✅ **COMPLETED:** A.14 (Dollar-cost tracking)
+12. ✅ **COMPLETED:** A.15 (Claude data import)
+13. ✅ **COMPLETED:** A.16 (Welcome & onboarding flow)
+14. ✅ **COMPLETED:** B.1 (Docker verification + staging environment)
+15. **NOW:** A.2 (Sentry integration) + A.3 (Alpha docs)
+16. **NEXT:** A.9 (License & legal compliance for beta) - code items can parallel with Phase B
+17. **THEN:** Phase B remaining (B.2 backend tests + B.3 frontend tests) - can run parallel
+18. **THEN:** Phase C infrastructure, leading to Phase D parallelization
 
 ---
 
