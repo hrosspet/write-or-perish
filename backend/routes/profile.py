@@ -171,6 +171,59 @@ def get_tts_status(profile_id):
     return jsonify(response_data)
 
 
+@profile_bp.route("/", methods=["POST"])
+@login_required
+def create_profile():
+    """Create a new user-generated profile."""
+    from flask import request
+
+    data = request.get_json()
+    content = data.get("content")
+
+    if not content:
+        return jsonify({"error": "Content is required"}), 400
+
+    if not content.strip():
+        return jsonify({"error": "Content cannot be empty"}), 400
+
+    privacy_level = data.get("privacy_level", PrivacyLevel.PRIVATE)
+    ai_usage = data.get("ai_usage", AIUsage.CHAT)
+
+    if not validate_privacy_level(privacy_level):
+        return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
+    if not validate_ai_usage(ai_usage):
+        return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
+
+    profile = UserProfile(
+        user_id=current_user.id,
+        generated_by="user",
+        tokens_used=0,
+        privacy_level=privacy_level,
+        ai_usage=ai_usage
+    )
+    profile.set_content(content)
+
+    try:
+        db.session.add(profile)
+        db.session.commit()
+
+        return jsonify({
+            "message": "Profile created successfully",
+            "profile": {
+                "id": profile.id,
+                "content": profile.get_content(),
+                "generated_by": profile.generated_by,
+                "tokens_used": profile.tokens_used,
+                "created_at": profile.created_at.isoformat(),
+                "privacy_level": profile.privacy_level,
+                "ai_usage": profile.ai_usage
+            }
+        }), 201
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Failed to create profile", "details": str(e)}), 500
+
+
 @profile_bp.route("/<int:profile_id>", methods=["PUT"])
 @login_required
 def update_profile(profile_id):

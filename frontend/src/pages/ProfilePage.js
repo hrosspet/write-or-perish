@@ -100,10 +100,14 @@ export default function ProfilePage() {
   }, [profile]);
 
   const handleSave = async () => {
-    if (!profile || !editContent.trim()) return;
+    if (!editContent.trim()) return;
     setSaving(true);
     try {
-      await api.put(`/profile/${profile.id}`, { content: editContent });
+      if (profile) {
+        await api.put(`/profile/${profile.id}`, { content: editContent });
+      } else {
+        await api.post('/profile', { content: editContent });
+      }
       setEditing(false);
       await fetchProfile();
     } catch (err) {
@@ -242,13 +246,34 @@ export default function ProfilePage() {
       <div style={{ height: '1px', background: 'var(--accent-dim)', opacity: 0.3, marginBottom: '24px' }} />
 
       {/* Content */}
-      {!profile && (
-        <p style={{ color: 'var(--text-muted)', fontFamily: 'var(--sans)', fontSize: '0.9rem' }}>
-          No profile generated yet. Your profile will be auto-generated as you use Loore.
-        </p>
+      {!profile && !editing && (
+        <div>
+          <p style={{ color: 'var(--text-muted)', fontFamily: 'var(--sans)', fontSize: '0.9rem', marginBottom: '4px' }}>
+            No profile generated yet. Your profile will be auto-generated as you use Loore.
+          </p>
+          <p style={{ color: 'var(--text-muted)', fontFamily: 'var(--sans)', fontSize: '0.9rem', marginBottom: '16px' }}>
+            Or write your own:
+          </p>
+          <button
+            onClick={() => { setEditing(true); setEditContent(''); }}
+            style={{
+              padding: '8px 20px',
+              background: 'none',
+              border: '1px solid var(--border)',
+              borderRadius: '6px',
+              color: 'var(--text-secondary)',
+              fontFamily: 'var(--sans)',
+              fontSize: '0.85rem',
+              fontWeight: 300,
+              cursor: 'pointer',
+            }}
+          >
+            Write your profile
+          </button>
+        </div>
       )}
 
-      {profile && editing && (
+      {editing && (
         <div>
           <textarea
             value={editContent}

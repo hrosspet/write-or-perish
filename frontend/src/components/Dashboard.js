@@ -85,7 +85,7 @@ function Dashboard() {
         });
     } else {
       // Create new profile (user-generated)
-      api.post("/export/create_profile", {
+      api.post("/profile", {
         content: editProfileContent,
         privacy_level: profilePrivacyLevel,
         ai_usage: profileAiUsage
