@@ -406,6 +406,8 @@ def finalize_streaming(session_id):
     label = data.get("label")  # e.g. "Reflect", "Orient"
     parent_id = data.get("parent_id")  # thread parent for LLM chain
     model = data.get("model")  # LLM model for server-side generation
+    if not model and label in ("Reflect", "Orient"):
+        model = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.5")
 
     if total_chunks is None:
         return jsonify({"error": "Missing total_chunks"}), 400
