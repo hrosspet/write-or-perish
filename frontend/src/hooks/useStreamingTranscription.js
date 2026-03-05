@@ -83,6 +83,8 @@ export function useStreamingTranscription(options = {}) {
   const totalChunksRef = useRef(0);
   const pendingUploadsRef = useRef([]); // Track in-flight upload promises
   const failedChunksRef = useRef([]); // Track chunks that failed all retries
+  const onCompleteRef = useRef(onComplete);
+  onCompleteRef.current = onComplete;
 
   // Network status
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
@@ -228,6 +230,39 @@ export function useStreamingTranscription(options = {}) {
       setTranscript(finalContent);
     }
   }, [transcriptionComplete, finalContent]);
+
+  // iOS suspends SSE connections when backgrounded, so the all_complete event
+  // can be missed. When the app is foregrounded, check session status via REST.
+  useEffect(() => {
+    if (sessionState !== 'finalizing') return;
+
+    const handleVisibilityChange = async () => {
+      if (document.visibilityState !== 'visible') return;
+      if (!sessionIdRef.current) return;
+
+      try {
+        const res = await api.get(`/drafts/streaming/${sessionIdRef.current}/status`);
+        if (res.data.streaming_status === 'completed' && res.data.content) {
+          console.log('[StreamingTranscription] Foreground recovery: transcription already complete');
+          disconnectSSE();
+          setSessionState('complete');
+          setTranscript(res.data.content);
+          if (onCompleteRef.current) {
+            onCompleteRef.current({
+              draftId: draftIdRef.current,
+              sessionId: sessionIdRef.current,
+              content: res.data.content,
+            });
+          }
+        }
+      } catch (err) {
+        console.error('[StreamingTranscription] Foreground status check failed:', err);
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [sessionState, disconnectSSE]);
 
   // Online/offline detection and retry failed chunks
   useEffect(() => {

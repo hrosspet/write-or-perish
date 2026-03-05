@@ -162,6 +162,20 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
     };
   }, [enabled, endpoint, poll, interval, maxDuration]);
 
+  // iOS throttles setInterval when backgrounded. Poll immediately on foreground.
+  useEffect(() => {
+    if (!isPolling) return;
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        poll();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [isPolling, poll]);
+
   return {
     status,
     progress,
