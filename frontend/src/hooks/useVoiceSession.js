@@ -83,12 +83,16 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
       const oscillator = ctx.createOscillator();
       const gain = ctx.createGain();
-      const dest = ctx.createMediaStreamDestination();
       gain.gain.value = 0;
       oscillator.connect(gain);
-      gain.connect(dest);
+      // Route to real audio output so iOS treats this as an active audio
+      // session and keeps the PWA alive when the screen locks.
+      gain.connect(ctx.destination);
       oscillator.start();
 
+      // Also keep an Audio element playing for Media Session API.
+      const dest = ctx.createMediaStreamDestination();
+      gain.connect(dest);
       const el = new Audio();
       el.srcObject = dest.stream;
       el.play().catch(() => {});
