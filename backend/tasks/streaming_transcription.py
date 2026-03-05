@@ -642,19 +642,18 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         else:
             logger.warning("ffmpeg not available, skipping last chunk duration fix")
 
-        # Refresh draft and update
+        # Refresh draft and update content (but don't mark completed yet
+        # if we're about to start a server-side LLM chain — we need to set
+        # llm_node_id in the same commit so the SSE all_complete event
+        # includes it).
         db.session.refresh(draft)
         draft.set_content(final_content)
-        draft.streaming_status = 'completed'
         draft.streaming_completed_chunks = len(completed_chunks)
-        db.session.commit()
 
-        # --- Server-side LLM + TTS chain for lock-screen workflows ---
-        # If the finalize was called with workflow params, create nodes
-        # and kick off LLM + TTS so the response is ready when the user
-        # returns to the app.
-        if (user_id and model and full_transcript.strip()
-                and label in ('Reflect', 'Orient')):
+        should_chain = (user_id and model and full_transcript.strip()
+                        and label in ('Reflect', 'Orient'))
+
+        if should_chain:
             try:
                 _start_server_side_llm_chain(
                     draft, session_id, full_transcript,
@@ -665,7 +664,13 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
                     f"Server-side LLM chain failed for session "
                     f"{session_id}: {e}", exc_info=True
                 )
-                # Non-fatal: frontend can still trigger LLM the old way
+                # Non-fatal: mark completed without llm_node_id;
+                # frontend can still trigger LLM the old way
+                draft.streaming_status = 'completed'
+                db.session.commit()
+        else:
+            draft.streaming_status = 'completed'
+            db.session.commit()
 
         logger.info(
             f"Draft streaming finalized for session {session_id}: "
@@ -688,16 +693,20 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
 
     Mirrors the logic in orient.py / reflect.py POST handlers:
     1. If no parent_id → create system node (with workflow prompt)
-    2. Create user node with transcript, attach streaming audio
-    3. Create LLM placeholder node (enqueue=False)
-    4. Chain: generate_llm_response → generate_tts_audio
-    5. Store llm_node_id on the draft so SSE / status can report it
+    2. Create user node with transcript
+    3. Move streaming audio to user node (without deleting draft)
+    4. Create LLM placeholder node (enqueue=False)
+    5. Set draft.llm_node_id AND draft.streaming_status='completed'
+       in one commit so the SSE all_complete event includes llm_node_id
+    6. Chain: generate_llm_response → generate_tts_audio
     """
     from celery import chain as celery_chain
-    from backend.models import Node
+    from backend.models import Node, NodeTranscriptChunk
     from backend.utils.prompts import get_user_prompt_record
     from backend.utils.llm_nodes import create_llm_placeholder
-    from backend.utils.audio_storage import attach_streaming_audio_to_node
+    from backend.utils.webm_utils import (
+        fix_last_chunk_duration, is_ffmpeg_available,
+    )
     from backend.tasks.llm_completion import generate_llm_response
     from backend.tasks.tts import generate_tts_audio
 
@@ -734,14 +743,37 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     db.session.add(user_node)
     db.session.flush()
 
-    # Attach streaming audio chunks to the user node
-    attach_streaming_audio_to_node(session_id, user_node, user_id)
-
-    # LLM placeholder (don't enqueue yet — we'll chain it)
+    # Move streaming audio to user node — inline version of
+    # attach_streaming_audio_to_node that does NOT delete the draft
+    # (we still need it for the SSE all_complete event).
     audio_storage_root = pathlib.Path(
         os.environ.get("AUDIO_STORAGE_PATH", "data/audio")
     ).resolve()
+    draft_audio_dir = audio_storage_root / f"drafts/{user_id}/{session_id}"
 
+    if draft_audio_dir.exists():
+        if is_ffmpeg_available():
+            success, msg = fix_last_chunk_duration(str(draft_audio_dir))
+            if success:
+                logger.info(f"Fixed last chunk duration: {msg}")
+        node_audio_dir = (
+            audio_storage_root / f"nodes/{user_id}/{user_node.id}"
+        )
+        try:
+            node_audio_dir.mkdir(parents=True, exist_ok=True)
+            for fp in draft_audio_dir.iterdir():
+                shutil.move(str(fp), str(node_audio_dir / fp.name))
+            draft_audio_dir.rmdir()
+        except Exception as e:
+            logger.warning(f"Failed to move audio files: {e}")
+
+    # Point transcript-chunk rows at the node
+    NodeTranscriptChunk.query.filter_by(
+        session_id=session_id,
+    ).update({"node_id": user_node.id})
+    user_node.streaming_transcription = True
+
+    # LLM placeholder (don't enqueue yet — we'll chain it)
     llm_node, _ = create_llm_placeholder(
         user_node.id, model, user_id, enqueue=False,
     )
@@ -750,8 +782,10 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     # detects the in-progress chain and skips duplicate enqueue.
     llm_node.tts_task_status = 'pending'
 
-    # Store llm_node_id on draft so SSE/status can report it
+    # CRITICAL: set llm_node_id AND streaming_status in one commit so
+    # the SSE all_complete event includes the llm_node_id.
     draft.llm_node_id = llm_node.id
+    draft.streaming_status = 'completed'
     db.session.commit()
 
     # Chain: LLM generation → TTS generation
