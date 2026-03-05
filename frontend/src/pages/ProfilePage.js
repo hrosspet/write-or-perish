@@ -247,28 +247,26 @@ export default function ProfilePage() {
 
       {/* Content */}
       {!profile && !editing && (
-        <div>
-          <p style={{ color: 'var(--text-muted)', fontFamily: 'var(--sans)', fontSize: '0.9rem', marginBottom: '4px' }}>
-            No profile generated yet. Your profile will be auto-generated as you use Loore.
-          </p>
+        <div style={{ textAlign: 'center', padding: '40px 0' }}>
           <p style={{ color: 'var(--text-muted)', fontFamily: 'var(--sans)', fontSize: '0.9rem', marginBottom: '16px' }}>
-            Or write your own:
+            No profile generated yet. Your profile will be auto-generated as you use Loore,
+            <br />or write your own.
           </p>
           <button
             onClick={() => { setEditing(true); setEditContent(''); }}
             style={{
-              padding: '8px 20px',
-              background: 'none',
-              border: '1px solid var(--border)',
+              padding: '10px 24px',
+              background: 'var(--accent)',
+              border: 'none',
               borderRadius: '6px',
-              color: 'var(--text-secondary)',
+              color: 'var(--bg-deep)',
               fontFamily: 'var(--sans)',
               fontSize: '0.85rem',
-              fontWeight: 300,
+              fontWeight: 400,
               cursor: 'pointer',
             }}
           >
-            Write your profile
+            Write Profile
           </button>
         </div>
       )}
