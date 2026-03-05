@@ -518,7 +518,8 @@ class DraftFinalizationTask(Task):
 
 @celery.task(base=DraftFinalizationTask, bind=True)
 def finalize_draft_streaming(self, session_id: str, total_chunks: int,
-                             label: str = None):
+                             label: str = None, user_id: int = None,
+                             parent_id: int = None, model: str = None):
     """
     Finalize streaming transcription for a draft.
 
@@ -526,11 +527,18 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
     The transcript text is already assembled incrementally in Draft.content
     as each chunk completes.
 
+    If user_id, parent_id, and model are provided and the label is a
+    workflow type (Reflect/Orient), server-side LLM + TTS generation is
+    kicked off so the response is ready when the user returns to the app.
+
     Args:
         session_id: UUID of the streaming session
         total_chunks: Total number of chunks expected
         label: Optional title label (e.g. "Reflect", "Orient").
                Defaults to "Voice note" when None.
+        user_id: ID of the user (for server-side LLM chain)
+        parent_id: Thread parent node ID (for server-side LLM chain)
+        model: LLM model ID (for server-side LLM chain)
     """
     logger.info(f"Finalizing draft streaming for session {session_id}, {total_chunks} chunks")
 
@@ -641,6 +649,24 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         draft.streaming_completed_chunks = len(completed_chunks)
         db.session.commit()
 
+        # --- Server-side LLM + TTS chain for lock-screen workflows ---
+        # If the finalize was called with workflow params, create nodes
+        # and kick off LLM + TTS so the response is ready when the user
+        # returns to the app.
+        if (user_id and model and full_transcript.strip()
+                and label in ('Reflect', 'Orient')):
+            try:
+                _start_server_side_llm_chain(
+                    draft, session_id, full_transcript,
+                    user_id, parent_id, model, label,
+                )
+            except Exception as e:
+                logger.error(
+                    f"Server-side LLM chain failed for session "
+                    f"{session_id}: {e}", exc_info=True
+                )
+                # Non-fatal: frontend can still trigger LLM the old way
+
         logger.info(
             f"Draft streaming finalized for session {session_id}: "
             f"{len(completed_chunks)} chunks, {len(full_transcript)} characters"
@@ -653,3 +679,89 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
             'failed_chunks': len(failed_chunks),
             'transcript_length': len(full_transcript)
         }
+
+
+def _start_server_side_llm_chain(draft, session_id, transcript,
+                                 user_id, parent_id, model, label):
+    """
+    Create nodes and kick off LLM + TTS generation server-side.
+
+    Mirrors the logic in orient.py / reflect.py POST handlers:
+    1. If no parent_id → create system node (with workflow prompt)
+    2. Create user node with transcript, attach streaming audio
+    3. Create LLM placeholder node (enqueue=False)
+    4. Chain: generate_llm_response → generate_tts_audio
+    5. Store llm_node_id on the draft so SSE / status can report it
+    """
+    from celery import chain as celery_chain
+    from backend.models import Node
+    from backend.utils.prompts import get_user_prompt_record
+    from backend.utils.llm_nodes import create_llm_placeholder
+    from backend.utils.audio_storage import attach_streaming_audio_to_node
+    from backend.tasks.llm_completion import generate_llm_response
+    from backend.tasks.tts import generate_tts_audio
+
+    prompt_key = label.lower()  # 'reflect' or 'orient'
+
+    if parent_id:
+        user_parent_id = parent_id
+    else:
+        # New thread — create system node with workflow prompt
+        prompt_record = get_user_prompt_record(user_id, prompt_key)
+        system_node = Node(
+            user_id=user_id,
+            human_owner_id=user_id,
+            parent_id=None,
+            node_type="user",
+            privacy_level="private",
+            ai_usage="chat",
+            user_prompt_id=prompt_record.id,
+        )
+        db.session.add(system_node)
+        db.session.flush()
+        user_parent_id = system_node.id
+
+    # User node with transcript
+    user_node = Node(
+        user_id=user_id,
+        human_owner_id=user_id,
+        parent_id=user_parent_id,
+        node_type="user",
+        privacy_level="private",
+        ai_usage="chat",
+    )
+    user_node.set_content(transcript)
+    db.session.add(user_node)
+    db.session.flush()
+
+    # Attach streaming audio chunks to the user node
+    attach_streaming_audio_to_node(session_id, user_node, user_id)
+
+    # LLM placeholder (don't enqueue yet — we'll chain it)
+    audio_storage_root = pathlib.Path(
+        os.environ.get("AUDIO_STORAGE_PATH", "data/audio")
+    ).resolve()
+
+    llm_node, _ = create_llm_placeholder(
+        user_node.id, model, user_id, enqueue=False,
+    )
+
+    # Store llm_node_id on draft so SSE/status can report it
+    draft.llm_node_id = llm_node.id
+    db.session.commit()
+
+    # Chain: LLM generation → TTS generation
+    celery_chain(
+        generate_llm_response.si(
+            user_node.id, llm_node.id, model, user_id
+        ),
+        generate_tts_audio.si(
+            llm_node.id, str(audio_storage_root),
+            requesting_user_id=user_id
+        ),
+    ).apply_async()
+
+    logger.info(
+        f"Server-side LLM chain started for session {session_id}: "
+        f"user_node={user_node.id}, llm_node={llm_node.id}, model={model}"
+    )

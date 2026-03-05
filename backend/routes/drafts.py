@@ -404,6 +404,8 @@ def finalize_streaming(session_id):
     data = request.get_json() or {}
     total_chunks = data.get("total_chunks")
     label = data.get("label")  # e.g. "Reflect", "Orient"
+    parent_id = data.get("parent_id")  # thread parent for LLM chain
+    model = data.get("model")  # LLM model for server-side generation
 
     if total_chunks is None:
         return jsonify({"error": "Missing total_chunks"}), 400
@@ -420,6 +422,9 @@ def finalize_streaming(session_id):
         session_id=session_id,
         total_chunks=total_chunks,
         label=label,
+        user_id=current_user.id,
+        parent_id=parent_id,
+        model=model,
     )
 
     # Log chunk status at time of finalize request
@@ -470,7 +475,7 @@ def get_streaming_status(session_id):
     completed_count = sum(1 for c in chunks if c.status == 'completed')
     failed_count = sum(1 for c in chunks if c.status == 'failed')
 
-    return jsonify({
+    status_data = {
         "session_id": session_id,
         "draft_id": draft.id,
         "streaming_status": draft.streaming_status,
@@ -478,8 +483,11 @@ def get_streaming_status(session_id):
         "completed_chunks": completed_count,
         "failed_chunks": failed_count,
         "chunks": chunk_statuses,
-        "content": draft.get_content()
-    })
+        "content": draft.get_content(),
+    }
+    if draft.llm_node_id:
+        status_data["llm_node_id"] = draft.llm_node_id
+    return jsonify(status_data)
 
 
 @drafts_bp.route("/streaming/<session_id>/save-as-node", methods=["POST"])

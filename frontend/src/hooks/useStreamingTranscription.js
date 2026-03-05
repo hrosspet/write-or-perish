@@ -201,6 +201,7 @@ export function useStreamingTranscription(options = {}) {
           draftId: draftIdRef.current,
           sessionId: sessionIdRef.current,
           content: data.content,
+          llmNodeId: data.llm_node_id || null,
         });
       }
     },
@@ -252,6 +253,7 @@ export function useStreamingTranscription(options = {}) {
               draftId: draftIdRef.current,
               sessionId: sessionIdRef.current,
               content: res.data.content,
+              llmNodeId: res.data.llm_node_id || null,
             });
           }
         }
@@ -356,7 +358,8 @@ export function useStreamingTranscription(options = {}) {
   }, [initSession, startMediaRecorder]);
 
   // Stop streaming and finalize
-  const stopStreaming = useCallback(async () => {
+  // extraParams: optional { parent_id, model } for server-side LLM chain
+  const stopStreaming = useCallback(async (extraParams) => {
     console.log(`[StreamingTranscription] stopStreaming called: session=${sessionIdRef.current}, pendingUploads=${pendingUploadsRef.current.length}`);
 
     setSessionState('finalizing');
@@ -379,6 +382,9 @@ export function useStreamingTranscription(options = {}) {
       // Call finalize endpoint
       const finalizePayload = { total_chunks: totalChunks };
       if (label) finalizePayload.label = label;
+      // Include workflow params for server-side LLM + TTS chain
+      if (extraParams?.parent_id) finalizePayload.parent_id = extraParams.parent_id;
+      if (extraParams?.model) finalizePayload.model = extraParams.model;
       await api.post(`/drafts/streaming/${sessionIdRef.current}/finalize`,
         finalizePayload, {
         timeout: 120000, // 2 minutes for finalize (just queues the task)

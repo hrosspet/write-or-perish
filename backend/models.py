@@ -225,6 +225,10 @@ class Draft(db.Model):
     privacy_level = db.Column(db.String(20), nullable=True)
     ai_usage = db.Column(db.String(20), nullable=True)
 
+    # Server-side LLM generation: stores the LLM node ID when the finalize
+    # task kicks off LLM + TTS server-side (lock-screen workflow).
+    llm_node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True)
+
     # Relationships
     user = db.relationship("User", backref="drafts")
     node = db.relationship("Node", foreign_keys=[node_id])

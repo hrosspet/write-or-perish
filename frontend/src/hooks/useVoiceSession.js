@@ -134,6 +134,16 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         setPhase('ready');
         return;
       }
+
+      // Server-side LLM chain: if the finalize task already created the LLM
+      // node, skip the frontend POST and use the server-provided node ID.
+      if (data.llmNodeId) {
+        console.log('[VoiceSession] Server-side LLM chain: llmNodeId=', data.llmNodeId);
+        setLlmNodeId(data.llmNodeId);
+        return;
+      }
+
+      // Fallback: trigger LLM via frontend POST (non-streaming or legacy path)
       try {
         const payload = { content: finalTranscript };
         if (model) {
@@ -279,13 +289,18 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     // Skip on iOS — autoplay is blocked there regardless, and the silent audio
     // playback conflicts with active Bluetooth mic streams (crashes headphones).
     if (!isIOS) audio.warmup();
+    // Pass workflow params so the server can kick off LLM + TTS without
+    // waiting for the frontend to foreground.
+    const extraParams = {};
+    if (threadParentIdRef.current) extraParams.parent_id = threadParentIdRef.current;
+    if (model) extraParams.model = model;
     // Keep silent audio playing until stopStreaming completes — on iOS it's the
     // only thing preventing the OS from suspending JS while the final chunk
     // upload and finalize request are in flight.
-    streaming.stopStreaming().finally(() => {
+    streaming.stopStreaming(extraParams).finally(() => {
       stopSilentAudio();
     });
-  }, [streaming, stopSilentAudio, audio]);
+  }, [streaming, stopSilentAudio, audio, model]);
 
   const handleContinue = useCallback((extraReset) => {
     audio.stop();

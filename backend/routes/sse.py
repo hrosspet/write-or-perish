@@ -404,11 +404,14 @@ def draft_transcription_stream(session_id):
 
                 # Check if streaming is complete
                 if current_draft.streaming_status == 'completed':
-                    yield format_sse_message({
+                    complete_data = {
                         "message": "Transcription complete",
                         "content": current_draft.get_content(),
-                        "draft_id": current_draft.id
-                    }, event="all_complete")
+                        "draft_id": current_draft.id,
+                    }
+                    if current_draft.llm_node_id:
+                        complete_data["llm_node_id"] = current_draft.llm_node_id
+                    yield format_sse_message(complete_data, event="all_complete")
                     break
 
                 # Check if streaming failed
