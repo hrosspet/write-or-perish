@@ -179,12 +179,14 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   // TTS SSE subscription
   const ttsSSE = useTTSStreamSSE(llmNodeId, {
     enabled: ttsGenerating,
-    onChunkReady: (data) => {
+    onChunkReady: async (data) => {
       console.log('[VoiceSession] TTS chunk ready:', { audio_url: data.audio_url, chunk_index: data.chunk_index, firstChunk: firstChunkRef.current });
       if (firstChunkRef.current) {
         firstChunkRef.current = false;
         stopSilentAudio(); // Real audio takes over
-        audio.loadAudioQueue(
+        // Await so duration state is set before we show the playback UI.
+        // loadAudioQueue also starts preloading the audio for instant play.
+        await audio.loadAudioQueue(
           [data.audio_url],
           { title: ttsTitle, url: data.audio_url },
           [data.duration]

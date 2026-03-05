@@ -186,8 +186,9 @@ export const AudioProvider = ({ children }) => {
     }
   }, []);
 
-  // Create and play a chunk at a specific index and time
-  const playChunkAtTime = useCallback((chunkIndex, timeInChunk, shouldAutoPlay = true) => {
+  // Create and play a chunk at a specific index and time.
+  // preloadedElement: optional Audio element that already started loading (for instant playback)
+  const playChunkAtTime = useCallback((chunkIndex, timeInChunk, shouldAutoPlay = true, preloadedElement = null) => {
     const urls = allChunkUrlsRef.current;
     const durations = chunkDurationsRef.current;
 
@@ -220,11 +221,13 @@ export const AudioProvider = ({ children }) => {
     // Update queue to contain chunks after current one
     audioQueueRef.current = urls.slice(chunkIndex + 1);
 
-    // Create or reuse audio element.
-    // Reuse the gesture-activated element from warmup() so Safari allows play().
+    // Reuse preloaded element (already fetching), gesture-activated warmup
+    // element (Safari autoplay), or create a fresh one.
     const chunkUrl = urls[chunkIndex];
     let audio;
-    if (warmedAudioRef.current) {
+    if (preloadedElement) {
+      audio = preloadedElement;
+    } else if (warmedAudioRef.current) {
       audio = warmedAudioRef.current;
       warmedAudioRef.current = null;
       audio.src = chunkUrl;
@@ -492,6 +495,19 @@ export const AudioProvider = ({ children }) => {
       stopTimeTracking();
     }
 
+    // Start preloading the first chunk IMMEDIATELY so audio is already
+    // buffering while we compute durations below.  Reuse the gesture-
+    // activated element on Safari (needed for autoplay permission).
+    let preloadedElement;
+    if (warmedAudioRef.current) {
+      preloadedElement = warmedAudioRef.current;
+      warmedAudioRef.current = null;
+      preloadedElement.src = urls[0];
+    } else {
+      preloadedElement = new Audio(urls[0]);
+      preloadedElement.preload = 'auto';
+    }
+
     setLoading(true);
     setCurrentAudio(audioData);
     queueMetadataRef.current = audioData;
@@ -522,8 +538,9 @@ export const AudioProvider = ({ children }) => {
     // Set up queue (remaining URLs after first)
     audioQueueRef.current = urls.slice(1);
 
-    // Play the first chunk
-    playChunkAtTime(0, 0, true);
+    // Play the first chunk — pass the preloaded element so it doesn't
+    // need to create and fetch a new one from scratch.
+    playChunkAtTime(0, 0, true, preloadedElement);
   }, [stopTimeTracking, preloadChunkDurations, playChunkAtTime]);
 
   // Append a single chunk URL to the active audio queue (for streaming TTS)
