@@ -2,7 +2,7 @@ from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node
 from backend.extensions import db
-from backend.utils.prompts import get_user_prompt_record
+from backend.utils.prompts import get_user_prompt_record, get_user_prompt
 from backend.utils.llm_nodes import create_llm_placeholder
 from backend.routes.reflect import (
     _ancestors_have_prompt, _is_llm_node, _create_llm_placeholder,
@@ -210,7 +210,39 @@ def apply_todo(llm_node_id):
     if not parent or parent.user_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
 
-    from backend.tasks.orient_todo import apply_orient_todo
-    task = apply_orient_todo.delay(llm_node_id, current_user.id)
+    # Create merge nodes synchronously so we can return the final node ID
+    # to the frontend for correct thread continuation.
+    merge_model = llm_node.llm_model
 
-    return jsonify({"task_id": task.id}), 202
+    merge_prompt_node = Node(
+        user_id=current_user.id,
+        human_owner_id=current_user.id,
+        parent_id=llm_node_id,
+        node_type="user",
+        privacy_level="private",
+        ai_usage="chat",
+    )
+    merge_prompt_node.set_content(
+        get_user_prompt(current_user.id, 'orient_apply_todo')
+    )
+    db.session.add(merge_prompt_node)
+    db.session.flush()
+
+    merge_llm_node, _ = create_llm_placeholder(
+        merge_prompt_node.id, merge_model, current_user.id,
+        placeholder_text="[Merging todo...]",
+        enqueue=False,
+    )
+
+    db.session.commit()
+
+    from backend.tasks.orient_todo import run_orient_todo_chain
+    task = run_orient_todo_chain.delay(
+        merge_prompt_node.id, merge_llm_node.id,
+        merge_model, current_user.id
+    )
+
+    return jsonify({
+        "task_id": task.id,
+        "merge_llm_node_id": merge_llm_node.id,
+    }), 202

@@ -303,6 +303,13 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     streaming.startStreaming();
   }, [audio, ttsSSE, streaming, startSilentAudio]);
 
+  const setThreadParentId = useCallback((id) => {
+    threadParentIdRef.current = id;
+    const url = new URL(window.location);
+    url.searchParams.set('parent', String(id));
+    window.history.replaceState({}, '', url);
+  }, []);
+
   const handleCancelProcessing = useCallback((extraReset) => {
     // Parent next recording to the user node (not the LLM node).
     // The cancelled LLM response completes async as a dead-end sibling.
@@ -366,5 +373,6 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     handleResumeRecording,
     handleContinue,
     handleCancelProcessing,
+    setThreadParentId,
   };
 }

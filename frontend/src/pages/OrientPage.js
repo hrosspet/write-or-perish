@@ -155,12 +155,18 @@ export default function OrientPage() {
   const [applied, setApplied] = useState(false);
   const [parsedResponse, setParsedResponse] = useState(null);
   const applyTriggeredForNodeRef = useRef(null);
+  const setThreadParentIdRef = useRef(null);
 
   // Trigger backend to merge Orient update into the full todo
   const handleApplyTodo = useCallback(async (nodeId) => {
     if (!nodeId) return;
     try {
-      await api.post(`/orient/${nodeId}/apply-todo`);
+      const res = await api.post(`/orient/${nodeId}/apply-todo`);
+      // Update thread parent to the final merge node so the next recording
+      // continues linearly after the todo update chain.
+      if (res.data.merge_llm_node_id && setThreadParentIdRef.current) {
+        setThreadParentIdRef.current(res.data.merge_llm_node_id);
+      }
       setApplied(true);
     } catch (err) {
       console.error('Failed to apply todo:', err);
@@ -171,7 +177,7 @@ export default function OrientPage() {
 
   const {
     phase, isStopping, hasError, streaming, audio, handleStart, handleStop,
-    handleContinue, handleCancelProcessing,
+    handleContinue, handleCancelProcessing, setThreadParentId,
   } = useVoiceSession({
     apiEndpoint: '/orient',
     ttsTitle: 'Orient',
@@ -189,6 +195,9 @@ export default function OrientPage() {
       }
     },
   });
+
+  // Keep ref in sync so handleApplyTodo (defined before hook) can use it
+  setThreadParentIdRef.current = setThreadParentId;
 
   const orientReset = useCallback(() => {
     setApplied(false);
