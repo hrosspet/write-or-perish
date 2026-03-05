@@ -36,6 +36,44 @@ def get_todo():
     }), 200
 
 
+@todo_bp.route("/", methods=["PATCH"])
+@login_required
+def patch_todo():
+    """Update the latest todo version in-place (e.g. checkbox toggles)."""
+    data = request.get_json()
+    content = data.get("content")
+
+    if content is None:
+        return jsonify({"error": "Content is required"}), 400
+    if not content.strip():
+        return jsonify({"error": "Content cannot be empty"}), 400
+
+    todo = UserTodo.query.filter_by(
+        user_id=current_user.id
+    ).order_by(UserTodo.created_at.desc()).first()
+
+    if not todo:
+        return jsonify({"error": "No todo exists to update"}), 404
+
+    todo.set_content(content)
+    db.session.commit()
+
+    version_count = UserTodo.query.filter_by(
+        user_id=current_user.id
+    ).count()
+
+    return jsonify({
+        "todo": {
+            "id": todo.id,
+            "content": todo.get_content(),
+            "generated_by": todo.generated_by,
+            "tokens_used": todo.tokens_used,
+            "created_at": todo.created_at.isoformat(),
+            "version_number": version_count,
+        }
+    }), 200
+
+
 @todo_bp.route("/", methods=["PUT"])
 @login_required
 def update_todo():

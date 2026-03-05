@@ -125,9 +125,8 @@ export default function TodoPage() {
     if (!todo) return;
     const newContent = toggleCheckbox(todo.content, item.text, item.checked);
     try {
-      const res = await api.put('/todo', {
+      const res = await api.patch('/todo', {
         content: newContent,
-        generated_by: 'user',
       });
       setTodo(res.data.todo);
       setEditContent(res.data.todo.content);
