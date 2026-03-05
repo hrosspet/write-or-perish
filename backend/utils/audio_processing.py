@@ -228,37 +228,50 @@ def chunk_text(text: str, max_chars: int = 4096) -> list:
 TTS_MAX_CHARS = 4096
 
 
-def adaptive_chunk_text(text: str, first_chunk_gen_secs: float = 7.5) -> list:
+def adaptive_chunk_text(text: str, first_chunk_gen_secs: float = 3.0) -> list:
     """
     Split text into chunks for streaming TTS with a small first chunk.
 
     The first chunk is small enough to generate quickly so playback starts
-    fast. All subsequent chunks use the full model limit (4096 chars) to
-    minimize the number of stitches.
+    fast.  Subsequent chunks are sized so each one generates within the
+    playback time of the previous chunk (gapless streaming).
 
     Based on benchmarked rates for gpt-4o-mini-tts:
-      - Generation: ~106 chars/s pure API (~4s fixed overhead for encryption/DB/SSE)
+      - Generation: ~106 chars/s pure API (~2s fixed overhead for
+        encryption/DB/SSE)
       - Audio output: ~0.062s of audio per char
-      - First chunk of ~800 chars: ~7.5s API + ~4s overhead = ~12s total,
-        produces ~50s of audio
-      - Second chunk of 4096 chars: ~39s to generate — fits within the
-        50s the first chunk plays
+      - First chunk of ~318 chars: ~3s API + ~2s overhead = ~5s total,
+        produces ~20s of audio
+      - Second chunk must generate within ~20s of first-chunk playback,
+        so capped at ~1908 chars (~118s of audio)
+      - Third+ chunks generate within the ~118s window of the second
+        chunk, so they can safely use the full model limit (4096 chars)
 
     All splits happen at sentence boundaries — never mid-sentence.
 
     Args:
         text: Full text to split
         first_chunk_gen_secs: Target API generation time for the first chunk (seconds).
-                              Does not include fixed overhead (~4s for encryption/DB/SSE).
+                              Does not include fixed overhead (~2s for encryption/DB/SSE).
     """
-    gen_chars_per_sec = 106.0  # benchmarked for gpt-4o-mini-tts
+    gen_chars_per_sec = 106.0   # benchmarked for gpt-4o-mini-tts
+    audio_secs_per_char = 0.062  # benchmarked audio output rate
+    overhead_secs = 2.0          # encryption + DB + SSE poll
 
     # First chunk: sized to generate within target time, capped at model limit
-    first_chunk_chars = min(int(first_chunk_gen_secs * gen_chars_per_sec),
-                           TTS_MAX_CHARS)  # ~795
+    first_chunk_chars = min(
+        int(first_chunk_gen_secs * gen_chars_per_sec), TTS_MAX_CHARS
+    )  # ~318
 
     if len(text) <= first_chunk_chars:
         return [text]
+
+    # Second chunk: must generate within the first chunk's playback time
+    first_play_secs = first_chunk_chars * audio_secs_per_char
+    next_budget_secs = max(first_play_secs - overhead_secs, 2.0)
+    second_chunk_chars = min(
+        int(next_budget_secs * gen_chars_per_sec), TTS_MAX_CHARS
+    )  # ~1908
 
     chunks = []
     remaining = text
@@ -268,7 +281,20 @@ def adaptive_chunk_text(text: str, first_chunk_gen_secs: float = 7.5) -> list:
     chunks.append(remaining[:split_point].strip())
     remaining = remaining[split_point:].strip()
 
-    # Remaining chunks: use full model limit
+    if not remaining:
+        return chunks
+
+    # Second chunk: intermediate size for gapless transition
+    if len(remaining) <= second_chunk_chars:
+        chunks.append(remaining)
+        return chunks
+
+    split_point = _split_at_sentence(remaining, second_chunk_chars)
+    chunks.append(remaining[:split_point].strip())
+    remaining = remaining[split_point:].strip()
+
+    # Remaining chunks: full model limit (they generate well within
+    # the second chunk's ~118s playback window)
     while remaining:
         if len(remaining) <= TTS_MAX_CHARS:
             chunks.append(remaining)

@@ -1004,6 +1004,19 @@ def generate_tts(node_id):
     if node.audio_tts_url:
         return jsonify({"message": "TTS already available", "tts_url": node.audio_tts_url}), 200
 
+    # Already in progress (e.g. triggered by server-side LLM chain)?
+    if node.tts_task_status in ('pending', 'processing'):
+        current_app.logger.info(
+            f"TTS already {node.tts_task_status} for node {node.id}, "
+            f"task={node.tts_task_id} — skipping duplicate enqueue"
+        )
+        return jsonify({
+            "message": "TTS generation already in progress",
+            "task_id": node.tts_task_id,
+            "status": node.tts_task_status,
+            "node_id": node.id
+        }), 202
+
     # Check if OpenAI API key is configured
     api_key = get_openai_chat_key(current_app.config)
     if not api_key:

@@ -746,6 +746,10 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
         user_node.id, model, user_id, enqueue=False,
     )
 
+    # Mark TTS as pending now so the frontend's POST /tts endpoint
+    # detects the in-progress chain and skips duplicate enqueue.
+    llm_node.tts_task_status = 'pending'
+
     # Store llm_node_id on draft so SSE/status can report it
     draft.llm_node_id = llm_node.id
     db.session.commit()
