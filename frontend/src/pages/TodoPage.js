@@ -54,24 +54,24 @@ function toggleCheckbox(content, itemText, currentChecked) {
 function TodoItem({ item, onToggle }) {
   return (
     <div
-      onClick={() => onToggle(item)}
       style={{
         display: 'flex',
         alignItems: 'flex-start',
         gap: '12px',
         padding: '12px 0',
         borderBottom: '1px solid #1e1d1a',
-        cursor: 'pointer',
       }}
     >
-      <div style={{
+      <div
+        onClick={() => onToggle(item)}
+        style={{
         width: '18px', height: '18px', borderRadius: '50%',
         border: `1.5px solid ${item.checked ? 'var(--accent-dim)' : 'var(--border-hover)'}`,
         background: item.checked ? 'var(--accent-dim)' : 'none',
         flexShrink: 0, marginTop: '2px',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         fontSize: '0.6rem', color: 'var(--bg-deep)', fontWeight: 600,
-        transition: 'all 0.3s',
+        transition: 'all 0.3s', cursor: 'pointer',
       }}>
         {item.checked && '✓'}
       </div>
