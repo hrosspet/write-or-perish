@@ -275,13 +275,17 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
 
   const handleStop = useCallback(() => {
     setIsStopping(true);
-    stopSilentAudio();
     // Unlock audio on desktop Safari/Chrome during user gesture.
     // Skip on iOS — autoplay is blocked there regardless, and the silent audio
     // playback conflicts with active Bluetooth mic streams (crashes headphones).
     if (!isIOS) audio.warmup();
-    streaming.stopStreaming();
-  }, [streaming, audio, stopSilentAudio]);
+    // Keep silent audio playing until stopStreaming completes — on iOS it's the
+    // only thing preventing the OS from suspending JS while the final chunk
+    // upload and finalize request are in flight.
+    streaming.stopStreaming().finally(() => {
+      stopSilentAudio();
+    });
+  }, [streaming, stopSilentAudio, audio]);
 
   const handleContinue = useCallback((extraReset) => {
     audio.stop();
