@@ -31,6 +31,9 @@ export function useMediaSession({
 }) {
   const intervalRef = useRef(null);
   const elapsedRef = useRef(0);
+  const recordingStartRef = useRef(null);
+  const pausedAccumRef = useRef(0);
+  const pausedAtRef = useRef(null);
 
   // Store callbacks in refs so the effect doesn't re-run when they change.
   // (The parent recreates these on every render due to unstable `streaming` object.)
@@ -66,19 +69,31 @@ export function useMediaSession({
 
       ms.playbackState = isPaused ? 'paused' : 'playing';
 
-      // Update title with elapsed duration every second
+      // Track wall-clock time so throttled setInterval still shows correct elapsed
+      if (!recordingStartRef.current) {
+        recordingStartRef.current = Date.now();
+        pausedAccumRef.current = 0;
+        pausedAtRef.current = null;
+      }
+      if (isPaused && !pausedAtRef.current) {
+        pausedAtRef.current = Date.now();
+      } else if (!isPaused && pausedAtRef.current) {
+        pausedAccumRef.current += Date.now() - pausedAtRef.current;
+        pausedAtRef.current = null;
+      }
+
       const updateTitle = () => {
+        const now = Date.now();
+        const paused = pausedAtRef.current ? (now - pausedAtRef.current) : 0;
+        elapsedRef.current = Math.floor(
+          (now - recordingStartRef.current - pausedAccumRef.current - paused) / 1000
+        );
         const time = formatTime(elapsedRef.current);
         const label = isPaused ? `Paused ${time}` : `Recording ${time}`;
         ms.metadata = new MediaMetadata({ title: label, artist: 'Loore', artwork });
       };
       updateTitle();
-      intervalRef.current = setInterval(() => {
-        if (!isPaused) {
-          elapsedRef.current += 1;
-        }
-        updateTitle();
-      }, 1000);
+      intervalRef.current = setInterval(updateTitle, 1000);
     } else if (phase === 'processing') {
       ms.metadata = new MediaMetadata({
         title: (ttsTitle || 'Thinking') + '…',
@@ -95,6 +110,7 @@ export function useMediaSession({
       clear('seekto');
       ms.playbackState = 'playing';
       elapsedRef.current = 0;
+      recordingStartRef.current = null;
     } else if (phase === 'playback') {
       ms.metadata = new MediaMetadata({
         title: ttsTitle || 'Audio',
@@ -103,10 +119,12 @@ export function useMediaSession({
       });
       allActions.forEach(clear);
       elapsedRef.current = 0;
+      recordingStartRef.current = null;
     } else {
       ms.metadata = null;
       allActions.forEach(clear);
       elapsedRef.current = 0;
+      recordingStartRef.current = null;
     }
 
     return () => {
