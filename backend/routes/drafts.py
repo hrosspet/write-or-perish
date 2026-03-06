@@ -62,7 +62,9 @@ def get_draft():
         else:
             query = query.filter_by(parent_id=None)
 
-    draft = query.first()
+    # Prefer the most recent draft (avoids stale empty drafts hiding
+    # newer ones with actual content or stored audio chunks)
+    draft = query.order_by(Draft.updated_at.desc()).first()
 
     if not draft:
         return jsonify({"error": "No draft found"}), 404
@@ -86,6 +88,65 @@ def get_draft():
         response_data["has_stored_chunks"] = stored_count > 0
 
     return jsonify(response_data), 200
+
+
+@drafts_bp.route("/interrupted", methods=["GET"])
+@login_required
+def get_interrupted_drafts():
+    """
+    Find streaming drafts that were interrupted (e.g. page refresh mid-recording).
+
+    Returns drafts where:
+    - streaming_status is 'recording' (never finalized)
+    - session_id is set
+    - llm_node_id is NULL (not already processed)
+    - Has at least one stored or completed chunk
+
+    Query params:
+      - parent_id: Filter by parent node (optional, omit for root-level)
+    """
+    parent_id = request.args.get("parent_id", type=int)
+
+    query = Draft.query.filter(
+        Draft.user_id == current_user.id,
+        Draft.session_id.isnot(None),
+        Draft.streaming_status == 'recording',
+        Draft.llm_node_id.is_(None),
+    )
+
+    if parent_id:
+        query = query.filter_by(parent_id=parent_id)
+    else:
+        query = query.filter_by(parent_id=None)
+
+    drafts = query.order_by(Draft.updated_at.desc()).all()
+
+    results = []
+    for draft in drafts:
+        chunk_count = NodeTranscriptChunk.query.filter_by(
+            session_id=draft.session_id,
+        ).count()
+        if chunk_count == 0:
+            continue
+
+        stored_count = NodeTranscriptChunk.query.filter_by(
+            session_id=draft.session_id,
+            status='stored',
+        ).count()
+
+        results.append({
+            "id": draft.id,
+            "session_id": draft.session_id,
+            "parent_id": draft.parent_id,
+            "label": draft.label,
+            "content": draft.get_content(),
+            "chunk_count": chunk_count,
+            "has_stored_chunks": stored_count > 0,
+            "created_at": draft.created_at.isoformat() + "Z",
+            "updated_at": draft.updated_at.isoformat() + "Z",
+        })
+
+    return jsonify(results), 200
 
 
 @drafts_bp.route("/", methods=["POST"])
@@ -212,6 +273,42 @@ def delete_draft():
     return jsonify({"message": "Draft deleted"}), 200
 
 
+@drafts_bp.route("/streaming/<session_id>/discard", methods=["DELETE"])
+@login_required
+def discard_streaming_draft(session_id):
+    """
+    Discard an interrupted streaming draft and its audio chunks.
+
+    Deletes the draft, its NodeTranscriptChunk records, and audio files.
+    """
+    import shutil
+
+    draft = Draft.query.filter_by(
+        session_id=session_id,
+        user_id=current_user.id,
+    ).first()
+
+    if not draft:
+        return jsonify({"error": "Streaming session not found"}), 404
+
+    # Delete chunk records
+    NodeTranscriptChunk.query.filter_by(session_id=session_id).delete()
+
+    # Delete audio files
+    audio_dir = AUDIO_STORAGE_ROOT / f"drafts/{draft.user_id}/{session_id}"
+    if audio_dir.exists():
+        shutil.rmtree(audio_dir)
+
+    db.session.delete(draft)
+    db.session.commit()
+
+    current_app.logger.info(
+        f"Discarded interrupted draft {draft.id} (session {session_id})"
+    )
+
+    return jsonify({"message": "Draft discarded"}), 200
+
+
 # =============================================================================
 # Streaming Transcription Endpoints (Draft-based)
 # =============================================================================
@@ -274,6 +371,7 @@ def init_streaming():
     parent_id = data.get("parent_id")
     privacy_level = data.get("privacy_level", "private")
     ai_usage = data.get("ai_usage", "none")
+    label = data.get("label")  # 'Reflect', 'Orient', etc.
 
     # Generate session ID
     session_id = str(uuid.uuid4())
@@ -288,6 +386,7 @@ def init_streaming():
         streaming_status="recording",
         streaming_total_chunks=None,
         streaming_completed_chunks=0,
+        label=label,
         privacy_level=privacy_level,
         ai_usage=ai_usage
     )

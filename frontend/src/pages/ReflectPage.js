@@ -3,6 +3,8 @@ import { useSearchParams } from 'react-router-dom';
 import { FaPlay, FaPause, FaUndo, FaRedo } from 'react-icons/fa';
 import { useVoiceSession } from '../hooks/useVoiceSession';
 import { useUser } from '../contexts/UserContext';
+import { useInterruptedRecovery } from '../hooks/useInterruptedRecovery';
+import RecoveryBanner from '../components/RecoveryBanner';
 
 function formatDuration(seconds) {
   const mins = Math.floor(seconds / 60);
@@ -182,6 +184,15 @@ export default function ReflectPage() {
 
   const selectedModel = user?.preferred_model || null;
 
+  // --- Recovery for interrupted recordings ---
+  const {
+    interruptedDraft, recoveryState, checked: recoveryChecked,
+    handleRecover, handleDiscard,
+  } = useInterruptedRecovery({
+    parentId: parentId ? Number(parentId) : null,
+    skip: !!resumeId,
+  });
+
   const {
     phase, isStopping, hasError, streaming, audio, handleStart, handleStop,
     handleContinue, handleCancelProcessing,
@@ -237,6 +248,26 @@ export default function ReflectPage() {
     justifyContent: 'center',
     transition: 'opacity 0.2s',
   });
+
+  // --- RECOVERY BANNER for interrupted recordings ---
+  if (!recoveryChecked) {
+    return <div style={containerStyle} />;
+  }
+
+  if (interruptedDraft && phase === 'ready') {
+    return (
+      <div style={containerStyle}>
+        <RecoveryBanner
+          draft={interruptedDraft}
+          recoveryState={recoveryState}
+          onRecover={handleRecover}
+          onDiscard={handleDiscard}
+        >
+          <EcgAnimation active={false} dim={true} showScanline={false} />
+        </RecoveryBanner>
+      </div>
+    );
+  }
 
   // --- READY / RECORDING STATE ---
   if (phase === 'ready' || phase === 'recording') {
