@@ -362,6 +362,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   useMediaSession({
     phase,
     isPaused: streaming.isPaused,
+    duration: streaming.duration,
     handlePauseRecording,
     handleResumeRecording,
     handleStop,

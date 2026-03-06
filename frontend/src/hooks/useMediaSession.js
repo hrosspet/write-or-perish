@@ -23,6 +23,7 @@ function formatTime(seconds) {
 export function useMediaSession({
   phase,
   isPaused,
+  duration,
   handlePauseRecording,
   handleResumeRecording,
   handleStop,
@@ -31,13 +32,9 @@ export function useMediaSession({
 }) {
   const intervalRef = useRef(null);
   const visChangeRef = useRef(null);
-  const elapsedRef = useRef(0);
-  const recordingStartRef = useRef(null);
-  const pausedAccumRef = useRef(0);
-  const pausedAtRef = useRef(null);
 
-  // Store callbacks in refs so the effect doesn't re-run when they change.
-  // (The parent recreates these on every render due to unstable `streaming` object.)
+  // Store mutable values in refs so the interval/visibilitychange closures
+  // always read the latest without causing the effect to re-run.
   const handlersRef = useRef({});
   handlersRef.current = {
     handlePauseRecording,
@@ -45,6 +42,10 @@ export function useMediaSession({
     handleStop,
     handleCancelProcessing,
   };
+  const durationRef = useRef(0);
+  durationRef.current = duration;
+  const isPausedRef = useRef(false);
+  isPausedRef.current = isPaused;
 
   useEffect(() => {
     if (!isIOS || !('mediaSession' in navigator)) return;
@@ -70,27 +71,11 @@ export function useMediaSession({
 
       ms.playbackState = isPaused ? 'paused' : 'playing';
 
-      // Track wall-clock time so throttled setInterval still shows correct elapsed
-      if (!recordingStartRef.current) {
-        recordingStartRef.current = Date.now();
-        pausedAccumRef.current = 0;
-        pausedAtRef.current = null;
-      }
-      if (isPaused && !pausedAtRef.current) {
-        pausedAtRef.current = Date.now();
-      } else if (!isPaused && pausedAtRef.current) {
-        pausedAccumRef.current += Date.now() - pausedAtRef.current;
-        pausedAtRef.current = null;
-      }
-
+      // Read duration from the single source of truth (useStreamingMediaRecorder)
       const updateTitle = () => {
-        const now = Date.now();
-        const paused = pausedAtRef.current ? (now - pausedAtRef.current) : 0;
-        elapsedRef.current = Math.floor(
-          (now - recordingStartRef.current - pausedAccumRef.current - paused) / 1000
-        );
-        const time = formatTime(elapsedRef.current);
-        const label = isPaused ? `Paused ${time}` : `Recording ${time}`;
+        const secs = Math.floor(durationRef.current || 0);
+        const time = formatTime(secs);
+        const label = isPausedRef.current ? `Paused ${time}` : `Recording ${time}`;
         ms.metadata = new MediaMetadata({ title: label, artist: 'Loore', artwork });
       };
       updateTitle();
@@ -121,8 +106,6 @@ export function useMediaSession({
       clear('seekforward');
       clear('seekto');
       ms.playbackState = 'playing';
-      elapsedRef.current = 0;
-      recordingStartRef.current = null;
     } else if (phase === 'playback') {
       ms.metadata = new MediaMetadata({
         title: ttsTitle || 'Audio',
@@ -130,13 +113,9 @@ export function useMediaSession({
         artwork,
       });
       allActions.forEach(clear);
-      elapsedRef.current = 0;
-      recordingStartRef.current = null;
     } else {
       ms.metadata = null;
       allActions.forEach(clear);
-      elapsedRef.current = 0;
-      recordingStartRef.current = null;
     }
 
     return () => {
