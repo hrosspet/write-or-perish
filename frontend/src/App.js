@@ -4,7 +4,7 @@ import LandingPage from "./components/LandingPage";
 import Dashboard from "./components/Dashboard";
 import Feed from "./components/Feed";
 import NavBar from "./components/NavBar";
-import NodeForm from "./components/NodeForm";
+import NodeFormModal from "./components/NodeFormModal";
 import TermsModal from "./components/TermsModal";
 import AdminPanel from "./components/AdminPanel";
 import NodeDetailWrapper from "./components/NodeDetailWrapper";
@@ -56,25 +56,6 @@ function App() {
     }
   }, [user]);
 
-  const handleCloseModal = () => {
-    // No confirmation needed for new entries since they're auto-saved as drafts
-    setShowNewEntry(false);
-  };
-
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if (e.key === "Escape") {
-        handleCloseModal();
-      }
-    };
-    if (showNewEntry) {
-      window.addEventListener("keydown", handleKeyDown);
-    }
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [showNewEntry]);
-
   // Cmd+K / Ctrl+K to open search
   useEffect(() => {
     const handleSearchShortcut = (e) => {
@@ -93,71 +74,18 @@ function App() {
         <NavBar onNewEntryClick={() => setShowNewEntry(true)} />
         <div style={{ paddingTop: "60px" }}>
         {showNewEntry && (
-        <div
-          onClick={handleCloseModal}
-          style={{
-            position: 'fixed',
-            top: 0, left: 0, right: 0, bottom: 0,
-            backgroundColor: 'rgba(5, 4, 3, 0.75)',
-            backdropFilter: 'blur(10px)',
-            WebkitBackdropFilter: 'blur(10px)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 1000
-          }}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              position: 'relative',
-              background: 'var(--bg-card)',
-              border: '1px solid var(--border)',
-              padding: '2rem',
-              borderRadius: '12px',
-              width: '1170px',
-              maxWidth: '90vw',
-              maxHeight: '90vh',
-              overflowY: 'auto',
-              boxShadow: '0 24px 80px rgba(0,0,0,0.5)',
-            }}
-          >
-            <button
-              style={{
-                position: 'absolute',
-                top: '12px',
-                right: '16px',
-                fontSize: '24px',
-                color: 'var(--text-muted)',
-                cursor: 'pointer',
-                background: 'none',
-                border: 'none',
-                padding: '4px',
-                lineHeight: 1,
-              }}
-              onClick={handleCloseModal}
-            >
-              &times;
-            </button>
-            <h2 style={{
-              fontFamily: 'var(--serif)',
-              fontSize: '1.4rem',
-              fontWeight: 300,
-              color: 'var(--text-primary)',
-              marginBottom: '20px',
-            }}>
-              Write New Entry
-            </h2>
-            <NodeForm
-              ref={nodeFormRef}
-              parentId={null}
-              onSuccess={(data) => {
+          <NodeFormModal
+            title="Write New Entry"
+            onClose={() => setShowNewEntry(false)}
+            nodeFormProps={{
+              ref: nodeFormRef,
+              parentId: null,
+              onSuccess: (data) => {
                 setShowNewEntry(false);
                 navigate(`/node/${data.id}`);
-              }}
-            />
-          </div>
-        </div>
+              },
+            }}
+          />
       )}
 
       {showSearch && <SearchModal onClose={() => setShowSearch(false)} />}

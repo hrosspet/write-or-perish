@@ -8,7 +8,7 @@ import ModelSelector from "./ModelSelector";
 import { useUser } from "../contexts/UserContext";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 import api from "../api";
-import NodeForm from "./NodeForm";
+import NodeFormModal from "./NodeFormModal";
 import Bubble from "./Bubble";
 import QuotedContent from "./QuotedContent";
 
@@ -383,51 +383,6 @@ function NodeDetail() {
     </div>
   );
 
-  // Modal overlay style
-  const modalOverlayStyle = {
-    position: "fixed",
-    top: 0, left: 0, right: 0, bottom: 0,
-    backgroundColor: "rgba(0,0,0,0.7)",
-    backdropFilter: "blur(8px)",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    zIndex: 1000
-  };
-
-  const modalContentStyle = {
-    background: "var(--bg-card)",
-    border: "1px solid var(--border)",
-    padding: "2rem",
-    borderRadius: "12px",
-    width: "1170px",
-    maxWidth: "90vw",
-    maxHeight: "90vh",
-    overflowY: "auto",
-    position: "relative"
-  };
-
-  const modalCloseStyle = {
-    position: "absolute",
-    top: "12px",
-    right: "16px",
-    fontSize: "24px",
-    cursor: "pointer",
-    color: "var(--text-muted)",
-    background: "none",
-    border: "none",
-    padding: "4px",
-    lineHeight: 1,
-  };
-
-  const modalHeadingStyle = {
-    marginBottom: "20px",
-    fontFamily: "var(--serif)",
-    fontSize: "1.4rem",
-    fontWeight: 300,
-    color: "var(--text-primary)",
-  };
-
   return (
     <div style={{ padding: "20px" }}>
       <h2 style={{
@@ -440,64 +395,36 @@ function NodeDetail() {
       {highlightedNodeSection}
       {childrenSection}
 
-      {/* Overlay for "Add Text" */}
       {showChildFormOverlay && (
-        <div
-          style={modalOverlayStyle}
-          onClick={() => setShowChildFormOverlay(false)}
-        >
-          <div
-            style={modalContentStyle}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <button
-              style={modalCloseStyle}
-              onClick={() => setShowChildFormOverlay(false)}
-            >
-              &times;
-            </button>
-            <h2 style={modalHeadingStyle}>Add Text</h2>
-            <NodeForm
-              parentId={node.id}
-              onSuccess={(data) => {
-                navigate(`/node/${data.id}`);
-                setShowChildFormOverlay(false);
-              }}
-            />
-          </div>
-        </div>
+        <NodeFormModal
+          title="Add Text"
+          onClose={() => setShowChildFormOverlay(false)}
+          nodeFormProps={{
+            parentId: node.id,
+            onSuccess: (data) => {
+              navigate(`/node/${data.id}`);
+              setShowChildFormOverlay(false);
+            },
+          }}
+        />
       )}
 
-      {/* Overlay for "Edit Text" */}
       {showEditOverlay && (
-        <div
-          style={modalOverlayStyle}
-          onClick={() => setShowEditOverlay(false)}
-        >
-          <div
-            style={modalContentStyle}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <button
-              style={modalCloseStyle}
-              onClick={() => setShowEditOverlay(false)}
-            >
-              &times;
-            </button>
-            <h2 style={modalHeadingStyle}>Edit Text</h2>
-            <NodeForm
-              editMode={true}
-              nodeId={node.id}
-              initialContent={node.content}
-              initialPrivacyLevel={node.privacy_level}
-              initialAiUsage={node.ai_usage}
-              onSuccess={(data) => {
-                setNode(data.node ? data.node : { ...node, content: data.content });
-                setShowEditOverlay(false);
-              }}
-            />
-          </div>
-        </div>
+        <NodeFormModal
+          title="Edit Text"
+          onClose={() => setShowEditOverlay(false)}
+          nodeFormProps={{
+            editMode: true,
+            nodeId: node.id,
+            initialContent: node.content,
+            initialPrivacyLevel: node.privacy_level,
+            initialAiUsage: node.ai_usage,
+            onSuccess: (data) => {
+              setNode(data.node ? data.node : { ...node, content: data.content });
+              setShowEditOverlay(false);
+            },
+          }}
+        />
       )}
     </div>
   );
