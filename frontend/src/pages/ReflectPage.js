@@ -186,8 +186,8 @@ export default function ReflectPage() {
 
   // --- Recovery for interrupted recordings ---
   const {
-    interruptedDraft, recoveryState, checked: recoveryChecked,
-    handleRecover, handleDiscard,
+    interruptedDraft, checked: recoveryChecked,
+    handleDiscard, clearInterrupted,
   } = useInterruptedRecovery({
     parentId: parentId ? Number(parentId) : null,
     skip: !!resumeId,
@@ -195,7 +195,7 @@ export default function ReflectPage() {
 
   const {
     phase, isStopping, hasError, streaming, audio, handleStart, handleStop,
-    handleContinue, handleCancelProcessing,
+    handleContinue, handleResumeSession, handleCancelProcessing,
   } = useVoiceSession({
     apiEndpoint: '/reflect',
     ttsTitle: 'Reflection',
@@ -259,8 +259,11 @@ export default function ReflectPage() {
       <div style={containerStyle}>
         <RecoveryBanner
           draft={interruptedDraft}
-          recoveryState={recoveryState}
-          onRecover={handleRecover}
+          onContinue={() => {
+            const { session_id, id, chunk_count } = interruptedDraft;
+            clearInterrupted();
+            handleResumeSession(session_id, id, chunk_count);
+          }}
           onDiscard={handleDiscard}
         >
           <EcgAnimation active={false} dim={true} showScanline={false} />

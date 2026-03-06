@@ -157,8 +157,8 @@ export default function OrientPage() {
 
   // --- Recovery for interrupted recordings ---
   const {
-    interruptedDraft, recoveryState, checked: recoveryChecked,
-    handleRecover, handleDiscard,
+    interruptedDraft, checked: recoveryChecked,
+    handleDiscard, clearInterrupted,
   } = useInterruptedRecovery({
     parentId: parentId ? Number(parentId) : null,
     skip: !!resumeId,
@@ -190,7 +190,7 @@ export default function OrientPage() {
 
   const {
     phase, isStopping, hasError, streaming, audio, handleStart, handleStop,
-    handleContinue, handleCancelProcessing, setThreadParentId,
+    handleContinue, handleResumeSession, handleCancelProcessing, setThreadParentId,
   } = useVoiceSession({
     apiEndpoint: '/orient',
     ttsTitle: 'Orient',
@@ -279,8 +279,11 @@ export default function OrientPage() {
       <div style={containerStyle}>
         <RecoveryBanner
           draft={interruptedDraft}
-          recoveryState={recoveryState}
-          onRecover={handleRecover}
+          onContinue={() => {
+            const { session_id, id, chunk_count } = interruptedDraft;
+            clearInterrupted();
+            handleResumeSession(session_id, id, chunk_count);
+          }}
           onDiscard={handleDiscard}
         >
           <div style={{ marginBottom: '32px', opacity: 0.4 }}>

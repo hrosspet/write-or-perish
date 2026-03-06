@@ -360,6 +360,14 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     streaming.cancelStreaming();
   }, [audio, ttsSSE, streaming, stopSilentAudio]);
 
+  // Resume an interrupted session (continue recording from where it left off)
+  const handleResumeSession = useCallback((sessionId, draftId, chunkCount) => {
+    setPhase('recording');
+    setHasError(false);
+    startSilentAudio();
+    streaming.resumeStreaming(sessionId, draftId, chunkCount);
+  }, [streaming, startSilentAudio]);
+
   const handlePauseRecording = useCallback(() => {
     streaming.pauseRecording();
   }, [streaming]);
@@ -404,6 +412,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     handlePauseRecording,
     handleResumeRecording,
     handleContinue,
+    handleResumeSession,
     handleCancelProcessing,
     setThreadParentId,
   };
