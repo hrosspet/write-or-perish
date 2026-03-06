@@ -352,6 +352,7 @@ export function useStreamingTranscription(options = {}) {
         parent_id: overrideParentId !== undefined ? overrideParentId : parentId,
         privacy_level: privacyLevel,
         ai_usage: aiUsage,
+        label: label || undefined,
       });
 
       const { draft_id, session_id } = response.data;
@@ -372,7 +373,7 @@ export function useStreamingTranscription(options = {}) {
       }
       throw err;
     }
-  }, [parentId, privacyLevel, aiUsage, onError]);
+  }, [parentId, privacyLevel, aiUsage, label, onError]);
 
   // Start streaming transcription
   // overrideParentId: optional parent ID to use instead of the hook's parentId

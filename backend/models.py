@@ -221,6 +221,8 @@ class Draft(db.Model):
     streaming_status = db.Column(db.String(20), nullable=True)  # recording, finalizing, completed, failed
     streaming_total_chunks = db.Column(db.Integer, nullable=True)  # Total chunks expected (set on finalize)
     streaming_completed_chunks = db.Column(db.Integer, default=0)  # Chunks transcribed so far
+    # Workflow label: 'Reflect', 'Orient', etc. Set on init for recovery UI.
+    label = db.Column(db.String(20), nullable=True)
     # Privacy settings for when this draft becomes a node
     privacy_level = db.Column(db.String(20), nullable=True)
     ai_usage = db.Column(db.String(20), nullable=True)

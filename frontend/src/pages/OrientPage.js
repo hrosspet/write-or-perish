@@ -2,6 +2,8 @@ import React, { useState, useCallback, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { FaRegCompass, FaPlay, FaPause, FaUndo, FaRedo } from 'react-icons/fa';
 import { useVoiceSession } from '../hooks/useVoiceSession';
+import { useInterruptedRecovery } from '../hooks/useInterruptedRecovery';
+import RecoveryBanner from '../components/RecoveryBanner';
 import api from '../api';
 
 function formatDuration(seconds) {
@@ -152,6 +154,15 @@ export default function OrientPage() {
   const parentId = searchParams.get('parent');
   const isFreshFromNode = searchParams.get('fresh') === '1';
 
+  // --- Recovery for interrupted recordings ---
+  const {
+    interruptedDraft, recoveryState, checked: recoveryChecked,
+    handleRecover, handleDiscard,
+  } = useInterruptedRecovery({
+    parentId: parentId ? Number(parentId) : null,
+    skip: !!resumeId,
+  });
+
   const [applied, setApplied] = useState(false);
   const [parsedResponse, setParsedResponse] = useState(null);
   const applyTriggeredForNodeRef = useRef(null);
@@ -255,6 +266,28 @@ export default function OrientPage() {
     display: 'flex', alignItems: 'center', gap: '8px',
     fontFamily: 'var(--sans)',
   };
+
+  // --- RECOVERY BANNER for interrupted recordings ---
+  if (!recoveryChecked) {
+    return <div style={containerStyle} />;
+  }
+
+  if (interruptedDraft && phase === 'ready') {
+    return (
+      <div style={containerStyle}>
+        <RecoveryBanner
+          draft={interruptedDraft}
+          recoveryState={recoveryState}
+          onRecover={handleRecover}
+          onDiscard={handleDiscard}
+        >
+          <div style={{ marginBottom: '32px', opacity: 0.4 }}>
+            <FaRegCompass size={48} color="var(--accent)" />
+          </div>
+        </RecoveryBanner>
+      </div>
+    );
+  }
 
   // --- READY / RECORDING STATE ---
   if (phase === 'ready' || phase === 'recording') {
