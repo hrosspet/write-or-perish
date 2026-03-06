@@ -1915,6 +1915,7 @@ def delete_node(node_id):
         # Update drafts that reference this node
         Draft.query.filter_by(node_id=node.id).update({"node_id": None})
         Draft.query.filter_by(parent_id=node.id).update({"parent_id": None})
+        Draft.query.filter_by(llm_node_id=node.id).delete()
 
         # Update linked_node_id references in other nodes
         Node.query.filter_by(linked_node_id=node.id).update({"linked_node_id": None})
