@@ -31,9 +31,8 @@ export function useMediaSession({
   ttsTitle,
 }) {
   const intervalRef = useRef(null);
-  const visChangeRef = useRef(null);
 
-  // Store mutable values in refs so the interval/visibilitychange closures
+  // Store mutable values in refs so the interval closures
   // always read the latest without causing the effect to re-run.
   const handlersRef = useRef({});
   handlersRef.current = {
@@ -80,17 +79,6 @@ export function useMediaSession({
       };
       updateTitle();
       intervalRef.current = setInterval(updateTitle, 1000);
-
-      // iOS throttles setInterval permanently after screen-off; restart it on wake
-      const onVisChange = () => {
-        if (document.visibilityState === 'visible') {
-          updateTitle();
-          clearInterval(intervalRef.current);
-          intervalRef.current = setInterval(updateTitle, 1000);
-        }
-      };
-      document.addEventListener('visibilitychange', onVisChange);
-      visChangeRef.current = onVisChange;
     } else if (phase === 'processing') {
       ms.metadata = new MediaMetadata({
         title: (ttsTitle || 'Thinking') + '…',
@@ -122,10 +110,6 @@ export function useMediaSession({
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
         intervalRef.current = null;
-      }
-      if (visChangeRef.current) {
-        document.removeEventListener('visibilitychange', visChangeRef.current);
-        visChangeRef.current = null;
       }
     };
   }, [phase, isPaused, ttsTitle]);
