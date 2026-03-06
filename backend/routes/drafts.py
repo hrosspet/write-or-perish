@@ -46,6 +46,11 @@ def get_draft():
     # Build query for the user's draft matching the context
     query = Draft.query.filter_by(user_id=current_user.id)
 
+    # Exclude drafts already processed by server-side LLM chain
+    # (Reflect/Orient workflows create nodes automatically but leave
+    # the draft alive for the SSE all_complete event)
+    query = query.filter(Draft.llm_node_id.is_(None))
+
     if node_id:
         # Editing an existing node
         query = query.filter_by(node_id=node_id)
@@ -200,6 +205,39 @@ def delete_draft():
 # Streaming Transcription Endpoints (Draft-based)
 # =============================================================================
 
+def _cleanup_stale_drafts(user_id):
+    """Delete streaming drafts already processed by the server-side LLM chain.
+
+    When Reflect/Orient workflows complete, the transcript is saved as a node
+    and llm_node_id is set on the draft. The draft only lingers for the SSE
+    all_complete event — after that it's safe to delete.
+    """
+    stale_drafts = Draft.query.filter(
+        Draft.user_id == user_id,
+        Draft.session_id.isnot(None),
+        Draft.llm_node_id.isnot(None),
+    ).all()
+
+    deleted = 0
+    for draft in stale_drafts:
+        audio_dir = AUDIO_STORAGE_ROOT / f"drafts/{user_id}/{draft.session_id}"
+        if audio_dir.exists():
+            current_app.logger.warning(
+                f"Draft {draft.id} (session {draft.session_id}) has "
+                f"llm_node_id={draft.llm_node_id} but audio files were "
+                f"not moved: {list(audio_dir.iterdir())}"
+            )
+            continue
+        db.session.delete(draft)
+        deleted += 1
+
+    if deleted:
+        db.session.commit()
+        current_app.logger.info(
+            f"Cleaned up {deleted} stale drafts for user {user_id}"
+        )
+
+
 @drafts_bp.route("/streaming/init", methods=["POST"])
 @login_required
 def init_streaming():
@@ -218,6 +256,8 @@ def init_streaming():
 
     Returns: { "session_id": "uuid", "draft_id": 456 }
     """
+    _cleanup_stale_drafts(current_user.id)
+
     data = request.get_json() or {}
 
     parent_id = data.get("parent_id")

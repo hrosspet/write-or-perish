@@ -411,6 +411,9 @@ def draft_transcription_stream(session_id):
                     }
                     if current_draft.llm_node_id:
                         complete_data["llm_node_id"] = current_draft.llm_node_id
+                        # Node already exists — draft only lingered for this event.
+                        db.session.delete(current_draft)
+                        db.session.commit()
                     yield format_sse_message(complete_data, event="all_complete")
                     break
 
