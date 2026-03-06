@@ -500,6 +500,300 @@ def transcribe_draft_chunk(self, session_id: str, chunk_index: int, chunk_path: 
             raise
 
 
+class BatchTranscriptionTask(Task):
+    """Custom task class with error handling for batch chunk transcription."""
+
+    def on_failure(self, exc, task_id, args, kwargs, einfo):
+        session_id = kwargs.get('session_id') or (args[0] if args else None)
+        chunk_indices = kwargs.get('chunk_indices') or (args[1] if len(args) > 1 else None)
+
+        if session_id and chunk_indices:
+            with flask_app.app_context():
+                NodeTranscriptChunk.query.filter(
+                    NodeTranscriptChunk.session_id == session_id,
+                    NodeTranscriptChunk.chunk_index.in_(chunk_indices)
+                ).update({
+                    'status': 'failed',
+                    'error': str(exc)[:500],
+                    'completed_at': datetime.utcnow()
+                }, synchronize_session='fetch')
+                db.session.commit()
+                logger.error(
+                    f"Batch transcription failed for session {session_id}, "
+                    f"chunks {chunk_indices}: {exc}"
+                )
+
+
+@celery.task(base=BatchTranscriptionTask, bind=True)
+def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
+    """
+    Transcribe a batch of audio chunks by merging them and sending to Whisper.
+
+    Instead of transcribing each 15s chunk individually, this task:
+    1. Decrypts all chunk files in the batch
+    2. Merges audio using ffmpeg concat demuxer
+    3. Sends merged audio to Whisper (gpt-4o-transcribe)
+    4. Stores transcript, marks all chunks as completed
+    5. Reassembles draft.content from all completed chunks
+    6. Encrypts the merged audio and deletes individual chunk files
+
+    Args:
+        session_id: UUID of the streaming session
+        chunk_indices: List of chunk indices to transcribe in this batch
+    """
+    logger.info(
+        f"Starting batch transcription for session {session_id}, "
+        f"chunks {chunk_indices}"
+    )
+
+    with flask_app.app_context():
+        import subprocess
+        import tempfile
+
+        audio_storage_root = pathlib.Path(
+            os.environ.get("AUDIO_STORAGE_PATH", "data/audio")
+        ).resolve()
+
+        draft = Draft.query.filter_by(session_id=session_id).first()
+        if not draft:
+            raise ValueError(f"Draft not found for session {session_id}")
+
+        chunk_dir = audio_storage_root / f"drafts/{draft.user_id}/{session_id}"
+
+        # Collect and decrypt chunk files
+        temp_files = []
+        decrypted_paths = []
+
+        try:
+            for idx in sorted(chunk_indices):
+                chunk_filename = f"chunk_{idx:04d}.webm"
+                chunk_path = chunk_dir / chunk_filename
+                enc_path = chunk_dir / f"{chunk_filename}.enc"
+
+                if enc_path.exists():
+                    temp_path = decrypt_file_to_temp(str(enc_path))
+                    temp_files.append(temp_path)
+                    decrypted_paths.append(temp_path)
+                elif chunk_path.exists():
+                    decrypted_paths.append(str(chunk_path))
+                else:
+                    logger.warning(
+                        f"Chunk file not found for session {session_id}, "
+                        f"index {idx}: {chunk_path}"
+                    )
+
+            if not decrypted_paths:
+                raise FileNotFoundError(
+                    f"No chunk files found for session {session_id}, "
+                    f"indices {chunk_indices}"
+                )
+
+            # Merge audio using ffmpeg concat demuxer
+            merged_path = None
+            if len(decrypted_paths) == 1:
+                # Single chunk — no merge needed
+                merge_input = decrypted_paths[0]
+            else:
+                # Create concat list file
+                concat_fd, concat_list_path = tempfile.mkstemp(
+                    suffix='.txt', prefix='concat_'
+                )
+                try:
+                    with os.fdopen(concat_fd, 'w') as f:
+                        for p in decrypted_paths:
+                            # Escape single quotes in path
+                            escaped = p.replace("'", "'\\''")
+                            f.write(f"file '{escaped}'\n")
+
+                    merged_fd, merged_path = tempfile.mkstemp(
+                        suffix='.webm', prefix='merged_'
+                    )
+                    os.close(merged_fd)
+
+                    cmd = [
+                        'ffmpeg', '-y',
+                        '-f', 'concat', '-safe', '0',
+                        '-i', concat_list_path,
+                        '-c', 'copy',
+                        merged_path
+                    ]
+                    result = subprocess.run(
+                        cmd, capture_output=True, text=True, timeout=120
+                    )
+                    if result.returncode != 0:
+                        logger.error(
+                            f"ffmpeg concat failed: {result.stderr}"
+                        )
+                        raise RuntimeError(
+                            f"ffmpeg concat failed: {result.stderr[:500]}"
+                        )
+
+                    merge_input = merged_path
+                finally:
+                    try:
+                        os.unlink(concat_list_path)
+                    except Exception:
+                        pass
+
+            # Compress if needed (webm -> mp3)
+            merge_input_path = pathlib.Path(merge_input)
+            processed_path = compress_audio_if_needed(merge_input_path, logger)
+
+            # Measure duration for cost tracking
+            batch_duration_sec = get_audio_duration(processed_path, logger)
+
+            try:
+                # Transcribe via Whisper
+                api_key = get_openai_chat_key(flask_app.config)
+                if not api_key:
+                    raise ValueError(
+                        "OpenAI API key not configured"
+                    )
+
+                client = OpenAI(api_key=api_key)
+                with open(processed_path, "rb") as audio_file:
+                    resp = client.audio.transcriptions.create(
+                        model="gpt-4o-transcribe",
+                        file=audio_file,
+                        response_format="text"
+                    )
+
+                    if hasattr(resp, "text"):
+                        transcript = resp.text
+                    elif isinstance(resp, dict):
+                        transcript = (
+                            resp.get("text") or resp.get("transcript") or ""
+                        )
+                    else:
+                        transcript = str(resp)
+
+            finally:
+                if processed_path != merge_input_path:
+                    try:
+                        os.unlink(processed_path)
+                    except Exception:
+                        pass
+
+            # Store transcript in the first chunk of the batch;
+            # mark all batch chunks as completed
+            first_idx = min(chunk_indices)
+            for idx in chunk_indices:
+                chunk_record = NodeTranscriptChunk.query.filter_by(
+                    session_id=session_id,
+                    chunk_index=idx
+                ).first()
+                if chunk_record:
+                    if idx == first_idx:
+                        chunk_record.set_text(transcript)
+                    else:
+                        # Other chunks in batch don't carry text —
+                        # their audio is merged into the first chunk
+                        chunk_record.set_text("")
+                    chunk_record.status = 'completed'
+                    chunk_record.completed_at = datetime.utcnow()
+
+            # Log transcription cost
+            if draft and batch_duration_sec > 0:
+                transcription_cost = calculate_audio_cost_microdollars(
+                    "gpt-4o-transcribe", batch_duration_sec
+                )
+                cost_log = APICostLog(
+                    user_id=draft.user_id,
+                    model_id="gpt-4o-transcribe",
+                    request_type="transcription",
+                    audio_duration_seconds=batch_duration_sec,
+                    cost_microdollars=transcription_cost,
+                )
+                db.session.add(cost_log)
+
+            db.session.commit()
+
+            # Reassemble draft.content from all completed chunks
+            completed_chunks = NodeTranscriptChunk.query.filter_by(
+                session_id=session_id,
+                status='completed'
+            ).order_by(NodeTranscriptChunk.chunk_index).all()
+
+            transcripts = [
+                c.get_text() for c in completed_chunks if c.get_text()
+            ]
+            draft.set_content("\n\n".join(transcripts))
+            draft.streaming_completed_chunks = len(completed_chunks)
+            db.session.commit()
+
+            # Encrypt the merged audio and store as a batch file;
+            # delete individual chunk .enc files
+            if merged_path and os.path.exists(merged_path):
+                batch_filename = (
+                    f"batch_{min(chunk_indices):04d}-"
+                    f"{max(chunk_indices):04d}.webm"
+                )
+                batch_dest = chunk_dir / batch_filename
+                shutil.move(merged_path, str(batch_dest))
+                from backend.utils.encryption import encrypt_file
+                encrypt_file(str(batch_dest))
+
+                # Delete individual encrypted chunk files in the batch
+                for idx in chunk_indices:
+                    for ext in [
+                        f"chunk_{idx:04d}.webm.enc",
+                        f"chunk_{idx:04d}.webm"
+                    ]:
+                        p = chunk_dir / ext
+                        if p.exists():
+                            try:
+                                p.unlink()
+                            except Exception as e:
+                                logger.warning(
+                                    f"Failed to delete {p}: {e}"
+                                )
+
+            logger.info(
+                f"Batch transcription successful for session {session_id}, "
+                f"chunks {chunk_indices}: {len(transcript)} characters"
+            )
+
+            return {
+                'session_id': session_id,
+                'chunk_indices': chunk_indices,
+                'status': 'completed',
+                'transcript_length': len(transcript)
+            }
+
+        except Exception as e:
+            logger.error(
+                f"Batch transcription error for session {session_id}, "
+                f"chunks {chunk_indices}: {e}",
+                exc_info=True
+            )
+            # Mark all chunks in batch as failed
+            for idx in chunk_indices:
+                chunk_record = NodeTranscriptChunk.query.filter_by(
+                    session_id=session_id,
+                    chunk_index=idx
+                ).first()
+                if chunk_record and chunk_record.status != 'completed':
+                    chunk_record.status = 'failed'
+                    chunk_record.error = str(e)[:500]
+                    chunk_record.completed_at = datetime.utcnow()
+            db.session.commit()
+            raise
+
+        finally:
+            # Clean up temp decrypted files
+            for tf in temp_files:
+                try:
+                    os.unlink(tf)
+                except Exception:
+                    pass
+            # Clean up merged file if still around
+            if merged_path and os.path.exists(merged_path):
+                try:
+                    os.unlink(merged_path)
+                except Exception:
+                    pass
+
+
 class DraftFinalizationTask(Task):
     """Custom task class with error handling for draft finalization."""
 
@@ -547,6 +841,31 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         if not draft:
             raise ValueError(f"Draft not found for session {session_id}")
 
+        # Trigger transcription of any remaining stored chunks (< 20, so
+        # they didn't hit the batch threshold during recording). This is a
+        # synchronous call to the batch task so we can wait for completion.
+        stored_chunks = NodeTranscriptChunk.query.filter_by(
+            session_id=session_id,
+            status='stored'
+        ).order_by(NodeTranscriptChunk.chunk_index).all()
+
+        if stored_chunks:
+            remaining_indices = [c.chunk_index for c in stored_chunks]
+            logger.info(
+                f"Session {session_id}: triggering transcription of "
+                f"{len(remaining_indices)} remaining stored chunks: "
+                f"{remaining_indices}"
+            )
+            # Queue async and let the polling loop below wait for completion
+            batch_task = transcribe_chunk_batch.delay(
+                session_id=session_id,
+                chunk_indices=remaining_indices
+            )
+            for c in stored_chunks:
+                c.status = 'processing'
+                c.task_id = batch_task.id
+            db.session.commit()
+
         # Wait for all chunks to complete (with timeout)
         import time
         max_wait_seconds = 600  # 10 minutes max wait
@@ -558,7 +877,7 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
             chunks = NodeTranscriptChunk.query.filter_by(session_id=session_id).all()
             completed = [c for c in chunks if c.status == 'completed']
             failed = [c for c in chunks if c.status == 'failed']
-            pending = [c for c in chunks if c.status in ['pending', 'processing']]
+            pending = [c for c in chunks if c.status in ['pending', 'processing', 'stored']]
 
             logger.info(
                 f"Session {session_id}: {len(completed)} completed, "
