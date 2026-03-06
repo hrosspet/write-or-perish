@@ -65,6 +65,16 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     window.history.replaceState({}, '', url);
   }, [llmNodeId]);
 
+  // Warn before leaving the page while recording is active
+  useEffect(() => {
+    if (phase !== 'recording') return;
+    const handleBeforeUnload = (e) => {
+      e.preventDefault();
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [phase]);
+
   // TTS state
   const ttsTriggeredForNodeRef = useRef(null);
   const [ttsGenerating, setTtsGenerating] = useState(false);

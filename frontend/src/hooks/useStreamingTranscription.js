@@ -310,13 +310,12 @@ export function useStreamingTranscription(options = {}) {
   }, [uploadChunkWithRetry]);
 
   // Best-effort upload of buffered audio on page unload (refresh, navigate away, close tab).
-  // Flushes any buffered audio from the MediaRecorder, then uses sendBeacon for reliability
-  // — it survives page teardown unlike fetch/XHR.
+  // Uses fetch+keepalive (128KB limit) with sendBeacon fallback (64KB limit).
+  // Listens on pagehide (more reliable than beforeunload on mobile/iOS).
   useEffect(() => {
-    const handleBeforeUnload = () => {
+    const handlePageHide = () => {
       if (!sessionIdRef.current) return;
 
-      // Flush buffered audio from MediaRecorder and get a properly headered blob.
       const flushed = flushAndGetEmergencyChunk();
       if (!flushed || flushed.blob.size === 0) return;
 
@@ -326,12 +325,19 @@ export function useStreamingTranscription(options = {}) {
       const formData = new FormData();
       formData.append('chunk', blob, `chunk_${chunkIndex}.webm`);
       formData.append('chunk_index', chunkIndex.toString());
-      navigator.sendBeacon(url, formData);
-      console.log(`[StreamingTranscription] beforeunload: sent beacon for chunk ${chunkIndex}, size=${blob.size}`);
+
+      try {
+        fetch(url, { method: 'POST', body: formData, keepalive: true });
+        console.log(`[StreamingTranscription] pagehide: sent keepalive fetch for chunk ${chunkIndex}, size=${blob.size}`);
+      } catch (_) {
+        // Fallback to sendBeacon if fetch+keepalive fails (e.g. payload too large for keepalive budget)
+        navigator.sendBeacon(url, formData);
+        console.log(`[StreamingTranscription] pagehide: fell back to sendBeacon for chunk ${chunkIndex}, size=${blob.size}`);
+      }
     };
 
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+    window.addEventListener('pagehide', handlePageHide);
+    return () => window.removeEventListener('pagehide', handlePageHide);
   }, [flushAndGetEmergencyChunk]);
 
   // Initialize streaming session (creates draft, NOT node)
