@@ -35,7 +35,7 @@ function extractWebMHeader(buffer) {
  * Returns status, mediaBlob (final), chunks array, duration, and control functions.
  */
 export function useStreamingMediaRecorder({
-  chunkIntervalMs = 5 * 60 * 1000, // 5 minutes default
+  chunkIntervalMs = 15 * 1000, // 15 seconds default — frequent uploads for safety
   onChunkReady = null, // Callback when a chunk is ready: (blob, chunkIndex) => void
 } = {}) {
   const [status, setStatus] = useState('idle'); // 'idle' | 'recording' | 'paused' | 'recorded'
@@ -293,6 +293,39 @@ export function useStreamingMediaRecorder({
     return new Blob(chunksRef.current, { type: 'audio/webm' });
   }, []);
 
+  // Flush buffered audio for emergency upload (e.g. beforeunload).
+  // Calls requestData() which synchronously pushes raw data to chunksRef,
+  // then returns { blob, chunkIndex } for the newly flushed chunk.
+  // The blob includes the WebM header if needed. Returns null if no data.
+  const flushAndGetEmergencyChunk = useCallback(() => {
+    const countBefore = chunksRef.current.length;
+    if (recorderRef.current && recorderRef.current.state === 'recording') {
+      try {
+        recorderRef.current.requestData();
+      } catch (_) { /* ignore if recorder is in a bad state */ }
+    }
+    const countAfter = chunksRef.current.length;
+    if (countAfter <= countBefore) return null; // No new data flushed
+
+    // The newly flushed raw data is the last element in chunksRef
+    const rawData = chunksRef.current[countAfter - 1];
+    if (!rawData || rawData.size === 0) return null;
+
+    const chunkIndex = countAfter - 1;
+    let blob;
+    if (chunkIndex === 0) {
+      // First chunk — already has the header, use as-is
+      blob = new Blob([rawData], { type: 'audio/webm' });
+    } else if (webmHeaderRef.current) {
+      // Subsequent chunk — prepend the stored WebM header
+      blob = new Blob([webmHeaderRef.current, rawData], { type: 'audio/webm' });
+    } else {
+      blob = new Blob([rawData], { type: 'audio/webm' });
+    }
+
+    return { blob, chunkIndex };
+  }, []);
+
   return {
     status,
     mediaBlob,
@@ -307,6 +340,7 @@ export function useStreamingMediaRecorder({
     resetRecording,
     getTotalChunks,
     getPartialBlob,
+    flushAndGetEmergencyChunk,
     chunkIntervalMs,
   };
 }

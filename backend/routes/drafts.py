@@ -67,14 +67,25 @@ def get_draft():
     if not draft:
         return jsonify({"error": "No draft found"}), 404
 
-    return jsonify({
+    response_data = {
         "id": draft.id,
         "content": draft.get_content(),
         "node_id": draft.node_id,
         "parent_id": draft.parent_id,
         "created_at": draft.created_at.isoformat() + "Z",
         "updated_at": draft.updated_at.isoformat() + "Z"
-    }), 200
+    }
+
+    # Include streaming session info so frontend can trigger recovery
+    if draft.session_id:
+        response_data["session_id"] = draft.session_id
+        stored_count = NodeTranscriptChunk.query.filter_by(
+            session_id=draft.session_id,
+            status='stored'
+        ).count()
+        response_data["has_stored_chunks"] = stored_count > 0
+
+    return jsonify(response_data), 200
 
 
 @drafts_bp.route("/", methods=["POST"])
@@ -355,6 +366,8 @@ def upload_streaming_chunk(session_id):
     encrypted_path = encrypt_file(str(chunk_path))
 
     # Create transcript chunk record (linked to session, not node)
+    # Chunks are stored on disk first; transcription is batched every 20 chunks
+    # (20 × 15s = 5min) for better Whisper quality.
     existing_chunk = NodeTranscriptChunk.query.filter_by(
         session_id=session_id,
         chunk_index=chunk_index
@@ -363,7 +376,7 @@ def upload_streaming_chunk(session_id):
     if existing_chunk:
         # Update existing chunk if it failed before
         if existing_chunk.status == 'failed':
-            existing_chunk.status = 'pending'
+            existing_chunk.status = 'stored'
             existing_chunk.error = None
             db.session.commit()
             transcript_chunk = existing_chunk
@@ -378,40 +391,62 @@ def upload_streaming_chunk(session_id):
             session_id=session_id,
             node_id=None,  # No node yet - this is draft-based
             chunk_index=chunk_index,
-            status='pending'
+            status='stored'
         )
         db.session.add(transcript_chunk)
         db.session.commit()
 
-    # Queue transcription task
-    from backend.tasks.streaming_transcription import transcribe_draft_chunk
-
-    task = transcribe_draft_chunk.delay(
+    # Check if we have enough stored chunks for a batch (20 × 15s = 5min)
+    BATCH_SIZE = 20
+    stored_chunks = NodeTranscriptChunk.query.filter_by(
         session_id=session_id,
-        chunk_index=chunk_index,
-        chunk_path=encrypted_path
-    )
+        status='stored'
+    ).order_by(NodeTranscriptChunk.chunk_index).all()
 
-    # Update chunk with task ID
-    transcript_chunk.task_id = task.id
-    transcript_chunk.status = 'processing'
-    db.session.commit()
+    task_id = None
+    if len(stored_chunks) >= BATCH_SIZE:
+        # Take the first BATCH_SIZE stored chunks and queue transcription
+        batch = stored_chunks[:BATCH_SIZE]
+        chunk_indices = [c.chunk_index for c in batch]
+
+        from backend.tasks.streaming_transcription import transcribe_chunk_batch
+
+        task = transcribe_chunk_batch.delay(
+            session_id=session_id,
+            chunk_indices=chunk_indices
+        )
+        task_id = task.id
+
+        # Mark batch chunks as processing
+        for c in batch:
+            c.status = 'processing'
+            c.task_id = task.id
+        db.session.commit()
+
+        current_app.logger.info(
+            f"Queued batch transcription for session {session_id}, "
+            f"chunks {chunk_indices}, task {task.id}"
+        )
 
     # Count total chunks in DB for this session for debugging
-    total_db_chunks = NodeTranscriptChunk.query.filter_by(session_id=session_id).count()
+    total_db_chunks = NodeTranscriptChunk.query.filter_by(
+        session_id=session_id
+    ).count()
     current_app.logger.info(
         f"Received audio chunk {chunk_index} for session {session_id}, "
-        f"file_size={chunk_path.stat().st_size if chunk_path.exists() else 'N/A'}, "
         f"encrypted_path={encrypted_path}, "
         f"total_db_chunks={total_db_chunks}, "
-        f"enqueued transcription task {task.id}"
+        f"status=stored"
     )
 
-    return jsonify({
+    response = {
         "chunk_index": chunk_index,
-        "task_id": task.id,
-        "status": "processing"
-    }), 202
+        "status": "stored"
+    }
+    if task_id:
+        response["task_id"] = task_id
+        response["batch_queued"] = True
+    return jsonify(response), 202
 
 
 @drafts_bp.route("/streaming/<session_id>/finalize", methods=["POST"])
@@ -483,6 +518,65 @@ def finalize_streaming(session_id):
         "task_id": task.id,
         "draft_id": draft.id,
         "total_chunks": total_chunks
+    }), 202
+
+
+@drafts_bp.route("/streaming/<session_id>/transcribe-remaining", methods=["POST"])
+@login_required
+def transcribe_remaining(session_id):
+    """
+    Trigger transcription of all remaining stored (untranscribed) chunks.
+
+    Used for:
+    - On-access recovery: user opens a draft that has stored but untranscribed chunks
+    - Finalize flow: transcribe whatever remains regardless of batch size
+
+    Returns: { "task_id": "...", "chunk_count": N }
+    """
+    draft = Draft.query.filter_by(
+        session_id=session_id,
+        user_id=current_user.id
+    ).first()
+
+    if not draft:
+        return jsonify({"error": "Streaming session not found"}), 404
+
+    # Find all stored (untranscribed) chunks
+    stored_chunks = NodeTranscriptChunk.query.filter_by(
+        session_id=session_id,
+        status='stored'
+    ).order_by(NodeTranscriptChunk.chunk_index).all()
+
+    if not stored_chunks:
+        return jsonify({
+            "message": "No stored chunks to transcribe",
+            "chunk_count": 0
+        }), 200
+
+    chunk_indices = [c.chunk_index for c in stored_chunks]
+
+    from backend.tasks.streaming_transcription import transcribe_chunk_batch
+
+    task = transcribe_chunk_batch.delay(
+        session_id=session_id,
+        chunk_indices=chunk_indices
+    )
+
+    # Mark as processing
+    for c in stored_chunks:
+        c.status = 'processing'
+        c.task_id = task.id
+    db.session.commit()
+
+    current_app.logger.info(
+        f"Triggered transcribe-remaining for session {session_id}, "
+        f"chunks {chunk_indices}, task {task.id}"
+    )
+
+    return jsonify({
+        "task_id": task.id,
+        "chunk_count": len(chunk_indices),
+        "chunk_indices": chunk_indices
     }), 202
 
 

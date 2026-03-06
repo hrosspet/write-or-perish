@@ -47,6 +47,8 @@ const NodeForm = forwardRef(
     // Track streaming session ID when transcription completes (for "review before save" flow)
     // With draft-based streaming, no node exists until user explicitly saves
     const [streamingSessionId, setStreamingSessionId] = useState(null);
+    // Recovery: transcribing stored chunks from a recovered draft
+    const [isRecoveringAudio, setIsRecoveringAudio] = useState(false);
     // Track content that existed before streaming started (to append new transcript to it)
     const preStreamingContentRef = React.useRef("");
 
@@ -92,6 +94,58 @@ const NodeForm = forwardRef(
         setHasDraft(true);
       }
     }, [isDraftLoaded, draft]);
+
+    // Recovery: when a draft has stored (untranscribed) audio chunks,
+    // trigger server-side transcription and poll for completion.
+    useEffect(() => {
+      if (!isDraftLoaded || !draft) return;
+      if (!draft.session_id || !draft.has_stored_chunks) return;
+
+      setIsRecoveringAudio(true);
+      setStreamingSessionId(draft.session_id);
+
+      const triggerRecovery = async () => {
+        try {
+          await api.post(`/drafts/streaming/${draft.session_id}/transcribe-remaining`);
+
+          // Poll for completion
+          const pollInterval = setInterval(async () => {
+            try {
+              const res = await api.get(`/drafts/streaming/${draft.session_id}/status`);
+              const { streaming_status, content } = res.data;
+
+              if (content) {
+                setContent(content);
+              }
+
+              if (streaming_status === 'completed' || streaming_status === 'failed') {
+                clearInterval(pollInterval);
+                setIsRecoveringAudio(false);
+                if (content) {
+                  saveDraft(content);
+                  setHasDraft(true);
+                }
+              }
+            } catch (err) {
+              console.error('[NodeForm] Recovery poll error:', err);
+              clearInterval(pollInterval);
+              setIsRecoveringAudio(false);
+            }
+          }, 3000);
+
+          // Safety timeout: stop polling after 5 minutes
+          setTimeout(() => {
+            clearInterval(pollInterval);
+            setIsRecoveringAudio(false);
+          }, 5 * 60 * 1000);
+        } catch (err) {
+          console.error('[NodeForm] Failed to trigger audio recovery:', err);
+          setIsRecoveringAudio(false);
+        }
+      };
+
+      triggerRecovery();
+    }, [isDraftLoaded, draft]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // Handle discard draft
     const handleDiscardDraft = useCallback(() => {
@@ -334,6 +388,22 @@ const NodeForm = forwardRef(
           onAIUsageChange={setAiUsage}
           disabled={loading}
         />
+
+        {isRecoveringAudio && (
+          <div style={{
+            padding: '8px 12px',
+            backgroundColor: 'var(--bg-surface)',
+            border: '1px solid var(--border)',
+            borderRadius: '6px',
+            color: 'var(--text-secondary)',
+            fontFamily: 'var(--sans)',
+            fontSize: '0.85rem',
+            fontWeight: 300,
+            marginBottom: '8px',
+          }}>
+            Transcribing recovered audio...
+          </div>
+        )}
 
         {error && <div style={{ color: "var(--accent)", fontFamily: "var(--sans)", fontSize: "0.9rem" }}>{error}</div>}
 

@@ -282,7 +282,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     setPhase('recording');
     setHasError(false);
     startSilentAudio(); // User gesture context — activates iOS lock screen controls
-    streaming.startStreaming();
+    streaming.startStreaming(threadParentIdRef.current);
   }, [streaming, startSilentAudio]);
 
   const handleStop = useCallback(() => {
@@ -321,7 +321,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     // Go straight to recording — skip the ready phase
     setPhase('recording');
     startSilentAudio(); // User gesture context
-    streaming.startStreaming();
+    streaming.startStreaming(threadParentIdRef.current);
   }, [audio, ttsSSE, streaming, startSilentAudio]);
 
   const setThreadParentId = useCallback((id) => {

@@ -61,7 +61,7 @@ export function useStreamingTranscription(options = {}) {
     parentId = null,
     privacyLevel = 'private',
     aiUsage = 'none',
-    chunkIntervalMs = 5 * 60 * 1000, // 5 minutes
+    chunkIntervalMs = 15 * 1000, // 15 seconds — frequent uploads for safety
     label = null, // e.g. "Reflect", "Orient" — used as title instead of "Voice note"
     onTranscriptUpdate = null,
     onComplete = null,
@@ -168,6 +168,7 @@ export function useStreamingTranscription(options = {}) {
     resetRecording: resetMediaRecorder,
     getTotalChunks,
     getPartialBlob,
+    flushAndGetEmergencyChunk,
   } = useStreamingMediaRecorder({
     chunkIntervalMs,
     onChunkReady: uploadChunk,
@@ -308,14 +309,41 @@ export function useStreamingTranscription(options = {}) {
     };
   }, [uploadChunkWithRetry]);
 
+  // Best-effort upload of buffered audio on page unload (refresh, navigate away, close tab).
+  // Flushes any buffered audio from the MediaRecorder, then uses sendBeacon for reliability
+  // — it survives page teardown unlike fetch/XHR.
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      if (!sessionIdRef.current) return;
+
+      // Flush buffered audio from MediaRecorder and get a properly headered blob.
+      const flushed = flushAndGetEmergencyChunk();
+      if (!flushed || flushed.blob.size === 0) return;
+
+      const { blob, chunkIndex } = flushed;
+      const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
+      const url = `${backendUrl}/api/drafts/streaming/${sessionIdRef.current}/audio-chunk?chunk_index=${chunkIndex}&beacon=1`;
+      const formData = new FormData();
+      formData.append('chunk', blob, `chunk_${chunkIndex}.webm`);
+      formData.append('chunk_index', chunkIndex.toString());
+      navigator.sendBeacon(url, formData);
+      console.log(`[StreamingTranscription] beforeunload: sent beacon for chunk ${chunkIndex}, size=${blob.size}`);
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [flushAndGetEmergencyChunk]);
+
   // Initialize streaming session (creates draft, NOT node)
-  const initSession = useCallback(async () => {
+  // overrideParentId allows callers to pass the current parent at call time
+  // (useful when parentId changes between recording turns)
+  const initSession = useCallback(async (overrideParentId) => {
     setSessionState('initializing');
     setErrorMessage(null);
 
     try {
       const response = await api.post('/drafts/streaming/init', {
-        parent_id: parentId,
+        parent_id: overrideParentId !== undefined ? overrideParentId : parentId,
         privacy_level: privacyLevel,
         ai_usage: aiUsage,
       });
@@ -341,10 +369,11 @@ export function useStreamingTranscription(options = {}) {
   }, [parentId, privacyLevel, aiUsage, onError]);
 
   // Start streaming transcription
-  const startStreaming = useCallback(async () => {
+  // overrideParentId: optional parent ID to use instead of the hook's parentId
+  const startStreaming = useCallback(async (overrideParentId) => {
     try {
       // Initialize session
-      await initSession();
+      await initSession(overrideParentId);
 
       // Start recording
       await startMediaRecorder();
