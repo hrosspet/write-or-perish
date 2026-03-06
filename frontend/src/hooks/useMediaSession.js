@@ -30,6 +30,7 @@ export function useMediaSession({
   ttsTitle,
 }) {
   const intervalRef = useRef(null);
+  const visChangeRef = useRef(null);
   const elapsedRef = useRef(0);
   const recordingStartRef = useRef(null);
   const pausedAccumRef = useRef(0);
@@ -94,6 +95,17 @@ export function useMediaSession({
       };
       updateTitle();
       intervalRef.current = setInterval(updateTitle, 1000);
+
+      // iOS throttles setInterval permanently after screen-off; restart it on wake
+      const onVisChange = () => {
+        if (document.visibilityState === 'visible') {
+          updateTitle();
+          clearInterval(intervalRef.current);
+          intervalRef.current = setInterval(updateTitle, 1000);
+        }
+      };
+      document.addEventListener('visibilitychange', onVisChange);
+      visChangeRef.current = onVisChange;
     } else if (phase === 'processing') {
       ms.metadata = new MediaMetadata({
         title: (ttsTitle || 'Thinking') + '…',
@@ -131,6 +143,10 @@ export function useMediaSession({
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
         intervalRef.current = null;
+      }
+      if (visChangeRef.current) {
+        document.removeEventListener('visibilitychange', visChangeRef.current);
+        visChangeRef.current = null;
       }
     };
   }, [phase, isPaused, ttsTitle]);
