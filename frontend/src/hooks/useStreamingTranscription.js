@@ -393,6 +393,27 @@ export function useStreamingTranscription(options = {}) {
     }
   }, [initSession, startMediaRecorder]);
 
+  // Resume an existing interrupted session (continue recording)
+  const resumeStreaming = useCallback(async (existingSessionId, existingDraftId, existingChunkCount) => {
+    try {
+      setSessionState('initializing');
+      setErrorMessage(null);
+
+      setDraftId(existingDraftId);
+      setSessionId(existingSessionId);
+      draftIdRef.current = existingDraftId;
+      sessionIdRef.current = existingSessionId;
+      totalChunksRef.current = existingChunkCount || 0;
+
+      await startMediaRecorder();
+      setSessionState('recording');
+    } catch (err) {
+      console.error('Failed to resume streaming:', err);
+      setSessionState('error');
+      setErrorMessage(err.message);
+    }
+  }, [startMediaRecorder]);
+
   // Stop streaming and finalize
   // extraParams: optional { parent_id, model } for server-side LLM chain
   const stopStreaming = useCallback(async (extraParams) => {
@@ -507,6 +528,7 @@ export function useStreamingTranscription(options = {}) {
 
     // Actions
     startStreaming,
+    resumeStreaming,
     stopStreaming,
     pauseRecording,
     resumeRecording,

@@ -2,15 +2,15 @@ import { useState, useEffect, useCallback } from 'react';
 import api from '../api';
 
 /**
- * Hook to detect and recover interrupted streaming recordings.
+ * Hook to detect interrupted streaming recordings on page load.
  *
- * On mount, checks for drafts with streaming_status='recording' that have
- * stored audio chunks. Provides UI state and actions for recovery or discard.
+ * Checks for drafts with streaming_status='recording' that have stored
+ * audio chunks. Provides draft info, discard, and transcript recovery actions.
  *
  * @param {Object} options
  * @param {number|null} options.parentId - Parent node ID filter (null for root)
  * @param {boolean} options.skip - Skip the check (e.g. when resuming LLM processing)
- * @returns {Object} - { interruptedDraft, recoveryState, checked, handleRecover, handleDiscard }
+ * @returns {Object}
  */
 export function useInterruptedRecovery({ parentId = null, skip = false } = {}) {
   const [interruptedDraft, setInterruptedDraft] = useState(null);
@@ -32,6 +32,7 @@ export function useInterruptedRecovery({ parentId = null, skip = false } = {}) {
     checkInterrupted();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Trigger transcription of stored chunks and poll until done
   const handleRecover = useCallback(async () => {
     if (!interruptedDraft) return;
     setRecoveryState('transcribing');
@@ -67,11 +68,16 @@ export function useInterruptedRecovery({ parentId = null, skip = false } = {}) {
     setRecoveryState(null);
   }, [interruptedDraft]);
 
+  const clearInterrupted = useCallback(() => {
+    setInterruptedDraft(null);
+  }, []);
+
   return {
     interruptedDraft,
-    recoveryState,
     checked,
+    recoveryState,
     handleRecover,
     handleDiscard,
+    clearInterrupted,
   };
 }
