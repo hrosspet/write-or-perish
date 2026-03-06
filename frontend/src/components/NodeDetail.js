@@ -182,7 +182,7 @@ function NodeDetail() {
             const parentNode = node.ancestors[node.ancestors.length - 1];
             navigate(`/node/${parentNode.id}`);
           } else {
-            navigate("/dashboard");
+            navigate("/log");
           }
         })
         .catch((err) => {
