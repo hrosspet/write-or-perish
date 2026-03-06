@@ -610,6 +610,17 @@ def get_streaming_status(session_id):
 
     completed_count = sum(1 for c in chunks if c.status == 'completed')
     failed_count = sum(1 for c in chunks if c.status == 'failed')
+    pending_count = sum(1 for c in chunks if c.status in ('stored', 'processing', 'pending'))
+
+    # Auto-complete interrupted recordings: if all chunks are done
+    # (no pending/stored/processing) and the draft is still in 'recording'
+    # state, the user refreshed mid-recording. Mark as completed so the
+    # frontend recovery polling can finish.
+    if (draft.streaming_status == 'recording'
+            and chunks and pending_count == 0):
+        draft.streaming_status = 'completed'
+        draft.streaming_completed_chunks = completed_count
+        db.session.commit()
 
     status_data = {
         "session_id": session_id,
