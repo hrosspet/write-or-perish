@@ -837,6 +837,32 @@ def get_profile_status(task_id):
     # Get task state and info
     state = task.state
 
+    # Celery returns PENDING for unknown/expired task IDs. If the DB no
+    # longer lists this task as the active generation, the task already
+    # finished — treat it as completed so the frontend stops polling.
+    if state == 'PENDING' and current_user.profile_generation_task_id != task_id:
+        latest = (UserProfile.query
+                  .filter_by(user_id=current_user.id)
+                  .order_by(UserProfile.created_at.desc())
+                  .first())
+        profile_data = None
+        if latest:
+            profile_data = {
+                "id": latest.id,
+                "content": latest.get_content(),
+                "generated_by": latest.generated_by,
+                "tokens_used": latest.tokens_used,
+                "created_at": latest.created_at.isoformat()
+            }
+        return jsonify({
+            "task_id": task_id,
+            "status": "completed",
+            "progress": 100,
+            "message": "Profile generation complete",
+            "error": None,
+            "profile": profile_data
+        }), 200
+
     # task.info can be a dict (for PROGRESS state) or an exception (for FAILURE)
     # or None/other for PENDING states
     info = {}
