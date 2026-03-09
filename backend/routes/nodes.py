@@ -695,11 +695,12 @@ def get_children(node_id):
 @nodes_bp.route("/models", methods=["GET"])
 @login_required
 def get_models():
-    """Return the list of supported models for the frontend."""
+    """Return the list of available (non-deprecated) models for the frontend."""
     supported = current_app.config["SUPPORTED_MODELS"]
     models = [
         {"id": model_id, "name": cfg["display_name"], "provider": cfg["provider"]}
         for model_id, cfg in supported.items()
+        if not cfg.get("deprecated")
     ]
     return jsonify({"models": models}), 200
 
@@ -726,24 +727,26 @@ def get_suggested_model(node_id):
     Logic:
     1. Walk up the thread ancestry from the given node
     2. Find the most recent node with node_type='llm' AND llm_model IS NOT NULL
-    3. If found AND the model is in the supported models list, return that model
-    4. If the model is "gpt-4.5-preview" (legacy), return default instead
+    3. If found AND the model is active (not deprecated), return that model
+    4. If the model is deprecated or legacy, fall through to default
     5. If no predecessor found, return system default
     """
     node = Node.query.get_or_404(node_id)
+    supported = current_app.config["SUPPORTED_MODELS"]
 
     # Walk up the ancestry to find the most recent LLM node
     current = node
     while current:
         if current.node_type == "llm" and current.llm_model:
-            # Check if the model is supported (not legacy)
-            if current.llm_model in current_app.config["SUPPORTED_MODELS"]:
+            cfg = supported.get(current.llm_model)
+            # Check if the model is supported and not deprecated
+            if cfg and not cfg.get("deprecated"):
                 return jsonify({
                     "suggested_model": current.llm_model,
                     "source": "predecessor"
                 }), 200
-            # If it's the legacy model, fall through to default
-            elif current.llm_model == "gpt-4.5-preview":
+            # Deprecated or legacy model — fall through to default
+            elif cfg or current.llm_model == "gpt-4.5-preview":
                 break
         current = current.parent
 

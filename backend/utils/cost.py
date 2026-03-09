@@ -19,6 +19,10 @@ def calculate_llm_cost_microdollars(model_id, input_tokens, output_tokens):
         return 0
     input_price = config.get("input_price_per_mtok", 0)
     output_price = config.get("output_price_per_mtok", 0)
+    threshold = config.get("long_context_threshold")
+    if threshold and input_tokens > threshold:
+        input_price *= config.get("long_context_input_multiplier", 1)
+        output_price *= config.get("long_context_output_multiplier", 1)
     return round(input_tokens * input_price + output_tokens * output_price)
 
 

@@ -35,6 +35,17 @@ class Config:
 
     # Supported models configuration (single source of truth for all model metadata)
     SUPPORTED_MODELS = {
+        "gpt-5.4": {
+            "provider": "openai",
+            "api_model": "gpt-5.4",
+            "display_name": "GPT-5.4",
+            "context_window": 1050000,
+            "input_price_per_mtok": 2.50,
+            "output_price_per_mtok": 15.00,
+            "long_context_threshold": 272000,
+            "long_context_input_multiplier": 2.0,
+            "long_context_output_multiplier": 1.5,
+        },
         "gpt-5": {
             "provider": "openai",
             "api_model": "gpt-5",
@@ -42,6 +53,7 @@ class Config:
             "context_window": 128000,
             "input_price_per_mtok": 1.25,
             "output_price_per_mtok": 10.00,
+            "deprecated": True,
         },
         "gpt-5.1": {
             "provider": "openai",
@@ -50,22 +62,25 @@ class Config:
             "context_window": 272000,
             "input_price_per_mtok": 1.25,
             "output_price_per_mtok": 10.00,
+            "deprecated": True,
         },
         "gpt-5.2": {
             "provider": "openai",
             "api_model": "gpt-5.2",
             "display_name": "GPT-5.2",
-            "context_window": 272000,  # Temporarily 272k until OpenAI fixes their API limit (should be 400k)
+            "context_window": 272000,
             "input_price_per_mtok": 1.75,
             "output_price_per_mtok": 14.00,
+            "deprecated": True,
         },
         "claude-sonnet-4.5": {
             "provider": "anthropic",
             "api_model": "claude-sonnet-4-5-20250929",
             "display_name": "Claude 4.5 Sonnet",
-            "context_window": 200000,  # Temporarily 200k due to API tier limit (should be 1M with higher tier)
+            "context_window": 200000,
             "input_price_per_mtok": 3.00,
             "output_price_per_mtok": 15.00,
+            "deprecated": True,
         },
         "claude-sonnet-4.6": {
             "provider": "anthropic",
