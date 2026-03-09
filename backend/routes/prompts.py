@@ -31,12 +31,21 @@ def _is_default_updated(prompt):
     return prompt.based_on_default_hash != current
 
 
+def _auto_upgraded_content(prompt):
+    """Return the file default if this is a stale auto-upgrade row."""
+    if prompt.generated_by == "default":
+        current = default_prompt_hash(prompt.prompt_key)
+        if current and prompt.based_on_default_hash != current:
+            return load_default_prompt(prompt.prompt_key)
+    return prompt.get_content()
+
+
 def _serialize_prompt(prompt, version_number):
     return {
         "id": prompt.id,
         "prompt_key": prompt.prompt_key,
         "title": prompt.title,
-        "content": prompt.get_content(),
+        "content": _auto_upgraded_content(prompt),
         "generated_by": prompt.generated_by,
         "created_at": prompt.created_at.isoformat(),
         "version_number": version_number,
@@ -55,7 +64,7 @@ def list_prompts():
         ).order_by(UserPrompt.created_at.desc()).first()
 
         if latest:
-            content = latest.get_content()
+            content = _auto_upgraded_content(latest)
             prompts.append({
                 "prompt_key": key,
                 "title": meta['title'],
