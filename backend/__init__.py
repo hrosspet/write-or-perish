@@ -164,4 +164,10 @@ def create_app():
     app.cli.add_command(backfill_human_owner_command)
     app.cli.add_command(backfill_prompt_refs_command)
 
+    try:
+        from experiments.prompt_rct.run_rct import rct_cli
+        app.cli.add_command(rct_cli)
+    except ImportError:
+        pass  # experiments not available (e.g. Docker/staging)
+
     return app
