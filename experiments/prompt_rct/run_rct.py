@@ -11,11 +11,14 @@ Usage:
     flask rct run-all       # All phases sequentially
 """
 import json
+import logging
 import os
 import random
 import re
 import string
+import tempfile
 import time
+from datetime import datetime
 
 import click
 from flask import current_app
@@ -32,6 +35,42 @@ CONFIG_PATH = os.path.join(RCT_DIR, "config.json")
 RESULTS_DIR = os.path.join(RCT_DIR, "results")
 
 rct_cli = AppGroup("rct", help="Prompt RCT experiment commands.")
+
+# Module-level logger, configured per-command via setup_logging()
+log = logging.getLogger("rct")
+
+
+# ---------------------------------------------------------------------------
+# Logging setup
+# ---------------------------------------------------------------------------
+
+def setup_logging(phase_name):
+    """Configure logger to write to both console and a log file in results/."""
+    ensure_dir(RESULTS_DIR)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(RESULTS_DIR, f"{phase_name}_{timestamp}.log")
+
+    # Reset handlers (avoid duplicates on repeated calls)
+    log.handlers.clear()
+    log.setLevel(logging.DEBUG)
+
+    fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(message)s",
+                            datefmt="%H:%M:%S")
+
+    # Console handler
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(fmt)
+    log.addHandler(ch)
+
+    # File handler
+    fh = logging.FileHandler(log_file)
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(fmt)
+    log.addHandler(fh)
+
+    log.info(f"Logging to {log_file}")
+    return log_file
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +188,7 @@ def fmt_cost(microdollars):
 @with_appcontext
 def estimate_cmd():
     """Estimate cost and interactively set shuffle count."""
+    setup_logging("estimate")
     cfg = load_config()
     node_ids = [parse_node_id(n) for n in cfg["node_ids"]]
     gen_models = cfg["generation_models"]
@@ -156,36 +196,34 @@ def estimate_cmd():
     variants = cfg["prompt_variants"]
 
     if not node_ids:
-        click.echo("Error: no node_ids in config.json")
+        log.error("No node_ids in config.json")
         return
 
     # Validate node ownership before any content access
     owner = cfg.get("owner")
     if not owner:
-        click.echo("Error: 'owner' not set in config.json")
+        log.error("'owner' not set in config.json")
         return
     valid_ids, errors = validate_node_ownership(node_ids, owner)
     if errors:
         for e in errors:
-            click.echo(f"  ERROR: {e}")
+            log.error(e)
         if not valid_ids:
             return
-        click.echo()
     node_ids = valid_ids
 
     # Fetch node content to estimate input tokens
-    click.echo(f"Fetching {len(node_ids)} nodes...")
+    log.info(f"Fetching {len(node_ids)} nodes...")
     node_texts = {}
     for nid in node_ids:
         node = Node.query.get(nid)
         if not node:
-            click.echo(f"  Warning: node {nid} not found, skipping")
+            log.warning(f"Node {nid} not found, skipping")
             continue
         node_texts[nid] = node.get_content()
-    click.echo()
 
     if not node_texts:
-        click.echo("Error: no valid nodes found")
+        log.error("No valid nodes found")
         return
 
     avg_node_tokens = sum(estimate_tokens(t) for t in node_texts.values()) // len(node_texts)
@@ -203,7 +241,7 @@ def estimate_cmd():
             resolved = apply_prompt_placeholders(raw, user_profile)
             prompt_tokens[vfile] = estimate_tokens(resolved)
         except FileNotFoundError:
-            click.echo(f"  Warning: prompt file {vfile} not found")
+            log.warning(f"Prompt file {vfile} not found")
             prompt_tokens[vfile] = 500  # fallback
     avg_prompt_tokens = sum(prompt_tokens.values()) // max(len(prompt_tokens), 1)
 
@@ -211,7 +249,7 @@ def estimate_cmd():
     try:
         eval_prompt_tokens = estimate_tokens(load_eval_prompt())
     except FileNotFoundError:
-        click.echo("  Warning: eval prompt not found")
+        log.warning("Eval prompt not found")
         eval_prompt_tokens = 500
 
     n_nodes = len(node_texts)
@@ -219,42 +257,39 @@ def estimate_cmd():
     n_gen_models = len(gen_models)
     n_eval_models = len(eval_models)
 
-    click.echo(f"  Avg node: ~{avg_node_tokens} tokens")
-    click.echo(f"  User profile: ~{profile_tokens} tokens")
-    click.echo(f"  Avg prompt variant (with profile): ~{avg_prompt_tokens} tokens")
-    click.echo(f"  Est. output: ~{est_output_tokens} tokens")
-    click.echo()
+    log.info(f"Avg node: ~{avg_node_tokens} tokens")
+    log.info(f"User profile: ~{profile_tokens} tokens")
+    log.info(f"Avg prompt variant (with profile): ~{avg_prompt_tokens} tokens")
+    log.info(f"Est. output: ~{est_output_tokens} tokens")
 
     # Generation cost
     n_gen_calls = n_nodes * n_variants * n_gen_models
     gen_input = avg_node_tokens + avg_prompt_tokens
-    click.echo("=== Generation ===")
-    click.echo(f"  {n_nodes} nodes x {n_variants} variants x {n_gen_models} models = {n_gen_calls} calls")
-    click.echo(f"  ~{gen_input} in + ~{est_output_tokens} out tokens/call")
+    log.info("=== Generation ===")
+    log.info(f"  {n_nodes} nodes x {n_variants} variants x {n_gen_models} models = {n_gen_calls} calls")
+    log.info(f"  ~{gen_input} in + ~{est_output_tokens} out tokens/call")
     gen_cost_total = 0
     for mid in gen_models:
         cost = calculate_llm_cost_microdollars(mid, gen_input, est_output_tokens)
         model_cost = cost * n_nodes * n_variants
         gen_cost_total += model_cost
-        click.echo(f"  {mid}: ~{fmt_cost(cost)}/call, ~{fmt_cost(model_cost)} total")
-    click.echo(f"  Generation total: ~{fmt_cost(gen_cost_total)}")
-    click.echo()
+        log.info(f"  {mid}: ~{fmt_cost(cost)}/call, ~{fmt_cost(model_cost)} total")
+    log.info(f"  Generation total: ~{fmt_cost(gen_cost_total)}")
 
     # Evaluation cost (per shuffle)
     n_responses = n_variants * n_gen_models
     eval_input = avg_node_tokens + est_output_tokens * n_responses + eval_prompt_tokens
     n_eval_calls_per_shuffle = n_nodes * n_eval_models
-    click.echo("=== Evaluation (per shuffle) ===")
-    click.echo(f"  {n_nodes} nodes x {n_eval_models} eval models = {n_eval_calls_per_shuffle} calls/shuffle")
-    click.echo(f"  ~{eval_input} in + ~{est_output_tokens} out tokens/call")
+    log.info("=== Evaluation (per shuffle) ===")
+    log.info(f"  {n_nodes} nodes x {n_eval_models} eval models = {n_eval_calls_per_shuffle} calls/shuffle")
+    log.info(f"  ~{eval_input} in + ~{est_output_tokens} out tokens/call")
     eval_cost_per_shuffle = 0
     for mid in eval_models:
         cost = calculate_llm_cost_microdollars(mid, eval_input, est_output_tokens)
         model_cost = cost * n_nodes
         eval_cost_per_shuffle += model_cost
-        click.echo(f"  {mid}: ~{fmt_cost(cost)}/call, ~{fmt_cost(model_cost)}/shuffle")
-    click.echo(f"  Per shuffle total: ~{fmt_cost(eval_cost_per_shuffle)}")
-    click.echo()
+        log.info(f"  {mid}: ~{fmt_cost(cost)}/call, ~{fmt_cost(model_cost)}/shuffle")
+    log.info(f"  Per shuffle total: ~{fmt_cost(eval_cost_per_shuffle)}")
 
     # Interactive: ask for shuffle count
     default_shuffles = cfg.get("shuffles", 1)
@@ -267,11 +302,10 @@ def estimate_cmd():
     total_eval_cost = eval_cost_per_shuffle * shuffles
     total_cost = gen_cost_total + total_eval_cost
 
-    click.echo()
-    click.echo(f"=== Total Estimate ({shuffles} shuffle(s)) ===")
-    click.echo(f"  Generation:  {fmt_cost(gen_cost_total)}")
-    click.echo(f"  Evaluation:  {fmt_cost(total_eval_cost)}")
-    click.echo(f"  TOTAL:       {fmt_cost(total_cost)}")
+    log.info(f"=== Total Estimate ({shuffles} shuffle(s)) ===")
+    log.info(f"  Generation:  {fmt_cost(gen_cost_total)}")
+    log.info(f"  Evaluation:  {fmt_cost(total_eval_cost)}")
+    log.info(f"  TOTAL:       {fmt_cost(total_cost)}")
 
     # Save shuffle count
     cfg["shuffles"] = shuffles
@@ -291,7 +325,221 @@ def estimate_cmd():
         json.dump(metadata, f, indent=2)
         f.write("\n")
 
-    click.echo(f"\nSaved shuffles={shuffles} to config.json and metadata.json")
+    log.info(f"Saved shuffles={shuffles} to config.json and metadata.json")
+
+
+# ---------------------------------------------------------------------------
+# Batch API helpers
+# ---------------------------------------------------------------------------
+
+BATCH_STATE_PATH = os.path.join(RESULTS_DIR, "batch_state.json")
+
+
+def load_batch_state():
+    if os.path.exists(BATCH_STATE_PATH):
+        with open(BATCH_STATE_PATH) as f:
+            return json.load(f)
+    return {}
+
+
+def save_batch_state(state):
+    ensure_dir(RESULTS_DIR)
+    with open(BATCH_STATE_PATH, "w") as f:
+        json.dump(state, f, indent=2)
+        f.write("\n")
+
+
+def get_model_provider(model_id):
+    """Return (provider, api_model) for a model_id."""
+    config = current_app.config["SUPPORTED_MODELS"].get(model_id)
+    if not config:
+        raise ValueError(f"Unsupported model: {model_id}")
+    return config["provider"], config["api_model"]
+
+
+def _convert_messages_for_anthropic(messages):
+    """Convert OpenAI-style messages to Anthropic batch params format."""
+    system_messages = [m for m in messages if m.get("role") == "system"]
+    system_text = "\n\n".join([
+        m["content"][0]["text"] if isinstance(m.get("content"), list)
+        else m["content"]
+        for m in system_messages if m.get("content")
+    ])
+    system_param = ([{"type": "text", "text": system_text}]
+                    if system_text else [])
+
+    anthropic_messages = []
+    for msg in messages:
+        if msg["role"] in ["user", "assistant"]:
+            content = msg["content"]
+            if isinstance(content, list) and len(content) > 0:
+                if isinstance(content[0], dict) and "text" in content[0]:
+                    content = content[0]["text"]
+            anthropic_messages.append({"role": msg["role"],
+                                       "content": content})
+    return system_param, anthropic_messages
+
+
+def batch_submit(requests_by_provider, api_keys, phase):
+    """Submit batch requests grouped by provider.
+
+    requests_by_provider: dict mapping provider -> list of
+        {"custom_id": str, "model_id": str, "api_model": str,
+         "messages": list, "max_tokens": int}
+
+    Returns dict of batch IDs keyed by provider (+ model for OpenAI).
+    """
+    from anthropic import Anthropic
+    from openai import OpenAI
+
+    batch_ids = {}
+
+    # --- Anthropic: single batch with all requests ---
+    anthropic_reqs = requests_by_provider.get("anthropic", [])
+    if anthropic_reqs:
+        client = Anthropic(api_key=api_keys["anthropic"])
+        batch_requests = []
+        for req in anthropic_reqs:
+            system_param, ant_messages = _convert_messages_for_anthropic(
+                req["messages"])
+            params = {
+                "model": req["api_model"],
+                "max_tokens": req.get("max_tokens", 10000),
+                "messages": ant_messages,
+            }
+            if system_param:
+                params["system"] = system_param
+            batch_requests.append({
+                "custom_id": req["custom_id"],
+                "params": params,
+            })
+        batch = client.messages.batches.create(requests=batch_requests)
+        batch_ids["anthropic"] = batch.id
+        log.info(f"Anthropic batch submitted: {batch.id} "
+                 f"({len(batch_requests)} requests)")
+
+    # --- OpenAI: one batch per model (all requests must share a model) ---
+    openai_reqs = requests_by_provider.get("openai", [])
+    if openai_reqs:
+        client = OpenAI(api_key=api_keys["openai"])
+        # Group by api_model
+        by_model = {}
+        for req in openai_reqs:
+            by_model.setdefault(req["api_model"], []).append(req)
+
+        for oai_model, reqs in by_model.items():
+            # Write JSONL to a temp file
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".jsonl", delete=False
+            ) as tmp:
+                for req in reqs:
+                    line = {
+                        "custom_id": req["custom_id"],
+                        "method": "POST",
+                        "url": "/v1/chat/completions",
+                        "body": {
+                            "model": oai_model,
+                            "messages": req["messages"],
+                            "max_completion_tokens": req.get(
+                                "max_tokens", 10000),
+                            "temperature": 1,
+                        },
+                    }
+                    tmp.write(json.dumps(line) + "\n")
+                tmp_path = tmp.name
+
+            with open(tmp_path, "rb") as f:
+                uploaded = client.files.create(file=f, purpose="batch")
+            os.unlink(tmp_path)
+
+            batch = client.batches.create(
+                input_file_id=uploaded.id,
+                endpoint="/v1/chat/completions",
+                completion_window="24h",
+            )
+            key = f"openai:{oai_model}"
+            batch_ids[key] = batch.id
+            log.info(f"OpenAI batch submitted for {oai_model}: {batch.id} "
+                     f"({len(reqs)} requests)")
+
+    return batch_ids
+
+
+def batch_check_and_collect(batch_ids, api_keys):
+    """Check batch statuses and collect completed results.
+
+    Returns (results_by_custom_id, still_pending) where:
+        results_by_custom_id: dict mapping custom_id -> result dict with
+            "content", "input_tokens", "output_tokens"
+        still_pending: dict of batch_ids still processing
+    """
+    from anthropic import Anthropic
+    from openai import OpenAI
+
+    results = {}
+    still_pending = {}
+
+    for key, batch_id in batch_ids.items():
+        if key == "anthropic":
+            client = Anthropic(api_key=api_keys["anthropic"])
+            batch = client.messages.batches.retrieve(batch_id)
+            log.info(f"Anthropic batch {batch_id}: "
+                     f"status={batch.processing_status}, "
+                     f"counts={batch.request_counts}")
+            if batch.processing_status != "ended":
+                still_pending[key] = batch_id
+                continue
+            # Collect results
+            for entry in client.messages.batches.results(batch_id):
+                cid = entry.custom_id
+                if entry.result.type == "succeeded":
+                    msg = entry.result.message
+                    content = ""
+                    for block in msg.content:
+                        if hasattr(block, "text"):
+                            content += block.text
+                    results[cid] = {
+                        "content": content,
+                        "input_tokens": msg.usage.input_tokens,
+                        "output_tokens": msg.usage.output_tokens,
+                    }
+                else:
+                    log.warning(f"Anthropic batch item {cid}: "
+                                f"type={entry.result.type}")
+
+        elif key.startswith("openai:"):
+            client = OpenAI(api_key=api_keys["openai"])
+            batch = client.batches.retrieve(batch_id)
+            log.info(f"OpenAI batch {batch_id}: status={batch.status}, "
+                     f"counts={batch.request_counts}")
+            if batch.status not in ("completed", "failed", "expired",
+                                    "cancelled"):
+                still_pending[key] = batch_id
+                continue
+            if batch.status != "completed":
+                log.error(f"OpenAI batch {batch_id} ended with "
+                          f"status={batch.status}")
+                continue
+            # Download results
+            content_bytes = client.files.content(
+                batch.output_file_id).content
+            for line in content_bytes.decode().strip().split("\n"):
+                entry = json.loads(line)
+                cid = entry["custom_id"]
+                resp = entry.get("response", entry.get("result", {}))
+                body = resp.get("body", {})
+                if resp.get("status_code") == 200 and body.get("choices"):
+                    results[cid] = {
+                        "content": body["choices"][0]["message"]["content"],
+                        "input_tokens": body["usage"]["prompt_tokens"],
+                        "output_tokens": body["usage"][
+                            "completion_tokens"],
+                    }
+                else:
+                    log.warning(f"OpenAI batch item {cid}: "
+                                f"status={resp.get('status_code')}")
+
+    return results, still_pending
 
 
 # ---------------------------------------------------------------------------
@@ -299,10 +547,23 @@ def estimate_cmd():
 # ---------------------------------------------------------------------------
 
 @rct_cli.command("generate")
+@click.option("--batch", "batch_mode", is_flag=True,
+              help="Submit requests via Batch API (50% cheaper, async).")
+@click.option("--batch-collect", "batch_collect", is_flag=True,
+              help="Check status / collect results from a previous --batch.")
 @with_appcontext
-def generate_cmd():
+def generate_cmd(batch_mode, batch_collect):
     """Generate responses for all node x variant x model combinations."""
+    setup_logging("generate")
     cfg = load_config()
+
+    # --batch flag or config-level use_batch
+    use_batch = batch_mode or cfg.get("use_batch", False)
+
+    if batch_collect:
+        _generate_batch_collect(cfg)
+        return
+
     node_ids = [parse_node_id(n) for n in cfg["node_ids"]]
     gen_models = cfg["generation_models"]
     variants = cfg["prompt_variants"]
@@ -310,36 +571,45 @@ def generate_cmd():
 
     owner = cfg.get("owner")
     if not owner:
-        click.echo("Error: 'owner' not set in config.json")
+        log.error("'owner' not set in config.json")
         return
     node_ids, errors = validate_node_ownership(node_ids, owner)
     if errors:
         for e in errors:
-            click.echo(f"  ERROR: {e}")
+            log.error(e)
         if not node_ids:
             return
 
     # Resolve user profile for {user_profile} placeholder
     user_profile, _ = resolve_user_profile(owner)
     if user_profile:
-        click.echo(f"User profile: {len(user_profile)} chars")
+        log.info(f"User profile: {len(user_profile)} chars")
     else:
-        click.echo("User profile: not available (placeholders will be empty)")
+        log.warning("User profile: not available (placeholders will be empty)")
 
     total = len(node_ids) * len(variants) * len(gen_models)
-    click.echo(f"API key type: {key_type} | {total} calls across {len(gen_models)} models")
+    mode_label = "BATCH" if use_batch else "sync"
+    log.info(f"API key type: {key_type} | {total} calls across "
+             f"{len(gen_models)} models [{mode_label}]")
     if not click.confirm("Proceed with generation?", default=True):
         return
 
     api_keys = get_api_keys(cfg)
+
+    if use_batch:
+        _generate_batch_submit(cfg, node_ids, gen_models, variants,
+                               user_profile, api_keys)
+        return
+
+    # --- Synchronous mode (original) ---
     done = 0
     skipped = 0
-    errors = 0
+    err_count = 0
 
     for nid in node_ids:
         node = Node.query.get(nid)
         if not node:
-            click.echo(f"Warning: node {nid} not found, skipping")
+            log.warning(f"Node {nid} not found, skipping")
             done += len(variants) * len(gen_models)
             continue
         node_text = node.get_content()
@@ -356,7 +626,7 @@ def generate_cmd():
 
                 if os.path.exists(out_file):
                     skipped += 1
-                    click.echo(f"[{done}/{total}] node {nid}, {vfile}, {mid} ... skipped (exists)")
+                    log.debug(f"[{done}/{total}] node {nid}, {vfile}, {mid} ... skipped (exists)")
                     continue
 
                 messages = [
@@ -368,12 +638,12 @@ def generate_cmd():
                 try:
                     result = LLMProvider.get_completion(mid, messages, api_keys)
                 except PromptTooLongError as e:
-                    click.echo(f"[{done}/{total}] node {nid}, {vfile}, {mid} ... ERROR: {e}")
-                    errors += 1
+                    log.error(f"[{done}/{total}] node {nid}, {vfile}, {mid} ... {e}")
+                    err_count += 1
                     continue
                 except Exception as e:
-                    click.echo(f"[{done}/{total}] node {nid}, {vfile}, {mid} ... ERROR: {e}")
-                    errors += 1
+                    log.error(f"[{done}/{total}] node {nid}, {vfile}, {mid} ... {e}")
+                    err_count += 1
                     continue
 
                 elapsed = time.time() - t0
@@ -399,12 +669,161 @@ def generate_cmd():
                     json.dump(output, f, indent=2)
                     f.write("\n")
 
-                click.echo(
+                log.info(
                     f"[{done}/{total}] node {nid}, {vfile}, {mid} "
                     f"... done ({elapsed:.1f}s, {fmt_cost(cost)})"
                 )
 
-    click.echo(f"\nGeneration complete. {done} total, {skipped} skipped, {errors} errors.")
+    log.info(f"Generation complete. {done} total, {skipped} skipped, {err_count} errors.")
+
+
+def _generate_batch_submit(cfg, node_ids, gen_models, variants,
+                           user_profile, api_keys):
+    """Build and submit generation requests as provider batches."""
+    requests_by_provider = {}
+    # Track metadata per custom_id for writing result files later
+    request_meta = {}
+    skipped = 0
+
+    for nid in node_ids:
+        node = Node.query.get(nid)
+        if not node:
+            log.warning(f"Node {nid} not found, skipping")
+            continue
+        node_text = node.get_content()
+
+        for vfile in variants:
+            raw_prompt = load_prompt_variant(vfile)
+            prompt_text = apply_prompt_placeholders(raw_prompt, user_profile)
+            vs = variant_slug(vfile)
+
+            for mid in gen_models:
+                ms = model_slug(mid)
+                out_file = result_path("generation", nid,
+                                       f"{vs}_{ms}.json")
+                if os.path.exists(out_file):
+                    skipped += 1
+                    continue
+
+                provider, api_model = get_model_provider(mid)
+                cid = f"gen_node{nid}_{vs}_{ms}"
+
+                messages = [
+                    {"role": "system",
+                     "content": [{"type": "text", "text": prompt_text}]},
+                    {"role": "user",
+                     "content": [{"type": "text", "text": node_text}]},
+                ]
+
+                requests_by_provider.setdefault(provider, []).append({
+                    "custom_id": cid,
+                    "model_id": mid,
+                    "api_model": api_model,
+                    "messages": messages,
+                    "max_tokens": 10000,
+                })
+                request_meta[cid] = {
+                    "node_id": nid,
+                    "variant": vfile,
+                    "model": mid,
+                    "prompt_template": raw_prompt,
+                    "prompt_used": prompt_text,
+                    "user_profile": user_profile,
+                    "node_text": node_text,
+                    "out_file": out_file,
+                }
+
+    total_queued = sum(len(v) for v in requests_by_provider.values())
+    if total_queued == 0:
+        log.info(f"Nothing to submit ({skipped} already exist).")
+        return
+
+    log.info(f"Submitting {total_queued} requests as batch "
+             f"({skipped} skipped existing)...")
+    batch_ids = batch_submit(requests_by_provider, api_keys, "generation")
+
+    # Save state for later collection
+    state = load_batch_state()
+    state["generation"] = {
+        "batch_ids": batch_ids,
+        "request_meta": request_meta,
+        "submitted_at": datetime.now().isoformat(),
+    }
+    save_batch_state(state)
+
+    log.info("Batch submitted. Run `flask rct generate --batch-collect` "
+             "to check/collect results.")
+
+
+def _generate_batch_collect(cfg):
+    """Check and collect generation batch results."""
+    state = load_batch_state()
+    gen_state = state.get("generation")
+    if not gen_state:
+        log.error("No generation batch state found. "
+                  "Run `flask rct generate --batch` first.")
+        return
+
+    api_keys = get_api_keys(cfg)
+    batch_ids = gen_state["batch_ids"]
+    request_meta = gen_state["request_meta"]
+
+    results, still_pending = batch_check_and_collect(batch_ids, api_keys)
+
+    if still_pending:
+        log.info(f"Still processing: {list(still_pending.keys())}. "
+                 "Run --batch-collect again later.")
+        # Update state with only pending batches
+        gen_state["batch_ids"] = still_pending
+        save_batch_state(state)
+
+    # Write collected results to individual files
+    written = 0
+    errors = 0
+    for cid, result in results.items():
+        meta = request_meta.get(cid)
+        if not meta:
+            log.warning(f"No metadata for custom_id {cid}")
+            errors += 1
+            continue
+
+        out_file = meta["out_file"]
+        if os.path.exists(out_file):
+            continue
+
+        cost = calculate_llm_cost_microdollars(
+            meta["model"], result["input_tokens"], result["output_tokens"]
+        )
+        # Apply 50% batch discount
+        cost = cost // 2
+
+        output = {
+            "node_id": meta["node_id"],
+            "variant": meta["variant"],
+            "model": meta["model"],
+            "prompt_template": meta["prompt_template"],
+            "prompt_used": meta["prompt_used"],
+            "user_profile": meta["user_profile"],
+            "node_text": meta["node_text"],
+            "response": result["content"],
+            "input_tokens": result["input_tokens"],
+            "output_tokens": result["output_tokens"],
+            "actual_cost_microdollars": cost,
+            "batch_mode": True,
+        }
+        ensure_dir(os.path.dirname(out_file))
+        with open(out_file, "w") as f:
+            json.dump(output, f, indent=2)
+            f.write("\n")
+        written += 1
+
+    log.info(f"Collected {written} results, {errors} errors.")
+
+    if not still_pending:
+        # Clean up generation batch state
+        del state["generation"]
+        save_batch_state(state)
+        log.info("All generation batches complete.")
 
 
 # ---------------------------------------------------------------------------
@@ -412,10 +831,22 @@ def generate_cmd():
 # ---------------------------------------------------------------------------
 
 @rct_cli.command("evaluate")
+@click.option("--batch", "batch_mode", is_flag=True,
+              help="Submit requests via Batch API (50% cheaper, async).")
+@click.option("--batch-collect", "batch_collect", is_flag=True,
+              help="Check status / collect results from a previous --batch.")
 @with_appcontext
-def evaluate_cmd():
+def evaluate_cmd(batch_mode, batch_collect):
     """Run blind evaluations with shuffled response labels."""
+    setup_logging("evaluate")
     cfg = load_config()
+
+    use_batch = batch_mode or cfg.get("use_batch", False)
+
+    if batch_collect:
+        _evaluate_batch_collect(cfg)
+        return
+
     node_ids = [parse_node_id(n) for n in cfg["node_ids"]]
     eval_models = cfg["evaluation_models"]
     gen_models = cfg["generation_models"]
@@ -425,26 +856,36 @@ def evaluate_cmd():
 
     owner = cfg.get("owner")
     if not owner:
-        click.echo("Error: 'owner' not set in config.json")
+        log.error("'owner' not set in config.json")
         return
     node_ids, errors = validate_node_ownership(node_ids, owner)
     if errors:
         for e in errors:
-            click.echo(f"  ERROR: {e}")
+            log.error(e)
         if not node_ids:
             return
 
     total = len(node_ids) * len(eval_models) * shuffles
-    click.echo(f"API key type: {key_type} | {total} calls across {len(eval_models)} eval models, {shuffles} shuffle(s)")
+    mode_label = "BATCH" if use_batch else "sync"
+    log.info(f"API key type: {key_type} | {total} calls across "
+             f"{len(eval_models)} eval models, "
+             f"{shuffles} shuffle(s) [{mode_label}]")
     if not click.confirm("Proceed with evaluation?", default=True):
         return
 
     api_keys = get_api_keys(cfg)
     eval_prompt_template = load_eval_prompt()
 
+    if use_batch:
+        _evaluate_batch_submit(cfg, node_ids, eval_models, gen_models,
+                               variants, shuffles, eval_prompt_template,
+                               api_keys)
+        return
+
+    # --- Synchronous mode (original) ---
     done = 0
     skipped = 0
-    errors = 0
+    err_count = 0
 
     for nid in node_ids:
         # Load all generation results for this node
@@ -455,13 +896,13 @@ def evaluate_cmd():
                 ms = model_slug(mid)
                 gen_file = result_path("generation", nid, f"{vs}_{ms}.json")
                 if not os.path.exists(gen_file):
-                    click.echo(f"Warning: missing generation {gen_file}")
+                    log.warning(f"Missing generation {gen_file}")
                     continue
                 with open(gen_file) as f:
                     gen_results.append(json.load(f))
 
         if not gen_results:
-            click.echo(f"Warning: no generation results for node {nid}, skipping")
+            log.warning(f"No generation results for node {nid}, skipping")
             done += len(eval_models) * shuffles
             continue
 
@@ -477,7 +918,7 @@ def evaluate_cmd():
 
                 if os.path.exists(out_file):
                     skipped += 1
-                    click.echo(f"[{done}/{total}] node {nid}, {eval_mid}, shuffle {shuffle_idx} ... skipped")
+                    log.debug(f"[{done}/{total}] node {nid}, {eval_mid}, shuffle {shuffle_idx} ... skipped")
                     continue
 
                 # Shuffle and assign labels (deterministic, stable seed)
@@ -513,8 +954,8 @@ def evaluate_cmd():
                         eval_mid, messages, api_keys,
                         max_tokens=eval_max_tokens)
                 except Exception as e:
-                    click.echo(f"[{done}/{total}] node {nid}, {eval_mid}, shuffle {shuffle_idx} ... ERROR: {e}")
-                    errors += 1
+                    log.error(f"[{done}/{total}] node {nid}, {eval_mid}, shuffle {shuffle_idx} ... {e}")
+                    err_count += 1
                     continue
 
                 elapsed = time.time() - t0
@@ -539,12 +980,192 @@ def evaluate_cmd():
                     json.dump(output, f, indent=2)
                     f.write("\n")
 
-                click.echo(
+                log.info(
                     f"[{done}/{total}] node {nid}, {eval_mid}, shuffle {shuffle_idx} "
                     f"... done ({elapsed:.1f}s, {fmt_cost(cost)})"
                 )
 
-    click.echo(f"\nEvaluation complete. {done} total, {skipped} skipped, {errors} errors.")
+    log.info(f"Evaluation complete. {done} total, {skipped} skipped, {err_count} errors.")
+
+
+def _evaluate_batch_submit(cfg, node_ids, eval_models, gen_models,
+                           variants, shuffles, eval_prompt_template,
+                           api_keys):
+    """Build and submit evaluation requests as provider batches."""
+    requests_by_provider = {}
+    request_meta = {}
+    skipped = 0
+    eval_max_tokens = cfg.get("eval_max_tokens", 1000)
+
+    for nid in node_ids:
+        # Load all generation results for this node
+        gen_results = []
+        for vfile in variants:
+            vs = variant_slug(vfile)
+            for mid in gen_models:
+                ms = model_slug(mid)
+                gen_file = result_path("generation", nid,
+                                       f"{vs}_{ms}.json")
+                if not os.path.exists(gen_file):
+                    log.warning(f"Missing generation {gen_file}")
+                    continue
+                with open(gen_file) as f:
+                    gen_results.append(json.load(f))
+
+        if not gen_results:
+            log.warning(f"No generation results for node {nid}, skipping")
+            continue
+
+        node_text = gen_results[0]["node_text"]
+
+        for shuffle_idx in range(shuffles):
+            for eval_mid in eval_models:
+                ems = model_slug(eval_mid)
+                out_file = result_path(
+                    "evaluation", nid,
+                    f"eval_{ems}_shuffle{shuffle_idx}.json")
+                if os.path.exists(out_file):
+                    skipped += 1
+                    continue
+
+                # Shuffle and assign labels (same seed logic as sync)
+                model_hash = (int.from_bytes(eval_mid.encode(), "big")
+                              % 1000)
+                shuffle_seed = (nid * 1000000 + shuffle_idx * 1000
+                                + model_hash)
+                rng = random.Random(shuffle_seed)
+                shuffled = list(gen_results)
+                rng.shuffle(shuffled)
+                labels = list(string.ascii_uppercase[:len(shuffled)])
+
+                label_map = {}
+                responses_text = []
+                for label, gr in zip(labels, shuffled):
+                    label_map[label] = {
+                        "variant": gr["variant"],
+                        "model": gr["model"],
+                    }
+                    responses_text.append(
+                        f"### Response {label}\n\n{gr['response']}")
+
+                eval_prompt = eval_prompt_template.format(
+                    node_text=node_text,
+                    responses="\n\n---\n\n".join(responses_text),
+                )
+
+                provider, api_model = get_model_provider(eval_mid)
+                cid = f"eval_node{nid}_{ems}_shuffle{shuffle_idx}"
+
+                messages = [
+                    {"role": "user",
+                     "content": [{"type": "text",
+                                  "text": eval_prompt}]},
+                ]
+
+                requests_by_provider.setdefault(provider, []).append({
+                    "custom_id": cid,
+                    "model_id": eval_mid,
+                    "api_model": api_model,
+                    "messages": messages,
+                    "max_tokens": eval_max_tokens,
+                })
+                request_meta[cid] = {
+                    "node_id": nid,
+                    "evaluator_model": eval_mid,
+                    "shuffle_index": shuffle_idx,
+                    "shuffle_seed": shuffle_seed,
+                    "eval_prompt": eval_prompt,
+                    "label_map": label_map,
+                    "out_file": out_file,
+                }
+
+    total_queued = sum(len(v) for v in requests_by_provider.values())
+    if total_queued == 0:
+        log.info(f"Nothing to submit ({skipped} already exist).")
+        return
+
+    log.info(f"Submitting {total_queued} evaluation requests as batch "
+             f"({skipped} skipped existing)...")
+    batch_ids = batch_submit(requests_by_provider, api_keys, "evaluation")
+
+    state = load_batch_state()
+    state["evaluation"] = {
+        "batch_ids": batch_ids,
+        "request_meta": request_meta,
+        "submitted_at": datetime.now().isoformat(),
+    }
+    save_batch_state(state)
+
+    log.info("Batch submitted. Run `flask rct evaluate --batch-collect` "
+             "to check/collect results.")
+
+
+def _evaluate_batch_collect(cfg):
+    """Check and collect evaluation batch results."""
+    state = load_batch_state()
+    eval_state = state.get("evaluation")
+    if not eval_state:
+        log.error("No evaluation batch state found. "
+                  "Run `flask rct evaluate --batch` first.")
+        return
+
+    api_keys = get_api_keys(cfg)
+    batch_ids = eval_state["batch_ids"]
+    request_meta = eval_state["request_meta"]
+
+    results, still_pending = batch_check_and_collect(batch_ids, api_keys)
+
+    if still_pending:
+        log.info(f"Still processing: {list(still_pending.keys())}. "
+                 "Run --batch-collect again later.")
+        eval_state["batch_ids"] = still_pending
+        save_batch_state(state)
+
+    written = 0
+    errors = 0
+    for cid, result in results.items():
+        meta = request_meta.get(cid)
+        if not meta:
+            log.warning(f"No metadata for custom_id {cid}")
+            errors += 1
+            continue
+
+        out_file = meta["out_file"]
+        if os.path.exists(out_file):
+            continue
+
+        cost = calculate_llm_cost_microdollars(
+            meta["evaluator_model"],
+            result["input_tokens"], result["output_tokens"]
+        )
+        # Apply 50% batch discount
+        cost = cost // 2
+
+        output = {
+            "node_id": meta["node_id"],
+            "evaluator_model": meta["evaluator_model"],
+            "shuffle_index": meta["shuffle_index"],
+            "shuffle_seed": meta["shuffle_seed"],
+            "eval_prompt": meta["eval_prompt"],
+            "label_map": meta["label_map"],
+            "evaluation": result["content"],
+            "input_tokens": result["input_tokens"],
+            "output_tokens": result["output_tokens"],
+            "actual_cost_microdollars": cost,
+            "batch_mode": True,
+        }
+        ensure_dir(os.path.dirname(out_file))
+        with open(out_file, "w") as f:
+            json.dump(output, f, indent=2)
+            f.write("\n")
+        written += 1
+
+    log.info(f"Collected {written} results, {errors} errors.")
+
+    if not still_pending:
+        del state["evaluation"]
+        save_batch_state(state)
+        log.info("All evaluation batches complete.")
 
 
 # ---------------------------------------------------------------------------
@@ -564,6 +1185,7 @@ def parse_ranking(text):
 @with_appcontext
 def aggregate_cmd():
     """Aggregate evaluations into Borda count rankings."""
+    setup_logging("aggregate")
     cfg = load_config()
     node_ids = [parse_node_id(n) for n in cfg["node_ids"]]
 
@@ -584,7 +1206,8 @@ def aggregate_cmd():
 
             ranking = parse_ranking(ev["evaluation"])
             if ranking is None:
-                click.echo(f"Warning: could not parse ranking from {fname}")
+                rel_path = os.path.join(f"node_{nid}", fname)
+                log.warning(f"Could not parse ranking from {rel_path}")
                 parse_failures += 1
                 parsed_rankings.append({
                     "node_id": ev["node_id"],
@@ -603,7 +1226,7 @@ def aggregate_cmd():
                 if label in label_map:
                     resolved.append(label_map[label])
                 else:
-                    click.echo(f"Warning: label {label} not in label_map for {fname}")
+                    log.warning(f"Label {label} not in label_map for {fname}")
 
             parsed_rankings.append({
                 "node_id": ev["node_id"],
@@ -615,7 +1238,7 @@ def aggregate_cmd():
             })
 
     if not parsed_rankings:
-        click.echo("No evaluation results found.")
+        log.warning("No evaluation results found.")
         return
 
     # Borda count
@@ -712,7 +1335,7 @@ def aggregate_cmd():
         f.write(summary)
         f.write("\n")
 
-    click.echo(summary)
+    log.info(summary)
 
 
 # ---------------------------------------------------------------------------
@@ -724,17 +1347,18 @@ def aggregate_cmd():
 @with_appcontext
 def run_all_cmd(ctx):
     """Run all phases: estimate -> generate -> evaluate -> aggregate."""
-    click.echo("=== Phase 0: Estimate ===\n")
+    setup_logging("run_all")
+    log.info("=== Phase 0: Estimate ===")
     ctx.invoke(estimate_cmd)
 
     if not click.confirm("\nProceed with generation?", default=True):
         return
 
-    click.echo("\n=== Phase 1: Generate ===\n")
+    log.info("=== Phase 1: Generate ===")
     ctx.invoke(generate_cmd)
 
-    click.echo("\n=== Phase 2: Evaluate ===\n")
+    log.info("=== Phase 2: Evaluate ===")
     ctx.invoke(evaluate_cmd)
 
-    click.echo("\n=== Phase 3: Aggregate ===\n")
+    log.info("=== Phase 3: Aggregate ===")
     ctx.invoke(aggregate_cmd)

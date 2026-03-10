@@ -6,5 +6,6 @@
   "prompt_variants": ["variant_1.txt", "variant_2.txt", "variant_3.txt"],
   "api_key_type": "chat",
   "eval_max_tokens": 1000,
-  "shuffles": 1
+  "shuffles": 1,
+  "use_batch": false
 }
