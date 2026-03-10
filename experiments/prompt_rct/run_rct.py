@@ -695,14 +695,23 @@ def _generate_batch_submit(cfg, node_ids, gen_models, variants,
                            user_profile, api_keys):
     """Build and submit generation requests as provider batches."""
     state = load_batch_state()
-    if state.get("generation"):
-        log.error("A generation batch is already in progress. "
-                  "Run `flask rct generate --batch-collect` first, "
-                  "or delete results/batch_state.json to reset.")
-        return
+    gen_state = state.get("generation", {})
+    existing_batch_ids = gen_state.get("batch_ids", {})
+    existing_meta = gen_state.get("request_meta", {})
+
+    # Determine which providers already have pending batches
+    pending_providers = set()
+    if "anthropic" in existing_batch_ids:
+        pending_providers.add("anthropic")
+    for key in existing_batch_ids:
+        if key.startswith("openai:"):
+            pending_providers.add("openai")
+
+    if pending_providers:
+        log.info(f"Existing pending batches for: "
+                 f"{', '.join(sorted(pending_providers))} (skipping)")
 
     requests_by_provider = {}
-    # Track metadata per custom_id for writing result files later
     request_meta = {}
     skipped = 0
 
@@ -727,6 +736,9 @@ def _generate_batch_submit(cfg, node_ids, gen_models, variants,
                     continue
 
                 provider, api_model = get_model_provider(mid)
+                if provider in pending_providers:
+                    continue
+
                 cid = f"gen_node{nid}_{vs}_{ms}"
 
                 messages = [
@@ -763,11 +775,12 @@ def _generate_batch_submit(cfg, node_ids, gen_models, variants,
              f"({skipped} skipped existing)...")
     batch_ids = batch_submit(requests_by_provider, api_keys, "generation")
 
-    # Save state for later collection
-    state = load_batch_state()
+    # Merge with existing state
+    existing_batch_ids.update(batch_ids)
+    existing_meta.update(request_meta)
     state["generation"] = {
-        "batch_ids": batch_ids,
-        "request_meta": request_meta,
+        "batch_ids": existing_batch_ids,
+        "request_meta": existing_meta,
         "submitted_at": datetime.now().isoformat(),
     }
     save_batch_state(state)
@@ -1014,11 +1027,21 @@ def _evaluate_batch_submit(cfg, node_ids, eval_models, gen_models,
                            api_keys):
     """Build and submit evaluation requests as provider batches."""
     state = load_batch_state()
-    if state.get("evaluation"):
-        log.error("An evaluation batch is already in progress. "
-                  "Run `flask rct evaluate --batch-collect` first, "
-                  "or delete results/batch_state.json to reset.")
-        return
+    eval_state = state.get("evaluation", {})
+    existing_batch_ids = eval_state.get("batch_ids", {})
+    existing_meta = eval_state.get("request_meta", {})
+
+    # Determine which providers already have pending batches
+    pending_providers = set()
+    if "anthropic" in existing_batch_ids:
+        pending_providers.add("anthropic")
+    for key in existing_batch_ids:
+        if key.startswith("openai:"):
+            pending_providers.add("openai")
+
+    if pending_providers:
+        log.info(f"Existing pending batches for: "
+                 f"{', '.join(sorted(pending_providers))} (skipping)")
 
     requests_by_provider = {}
     request_meta = {}
@@ -1056,6 +1079,10 @@ def _evaluate_batch_submit(cfg, node_ids, eval_models, gen_models,
                     skipped += 1
                     continue
 
+                provider, api_model = get_model_provider(eval_mid)
+                if provider in pending_providers:
+                    continue
+
                 # Shuffle and assign labels (same seed logic as sync)
                 model_hash = (int.from_bytes(eval_mid.encode(), "big")
                               % 1000)
@@ -1081,7 +1108,6 @@ def _evaluate_batch_submit(cfg, node_ids, eval_models, gen_models,
                     responses="\n\n---\n\n".join(responses_text),
                 )
 
-                provider, api_model = get_model_provider(eval_mid)
                 cid = f"eval_node{nid}_{ems}_shuffle{shuffle_idx}"
 
                 messages = [
@@ -1116,10 +1142,12 @@ def _evaluate_batch_submit(cfg, node_ids, eval_models, gen_models,
              f"({skipped} skipped existing)...")
     batch_ids = batch_submit(requests_by_provider, api_keys, "evaluation")
 
-    state = load_batch_state()
+    # Merge with existing state
+    existing_batch_ids.update(batch_ids)
+    existing_meta.update(request_meta)
     state["evaluation"] = {
-        "batch_ids": batch_ids,
-        "request_meta": request_meta,
+        "batch_ids": existing_batch_ids,
+        "request_meta": existing_meta,
         "submitted_at": datetime.now().isoformat(),
     }
     save_batch_state(state)
