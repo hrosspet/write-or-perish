@@ -9,12 +9,14 @@ Usage:
     flask rct evaluate      # Phase 2: blind evaluation
     flask rct aggregate     # Phase 3: Borda count + summary
     flask rct run-all       # All phases sequentially
+    flask rct archive       # Archive results + config, reset for next run
 """
 import json
 import logging
 import os
 import random
 import re
+import shutil
 import string
 import tempfile
 import time
@@ -33,6 +35,8 @@ from backend.utils.cost import calculate_llm_cost_microdollars
 RCT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(RCT_DIR, "config.json")
 RESULTS_DIR = os.path.join(RCT_DIR, "results")
+ARCHIVE_DIR = os.path.join(RCT_DIR, "archive")
+PROMPTS_DIR = os.path.join(RCT_DIR, "prompts")
 
 rct_cli = AppGroup("rct", help="Prompt RCT experiment commands.")
 
@@ -1336,6 +1340,109 @@ def aggregate_cmd():
         f.write("\n")
 
     log.info(summary)
+
+
+# ---------------------------------------------------------------------------
+# Archive
+# ---------------------------------------------------------------------------
+
+CONFIG_DEFAULTS = {
+    "eval_max_tokens": 1000,
+    "shuffles": 1,
+    "use_batch": False,
+}
+
+
+@rct_cli.command("archive")
+@with_appcontext
+def archive_cmd():
+    """Archive results + config + prompts, then reset for next run."""
+    setup_logging("archive")
+    cfg = load_config()
+
+    if not os.path.isdir(RESULTS_DIR):
+        log.info("No results directory found. Nothing to archive.")
+        return
+
+    file_count = sum(len(files) for _, _, files in os.walk(RESULTS_DIR))
+    log.info(f"Results: {file_count} files")
+
+    # Suggest archive folder name
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    default_name = f"rct_{timestamp}"
+    archive_name = click.prompt("Archive folder name", default=default_name)
+    archive_path = os.path.join(ARCHIVE_DIR, archive_name)
+
+    if os.path.exists(archive_path):
+        log.error(f"Archive already exists: {archive_path}")
+        return
+
+    if not click.confirm(
+        f"Archive to archive/{archive_name}/ and delete results?",
+        default=True,
+    ):
+        log.info("Aborted.")
+        return
+
+    # Create archive and copy results
+    ensure_dir(archive_path)
+    shutil.copytree(RESULTS_DIR, os.path.join(archive_path, "results"))
+    log.info("Copied results/")
+
+    # Copy config snapshot
+    shutil.copy2(CONFIG_PATH, os.path.join(archive_path, "config.json"))
+    log.info("Copied config.json")
+
+    # Copy prompts
+    if os.path.isdir(PROMPTS_DIR):
+        prompt_files = [f for f in os.listdir(PROMPTS_DIR)
+                        if not f.startswith(".")]
+        if prompt_files:
+            shutil.copytree(PROMPTS_DIR,
+                            os.path.join(archive_path, "prompts"))
+            log.info(f"Copied prompts/ ({len(prompt_files)} files)")
+
+    # Copy eval prompts
+    eval_prompts_dir = os.path.join(RCT_DIR, "eval_prompts")
+    if os.path.isdir(eval_prompts_dir):
+        shutil.copytree(eval_prompts_dir,
+                        os.path.join(archive_path, "eval_prompts"))
+        log.info("Copied eval_prompts/")
+
+    # Delete results
+    shutil.rmtree(RESULTS_DIR)
+    log.info("Deleted results/")
+
+    # Ask about config reset
+    resettable = {
+        k: v for k, v in CONFIG_DEFAULTS.items()
+        if cfg.get(k) != v
+    }
+    if resettable:
+        log.info("Current non-default settings:")
+        for k, default in resettable.items():
+            log.info(f"  {k}: {cfg[k]} (default: {default})")
+
+        if click.confirm("Reset these to defaults?", default=True):
+            for k, v in resettable.items():
+                cfg[k] = v
+            # Also clear prompt_variants when resetting
+            prompt_files = [f for f in os.listdir(PROMPTS_DIR)
+                            if not f.startswith(".")]
+            if prompt_files:
+                for f in prompt_files:
+                    os.remove(os.path.join(PROMPTS_DIR, f))
+                cfg["prompt_variants"] = []
+                log.info("Cleared prompts/ directory")
+            save_config(cfg)
+            log.info("Config reset to defaults.")
+        else:
+            log.info("Config kept as-is.")
+    else:
+        log.info("Config already at defaults.")
+
+    log.info(f"Archived to archive/{archive_name}/. "
+             "Ready for a new experiment run.")
 
 
 # ---------------------------------------------------------------------------

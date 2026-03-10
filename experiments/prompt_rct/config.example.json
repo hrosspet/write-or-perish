@@ -1,9 +1,9 @@
 {
-  "owner": "hrosspet",
+  "owner": "",
   "node_ids": [],
   "generation_models": ["claude-opus-4.6", "gpt-5.4"],
   "evaluation_models": ["claude-opus-4.6", "gpt-5.4"],
-  "prompt_variants": ["variant_1.txt", "variant_2.txt", "variant_3.txt"],
+  "prompt_variants": [],
   "api_key_type": "chat",
   "eval_max_tokens": 1000,
   "shuffles": 1,

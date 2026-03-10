@@ -1,1 +1,5 @@
 results/
+archive/
+config.json
+prompts/*
+!prompts/.gitkeep
