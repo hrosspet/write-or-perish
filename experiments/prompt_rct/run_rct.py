@@ -191,11 +191,17 @@ def estimate_cmd():
     avg_node_tokens = sum(estimate_tokens(t) for t in node_texts.values()) // len(node_texts)
     est_output_tokens = 1000  # default output estimate
 
-    # Load actual prompt variants to get real token counts
+    # Resolve user profile for token estimation
+    user_profile, _ = resolve_user_profile(owner)
+    profile_tokens = estimate_tokens(user_profile) if user_profile else 0
+
+    # Load actual prompt variants, substitute {user_profile}, then estimate
     prompt_tokens = {}
     for vfile in variants:
         try:
-            prompt_tokens[vfile] = estimate_tokens(load_prompt_variant(vfile))
+            raw = load_prompt_variant(vfile)
+            resolved = apply_prompt_placeholders(raw, user_profile)
+            prompt_tokens[vfile] = estimate_tokens(resolved)
         except FileNotFoundError:
             click.echo(f"  Warning: prompt file {vfile} not found")
             prompt_tokens[vfile] = 500  # fallback
@@ -214,7 +220,8 @@ def estimate_cmd():
     n_eval_models = len(eval_models)
 
     click.echo(f"  Avg node: ~{avg_node_tokens} tokens")
-    click.echo(f"  Avg prompt variant: ~{avg_prompt_tokens} tokens")
+    click.echo(f"  User profile: ~{profile_tokens} tokens")
+    click.echo(f"  Avg prompt variant (with profile): ~{avg_prompt_tokens} tokens")
     click.echo(f"  Est. output: ~{est_output_tokens} tokens")
     click.echo()
 
