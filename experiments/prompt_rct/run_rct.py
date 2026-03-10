@@ -694,6 +694,13 @@ def generate_cmd(batch_mode, batch_collect):
 def _generate_batch_submit(cfg, node_ids, gen_models, variants,
                            user_profile, api_keys):
     """Build and submit generation requests as provider batches."""
+    state = load_batch_state()
+    if state.get("generation"):
+        log.error("A generation batch is already in progress. "
+                  "Run `flask rct generate --batch-collect` first, "
+                  "or delete results/batch_state.json to reset.")
+        return
+
     requests_by_provider = {}
     # Track metadata per custom_id for writing result files later
     request_meta = {}
@@ -1006,6 +1013,13 @@ def _evaluate_batch_submit(cfg, node_ids, eval_models, gen_models,
                            variants, shuffles, eval_prompt_template,
                            api_keys):
     """Build and submit evaluation requests as provider batches."""
+    state = load_batch_state()
+    if state.get("evaluation"):
+        log.error("An evaluation batch is already in progress. "
+                  "Run `flask rct evaluate --batch-collect` first, "
+                  "or delete results/batch_state.json to reset.")
+        return
+
     requests_by_provider = {}
     request_meta = {}
     skipped = 0
