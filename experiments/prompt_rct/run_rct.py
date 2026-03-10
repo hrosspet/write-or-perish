@@ -91,9 +91,10 @@ def variant_slug(variant_file):
     return f"v{m.group(1)}" if m else variant_file.replace(".txt", "")
 
 
-def get_api_keys():
-    """Get API keys using 'chat' key type (RCT is interactive, not training)."""
-    return get_api_keys_for_usage(current_app.config, "chat")
+def get_api_keys(cfg):
+    """Get API keys using key type from config (default: chat)."""
+    key_type = cfg.get("api_key_type", "chat")
+    return get_api_keys_for_usage(current_app.config, key_type)
 
 
 def estimate_tokens(text):
@@ -226,9 +227,14 @@ def generate_cmd():
     node_ids = [parse_node_id(n) for n in cfg["node_ids"]]
     gen_models = cfg["generation_models"]
     variants = cfg["prompt_variants"]
-    api_keys = get_api_keys()
+    key_type = cfg.get("api_key_type", "chat")
 
     total = len(node_ids) * len(variants) * len(gen_models)
+    click.echo(f"API key type: {key_type} | {total} calls across {len(gen_models)} models")
+    if not click.confirm("Proceed with generation?", default=True):
+        return
+
+    api_keys = get_api_keys(cfg)
     done = 0
     skipped = 0
     errors = 0
@@ -314,10 +320,16 @@ def evaluate_cmd():
     gen_models = cfg["generation_models"]
     variants = cfg["prompt_variants"]
     shuffles = cfg.get("shuffles", 1)
-    api_keys = get_api_keys()
-    eval_prompt_template = load_eval_prompt()
+    key_type = cfg.get("api_key_type", "chat")
 
     total = len(node_ids) * len(eval_models) * shuffles
+    click.echo(f"API key type: {key_type} | {total} calls across {len(eval_models)} eval models, {shuffles} shuffle(s)")
+    if not click.confirm("Proceed with evaluation?", default=True):
+        return
+
+    api_keys = get_api_keys(cfg)
+    eval_prompt_template = load_eval_prompt()
+
     done = 0
     skipped = 0
     errors = 0
