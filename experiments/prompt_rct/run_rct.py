@@ -313,10 +313,13 @@ def estimate_cmd():
     total_eval_cost = eval_cost_per_shuffle * shuffles
     total_cost = gen_cost_total + total_eval_cost
 
+    batch_total = total_cost // 2
+
     log.info(f"=== Total Estimate ({shuffles} shuffle(s)) ===")
     log.info(f"  Generation:  {fmt_cost(gen_cost_total)}")
     log.info(f"  Evaluation:  {fmt_cost(total_eval_cost)}")
-    log.info(f"  TOTAL:       {fmt_cost(total_cost)}")
+    log.info(f"  TOTAL (sync):   {fmt_cost(total_cost)}")
+    log.info(f"  TOTAL (batch):  {fmt_cost(batch_total)}  (50% off)")
 
     # Save shuffle count
     cfg["shuffles"] = shuffles
