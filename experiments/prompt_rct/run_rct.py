@@ -411,26 +411,30 @@ def batch_submit(requests_by_provider, api_keys, phase):
     # --- Anthropic: single batch with all requests ---
     anthropic_reqs = requests_by_provider.get("anthropic", [])
     if anthropic_reqs:
-        client = Anthropic(api_key=api_keys["anthropic"])
-        batch_requests = []
-        for req in anthropic_reqs:
-            system_param, ant_messages = _convert_messages_for_anthropic(
-                req["messages"])
-            params = {
-                "model": req["api_model"],
-                "max_tokens": req.get("max_tokens", 10000),
-                "messages": ant_messages,
-            }
-            if system_param:
-                params["system"] = system_param
-            batch_requests.append({
-                "custom_id": req["custom_id"],
-                "params": params,
-            })
-        batch = client.messages.batches.create(requests=batch_requests)
-        batch_ids["anthropic"] = batch.id
-        log.info(f"Anthropic batch submitted: {batch.id} "
-                 f"({len(batch_requests)} requests)")
+        try:
+            client = Anthropic(api_key=api_keys["anthropic"])
+            batch_requests = []
+            for req in anthropic_reqs:
+                system_param, ant_messages = (
+                    _convert_messages_for_anthropic(req["messages"]))
+                params = {
+                    "model": req["api_model"],
+                    "max_tokens": req.get("max_tokens", 10000),
+                    "messages": ant_messages,
+                }
+                if system_param:
+                    params["system"] = system_param
+                batch_requests.append({
+                    "custom_id": req["custom_id"],
+                    "params": params,
+                })
+            batch = client.messages.batches.create(
+                requests=batch_requests)
+            batch_ids["anthropic"] = batch.id
+            log.info(f"Anthropic batch submitted: {batch.id} "
+                     f"({len(batch_requests)} requests)")
+        except Exception as e:
+            log.error(f"Anthropic batch submission failed: {e}")
 
     # --- OpenAI: one batch per model (all requests must share a model) ---
     openai_reqs = requests_by_provider.get("openai", [])
@@ -442,39 +446,45 @@ def batch_submit(requests_by_provider, api_keys, phase):
             by_model.setdefault(req["api_model"], []).append(req)
 
         for oai_model, reqs in by_model.items():
-            # Write JSONL to a temp file
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".jsonl", delete=False
-            ) as tmp:
-                for req in reqs:
-                    line = {
-                        "custom_id": req["custom_id"],
-                        "method": "POST",
-                        "url": "/v1/chat/completions",
-                        "body": {
-                            "model": oai_model,
-                            "messages": req["messages"],
-                            "max_completion_tokens": req.get(
-                                "max_tokens", 10000),
-                            "temperature": 1,
-                        },
-                    }
-                    tmp.write(json.dumps(line) + "\n")
-                tmp_path = tmp.name
+            try:
+                # Write JSONL to a temp file
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".jsonl", delete=False
+                ) as tmp:
+                    for req in reqs:
+                        line = {
+                            "custom_id": req["custom_id"],
+                            "method": "POST",
+                            "url": "/v1/chat/completions",
+                            "body": {
+                                "model": oai_model,
+                                "messages": req["messages"],
+                                "max_completion_tokens": req.get(
+                                    "max_tokens", 10000),
+                                "temperature": 1,
+                            },
+                        }
+                        tmp.write(json.dumps(line) + "\n")
+                    tmp_path = tmp.name
 
-            with open(tmp_path, "rb") as f:
-                uploaded = client.files.create(file=f, purpose="batch")
-            os.unlink(tmp_path)
+                with open(tmp_path, "rb") as f:
+                    uploaded = client.files.create(file=f, purpose="batch")
+                os.unlink(tmp_path)
 
-            batch = client.batches.create(
-                input_file_id=uploaded.id,
-                endpoint="/v1/chat/completions",
-                completion_window="24h",
-            )
-            key = f"openai:{oai_model}"
-            batch_ids[key] = batch.id
-            log.info(f"OpenAI batch submitted for {oai_model}: {batch.id} "
-                     f"({len(reqs)} requests)")
+                batch = client.batches.create(
+                    input_file_id=uploaded.id,
+                    endpoint="/v1/chat/completions",
+                    completion_window="24h",
+                )
+                key = f"openai:{oai_model}"
+                batch_ids[key] = batch.id
+                log.info(f"OpenAI batch submitted for {oai_model}: "
+                         f"{batch.id} ({len(reqs)} requests)")
+            except Exception as e:
+                log.error(f"OpenAI batch submission failed for "
+                          f"{oai_model}: {e}")
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
 
     return batch_ids
 
