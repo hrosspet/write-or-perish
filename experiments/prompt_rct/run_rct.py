@@ -584,7 +584,8 @@ def aggregate_cmd():
 
             ranking = parse_ranking(ev["evaluation"])
             if ranking is None:
-                click.echo(f"Warning: could not parse ranking from {fname}")
+                rel_path = os.path.join(f"node_{nid}", fname)
+                click.echo(f"Warning: could not parse ranking from {rel_path}")
                 parse_failures += 1
                 parsed_rankings.append({
                     "node_id": ev["node_id"],
