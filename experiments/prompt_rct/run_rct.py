@@ -148,6 +148,16 @@ def get_api_keys(cfg):
     return get_api_keys_for_usage(current_app.config, key_type)
 
 
+def get_batch_api_keys(cfg):
+    """Get API keys for batch mode, using batch-specific keys if available."""
+    keys = get_api_keys(cfg)
+    # Override with batch-specific OpenAI key if configured
+    batch_oai_key = current_app.config.get("OPENAI_API_KEY_BATCH")
+    if batch_oai_key:
+        keys["openai"] = batch_oai_key
+    return keys
+
+
 def resolve_user_profile(owner_username):
     """Fetch the owner's latest user profile content. Returns (content, user_id) or (None, None)."""
     user = User.query.filter_by(username=owner_username).first()
@@ -618,7 +628,7 @@ def generate_cmd(batch_mode, batch_collect):
     if not click.confirm("Proceed with generation?", default=True):
         return
 
-    api_keys = get_api_keys(cfg)
+    api_keys = get_batch_api_keys(cfg) if use_batch else get_api_keys(cfg)
 
     if use_batch:
         _generate_batch_submit(cfg, node_ids, gen_models, variants,
@@ -811,7 +821,7 @@ def _generate_batch_collect(cfg):
                   "Run `flask rct generate --batch` first.")
         return
 
-    api_keys = get_api_keys(cfg)
+    api_keys = get_batch_api_keys(cfg)
     batch_ids = gen_state["batch_ids"]
     request_meta = gen_state["request_meta"]
 
@@ -920,7 +930,7 @@ def evaluate_cmd(batch_mode, batch_collect):
     if not click.confirm("Proceed with evaluation?", default=True):
         return
 
-    api_keys = get_api_keys(cfg)
+    api_keys = get_batch_api_keys(cfg) if use_batch else get_api_keys(cfg)
     eval_prompt_template = load_eval_prompt()
 
     if use_batch:
@@ -1182,7 +1192,7 @@ def _evaluate_batch_collect(cfg):
                   "Run `flask rct evaluate --batch` first.")
         return
 
-    api_keys = get_api_keys(cfg)
+    api_keys = get_batch_api_keys(cfg)
     batch_ids = eval_state["batch_ids"]
     request_meta = eval_state["request_meta"]
 
