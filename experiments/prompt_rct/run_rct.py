@@ -10,6 +10,13 @@ Usage:
     flask rct aggregate     # Phase 3: Borda count + summary
     flask rct run-all       # All phases sequentially
     flask rct archive       # Archive results + config, reset for next run
+
+Batch mode (50% cheaper, async within 24h):
+    flask rct generate --batch          # Submit generation requests
+    flask rct generate --batch-collect  # Check status / collect results
+    flask rct evaluate --batch          # Submit evaluation requests
+    flask rct evaluate --batch-collect  # Check status / collect results
+    Set "use_batch": true in config.json to use batch mode by default.
 """
 import json
 import logging
