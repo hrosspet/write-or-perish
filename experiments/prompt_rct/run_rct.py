@@ -472,8 +472,10 @@ def evaluate_cmd():
                     click.echo(f"[{done}/{total}] node {nid}, {eval_mid}, shuffle {shuffle_idx} ... skipped")
                     continue
 
-                # Shuffle and assign labels
-                rng = random.Random(nid * 1000 + shuffle_idx * 100 + hash(eval_mid) % 100)
+                # Shuffle and assign labels (deterministic, stable seed)
+                model_hash = int.from_bytes(eval_mid.encode(), "big") % 1000
+                shuffle_seed = nid * 1000000 + shuffle_idx * 1000 + model_hash
+                rng = random.Random(shuffle_seed)
                 shuffled = list(gen_results)
                 rng.shuffle(shuffled)
                 labels = list(string.ascii_uppercase[:len(shuffled)])
@@ -513,6 +515,7 @@ def evaluate_cmd():
                     "node_id": nid,
                     "evaluator_model": eval_mid,
                     "shuffle_index": shuffle_idx,
+                    "shuffle_seed": shuffle_seed,
                     "eval_prompt": eval_prompt,
                     "label_map": label_map,
                     "evaluation": result["content"],
