@@ -23,6 +23,7 @@ from flask.cli import AppGroup, with_appcontext
 
 from backend.llm_providers import LLMProvider, PromptTooLongError
 from backend.models import Node, User
+from backend.tasks.llm_completion import get_user_profile_content
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import calculate_llm_cost_microdollars
 
@@ -95,6 +96,22 @@ def get_api_keys(cfg):
     """Get API keys using key type from config (default: chat)."""
     key_type = cfg.get("api_key_type", "chat")
     return get_api_keys_for_usage(current_app.config, key_type)
+
+
+def resolve_user_profile(owner_username):
+    """Fetch the owner's latest user profile content. Returns (content, user_id) or (None, None)."""
+    user = User.query.filter_by(username=owner_username).first()
+    if not user:
+        return None, None
+    content = get_user_profile_content(user.id)
+    return content, user.id
+
+
+def apply_prompt_placeholders(prompt_text, user_profile):
+    """Substitute {user_profile} placeholder in prompt text."""
+    if "{user_profile}" in prompt_text:
+        prompt_text = prompt_text.replace("{user_profile}", user_profile or "")
+    return prompt_text
 
 
 def validate_node_ownership(node_ids, owner_username):
@@ -295,6 +312,13 @@ def generate_cmd():
         if not node_ids:
             return
 
+    # Resolve user profile for {user_profile} placeholder
+    user_profile, _ = resolve_user_profile(owner)
+    if user_profile:
+        click.echo(f"User profile: {len(user_profile)} chars")
+    else:
+        click.echo("User profile: not available (placeholders will be empty)")
+
     total = len(node_ids) * len(variants) * len(gen_models)
     click.echo(f"API key type: {key_type} | {total} calls across {len(gen_models)} models")
     if not click.confirm("Proceed with generation?", default=True):
@@ -314,7 +338,8 @@ def generate_cmd():
         node_text = node.get_content()
 
         for vfile in variants:
-            prompt_text = load_prompt_variant(vfile)
+            raw_prompt = load_prompt_variant(vfile)
+            prompt_text = apply_prompt_placeholders(raw_prompt, user_profile)
             vs = variant_slug(vfile)
 
             for mid in gen_models:
@@ -353,7 +378,9 @@ def generate_cmd():
                     "node_id": nid,
                     "variant": vfile,
                     "model": mid,
+                    "prompt_template": raw_prompt,
                     "prompt_used": prompt_text,
+                    "user_profile": user_profile,
                     "node_text": node_text,
                     "response": result["content"],
                     "input_tokens": result["input_tokens"],
