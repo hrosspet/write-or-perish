@@ -1,4 +1,5 @@
 {
+  "owner": "hrosspet",
   "node_ids": [],
   "generation_models": ["claude-opus-4.6", "gpt-5.4"],
   "evaluation_models": ["claude-opus-4.6", "gpt-5.4"],

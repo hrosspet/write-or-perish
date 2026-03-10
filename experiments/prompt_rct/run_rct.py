@@ -22,7 +22,7 @@ from flask import current_app
 from flask.cli import AppGroup, with_appcontext
 
 from backend.llm_providers import LLMProvider, PromptTooLongError
-from backend.models import Node
+from backend.models import Node, User
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import calculate_llm_cost_microdollars
 
@@ -97,6 +97,24 @@ def get_api_keys(cfg):
     return get_api_keys_for_usage(current_app.config, key_type)
 
 
+def validate_node_ownership(node_ids, owner_username):
+    """Check all nodes belong to the given user. Returns (valid_ids, errors)."""
+    user = User.query.filter_by(username=owner_username).first()
+    if not user:
+        return [], [f"User '{owner_username}' not found"]
+    errors = []
+    valid = []
+    for nid in node_ids:
+        node = Node.query.get(nid)
+        if not node:
+            errors.append(f"Node {nid} not found")
+        elif node.user_id != user.id:
+            errors.append(f"Node {nid} does not belong to '{owner_username}'")
+        else:
+            valid.append(nid)
+    return valid, errors
+
+
 def estimate_tokens(text):
     """Rough token estimate: ~4 chars per token."""
     return len(text) // 4
@@ -123,6 +141,20 @@ def estimate_cmd():
     if not node_ids:
         click.echo("Error: no node_ids in config.json")
         return
+
+    # Validate node ownership before any content access
+    owner = cfg.get("owner")
+    if not owner:
+        click.echo("Error: 'owner' not set in config.json")
+        return
+    valid_ids, errors = validate_node_ownership(node_ids, owner)
+    if errors:
+        for e in errors:
+            click.echo(f"  ERROR: {e}")
+        if not valid_ids:
+            return
+        click.echo()
+    node_ids = valid_ids
 
     # Fetch node content to estimate input tokens
     click.echo(f"Fetching {len(node_ids)} nodes...")
@@ -252,6 +284,17 @@ def generate_cmd():
     variants = cfg["prompt_variants"]
     key_type = cfg.get("api_key_type", "chat")
 
+    owner = cfg.get("owner")
+    if not owner:
+        click.echo("Error: 'owner' not set in config.json")
+        return
+    node_ids, errors = validate_node_ownership(node_ids, owner)
+    if errors:
+        for e in errors:
+            click.echo(f"  ERROR: {e}")
+        if not node_ids:
+            return
+
     total = len(node_ids) * len(variants) * len(gen_models)
     click.echo(f"API key type: {key_type} | {total} calls across {len(gen_models)} models")
     if not click.confirm("Proceed with generation?", default=True):
@@ -344,6 +387,17 @@ def evaluate_cmd():
     variants = cfg["prompt_variants"]
     shuffles = cfg.get("shuffles", 1)
     key_type = cfg.get("api_key_type", "chat")
+
+    owner = cfg.get("owner")
+    if not owner:
+        click.echo("Error: 'owner' not set in config.json")
+        return
+    node_ids, errors = validate_node_ownership(node_ids, owner)
+    if errors:
+        for e in errors:
+            click.echo(f"  ERROR: {e}")
+        if not node_ids:
+            return
 
     total = len(node_ids) * len(eval_models) * shuffles
     click.echo(f"API key type: {key_type} | {total} calls across {len(eval_models)} eval models, {shuffles} shuffle(s)")
