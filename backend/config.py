@@ -17,6 +17,7 @@ class Config:
     # TRAIN keys: used when content has ai_usage='train' (can be used for training)
     OPENAI_API_KEY_CHAT = os.environ.get("OPENAI_API_KEY_CHAT")
     OPENAI_API_KEY_TRAIN = os.environ.get("OPENAI_API_KEY_TRAIN")
+    OPENAI_API_KEY_BATCH = os.environ.get("OPENAI_API_KEY_BATCH")
     ANTHROPIC_API_KEY_CHAT = os.environ.get("ANTHROPIC_API_KEY_CHAT")
     ANTHROPIC_API_KEY_TRAIN = os.environ.get("ANTHROPIC_API_KEY_TRAIN")
 

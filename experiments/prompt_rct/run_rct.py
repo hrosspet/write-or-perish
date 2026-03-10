@@ -808,8 +808,11 @@ def _generate_batch_submit(cfg, node_ids, gen_models, variants,
     }
     save_batch_state(state)
 
-    log.info("Batch submitted. Run `flask rct generate --batch-collect` "
-             "to check/collect results.")
+    if batch_ids:
+        log.info("Run `flask rct generate --batch-collect` "
+                 "to check/collect results.")
+    else:
+        log.warning("No batches were successfully submitted.")
 
 
 def _generate_batch_collect(cfg):
@@ -1179,8 +1182,11 @@ def _evaluate_batch_submit(cfg, node_ids, eval_models, gen_models,
     }
     save_batch_state(state)
 
-    log.info("Batch submitted. Run `flask rct evaluate --batch-collect` "
-             "to check/collect results.")
+    if batch_ids:
+        log.info("Run `flask rct evaluate --batch-collect` "
+                 "to check/collect results.")
+    else:
+        log.warning("No batches were successfully submitted.")
 
 
 def _evaluate_batch_collect(cfg):
