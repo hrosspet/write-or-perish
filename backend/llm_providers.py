@@ -32,7 +32,8 @@ class LLMProvider:
     """Unified interface for multiple LLM providers"""
 
     @staticmethod
-    def get_completion(model_id: str, messages: list, api_keys: dict) -> dict:
+    def get_completion(model_id: str, messages: list, api_keys: dict,
+                       max_tokens: int = None) -> dict:
         """
         Generate a completion using the specified model.
 
@@ -40,6 +41,7 @@ class LLMProvider:
             model_id: Internal model identifier (e.g., "gpt-5", "claude-sonnet-4.5")
             messages: List of message dicts in OpenAI format
             api_keys: Dict with "openai" and "anthropic" keys
+            max_tokens: Optional max output tokens (overrides provider default)
 
         Returns:
             Dict with:
@@ -57,14 +59,17 @@ class LLMProvider:
         api_model = config["api_model"]
 
         if provider == "openai":
-            return LLMProvider._call_openai(api_model, messages, api_keys["openai"])
+            return LLMProvider._call_openai(
+                api_model, messages, api_keys["openai"], max_tokens)
         elif provider == "anthropic":
-            return LLMProvider._call_anthropic(api_model, messages, api_keys["anthropic"])
+            return LLMProvider._call_anthropic(
+                api_model, messages, api_keys["anthropic"], max_tokens)
         else:
             raise ValueError(f"Unknown provider: {provider}")
 
     @staticmethod
-    def _call_openai(model: str, messages: list, api_key: str) -> dict:
+    def _call_openai(model: str, messages: list, api_key: str,
+                     max_tokens: int = None) -> dict:
         """
         Call OpenAI API with the given model and messages.
 
@@ -82,7 +87,7 @@ class LLMProvider:
                 model=model,
                 messages=messages,
                 temperature=1,
-                max_completion_tokens=10000,
+                max_completion_tokens=max_tokens or 10000,
             )
         except openai.BadRequestError as e:
             error_msg = str(e)
@@ -104,7 +109,8 @@ class LLMProvider:
         }
 
     @staticmethod
-    def _call_anthropic(model: str, messages: list, api_key: str) -> dict:
+    def _call_anthropic(model: str, messages: list, api_key: str,
+                        max_tokens: int = None) -> dict:
         """
         Call Anthropic API with the given model and messages.
 
@@ -149,7 +155,8 @@ class LLMProvider:
         system_param = [{"type": "text", "text": system_text}] if system_text else []
 
         # Claude Opus 3 has a lower max_tokens limit than newer models
-        max_tokens = 4096 if "claude-3-opus" in model else 10000
+        if max_tokens is None:
+            max_tokens = 4096 if "claude-3-opus" in model else 10000
 
         # Log the actual API call details
         total_input_chars = sum(len(m.get("content", "")) for m in anthropic_messages)

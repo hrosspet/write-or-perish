@@ -499,8 +499,11 @@ def evaluate_cmd():
                 ]
 
                 t0 = time.time()
+                eval_max_tokens = cfg.get("eval_max_tokens", 1000)
                 try:
-                    result = LLMProvider.get_completion(eval_mid, messages, api_keys)
+                    result = LLMProvider.get_completion(
+                        eval_mid, messages, api_keys,
+                        max_tokens=eval_max_tokens)
                 except Exception as e:
                     click.echo(f"[{done}/{total}] node {nid}, {eval_mid}, shuffle {shuffle_idx} ... ERROR: {e}")
                     errors += 1
