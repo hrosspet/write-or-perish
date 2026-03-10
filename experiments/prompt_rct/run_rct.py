@@ -1347,6 +1347,8 @@ def aggregate_cmd():
 # ---------------------------------------------------------------------------
 
 CONFIG_DEFAULTS = {
+    "node_ids": [],
+    "prompt_variants": [],
     "eval_max_tokens": 1000,
     "shuffles": 1,
     "use_batch": False,
@@ -1426,14 +1428,14 @@ def archive_cmd():
         if click.confirm("Reset these to defaults?", default=True):
             for k, v in resettable.items():
                 cfg[k] = v
-            # Also clear prompt_variants when resetting
-            prompt_files = [f for f in os.listdir(PROMPTS_DIR)
-                            if not f.startswith(".")]
-            if prompt_files:
+            # Clear prompt files when prompt_variants is being reset
+            if "prompt_variants" in resettable:
+                prompt_files = [f for f in os.listdir(PROMPTS_DIR)
+                                if not f.startswith(".")]
                 for f in prompt_files:
                     os.remove(os.path.join(PROMPTS_DIR, f))
-                cfg["prompt_variants"] = []
-                log.info("Cleared prompts/ directory")
+                if prompt_files:
+                    log.info("Cleared prompts/ directory")
             save_config(cfg)
             log.info("Config reset to defaults.")
         else:
