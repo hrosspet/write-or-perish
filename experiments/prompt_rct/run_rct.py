@@ -140,19 +140,41 @@ def estimate_cmd():
         return
 
     avg_node_tokens = sum(estimate_tokens(t) for t in node_texts.values()) // len(node_texts)
-    avg_prompt_tokens = 500  # rough estimate for prompt text
     est_output_tokens = 1000  # default output estimate
+
+    # Load actual prompt variants to get real token counts
+    prompt_tokens = {}
+    for vfile in variants:
+        try:
+            prompt_tokens[vfile] = estimate_tokens(load_prompt_variant(vfile))
+        except FileNotFoundError:
+            click.echo(f"  Warning: prompt file {vfile} not found")
+            prompt_tokens[vfile] = 500  # fallback
+    avg_prompt_tokens = sum(prompt_tokens.values()) // max(len(prompt_tokens), 1)
+
+    # Load eval prompt for token estimate
+    try:
+        eval_prompt_tokens = estimate_tokens(load_eval_prompt())
+    except FileNotFoundError:
+        click.echo("  Warning: eval prompt not found")
+        eval_prompt_tokens = 500
 
     n_nodes = len(node_texts)
     n_variants = len(variants)
     n_gen_models = len(gen_models)
     n_eval_models = len(eval_models)
 
+    click.echo(f"  Avg node: ~{avg_node_tokens} tokens")
+    click.echo(f"  Avg prompt variant: ~{avg_prompt_tokens} tokens")
+    click.echo(f"  Est. output: ~{est_output_tokens} tokens")
+    click.echo()
+
     # Generation cost
     n_gen_calls = n_nodes * n_variants * n_gen_models
     gen_input = avg_node_tokens + avg_prompt_tokens
     click.echo("=== Generation ===")
     click.echo(f"  {n_nodes} nodes x {n_variants} variants x {n_gen_models} models = {n_gen_calls} calls")
+    click.echo(f"  ~{gen_input} in + ~{est_output_tokens} out tokens/call")
     gen_cost_total = 0
     for mid in gen_models:
         cost = calculate_llm_cost_microdollars(mid, gen_input, est_output_tokens)
@@ -164,10 +186,11 @@ def estimate_cmd():
 
     # Evaluation cost (per shuffle)
     n_responses = n_variants * n_gen_models
-    eval_input = avg_node_tokens + est_output_tokens * n_responses + 500  # node + all responses + eval prompt
+    eval_input = avg_node_tokens + est_output_tokens * n_responses + eval_prompt_tokens
     n_eval_calls_per_shuffle = n_nodes * n_eval_models
     click.echo("=== Evaluation (per shuffle) ===")
     click.echo(f"  {n_nodes} nodes x {n_eval_models} eval models = {n_eval_calls_per_shuffle} calls/shuffle")
+    click.echo(f"  ~{eval_input} in + ~{est_output_tokens} out tokens/call")
     eval_cost_per_shuffle = 0
     for mid in eval_models:
         cost = calculate_llm_cost_microdollars(mid, eval_input, est_output_tokens)
