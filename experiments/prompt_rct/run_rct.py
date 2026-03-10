@@ -393,6 +393,7 @@ def generate_cmd():
                     "input_tokens": result["input_tokens"],
                     "output_tokens": result["output_tokens"],
                     "actual_cost_microdollars": cost,
+                    "elapsed_seconds": round(elapsed, 2),
                 }
                 with open(out_file, "w") as f:
                     json.dump(output, f, indent=2)
@@ -532,6 +533,7 @@ def evaluate_cmd():
                     "input_tokens": result["input_tokens"],
                     "output_tokens": result["output_tokens"],
                     "actual_cost_microdollars": cost,
+                    "elapsed_seconds": round(elapsed, 2),
                 }
                 with open(out_file, "w") as f:
                     json.dump(output, f, indent=2)
@@ -640,8 +642,9 @@ def aggregate_cmd():
     model_ranking = sorted(model_scores.items(), key=lambda x: -x[1])
     combo_ranking = sorted(combo_scores.items(), key=lambda x: -x[1])
 
-    # Sum actual costs from all generation + evaluation files
+    # Sum actual costs and elapsed time from all generation + evaluation files
     total_cost = 0
+    total_elapsed = 0
     for phase in ["generation", "evaluation"]:
         phase_dir = os.path.join(RESULTS_DIR, phase)
         if not os.path.isdir(phase_dir):
@@ -653,6 +656,7 @@ def aggregate_cmd():
                 with open(os.path.join(root, fname)) as f:
                     data = json.load(f)
                 total_cost += data.get("actual_cost_microdollars", 0)
+                total_elapsed += data.get("elapsed_seconds", 0)
 
     # Save parsed rankings
     agg_dir = os.path.join(RESULTS_DIR, "aggregation")
@@ -671,6 +675,7 @@ def aggregate_cmd():
         "successful_parses": len(successful),
         "parse_failures": parse_failures,
         "total_actual_cost_microdollars": total_cost,
+        "total_elapsed_seconds": round(total_elapsed, 2),
     }
     with open(os.path.join(agg_dir, "rankings.json"), "w") as f:
         json.dump(rankings_data, f, indent=2)
@@ -684,6 +689,7 @@ def aggregate_cmd():
     lines.append("")
     lines.append(f"Evaluations: {len(successful)} successful, {parse_failures} parse failures")
     lines.append(f"Total actual cost: {fmt_cost(total_cost)}")
+    lines.append(f"Total elapsed time: {total_elapsed:.0f}s ({total_elapsed/60:.1f}min)")
     lines.append("")
 
     lines.append("--- By Prompt Variant (Borda scores) ---")
