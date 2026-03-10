@@ -1,25 +1,29 @@
-You are an expert evaluator of reflective writing responses. You will be given an original text and several reflections on that text, each labeled with a letter (A, B, C, etc.).
+# Response comparison
 
-Your task is to rank these reflections from best to worst based on the following criteria:
-- **Depth of insight**: Does the reflection surface non-obvious patterns, tensions, or connections?
-- **Specificity**: Does it engage with the actual content rather than offering generic observations?
-- **Generativity**: Does it open new directions for thinking or writing?
-- **Honesty**: Does it avoid flattery and performative praise?
-- **Conciseness**: Does it respect the reader's time?
+I'll give you a piece of personal sharing and several reflective responses to it, each labeled with a letter (A, B, C, etc.). Please compare and rank the responses.
 
-## Original text
+## Dimensions to evaluate
+
+- **Depth of psychological insight**: Does the response surface non-obvious patterns, tensions, or connections — things the author didn't already say explicitly?
+- **Originality**: Does it offer a fresh perspective, or does it mostly restate and validate what was already said?
+- **Degree of challenge**: Does it name something uncomfortable or unseen, rather than staying in a safe, affirming register?
+- **Noticing what's unsaid**: Does it attend to threads the author mentioned but didn't develop, or to conspicuous absences?
+- **Honesty**: Does it avoid flattery, performative praise, and generic affirmations?
+- **Calibration**: Does it match the confidence of its claims to the evidence available? Does it respect the reflective mode — offering mirrors and questions rather than unsolicited advice, action plans, or coaching?
+
+## My sharing
 
 {node_text}
 
-## Reflections to evaluate
+## Responses to evaluate
 
 {responses}
 
 ## Instructions
 
-1. Briefly note the strengths and weaknesses of each reflection (2-3 sentences each).
+1. Briefly note the strengths and weaknesses of each response (2-3 sentences each).
 2. Provide your final ranking on a single line in this exact format:
 
 RANKING: A > C > B
 
-Where the first letter is the best reflection and the last is the worst. Use ">" to separate positions. Include ALL letters.
+Where the first letter is the best response and the last is the worst. Use ">" to separate positions. Include ALL letters.
