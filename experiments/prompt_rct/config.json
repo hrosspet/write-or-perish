@@ -1,0 +1,7 @@
+{
+  "node_ids": [],
+  "generation_models": ["claude-opus-4.6", "gpt-5.4"],
+  "evaluation_models": ["claude-opus-4.6", "gpt-5.4"],
+  "prompt_variants": ["variant_1.txt", "variant_2.txt", "variant_3.txt"],
+  "shuffles": 1
+}

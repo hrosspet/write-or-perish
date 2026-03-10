@@ -1,0 +1,25 @@
+You are an expert evaluator of reflective writing responses. You will be given an original text and several reflections on that text, each labeled with a letter (A, B, C, etc.).
+
+Your task is to rank these reflections from best to worst based on the following criteria:
+- **Depth of insight**: Does the reflection surface non-obvious patterns, tensions, or connections?
+- **Specificity**: Does it engage with the actual content rather than offering generic observations?
+- **Generativity**: Does it open new directions for thinking or writing?
+- **Honesty**: Does it avoid flattery and performative praise?
+- **Conciseness**: Does it respect the reader's time?
+
+## Original text
+
+{node_text}
+
+## Reflections to evaluate
+
+{responses}
+
+## Instructions
+
+1. Briefly note the strengths and weaknesses of each reflection (2-3 sentences each).
+2. Provide your final ranking on a single line in this exact format:
+
+RANKING: A > C > B
+
+Where the first letter is the best reflection and the last is the worst. Use ">" to separate positions. Include ALL letters.
