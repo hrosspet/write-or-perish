@@ -746,9 +746,6 @@ def _generate_batch_submit(cfg, node_ids, gen_models, variants,
                     continue
 
                 provider, api_model = get_model_provider(mid)
-                if provider in pending_providers:
-                    continue
-
                 cid = f"gen_node{nid}_{vs}_{ms}"
 
                 messages = [
@@ -758,13 +755,7 @@ def _generate_batch_submit(cfg, node_ids, gen_models, variants,
                      "content": [{"type": "text", "text": node_text}]},
                 ]
 
-                requests_by_provider.setdefault(provider, []).append({
-                    "custom_id": cid,
-                    "model_id": mid,
-                    "api_model": api_model,
-                    "messages": messages,
-                    "max_tokens": 10000,
-                })
+                # Always build metadata (needed for --batch-collect)
                 request_meta[cid] = {
                     "node_id": nid,
                     "variant": vfile,
@@ -775,6 +766,18 @@ def _generate_batch_submit(cfg, node_ids, gen_models, variants,
                     "node_text": node_text,
                     "out_file": out_file,
                 }
+
+                # Only queue for submission if not already pending
+                if provider in pending_providers:
+                    continue
+
+                requests_by_provider.setdefault(provider, []).append({
+                    "custom_id": cid,
+                    "model_id": mid,
+                    "api_model": api_model,
+                    "messages": messages,
+                    "max_tokens": 10000,
+                })
 
     total_queued = sum(len(v) for v in requests_by_provider.values())
     if total_queued == 0:
@@ -1090,8 +1093,6 @@ def _evaluate_batch_submit(cfg, node_ids, eval_models, gen_models,
                     continue
 
                 provider, api_model = get_model_provider(eval_mid)
-                if provider in pending_providers:
-                    continue
 
                 # Shuffle and assign labels (same seed logic as sync)
                 model_hash = (int.from_bytes(eval_mid.encode(), "big")
@@ -1126,13 +1127,7 @@ def _evaluate_batch_submit(cfg, node_ids, eval_models, gen_models,
                                   "text": eval_prompt}]},
                 ]
 
-                requests_by_provider.setdefault(provider, []).append({
-                    "custom_id": cid,
-                    "model_id": eval_mid,
-                    "api_model": api_model,
-                    "messages": messages,
-                    "max_tokens": eval_max_tokens,
-                })
+                # Always build metadata (needed for --batch-collect)
                 request_meta[cid] = {
                     "node_id": nid,
                     "evaluator_model": eval_mid,
@@ -1142,6 +1137,18 @@ def _evaluate_batch_submit(cfg, node_ids, eval_models, gen_models,
                     "label_map": label_map,
                     "out_file": out_file,
                 }
+
+                # Only queue for submission if not already pending
+                if provider in pending_providers:
+                    continue
+
+                requests_by_provider.setdefault(provider, []).append({
+                    "custom_id": cid,
+                    "model_id": eval_mid,
+                    "api_model": api_model,
+                    "messages": messages,
+                    "max_tokens": eval_max_tokens,
+                })
 
     total_queued = sum(len(v) for v in requests_by_provider.values())
     if total_queued == 0:
