@@ -262,8 +262,8 @@ def estimate_cmd():
             resolved = apply_prompt_placeholders(raw, user_profile)
             prompt_tokens[vfile] = estimate_tokens(resolved)
         except FileNotFoundError:
-            log.warning(f"Prompt file {vfile} not found")
-            prompt_tokens[vfile] = 500  # fallback
+            log.error(f"Prompt file {vfile} not found — check prompt_variants in config.json")
+            return
     avg_prompt_tokens = sum(prompt_tokens.values()) // max(len(prompt_tokens), 1)
 
     # Load eval prompt for token estimate
