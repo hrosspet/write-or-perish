@@ -313,10 +313,19 @@ def estimate_cmd():
     log.info(f"  Per shuffle total: ~{fmt_cost(eval_cost_per_shuffle)}")
 
     # Interactive: ask for shuffle count
+    # N responses are shuffled to eliminate position bias in eval.
+    # N shuffles = each response in each position ~once on average.
+    # N! = all unique permutations (hard max, overkill).
+    import math
+    max_shuffles = math.factorial(n_responses)
+    recommended = n_responses
     default_shuffles = cfg.get("shuffles", 1)
+    log.info(f"  {n_responses} responses per eval → "
+             f"recommended {recommended} shuffles, "
+             f"max {max_shuffles} (={n_responses}!)")
     shuffles = click.prompt(
-        "How many evaluation shuffles?",
-        type=int,
+        f"How many evaluation shuffles? (1-{max_shuffles})",
+        type=click.IntRange(1, max_shuffles),
         default=default_shuffles,
     )
 
