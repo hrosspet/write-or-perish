@@ -1691,67 +1691,69 @@ def _detect_eval_status(cfg):
 @click.pass_context
 @with_appcontext
 def run_cmd(ctx):
-    """Auto-detect progress and run the next step."""
+    """Auto-detect progress and run the next step(s)."""
     setup_logging("run")
-    cfg = load_config()
-    use_batch = cfg.get("use_batch", False)
 
-    gen_status = _detect_gen_status(cfg)
-    eval_status = _detect_eval_status(cfg)
-
-    log.info(f"Status: generation={gen_status}, "
-             f"evaluation={eval_status}")
-
-    # Step 1: Generation
-    if gen_status == "none":
-        log.info("=== Step: Estimate ===")
-        ctx.invoke(estimate_cmd)
-        # Reload config after estimate (shuffles may have changed)
+    while True:
         cfg = load_config()
-        log.info("=== Step: Generate ===")
-        if use_batch:
-            ctx.invoke(generate_cmd, batch_mode=True,
+        use_batch = cfg.get("use_batch", False)
+
+        gen_status = _detect_gen_status(cfg)
+        eval_status = _detect_eval_status(cfg)
+
+        log.info(f"Status: generation={gen_status}, "
+                 f"evaluation={eval_status}")
+
+        # Step 1: Generation
+        if gen_status == "none":
+            log.info("=== Step: Estimate ===")
+            ctx.invoke(estimate_cmd)
+            cfg = load_config()
+            use_batch = cfg.get("use_batch", False)
+            log.info("=== Step: Generate ===")
+            ctx.invoke(generate_cmd, batch_mode=use_batch,
                        batch_collect=False)
-        else:
+            if use_batch:
+                return  # Must wait for batch processing
+            continue
+
+        if gen_status == "batch_pending":
+            log.info("=== Step: Collect generation results ===")
             ctx.invoke(generate_cmd, batch_mode=False,
-                       batch_collect=False)
-        return
+                       batch_collect=True)
+            # Re-check: if still pending, stop
+            if _detect_gen_status(cfg) == "batch_pending":
+                return
+            continue
 
-    if gen_status == "batch_pending":
-        log.info("=== Step: Collect generation results ===")
-        ctx.invoke(generate_cmd, batch_mode=False,
-                   batch_collect=True)
-        return
+        if gen_status == "incomplete":
+            log.info("=== Step: Resume generation ===")
+            ctx.invoke(generate_cmd, batch_mode=use_batch,
+                       batch_collect=False)
+            if use_batch:
+                return
+            continue
 
-    if gen_status == "incomplete":
-        log.info("=== Step: Resume generation ===")
-        if use_batch:
-            ctx.invoke(generate_cmd, batch_mode=True,
+        # Step 2: Evaluation
+        if eval_status in ("none", "incomplete"):
+            log.info("=== Step: Evaluate ===")
+            ctx.invoke(evaluate_cmd, batch_mode=use_batch,
                        batch_collect=False)
-        else:
-            ctx.invoke(generate_cmd, batch_mode=False,
-                       batch_collect=False)
-        return
+            if use_batch:
+                return
+            continue
 
-    # Step 2: Evaluation
-    if eval_status == "none" or eval_status == "incomplete":
-        log.info("=== Step: Evaluate ===")
-        if use_batch:
-            ctx.invoke(evaluate_cmd, batch_mode=True,
-                       batch_collect=False)
-        else:
+        if eval_status == "batch_pending":
+            log.info("=== Step: Collect evaluation results ===")
             ctx.invoke(evaluate_cmd, batch_mode=False,
-                       batch_collect=False)
-        return
+                       batch_collect=True)
+            if _detect_eval_status(cfg) == "batch_pending":
+                return
+            continue
 
-    if eval_status == "batch_pending":
-        log.info("=== Step: Collect evaluation results ===")
-        ctx.invoke(evaluate_cmd, batch_mode=False,
-                   batch_collect=True)
+        # Step 3: Aggregate
+        log.info("=== Step: Aggregate ===")
+        ctx.invoke(aggregate_cmd)
+        log.info("\nAll phases complete. "
+                 "Run `flask rct archive` to archive results.")
         return
-
-    # Step 3: Aggregate
-    log.info("=== Step: Aggregate ===")
-    ctx.invoke(aggregate_cmd)
-    log.info("\nAll phases complete. "
-             "Run `flask rct archive` to archive results.")
