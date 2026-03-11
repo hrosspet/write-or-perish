@@ -502,16 +502,18 @@ def batch_submit(requests_by_provider, api_keys, phase):
 def batch_check_and_collect(batch_ids, api_keys):
     """Check batch statuses and collect completed results.
 
-    Returns (results_by_custom_id, still_pending) where:
+    Returns (results_by_custom_id, still_pending, batch_durations) where:
         results_by_custom_id: dict mapping custom_id -> result dict with
             "content", "input_tokens", "output_tokens"
         still_pending: dict of batch_ids still processing
+        batch_durations: dict mapping provider key -> duration in seconds
     """
     from anthropic import Anthropic
     from openai import OpenAI
 
     results = {}
     still_pending = {}
+    batch_durations = {}
 
     for key, batch_id in batch_ids.items():
         if key == "anthropic":
@@ -523,6 +525,13 @@ def batch_check_and_collect(batch_ids, api_keys):
             if batch.processing_status != "ended":
                 still_pending[key] = batch_id
                 continue
+            # Compute batch duration
+            if batch.created_at and batch.ended_at:
+                duration = (batch.ended_at - batch.created_at
+                            ).total_seconds()
+                batch_durations[key] = round(duration, 1)
+                log.info(f"Anthropic batch duration: {duration:.0f}s "
+                         f"({duration/60:.1f}min)")
             # Collect results
             for entry in client.messages.batches.results(batch_id):
                 cid = entry.custom_id
@@ -554,6 +563,12 @@ def batch_check_and_collect(batch_ids, api_keys):
                 log.error(f"OpenAI batch {batch_id} ended with "
                           f"status={batch.status}")
                 continue
+            # Compute batch duration
+            if batch.created_at and batch.completed_at:
+                duration = batch.completed_at - batch.created_at
+                batch_durations[key] = round(duration, 1)
+                log.info(f"OpenAI batch {key} duration: {duration:.0f}s "
+                         f"({duration/60:.1f}min)")
             # Download results
             content_bytes = client.files.content(
                 batch.output_file_id).content
@@ -573,7 +588,7 @@ def batch_check_and_collect(batch_ids, api_keys):
                     log.warning(f"OpenAI batch item {cid}: "
                                 f"status={resp.get('status_code')}")
 
-    return results, still_pending
+    return results, still_pending, batch_durations
 
 
 # ---------------------------------------------------------------------------
@@ -828,7 +843,8 @@ def _generate_batch_collect(cfg):
     batch_ids = gen_state["batch_ids"]
     request_meta = gen_state["request_meta"]
 
-    results, still_pending = batch_check_and_collect(batch_ids, api_keys)
+    results, still_pending, batch_durations = batch_check_and_collect(
+        batch_ids, api_keys)
 
     if still_pending:
         log.info(f"Still processing: {list(still_pending.keys())}. "
@@ -837,9 +853,17 @@ def _generate_batch_collect(cfg):
         gen_state["batch_ids"] = still_pending
         save_batch_state(state)
 
+    # Save batch durations for aggregate
+    if batch_durations:
+        dur_file = os.path.join(RESULTS_DIR, "generation_batch_durations.json")
+        with open(dur_file, "w") as f:
+            json.dump(batch_durations, f, indent=2)
+            f.write("\n")
+
     # Write collected results to individual files
     written = 0
     errors = 0
+
     for cid, result in results.items():
         meta = request_meta.get(cid)
         if not meta:
@@ -1202,7 +1226,8 @@ def _evaluate_batch_collect(cfg):
     batch_ids = eval_state["batch_ids"]
     request_meta = eval_state["request_meta"]
 
-    results, still_pending = batch_check_and_collect(batch_ids, api_keys)
+    results, still_pending, batch_durations = batch_check_and_collect(
+        batch_ids, api_keys)
 
     if still_pending:
         log.info(f"Still processing: {list(still_pending.keys())}. "
@@ -1210,8 +1235,16 @@ def _evaluate_batch_collect(cfg):
         eval_state["batch_ids"] = still_pending
         save_batch_state(state)
 
+    # Save batch durations for aggregate
+    if batch_durations:
+        dur_file = os.path.join(RESULTS_DIR, "evaluation_batch_durations.json")
+        with open(dur_file, "w") as f:
+            json.dump(batch_durations, f, indent=2)
+            f.write("\n")
+
     written = 0
     errors = 0
+
     for cid, result in results.items():
         meta = request_meta.get(cid)
         if not meta:
@@ -1354,7 +1387,7 @@ def aggregate_cmd():
     model_ranking = sorted(model_scores.items(), key=lambda x: -x[1])
     combo_ranking = sorted(combo_scores.items(), key=lambda x: -x[1])
 
-    # Sum actual costs and elapsed time from all generation + evaluation files
+    # Sum actual costs from all generation + evaluation files
     total_cost = 0
     total_elapsed = 0
     for phase in ["generation", "evaluation"]:
@@ -1369,6 +1402,28 @@ def aggregate_cmd():
                     data = json.load(f)
                 total_cost += data.get("actual_cost_microdollars", 0)
                 total_elapsed += data.get("elapsed_seconds", 0)
+
+    # Load batch durations if available (batch mode)
+    batch_duration_details = {}
+    for phase in ["generation", "evaluation"]:
+        dur_file = os.path.join(RESULTS_DIR,
+                                f"{phase}_batch_durations.json")
+        if os.path.exists(dur_file):
+            with open(dur_file) as f:
+                durations = json.load(f)
+            for provider, secs in durations.items():
+                batch_duration_details[f"{phase}/{provider}"] = secs
+
+    if batch_duration_details:
+        # Wall-clock: gen and eval are sequential, providers are parallel
+        gen_durs = {k: v for k, v in batch_duration_details.items()
+                    if k.startswith("generation/")}
+        eval_durs = {k: v for k, v in batch_duration_details.items()
+                     if k.startswith("evaluation/")}
+        total_elapsed = (
+            (max(gen_durs.values()) if gen_durs else 0)
+            + (max(eval_durs.values()) if eval_durs else 0)
+        )
 
     # Save parsed rankings
     agg_dir = os.path.join(RESULTS_DIR, "aggregation")
@@ -1402,6 +1457,10 @@ def aggregate_cmd():
     lines.append(f"Evaluations: {len(successful)} successful, {parse_failures} parse failures")
     lines.append(f"Total actual cost: {fmt_cost(total_cost)}")
     lines.append(f"Total elapsed time: {total_elapsed:.0f}s ({total_elapsed/60:.1f}min)")
+    if batch_duration_details:
+        lines.append("  Batch durations:")
+        for label, secs in sorted(batch_duration_details.items()):
+            lines.append(f"    {label}: {secs:.0f}s ({secs/60:.1f}min)")
     lines.append("")
 
     lines.append("--- By Prompt Variant (Borda scores) ---")
