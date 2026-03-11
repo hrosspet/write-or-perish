@@ -8,7 +8,7 @@ Usage:
     flask rct generate      # Phase 1: generate responses
     flask rct evaluate      # Phase 2: blind evaluation
     flask rct aggregate     # Phase 3: Borda count + summary
-    flask rct run-all       # All phases sequentially
+    flask rct run           # Auto-detect progress, run next step
     flask rct archive       # Archive results + config, reset for next run
 
 Batch mode (50% cheaper, async within 24h):
@@ -1607,26 +1607,144 @@ def archive_cmd():
 
 
 # ---------------------------------------------------------------------------
-# Run All
+# Run (auto-detect next step)
 # ---------------------------------------------------------------------------
 
-@rct_cli.command("run-all")
+def _detect_gen_status(cfg):
+    """Return 'none', 'batch_pending', 'incomplete', or 'complete'."""
+    node_ids = [parse_node_id(n) for n in cfg["node_ids"]]
+    gen_models = cfg["generation_models"]
+    variants = cfg["prompt_variants"]
+
+    if not node_ids or not gen_models or not variants:
+        return "none"
+
+    # Check for pending batch
+    state = load_batch_state()
+    if state.get("generation"):
+        return "batch_pending"
+
+    # Check individual files
+    expected = 0
+    found = 0
+    for nid in node_ids:
+        for vfile in variants:
+            vs = variant_slug(vfile)
+            for mid in gen_models:
+                ms = model_slug(mid)
+                expected += 1
+                out_file = result_path("generation", nid,
+                                       f"{vs}_{ms}.json")
+                if os.path.exists(out_file):
+                    found += 1
+
+    if found == 0:
+        return "none"
+    if found < expected:
+        return "incomplete"
+    return "complete"
+
+
+def _detect_eval_status(cfg):
+    """Return 'none', 'batch_pending', 'incomplete', or 'complete'."""
+    node_ids = [parse_node_id(n) for n in cfg["node_ids"]]
+    eval_models = cfg["evaluation_models"]
+    shuffles = cfg.get("shuffles", 1)
+
+    if not node_ids or not eval_models:
+        return "none"
+
+    # Check for pending batch
+    state = load_batch_state()
+    if state.get("evaluation"):
+        return "batch_pending"
+
+    # Check individual files
+    expected = 0
+    found = 0
+    for nid in node_ids:
+        for shuffle_idx in range(shuffles):
+            for eval_mid in eval_models:
+                ems = model_slug(eval_mid)
+                expected += 1
+                out_file = result_path(
+                    "evaluation", nid,
+                    f"eval_{ems}_shuffle{shuffle_idx}.json")
+                if os.path.exists(out_file):
+                    found += 1
+
+    if found == 0:
+        return "none"
+    if found < expected:
+        return "incomplete"
+    return "complete"
+
+
+@rct_cli.command("run")
 @click.pass_context
 @with_appcontext
-def run_all_cmd(ctx):
-    """Run all phases: estimate -> generate -> evaluate -> aggregate."""
-    setup_logging("run_all")
-    log.info("=== Phase 0: Estimate ===")
-    ctx.invoke(estimate_cmd)
+def run_cmd(ctx):
+    """Auto-detect progress and run the next step."""
+    setup_logging("run")
+    cfg = load_config()
+    use_batch = cfg.get("use_batch", False)
 
-    if not click.confirm("\nProceed with generation?", default=True):
+    gen_status = _detect_gen_status(cfg)
+    eval_status = _detect_eval_status(cfg)
+
+    log.info(f"Status: generation={gen_status}, "
+             f"evaluation={eval_status}")
+
+    # Step 1: Generation
+    if gen_status == "none":
+        log.info("=== Step: Estimate ===")
+        ctx.invoke(estimate_cmd)
+        # Reload config after estimate (shuffles may have changed)
+        cfg = load_config()
+        log.info("=== Step: Generate ===")
+        if use_batch:
+            ctx.invoke(generate_cmd, batch_mode=True,
+                       batch_collect=False)
+        else:
+            ctx.invoke(generate_cmd, batch_mode=False,
+                       batch_collect=False)
         return
 
-    log.info("=== Phase 1: Generate ===")
-    ctx.invoke(generate_cmd)
+    if gen_status == "batch_pending":
+        log.info("=== Step: Collect generation results ===")
+        ctx.invoke(generate_cmd, batch_mode=False,
+                   batch_collect=True)
+        return
 
-    log.info("=== Phase 2: Evaluate ===")
-    ctx.invoke(evaluate_cmd)
+    if gen_status == "incomplete":
+        log.info("=== Step: Resume generation ===")
+        if use_batch:
+            ctx.invoke(generate_cmd, batch_mode=True,
+                       batch_collect=False)
+        else:
+            ctx.invoke(generate_cmd, batch_mode=False,
+                       batch_collect=False)
+        return
 
-    log.info("=== Phase 3: Aggregate ===")
+    # Step 2: Evaluation
+    if eval_status == "none" or eval_status == "incomplete":
+        log.info("=== Step: Evaluate ===")
+        if use_batch:
+            ctx.invoke(evaluate_cmd, batch_mode=True,
+                       batch_collect=False)
+        else:
+            ctx.invoke(evaluate_cmd, batch_mode=False,
+                       batch_collect=False)
+        return
+
+    if eval_status == "batch_pending":
+        log.info("=== Step: Collect evaluation results ===")
+        ctx.invoke(evaluate_cmd, batch_mode=False,
+                   batch_collect=True)
+        return
+
+    # Step 3: Aggregate
+    log.info("=== Step: Aggregate ===")
     ctx.invoke(aggregate_cmd)
+    log.info("\nAll phases complete. "
+             "Run `flask rct archive` to archive results.")
