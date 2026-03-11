@@ -54,3 +54,6 @@ gunicorn.pid
 frontend-build.tar.gz
 frontend/build-staging/
 logs/
+
+# Experiment-specific prompts (vary per run)
+experiments/prompt_rct/eval_prompts/
