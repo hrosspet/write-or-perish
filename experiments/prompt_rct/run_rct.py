@@ -340,8 +340,15 @@ def estimate_cmd():
     log.info(f"  TOTAL (sync):   {fmt_cost(total_cost)}")
     log.info(f"  TOTAL (batch):  {fmt_cost(batch_total)}  (50% off)")
 
-    # Save shuffle count
+    # Ask about batch mode
+    current_batch = cfg.get("use_batch", False)
+    use_batch = click.confirm(
+        "Use batch mode? (50% cheaper, up to 24h processing)",
+        default=current_batch)
+
+    # Save settings
     cfg["shuffles"] = shuffles
+    cfg["use_batch"] = use_batch
     save_config(cfg)
 
     # Save metadata
