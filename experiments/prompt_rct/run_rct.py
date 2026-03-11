@@ -1425,8 +1425,14 @@ def aggregate_cmd():
             + (max(eval_durs.values()) if eval_durs else 0)
         )
 
+    # Determine actual shuffle count from parsed results
+    shuffle_indices = set()
+    for pr in parsed_rankings:
+        shuffle_indices.add(pr["shuffle_index"])
+    n_shuffles = len(shuffle_indices) if shuffle_indices else cfg.get("shuffles", 1)
+
     # Save parsed rankings
-    agg_dir = os.path.join(RESULTS_DIR, "aggregation")
+    agg_dir = os.path.join(RESULTS_DIR, f"aggregation_{n_shuffles}shuffles")
     ensure_dir(agg_dir)
 
     with open(os.path.join(agg_dir, "parsed_rankings.json"), "w") as f:
