@@ -1,8 +1,12 @@
+import re
+
 from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
 from backend.models import Node, User, UserProfile
 from backend.extensions import db
-from backend.utils.privacy import accessible_nodes_filter
+from backend.utils.privacy import (
+    accessible_nodes_filter, VALID_PRIVACY_LEVELS, VALID_AI_USAGE,
+)
 from backend.routes.terms import CURRENT_TERMS_VERSION
 
 dashboard_bp = Blueprint("dashboard_bp", __name__)
@@ -108,7 +112,9 @@ def get_dashboard():
             "voice_mode_enabled": voice_mode_enabled,
             "craft_mode": current_user.craft_mode,
             "preferred_model": current_user.preferred_model,
-            "profile_generation_task_id": current_user.profile_generation_task_id
+            "profile_generation_task_id": current_user.profile_generation_task_id,
+            "default_privacy_level": current_user.default_privacy_level,
+            "default_ai_usage": current_user.default_ai_usage,
         },
         "pinned_nodes": pinned_list,
         "nodes": nodes_list,
@@ -177,7 +183,24 @@ def update_user():
         return jsonify({"error": "Description exceeds maximum length of 128 characters."}), 400
 
     if new_username:
+        new_username = new_username.strip()
+        if not new_username:
+            return jsonify({"error": "Username cannot be empty."}), 400
+        if len(new_username) > 64:
+            return jsonify({"error": "Username must be 64 characters or fewer."}), 400
+        if not re.fullmatch(r'[a-zA-Z0-9_]+', new_username):
+            return jsonify({
+                "error": "Username may only contain letters, numbers, and underscores."
+            }), 400
+        # Case-insensitive uniqueness check (exclude current user)
+        existing = User.query.filter(
+            db.func.lower(User.username) == new_username.lower(),
+            User.id != current_user.id
+        ).first()
+        if existing:
+            return jsonify({"error": "That username is already taken."}), 400
         current_user.username = new_username
+
     if new_description is not None:
         current_user.description = new_description
     if new_email is not None:
@@ -188,6 +211,18 @@ def update_user():
 
     if "preferred_model" in data:
         current_user.preferred_model = data["preferred_model"]
+
+    if "default_privacy_level" in data:
+        val = data["default_privacy_level"]
+        if val not in VALID_PRIVACY_LEVELS:
+            return jsonify({"error": f"Invalid privacy level: {val}"}), 400
+        current_user.default_privacy_level = val
+
+    if "default_ai_usage" in data:
+        val = data["default_ai_usage"]
+        if val not in VALID_AI_USAGE:
+            return jsonify({"error": f"Invalid AI usage value: {val}"}), 400
+        current_user.default_ai_usage = val
 
     try:
         db.session.commit()
@@ -208,7 +243,9 @@ def update_user():
                 "voice_mode_enabled": voice_mode_enabled,
                 "craft_mode": current_user.craft_mode,
                 "preferred_model": current_user.preferred_model,
-                "profile_generation_task_id": current_user.profile_generation_task_id
+                "profile_generation_task_id": current_user.profile_generation_task_id,
+                "default_privacy_level": current_user.default_privacy_level,
+                "default_ai_usage": current_user.default_ai_usage,
             }
         }), 200
     except Exception as e:

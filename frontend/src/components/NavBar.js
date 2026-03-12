@@ -1,8 +1,7 @@
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useUser } from "../contexts/UserContext";
 import GlobalAudioPlayer from "./GlobalAudioPlayer";
-import ModelSelector from "./ModelSelector";
 import api from "../api";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL;
@@ -24,12 +23,6 @@ function NavBar({ onNewEntryClick }) {
     return localStorage.getItem('loore_craft_mode') === 'true';
   });
 
-  // Model selection — read from user preference, localStorage fallback, or null
-  const [selectedModel, setSelectedModel] = useState(() => {
-    if (user && user.preferred_model) return user.preferred_model;
-    return localStorage.getItem('loore_selected_model') || null;
-  });
-
   // Profile generation state — read from backend task_id OR localStorage
   const [generatingProfile, setGeneratingProfile] = useState(() => {
     return !!(localStorage.getItem('loore_profile_task_id')
@@ -40,9 +33,6 @@ function NavBar({ onNewEntryClick }) {
   useEffect(() => {
     if (user && user.craft_mode !== undefined) {
       setCraftMode(user.craft_mode);
-    }
-    if (user && user.preferred_model) {
-      setSelectedModel(user.preferred_model);
     }
     // Sync profile generation state from backend (cross-browser persistence)
     if (user && user.profile_generation_task_id) {
@@ -78,42 +68,12 @@ function NavBar({ onNewEntryClick }) {
     }
   };
 
-  // Fetch default model only if no user preference or localStorage value exists
-  useEffect(() => {
-    if (user && !selectedModel) {
-      const stored = localStorage.getItem('loore_selected_model');
-      if (stored) {
-        setSelectedModel(stored);
-      } else {
-        api.get("/nodes/default-model")
-          .then(r => setSelectedModel(r.data.suggested_model))
-          .catch(() => setSelectedModel("claude-opus-4.6"));
-      }
-    }
-  }, [user, selectedModel]);
-
-  // Handle model selection change — persist to localStorage + backend
-  const handleModelChange = useCallback(async (model) => {
-    setSelectedModel(model);
-    localStorage.setItem('loore_selected_model', model);
-    if (user) {
-      try {
-        const response = await api.put('/dashboard/user', { preferred_model: model });
-        if (response.data.user) {
-          setUser(response.data.user);
-        }
-      } catch (e) {
-        // Silently fall back to localStorage
-      }
-    }
-  }, [user, setUser]);
-
   // Profile generation handler — navigate to /profile after starting
   const handleGenerateProfile = async () => {
     if (generatingProfile) return;
     setGeneratingProfile(true);
     try {
-      const res = await api.post("/export/update_profile", { model: selectedModel, force_full_regen: true });
+      const res = await api.post("/export/update_profile", { model: user?.preferred_model || localStorage.getItem('loore_selected_model'), force_full_regen: true });
       localStorage.setItem('loore_profile_task_id', res.data.task_id);
       window.dispatchEvent(new CustomEvent('loore_profile_started', {
         detail: { taskId: res.data.task_id }
@@ -361,16 +321,6 @@ function NavBar({ onNewEntryClick }) {
                     <Link to="/prompts" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
                       Prompts
                     </Link>
-                    <div style={{ ...dropdownItemStyle, cursor: "default", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <span>Model</span>
-                      <span style={{ fontSize: "0.75rem" }}>
-                        <ModelSelector
-                          nodeId={null}
-                          selectedModel={selectedModel}
-                          onModelChange={handleModelChange}
-                        />
-                      </span>
-                    </div>
                     <button
                       onClick={handleGenerateProfile}
                       disabled={generatingProfile}
@@ -394,6 +344,10 @@ function NavBar({ onNewEntryClick }) {
                     Admin
                   </Link>
                 )}
+
+                <Link to="/account" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
+                  Account
+                </Link>
 
                 {/* Craft mode toggle */}
                 <button

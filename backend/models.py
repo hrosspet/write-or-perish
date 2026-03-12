@@ -38,6 +38,14 @@ class User(db.Model, UserMixin):
     # Subscription plan ("free", "alpha", "pro", etc.).
     plan = db.Column(db.String(16), nullable=False, default="alpha")
 
+    # Per-user defaults for new nodes (overridable per-node)
+    default_privacy_level = db.Column(
+        db.String(16), nullable=False, default="private"
+    )
+    default_ai_usage = db.Column(
+        db.String(16), nullable=False, default="chat"
+    )
+
     # Concurrency guard: Celery task ID of in-flight profile generation
     profile_generation_task_id = db.Column(db.String(255), nullable=True)
     # When the profile generation task was dispatched (for staleness detection)

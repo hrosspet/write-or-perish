@@ -22,6 +22,7 @@ import ConversePage from "./pages/ConversePage";
 import ProfilePage from "./pages/ProfilePage";
 import TodoPage from "./pages/TodoPage";
 import ImportPage from "./pages/ImportPage";
+import AccountPage from "./pages/AccountPage";
 import PromptsPage from "./pages/PromptsPage";
 import PromptDetailPage from "./pages/PromptDetailPage";
 import SearchModal from "./components/SearchModal";
@@ -133,6 +134,7 @@ function App() {
           <Route path="/prompts" element={<ProtectedRoute><PromptsPage /></ProtectedRoute>} />
           <Route path="/prompts/:promptKey" element={<ProtectedRoute><PromptDetailPage /></ProtectedRoute>} />
           <Route path="/import" element={<ProtectedRoute><ImportPage /></ProtectedRoute>} />
+          <Route path="/account" element={<ProtectedRoute><AccountPage /></ProtectedRoute>} />
           <Route path="/node/:id" element={<ProtectedRoute><NodeDetailWrapper /></ProtectedRoute>} />
           <Route path="/admin" element={<ProtectedRoute><AdminPanel /></ProtectedRoute>} />
           <Route path="*" element={<Navigate to="/" replace />} />

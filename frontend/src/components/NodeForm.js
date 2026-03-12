@@ -1,6 +1,7 @@
 import React, { useState, forwardRef, useImperativeHandle, useEffect, useCallback } from "react";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 import { useDraft } from "../hooks/useDraft";
+import { useUser } from "../contexts/UserContext";
 import StreamingMicButton from "./StreamingMicButton";
 import PrivacySelector from "./PrivacySelector";
 import api from "../api";
@@ -11,6 +12,7 @@ const NodeForm = forwardRef(
     { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage },
     ref
   ) => {
+    const { user } = useUser();
     const [content, setContent] = useState(initialContent || "");
     const [error, setError] = useState("");
     const [loading, setLoading] = useState(false);
@@ -19,10 +21,11 @@ const NodeForm = forwardRef(
     const [isUploading, setIsUploading] = useState(false);
     const [hasDraft, setHasDraft] = useState(false);
 
-    // Privacy settings state - use initial values if provided (edit mode), otherwise defaults
-    // For new nodes with a parent, we'll update these after fetching the parent
-    const [privacyLevel, setPrivacyLevel] = useState(initialPrivacyLevel || "private");
-    const [aiUsage, setAiUsage] = useState(initialAiUsage || "none");
+    // Privacy settings state - use initial values if provided (edit mode),
+    // then user defaults from context, then hardcoded fallback.
+    // For new nodes with a parent, we'll update these after fetching the parent.
+    const [privacyLevel, setPrivacyLevel] = useState(initialPrivacyLevel || user?.default_privacy_level || "private");
+    const [aiUsage, setAiUsage] = useState(initialAiUsage || user?.default_ai_usage || "none");
 
     // Draft auto-save hook
     const {
