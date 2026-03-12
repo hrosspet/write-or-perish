@@ -61,7 +61,7 @@ export function useStreamingTranscription(options = {}) {
     parentId = null,
     privacyLevel = 'private',
     aiUsage = 'none',
-    chunkIntervalMs = 5 * 60 * 1000, // 5 minutes
+    chunkIntervalMs = 15 * 1000, // 15 seconds — frequent uploads for safety
     label = null, // e.g. "Reflect", "Orient" — used as title instead of "Voice note"
     onTranscriptUpdate = null,
     onComplete = null,
@@ -168,6 +168,7 @@ export function useStreamingTranscription(options = {}) {
     resetRecording: resetMediaRecorder,
     getTotalChunks,
     getPartialBlob,
+    flushAndGetEmergencyChunk,
   } = useStreamingMediaRecorder({
     chunkIntervalMs,
     onChunkReady: uploadChunk,
@@ -308,16 +309,50 @@ export function useStreamingTranscription(options = {}) {
     };
   }, [uploadChunkWithRetry]);
 
+  // Best-effort upload of buffered audio on page unload (refresh, navigate away, close tab).
+  // Uses fetch+keepalive (128KB limit) with sendBeacon fallback (64KB limit).
+  // Listens on pagehide (more reliable than beforeunload on mobile/iOS).
+  useEffect(() => {
+    const handlePageHide = () => {
+      if (!sessionIdRef.current) return;
+
+      const flushed = flushAndGetEmergencyChunk();
+      if (!flushed || flushed.blob.size === 0) return;
+
+      const { blob, chunkIndex } = flushed;
+      const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
+      const url = `${backendUrl}/api/drafts/streaming/${sessionIdRef.current}/audio-chunk?chunk_index=${chunkIndex}&beacon=1`;
+      const formData = new FormData();
+      formData.append('chunk', blob, `chunk_${chunkIndex}.webm`);
+      formData.append('chunk_index', chunkIndex.toString());
+
+      try {
+        fetch(url, { method: 'POST', body: formData, keepalive: true });
+        console.log(`[StreamingTranscription] pagehide: sent keepalive fetch for chunk ${chunkIndex}, size=${blob.size}`);
+      } catch (_) {
+        // Fallback to sendBeacon if fetch+keepalive fails (e.g. payload too large for keepalive budget)
+        navigator.sendBeacon(url, formData);
+        console.log(`[StreamingTranscription] pagehide: fell back to sendBeacon for chunk ${chunkIndex}, size=${blob.size}`);
+      }
+    };
+
+    window.addEventListener('pagehide', handlePageHide);
+    return () => window.removeEventListener('pagehide', handlePageHide);
+  }, [flushAndGetEmergencyChunk]);
+
   // Initialize streaming session (creates draft, NOT node)
-  const initSession = useCallback(async () => {
+  // overrideParentId allows callers to pass the current parent at call time
+  // (useful when parentId changes between recording turns)
+  const initSession = useCallback(async (overrideParentId) => {
     setSessionState('initializing');
     setErrorMessage(null);
 
     try {
       const response = await api.post('/drafts/streaming/init', {
-        parent_id: parentId,
+        parent_id: overrideParentId !== undefined ? overrideParentId : parentId,
         privacy_level: privacyLevel,
         ai_usage: aiUsage,
+        label: label || undefined,
       });
 
       const { draft_id, session_id } = response.data;
@@ -338,13 +373,14 @@ export function useStreamingTranscription(options = {}) {
       }
       throw err;
     }
-  }, [parentId, privacyLevel, aiUsage, onError]);
+  }, [parentId, privacyLevel, aiUsage, label, onError]);
 
   // Start streaming transcription
-  const startStreaming = useCallback(async () => {
+  // overrideParentId: optional parent ID to use instead of the hook's parentId
+  const startStreaming = useCallback(async (overrideParentId) => {
     try {
       // Initialize session
-      await initSession();
+      await initSession(overrideParentId);
 
       // Start recording
       await startMediaRecorder();
@@ -356,6 +392,27 @@ export function useStreamingTranscription(options = {}) {
       setErrorMessage(err.message);
     }
   }, [initSession, startMediaRecorder]);
+
+  // Resume an existing interrupted session (continue recording)
+  const resumeStreaming = useCallback(async (existingSessionId, existingDraftId, existingChunkCount) => {
+    try {
+      setSessionState('initializing');
+      setErrorMessage(null);
+
+      setDraftId(existingDraftId);
+      setSessionId(existingSessionId);
+      draftIdRef.current = existingDraftId;
+      sessionIdRef.current = existingSessionId;
+      totalChunksRef.current = existingChunkCount || 0;
+
+      await startMediaRecorder();
+      setSessionState('recording');
+    } catch (err) {
+      console.error('Failed to resume streaming:', err);
+      setSessionState('error');
+      setErrorMessage(err.message);
+    }
+  }, [startMediaRecorder]);
 
   // Stop streaming and finalize
   // extraParams: optional { parent_id, model } for server-side LLM chain
@@ -471,6 +528,7 @@ export function useStreamingTranscription(options = {}) {
 
     // Actions
     startStreaming,
+    resumeStreaming,
     stopStreaming,
     pauseRecording,
     resumeRecording,

@@ -2,6 +2,8 @@ import React from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { FaPlay, FaPause, FaUndo, FaRedo } from 'react-icons/fa';
 import { useVoiceSession } from '../hooks/useVoiceSession';
+import { useInterruptedRecovery } from '../hooks/useInterruptedRecovery';
+import RecoveryBanner from '../components/RecoveryBanner';
 
 function formatDuration(seconds) {
   const mins = Math.floor(seconds / 60);
@@ -180,9 +182,18 @@ export default function ReflectPage() {
 
   const selectedModel = localStorage.getItem('loore_selected_model') || null;
 
+  // --- Recovery for interrupted recordings ---
+  const {
+    interruptedDraft, checked: recoveryChecked,
+    handleDiscard, clearInterrupted,
+  } = useInterruptedRecovery({
+    parentId: parentId ? Number(parentId) : null,
+    skip: !!resumeId,
+  });
+
   const {
     phase, isStopping, hasError, streaming, audio, handleStart, handleStop,
-    handleContinue, handleCancelProcessing,
+    handleContinue, handleResumeSession, handleCancelProcessing,
   } = useVoiceSession({
     apiEndpoint: '/reflect',
     ttsTitle: 'Reflection',
@@ -235,6 +246,29 @@ export default function ReflectPage() {
     justifyContent: 'center',
     transition: 'opacity 0.2s',
   });
+
+  // --- RECOVERY BANNER for interrupted recordings ---
+  if (!recoveryChecked) {
+    return <div style={containerStyle} />;
+  }
+
+  if (interruptedDraft && phase === 'ready') {
+    return (
+      <div style={containerStyle}>
+        <RecoveryBanner
+          draft={interruptedDraft}
+          onContinue={() => {
+            const { session_id, id, chunk_count } = interruptedDraft;
+            clearInterrupted();
+            handleResumeSession(session_id, id, chunk_count);
+          }}
+          onDiscard={handleDiscard}
+        >
+          <EcgAnimation active={false} dim={true} showScanline={false} />
+        </RecoveryBanner>
+      </div>
+    );
+  }
 
   // --- READY / RECORDING STATE ---
   if (phase === 'ready' || phase === 'recording') {

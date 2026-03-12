@@ -133,6 +133,10 @@ jobs:
               psql -U staging -d writeorperish_staging \
               -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" < /dev/null || true
 
+            echo "Clearing staging media files..."
+            docker compose -p wop-staging exec -T backend \
+              sh -c 'rm -rf /app/data/audio/*' < /dev/null || true
+
             echo "Running flask init-db..."
             docker compose -p wop-staging exec -T backend flask init-db < /dev/null
 
