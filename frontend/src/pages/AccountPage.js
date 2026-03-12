@@ -243,6 +243,11 @@ export default function AccountPage() {
           nodeId={null}
           selectedModel={selectedModel}
           onModelChange={handleModelChange}
+          style={{
+            padding: "10px 12px",
+            fontSize: "0.95rem",
+            color: "var(--text-primary)",
+          }}
         />
         <div style={helperStyle}>
           Used for profile generation and LLM responses.

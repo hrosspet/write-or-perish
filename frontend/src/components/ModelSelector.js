@@ -8,7 +8,7 @@ import api from '../api';
  * Displays inline next to the "LLM Response" button.
  * Automatically fetches the suggested model based on thread context.
  */
-const ModelSelector = ({ nodeId, selectedModel, onModelChange }) => {
+const ModelSelector = ({ nodeId, selectedModel, onModelChange, style: styleProp }) => {
   const [loading, setLoading] = useState(true);
   const [models, setModels] = useState([]);
 
@@ -57,6 +57,7 @@ const ModelSelector = ({ nodeId, selectedModel, onModelChange }) => {
         fontWeight: 300,
         WebkitAppearance: 'none',
         appearance: 'none',
+        ...styleProp,
       }}
     >
       {models.map((m) => (
