@@ -40,10 +40,12 @@ class User(db.Model, UserMixin):
 
     # Per-user defaults for new nodes (overridable per-node)
     default_privacy_level = db.Column(
-        db.String(16), nullable=False, default="private"
+        db.String(16), nullable=False, default="private",
+        server_default="private"
     )
     default_ai_usage = db.Column(
-        db.String(16), nullable=False, default="chat"
+        db.String(16), nullable=False, default="chat",
+        server_default="chat"
     )
 
     # Concurrency guard: Celery task ID of in-flight profile generation
