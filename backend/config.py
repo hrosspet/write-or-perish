@@ -87,7 +87,7 @@ class Config:
             "provider": "anthropic",
             "api_model": "claude-sonnet-4-6",
             "display_name": "Claude 4.6 Sonnet",
-            "context_window": 200000,
+            "context_window": 1000000,
             "input_price_per_mtok": 3.00,
             "output_price_per_mtok": 15.00,
         },
@@ -95,7 +95,7 @@ class Config:
             "provider": "anthropic",
             "api_model": "claude-opus-4-5-20251101",
             "display_name": "Claude 4.5 Opus",
-            "context_window": 200000,  # Temporarily 200k due to API tier limit (should be 1M with higher tier)
+            "context_window": 200000,
             "input_price_per_mtok": 5.00,
             "output_price_per_mtok": 25.00,
         },
@@ -103,7 +103,7 @@ class Config:
             "provider": "anthropic",
             "api_model": "claude-opus-4-6",
             "display_name": "Claude 4.6 Opus",
-            "context_window": 200000,  # Temporarily 200k due to API tier limit (should be 1M with higher tier)
+            "context_window": 1000000,
             "input_price_per_mtok": 5.00,
             "output_price_per_mtok": 25.00,
         },
