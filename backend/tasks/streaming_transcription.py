@@ -704,6 +704,7 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     from backend.models import Node, NodeTranscriptChunk
     from backend.utils.prompts import get_user_prompt_record
     from backend.utils.llm_nodes import create_llm_placeholder
+    from backend.utils.context_artifacts import attach_context_artifacts
     from backend.utils.webm_utils import (
         fix_last_chunk_duration, is_ffmpeg_available,
     )
@@ -728,6 +729,9 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
         )
         db.session.add(system_node)
         db.session.flush()
+        attach_context_artifacts(
+            system_node.id, user_id, prompt_record=prompt_record,
+        )
         user_parent_id = system_node.id
 
     # User node with transcript

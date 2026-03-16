@@ -297,13 +297,27 @@ function NodeDetail() {
             fontWeight: 300,
             color: "var(--text-muted)",
             marginBottom: "0.6rem",
+            display: "flex",
+            alignItems: "center",
+            gap: "0.5em",
           }}>
-            {node.prompt_title}{node.prompt_version_number ? ` v${node.prompt_version_number}` : ''}
+            <span>{node.prompt_title}{node.prompt_version_number ? ` v${node.prompt_version_number}` : ''}</span>
+            {node.context_artifacts?.profile && (
+              <span style={{ opacity: 0.7 }}>
+                {'\u00B7'} Profile v{node.context_artifacts.profile.version_number}
+              </span>
+            )}
+            {node.context_artifacts?.todo && (
+              <span style={{ opacity: 0.7 }}>
+                {'\u00B7'} TODO v{node.context_artifacts.todo.version_number}
+              </span>
+            )}
           </div>
         )}
         <QuotedContent
           content={node.content}
           quotes={quotes}
+          contextArtifacts={node.context_artifacts || null}
           onQuoteClick={handleBubbleClick}
         />
       </div>

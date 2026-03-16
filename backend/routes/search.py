@@ -4,7 +4,7 @@ from datetime import datetime
 from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
 from sqlalchemy import or_
-from backend.models import Node, User
+from backend.models import Node, NodeContextArtifact, User
 from backend.extensions import db
 
 search_bp = Blueprint("search_bp", __name__)
@@ -73,12 +73,18 @@ def search():
 
     # Base query: user's own nodes + nodes where they are the human owner
     # Exclude system prompt nodes (content resolved from UserPrompt)
+    # Check both legacy user_prompt_id and new artifact join table
+    prompt_node_ids = db.session.query(
+        NodeContextArtifact.node_id
+    ).filter(NodeContextArtifact.artifact_type == "prompt").subquery()
+
     query = Node.query.filter(
         or_(
             Node.user_id == current_user.id,
             Node.human_owner_id == current_user.id,
         ),
         Node.user_prompt_id.is_(None),
+        ~Node.id.in_(db.session.query(prompt_node_ids)),
     )
 
     # Date filters (SQL-level, fast)

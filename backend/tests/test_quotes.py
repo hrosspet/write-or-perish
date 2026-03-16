@@ -848,3 +848,44 @@ class TestExportPromptResolver:
         assert "System Prompts Referenced" in preamble
         assert "reflective writing coach" in preamble
         assert "ref #42" in preamble
+
+    def test_artifacts_tracked_in_referenced(self):
+        """Artifact tuples are tracked in referenced_artifacts after resolve."""
+        resolver = ExportQuoteResolver(user_id=1, max_tokens=500)
+
+        now = datetime.utcnow()
+        resolver.add_node(
+            1, now, "",
+            user_prompt_id=42,
+            prompt_content="Prompt content",
+            prompt_label="Reflect v1",
+            artifacts=[("prompt", 42), ("profile", 7), ("todo", 3)],
+        )
+        resolver.add_node(2, now - timedelta(hours=1), "User text")
+
+        resolver.resolve()
+
+        assert 42 in resolver.referenced_artifacts["prompt"]
+        assert 7 in resolver.referenced_artifacts["profile"]
+        assert 3 in resolver.referenced_artifacts["todo"]
+
+    def test_artifacts_not_referenced_when_truncated(self):
+        """Artifacts from truncated nodes are not in referenced_artifacts."""
+        resolver = ExportQuoteResolver(user_id=1, max_tokens=30)
+
+        now = datetime.utcnow()
+        # Newest node takes most budget
+        resolver.add_node(1, now, "A" * 100)
+        # Older node with artifacts gets truncated
+        resolver.add_node(
+            2, now - timedelta(hours=1), "",
+            user_prompt_id=42,
+            prompt_content="P" * 200,
+            prompt_label="Reflect v1",
+            artifacts=[("prompt", 42), ("profile", 7)],
+        )
+
+        resolver.resolve()
+
+        assert 42 not in resolver.referenced_artifacts.get("prompt", set())
+        assert 7 not in resolver.referenced_artifacts.get("profile", set())

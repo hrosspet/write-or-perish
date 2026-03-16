@@ -1,6 +1,8 @@
 from flask import Blueprint, jsonify, Response, request, current_app
 from flask_login import login_required, current_user
-from backend.models import Node, NodeVersion, UserProfile
+from backend.models import (
+    Node, NodeVersion, UserProfile, UserPrompt, UserTodo,
+)
 from backend.extensions import db
 from backend.utils.tokens import approximate_token_count, get_model_context_window
 from backend.utils.quotes import (
@@ -107,15 +109,36 @@ def format_node_tree(
     result = f"{header_prefix} [{index_path}] {node_type_display} ({author}) - {timestamp}\n"
 
     # System prompt nodes: emit reference instead of full content
-    if node.user_prompt_id is not None and node.user_prompt:
-        prompt = node.user_prompt
-        from backend.models import UserPrompt
+    # Check new artifact system first, then legacy FK
+    prompt = node.get_artifact("prompt")
+    if prompt is None and node.user_prompt_id is not None:
+        prompt = node.user_prompt  # legacy fallback
+    if prompt is not None:
         version_num = UserPrompt.query.filter(
             UserPrompt.user_id == prompt.user_id,
             UserPrompt.prompt_key == prompt.prompt_key,
             UserPrompt.created_at <= prompt.created_at,
         ).count()
-        result += f"[System Prompt: {prompt.title} v{version_num} (ref #{prompt.id})]\n\n"
+        result += f"[System Prompt: {prompt.title} v{version_num} (ref #{prompt.id})]\n"
+
+        # Emit profile/todo artifact refs if present
+        profile = node.get_artifact("profile")
+        if profile is not None:
+            profile_ver = UserProfile.query.filter(
+                UserProfile.user_id == profile.user_id,
+                UserProfile.created_at <= profile.created_at,
+            ).count()
+            result += f"[User Profile v{profile_ver} (ref #{profile.id})]\n"
+
+        todo = node.get_artifact("todo")
+        if todo is not None:
+            todo_ver = UserTodo.query.filter(
+                UserTodo.user_id == todo.user_id,
+                UserTodo.created_at <= todo.created_at,
+            ).count()
+            result += f"[User TODO v{todo_ver} (ref #{todo.id})]\n"
+
+        result += "\n"
 
         # Process children
         children = node.children
@@ -324,27 +347,36 @@ def build_user_export_content(
         # Add all nodes to the resolver
         for node in all_nodes:
             content = node.get_content()
-            if node.user_prompt_id is not None and node.user_prompt:
+            # Collect artifact tuples from join table
+            node_artifacts = [
+                (a.artifact_type, a.artifact_id)
+                for a in node.context_artifacts
+            ]
+            # Determine prompt (new artifact system or legacy)
+            prompt = node.get_artifact("prompt")
+            if prompt is None and node.user_prompt_id is not None:
                 prompt = node.user_prompt
-                from backend.models import UserPrompt as _UP
-                version_num = _UP.query.filter(
-                    _UP.user_id == prompt.user_id,
-                    _UP.prompt_key == prompt.prompt_key,
-                    _UP.created_at <= prompt.created_at,
+            if prompt is not None:
+                version_num = UserPrompt.query.filter(
+                    UserPrompt.user_id == prompt.user_id,
+                    UserPrompt.prompt_key == prompt.prompt_key,
+                    UserPrompt.created_at <= prompt.created_at,
                 ).count()
                 resolver.add_node(
                     node_id=node.id,
                     created_at=node.created_at,
                     content=content,
-                    user_prompt_id=node.user_prompt_id,
+                    user_prompt_id=prompt.id,
                     prompt_content=content,
                     prompt_label=f"{prompt.title} v{version_num}",
+                    artifacts=node_artifacts,
                 )
             else:
                 resolver.add_node(
                     node_id=node.id,
                     created_at=node.created_at,
-                    content=content
+                    content=content,
+                    artifacts=node_artifacts,
                 )
 
         # Run the resolution algorithm
@@ -378,36 +410,64 @@ def build_user_export_content(
     export_lines.append("---")
     export_lines.append("")
 
-    # Emit system prompt preamble if any prompts are referenced
+    # Emit artifact preambles (prompts, profiles, todos) if any are referenced
     if resolver is not None:
-        preamble = resolver.get_prompt_preamble()
+        preamble = resolver.get_artifacts_preamble()
         if preamble:
             export_lines.append(preamble)
             export_lines.append("---")
             export_lines.append("")
     elif not max_tokens:
-        # Full export: collect all unique prompt versions
+        # Full export: collect all unique artifact versions
         prompt_versions = {}
+        profile_versions = {}
+        todo_versions = {}
         for top_node in top_level_nodes:
             tree_nodes = _collect_all_nodes_in_tree(
                 top_node, filter_ai_usage, created_before
             )
             for n in tree_nodes:
-                if n.user_prompt_id is not None and n.user_prompt:
-                    pid = n.user_prompt_id
-                    if pid not in prompt_versions:
-                        prompt = n.user_prompt
-                        from backend.models import UserPrompt as _UP2
-                        vnum = _UP2.query.filter(
-                            _UP2.user_id == prompt.user_id,
-                            _UP2.prompt_key == prompt.prompt_key,
-                            _UP2.created_at <= prompt.created_at,
-                        ).count()
-                        prompt_versions[pid] = {
-                            "title": prompt.title,
-                            "version": vnum,
-                            "content": n.get_content(),
-                        }
+                # Prompt artifacts
+                prompt = n.get_artifact("prompt")
+                if prompt is None and n.user_prompt_id is not None:
+                    prompt = n.user_prompt
+                if prompt is not None and prompt.id not in prompt_versions:
+                    vnum = UserPrompt.query.filter(
+                        UserPrompt.user_id == prompt.user_id,
+                        UserPrompt.prompt_key == prompt.prompt_key,
+                        UserPrompt.created_at <= prompt.created_at,
+                    ).count()
+                    prompt_versions[prompt.id] = {
+                        "title": prompt.title,
+                        "version": vnum,
+                        "content": n.get_content(),
+                    }
+                # Profile artifacts
+                profile = n.get_artifact("profile")
+                if profile is not None and profile.id not in profile_versions:
+                    pver = UserProfile.query.filter(
+                        UserProfile.user_id == profile.user_id,
+                        UserProfile.created_at <= profile.created_at,
+                    ).count()
+                    profile_versions[profile.id] = {
+                        "version": pver,
+                        "content": profile.get_content(),
+                    }
+                # Todo artifacts
+                todo = n.get_artifact("todo")
+                if todo is not None and todo.id not in todo_versions:
+                    tver = UserTodo.query.filter(
+                        UserTodo.user_id == todo.user_id,
+                        UserTodo.created_at <= todo.created_at,
+                    ).count()
+                    todo_versions[todo.id] = {
+                        "version": tver,
+                        "content": todo.get_content(),
+                    }
+
+        has_any_preamble = (
+            prompt_versions or profile_versions or todo_versions
+        )
         if prompt_versions:
             export_lines.append("## System Prompts Referenced\n")
             for pid in sorted(prompt_versions):
@@ -417,6 +477,25 @@ def build_user_export_content(
                 )
                 export_lines.append(pv["content"])
                 export_lines.append("")
+        if profile_versions:
+            export_lines.append("## User Profiles Referenced\n")
+            for pid in sorted(profile_versions):
+                pv = profile_versions[pid]
+                export_lines.append(
+                    f"### User Profile v{pv['version']} (ref #{pid})\n"
+                )
+                export_lines.append(pv["content"])
+                export_lines.append("")
+        if todo_versions:
+            export_lines.append("## User TODOs Referenced\n")
+            for tid in sorted(todo_versions):
+                tv = todo_versions[tid]
+                export_lines.append(
+                    f"### User TODO v{tv['version']} (ref #{tid})\n"
+                )
+                export_lines.append(tv["content"])
+                export_lines.append("")
+        if has_any_preamble:
             export_lines.append("---")
             export_lines.append("")
 

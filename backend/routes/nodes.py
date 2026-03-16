@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify, current_app
 from flask_login import login_required, current_user
-from backend.models import Node, NodeVersion, UserPrompt
+from backend.models import Node, NodeVersion, UserPrompt, UserProfile, UserTodo
 from backend.extensions import db
 from datetime import datetime
 from openai import OpenAI
@@ -313,6 +313,18 @@ def _prompt_version_number(prompt):
 
 def _system_prompt_fields(n):
     """Return system prompt serialization fields for a node."""
+    # Try new artifact system first
+    prompt = n.get_artifact("prompt")
+    if prompt is not None:
+        return {
+            "is_system_prompt": True,
+            "prompt_title": prompt.title,
+            "prompt_key": prompt.prompt_key,
+            "user_prompt_id": prompt.id,
+            "prompt_version_number": _prompt_version_number(prompt),
+            "context_artifacts": _context_artifact_fields(n),
+        }
+    # Legacy FK fallback
     if n.user_prompt_id is not None and n.user_prompt:
         return {
             "is_system_prompt": True,
@@ -320,14 +332,54 @@ def _system_prompt_fields(n):
             "prompt_key": n.user_prompt.prompt_key,
             "user_prompt_id": n.user_prompt_id,
             "prompt_version_number": _prompt_version_number(n.user_prompt),
+            "context_artifacts": _context_artifact_fields(n),
         }
     return {
-        "is_system_prompt": n.user_prompt_id is not None,
+        "is_system_prompt": n.is_system_prompt,
         "prompt_title": None,
         "prompt_key": None,
         "user_prompt_id": n.user_prompt_id,
         "prompt_version_number": None,
+        "context_artifacts": None,
     }
+
+
+def _context_artifact_fields(n):
+    """Build a dict of context artifacts attached to a node."""
+    artifacts = {}
+    for row in n.context_artifacts:
+        if row.artifact_type == "prompt":
+            prompt = UserPrompt.query.get(row.artifact_id)
+            if prompt:
+                artifacts["prompt"] = {
+                    "id": prompt.id,
+                    "title": prompt.title,
+                    "version_number": _prompt_version_number(prompt),
+                    "prompt_key": prompt.prompt_key,
+                }
+        elif row.artifact_type == "profile":
+            profile = UserProfile.query.get(row.artifact_id)
+            if profile:
+                artifacts["profile"] = {
+                    "id": profile.id,
+                    "version_number": UserProfile.query.filter(
+                        UserProfile.user_id == profile.user_id,
+                        UserProfile.created_at <= profile.created_at,
+                    ).count(),
+                    "content": profile.get_content(),
+                }
+        elif row.artifact_type == "todo":
+            todo = UserTodo.query.get(row.artifact_id)
+            if todo:
+                artifacts["todo"] = {
+                    "id": todo.id,
+                    "version_number": UserTodo.query.filter(
+                        UserTodo.user_id == todo.user_id,
+                        UserTodo.created_at <= todo.created_at,
+                    ).count(),
+                    "content": todo.get_content(),
+                }
+    return artifacts if artifacts else None
 
 
 def serialize_node_recursive(n, user_id=None):

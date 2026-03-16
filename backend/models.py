@@ -78,10 +78,12 @@ class Node(db.Model):
     parent_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True)
     human_owner_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
     linked_node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True)
+    # DEPRECATED: kept only for migration compatibility. New code should use
+    # NodeContextArtifact with artifact_type='prompt'.
     user_prompt_id = db.Column(
         db.Integer,
         db.ForeignKey("user_prompt.id", ondelete="SET NULL"),
-        nullable=True
+        nullable=True,
     )
     node_type = db.Column(db.String(16), nullable=False, default="user")
     # Model used to generate this node (only populated for node_type='llm')
@@ -162,11 +164,47 @@ class Node(db.Model):
                                lazy=True, foreign_keys=[parent_id])
     linked_children = db.relationship("Node", backref=db.backref("linked_parent", remote_side=[id]),
                                       lazy=True, foreign_keys=[linked_node_id])
+    # Legacy relationship (used during migration; new code uses context_artifacts)
     user_prompt = db.relationship("UserPrompt", foreign_keys=[user_prompt_id])
+
+    # ----- Artifact helpers ------------------------------------------------
 
     @property
     def is_system_prompt(self):
-        return self.user_prompt_id is not None
+        """True when this node carries a prompt artifact (or legacy FK)."""
+        if self.user_prompt_id is not None:
+            return True
+        return self.has_artifact("prompt")
+
+    def get_artifact_row(self, artifact_type):
+        """Return the NodeContextArtifact row for *artifact_type*, or None."""
+        for a in self.context_artifacts:
+            if a.artifact_type == artifact_type:
+                return a
+        return None
+
+    def get_artifact_id(self, artifact_type):
+        """Return the artifact PK for *artifact_type*, or None."""
+        row = self.get_artifact_row(artifact_type)
+        return row.artifact_id if row else None
+
+    def has_artifact(self, artifact_type):
+        return self.get_artifact_row(artifact_type) is not None
+
+    def get_artifact(self, artifact_type):
+        """Load and return the actual model instance for *artifact_type*."""
+        row = self.get_artifact_row(artifact_type)
+        if row is None:
+            return None
+        if artifact_type == "prompt":
+            return UserPrompt.query.get(row.artifact_id)
+        if artifact_type == "profile":
+            return UserProfile.query.get(row.artifact_id)
+        if artifact_type == "todo":
+            return UserTodo.query.get(row.artifact_id)
+        return None
+
+    # ----- Content ---------------------------------------------------------
 
     def set_content(self, plaintext: str):
         """Set content with encryption."""
@@ -174,15 +212,48 @@ class Node(db.Model):
 
     def get_content(self) -> str:
         """Get decrypted content. Resolves from linked UserPrompt if set."""
+        # New artifact-based prompt resolution
+        prompt_artifact = self.get_artifact_row("prompt")
+        if prompt_artifact is not None:
+            prompt = UserPrompt.query.get(prompt_artifact.artifact_id)
+            return prompt.get_content() if prompt else ""
+        # Legacy FK fallback
         if self.user_prompt_id is not None:
             if self.user_prompt:
                 return self.user_prompt.get_content()
-            from backend.models import UserPrompt
             prompt = UserPrompt.query.get(self.user_prompt_id)
             return prompt.get_content() if prompt else ""
         if self.content is None:
             return ""
         return decrypt_content(self.content)
+
+class NodeContextArtifact(db.Model):
+    """Generic join table linking nodes to versioned context artifacts.
+
+    artifact_type is one of: "prompt", "profile", "todo"
+    artifact_id references the PK in the corresponding table
+    (UserPrompt, UserProfile, UserTodo).
+    """
+    __tablename__ = "node_context_artifact"
+    id = db.Column(db.Integer, primary_key=True)
+    node_id = db.Column(
+        db.Integer,
+        db.ForeignKey("node.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    artifact_type = db.Column(db.String(32), nullable=False)
+    artifact_id = db.Column(db.Integer, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    node = db.relationship("Node", backref="context_artifacts")
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'node_id', 'artifact_type',
+            name='uq_node_artifact_type',
+        ),
+    )
+
 
 class NodeVersion(db.Model):
     id = db.Column(db.Integer, primary_key=True)
