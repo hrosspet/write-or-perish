@@ -2,6 +2,7 @@ import React from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { FaPlay, FaPause, FaUndo, FaRedo } from 'react-icons/fa';
 import { useVoiceSession } from '../hooks/useVoiceSession';
+import { useUser } from '../contexts/UserContext';
 
 function formatDuration(seconds) {
   const mins = Math.floor(seconds / 60);
@@ -177,8 +178,9 @@ export default function ReflectPage() {
   const [searchParams] = useSearchParams();
   const resumeId = searchParams.get('resume');
   const parentId = searchParams.get('parent');
+  const { user } = useUser();
 
-  const selectedModel = localStorage.getItem('loore_selected_model') || null;
+  const selectedModel = user?.preferred_model || null;
 
   const {
     phase, isStopping, hasError, streaming, audio, handleStart, handleStop,

@@ -2,6 +2,7 @@ import React, { useState, useCallback, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { FaRegCompass, FaPlay, FaPause, FaUndo, FaRedo } from 'react-icons/fa';
 import { useVoiceSession } from '../hooks/useVoiceSession';
+import { useUser } from '../contexts/UserContext';
 import api from '../api';
 
 function formatDuration(seconds) {
@@ -173,7 +174,8 @@ export default function OrientPage() {
     }
   }, []);
 
-  const selectedModel = localStorage.getItem('loore_selected_model') || null;
+  const { user } = useUser();
+  const selectedModel = user?.preferred_model || null;
 
   const {
     phase, isStopping, hasError, streaming, audio, handleStart, handleStop,

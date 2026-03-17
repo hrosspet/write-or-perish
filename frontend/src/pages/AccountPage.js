@@ -11,11 +11,7 @@ export default function AccountPage() {
   const [usernameSaving, setUsernameSaving] = useState(false);
   const [usernameMsg, setUsernameMsg] = useState(null); // { type, text }
 
-  // Model selector state — read from user preference, localStorage fallback
-  const [selectedModel, setSelectedModel] = useState(() => {
-    if (user && user.preferred_model) return user.preferred_model;
-    return localStorage.getItem("loore_selected_model") || null;
-  });
+  const [selectedModel, setSelectedModel] = useState(user?.preferred_model || null);
 
   // Privacy / AI usage defaults
   const [privacySaving, setPrivacySaving] = useState(false);
@@ -55,7 +51,6 @@ export default function AccountPage() {
   const handleModelChange = useCallback(
     async (model) => {
       setSelectedModel(model);
-      localStorage.setItem("loore_selected_model", model);
       try {
         const res = await api.put("/dashboard/user", { preferred_model: model });
         if (res.data.user) setUser(res.data.user);
