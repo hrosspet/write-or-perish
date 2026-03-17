@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { FaRegCompass, FaPlay, FaPause, FaUndo, FaRedo } from 'react-icons/fa';
 import { useVoiceSession } from '../hooks/useVoiceSession';
@@ -266,12 +266,20 @@ export default function OrientPage() {
     fontFamily: 'var(--sans)',
   };
 
+  // Pause audio while recovery banner is visible
+  const showRecovery = interruptedDraft && phase !== 'recording';
+  useEffect(() => {
+    if (showRecovery && audio.isPlaying) {
+      audio.pause();
+    }
+  }, [showRecovery, audio]);
+
   // --- RECOVERY BANNER for interrupted recordings ---
   if (!recoveryChecked) {
     return <div style={containerStyle} />;
   }
 
-  if (interruptedDraft && (phase === 'ready' || phase === 'processing' || phase === 'playback')) {
+  if (showRecovery) {
     return (
       <div style={containerStyle}>
         <RecoveryBanner
@@ -281,7 +289,12 @@ export default function OrientPage() {
             clearInterrupted();
             handleResumeSession({ sessionId: session_id, draftId: id, chunkCount: chunk_count, parentId: parent_id });
           }}
-          onDiscard={handleDiscard}
+          onDiscard={() => {
+            handleDiscard();
+            if (phase === 'playback') {
+              setTimeout(() => audio.play(), 100);
+            }
+          }}
         >
           <div style={{ marginBottom: '32px', opacity: 0.4 }}>
             <FaRegCompass size={48} color="var(--accent)" />

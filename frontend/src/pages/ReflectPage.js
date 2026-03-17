@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { FaPlay, FaPause, FaUndo, FaRedo } from 'react-icons/fa';
 import { useVoiceSession } from '../hooks/useVoiceSession';
@@ -246,12 +246,20 @@ export default function ReflectPage() {
     transition: 'opacity 0.2s',
   });
 
+  // Pause audio while recovery banner is visible
+  const showRecovery = interruptedDraft && phase !== 'recording';
+  useEffect(() => {
+    if (showRecovery && audio.isPlaying) {
+      audio.pause();
+    }
+  }, [showRecovery, audio]);
+
   // --- RECOVERY BANNER for interrupted recordings ---
   if (!recoveryChecked) {
     return <div style={containerStyle} />;
   }
 
-  if (interruptedDraft && (phase === 'ready' || phase === 'processing' || phase === 'playback')) {
+  if (showRecovery) {
     return (
       <div style={containerStyle}>
         <RecoveryBanner
@@ -261,7 +269,13 @@ export default function ReflectPage() {
             clearInterrupted();
             handleResumeSession({ sessionId: session_id, draftId: id, chunkCount: chunk_count, parentId: parent_id });
           }}
-          onDiscard={handleDiscard}
+          onDiscard={() => {
+            handleDiscard();
+            // Resume LLM audio playback if in playback phase
+            if (phase === 'playback') {
+              setTimeout(() => audio.play(), 100);
+            }
+          }}
         >
           <EcgAnimation active={false} dim={true} showScanline={false} />
         </RecoveryBanner>
