@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { useBlocker } from 'react-router-dom';
 import { useStreamingTranscription } from './useStreamingTranscription';
 import { useAsyncTaskPolling } from './useAsyncTaskPolling';
 import { useTTSStreamSSE } from './useSSE';
@@ -65,7 +66,8 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     window.history.replaceState({}, '', url);
   }, [llmNodeId]);
 
-  // Warn before leaving the page while recording is active
+  // Warn before leaving the page while recording is active.
+  // beforeunload handles browser refresh/close; useBlocker handles SPA navigation.
   useEffect(() => {
     if (phase !== 'recording') return;
     const handleBeforeUnload = (e) => {
@@ -74,6 +76,17 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [phase]);
+
+  const blocker = useBlocker(phase === 'recording');
+  useEffect(() => {
+    if (blocker.state === 'blocked') {
+      if (window.confirm('You have an active recording. Leave this page?')) {
+        blocker.proceed();
+      } else {
+        blocker.reset();
+      }
+    }
+  }, [blocker]);
 
   // TTS state
   const ttsTriggeredForNodeRef = useRef(null);
