@@ -1,5 +1,4 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { useBlocker } from 'react-router-dom';
 import { useStreamingTranscription } from './useStreamingTranscription';
 import { useAsyncTaskPolling } from './useAsyncTaskPolling';
 import { useTTSStreamSSE } from './useSSE';
@@ -77,19 +76,9 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [phase]);
 
-  const blocker = useBlocker(
-    ({ currentLocation, nextLocation }) =>
-      phase === 'recording' && currentLocation.pathname !== nextLocation.pathname
-  );
-  useEffect(() => {
-    if (blocker.state === 'blocked') {
-      if (window.confirm('You have an active recording. Leave this page?')) {
-        blocker.proceed();
-      } else {
-        blocker.reset();
-      }
-    }
-  }, [blocker.state]); // eslint-disable-line react-hooks/exhaustive-deps
+  // NOTE: SPA navigation during recording is not blocked. useBlocker/usePrompt
+  // require createBrowserRouter (data router) but the app uses <BrowserRouter>.
+  // beforeunload above covers browser refresh/close/external navigation.
 
   // TTS state
   const ttsTriggeredForNodeRef = useRef(null);
