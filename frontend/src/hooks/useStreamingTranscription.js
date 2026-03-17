@@ -61,7 +61,7 @@ export function useStreamingTranscription(options = {}) {
     parentId = null,
     privacyLevel = 'private',
     aiUsage = 'none',
-    chunkIntervalMs = 5 * 60 * 1000, // 5 minutes
+    chunkIntervalMs = 15 * 1000, // 15 seconds — frequent uploads for safety
     label = null, // e.g. "Reflect", "Orient" — used as title instead of "Voice note"
     onTranscriptUpdate = null,
     onComplete = null,
@@ -308,16 +308,27 @@ export function useStreamingTranscription(options = {}) {
     };
   }, [uploadChunkWithRetry]);
 
+  // NOTE: Emergency chunk upload on page unload was attempted using both
+  // sendBeacon and fetch+keepalive, but Chrome fires ondataavailable from
+  // requestData() asynchronously, so there's no synchronous way to extract
+  // buffered audio from MediaRecorder during page teardown. The beforeunload
+  // dialog gives users a chance to stay, and the recovery banner on Reflect/
+  // Orient pages lets them continue the session. At most 15s of audio
+  // (one chunk interval) is lost on unexpected page unload.
+
   // Initialize streaming session (creates draft, NOT node)
-  const initSession = useCallback(async () => {
+  // overrideParentId allows callers to pass the current parent at call time
+  // (useful when parentId changes between recording turns)
+  const initSession = useCallback(async (overrideParentId) => {
     setSessionState('initializing');
     setErrorMessage(null);
 
     try {
       const response = await api.post('/drafts/streaming/init', {
-        parent_id: parentId,
+        parent_id: overrideParentId !== undefined ? overrideParentId : parentId,
         privacy_level: privacyLevel,
         ai_usage: aiUsage,
+        label: label || undefined,
       });
 
       const { draft_id, session_id } = response.data;
@@ -338,13 +349,14 @@ export function useStreamingTranscription(options = {}) {
       }
       throw err;
     }
-  }, [parentId, privacyLevel, aiUsage, onError]);
+  }, [parentId, privacyLevel, aiUsage, label, onError]);
 
   // Start streaming transcription
-  const startStreaming = useCallback(async () => {
+  // overrideParentId: optional parent ID to use instead of the hook's parentId
+  const startStreaming = useCallback(async (overrideParentId) => {
     try {
       // Initialize session
-      await initSession();
+      await initSession(overrideParentId);
 
       // Start recording
       await startMediaRecorder();
@@ -356,6 +368,32 @@ export function useStreamingTranscription(options = {}) {
       setErrorMessage(err.message);
     }
   }, [initSession, startMediaRecorder]);
+
+  // Resume an existing interrupted session (continue recording).
+  // New chunks start after existingChunkCount, duration continues from estimated offset.
+  const resumeStreaming = useCallback(async (existingSessionId, existingDraftId, existingChunkCount) => {
+    try {
+      setSessionState('initializing');
+      setErrorMessage(null);
+
+      setDraftId(existingDraftId);
+      setSessionId(existingSessionId);
+      draftIdRef.current = existingDraftId;
+      sessionIdRef.current = existingSessionId;
+      totalChunksRef.current = existingChunkCount || 0;
+
+      const durationOffset = (existingChunkCount || 0) * (chunkIntervalMs / 1000);
+      await startMediaRecorder({
+        startingChunkIndex: existingChunkCount || 0,
+        durationOffset,
+      });
+      setSessionState('recording');
+    } catch (err) {
+      console.error('Failed to resume streaming:', err);
+      setSessionState('error');
+      setErrorMessage(err.message);
+    }
+  }, [startMediaRecorder, chunkIntervalMs]);
 
   // Stop streaming and finalize
   // extraParams: optional { parent_id, model } for server-side LLM chain
@@ -471,6 +509,7 @@ export function useStreamingTranscription(options = {}) {
 
     // Actions
     startStreaming,
+    resumeStreaming,
     stopStreaming,
     pauseRecording,
     resumeRecording,

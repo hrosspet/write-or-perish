@@ -1,8 +1,10 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { FaRegCompass, FaPlay, FaPause, FaUndo, FaRedo } from 'react-icons/fa';
 import { useVoiceSession } from '../hooks/useVoiceSession';
 import { useUser } from '../contexts/UserContext';
+import { useInterruptedRecovery } from '../hooks/useInterruptedRecovery';
+import RecoveryBanner from '../components/RecoveryBanner';
 import api from '../api';
 
 function formatDuration(seconds) {
@@ -153,6 +155,12 @@ export default function OrientPage() {
   const parentId = searchParams.get('parent');
   const isFreshFromNode = searchParams.get('fresh') === '1';
 
+  // --- Recovery for interrupted recordings ---
+  const {
+    interruptedDraft, checked: recoveryChecked,
+    handleDiscard, clearInterrupted,
+  } = useInterruptedRecovery();
+
   const [applied, setApplied] = useState(false);
   const [parsedResponse, setParsedResponse] = useState(null);
   const applyTriggeredForNodeRef = useRef(null);
@@ -179,7 +187,7 @@ export default function OrientPage() {
 
   const {
     phase, isStopping, hasError, streaming, audio, handleStart, handleStop,
-    handleContinue, handleCancelProcessing, setThreadParentId,
+    handleContinue, handleResumeSession, handleCancelProcessing, setThreadParentId,
   } = useVoiceSession({
     apiEndpoint: '/orient',
     ttsTitle: 'Orient',
@@ -257,6 +265,49 @@ export default function OrientPage() {
     display: 'flex', alignItems: 'center', gap: '8px',
     fontFamily: 'var(--sans)',
   };
+
+  // Pause audio while recovery banner is visible; autoplay on dismiss
+  const showRecovery = interruptedDraft && phase !== 'recording';
+  const playAfterDismissRef = React.useRef(false);
+  useEffect(() => {
+    if (showRecovery && audio.isPlaying) {
+      audio.pause();
+    }
+    if (!showRecovery && playAfterDismissRef.current) {
+      playAfterDismissRef.current = false;
+      audio.play();
+    }
+  }, [showRecovery, audio]);
+
+  // --- RECOVERY BANNER for interrupted recordings ---
+  if (!recoveryChecked) {
+    return <div style={containerStyle} />;
+  }
+
+  if (showRecovery) {
+    return (
+      <div style={containerStyle}>
+        <RecoveryBanner
+          draft={interruptedDraft}
+          onContinue={() => {
+            const { session_id, id, chunk_count, parent_id } = interruptedDraft;
+            clearInterrupted();
+            handleResumeSession({ sessionId: session_id, draftId: id, chunkCount: chunk_count, parentId: parent_id });
+          }}
+          onDiscard={() => {
+            if (phase === 'playback') {
+              playAfterDismissRef.current = true;
+            }
+            handleDiscard();
+          }}
+        >
+          <div style={{ marginBottom: '32px', opacity: 0.4 }}>
+            <FaRegCompass size={48} color="var(--accent)" />
+          </div>
+        </RecoveryBanner>
+      </div>
+    );
+  }
 
   // --- READY / RECORDING STATE ---
   if (phase === 'ready' || phase === 'recording') {

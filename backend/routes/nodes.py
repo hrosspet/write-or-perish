@@ -978,9 +978,14 @@ def get_audio_chunks(node_id):
     if not chunk_dir.exists():
         return jsonify({"error": "No audio chunks found"}), 404
 
-    # Get all chunk files sorted by name (support both plain and encrypted)
+    # Get all audio files sorted by name (support both plain and encrypted).
+    # After batch transcription, individual chunk_*.webm files are replaced by
+    # batch_*.webm files — check for both patterns.
     chunk_files = sorted(chunk_dir.glob("chunk_*.webm"))
     chunk_files_enc = sorted(chunk_dir.glob("chunk_*.webm.enc"))
+    if not chunk_files and not chunk_files_enc:
+        chunk_files = sorted(chunk_dir.glob("batch_*.webm"))
+        chunk_files_enc = sorted(chunk_dir.glob("batch_*.webm.enc"))
     # Prefer encrypted files if they exist, fall back to plain
     if not chunk_files and chunk_files_enc:
         chunk_files = chunk_files_enc

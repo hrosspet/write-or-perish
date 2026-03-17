@@ -35,7 +35,7 @@ function extractWebMHeader(buffer) {
  * Returns status, mediaBlob (final), chunks array, duration, and control functions.
  */
 export function useStreamingMediaRecorder({
-  chunkIntervalMs = 5 * 60 * 1000, // 5 minutes default
+  chunkIntervalMs = 15 * 1000, // 15 seconds default — frequent uploads for safety
   onChunkReady = null, // Callback when a chunk is ready: (blob, chunkIndex) => void
 } = {}) {
   const [status, setStatus] = useState('idle'); // 'idle' | 'recording' | 'paused' | 'recorded'
@@ -100,7 +100,9 @@ export function useStreamingMediaRecorder({
     setStatus('idle');
   }, [mediaUrl]);
 
-  const startRecording = useCallback(async () => {
+  // startingChunkIndex: offset for chunk numbering when resuming an interrupted session
+  // durationOffset: seconds of audio already recorded before this session
+  const startRecording = useCallback(async ({ startingChunkIndex = 0, durationOffset = 0 } = {}) => {
     resetRecording();
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -117,7 +119,7 @@ export function useStreamingMediaRecorder({
       const mediaRecorder = new MediaRecorder(stream, options);
       recorderRef.current = mediaRecorder;
       chunksRef.current = [];
-      chunkIndexRef.current = 0;
+      chunkIndexRef.current = startingChunkIndex;
 
       mediaRecorder.ondataavailable = async (e) => {
         const recorderState = recorderRef.current?.state || 'unknown';
@@ -180,7 +182,7 @@ export function useStreamingMediaRecorder({
         setMediaBlob(blob);
         setMediaUrl(url);
 
-        const ms = Date.now() - startTimeRef.current - totalPausedMsRef.current;
+        const ms = Date.now() - startTimeRef.current - totalPausedMsRef.current + durationOffsetMs;
         setDuration(ms / 1000);
         setStatus('recorded');
 
@@ -213,16 +215,18 @@ export function useStreamingMediaRecorder({
       startTimeRef.current = Date.now();
       totalPausedMsRef.current = 0;
       pausedAtRef.current = null;
+      const durationOffsetMs = durationOffset * 1000;
 
       // Start recording with timeslice for chunked output
       // The timeslice parameter makes ondataavailable fire at the specified interval
       mediaRecorder.start(chunkIntervalMs);
       setStatus('recording');
+      setDuration(durationOffset);
 
       // Start duration tracking (subtracts paused time from elapsed)
       durationIntervalRef.current = setInterval(() => {
         if (startTimeRef.current && !pausedAtRef.current) {
-          const elapsed = Date.now() - startTimeRef.current - totalPausedMsRef.current;
+          const elapsed = Date.now() - startTimeRef.current - totalPausedMsRef.current + durationOffsetMs;
           setDuration(elapsed / 1000);
         }
       }, 1000);
@@ -282,9 +286,9 @@ export function useStreamingMediaRecorder({
     return Promise.resolve();
   }, []);
 
-  // Get the current chunk count (for finalization)
+  // Get the total chunk count including any offset from resumed sessions
   const getTotalChunks = useCallback(() => {
-    return chunksRef.current.length;
+    return chunkIndexRef.current;
   }, []);
 
   // Get a partial blob from chunks recorded so far (for download during recording)

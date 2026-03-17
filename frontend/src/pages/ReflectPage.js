@@ -1,8 +1,10 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { FaPlay, FaPause, FaUndo, FaRedo } from 'react-icons/fa';
 import { useVoiceSession } from '../hooks/useVoiceSession';
 import { useUser } from '../contexts/UserContext';
+import { useInterruptedRecovery } from '../hooks/useInterruptedRecovery';
+import RecoveryBanner from '../components/RecoveryBanner';
 
 function formatDuration(seconds) {
   const mins = Math.floor(seconds / 60);
@@ -182,9 +184,15 @@ export default function ReflectPage() {
 
   const selectedModel = user?.preferred_model || null;
 
+  // --- Recovery for interrupted recordings ---
+  const {
+    interruptedDraft, checked: recoveryChecked,
+    handleDiscard, clearInterrupted,
+  } = useInterruptedRecovery();
+
   const {
     phase, isStopping, hasError, streaming, audio, handleStart, handleStop,
-    handleContinue, handleCancelProcessing,
+    handleContinue, handleResumeSession, handleCancelProcessing,
   } = useVoiceSession({
     apiEndpoint: '/reflect',
     ttsTitle: 'Reflection',
@@ -237,6 +245,48 @@ export default function ReflectPage() {
     justifyContent: 'center',
     transition: 'opacity 0.2s',
   });
+
+  // Pause audio while recovery banner is visible; autoplay on dismiss
+  const showRecovery = interruptedDraft && phase !== 'recording';
+  const playAfterDismissRef = React.useRef(false);
+  useEffect(() => {
+    if (showRecovery && audio.isPlaying) {
+      audio.pause();
+    }
+    // When recovery banner disappears and we flagged autoplay, resume
+    if (!showRecovery && playAfterDismissRef.current) {
+      playAfterDismissRef.current = false;
+      audio.play();
+    }
+  }, [showRecovery, audio]);
+
+  // --- RECOVERY BANNER for interrupted recordings ---
+  if (!recoveryChecked) {
+    return <div style={containerStyle} />;
+  }
+
+  if (showRecovery) {
+    return (
+      <div style={containerStyle}>
+        <RecoveryBanner
+          draft={interruptedDraft}
+          onContinue={() => {
+            const { session_id, id, chunk_count, parent_id } = interruptedDraft;
+            clearInterrupted();
+            handleResumeSession({ sessionId: session_id, draftId: id, chunkCount: chunk_count, parentId: parent_id });
+          }}
+          onDiscard={() => {
+            if (phase === 'playback') {
+              playAfterDismissRef.current = true;
+            }
+            handleDiscard();
+          }}
+        >
+          <EcgAnimation active={false} dim={true} showScanline={false} />
+        </RecoveryBanner>
+      </div>
+    );
+  }
 
   // --- READY / RECORDING STATE ---
   if (phase === 'ready' || phase === 'recording') {

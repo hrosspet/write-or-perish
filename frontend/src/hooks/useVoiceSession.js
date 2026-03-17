@@ -65,6 +65,21 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     window.history.replaceState({}, '', url);
   }, [llmNodeId]);
 
+  // Warn before leaving the page while recording is active.
+  // beforeunload handles browser refresh/close; useBlocker handles SPA navigation.
+  useEffect(() => {
+    if (phase !== 'recording') return;
+    const handleBeforeUnload = (e) => {
+      e.preventDefault();
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [phase]);
+
+  // NOTE: SPA navigation during recording is not blocked. useBlocker/usePrompt
+  // require createBrowserRouter (data router) but the app uses <BrowserRouter>.
+  // beforeunload above covers browser refresh/close/external navigation.
+
   // TTS state
   const ttsTriggeredForNodeRef = useRef(null);
   const [ttsGenerating, setTtsGenerating] = useState(false);
@@ -282,7 +297,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     setPhase('recording');
     setHasError(false);
     startSilentAudio(); // User gesture context — activates iOS lock screen controls
-    streaming.startStreaming();
+    streaming.startStreaming(threadParentIdRef.current);
   }, [streaming, startSilentAudio]);
 
   const handleStop = useCallback(() => {
@@ -321,7 +336,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     // Go straight to recording — skip the ready phase
     setPhase('recording');
     startSilentAudio(); // User gesture context
-    streaming.startStreaming();
+    streaming.startStreaming(threadParentIdRef.current);
   }, [audio, ttsSSE, streaming, startSilentAudio]);
 
   const setThreadParentId = useCallback((id) => {
@@ -349,6 +364,23 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     if (extraReset) extraReset();
     streaming.cancelStreaming();
   }, [audio, ttsSSE, streaming, stopSilentAudio]);
+
+  // Resume an interrupted session (continue recording from where it left off)
+  const handleResumeSession = useCallback(({ sessionId, draftId, chunkCount, parentId: draftParentId }) => {
+    // Restore thread context so finalization uses the correct parent
+    if (draftParentId != null) {
+      threadParentIdRef.current = draftParentId;
+      // Update URL to reflect the thread context
+      const url = new URL(window.location);
+      url.searchParams.set('parent', String(draftParentId));
+      url.searchParams.delete('resume');
+      window.history.replaceState({}, '', url);
+    }
+    setPhase('recording');
+    setHasError(false);
+    startSilentAudio();
+    streaming.resumeStreaming(sessionId, draftId, chunkCount);
+  }, [streaming, startSilentAudio]);
 
   const handlePauseRecording = useCallback(() => {
     streaming.pauseRecording();
@@ -394,6 +426,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     handlePauseRecording,
     handleResumeRecording,
     handleContinue,
+    handleResumeSession,
     handleCancelProcessing,
     setThreadParentId,
   };
