@@ -31,8 +31,6 @@ Extract only what is explicitly stated or directly inferable.
 - Explicit feedback: what have they directly praised or complained about?
 - Request patterns: how do they frame what they want? (commands, questions, vague gestures)
 
----
-
 ### SECTION 2: SHADOW MAP (~500 tokens)
 Abandon caution. Read between every line. This section should feel slightly uncomfortable in its accuracy.
 
@@ -72,8 +70,6 @@ Abandon caution. Read between every line. This section should feel slightly unco
 **Shadow Guess**
 One high-risk inference about their struggles/limitations—something you're 60% confident about that isn't supported by direct evidence but *feels* true from the gestalt. Frame it as: "There's something about [X] that suggests [Y], though you've never said it directly."
 
----
-
 ### SECTION 3: LIGHT MAP (~500 tokens)
 Same inferential boldness as the Shadow Map, but oriented toward hidden strengths, latent gifts, and unrecognized beauty. What would make them cry if they truly believed it about themselves?
 
@@ -109,8 +105,6 @@ Same inferential boldness as the Shadow Map, but oriented toward hidden strength
 
 **Light Guess**
 One high-risk inference about a gift or quality they'd resist believing—something you're 60% confident about that isn't supported by direct evidence but *feels* true from the gestalt. Frame it as: "You probably don't see this, but [X] suggests you're [Y] in a way that matters more than you know."
-
----
 
 ## GENERATION RULES
 1. Section 1 must be defensible—every claim traceable to source text

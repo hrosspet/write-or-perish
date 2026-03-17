@@ -565,12 +565,16 @@ class ExportQuoteResolver:
         """Build a preamble section listing all referenced system prompts."""
         if not self.referenced_prompt_ids:
             return ""
+        sorted_ids = sorted(self.referenced_prompt_ids)
         lines = ["## System Prompts Referenced\n"]
-        for pid in sorted(self.referenced_prompt_ids):
+        for i, pid in enumerate(sorted_ids):
             content = self._prompt_contents.get(pid, "")
             lines.append(f"### Prompt (ref #{pid})\n")
             lines.append(content)
-            lines.append("\n")
+            if i < len(sorted_ids) - 1:
+                lines.append("\n===\n")
+            else:
+                lines.append("\n")
         return "\n".join(lines)
 
     def get_artifacts_preamble(self) -> str:
@@ -583,28 +587,34 @@ class ExportQuoteResolver:
             sections.append(prompt_text)
 
         # Profiles
-        profile_ids = self.referenced_artifacts.get("profile", set())
+        profile_ids = sorted(self.referenced_artifacts.get("profile", set()))
         if profile_ids:
             lines = ["## User Profiles Referenced\n"]
-            for pid in sorted(profile_ids):
+            for i, pid in enumerate(profile_ids):
                 content = self._artifact_contents.get(("profile", pid), "")
                 lines.append(f"### User Profile (ref #{pid})\n")
                 lines.append(content)
-                lines.append("\n")
+                if i < len(profile_ids) - 1:
+                    lines.append("\n===\n")
+                else:
+                    lines.append("\n")
             sections.append("\n".join(lines))
 
         # TODOs
-        todo_ids = self.referenced_artifacts.get("todo", set())
+        todo_ids = sorted(self.referenced_artifacts.get("todo", set()))
         if todo_ids:
             lines = ["## User TODOs Referenced\n"]
-            for tid in sorted(todo_ids):
+            for i, tid in enumerate(todo_ids):
                 content = self._artifact_contents.get(("todo", tid), "")
                 lines.append(f"### User TODO (ref #{tid})\n")
                 lines.append(content)
-                lines.append("\n")
+                if i < len(todo_ids) - 1:
+                    lines.append("\n===\n")
+                else:
+                    lines.append("\n")
             sections.append("\n".join(lines))
 
-        return "\n".join(sections)
+        return "\n===\n\n".join(sections)
 
     def get_included_entries(self) -> List[NodeEntry]:
         """

@@ -470,33 +470,46 @@ def build_user_export_content(
         )
         if prompt_versions:
             export_lines.append("## System Prompts Referenced\n")
-            for pid in sorted(prompt_versions):
+            sorted_pids = sorted(prompt_versions)
+            for i, pid in enumerate(sorted_pids):
                 pv = prompt_versions[pid]
                 export_lines.append(
                     f"### {pv['title']} v{pv['version']} (ref #{pid})\n"
                 )
                 export_lines.append(pv["content"])
                 export_lines.append("")
+                if i < len(sorted_pids) - 1:
+                    export_lines.append("===\n")
         if profile_versions:
+            if prompt_versions:
+                export_lines.append("===\n")
             export_lines.append("## User Profiles Referenced\n")
-            for pid in sorted(profile_versions):
+            sorted_pids = sorted(profile_versions)
+            for i, pid in enumerate(sorted_pids):
                 pv = profile_versions[pid]
                 export_lines.append(
                     f"### User Profile v{pv['version']} (ref #{pid})\n"
                 )
                 export_lines.append(pv["content"])
                 export_lines.append("")
+                if i < len(sorted_pids) - 1:
+                    export_lines.append("===\n")
         if todo_versions:
+            if prompt_versions or profile_versions:
+                export_lines.append("===\n")
             export_lines.append("## User TODOs Referenced\n")
-            for tid in sorted(todo_versions):
+            sorted_tids = sorted(todo_versions)
+            for i, tid in enumerate(sorted_tids):
                 tv = todo_versions[tid]
                 export_lines.append(
                     f"### User TODO v{tv['version']} (ref #{tid})\n"
                 )
                 export_lines.append(tv["content"])
                 export_lines.append("")
+                if i < len(sorted_tids) - 1:
+                    export_lines.append("===\n")
         if has_any_preamble:
-            export_lines.append("---")
+            export_lines.append("===")
             export_lines.append("")
 
     # Process each thread
