@@ -77,7 +77,10 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [phase]);
 
-  const blocker = useBlocker(phase === 'recording');
+  const blocker = useBlocker(
+    ({ currentLocation, nextLocation }) =>
+      phase === 'recording' && currentLocation.pathname !== nextLocation.pathname
+  );
   useEffect(() => {
     if (blocker.state === 'blocked') {
       if (window.confirm('You have an active recording. Leave this page?')) {
@@ -86,7 +89,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         blocker.reset();
       }
     }
-  }, [blocker]);
+  }, [blocker.state]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // TTS state
   const ttsTriggeredForNodeRef = useRef(null);
