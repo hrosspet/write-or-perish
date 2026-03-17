@@ -149,7 +149,8 @@ def _make_node(user, parent_id=None, content="hello", node_type="user",
 
 
 def _make_prompt_node(user, prompt_key, parent_id=None):
-    """Create a system prompt node linked via user_prompt_id."""
+    """Create a system prompt node linked via NodeContextArtifact."""
+    from backend.models import NodeContextArtifact
     from backend.utils.prompts import get_user_prompt_record
     record = get_user_prompt_record(user.id, prompt_key)
     n = Node(
@@ -159,9 +160,12 @@ def _make_prompt_node(user, prompt_key, parent_id=None):
         node_type="user",
         privacy_level="private",
         ai_usage="chat",
-        user_prompt_id=record.id,
     )
     _db.session.add(n)
+    _db.session.flush()
+    _db.session.add(NodeContextArtifact(
+        node_id=n.id, artifact_type="prompt", artifact_id=record.id,
+    ))
     _db.session.flush()
     return n
 
@@ -254,16 +258,14 @@ class TestReflectFromNodeMatrix:
         system_node = Node.query.get(llm_node.parent_id)
         assert system_node.parent_id == user_node.id
         assert system_node.node_type == "user"
-        assert system_node.user_prompt_id is not None
+        assert system_node.is_system_prompt
         assert system_node.content is None
-        linked_prompt = UserPrompt.query.get(system_node.user_prompt_id)
-        assert linked_prompt.prompt_key == "reflect"
-        # Verify artifact row was created
         prompt_artifact = NodeContextArtifact.query.filter_by(
             node_id=system_node.id, artifact_type="prompt",
         ).first()
         assert prompt_artifact is not None
-        assert prompt_artifact.artifact_id == linked_prompt.id
+        linked_prompt = UserPrompt.query.get(prompt_artifact.artifact_id)
+        assert linked_prompt.prompt_key == "reflect"
 
     def test_no_prompt_llm_node_creates_system_prompt_and_processing(
         self, app
@@ -295,9 +297,9 @@ class TestReflectFromNodeMatrix:
         # Verify system prompt was created as child of llm_node
         system_node = Node.query.get(data["parent_id"])
         assert system_node.parent_id == llm_node.id
-        assert system_node.user_prompt_id is not None
+        assert system_node.is_system_prompt
         assert system_node.content is None
-        linked_prompt = UserPrompt.query.get(system_node.user_prompt_id)
+        linked_prompt = system_node.get_artifact("prompt")
         assert linked_prompt.prompt_key == "reflect"
 
 
@@ -491,9 +493,9 @@ class TestOrientFromNodeMatrix:
         # Verify system prompt is the orient prompt
         llm_node = Node.query.get(data["llm_node_id"])
         system_node = Node.query.get(llm_node.parent_id)
-        assert system_node.user_prompt_id is not None
+        assert system_node.is_system_prompt
         assert system_node.content is None
-        linked_prompt = UserPrompt.query.get(system_node.user_prompt_id)
+        linked_prompt = system_node.get_artifact("prompt")
         assert linked_prompt.prompt_key == "orient"
 
     def test_no_prompt_llm_node_creates_system_prompt_and_processing(
@@ -521,7 +523,7 @@ class TestOrientFromNodeMatrix:
         assert data["llm_node_id"] == llm_node.id
 
         system_node = Node.query.get(data["parent_id"])
-        assert system_node.user_prompt_id is not None
+        assert system_node.is_system_prompt
         assert system_node.content is None
-        linked_prompt = UserPrompt.query.get(system_node.user_prompt_id)
+        linked_prompt = system_node.get_artifact("prompt")
         assert linked_prompt.prompt_key == "orient"

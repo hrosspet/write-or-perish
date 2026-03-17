@@ -73,7 +73,6 @@ def search():
 
     # Base query: user's own nodes + nodes where they are the human owner
     # Exclude system prompt nodes (content resolved from UserPrompt)
-    # Check both legacy user_prompt_id and new artifact join table
     prompt_node_ids = db.session.query(
         NodeContextArtifact.node_id
     ).filter(NodeContextArtifact.artifact_type == "prompt").subquery()
@@ -83,7 +82,6 @@ def search():
             Node.user_id == current_user.id,
             Node.human_owner_id == current_user.id,
         ),
-        Node.user_prompt_id.is_(None),
         ~Node.id.in_(db.session.query(prompt_node_ids)),
     )
 

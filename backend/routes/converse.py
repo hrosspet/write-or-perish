@@ -67,7 +67,7 @@ def start_conversation():
         node_type="user",
         privacy_level="private",
         ai_usage="chat",
-        user_prompt_id=prompt_record.id,
+
     )
     db.session.add(system_node)
     db.session.flush()

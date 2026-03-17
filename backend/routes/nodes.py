@@ -313,7 +313,6 @@ def _prompt_version_number(prompt):
 
 def _system_prompt_fields(n):
     """Return system prompt serialization fields for a node."""
-    # Try new artifact system first
     prompt = n.get_artifact("prompt")
     if prompt is not None:
         return {
@@ -324,21 +323,11 @@ def _system_prompt_fields(n):
             "prompt_version_number": _prompt_version_number(prompt),
             "context_artifacts": _context_artifact_fields(n),
         }
-    # Legacy FK fallback
-    if n.user_prompt_id is not None and n.user_prompt:
-        return {
-            "is_system_prompt": True,
-            "prompt_title": n.user_prompt.title,
-            "prompt_key": n.user_prompt.prompt_key,
-            "user_prompt_id": n.user_prompt_id,
-            "prompt_version_number": _prompt_version_number(n.user_prompt),
-            "context_artifacts": _context_artifact_fields(n),
-        }
     return {
-        "is_system_prompt": n.is_system_prompt,
+        "is_system_prompt": False,
         "prompt_title": None,
         "prompt_key": None,
-        "user_prompt_id": n.user_prompt_id,
+        "user_prompt_id": None,
         "prompt_version_number": None,
         "context_artifacts": None,
     }
@@ -1950,7 +1939,8 @@ def unpin_node(node_id):
 @nodes_bp.route("/<int:node_id>", methods=["DELETE"])
 @login_required
 def delete_node(node_id):
-    from backend.models import NodeVersion, NodeTranscriptChunk, TTSChunk, Draft
+    from backend.models import (NodeVersion, NodeTranscriptChunk, TTSChunk,
+                                Draft, NodeContextArtifact)
 
     node = Node.query.get_or_404(node_id)
     # Allow deletion if user is the owner or LLM requester (parent node owner)
@@ -1971,6 +1961,9 @@ def delete_node(node_id):
         Draft.query.filter_by(node_id=node.id).update({"node_id": None})
         Draft.query.filter_by(parent_id=node.id).update({"parent_id": None})
         Draft.query.filter_by(llm_node_id=node.id).delete()
+
+        # Clean up context artifact tracking
+        NodeContextArtifact.query.filter_by(node_id=node.id).delete()
 
         # Update linked_node_id references in other nodes
         Node.query.filter_by(linked_node_id=node.id).update({"linked_node_id": None})

@@ -99,7 +99,7 @@ def backfill_prompt_refs_command():
     total_linked = 0
 
     for user in users:
-        # Build lookup: decrypted_content → user_prompt_id
+        # Build lookup: decrypted_content → prompt_id
         content_to_prompt_id = {}
 
         # Include all existing UserPrompt rows for this user
@@ -127,11 +127,15 @@ def backfill_prompt_refs_command():
         if not content_to_prompt_id:
             continue
 
-        # Find unlinked nodes for this user
+        # Find unlinked nodes (no artifact row yet, have encrypted content)
         nodes = Node.query.filter(
             Node.user_id == user.id,
-            Node.user_prompt_id.is_(None),
             Node.content.isnot(None),
+            ~Node.id.in_(
+                db.session.query(NodeContextArtifact.node_id).filter(
+                    NodeContextArtifact.artifact_type == "prompt"
+                )
+            ),
         ).all()
 
         linked = 0
@@ -142,18 +146,12 @@ def backfill_prompt_refs_command():
                 continue
             if plaintext in content_to_prompt_id:
                 prompt_id = content_to_prompt_id[plaintext]
-                node.user_prompt_id = prompt_id
                 node.content = None
-                # Also create artifact row if not already present
-                existing = NodeContextArtifact.query.filter_by(
-                    node_id=node.id, artifact_type="prompt",
-                ).first()
-                if not existing:
-                    db.session.add(NodeContextArtifact(
-                        node_id=node.id,
-                        artifact_type="prompt",
-                        artifact_id=prompt_id,
-                    ))
+                db.session.add(NodeContextArtifact(
+                    node_id=node.id,
+                    artifact_type="prompt",
+                    artifact_id=prompt_id,
+                ))
                 linked += 1
 
         if linked:

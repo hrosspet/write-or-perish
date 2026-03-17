@@ -78,13 +78,6 @@ class Node(db.Model):
     parent_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True)
     human_owner_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
     linked_node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True)
-    # DEPRECATED: kept only for migration compatibility. New code should use
-    # NodeContextArtifact with artifact_type='prompt'.
-    user_prompt_id = db.Column(
-        db.Integer,
-        db.ForeignKey("user_prompt.id", ondelete="SET NULL"),
-        nullable=True,
-    )
     node_type = db.Column(db.String(16), nullable=False, default="user")
     # Model used to generate this node (only populated for node_type='llm')
     llm_model = db.Column(db.String(64), nullable=True)
@@ -164,16 +157,11 @@ class Node(db.Model):
                                lazy=True, foreign_keys=[parent_id])
     linked_children = db.relationship("Node", backref=db.backref("linked_parent", remote_side=[id]),
                                       lazy=True, foreign_keys=[linked_node_id])
-    # Legacy relationship (used during migration; new code uses context_artifacts)
-    user_prompt = db.relationship("UserPrompt", foreign_keys=[user_prompt_id])
-
     # ----- Artifact helpers ------------------------------------------------
 
     @property
     def is_system_prompt(self):
-        """True when this node carries a prompt artifact (or legacy FK)."""
-        if self.user_prompt_id is not None:
-            return True
+        """True when this node carries a prompt artifact."""
         return self.has_artifact("prompt")
 
     def get_artifact_row(self, artifact_type):
@@ -212,16 +200,10 @@ class Node(db.Model):
 
     def get_content(self) -> str:
         """Get decrypted content. Resolves from linked UserPrompt if set."""
-        # New artifact-based prompt resolution
+        # Artifact-based prompt resolution
         prompt_artifact = self.get_artifact_row("prompt")
         if prompt_artifact is not None:
             prompt = UserPrompt.query.get(prompt_artifact.artifact_id)
-            return prompt.get_content() if prompt else ""
-        # Legacy FK fallback
-        if self.user_prompt_id is not None:
-            if self.user_prompt:
-                return self.user_prompt.get_content()
-            prompt = UserPrompt.query.get(self.user_prompt_id)
             return prompt.get_content() if prompt else ""
         if self.content is None:
             return ""
@@ -245,7 +227,10 @@ class NodeContextArtifact(db.Model):
     artifact_id = db.Column(db.Integer, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-    node = db.relationship("Node", backref="context_artifacts")
+    node = db.relationship(
+        "Node", backref="context_artifacts", cascade="all,delete-orphan",
+        single_parent=True,
+    )
 
     __table_args__ = (
         db.UniqueConstraint(

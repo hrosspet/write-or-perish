@@ -725,7 +725,7 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
             node_type="user",
             privacy_level="private",
             ai_usage="chat",
-            user_prompt_id=prompt_record.id,
+
         )
         db.session.add(system_node)
         db.session.flush()

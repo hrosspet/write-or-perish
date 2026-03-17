@@ -111,8 +111,6 @@ def format_node_tree(
     # System prompt nodes: emit reference instead of full content
     # Check new artifact system first, then legacy FK
     prompt = node.get_artifact("prompt")
-    if prompt is None and node.user_prompt_id is not None:
-        prompt = node.user_prompt  # legacy fallback
     if prompt is not None:
         version_num = UserPrompt.query.filter(
             UserPrompt.user_id == prompt.user_id,
@@ -352,10 +350,7 @@ def build_user_export_content(
                 (a.artifact_type, a.artifact_id)
                 for a in node.context_artifacts
             ]
-            # Determine prompt (new artifact system or legacy)
             prompt = node.get_artifact("prompt")
-            if prompt is None and node.user_prompt_id is not None:
-                prompt = node.user_prompt
             if prompt is not None:
                 version_num = UserPrompt.query.filter(
                     UserPrompt.user_id == prompt.user_id,
@@ -429,8 +424,6 @@ def build_user_export_content(
             for n in tree_nodes:
                 # Prompt artifacts
                 prompt = n.get_artifact("prompt")
-                if prompt is None and n.user_prompt_id is not None:
-                    prompt = n.user_prompt
                 if prompt is not None and prompt.id not in prompt_versions:
                     vnum = UserPrompt.query.filter(
                         UserPrompt.user_id == prompt.user_id,

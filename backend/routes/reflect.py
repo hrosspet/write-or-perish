@@ -15,14 +15,8 @@ def _ancestors_have_prompt(node, user_id, prompt_key):
     """Walk up ancestors and check if any node links to a UserPrompt with this key."""
     current = node
     while current:
-        # New artifact-based check
         prompt = current.get_artifact("prompt")
         if prompt is not None and prompt.prompt_key == prompt_key:
-            return True
-        # Legacy FK fallback
-        if (current.user_prompt_id is not None
-                and current.user_prompt
-                and current.user_prompt.prompt_key == prompt_key):
             return True
         if current.parent_id:
             current = Node.query.get(current.parent_id)
@@ -98,7 +92,7 @@ def create_reflect_from_node(node_id):
             node_type="user",
             privacy_level="private",
             ai_usage="chat",
-            user_prompt_id=prompt_record.id,
+
         )
         db.session.add(system_node)
         db.session.flush()
@@ -126,7 +120,6 @@ def create_reflect_from_node(node_id):
         node_type="user",
         privacy_level="private",
         ai_usage="chat",
-        user_prompt_id=prompt_record.id,
     )
     db.session.add(system_node)
     db.session.flush()
@@ -187,7 +180,7 @@ def create_reflect_session():
             node_type="user",
             privacy_level="private",
             ai_usage="chat",
-            user_prompt_id=prompt_record.id,
+
         )
         db.session.add(system_node)
         db.session.flush()
