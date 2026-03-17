@@ -369,7 +369,8 @@ export function useStreamingTranscription(options = {}) {
     }
   }, [initSession, startMediaRecorder]);
 
-  // Resume an existing interrupted session (continue recording)
+  // Resume an existing interrupted session (continue recording).
+  // New chunks start after existingChunkCount, duration continues from estimated offset.
   const resumeStreaming = useCallback(async (existingSessionId, existingDraftId, existingChunkCount) => {
     try {
       setSessionState('initializing');
@@ -381,14 +382,18 @@ export function useStreamingTranscription(options = {}) {
       sessionIdRef.current = existingSessionId;
       totalChunksRef.current = existingChunkCount || 0;
 
-      await startMediaRecorder();
+      const durationOffset = (existingChunkCount || 0) * (chunkIntervalMs / 1000);
+      await startMediaRecorder({
+        startingChunkIndex: existingChunkCount || 0,
+        durationOffset,
+      });
       setSessionState('recording');
     } catch (err) {
       console.error('Failed to resume streaming:', err);
       setSessionState('error');
       setErrorMessage(err.message);
     }
-  }, [startMediaRecorder]);
+  }, [startMediaRecorder, chunkIntervalMs]);
 
   // Stop streaming and finalize
   // extraParams: optional { parent_id, model } for server-side LLM chain
