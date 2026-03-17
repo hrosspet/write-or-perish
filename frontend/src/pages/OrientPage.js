@@ -266,11 +266,16 @@ export default function OrientPage() {
     fontFamily: 'var(--sans)',
   };
 
-  // Pause audio while recovery banner is visible
+  // Pause audio while recovery banner is visible; autoplay on dismiss
   const showRecovery = interruptedDraft && phase !== 'recording';
+  const playAfterDismissRef = React.useRef(false);
   useEffect(() => {
     if (showRecovery && audio.isPlaying) {
       audio.pause();
+    }
+    if (!showRecovery && playAfterDismissRef.current) {
+      playAfterDismissRef.current = false;
+      audio.play();
     }
   }, [showRecovery, audio]);
 
@@ -290,10 +295,10 @@ export default function OrientPage() {
             handleResumeSession({ sessionId: session_id, draftId: id, chunkCount: chunk_count, parentId: parent_id });
           }}
           onDiscard={() => {
-            handleDiscard();
             if (phase === 'playback') {
-              setTimeout(() => audio.play(), 100);
+              playAfterDismissRef.current = true;
             }
+            handleDiscard();
           }}
         >
           <div style={{ marginBottom: '32px', opacity: 0.4 }}>

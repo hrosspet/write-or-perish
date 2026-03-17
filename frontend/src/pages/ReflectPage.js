@@ -246,11 +246,17 @@ export default function ReflectPage() {
     transition: 'opacity 0.2s',
   });
 
-  // Pause audio while recovery banner is visible
+  // Pause audio while recovery banner is visible; autoplay on dismiss
   const showRecovery = interruptedDraft && phase !== 'recording';
+  const playAfterDismissRef = React.useRef(false);
   useEffect(() => {
     if (showRecovery && audio.isPlaying) {
       audio.pause();
+    }
+    // When recovery banner disappears and we flagged autoplay, resume
+    if (!showRecovery && playAfterDismissRef.current) {
+      playAfterDismissRef.current = false;
+      audio.play();
     }
   }, [showRecovery, audio]);
 
@@ -270,11 +276,10 @@ export default function ReflectPage() {
             handleResumeSession({ sessionId: session_id, draftId: id, chunkCount: chunk_count, parentId: parent_id });
           }}
           onDiscard={() => {
-            handleDiscard();
-            // Resume LLM audio playback if in playback phase
             if (phase === 'playback') {
-              setTimeout(() => audio.play(), 100);
+              playAfterDismissRef.current = true;
             }
+            handleDiscard();
           }}
         >
           <EcgAnimation active={false} dim={true} showScanline={false} />
