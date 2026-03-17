@@ -188,10 +188,7 @@ export default function ReflectPage() {
   const {
     interruptedDraft, checked: recoveryChecked,
     handleDiscard, clearInterrupted,
-  } = useInterruptedRecovery({
-    parentId: parentId ? Number(parentId) : null,
-    skip: !!resumeId,
-  });
+  } = useInterruptedRecovery();
 
   const {
     phase, isStopping, hasError, streaming, audio, handleStart, handleStop,
@@ -260,9 +257,9 @@ export default function ReflectPage() {
         <RecoveryBanner
           draft={interruptedDraft}
           onContinue={() => {
-            const { session_id, id, chunk_count } = interruptedDraft;
+            const { session_id, id, chunk_count, parent_id } = interruptedDraft;
             clearInterrupted();
-            handleResumeSession(session_id, id, chunk_count);
+            handleResumeSession({ sessionId: session_id, draftId: id, chunkCount: chunk_count, parentId: parent_id });
           }}
           onDiscard={handleDiscard}
         >

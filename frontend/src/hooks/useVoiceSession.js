@@ -366,7 +366,16 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   }, [audio, ttsSSE, streaming, stopSilentAudio]);
 
   // Resume an interrupted session (continue recording from where it left off)
-  const handleResumeSession = useCallback((sessionId, draftId, chunkCount) => {
+  const handleResumeSession = useCallback(({ sessionId, draftId, chunkCount, parentId: draftParentId }) => {
+    // Restore thread context so finalization uses the correct parent
+    if (draftParentId != null) {
+      threadParentIdRef.current = draftParentId;
+      // Update URL to reflect the thread context
+      const url = new URL(window.location);
+      url.searchParams.set('parent', String(draftParentId));
+      url.searchParams.delete('resume');
+      window.history.replaceState({}, '', url);
+    }
     setPhase('recording');
     setHasError(false);
     startSilentAudio();

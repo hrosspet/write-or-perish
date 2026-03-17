@@ -102,22 +102,15 @@ def get_interrupted_drafts():
     - llm_node_id is NULL (not already processed)
     - Has at least one stored or completed chunk
 
-    Query params:
-      - parent_id: Filter by parent node (optional, omit for root-level)
+    Returns the most recent interrupted draft regardless of parent context,
+    so recovery works from any entry point (Reflect, Orient, Log resume).
     """
-    parent_id = request.args.get("parent_id", type=int)
-
     query = Draft.query.filter(
         Draft.user_id == current_user.id,
         Draft.session_id.isnot(None),
         Draft.streaming_status == 'recording',
         Draft.llm_node_id.is_(None),
     )
-
-    if parent_id:
-        query = query.filter_by(parent_id=parent_id)
-    else:
-        query = query.filter_by(parent_id=None)
 
     drafts = query.order_by(Draft.updated_at.desc()).all()
 

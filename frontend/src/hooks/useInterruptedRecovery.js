@@ -4,25 +4,21 @@ import api from '../api';
 /**
  * Hook to detect interrupted streaming recordings on page load.
  *
- * Checks for drafts with streaming_status='recording' that have stored
- * audio chunks. Provides draft info, discard, and transcript recovery actions.
+ * Checks for any draft with streaming_status='recording' that has stored
+ * audio chunks, regardless of parent context. This ensures recovery works
+ * from any entry point (Reflect, Orient, Log resume, home page).
  *
- * @param {Object} options
- * @param {number|null} options.parentId - Parent node ID filter (null for root)
- * @param {boolean} options.skip - Skip the check (e.g. when resuming LLM processing)
  * @returns {Object}
  */
-export function useInterruptedRecovery({ parentId = null, skip = false } = {}) {
+export function useInterruptedRecovery() {
   const [interruptedDraft, setInterruptedDraft] = useState(null);
   const [checked, setChecked] = useState(false);
   const [recoveryState, setRecoveryState] = useState(null); // null | 'transcribing' | 'done'
 
   useEffect(() => {
-    if (skip) { setChecked(true); return; }
     const checkInterrupted = async () => {
       try {
-        const params = parentId ? `?parent_id=${parentId}` : '';
-        const res = await api.get(`/drafts/interrupted${params}`);
+        const res = await api.get('/drafts/interrupted');
         if (res.data.length > 0) {
           setInterruptedDraft(res.data[0]);
         }
@@ -30,7 +26,7 @@ export function useInterruptedRecovery({ parentId = null, skip = false } = {}) {
       setChecked(true);
     };
     checkInterrupted();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   // Trigger transcription of stored chunks and poll until done
   const handleRecover = useCallback(async () => {
