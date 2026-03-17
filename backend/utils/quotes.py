@@ -209,7 +209,8 @@ class NodeEntry:
     embedded_tokens: int = 0  # Additional tokens from embedded quote content
     quote_ids: List[int] = field(default_factory=list)  # Unresolved quote targets
     is_top_level: bool = True  # Whether this is a top-level entry vs embedded
-    user_prompt_id: Optional[int] = None  # System prompt reference
+    user_prompt_id: Optional[int] = None  # System prompt reference (legacy)
+    artifacts: List[Tuple[str, int]] = field(default_factory=list)  # (type, id)
 
     @property
     def total_tokens(self) -> int:
@@ -270,6 +271,12 @@ class ExportQuoteResolver:
         self._prompt_tokens: Dict[int, int] = {}  # user_prompt_id → token cost
         self._prompt_contents: Dict[int, str] = {}  # user_prompt_id → content
         self.referenced_prompt_ids: Set[int] = set()  # final result
+        # Generic artifact tracking: (artifact_type, artifact_id) → content
+        self._artifact_contents: Dict[Tuple[str, int], str] = {}
+        self._artifact_tokens: Dict[Tuple[str, int], int] = {}
+        self.referenced_artifacts: Dict[str, Set[int]] = {
+            "prompt": set(), "profile": set(), "todo": set(),
+        }
 
     def add_node(
         self,
@@ -279,7 +286,8 @@ class ExportQuoteResolver:
         token_count: Optional[int] = None,
         user_prompt_id: Optional[int] = None,
         prompt_content: Optional[str] = None,
-        prompt_label: Optional[str] = None
+        prompt_label: Optional[str] = None,
+        artifacts: Optional[List[Tuple[str, int]]] = None,
     ):
         """
         Add a node to the export.
@@ -289,9 +297,10 @@ class ExportQuoteResolver:
             created_at: When the node was created (for sorting)
             content: The node's content (used to extract quote IDs and estimate tokens)
             token_count: Optional pre-computed token count
-            user_prompt_id: Optional system prompt FK
+            user_prompt_id: Optional system prompt FK (legacy)
             prompt_content: Full prompt content (for preamble)
             prompt_label: Label like "Reflect v3" (for reference text)
+            artifacts: List of (artifact_type, artifact_id) tuples
         """
         from backend.utils.tokens import approximate_token_count
 
@@ -318,8 +327,21 @@ class ExportQuoteResolver:
             base_tokens=base_tokens,
             quote_ids=quote_ids,
             user_prompt_id=user_prompt_id,
+            artifacts=artifacts or [],
         )
         self.entries.append(entry)
+
+        # Cache artifact content for preamble building
+        if artifacts:
+            for atype, aid in artifacts:
+                key = (atype, aid)
+                if key not in self._artifact_contents:
+                    acontent = self._load_artifact_content(atype, aid)
+                    if acontent:
+                        self._artifact_contents[key] = acontent
+                        self._artifact_tokens[key] = (
+                            approximate_token_count(acontent)
+                        )
 
         # Cache for later use
         self._node_cache[node_id] = {
@@ -327,6 +349,23 @@ class ExportQuoteResolver:
             'quote_ids': quote_ids,
             'content': content
         }
+
+    @staticmethod
+    def _load_artifact_content(artifact_type, artifact_id):
+        """Load content for an artifact by type and id."""
+        if artifact_type == "prompt":
+            from backend.models import UserPrompt
+            obj = UserPrompt.query.get(artifact_id)
+            return obj.get_content() if obj else None
+        if artifact_type == "profile":
+            from backend.models import UserProfile
+            obj = UserProfile.query.get(artifact_id)
+            return obj.get_content() if obj else None
+        if artifact_type == "todo":
+            from backend.models import UserTodo
+            obj = UserTodo.query.get(artifact_id)
+            return obj.get_content() if obj else None
+        return None
 
     def _truncate(self):
         """
@@ -389,6 +428,15 @@ class ExportQuoteResolver:
             for e in self.entries[:self.included_count]
             if e.user_prompt_id is not None
         }
+
+        # Compute final referenced artifacts (all types)
+        self.referenced_artifacts = {
+            "prompt": set(), "profile": set(), "todo": set(),
+        }
+        for e in self.entries[:self.included_count]:
+            for atype, aid in e.artifacts:
+                if atype in self.referenced_artifacts:
+                    self.referenced_artifacts[atype].add(aid)
 
     def _get_node_metadata(self, node_id: int) -> Optional[dict]:
         """
@@ -517,13 +565,56 @@ class ExportQuoteResolver:
         """Build a preamble section listing all referenced system prompts."""
         if not self.referenced_prompt_ids:
             return ""
+        sorted_ids = sorted(self.referenced_prompt_ids)
         lines = ["## System Prompts Referenced\n"]
-        for pid in sorted(self.referenced_prompt_ids):
+        for i, pid in enumerate(sorted_ids):
             content = self._prompt_contents.get(pid, "")
             lines.append(f"### Prompt (ref #{pid})\n")
             lines.append(content)
-            lines.append("\n")
+            if i < len(sorted_ids) - 1:
+                lines.append("\n===\n")
+            else:
+                lines.append("\n")
         return "\n".join(lines)
+
+    def get_artifacts_preamble(self) -> str:
+        """Build preamble sections for all referenced artifact types."""
+        sections = []
+
+        # Prompts (reuse existing logic)
+        prompt_text = self.get_prompt_preamble()
+        if prompt_text:
+            sections.append(prompt_text)
+
+        # Profiles
+        profile_ids = sorted(self.referenced_artifacts.get("profile", set()))
+        if profile_ids:
+            lines = ["## User Profiles Referenced\n"]
+            for i, pid in enumerate(profile_ids):
+                content = self._artifact_contents.get(("profile", pid), "")
+                lines.append(f"### User Profile (ref #{pid})\n")
+                lines.append(content)
+                if i < len(profile_ids) - 1:
+                    lines.append("\n===\n")
+                else:
+                    lines.append("\n")
+            sections.append("\n".join(lines))
+
+        # TODOs
+        todo_ids = sorted(self.referenced_artifacts.get("todo", set()))
+        if todo_ids:
+            lines = ["## User TODOs Referenced\n"]
+            for i, tid in enumerate(todo_ids):
+                content = self._artifact_contents.get(("todo", tid), "")
+                lines.append(f"### User TODO (ref #{tid})\n")
+                lines.append(content)
+                if i < len(todo_ids) - 1:
+                    lines.append("\n===\n")
+                else:
+                    lines.append("\n")
+            sections.append("\n".join(lines))
+
+        return "\n===\n\n".join(sections)
 
     def get_included_entries(self) -> List[NodeEntry]:
         """

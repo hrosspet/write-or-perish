@@ -88,7 +88,7 @@ def backfill_human_owner_command():
 def backfill_prompt_refs_command():
     """Link existing system prompt nodes to UserPrompt rows. Idempotent."""
     from backend.extensions import db
-    from backend.models import Node, UserPrompt, User
+    from backend.models import Node, NodeContextArtifact, UserPrompt, User
     from backend.utils.encryption import decrypt_content
     from backend.utils.prompts import get_user_prompt_record, PROMPT_DEFAULTS
 
@@ -141,8 +141,19 @@ def backfill_prompt_refs_command():
             except Exception:
                 continue
             if plaintext in content_to_prompt_id:
-                node.user_prompt_id = content_to_prompt_id[plaintext]
+                prompt_id = content_to_prompt_id[plaintext]
+                node.user_prompt_id = prompt_id
                 node.content = None
+                # Also create artifact row if not already present
+                existing = NodeContextArtifact.query.filter_by(
+                    node_id=node.id, artifact_type="prompt",
+                ).first()
+                if not existing:
+                    db.session.add(NodeContextArtifact(
+                        node_id=node.id,
+                        artifact_type="prompt",
+                        artifact_id=prompt_id,
+                    ))
                 linked += 1
 
         if linked:

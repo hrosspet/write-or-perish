@@ -4,6 +4,7 @@ from backend.models import Node
 from backend.extensions import db
 from backend.utils.prompts import get_user_prompt_record
 from backend.utils.llm_nodes import create_llm_placeholder
+from backend.utils.context_artifacts import attach_context_artifacts
 
 converse_bp = Blueprint("converse", __name__)
 
@@ -70,6 +71,9 @@ def start_conversation():
     )
     db.session.add(system_node)
     db.session.flush()
+    attach_context_artifacts(
+        system_node.id, current_user.id, prompt_record=prompt_record,
+    )
 
     # 2. User message node
     user_node = Node(

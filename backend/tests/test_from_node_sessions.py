@@ -55,7 +55,7 @@ for _mod in [k for k in list(sys.modules)
 
 import flask_login as _real_flask_login          # noqa: E402
 from backend.extensions import db as _db         # noqa: E402
-from backend.models import User, Node, UserPrompt  # noqa: E402
+from backend.models import User, Node, NodeContextArtifact, UserPrompt  # noqa: E402
 import backend.models as _real_backend_models    # noqa: E402
 
 # Re-register task mock after force-import loop
@@ -258,6 +258,12 @@ class TestReflectFromNodeMatrix:
         assert system_node.content is None
         linked_prompt = UserPrompt.query.get(system_node.user_prompt_id)
         assert linked_prompt.prompt_key == "reflect"
+        # Verify artifact row was created
+        prompt_artifact = NodeContextArtifact.query.filter_by(
+            node_id=system_node.id, artifact_type="prompt",
+        ).first()
+        assert prompt_artifact is not None
+        assert prompt_artifact.artifact_id == linked_prompt.id
 
     def test_no_prompt_llm_node_creates_system_prompt_and_processing(
         self, app

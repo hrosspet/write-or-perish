@@ -1,9 +1,12 @@
 import React from 'react';
 import ReactMarkdown from 'react-markdown';
 import InlineQuoteBubble from './InlineQuoteBubble';
+import InlineArtifactSection from './InlineArtifactSection';
 
-// Pattern to match {quote:123} placeholders
-const QUOTE_PATTERN = /\{quote:(\d+)\}/g;
+// Pattern to match {user_profile} and {user_todo} placeholders
+const ARTIFACT_PATTERN = /\{user_(profile|todo)\}/g;
+// Combined pattern for splitting (quotes + artifacts)
+const COMBINED_PATTERN = /(\{quote:\d+\}|\{user_(?:profile|todo)\})/g;
 
 /**
  * QuotedContent - Renders content with inline quote previews.
@@ -12,17 +15,21 @@ const QUOTE_PATTERN = /\{quote:(\d+)\}/g;
  * as clickable InlineQuoteBubble components.
  *
  * Props:
- *   content: The raw text content that may contain {quote:ID} placeholders
+ *   content: The raw text content that may contain {quote:ID} / {user_profile} / {user_todo} placeholders
  *   quotes: Object mapping quote IDs to quote data (or null if not accessible)
+ *   contextArtifacts: Object with "profile" and/or "todo" keys containing artifact data
  *   onQuoteClick: Callback when a quote is clicked (receives quote ID)
  */
-const QuotedContent = ({ content, quotes, onQuoteClick }) => {
+const QuotedContent = ({ content, quotes, contextArtifacts, onQuoteClick }) => {
   if (!content) {
     return null;
   }
 
-  // If no quotes data provided, just render the content as-is with markdown
-  if (!quotes || Object.keys(quotes).length === 0) {
+  const hasQuotes = quotes && Object.keys(quotes).length > 0;
+  const hasArtifacts = contextArtifacts && Object.keys(contextArtifacts).length > 0;
+
+  // If no special data provided, just render the content as-is with markdown
+  if (!hasQuotes && !hasArtifacts && !ARTIFACT_PATTERN.test(content)) {
     return (
       <ReactMarkdown components={markdownComponents}>
         {content}
@@ -30,39 +37,29 @@ const QuotedContent = ({ content, quotes, onQuoteClick }) => {
     );
   }
 
-  // Parse content into segments: text and quote placeholders
+  // Parse content into segments using the combined pattern
   const segments = [];
-  let lastIndex = 0;
-  let match;
+  const parts = content.split(COMBINED_PATTERN);
 
-  // Reset the regex lastIndex for fresh matching
-  QUOTE_PATTERN.lastIndex = 0;
+  for (const part of parts) {
+    if (!part) continue;
 
-  while ((match = QUOTE_PATTERN.exec(content)) !== null) {
-    // Add text before this match
-    if (match.index > lastIndex) {
-      segments.push({
-        type: 'text',
-        content: content.substring(lastIndex, match.index),
-      });
+    // Check if this part is a quote placeholder
+    const quoteMatch = part.match(/^\{quote:(\d+)\}$/);
+    if (quoteMatch) {
+      segments.push({ type: 'quote', quoteId: quoteMatch[1] });
+      continue;
     }
 
-    // Add the quote placeholder
-    const quoteId = match[1];
-    segments.push({
-      type: 'quote',
-      quoteId: quoteId,
-    });
+    // Check if this part is an artifact placeholder
+    const artifactMatch = part.match(/^\{user_(profile|todo)\}$/);
+    if (artifactMatch) {
+      segments.push({ type: 'artifact', artifactType: artifactMatch[1] });
+      continue;
+    }
 
-    lastIndex = match.index + match[0].length;
-  }
-
-  // Add remaining text after last match
-  if (lastIndex < content.length) {
-    segments.push({
-      type: 'text',
-      content: content.substring(lastIndex),
-    });
+    // Regular text
+    segments.push({ type: 'text', content: part });
   }
 
   // Render segments
@@ -76,12 +73,23 @@ const QuotedContent = ({ content, quotes, onQuoteClick }) => {
             </ReactMarkdown>
           );
         } else if (segment.type === 'quote') {
-          const quoteData = quotes[segment.quoteId];
+          const quoteData = quotes ? quotes[segment.quoteId] : null;
           return (
             <InlineQuoteBubble
               key={index}
               quote={quoteData}
               onClick={onQuoteClick}
+            />
+          );
+        } else if (segment.type === 'artifact') {
+          const artifact = contextArtifacts
+            ? contextArtifacts[segment.artifactType]
+            : null;
+          return (
+            <InlineArtifactSection
+              key={index}
+              type={segment.artifactType}
+              artifact={artifact}
             />
           );
         }

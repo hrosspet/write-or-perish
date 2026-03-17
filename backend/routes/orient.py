@@ -4,6 +4,7 @@ from backend.models import Node
 from backend.extensions import db
 from backend.utils.prompts import get_user_prompt_record, get_user_prompt
 from backend.utils.llm_nodes import create_llm_placeholder
+from backend.utils.context_artifacts import attach_context_artifacts
 from backend.routes.reflect import (
     _ancestors_have_prompt, _is_llm_node, _create_llm_placeholder,
 )
@@ -62,6 +63,9 @@ def create_orient_session():
         )
         db.session.add(system_node)
         db.session.flush()
+        attach_context_artifacts(
+            system_node.id, current_user.id, prompt_record=prompt_record,
+        )
         user_parent_id = system_node.id
 
     # User node with transcription
@@ -160,6 +164,9 @@ def create_orient_from_node(node_id):
         )
         db.session.add(system_node)
         db.session.flush()
+        attach_context_artifacts(
+            system_node.id, current_user.id, prompt_record=prompt_record,
+        )
 
         llm_node = _create_llm_placeholder(
             system_node.id, model_id, current_user.id
@@ -184,6 +191,10 @@ def create_orient_from_node(node_id):
         user_prompt_id=prompt_record.id,
     )
     db.session.add(system_node)
+    db.session.flush()
+    attach_context_artifacts(
+        system_node.id, current_user.id, prompt_record=prompt_record,
+    )
     db.session.commit()
 
     return jsonify({
