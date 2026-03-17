@@ -271,7 +271,7 @@ export default function OrientPage() {
     return <div style={containerStyle} />;
   }
 
-  if (interruptedDraft && phase === 'ready') {
+  if (interruptedDraft && (phase === 'ready' || phase === 'processing' || phase === 'playback')) {
     return (
       <div style={containerStyle}>
         <RecoveryBanner
