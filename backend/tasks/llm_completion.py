@@ -1,9 +1,11 @@
 """
 Celery task for asynchronous LLM completion.
 """
+import re
 from celery import Task
 from celery.utils.log import get_task_logger
 from datetime import datetime
+from urllib.parse import parse_qs
 
 from backend.celery_app import celery, flask_app
 from backend.models import Node, User, UserProfile, UserTodo, APICostLog
@@ -16,18 +18,37 @@ from backend.utils.cost import calculate_llm_cost_microdollars
 
 logger = get_task_logger(__name__)
 
-# Placeholder for injecting user's writing archive into messages
-USER_EXPORT_PLACEHOLDER = "{user_export}"
+# Pattern for detecting {user_export} with optional URL-style params.
+#
+# Syntax: {user_export} or {user_export?param=value&param2=value2}
+#
+# Supported params:
+#   keep=oldest  - When truncating to fit the context window, keep the oldest
+#                  threads instead of the newest (default). Useful for tasks
+#                  that need early/foundational writing.
+#   keep=newest  - Explicit default: keep the newest threads when truncating.
+#
+USER_EXPORT_PATTERN = re.compile(r"\{user_export(\?[^}]*)?\}")
 # Placeholder for injecting user's AI-generated profile into messages
 USER_PROFILE_PLACEHOLDER = "{user_profile}"
 # Placeholder for injecting user's todo list into messages
 USER_TODO_PLACEHOLDER = "{user_todo}"
 
 
-def build_user_export_content(user, max_tokens=None, filter_ai_usage=False, created_before=None):
+def parse_placeholder_params(match_str):
+    """Parse URL-style params from a placeholder like {user_export?keep=oldest}."""
+    if '?' in match_str:
+        qs = match_str.split('?', 1)[1].rstrip('}')
+        return {k: v[0] for k, v in parse_qs(qs).items()}
+    return {}
+
+
+def build_user_export_content(user, max_tokens=None, filter_ai_usage=False,
+                              created_before=None, chronological_order=False):
     """Import the actual implementation from export_data routes."""
     from backend.routes.export_data import build_user_export_content as _build
-    return _build(user, max_tokens, filter_ai_usage, created_before)
+    return _build(user, max_tokens, filter_ai_usage, created_before,
+                  chronological_order=chronological_order)
 
 
 def get_user_profile_content(user_id):
@@ -130,12 +151,17 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # Check if any node contains the {user_export} placeholder
             # Find the first node containing it to use its timestamp as cutoff
             export_node = None
+            export_placeholder_match = None
             for node in node_chain:
                 node_content = node.get_content()
-                if node_content and USER_EXPORT_PLACEHOLDER in node_content:
-                    export_node = node
-                    break
+                if node_content:
+                    m = USER_EXPORT_PATTERN.search(node_content)
+                    if m:
+                        export_node = node
+                        export_placeholder_match = m.group(0)
+                        break
             needs_export = export_node is not None
+            export_params = parse_placeholder_params(export_placeholder_match) if export_placeholder_match else {}
             user_export_content = None
 
             # Check if any node contains the {user_profile} placeholder
@@ -198,11 +224,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         # Use the timestamp of the node containing {user_export} as cutoff
                         # to only include archive data created before that node
                         created_before = export_node.created_at if export_node else None
+                        chronological = export_params.get('keep') == 'oldest'
                         user_export_content = build_user_export_content(
                             user,
                             max_tokens=max_export_tokens,
                             filter_ai_usage=True,
-                            created_before=created_before
+                            created_before=created_before,
+                            chronological_order=chronological
                         )
                         logger.info(f"Built user export for {user_id}: {len(user_export_content or '')} chars, ~{approximate_token_count(user_export_content or '')} tokens, cutoff={created_before} (attempt {attempt + 1})")
 
@@ -219,9 +247,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         role = "user"
                         message_text = f"author {author}: {node_content}"
                         # Replace {user_export} placeholder if present
-                        if user_export_content and USER_EXPORT_PLACEHOLDER in message_text:
+                        if user_export_content and export_placeholder_match:
                             message_text = message_text.replace(
-                                USER_EXPORT_PLACEHOLDER,
+                                export_placeholder_match,
                                 user_export_content
                             )
                         # Replace {user_profile} placeholder if present
