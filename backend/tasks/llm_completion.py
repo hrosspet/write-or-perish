@@ -8,7 +8,7 @@ from datetime import datetime
 from urllib.parse import parse_qs
 
 from backend.celery_app import celery, flask_app
-from backend.models import Node, User, UserProfile, UserTodo, APICostLog
+from backend.models import Node, User, UserProfile, UserRecentContext, UserTodo, APICostLog
 from backend.extensions import db
 from backend.llm_providers import LLMProvider, PromptTooLongError
 from backend.utils.tokens import approximate_token_count, reduce_export_tokens
@@ -33,6 +33,9 @@ USER_EXPORT_PATTERN = re.compile(r"\{user_export(\?[^}]*)?\}")
 USER_PROFILE_PLACEHOLDER = "{user_profile}"
 # Placeholder for injecting user's todo list into messages
 USER_TODO_PLACEHOLDER = "{user_todo}"
+# Placeholders for recent context (summary + raw data since last summary)
+USER_RECENT_PLACEHOLDER = "{user_recent}"
+USER_RECENT_RAW_PLACEHOLDER = "{user_recent_raw}"
 
 
 def parse_placeholder_params(match_str):
@@ -81,6 +84,79 @@ def get_user_todo_content(user_id):
     if todo and todo.ai_usage == "chat":
         return todo.get_content()
     return None
+
+
+def get_user_recent_content(user_id):
+    """Get the latest recent context summary for a user.
+
+    Filters by profile_id matching the current profile so old summaries
+    (from before a profile update) are not returned.
+    """
+    profile = UserProfile.query.filter_by(user_id=user_id).filter(
+        UserProfile.ai_usage.in_(["chat", "train"])
+    ).order_by(UserProfile.created_at.desc()).first()
+
+    profile_id = profile.id if profile else None
+
+    q = UserRecentContext.query.filter_by(user_id=user_id)
+    if profile_id is not None:
+        q = q.filter_by(profile_id=profile_id)
+    else:
+        q = q.filter(UserRecentContext.profile_id.is_(None))
+
+    rc = q.order_by(UserRecentContext.created_at.desc()).first()
+    if rc and rc.ai_usage == "chat":
+        return rc
+    return None
+
+
+def get_user_recent_raw_content(user_id, created_before=None):
+    """Get raw user writing since the last recent context summary.
+
+    Falls back to profile cutoff if no recent context exists,
+    or returns None if neither exists.
+
+    Args:
+        created_before: Upper bound timestamp. Nodes created at/after this
+            time are excluded to avoid duplicating current session context.
+    """
+    profile = UserProfile.query.filter_by(user_id=user_id).filter(
+        UserProfile.ai_usage.in_(["chat", "train"])
+    ).order_by(UserProfile.created_at.desc()).first()
+
+    profile_id = profile.id if profile else None
+
+    # Find latest recent context for current profile
+    q = UserRecentContext.query.filter_by(user_id=user_id)
+    if profile_id is not None:
+        q = q.filter_by(profile_id=profile_id)
+    else:
+        q = q.filter(UserRecentContext.profile_id.is_(None))
+    rc = q.order_by(UserRecentContext.created_at.desc()).first()
+
+    # Determine cutoff timestamp
+    if rc and rc.source_data_cutoff:
+        created_after = rc.source_data_cutoff
+    elif profile and profile.source_data_cutoff:
+        created_after = profile.source_data_cutoff
+    else:
+        return None
+
+    from backend.routes.export_data import (
+        build_user_export_content as _build_export,
+    )
+    user = User.query.get(user_id)
+    if not user:
+        return None
+
+    return _build_export(
+        user,
+        max_tokens=10000,
+        filter_ai_usage=True,
+        created_after=created_after,
+        created_before=created_before,
+        chronological_order=True,
+    )
 
 
 class LLMCompletionTask(Task):
@@ -178,6 +254,23 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             )
             user_todo_content = None
 
+            # Check if any node contains {user_recent} or {user_recent_raw}
+            needs_recent = any(
+                USER_RECENT_PLACEHOLDER in node.get_content()
+                for node in node_chain if node.get_content()
+            )
+            # Find the node containing {user_recent_raw} to use its
+            # created_at as an upper bound (avoid duplicating session context)
+            recent_raw_node = None
+            for node in node_chain:
+                nc = node.get_content()
+                if nc and USER_RECENT_RAW_PLACEHOLDER in nc:
+                    recent_raw_node = node
+                    break
+            needs_recent_raw = recent_raw_node is not None
+            user_recent_content = None
+            user_recent_raw_content = None
+
             # Check if any node contains {quote:ID} placeholders
             needs_quotes = any(
                 has_quotes(node.get_content())
@@ -199,6 +292,20 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     logger.info(f"Retrieved user todo for {user_id}: {len(user_todo_content)} chars")
                 else:
                     logger.info(f"No todo with chat permission found for user {user_id}")
+
+            if needs_recent:
+                rc = get_user_recent_content(user_id)
+                if rc:
+                    user_recent_content = rc.get_content()
+                    logger.info(f"Retrieved recent context for {user_id}: {len(user_recent_content)} chars")
+
+            if needs_recent_raw:
+                raw_cutoff = recent_raw_node.created_at if recent_raw_node else None
+                user_recent_raw_content = get_user_recent_raw_content(
+                    user_id, created_before=raw_cutoff
+                )
+                if user_recent_raw_content:
+                    logger.info(f"Retrieved recent raw data for {user_id}: {len(user_recent_raw_content)} chars, cutoff={raw_cutoff}")
 
             if needs_export:
                 max_export_tokens = None  # Send entire archive; let retry loop converge
@@ -263,6 +370,18 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             message_text = message_text.replace(
                                 USER_TODO_PLACEHOLDER,
                                 user_todo_content or ""
+                            )
+                        # Replace {user_recent} placeholder if present
+                        if USER_RECENT_PLACEHOLDER in message_text:
+                            message_text = message_text.replace(
+                                USER_RECENT_PLACEHOLDER,
+                                user_recent_content or ""
+                            )
+                        # Replace {user_recent_raw} placeholder if present
+                        if USER_RECENT_RAW_PLACEHOLDER in message_text:
+                            message_text = message_text.replace(
+                                USER_RECENT_RAW_PLACEHOLDER,
+                                user_recent_raw_content or ""
                             )
                         # Resolve {quote:ID} placeholders if present
                         if needs_quotes and has_quotes(message_text):

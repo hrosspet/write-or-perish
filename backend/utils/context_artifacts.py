@@ -2,7 +2,7 @@
 
 from backend.extensions import db
 from backend.models import (
-    NodeContextArtifact, UserProfile, UserTodo,
+    NodeContextArtifact, UserProfile, UserRecentContext, UserTodo,
 )
 
 
@@ -37,6 +37,23 @@ def attach_context_artifacts(node_id, user_id, prompt_record=None):
             node_id=node_id,
             artifact_type="profile",
             artifact_id=profile.id,
+        ))
+
+    # Latest recent context summary for the current profile
+    profile_id = profile.id if profile is not None else None
+    rc_query = UserRecentContext.query.filter_by(user_id=user_id)
+    if profile_id is not None:
+        rc_query = rc_query.filter_by(profile_id=profile_id)
+    else:
+        rc_query = rc_query.filter(UserRecentContext.profile_id.is_(None))
+    recent_ctx = rc_query.order_by(
+        UserRecentContext.created_at.desc()
+    ).first()
+    if recent_ctx is not None:
+        db.session.add(NodeContextArtifact(
+            node_id=node_id,
+            artifact_type="recent_context",
+            artifact_id=recent_ctx.id,
         ))
 
     # Latest todo that the AI is allowed to see

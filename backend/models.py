@@ -190,6 +190,8 @@ class Node(db.Model):
             return UserProfile.query.get(row.artifact_id)
         if artifact_type == "todo":
             return UserTodo.query.get(row.artifact_id)
+        if artifact_type == "recent_context":
+            return UserRecentContext.query.get(row.artifact_id)
         return None
 
     # ----- Content ---------------------------------------------------------
@@ -353,6 +355,40 @@ class UserProfile(db.Model):
     parent_profile = db.relationship(
         "UserProfile", remote_side="UserProfile.id", uselist=False
     )
+
+    def set_content(self, plaintext: str):
+        """Set content with encryption."""
+        self.content = encrypt_content(plaintext)
+
+    def get_content(self) -> str:
+        """Get decrypted content."""
+        return decrypt_content(self.content)
+
+
+class UserRecentContext(db.Model):
+    """Auto-generated summary of recent user activity since last profile update.
+
+    Sits between the long-term UserProfile (~monthly) and raw data,
+    providing ~500-800 token summaries regenerated every ~10k new tokens.
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    generated_by = db.Column(db.String(64), nullable=False)
+    tokens_used = db.Column(db.Integer, nullable=False, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    # Timestamp of newest Node included in this summary
+    source_data_cutoff = db.Column(db.DateTime, nullable=True)
+    # Cumulative tokens since last profile update covered by this summary
+    source_tokens_covered = db.Column(db.Integer, nullable=True, default=0)
+    # Which profile this supplements (null if no profile exists yet)
+    profile_id = db.Column(
+        db.Integer, db.ForeignKey("user_profile.id"), nullable=True
+    )
+    ai_usage = db.Column(db.String(16), nullable=False, default="chat")
+
+    user = db.relationship("User", backref="recent_contexts")
+    profile = db.relationship("UserProfile", backref="recent_contexts")
 
     def set_content(self, plaintext: str):
         """Set content with encryption."""

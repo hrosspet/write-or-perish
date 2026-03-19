@@ -15,3 +15,13 @@ Respond naturally — the user chose Loore because they want genuine engagement 
 <user_profile>
 {user_profile}
 </user_profile>
+
+<user_recent_context>
+Summary of activity since the profile was last updated:
+{user_recent}
+</user_recent_context>
+
+<recent_raw_data>
+Raw entries since the last summary was generated:
+{user_recent_raw}
+</recent_raw_data>
