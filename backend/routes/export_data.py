@@ -256,7 +256,8 @@ def _collect_all_nodes_in_tree(node, filter_ai_usage=False, created_before=None,
 def build_user_export_content(
     user, max_tokens=None, filter_ai_usage=False,
     created_before=None, created_after=None,
-    chronological_order=False, return_metadata=False
+    chronological_order=False, return_metadata=False,
+    collapse_artifacts=False
 ):
     """
     Core export logic: Build a human-readable text export of all threads for a given user.
@@ -406,7 +407,9 @@ def build_user_export_content(
     export_lines.append("")
 
     # Emit artifact preambles (prompts, profiles, todos) if any are referenced
-    if resolver is not None:
+    if collapse_artifacts:
+        pass  # Skip full artifact content; inline refs are still emitted
+    elif resolver is not None:
         preamble = resolver.get_artifacts_preamble()
         if preamble:
             export_lines.append(preamble)

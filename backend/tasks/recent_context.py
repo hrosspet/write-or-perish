@@ -221,6 +221,7 @@ def generate_recent_context(user_id, profile_id=None, data_cutoff_iso=None):
             created_after=data_cutoff,
             chronological_order=True,
             return_metadata=True,
+            collapse_artifacts=True,
         )
         if not export_result:
             logger.debug(f"User {user_id}: no data for recent context")
@@ -262,6 +263,7 @@ def generate_recent_context(user_id, profile_id=None, data_cutoff_iso=None):
                     created_after=data_cutoff,
                     chronological_order=True,
                     return_metadata=True,
+                    collapse_artifacts=True,
                 )
                 if not export_result:
                     logger.warning(f"User {user_id}: no data after truncation")
