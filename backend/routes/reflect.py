@@ -190,6 +190,7 @@ def create_reflect_session():
         user_parent_id = system_node.id
 
     # Create user node with transcribed content
+    from backend.utils.tokens import approximate_token_count
     user_node = Node(
         user_id=current_user.id,
         human_owner_id=current_user.id,
@@ -197,6 +198,7 @@ def create_reflect_session():
         node_type="user",
         privacy_level="private",
         ai_usage="chat",
+        token_count=approximate_token_count(content),
     )
     user_node.set_content(content)
     db.session.add(user_node)

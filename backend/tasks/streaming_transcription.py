@@ -293,7 +293,9 @@ def finalize_streaming(self, node_id: int, session_id: str, total_chunks: int):
                 final_content = full_transcript
 
         # Update node
+        from backend.utils.tokens import approximate_token_count
         node.set_content(final_content)
+        node.token_count = approximate_token_count(final_content)
         node.transcription_status = 'completed'
         node.transcription_completed_at = datetime.utcnow()
         node.transcription_progress = 100
@@ -1054,6 +1056,7 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
         user_parent_id = system_node.id
 
     # User node with transcript
+    from backend.utils.tokens import approximate_token_count
     user_node = Node(
         user_id=user_id,
         human_owner_id=user_id,
@@ -1061,6 +1064,7 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
         node_type="user",
         privacy_level="private",
         ai_usage="chat",
+        token_count=approximate_token_count(transcript),
     )
     user_node.set_content(transcript)
     db.session.add(user_node)

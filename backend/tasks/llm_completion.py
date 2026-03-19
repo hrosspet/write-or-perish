@@ -445,6 +445,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # Step 5: Update the placeholder LLM node with the response
             self.update_state(state='PROGRESS', meta={'progress': 95, 'status': 'Finalizing'})
             llm_node.set_content(llm_text)
+            llm_node.token_count = output_tokens or approximate_token_count(llm_text)
             llm_node.llm_task_status = 'completed'
             llm_node.llm_task_progress = 100
             db.session.commit()

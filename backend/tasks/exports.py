@@ -949,11 +949,12 @@ def maybe_trigger_incremental_profile_update(user):
 
         cutoff = latest_profile.source_data_cutoff
         if cutoff:
-            from sqlalchemy import func
+            from sqlalchemy import func, or_
             new_tokens = db.session.query(
                 func.coalesce(func.sum(Node.token_count), 0)
             ).filter(
-                Node.user_id == user.id,
+                or_(Node.user_id == user.id,
+                    Node.human_owner_id == user.id),
                 Node.updated_at >= cutoff,
                 Node.ai_usage.in_(['chat', 'train']),
                 Node.token_count.isnot(None)
@@ -962,11 +963,12 @@ def maybe_trigger_incremental_profile_update(user):
             new_tokens = THRESHOLD_TOKENS  # No cutoff = trigger
     else:
         # No profile exists: check total eligible tokens
-        from sqlalchemy import func
+        from sqlalchemy import func, or_
         new_tokens = db.session.query(
             func.coalesce(func.sum(Node.token_count), 0)
         ).filter(
-            Node.user_id == user.id,
+            or_(Node.user_id == user.id,
+                Node.human_owner_id == user.id),
             Node.ai_usage.in_(['chat', 'train']),
             Node.token_count.isnot(None)
         ).scalar()

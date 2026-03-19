@@ -770,7 +770,9 @@ def save_streaming_as_node(session_id):
         transcription_status="completed",
         streaming_transcription=True  # Mark as having chunked audio
     )
+    from backend.utils.tokens import approximate_token_count
     node.set_content(content)
+    node.token_count = approximate_token_count(content)
     db.session.add(node)
     db.session.commit()
 

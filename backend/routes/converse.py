@@ -76,6 +76,7 @@ def start_conversation():
     )
 
     # 2. User message node
+    from backend.utils.tokens import approximate_token_count
     user_node = Node(
         user_id=current_user.id,
         human_owner_id=current_user.id,
@@ -83,6 +84,7 @@ def start_conversation():
         node_type="user",
         privacy_level="private",
         ai_usage="chat",
+        token_count=approximate_token_count(content),
     )
     user_node.set_content(content)
     db.session.add(user_node)
@@ -131,6 +133,7 @@ def add_message(conversation_id):
     last_node = _get_last_node_in_chain(system_node)
 
     # Create user message node
+    from backend.utils.tokens import approximate_token_count
     user_node = Node(
         user_id=current_user.id,
         human_owner_id=current_user.id,
@@ -138,6 +141,7 @@ def add_message(conversation_id):
         node_type="user",
         privacy_level="private",
         ai_usage="chat",
+        token_count=approximate_token_count(content),
     )
     user_node.set_content(content)
     db.session.add(user_node)

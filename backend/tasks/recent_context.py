@@ -6,7 +6,7 @@ providing ~500-800 token summaries regenerated every ~10k new tokens of user wri
 """
 from datetime import datetime, timedelta
 from celery.utils.log import get_task_logger
-from sqlalchemy import func
+from sqlalchemy import func, or_
 
 from backend.celery_app import celery, flask_app
 from backend.models import User, UserProfile, UserRecentContext, Node, APICostLog
@@ -46,11 +46,12 @@ def _get_latest_recent_context(user_id, profile_id=None):
 
 
 def _count_new_tokens(user_id, since):
-    """Count tokens of user nodes created at/after *since*."""
+    """Count tokens of nodes owned by user created at/after *since*."""
     return db.session.query(
         func.coalesce(func.sum(Node.token_count), 0)
     ).filter(
-        Node.user_id == user_id,
+        or_(Node.user_id == user_id,
+            Node.human_owner_id == user_id),
         Node.created_at >= since,
         Node.ai_usage.in_(['chat', 'train']),
         Node.token_count.isnot(None)
@@ -62,7 +63,8 @@ def _count_total_eligible_tokens(user_id):
     return db.session.query(
         func.coalesce(func.sum(Node.token_count), 0)
     ).filter(
-        Node.user_id == user_id,
+        or_(Node.user_id == user_id,
+            Node.human_owner_id == user_id),
         Node.ai_usage.in_(['chat', 'train']),
         Node.token_count.isnot(None)
     ).scalar()
