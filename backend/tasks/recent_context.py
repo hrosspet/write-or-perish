@@ -155,6 +155,7 @@ def check_pending_recent_context_updates():
         users = User.query.filter(
             User.plan.in_(list(User.VOICE_MODE_PLANS))
         ).all()
+        triggered = 0
         for user in users:
             try:
                 should, profile, data_cutoff = _should_generate_recent_context(user)
@@ -164,10 +165,15 @@ def check_pending_recent_context_updates():
                         profile_id=profile.id if profile else None,
                         data_cutoff_iso=data_cutoff.isoformat() if data_cutoff else None,
                     )
+                    triggered += 1
             except Exception as e:
                 logger.warning(
                     f"Recent context check failed for user {user.id}: {e}"
                 )
+        logger.info(
+            f"Recent context check: {len(users)} users, "
+            f"{triggered} generations triggered"
+        )
 
 
 @celery.task
@@ -217,7 +223,7 @@ def generate_recent_context(user_id, profile_id=None, data_cutoff_iso=None):
             return_metadata=True,
         )
         if not export_result:
-            logger.info(f"User {user_id}: no data for recent context")
+            logger.debug(f"User {user_id}: no data for recent context")
             return
 
         recent_data = export_result["content"]
