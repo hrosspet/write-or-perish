@@ -33,6 +33,10 @@ celery.conf.update(
             'task': 'backend.tasks.exports.check_pending_profile_updates',
             'schedule': 3600.0,  # every hour
         },
+        'check-recent-context-updates': {
+            'task': 'backend.tasks.recent_context.check_pending_recent_context_updates',
+            'schedule': 600.0,  # every 10 minutes
+        },
     },
 )
 
@@ -44,3 +48,4 @@ from backend.tasks import tts  # noqa: F401
 from backend.tasks import exports  # noqa: F401
 from backend.tasks import streaming_transcription  # noqa: F401
 from backend.tasks import orient_todo  # noqa: F401
+from backend.tasks import recent_context  # noqa: F401
