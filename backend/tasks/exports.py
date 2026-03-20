@@ -16,6 +16,12 @@ from backend.utils.cost import calculate_llm_cost_microdollars
 
 logger = get_task_logger(__name__)
 
+# Chunking constants for iterative profile generation and incremental updates.
+# Each chunk targets ~90k raw tokens (yielding ~100-110k formatted tokens).
+# Chunks smaller than MIN_CHUNK_TOKENS are deferred to the next update cycle.
+CHUNK_BUDGET = 90000
+MIN_CHUNK_TOKENS = 80000
+
 
 def _is_task_stale(user):
     """Check if the user's profile generation task is stale (lost or timed out).
@@ -464,12 +470,10 @@ def _do_iterative_incremental_update(self, user, model_id, prev_profile,
                                      update_template, cutoff, api_keys):
     """Incremental update with chunked processing.
 
-    Processes new data in ~90k-token chunks (yielding ~100-110k formatted
-    tokens per chunk). Stops when remaining data is undersized (< 80k
-    formatted tokens), leaving that for recent context summaries.
+    Processes new data in ~CHUNK_BUDGET-token chunks (yielding ~100-110k
+    formatted tokens per chunk). Stops when remaining data is undersized
+    (< MIN_CHUNK_TOKENS formatted tokens), leaving that for the next cycle.
     """
-    CHUNK_BUDGET = 90000
-    MIN_CHUNK_TOKENS = 80000
     current_profile_content = prev_profile.get_content()
     current_profile_id = prev_profile.id
     cumulative_source_tokens = prev_profile.source_tokens_used or 0
@@ -822,6 +826,7 @@ def _do_integration(self, user, model_id, last_iterative_profile_id,
 def _iterative_generation(self, user, model_id, gen_template, budget,
                           context_window, max_output_tokens, api_keys):
     """Iterative profile building: process data in chronological chunks."""
+    budget = min(budget, CHUNK_BUDGET)
     logger.info(
         f"Starting iterative profile build for user {user.id}, "
         f"budget={budget} tokens per chunk"
