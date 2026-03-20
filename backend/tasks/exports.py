@@ -444,13 +444,14 @@ def _do_incremental_update(self, user, model_id, previous_profile_id,
     )
 
     # Check if there's any new data at all
-    export_result = build_user_export_content(
-        user, max_tokens=1000, filter_ai_usage=True,
-        created_after=cutoff, chronological_order=True,
-        return_metadata=True
-    )
+    from backend.models import Node
+    has_new_data = Node.query.filter(
+        Node.user_id == user.id,
+        Node.created_at > cutoff,
+        Node.ai_usage.in_(['chat', 'train'])
+    ).first() is not None
 
-    if not export_result or not export_result.get("content"):
+    if not has_new_data:
         logger.info(f"No new data for user {user.id} since cutoff {cutoff}")
         return {
             'user_id': user.id,
