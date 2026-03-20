@@ -445,8 +445,9 @@ def _do_iterative_incremental_update(self, user, model_id, prev_profile,
         # recent context summaries and raw data injection.
         if chunk_tokens_est < MIN_CHUNK_TOKENS:
             logger.info(
-                f"User {user.id}: stopping iterative update, "
-                f"remaining chunk only {chunk_tokens_est} tokens"
+                f"User {user.id}: stopping iterative update — "
+                f"chunk {chunk_num} has {chunk_tokens_est} formatted "
+                f"tokens < {MIN_CHUNK_TOKENS} min threshold"
             )
             break
 
@@ -492,8 +493,10 @@ def _do_iterative_incremental_update(self, user, model_id, prev_profile,
         current_cutoff = latest_ts
 
         logger.info(
-            f"Iterative incremental chunk {chunk_num} for user {user.id}: "
-            f"profile {profile.id}, +{actual_chunk_tokens} tokens"
+            f"User {user.id}: chunk {chunk_num} done — "
+            f"profile {profile.id}, {chunk_tokens_est} formatted tokens, "
+            f"+{actual_chunk_tokens} actual LLM tokens, "
+            f"cumulative={cumulative_source_tokens}"
         )
 
         # Check if there's more data
@@ -522,11 +525,20 @@ def _do_iterative_incremental_update(self, user, model_id, prev_profile,
     # Run integration if we processed chunks and there are
     # pre-existing profile versions to integrate with
     if chunk_num > 0 and prev_profile.id != current_profile_id:
+        logger.info(
+            f"User {user.id}: running integration after "
+            f"{chunk_num} chunks"
+        )
         integration_result = _do_integration(
             self, user, model_id, current_profile_id, api_keys
         )
         if integration_result:
             result = integration_result
+    elif chunk_num == 0:
+        logger.info(
+            f"User {user.id}: no chunks processed — "
+            f"all data below {MIN_CHUNK_TOKENS} min threshold"
+        )
 
     return result
 
@@ -1039,11 +1051,19 @@ def maybe_trigger_incremental_profile_update(user):
         ).scalar()
 
     if new_tokens >= THRESHOLD_TOKENS:
+        logger.info(
+            f"User {user.id}: triggering profile update — "
+            f"{new_tokens} DB tokens >= {THRESHOLD_TOKENS} threshold"
+        )
         force = user.profile_needs_full_regen
         return maybe_trigger_profile_update(
             user.id, force_full_regen=force
         )
 
+    logger.debug(
+        f"User {user.id}: skipping profile update — "
+        f"{new_tokens} DB tokens < {THRESHOLD_TOKENS} threshold"
+    )
     return None
 
 

@@ -110,7 +110,7 @@ def _should_generate_recent_context(user):
     profile_cutoff = profile.source_data_cutoff if profile else None
 
     # Check: profile update NOT imminent
-    # Total new tokens since profile cutoff must be < 100k
+    # Total new tokens since profile cutoff must be < 80k
     if profile_cutoff:
         total_since_profile = _count_new_tokens(user_id, profile_cutoff)
     else:
