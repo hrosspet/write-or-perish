@@ -412,6 +412,24 @@ def _do_incremental_update(self, user, model_id, previous_profile_id,
             'message': 'No new data to update',
         }
 
+    # Check total new data to decide single-pass vs iterative
+    total_new_export = build_user_export_content(
+        user, max_tokens=None, filter_ai_usage=True,
+        created_after=cutoff, chronological_order=True,
+        return_metadata=True
+    )
+    total_new_tokens = total_new_export["token_count"] if total_new_export else 0
+
+    ITERATIVE_THRESHOLD = 130000
+
+    if total_new_tokens > ITERATIVE_THRESHOLD:
+        # Too much data for a single update — process in chunks
+        return _do_iterative_incremental_update(
+            self, user, model_id, prev_profile, update_template,
+            budget, cutoff, api_keys
+        )
+
+    # Single-pass incremental update
     new_data = export_result["content"]
     new_data_tokens = export_result["token_count"]
     latest_ts = export_result["latest_node_created_at"]
@@ -463,6 +481,116 @@ def _do_incremental_update(self, user, model_id, previous_profile_id,
         'status': 'completed',
         'total_tokens': response["total_tokens"],
         'profile_length': len(response["content"]),
+    }
+
+
+def _do_iterative_incremental_update(self, user, model_id, prev_profile,
+                                     update_template, budget, cutoff,
+                                     api_keys):
+    """Incremental update with chunked processing for large data volumes.
+
+    When new data since the last profile exceeds 150k tokens, processes
+    it in budget-sized chronological chunks — each chunk updates the
+    profile iteratively, continuing from the previous profile content.
+    """
+    current_profile_content = prev_profile.get_content()
+    current_profile_id = prev_profile.id
+    cumulative_source_tokens = prev_profile.source_tokens_used or 0
+    current_cutoff = cutoff
+    chunk_num = 0
+
+    logger.info(
+        f"Starting iterative incremental update for user {user.id}, "
+        f"budget={budget} tokens per chunk, cutoff={cutoff}"
+    )
+
+    while True:
+        chunk_num += 1
+        progress = min(10 + chunk_num * 15, 85)
+        self.update_state(state='PROGRESS', meta={
+            'progress': progress,
+            'status': f'Processing chunk {chunk_num}'
+        })
+
+        chunk = build_user_export_content(
+            user, max_tokens=budget, filter_ai_usage=True,
+            created_after=current_cutoff, chronological_order=True,
+            return_metadata=True
+        )
+
+        if not chunk or not chunk.get("content"):
+            break
+
+        chunk_tokens_est = chunk["token_count"]
+        latest_ts = chunk["latest_node_created_at"]
+
+        ratio_pct = round(
+            chunk_tokens_est / max(
+                cumulative_source_tokens + chunk_tokens_est, 1
+            ) * 100, 1
+        )
+
+        prompt = update_template.replace(
+            "{existing_profile}", current_profile_content
+        )
+        prompt = prompt.replace("{new_data}", chunk["content"])
+        prompt = prompt.replace(
+            "{source_tokens_past}", str(cumulative_source_tokens)
+        )
+        prompt = prompt.replace(
+            "{source_tokens_new}", str(chunk_tokens_est)
+        )
+        prompt = prompt.replace("{ratio_percent}", str(ratio_pct))
+
+        response = _call_llm_with_retries(
+            self, model_id, prompt, user.id, api_keys,
+            progress_base=progress,
+            status_label=f'Updating profile: Chunk {chunk_num}'
+        )
+
+        actual_chunk_tokens = response.get(
+            "input_tokens", chunk_tokens_est
+        )
+        cumulative_source_tokens += actual_chunk_tokens
+
+        profile = _save_profile(
+            user, model_id, response["content"], response,
+            source_tokens_used=cumulative_source_tokens,
+            source_data_cutoff=latest_ts,
+            generation_type="iterative",
+            parent_profile_id=current_profile_id,
+        )
+
+        current_profile_content = response["content"]
+        current_profile_id = profile.id
+        current_cutoff = latest_ts
+
+        logger.info(
+            f"Iterative incremental chunk {chunk_num} for user {user.id}: "
+            f"profile {profile.id}, +{actual_chunk_tokens} tokens"
+        )
+
+        # Check if there's more data
+        from backend.models import Node
+        has_more = Node.query.filter(
+            Node.user_id == user.id,
+            Node.created_at > current_cutoff,
+            Node.ai_usage.in_(['chat', 'train'])
+        ).first() is not None
+        if not has_more:
+            break
+
+    logger.info(
+        f"Iterative incremental update for user {user.id}: "
+        f"{chunk_num} chunks, profile {current_profile_id}"
+    )
+
+    return {
+        'user_id': user.id,
+        'profile_id': current_profile_id,
+        'status': 'completed',
+        'total_tokens': cumulative_source_tokens,
+        'chunks_processed': chunk_num,
     }
 
 
