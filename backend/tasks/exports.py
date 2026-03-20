@@ -468,110 +468,22 @@ def _do_incremental_update(self, user, model_id, previous_profile_id,
 
 def _do_iterative_incremental_update(self, user, model_id, prev_profile,
                                      update_template, cutoff, api_keys):
-    """Incremental update with chunked processing.
-
-    Processes new data in ~CHUNK_BUDGET-token chunks (yielding ~100-110k
-    formatted tokens per chunk). Stops when remaining data is undersized
-    (< MIN_CHUNK_TOKENS formatted tokens), leaving that for the next cycle.
-    """
-    current_profile_content = prev_profile.get_content()
-    current_profile_id = prev_profile.id
-    cumulative_source_tokens = prev_profile.source_tokens_used or 0
-    current_cutoff = cutoff
-    chunk_num = 0
-
+    """Incremental update with chunked processing."""
     logger.info(
         f"Starting iterative incremental update for user {user.id}, "
         f"budget={CHUNK_BUDGET} tokens per chunk, cutoff={cutoff}"
     )
 
-    while True:
-        chunk_num += 1
-        progress = min(10 + chunk_num * 15, 85)
-        self.update_state(state='PROGRESS', meta={
-            'progress': progress,
-            'status': f'Processing chunk {chunk_num}'
-        })
-
-        chunk = build_user_export_content(
-            user, max_tokens=CHUNK_BUDGET, filter_ai_usage=True,
-            created_after=current_cutoff, chronological_order=True,
-            return_metadata=True
-        )
-
-        if not chunk or not chunk.get("content"):
-            break
-
-        chunk_tokens_est = chunk["token_count"]
-        latest_ts = chunk["latest_node_created_at"]
-
-        # Stop if this chunk is undersized — leave remainder for
-        # recent context summaries and raw data injection.
-        if chunk_tokens_est < MIN_CHUNK_TOKENS:
-            logger.info(
-                f"User {user.id}: stopping iterative update — "
-                f"chunk {chunk_num} has {chunk_tokens_est} formatted "
-                f"tokens < {MIN_CHUNK_TOKENS} min threshold"
-            )
-            break
-
-        ratio_pct = round(
-            chunk_tokens_est / max(
-                cumulative_source_tokens + chunk_tokens_est, 1
-            ) * 100, 1
-        )
-
-        prompt = update_template.replace(
-            "{existing_profile}", current_profile_content
-        )
-        prompt = prompt.replace("{new_data}", chunk["content"])
-        prompt = prompt.replace(
-            "{source_tokens_past}", str(cumulative_source_tokens)
-        )
-        prompt = prompt.replace(
-            "{source_tokens_new}", str(chunk_tokens_est)
-        )
-        prompt = prompt.replace("{ratio_percent}", str(ratio_pct))
-
-        response = _call_llm_with_retries(
-            self, model_id, prompt, user.id, api_keys,
-            progress_base=progress,
-            status_label=f'Updating profile: Chunk {chunk_num}'
-        )
-
-        actual_chunk_tokens = response.get(
-            "input_tokens", chunk_tokens_est
-        )
-        cumulative_source_tokens += actual_chunk_tokens
-
-        profile = _save_profile(
-            user, model_id, response["content"], response,
-            source_tokens_used=cumulative_source_tokens,
-            source_data_cutoff=latest_ts,
+    current_profile_id, chunk_num, cumulative_source_tokens = \
+        _chunked_profile_loop(
+            self, user, model_id, update_template, api_keys,
+            initial_profile_content=prev_profile.get_content(),
+            initial_profile_id=prev_profile.id,
+            initial_source_tokens=prev_profile.source_tokens_used or 0,
+            initial_cutoff=cutoff,
             generation_type="update",
-            parent_profile_id=current_profile_id,
+            status_prefix="Updating profile",
         )
-
-        current_profile_content = response["content"]
-        current_profile_id = profile.id
-        current_cutoff = latest_ts
-
-        logger.info(
-            f"User {user.id}: chunk {chunk_num} done — "
-            f"profile {profile.id}, {chunk_tokens_est} formatted tokens, "
-            f"+{actual_chunk_tokens} actual LLM tokens, "
-            f"cumulative={cumulative_source_tokens}"
-        )
-
-        # Check if there's more data
-        from backend.models import Node
-        has_more = Node.query.filter(
-            Node.user_id == user.id,
-            Node.created_at > current_cutoff,
-            Node.ai_usage.in_(['chat', 'train'])
-        ).first() is not None
-        if not has_more:
-            break
 
     logger.info(
         f"Iterative incremental update for user {user.id}: "
@@ -586,8 +498,7 @@ def _do_iterative_incremental_update(self, user, model_id, prev_profile,
         'chunks_processed': chunk_num,
     }
 
-    # Run integration if we processed chunks and there are
-    # pre-existing profile versions to integrate with
+    # Run integration if we processed chunks and profile changed
     if chunk_num > 0 and prev_profile.id != current_profile_id:
         logger.info(
             f"User {user.id}: running integration after "
@@ -823,40 +734,50 @@ def _do_integration(self, user, model_id, last_iterative_profile_id,
     }
 
 
-def _iterative_generation(self, user, model_id, gen_template, budget,
-                          context_window, max_output_tokens, api_keys):
-    """Iterative profile building: process data in chronological chunks."""
-    budget = min(budget, CHUNK_BUDGET)
-    logger.info(
-        f"Starting iterative profile build for user {user.id}, "
-        f"budget={budget} tokens per chunk"
-    )
+def _chunked_profile_loop(self, user, model_id, update_template,
+                          api_keys, initial_profile_content=None,
+                          initial_profile_id=None,
+                          initial_source_tokens=0,
+                          initial_cutoff=None,
+                          first_chunk_prompt_fn=None,
+                          generation_type="iterative",
+                          status_prefix="Generating profile",
+                          chunk_budget=CHUNK_BUDGET):
+    """Shared chunked profile processing loop.
 
-    update_template = _load_prompt("profile_update.txt", user_id=user.id)
-    # Strip the OUTPUT section so its "generate now" instruction
-    # doesn't confuse the update prompt.
-    gen_template_no_output = gen_template.split("## OUTPUT")[0]
-    update_template = update_template.replace(
-        "{profile_generation_prompt}", gen_template_no_output
-    )
-    current_profile = None
-    current_profile_id = None
-    cumulative_source_tokens = 0
+    Processes user data in chronological chunks of ~chunk_budget tokens,
+    calling the LLM to generate/update the profile for each chunk.
+
+    Args:
+        first_chunk_prompt_fn: Optional callable(chunk) -> prompt string
+            for the first chunk. If provided, the undersized-chunk guard
+            is skipped for the first chunk. If None, update_template is
+            used for all chunks.
+        generation_type: Profile generation_type for saved profiles.
+        status_prefix: Label prefix for progress updates.
+        chunk_budget: Max raw tokens per chunk.
+
+    Returns:
+        (current_profile_id, chunk_num, cumulative_source_tokens)
+    """
+    current_profile_content = initial_profile_content
+    current_profile_id = initial_profile_id
+    cumulative_source_tokens = initial_source_tokens
+    current_cutoff = initial_cutoff
     chunk_num = 0
-    current_cutoff = None
 
     while True:
         chunk_num += 1
-        progress = min(10 + chunk_num * 20, 85)
+        progress = min(10 + chunk_num * 15, 85)
         self.update_state(state='PROGRESS', meta={
             'progress': progress,
             'status': f'Processing chunk {chunk_num}'
         })
 
         chunk = build_user_export_content(
-            user, max_tokens=budget, filter_ai_usage=True,
-            created_after=current_cutoff,
-            chronological_order=True, return_metadata=True
+            user, max_tokens=chunk_budget, filter_ai_usage=True,
+            created_after=current_cutoff, chronological_order=True,
+            return_metadata=True
         )
 
         if not chunk or not chunk.get("content"):
@@ -865,19 +786,30 @@ def _iterative_generation(self, user, model_id, gen_template, budget,
         chunk_tokens_est = chunk["token_count"]
         latest_ts = chunk["latest_node_created_at"]
 
-        if current_profile is None:
-            # First chunk: use generation template
-            prompt = gen_template.replace("{user_export}", chunk["content"])
+        # Skip undersized chunks. When first_chunk_prompt_fn is set,
+        # the first chunk is always processed (initial generation
+        # must produce something even with little data).
+        is_first_with_gen = (
+            first_chunk_prompt_fn and current_profile_content is None
+        )
+        if not is_first_with_gen and chunk_tokens_est < MIN_CHUNK_TOKENS:
+            logger.info(
+                f"User {user.id}: stopping chunked loop — "
+                f"chunk {chunk_num} has {chunk_tokens_est} formatted "
+                f"tokens < {MIN_CHUNK_TOKENS} min threshold"
+            )
+            break
+
+        if is_first_with_gen:
+            prompt = first_chunk_prompt_fn(chunk)
         else:
-            # Subsequent chunks: use update template
-            # Use estimates for prompt placeholders (guidance for LLM)
             ratio_pct = round(
                 chunk_tokens_est / max(
                     cumulative_source_tokens + chunk_tokens_est, 1
                 ) * 100, 1
             )
             prompt = update_template.replace(
-                "{existing_profile}", current_profile
+                "{existing_profile}", current_profile_content
             )
             prompt = prompt.replace("{new_data}", chunk["content"])
             prompt = prompt.replace(
@@ -892,33 +824,32 @@ def _iterative_generation(self, user, model_id, gen_template, budget,
         response = _call_llm_with_retries(
             self, model_id, prompt, user.id, api_keys,
             progress_base=progress,
-            status_label=f'Generating profile: Chunk {chunk_num}'
+            status_label=f'{status_prefix}: Chunk {chunk_num}'
         )
 
-        # Use actual input tokens from LLM response for accurate tracking
         actual_chunk_tokens = response.get(
             "input_tokens", chunk_tokens_est
         )
         cumulative_source_tokens += actual_chunk_tokens
 
-        # Determine generation type for intermediate vs final
-        gen_type = "iterative"
-
         profile = _save_profile(
             user, model_id, response["content"], response,
             source_tokens_used=cumulative_source_tokens,
             source_data_cutoff=latest_ts,
-            generation_type=gen_type,
+            generation_type=generation_type,
             parent_profile_id=current_profile_id,
         )
 
-        current_profile = response["content"]
+        current_profile_content = response["content"]
         current_profile_id = profile.id
         current_cutoff = latest_ts
 
-        # Check if we've processed all data
-        if chunk["node_count"] == 0:
-            break
+        logger.info(
+            f"User {user.id}: chunk {chunk_num} done — "
+            f"profile {profile.id}, {chunk_tokens_est} formatted tokens, "
+            f"+{actual_chunk_tokens} actual LLM tokens, "
+            f"cumulative={cumulative_source_tokens}"
+        )
 
         # Check if there's more data after this cutoff
         from backend.models import Node
@@ -929,6 +860,35 @@ def _iterative_generation(self, user, model_id, gen_template, budget,
         ).first() is not None
         if not has_more:
             break
+
+    return current_profile_id, chunk_num, cumulative_source_tokens
+
+
+def _iterative_generation(self, user, model_id, gen_template, budget,
+                          context_window, max_output_tokens, api_keys):
+    """Iterative profile building: process data in chronological chunks."""
+    budget = min(budget, CHUNK_BUDGET)
+    logger.info(
+        f"Starting iterative profile build for user {user.id}, "
+        f"budget={budget} tokens per chunk"
+    )
+
+    update_template = _load_prompt("profile_update.txt", user_id=user.id)
+    gen_template_no_output = gen_template.split("## OUTPUT")[0]
+    update_template = update_template.replace(
+        "{profile_generation_prompt}", gen_template_no_output
+    )
+
+    current_profile_id, chunk_num, cumulative_source_tokens = \
+        _chunked_profile_loop(
+            self, user, model_id, update_template, api_keys,
+            first_chunk_prompt_fn=lambda chunk: gen_template.replace(
+                "{user_export}", chunk["content"]
+            ),
+            generation_type="iterative",
+            status_prefix="Generating profile",
+            chunk_budget=budget,
+        )
 
     # Run integration over the iterative chain
     if current_profile_id and chunk_num > 1:
