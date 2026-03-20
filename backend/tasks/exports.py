@@ -330,8 +330,8 @@ def update_user_profile(self, user_id: int, model_id: str,
                     self, user, model_id, previous_profile_id,
                     context_window, max_output_tokens, api_keys
                 )
-                # Auto re-integrate over the full chain
-                if result and result.get('profile_id'):
+                # Auto re-integrate over the full chain (skip if no new data)
+                if result and result.get('profile_id') and result.get('total_tokens', 0) > 0:
                     integration_result = _do_integration(
                         self, user, model_id,
                         result['profile_id'], api_keys
@@ -986,8 +986,11 @@ def maybe_trigger_incremental_profile_update(user):
 def check_pending_profile_updates():
     """Periodic task: check all eligible users for pending profile updates."""
     with flask_app.app_context():
+        # Exclude LLM bot accounts (created by create_llm_placeholder
+        # with twitter_id="llm-{model_id}") — no need for profiles.
         users = User.query.filter(
-            User.plan.in_(list(User.VOICE_MODE_PLANS))
+            User.plan.in_(list(User.VOICE_MODE_PLANS)),
+            ~User.twitter_id.like("llm-%"),
         ).all()
         for user in users:
             try:
