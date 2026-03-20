@@ -489,10 +489,12 @@ def _do_iterative_incremental_update(self, user, model_id, prev_profile,
                                      api_keys):
     """Incremental update with chunked processing for large data volumes.
 
-    When new data since the last profile exceeds 150k tokens, processes
-    it in budget-sized chronological chunks — each chunk updates the
-    profile iteratively, continuing from the previous profile content.
+    When new data since the last profile exceeds 130k tokens, processes
+    it in ~100k chronological chunks — each chunk updates the profile
+    iteratively, continuing from the previous profile content.
     """
+    CHUNK_BUDGET = 100000
+    budget = min(budget, CHUNK_BUDGET)
     current_profile_content = prev_profile.get_content()
     current_profile_id = prev_profile.id
     cumulative_source_tokens = prev_profile.source_tokens_used or 0
