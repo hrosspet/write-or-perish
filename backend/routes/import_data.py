@@ -295,6 +295,7 @@ def confirm_import():
                               if latest_profile else None)
 
                     needs_full_regen = False
+                    earliest_ts = None
                     if cutoff:
                         for f in files_sorted:
                             raw_ts = f.get('modified_at', '')
@@ -303,12 +304,19 @@ def confirm_import():
                                     ts = datetime.fromisoformat(raw_ts)
                                     if ts < cutoff:
                                         needs_full_regen = True
-                                        break
+                                    if (earliest_ts is None
+                                            or ts < earliest_ts):
+                                        earliest_ts = ts
                                 except (ValueError, TypeError):
                                     pass
 
                     if needs_full_regen:
-                        user_obj.profile_needs_full_regen = True
+                        from backend.tasks.exports import (
+                            revert_profile_for_import
+                        )
+                        revert_profile_for_import(
+                            user_obj.id, earliest_ts
+                        )
                         db.session.commit()
 
                     total_imported_tokens = sum(
@@ -743,6 +751,7 @@ def confirm_claude_import():
                               if latest_profile else None)
 
                     needs_full_regen = False
+                    earliest_ts = None
                     if cutoff:
                         for conv in conversations_sorted:
                             for msg in conv.get('messages', []):
@@ -757,14 +766,19 @@ def confirm_claude_import():
                                         ).replace(tzinfo=None)
                                         if ts < cutoff:
                                             needs_full_regen = True
-                                            break
+                                        if (earliest_ts is None
+                                                or ts < earliest_ts):
+                                            earliest_ts = ts
                                     except (ValueError, TypeError):
                                         pass
-                            if needs_full_regen:
-                                break
 
                     if needs_full_regen:
-                        user_obj.profile_needs_full_regen = True
+                        from backend.tasks.exports import (
+                            revert_profile_for_import
+                        )
+                        revert_profile_for_import(
+                            user_obj.id, earliest_ts
+                        )
                         db.session.commit()
 
                     total_imported_tokens = sum(
@@ -956,6 +970,7 @@ def confirm_twitter_import():
                               if latest_profile else None)
 
                     needs_full_regen = False
+                    earliest_ts = None
                     if cutoff:
                         for t in tweets_sorted:
                             raw_ts = t.get('created_at', '')
@@ -967,12 +982,19 @@ def confirm_twitter_import():
                                     ).replace(tzinfo=None)
                                     if ts < cutoff:
                                         needs_full_regen = True
-                                        break
+                                    if (earliest_ts is None
+                                            or ts < earliest_ts):
+                                        earliest_ts = ts
                                 except (ValueError, TypeError):
                                     pass
 
                     if needs_full_regen:
-                        user_obj.profile_needs_full_regen = True
+                        from backend.tasks.exports import (
+                            revert_profile_for_import
+                        )
+                        revert_profile_for_import(
+                            user_obj.id, earliest_ts
+                        )
                         db.session.commit()
 
                     total_imported_tokens = sum(
@@ -1338,6 +1360,7 @@ def confirm_chatgpt_import():
                               if latest_profile else None)
 
                     needs_full_regen = False
+                    earliest_ts = None
                     if cutoff:
                         for conv in conversations_sorted:
                             for msg in conv.get('messages', []):
@@ -1349,14 +1372,19 @@ def confirm_chatgpt_import():
                                         )
                                         if ts < cutoff:
                                             needs_full_regen = True
-                                            break
+                                        if (earliest_ts is None
+                                                or ts < earliest_ts):
+                                            earliest_ts = ts
                                     except (ValueError, TypeError):
                                         pass
-                            if needs_full_regen:
-                                break
 
                     if needs_full_regen:
-                        user_obj.profile_needs_full_regen = True
+                        from backend.tasks.exports import (
+                            revert_profile_for_import
+                        )
+                        revert_profile_for_import(
+                            user_obj.id, earliest_ts
+                        )
                         db.session.commit()
 
                     total_imported_tokens = sum(

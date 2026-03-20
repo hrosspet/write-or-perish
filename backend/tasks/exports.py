@@ -289,6 +289,66 @@ def _save_profile(user, model_id, profile_text, response,
     return new_profile
 
 
+def revert_profile_for_import(user_id, earliest_imported_created_at):
+    """Revert to the last valid profile instead of full regen on import.
+
+    Finds the latest non-integration profile whose source_data_cutoff
+    <= earliest_imported_created_at and creates a "revert" copy.
+    If no valid profile exists, falls back to profile_needs_full_regen.
+    """
+    from backend.utils.privacy import PrivacyLevel, AIUsage
+
+    profiles = UserProfile.query.filter(
+        UserProfile.user_id == user_id,
+        UserProfile.generation_type != 'integration'
+    ).order_by(UserProfile.created_at.desc()).all()
+
+    if not profiles:
+        # No profiles at all — nothing to revert to
+        user = User.query.get(user_id)
+        if user:
+            user.profile_needs_full_regen = True
+        return
+
+    # Find the latest profile with cutoff <= earliest imported timestamp
+    valid_profile = None
+    for p in profiles:
+        if (p.source_data_cutoff
+                and p.source_data_cutoff <= earliest_imported_created_at):
+            valid_profile = p
+            break  # profiles are ordered desc, so first match is latest
+
+    if valid_profile is None:
+        # All profiles are invalidated
+        user = User.query.get(user_id)
+        if user:
+            user.profile_needs_full_regen = True
+        return
+
+    # If the valid profile is already the latest, no revert needed
+    if valid_profile.id == profiles[0].id:
+        return
+
+    # Create a revert profile copying the valid version's content
+    new_profile = UserProfile(
+        user_id=user_id,
+        generated_by=valid_profile.generated_by,
+        tokens_used=0,
+        privacy_level=PrivacyLevel.PRIVATE,
+        ai_usage=AIUsage.CHAT,
+        source_tokens_used=valid_profile.source_tokens_used,
+        source_data_cutoff=valid_profile.source_data_cutoff,
+        generation_type="revert",
+        parent_profile_id=valid_profile.id,
+    )
+    new_profile.set_content(valid_profile.get_content())
+    db.session.add(new_profile)
+    logger.info(
+        "Reverted user %d profile to version %d (cutoff=%s)",
+        user_id, valid_profile.id, valid_profile.source_data_cutoff
+    )
+
+
 @celery.task(base=ProfileGenerationTask, bind=True)
 def update_user_profile(self, user_id: int, model_id: str,
                         previous_profile_id: int = None):
@@ -645,7 +705,7 @@ def _collect_iterative_chain(last_profile_id):
         if not profile:
             break
         if profile.generation_type not in (
-            "iterative", "update", "initial"
+            "iterative", "update", "initial", "revert"
         ):
             break
         chain.append(profile)
