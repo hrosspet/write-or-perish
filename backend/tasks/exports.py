@@ -330,14 +330,6 @@ def update_user_profile(self, user_id: int, model_id: str,
                     self, user, model_id, previous_profile_id,
                     context_window, max_output_tokens, api_keys
                 )
-                # Auto re-integrate over the full chain (skip if no new data)
-                if result and result.get('profile_id') and result.get('total_tokens', 0) > 0:
-                    integration_result = _do_integration(
-                        self, user, model_id,
-                        result['profile_id'], api_keys
-                    )
-                    if integration_result:
-                        result = integration_result
             else:
                 result = _do_initial_generation(
                     self, user, model_id, context_window,
@@ -366,7 +358,7 @@ def update_user_profile(self, user_id: int, model_id: str,
 
 def _do_incremental_update(self, user, model_id, previous_profile_id,
                            context_window, max_output_tokens, api_keys):
-    """Incremental update: load previous profile + new data since cutoff."""
+    """Incremental update: always uses chunked processing."""
     self.update_state(state='PROGRESS', meta={
         'progress': 10, 'status': 'Loading previous profile'
     })
@@ -375,29 +367,19 @@ def _do_incremental_update(self, user, model_id, previous_profile_id,
     if not prev_profile or prev_profile.user_id != user.id:
         raise ValueError(f"Previous profile {previous_profile_id} not found")
 
-    existing_content = prev_profile.get_content()
     cutoff = prev_profile.source_data_cutoff
 
-    # Calculate budget for new data
+    # Build update template
     update_template = _load_prompt("profile_update.txt", user_id=user.id)
     gen_template = _load_prompt("profile_generation.txt", user_id=user.id)
-    # Strip the OUTPUT section so its "generate now" instruction
-    # doesn't confuse the update prompt.
     gen_template_no_output = gen_template.split("## OUTPUT")[0]
     update_template = update_template.replace(
         "{profile_generation_prompt}", gen_template_no_output
     )
-    overhead = (approximate_token_count(update_template)
-                + approximate_token_count(existing_content)
-                + max_output_tokens + 500)
-    budget = max(context_window // 2 - overhead, 5000)
 
-    self.update_state(state='PROGRESS', meta={
-        'progress': 20, 'status': 'Gathering new writing'
-    })
-
+    # Check if there's any new data at all
     export_result = build_user_export_content(
-        user, max_tokens=budget, filter_ai_usage=True,
+        user, max_tokens=1000, filter_ai_usage=True,
         created_after=cutoff, chronological_order=True,
         return_metadata=True
     )
@@ -412,89 +394,22 @@ def _do_incremental_update(self, user, model_id, previous_profile_id,
             'message': 'No new data to update',
         }
 
-    # Check total new data to decide single-pass vs iterative
-    total_new_export = build_user_export_content(
-        user, max_tokens=None, filter_ai_usage=True,
-        created_after=cutoff, chronological_order=True,
-        return_metadata=True
+    return _do_iterative_incremental_update(
+        self, user, model_id, prev_profile, update_template,
+        cutoff, api_keys
     )
-    total_new_tokens = total_new_export["token_count"] if total_new_export else 0
-
-    ITERATIVE_THRESHOLD = 130000
-
-    if total_new_tokens > ITERATIVE_THRESHOLD:
-        # Too much data for a single update — process in chunks
-        return _do_iterative_incremental_update(
-            self, user, model_id, prev_profile, update_template,
-            budget, cutoff, api_keys
-        )
-
-    # Single-pass incremental update
-    new_data = export_result["content"]
-    new_data_tokens = export_result["token_count"]
-    latest_ts = export_result["latest_node_created_at"]
-
-    prev_source_tokens = prev_profile.source_tokens_used or 0
-    total_source = prev_source_tokens + new_data_tokens
-    ratio_pct = round(
-        new_data_tokens / max(total_source, 1) * 100, 1
-    )
-
-    self.update_state(state='PROGRESS', meta={
-        'progress': 40, 'status': 'Building update prompt'
-    })
-
-    prompt = update_template.replace("{existing_profile}", existing_content)
-    prompt = prompt.replace("{new_data}", new_data)
-    prompt = prompt.replace("{source_tokens_past}", str(prev_source_tokens))
-    prompt = prompt.replace("{source_tokens_new}", str(new_data_tokens))
-    prompt = prompt.replace("{ratio_percent}", str(ratio_pct))
-
-    response = _call_llm_with_retries(
-        self, model_id, prompt, user.id, api_keys, progress_base=50
-    )
-
-    # Use actual input tokens from LLM response for accurate tracking
-    actual_input_tokens = response.get("input_tokens", new_data_tokens)
-    actual_total_source = prev_source_tokens + actual_input_tokens
-
-    self.update_state(state='PROGRESS', meta={
-        'progress': 90, 'status': 'Saving updated profile'
-    })
-
-    new_profile = _save_profile(
-        user, model_id, response["content"], response,
-        source_tokens_used=actual_total_source,
-        source_data_cutoff=latest_ts,
-        generation_type="update",
-        parent_profile_id=prev_profile.id,
-    )
-
-    logger.info(
-        f"Incremental profile update for user {user.id}: "
-        f"profile {new_profile.id}, +{actual_input_tokens} tokens"
-    )
-
-    return {
-        'user_id': user.id,
-        'profile_id': new_profile.id,
-        'status': 'completed',
-        'total_tokens': response["total_tokens"],
-        'profile_length': len(response["content"]),
-    }
 
 
 def _do_iterative_incremental_update(self, user, model_id, prev_profile,
-                                     update_template, budget, cutoff,
-                                     api_keys):
-    """Incremental update with chunked processing for large data volumes.
+                                     update_template, cutoff, api_keys):
+    """Incremental update with chunked processing.
 
-    When new data since the last profile exceeds 130k tokens, processes
-    it in ~100k chronological chunks — each chunk updates the profile
-    iteratively, continuing from the previous profile content.
+    Processes new data in ~90k-token chunks (yielding ~100-110k formatted
+    tokens per chunk). Stops when remaining data is undersized (< 80k
+    formatted tokens), leaving that for recent context summaries.
     """
-    CHUNK_BUDGET = 100000
-    budget = min(budget, CHUNK_BUDGET)
+    CHUNK_BUDGET = 90000
+    MIN_CHUNK_TOKENS = 80000
     current_profile_content = prev_profile.get_content()
     current_profile_id = prev_profile.id
     cumulative_source_tokens = prev_profile.source_tokens_used or 0
@@ -503,7 +418,7 @@ def _do_iterative_incremental_update(self, user, model_id, prev_profile,
 
     logger.info(
         f"Starting iterative incremental update for user {user.id}, "
-        f"budget={budget} tokens per chunk, cutoff={cutoff}"
+        f"budget={CHUNK_BUDGET} tokens per chunk, cutoff={cutoff}"
     )
 
     while True:
@@ -515,7 +430,7 @@ def _do_iterative_incremental_update(self, user, model_id, prev_profile,
         })
 
         chunk = build_user_export_content(
-            user, max_tokens=budget, filter_ai_usage=True,
+            user, max_tokens=CHUNK_BUDGET, filter_ai_usage=True,
             created_after=current_cutoff, chronological_order=True,
             return_metadata=True
         )
@@ -525,6 +440,15 @@ def _do_iterative_incremental_update(self, user, model_id, prev_profile,
 
         chunk_tokens_est = chunk["token_count"]
         latest_ts = chunk["latest_node_created_at"]
+
+        # Stop if this chunk is undersized — leave remainder for
+        # recent context summaries and raw data injection.
+        if chunk_tokens_est < MIN_CHUNK_TOKENS:
+            logger.info(
+                f"User {user.id}: stopping iterative update, "
+                f"remaining chunk only {chunk_tokens_est} tokens"
+            )
+            break
 
         ratio_pct = round(
             chunk_tokens_est / max(
@@ -559,7 +483,7 @@ def _do_iterative_incremental_update(self, user, model_id, prev_profile,
             user, model_id, response["content"], response,
             source_tokens_used=cumulative_source_tokens,
             source_data_cutoff=latest_ts,
-            generation_type="iterative",
+            generation_type="update",
             parent_profile_id=current_profile_id,
         )
 
@@ -587,13 +511,24 @@ def _do_iterative_incremental_update(self, user, model_id, prev_profile,
         f"{chunk_num} chunks, profile {current_profile_id}"
     )
 
-    return {
+    result = {
         'user_id': user.id,
         'profile_id': current_profile_id,
         'status': 'completed',
         'total_tokens': cumulative_source_tokens,
         'chunks_processed': chunk_num,
     }
+
+    # Run integration if we processed chunks and there are
+    # pre-existing profile versions to integrate with
+    if chunk_num > 0 and prev_profile.id != current_profile_id:
+        integration_result = _do_integration(
+            self, user, model_id, current_profile_id, api_keys
+        )
+        if integration_result:
+            result = integration_result
+
+    return result
 
 
 def _do_initial_generation(self, user, model_id, context_window,
@@ -1069,7 +1004,7 @@ def maybe_trigger_incremental_profile_update(user):
         UserProfile.generation_type != 'integration'
     ).order_by(UserProfile.created_at.desc()).first()
 
-    THRESHOLD_TOKENS = 100000
+    THRESHOLD_TOKENS = 80000
     MIN_INTERVAL = timedelta(hours=1)
 
     if latest_profile:

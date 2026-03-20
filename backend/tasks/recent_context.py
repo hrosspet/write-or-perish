@@ -19,7 +19,7 @@ from backend.utils.cost import calculate_llm_cost_microdollars
 logger = get_task_logger(__name__)
 
 RECENT_CONTEXT_TOKEN_THRESHOLD = 10000
-PROFILE_UPDATE_TOKEN_THRESHOLD = 100000
+PROFILE_UPDATE_TOKEN_THRESHOLD = 80000
 MIN_INACTIVITY = timedelta(minutes=5)
 MIN_GENERATION_INTERVAL = timedelta(minutes=5)
 
