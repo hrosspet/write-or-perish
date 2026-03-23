@@ -169,11 +169,8 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
 
         try:
             if name == "update_todo":
-                # Delete any existing pending draft in ancestor chain
+                # Find existing pending draft before creating new one
                 existing = _find_pending_todo_draft(node_chain, user_id)
-                if existing:
-                    db.session.delete(existing)
-                    db.session.flush()
 
                 # Save update_summary as a child node of the LLM node
                 summary_node = Node(
@@ -198,6 +195,11 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
                 draft.set_content(inp["updated_todo"])
                 db.session.add(draft)
                 db.session.flush()
+
+                # Delete previous pending draft now that new one exists
+                if existing:
+                    db.session.delete(existing)
+                    db.session.flush()
 
                 result["status"] = "success"
                 result["summary_node_id"] = summary_node.id

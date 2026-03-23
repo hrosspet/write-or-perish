@@ -274,7 +274,16 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str,
 
             text = node.get_content() or ""
             if not text:
-                raise ValueError("No content to generate TTS for")
+                logger.info(f"No text content for node {node_id}, skipping TTS")
+                node.tts_task_status = 'completed'
+                node.tts_task_progress = 100
+                db.session.commit()
+                return {
+                    'node_id': node_id,
+                    'status': 'completed',
+                    'tts_url': None,
+                    'skipped': True,
+                }
 
             target_dir = (
                 Path(audio_storage_root)
