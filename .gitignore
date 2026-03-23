@@ -1,6 +1,7 @@
 **/__pycache__
-!.gitignore  
+!.gitignore
 !.gitattributes
+.claude/
 
 __pycache__/
 *.py[cod]
