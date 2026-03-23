@@ -246,15 +246,19 @@ function NavBar({ onNewEntryClick }) {
           )}
         </div>
 
-        <Link to="/profile" style={linkStyle("/profile")}>
-          Profile
-        </Link>
-        <Link to="/todo" style={linkStyle("/todo")}>
-          Todo
-        </Link>
-        <Link to="/log" style={linkStyle("/log")}>
-          Log
-        </Link>
+        {(!user || user.approved) && (
+          <>
+            <Link to="/profile" style={linkStyle("/profile")}>
+              Profile
+            </Link>
+            <Link to="/todo" style={linkStyle("/todo")}>
+              Todo
+            </Link>
+            <Link to="/log" style={linkStyle("/log")}>
+              Log
+            </Link>
+          </>
+        )}
 
         {!user && (
           <Link
@@ -291,90 +295,93 @@ function NavBar({ onNewEntryClick }) {
             </button>
             {overflowOpen && (
               <div style={dropdownStyle}>
-                {/* Always visible */}
-                <Link to="/import" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
-                  Import data
-                </Link>
-
-                {/* Craft mode items */}
-                {craftMode && (
+                {user.approved && (
                   <>
-                    <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
-                    <button onClick={handleWriteClick} style={dropdownItemStyle}>
-                      Write new entry
-                    </button>
-                    <button onClick={() => {
-                      setOverflowOpen(false);
-                      api.get("/export/threads", { responseType: "blob" })
-                        .then((res) => {
-                          const url = window.URL.createObjectURL(new Blob([res.data]));
-                          const a = document.createElement("a");
-                          a.href = url;
-                          a.download = `loore-export-${new Date().toISOString().slice(0, 10)}.txt`;
-                          a.click();
-                          window.URL.revokeObjectURL(url);
-                        })
-                        .catch((err) => console.error("Export failed:", err));
-                    }} style={dropdownItemStyle}>
-                      Export data
-                    </button>
-                    <Link to="/prompts" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
-                      Prompts
+                    <Link to="/import" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
+                      Import data
                     </Link>
+
+                    {/* Craft mode items */}
+                    {craftMode && (
+                      <>
+                        <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
+                        <button onClick={handleWriteClick} style={dropdownItemStyle}>
+                          Write new entry
+                        </button>
+                        <button onClick={() => {
+                          setOverflowOpen(false);
+                          api.get("/export/threads", { responseType: "blob" })
+                            .then((res) => {
+                              const url = window.URL.createObjectURL(new Blob([res.data]));
+                              const a = document.createElement("a");
+                              a.href = url;
+                              a.download = `loore-export-${new Date().toISOString().slice(0, 10)}.txt`;
+                              a.click();
+                              window.URL.revokeObjectURL(url);
+                            })
+                            .catch((err) => console.error("Export failed:", err));
+                        }} style={dropdownItemStyle}>
+                          Export data
+                        </button>
+                        <Link to="/prompts" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
+                          Prompts
+                        </Link>
+                        <button
+                          onClick={handleGenerateProfile}
+                          disabled={generatingProfile}
+                          style={{
+                            ...dropdownItemStyle,
+                            color: "var(--text-muted)",
+                            cursor: generatingProfile ? "not-allowed" : "pointer",
+                            opacity: generatingProfile ? 0.6 : 1,
+                          }}
+                        >
+                          {generatingProfile ? "Generating profile..." : "(Re-)Generate Profile"}
+                        </button>
+                      </>
+                    )}
+
+                    {/* Bottom section */}
+                    <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
+
+                    {user.is_admin && (
+                      <Link to="/admin" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
+                        Admin
+                      </Link>
+                    )}
+
+                    <Link to="/account" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
+                      Account
+                    </Link>
+
+                    {/* Craft mode toggle */}
                     <button
-                      onClick={handleGenerateProfile}
-                      disabled={generatingProfile}
-                      style={{
-                        ...dropdownItemStyle,
-                        color: "var(--text-muted)",
-                        cursor: generatingProfile ? "not-allowed" : "pointer",
-                        opacity: generatingProfile ? 0.6 : 1,
-                      }}
+                      onClick={toggleCraftMode}
+                      style={{ ...dropdownItemStyle, display: "flex", justifyContent: "space-between", alignItems: "center" }}
                     >
-                      {generatingProfile ? "Generating profile..." : "(Re-)Generate Profile"}
+                      <span>Craft mode</span>
+                      <div style={{
+                        width: "32px",
+                        height: "18px",
+                        borderRadius: "9px",
+                        background: craftMode ? "var(--accent)" : "var(--border)",
+                        position: "relative",
+                        transition: "background 0.2s ease",
+                      }}>
+                        <div style={{
+                          width: "14px",
+                          height: "14px",
+                          borderRadius: "50%",
+                          background: "var(--text-primary)",
+                          position: "absolute",
+                          top: "2px",
+                          left: craftMode ? "16px" : "2px",
+                          transition: "left 0.2s ease",
+                        }} />
+                      </div>
                     </button>
                   </>
                 )}
-
-                {/* Bottom section */}
-                <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
-
-                {user.is_admin && (
-                  <Link to="/admin" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
-                    Admin
-                  </Link>
-                )}
-
-                <Link to="/account" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
-                  Account
-                </Link>
-
-                {/* Craft mode toggle */}
-                <button
-                  onClick={toggleCraftMode}
-                  style={{ ...dropdownItemStyle, display: "flex", justifyContent: "space-between", alignItems: "center" }}
-                >
-                  <span>Craft mode</span>
-                  <div style={{
-                    width: "32px",
-                    height: "18px",
-                    borderRadius: "9px",
-                    background: craftMode ? "var(--accent)" : "var(--border)",
-                    position: "relative",
-                    transition: "background 0.2s ease",
-                  }}>
-                    <div style={{
-                      width: "14px",
-                      height: "14px",
-                      borderRadius: "50%",
-                      background: "var(--text-primary)",
-                      position: "absolute",
-                      top: "2px",
-                      left: craftMode ? "16px" : "2px",
-                      transition: "left 0.2s ease",
-                    }} />
-                  </div>
-                </button>
 
                 <a href={`${backendUrl}/auth/logout`} style={dropdownItemStyle}>
                   Logout

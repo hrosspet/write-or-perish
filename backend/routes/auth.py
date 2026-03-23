@@ -173,7 +173,6 @@ def magic_link_verify():
 @login_required
 def logout():
     logout_user()
-    session.clear()
     flash("Logged out successfully", "success")
     frontend_url = current_app.config.get("FRONTEND_URL")
     return redirect(frontend_url)
