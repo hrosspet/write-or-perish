@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { FaRegCompass } from 'react-icons/fa';
 
 function useOnScreen(ref, threshold = 0.1) {
   const [isVisible, setIsVisible] = useState(false);
@@ -26,25 +25,16 @@ function getGreeting() {
 
 const cards = [
   {
-    key: "reflect",
-    path: "/reflect",
-    title: "Reflect",
-    description: "Speak what's present. Let it come back clearer.",
+    key: "voice",
+    path: "/voice",
+    title: "Voice",
+    description: "Speak what's present. Reflect, orient, or both.",
     icon: (
       <img
         src="/loore-logo-transparent.svg"
         alt=""
         style={{ height: "42px", width: "auto" }}
       />
-    ),
-  },
-  {
-    key: "orient",
-    path: "/orient",
-    title: "Orient",
-    description: "Ground your day. See what matters.",
-    icon: (
-      <FaRegCompass size={42} color="var(--accent)" />
     ),
   },
   {

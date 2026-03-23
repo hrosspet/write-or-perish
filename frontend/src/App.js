@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Routes, Route, Navigate, useNavigate } from 'react-router-dom';
+import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import LandingPage from "./components/LandingPage";
 import Dashboard from "./components/Dashboard";
 import Feed from "./components/Feed";
@@ -16,18 +16,23 @@ import HowToPage from "./pages/HowToPage";
 import AlphaThankYouPage from "./pages/AlphaThankYouPage";
 import WelcomePage from "./pages/WelcomePage";
 import HomePage from "./pages/HomePage";
-import ReflectPage from "./pages/ReflectPage";
-import OrientPage from "./pages/OrientPage";
+import VoicePage from "./pages/VoicePage";
 import ConversePage from "./pages/ConversePage";
 import ProfilePage from "./pages/ProfilePage";
 import TodoPage from "./pages/TodoPage";
 import ImportPage from "./pages/ImportPage";
 import AccountPage from "./pages/AccountPage";
+import AiPreferencesPage from "./pages/AiPreferencesPage";
 import PromptsPage from "./pages/PromptsPage";
 import PromptDetailPage from "./pages/PromptDetailPage";
 import SearchModal from "./components/SearchModal";
 import { useUser } from "./contexts/UserContext";
 import { AudioProvider } from "./contexts/AudioContext";
+
+function RedirectToVoice() {
+  const location = useLocation();
+  return <Navigate to={'/voice' + location.search} replace />;
+}
 
 function RootRoute() {
   const { user, loading } = useUser();
@@ -118,8 +123,9 @@ function App() {
           {/* Welcome - protected (for newly approved users) */}
           <Route path="/welcome" element={<ProtectedRoute><WelcomePage onNewEntryClick={() => setShowNewEntry(true)} /></ProtectedRoute>} />
           {/* New workflow routes */}
-          <Route path="/reflect" element={<ProtectedRoute><ReflectPage /></ProtectedRoute>} />
-          <Route path="/orient" element={<ProtectedRoute><OrientPage /></ProtectedRoute>} />
+          <Route path="/voice" element={<ProtectedRoute><VoicePage /></ProtectedRoute>} />
+          <Route path="/reflect" element={<ProtectedRoute><RedirectToVoice /></ProtectedRoute>} />
+          <Route path="/orient" element={<ProtectedRoute><RedirectToVoice /></ProtectedRoute>} />
           <Route path="/converse" element={<ProtectedRoute><ConversePage /></ProtectedRoute>} />
           {/* Profile and Todo */}
           <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
@@ -134,6 +140,7 @@ function App() {
           <Route path="/prompts" element={<ProtectedRoute><PromptsPage /></ProtectedRoute>} />
           <Route path="/prompts/:promptKey" element={<ProtectedRoute><PromptDetailPage /></ProtectedRoute>} />
           <Route path="/import" element={<ProtectedRoute><ImportPage /></ProtectedRoute>} />
+          <Route path="/ai-preferences" element={<ProtectedRoute><AiPreferencesPage /></ProtectedRoute>} />
           <Route path="/account" element={<ProtectedRoute><AccountPage /></ProtectedRoute>} />
           <Route path="/node/:id" element={<ProtectedRoute><NodeDetailWrapper /></ProtectedRoute>} />
           <Route path="/admin" element={<ProtectedRoute><AdminPanel /></ProtectedRoute>} />

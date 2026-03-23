@@ -33,7 +33,7 @@ class LLMProvider:
 
     @staticmethod
     def get_completion(model_id: str, messages: list, api_keys: dict,
-                       max_tokens: int = None) -> dict:
+                       max_tokens: int = None, tools: list = None) -> dict:
         """
         Generate a completion using the specified model.
 
@@ -42,11 +42,13 @@ class LLMProvider:
             messages: List of message dicts in OpenAI format
             api_keys: Dict with "openai" and "anthropic" keys
             max_tokens: Optional max output tokens (overrides provider default)
+            tools: Optional list of tool definitions (Anthropic format)
 
         Returns:
             Dict with:
                 - content (str): The generated text
                 - total_tokens (int): Total tokens used
+                - tool_calls (list): Tool call results [{id, name, input}]
 
         Raises:
             ValueError: If model is unsupported or provider is unknown
@@ -60,16 +62,18 @@ class LLMProvider:
 
         if provider == "openai":
             return LLMProvider._call_openai(
-                api_model, messages, api_keys["openai"], max_tokens)
+                api_model, messages, api_keys["openai"], max_tokens,
+                tools=tools)
         elif provider == "anthropic":
             return LLMProvider._call_anthropic(
-                api_model, messages, api_keys["anthropic"], max_tokens)
+                api_model, messages, api_keys["anthropic"], max_tokens,
+                tools=tools)
         else:
             raise ValueError(f"Unknown provider: {provider}")
 
     @staticmethod
     def _call_openai(model: str, messages: list, api_key: str,
-                     max_tokens: int = None) -> dict:
+                     max_tokens: int = None, tools: list = None) -> dict:
         """
         Call OpenAI API with the given model and messages.
 
@@ -77,21 +81,38 @@ class LLMProvider:
             model: OpenAI model name (e.g., "gpt-5")
             messages: List of message dicts in OpenAI format
             api_key: OpenAI API key
+            tools: Optional tool definitions (Anthropic format, converted here)
 
         Returns:
-            Dict with content and total_tokens
+            Dict with content, total_tokens, and tool_calls
         """
         client = OpenAI(api_key=api_key)
+
+        kwargs = dict(
+            model=model,
+            messages=messages,
+            temperature=1,
+            max_completion_tokens=max_tokens or 10000,
+        )
+
+        # Convert Anthropic-format tools to OpenAI format
+        if tools:
+            openai_tools = []
+            for tool in tools:
+                openai_tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": tool["name"],
+                        "description": tool.get("description", ""),
+                        "parameters": tool.get("input_schema", {}),
+                    }
+                })
+            kwargs["tools"] = openai_tools
+
         try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=1,
-                max_completion_tokens=max_tokens or 10000,
-            )
+            response = client.chat.completions.create(**kwargs)
         except openai.BadRequestError as e:
             error_msg = str(e)
-            # e.g. "maximum context length is 128000 tokens. However, your messages resulted in 130000 tokens"
             match = re.search(
                 r'maximum context length is (\d+) tokens.*?resulted in (\d+) tokens',
                 error_msg
@@ -101,16 +122,29 @@ class LLMProvider:
                 actual_tok = int(match.group(2))
                 raise PromptTooLongError(actual_tok, max_tok, e) from e
             raise
+
+        message = response.choices[0].message
+        tool_calls = []
+        if message.tool_calls:
+            import json
+            for tc in message.tool_calls:
+                tool_calls.append({
+                    "id": tc.id,
+                    "name": tc.function.name,
+                    "input": json.loads(tc.function.arguments),
+                })
+
         return {
-            "content": response.choices[0].message.content,
+            "content": message.content or "",
             "total_tokens": response.usage.total_tokens,
             "input_tokens": response.usage.prompt_tokens,
             "output_tokens": response.usage.completion_tokens,
+            "tool_calls": tool_calls,
         }
 
     @staticmethod
     def _call_anthropic(model: str, messages: list, api_key: str,
-                        max_tokens: int = None) -> dict:
+                        max_tokens: int = None, tools: list = None) -> dict:
         """
         Call Anthropic API with the given model and messages.
 
@@ -122,9 +156,10 @@ class LLMProvider:
             model: Anthropic model name (e.g., "claude-sonnet-4-5-20250929")
             messages: List of message dicts in OpenAI format
             api_key: Anthropic API key
+            tools: Optional tool definitions (Anthropic format)
 
         Returns:
-            Dict with content and total_tokens
+            Dict with content, total_tokens, and tool_calls
         """
         client = Anthropic(api_key=api_key)
 
@@ -162,16 +197,19 @@ class LLMProvider:
         total_input_chars = sum(len(m.get("content", "")) for m in anthropic_messages)
         logger.info(f"Anthropic API call: model={model}, num_messages={len(anthropic_messages)}, total_input_chars={total_input_chars}, max_tokens={max_tokens}")
 
+        kwargs = dict(
+            model=model,
+            max_tokens=max_tokens,
+            system=system_param,
+            messages=anthropic_messages,
+        )
+        if tools:
+            kwargs["tools"] = tools
+
         try:
-            response = client.messages.create(
-                model=model,
-                max_tokens=max_tokens,
-                system=system_param,
-                messages=anthropic_messages
-            )
+            response = client.messages.create(**kwargs)
         except anthropic.BadRequestError as e:
             error_msg = str(e)
-            # e.g. "prompt is too long: 203565 tokens > 200000 maximum"
             match = re.search(
                 r'prompt is too long: (\d+) tokens > (\d+) maximum',
                 error_msg
@@ -182,11 +220,18 @@ class LLMProvider:
                 raise PromptTooLongError(actual_tok, max_tok, e) from e
             raise
 
-        # Extract text content from response
+        # Extract text content and tool calls from response
         content = ""
+        tool_calls = []
         for block in response.content:
             if hasattr(block, "text"):
                 content += block.text
+            elif block.type == "tool_use":
+                tool_calls.append({
+                    "id": block.id,
+                    "name": block.name,
+                    "input": block.input,
+                })
 
         # Calculate total tokens (Anthropic reports input/output separately)
         total_tokens = response.usage.input_tokens + response.usage.output_tokens
@@ -196,4 +241,5 @@ class LLMProvider:
             "total_tokens": total_tokens,
             "input_tokens": response.usage.input_tokens,
             "output_tokens": response.usage.output_tokens,
+            "tool_calls": tool_calls,
         }

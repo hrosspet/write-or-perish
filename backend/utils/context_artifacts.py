@@ -3,6 +3,7 @@
 from backend.extensions import db
 from backend.models import (
     NodeContextArtifact, UserProfile, UserRecentContext, UserTodo,
+    UserAIPreferences,
 )
 
 
@@ -69,4 +70,19 @@ def attach_context_artifacts(node_id, user_id, prompt_record=None):
             node_id=node_id,
             artifact_type="todo",
             artifact_id=todo.id,
+        ))
+
+    # Latest AI preferences that the AI is allowed to see
+    ai_prefs = (
+        UserAIPreferences.query
+        .filter_by(user_id=user_id)
+        .filter(UserAIPreferences.ai_usage.in_(["chat", "train"]))
+        .order_by(UserAIPreferences.created_at.desc())
+        .first()
+    )
+    if ai_prefs is not None:
+        db.session.add(NodeContextArtifact(
+            node_id=node_id,
+            artifact_type="ai_preferences",
+            artifact_id=ai_prefs.id,
         ))

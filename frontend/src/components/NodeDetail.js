@@ -52,8 +52,8 @@ function NodeDetail() {
   const [llmTaskNodeId, setLlmTaskNodeId] = useState(null);
   const [quotes, setQuotes] = useState({});
   const [pinLoading, setPinLoading] = useState(false);
-  const [reflectLoading, setReflectLoading] = useState(false);
-  const [orientLoading, setOrientLoading] = useState(false);
+  const [voiceLoading, setVoiceLoading] = useState(false);
+  const [toolActionsExpanded, setToolActionsExpanded] = useState(false);
   const highlightedNodeRef = useRef(null);
 
   // LLM completion polling - enabled automatically when llmTaskNodeId is set
@@ -214,26 +214,25 @@ function NodeDetail() {
   };
 
   const handleSessionFromNode = (sessionType) => {
-    const setLoading = sessionType === 'reflect' ? setReflectLoading : setOrientLoading;
-    setLoading(true);
+    setVoiceLoading(true);
     setError("");
     api
       .post(`/${sessionType}/from-node/${id}`, { model: selectedModel })
       .then((response) => {
         const { mode, llm_node_id, parent_id, fresh } = response.data;
         if (mode === "processing") {
-          let url = `/${sessionType}?resume=${llm_node_id}`;
+          let url = `/voice?resume=${llm_node_id}`;
           if (parent_id) url += `&parent=${parent_id}`;
           if (fresh) url += `&fresh=1`;
           navigate(url);
         } else {
-          navigate(`/${sessionType}?parent=${parent_id}`);
+          navigate(`/voice?parent=${parent_id}`);
         }
       })
       .catch((err) => {
         console.error(err);
         setError(err.response?.data?.error || `Error starting ${sessionType} session.`);
-        setLoading(false);
+        setVoiceLoading(false);
       });
   };
 
@@ -320,6 +319,39 @@ function NodeDetail() {
           contextArtifacts={node.context_artifacts || null}
           onQuoteClick={handleBubbleClick}
         />
+        {node.tool_calls_meta && node.tool_calls_meta.length > 0 && (
+          <div style={{ marginTop: '12px', borderTop: '1px solid var(--border)', paddingTop: '8px' }}>
+            <button
+              onClick={() => setToolActionsExpanded(!toolActionsExpanded)}
+              style={{
+                background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+                fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
+                color: 'var(--text-muted)',
+              }}
+            >
+              {toolActionsExpanded ? '▾' : '▸'} Actions taken ({node.tool_calls_meta.length})
+            </button>
+            {toolActionsExpanded && (
+              <div style={{ marginTop: '8px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                {node.tool_calls_meta.map((tc, i) => (
+                  <div key={i} style={{
+                    fontFamily: 'var(--sans)', fontSize: '0.78rem', fontWeight: 300,
+                    color: 'var(--text-secondary)', padding: '6px 10px',
+                    background: 'var(--bg-surface)', borderRadius: '6px',
+                    border: '1px solid var(--border)',
+                  }}>
+                    {tc.status === 'success' ? '✓' : '✗'}{' '}
+                    {tc.name === 'update_todo' && 'Todo update proposed'}
+                    {tc.name === 'apply_todo_changes' && 'Todo changes applied'}
+                    {tc.name === 'update_ai_preferences' && 'Preferences updated'}
+                    {!['update_todo', 'apply_todo_changes', 'update_ai_preferences'].includes(tc.name) && tc.name}
+                    {tc.error && <span style={{ color: 'var(--accent)', marginLeft: '8px' }}>{tc.error}</span>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
       <div style={actionContainerStyle}>
         <NodeFooter
@@ -367,11 +399,8 @@ function NodeDetail() {
                   ? "Generating..."
                   : "LLM Response"}
               </button>
-              <button onClick={() => handleSessionFromNode('reflect')} disabled={reflectLoading}>
-                {reflectLoading ? "Starting..." : "Reflect"}
-              </button>
-              <button onClick={() => handleSessionFromNode('orient')} disabled={orientLoading}>
-                {orientLoading ? "Starting..." : "Orient"}
+              <button onClick={() => handleSessionFromNode('voice')} disabled={voiceLoading}>
+                {voiceLoading ? "Starting..." : "Voice"}
               </button>
               <ModelSelector
                 nodeId={node.id}

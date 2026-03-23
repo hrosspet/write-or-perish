@@ -931,7 +931,7 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         draft.streaming_completed_chunks = len(completed_chunks)
 
         should_chain = (user_id and model and full_transcript.strip()
-                        and label in ('Reflect', 'Orient'))
+                        and label in ('Reflect', 'Orient', 'Voice'))
 
         if should_chain:
             try:

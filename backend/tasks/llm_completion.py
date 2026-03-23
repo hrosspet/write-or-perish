@@ -1,6 +1,7 @@
 """
 Celery task for asynchronous LLM completion.
 """
+import json
 import re
 from celery import Task
 from celery.utils.log import get_task_logger
@@ -8,7 +9,10 @@ from datetime import datetime
 from urllib.parse import parse_qs
 
 from backend.celery_app import celery, flask_app
-from backend.models import Node, User, UserProfile, UserRecentContext, UserTodo, APICostLog
+from backend.models import (
+    Node, User, UserProfile, UserRecentContext, UserTodo, APICostLog,
+    UserAIPreferences, Draft,
+)
 from backend.extensions import db
 from backend.llm_providers import LLMProvider, PromptTooLongError
 from backend.utils.tokens import approximate_token_count, reduce_export_tokens
@@ -36,6 +40,212 @@ USER_TODO_PLACEHOLDER = "{user_todo}"
 # Placeholders for recent context (summary + raw data since last summary)
 USER_RECENT_PLACEHOLDER = "{user_recent}"
 USER_RECENT_RAW_PLACEHOLDER = "{user_recent_raw}"
+# Placeholder for AI interaction preferences
+USER_AI_PREFERENCES_PLACEHOLDER = "{user_ai_preferences}"
+
+# ── Voice tool definitions ──────────────────────────────────────────────
+
+VOICE_TOOLS = [
+    {
+        "name": "update_todo",
+        "description": (
+            "Propose changes to the user's todo list based on what they "
+            "shared. Call this when the user mentions completing tasks, "
+            "new tasks they need to do, or wants to reorganize priorities. "
+            "Produces a summary of proposed changes and a full updated "
+            "todo. The changes are NOT applied immediately — the user "
+            "must confirm first."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "update_summary": {
+                    "type": "string",
+                    "description": (
+                        "Structured markdown summary of changes. Use "
+                        "### Completed, ### New Tasks, ### Priority Order "
+                        "sections. Based on what the user shared, "
+                        "cross-referenced with their existing todo."
+                    ),
+                },
+                "updated_todo": {
+                    "type": "string",
+                    "description": (
+                        "Complete updated todo in markdown. Apply all "
+                        "changes: mark completed with [x], add new items "
+                        "as [ ], reorder priorities, preserve unchanged "
+                        "items."
+                    ),
+                },
+            },
+            "required": ["update_summary", "updated_todo"],
+        },
+    },
+    {
+        "name": "apply_todo_changes",
+        "description": (
+            "Apply previously proposed todo changes to the user's actual "
+            "todo list. Call this ONLY when the user explicitly confirms "
+            "they want to apply the changes (e.g. 'ok apply those "
+            "changes', 'yes update my todo', 'go ahead'). Do NOT call "
+            "proactively."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "update_ai_preferences",
+        "description": (
+            "Update the user's AI interaction preferences. Call this when "
+            "the user expresses how they want AI to interact with them — "
+            "tone, style, boundaries, topics to avoid, interaction "
+            "patterns. Examples: 'don't bring up family unless I do', "
+            "'be more direct', 'keep todo updates concise'. The "
+            "updated_preferences should be the FULL updated text (not "
+            "just the diff), incorporating the new preference into the "
+            "existing ones."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "updated_preferences": {
+                    "type": "string",
+                    "description": (
+                        "The complete updated AI interaction preferences "
+                        "as markdown text. Incorporate the new preference "
+                        "into the existing text. Keep it concise."
+                    ),
+                },
+            },
+            "required": ["updated_preferences"],
+        },
+    },
+]
+
+
+def get_user_ai_preferences_content(user_id):
+    """Get the most recent AI preferences if AI usage is permitted."""
+    prefs = UserAIPreferences.query.filter_by(user_id=user_id).order_by(
+        UserAIPreferences.created_at.desc()
+    ).first()
+    if prefs and prefs.ai_usage == "chat":
+        return prefs.get_content()
+    return None
+
+
+def _is_voice_prompt(node_chain):
+    """Check if this conversation has a voice prompt in its chain."""
+    for node in node_chain:
+        prompt = node.get_artifact("prompt") if hasattr(node, 'get_artifact') else None
+        if prompt is not None and prompt.prompt_key == 'voice':
+            return True
+    return False
+
+
+def _find_pending_todo_draft(node_chain, user_id):
+    """Walk the node chain to find a pending todo draft."""
+    for node in reversed(node_chain):
+        draft = Draft.query.filter_by(
+            parent_id=node.id,
+            user_id=user_id,
+            label='todo_pending',
+        ).first()
+        if draft:
+            return draft
+    return None
+
+
+def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
+    """Execute tool calls and return metadata list."""
+    tool_results = []
+
+    for tc in tool_calls:
+        name = tc["name"]
+        inp = tc.get("input", {})
+        result = {"name": name, "input": inp}
+
+        try:
+            if name == "update_todo":
+                # Delete any existing pending draft in ancestor chain
+                existing = _find_pending_todo_draft(node_chain, user_id)
+                if existing:
+                    db.session.delete(existing)
+                    db.session.flush()
+
+                # Save update_summary as a child node of the LLM node
+                summary_node = Node(
+                    user_id=llm_node.user_id,
+                    human_owner_id=user_id,
+                    parent_id=llm_node.id,
+                    node_type="llm",
+                    llm_model=llm_node.llm_model,
+                    privacy_level="private",
+                    ai_usage="chat",
+                )
+                summary_node.set_content(inp["update_summary"])
+                db.session.add(summary_node)
+                db.session.flush()
+
+                # Save updated_todo as a Draft (not a node)
+                draft = Draft(
+                    user_id=user_id,
+                    parent_id=summary_node.id,
+                    label='todo_pending',
+                )
+                draft.set_content(inp["updated_todo"])
+                db.session.add(draft)
+                db.session.flush()
+
+                result["status"] = "success"
+                result["summary_node_id"] = summary_node.id
+                result["draft_id"] = draft.id
+
+            elif name == "apply_todo_changes":
+                draft = _find_pending_todo_draft(node_chain, user_id)
+                if not draft:
+                    result["status"] = "error"
+                    result["error"] = "No pending todo changes found"
+                else:
+                    new_todo = UserTodo(
+                        user_id=user_id,
+                        generated_by="voice_session",
+                        tokens_used=0,
+                    )
+                    new_todo.set_content(draft.get_content())
+                    db.session.add(new_todo)
+                    db.session.delete(draft)
+                    db.session.flush()
+                    result["status"] = "success"
+                    result["todo_id"] = new_todo.id
+
+            elif name == "update_ai_preferences":
+                prefs = UserAIPreferences(
+                    user_id=user_id,
+                    generated_by=llm_node.llm_model or "voice_session",
+                    tokens_used=0,
+                )
+                prefs.set_content(inp["updated_preferences"])
+                db.session.add(prefs)
+                db.session.flush()
+                result["status"] = "success"
+                result["preferences_id"] = prefs.id
+
+            else:
+                result["status"] = "error"
+                result["error"] = f"Unknown tool: {name}"
+
+        except Exception as e:
+            logger.error(f"Tool execution error for {name}: {e}",
+                         exc_info=True)
+            result["status"] = "error"
+            result["error"] = str(e)
+
+        tool_results.append(result)
+
+    return tool_results
 
 
 def parse_placeholder_params(match_str):
@@ -271,6 +481,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             user_recent_content = None
             user_recent_raw_content = None
 
+            # Check if any node contains {user_ai_preferences}
+            needs_ai_prefs = any(
+                USER_AI_PREFERENCES_PLACEHOLDER in node.get_content()
+                for node in node_chain if node.get_content()
+            )
+            user_ai_preferences_content = None
+
             # Check if any node contains {quote:ID} placeholders
             needs_quotes = any(
                 has_quotes(node.get_content())
@@ -306,6 +523,46 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 )
                 if user_recent_raw_content:
                     logger.info(f"Retrieved recent raw data for {user_id}: {len(user_recent_raw_content)} chars, cutoff={raw_cutoff}")
+
+            if needs_ai_prefs:
+                user_ai_preferences_content = get_user_ai_preferences_content(user_id)
+                if user_ai_preferences_content:
+                    logger.info(f"Retrieved AI preferences for {user_id}: {len(user_ai_preferences_content)} chars")
+
+            # Detect if this is a voice session (enables tools)
+            is_voice = _is_voice_prompt(node_chain)
+            voice_tools = VOICE_TOOLS if is_voice else None
+
+            # Check for pending todo draft and inject context note
+            pending_draft_note = None
+            if is_voice:
+                pending = _find_pending_todo_draft(node_chain, user_id)
+                if pending:
+                    pending_draft_note = (
+                        "[Note: there are pending todo changes awaiting "
+                        "confirmation. The user can say 'apply the "
+                        "changes' to confirm.]"
+                    )
+
+            # Inject tool result context from previous LLM node
+            prev_tool_note = None
+            if is_voice and len(node_chain) >= 2:
+                # Check the previous node (likely the last LLM node)
+                for prev_node in reversed(node_chain):
+                    if prev_node.tool_calls_meta:
+                        try:
+                            prev_meta = json.loads(prev_node.tool_calls_meta)
+                            summaries = []
+                            for m in prev_meta:
+                                s = m.get("status", "unknown")
+                                summaries.append(f"{m['name']} {s}")
+                            prev_tool_note = (
+                                "[Previous tool results: "
+                                + ", ".join(summaries) + "]"
+                            )
+                        except (json.JSONDecodeError, KeyError):
+                            pass
+                        break
 
             if needs_export:
                 max_export_tokens = None  # Send entire archive; let retry loop converge
@@ -383,6 +640,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 USER_RECENT_RAW_PLACEHOLDER,
                                 user_recent_raw_content or ""
                             )
+                        # Replace {user_ai_preferences} placeholder
+                        if USER_AI_PREFERENCES_PLACEHOLDER in message_text:
+                            message_text = message_text.replace(
+                                USER_AI_PREFERENCES_PLACEHOLDER,
+                                user_ai_preferences_content or ""
+                            )
                         # Resolve {quote:ID} placeholders if present
                         if needs_quotes and has_quotes(message_text):
                             message_text, resolved_ids = resolve_quotes(message_text, user_id, for_llm=True)
@@ -392,6 +655,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     messages.append({
                         "role": role,
                         "content": [{"type": "text", "text": message_text}]
+                    })
+
+                # Inject voice context notes as a final user message
+                if is_voice and (pending_draft_note or prev_tool_note):
+                    notes = [n for n in [prev_tool_note, pending_draft_note] if n]
+                    messages.append({
+                        "role": "user",
+                        "content": [{"type": "text", "text": "\n".join(notes)}]
                     })
 
                 # Step 3: Call LLM API
@@ -405,7 +676,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 logger.info(f"Calling LLM API: model_id={model_id}, api_model={api_model}, provider={provider}, key_type={key_type}, estimated_tokens={estimated_tokens}, total_chars={len(total_content)}")
 
                 try:
-                    response = LLMProvider.get_completion(model_id, messages, api_keys)
+                    response = LLMProvider.get_completion(
+                        model_id, messages, api_keys,
+                        tools=voice_tools,
+                    )
                     break  # Success
                 except PromptTooLongError as e:
                     if attempt == MAX_RETRIES or not needs_export:
@@ -423,8 +697,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             total_tokens = response["total_tokens"]
             input_tokens = response.get("input_tokens", 0)
             output_tokens = response.get("output_tokens", 0)
+            response_tool_calls = response.get("tool_calls", [])
 
-            logger.info(f"LLM response generated: {len(llm_text)} chars, {total_tokens} tokens")
+            logger.info(f"LLM response generated: {len(llm_text)} chars, {total_tokens} tokens, {len(response_tool_calls)} tool calls")
 
             # Step 4: Log API cost
             self.update_state(state='PROGRESS', meta={'progress': 90, 'status': 'Logging cost'})
@@ -446,18 +721,32 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             self.update_state(state='PROGRESS', meta={'progress': 95, 'status': 'Finalizing'})
             llm_node.set_content(llm_text)
             llm_node.token_count = output_tokens or approximate_token_count(llm_text)
+
+            # Step 5b: Execute tool calls if any
+            tool_meta = None
+            if response_tool_calls:
+                logger.info(f"Executing {len(response_tool_calls)} tool calls")
+                tool_results = _execute_tool_calls(
+                    response_tool_calls, llm_node, node_chain, user_id
+                )
+                tool_meta = tool_results
+                llm_node.tool_calls_meta = json.dumps(tool_results)
+
             llm_node.llm_task_status = 'completed'
             llm_node.llm_task_progress = 100
             db.session.commit()
 
             logger.info(f"LLM completion successful, updated node {llm_node.id}")
 
-            return {
+            result = {
                 'parent_node_id': parent_node_id,
                 'llm_node_id': llm_node.id,
                 'status': 'completed',
-                'total_tokens': total_tokens
+                'total_tokens': total_tokens,
             }
+            if tool_meta:
+                result['tool_calls_meta'] = tool_meta
+            return result
 
         except Exception as e:
             error_message = str(e)
