@@ -61,7 +61,7 @@ const DownloadAudioIcon = ({ nodeId, isPublic, aiUsage }) => {
       // Try audio chunks (streaming recordings) — server merges with ffmpeg
       if (has_audio_chunks) {
         try {
-          const blob = await fetchAsBlob(`/nodes/${nodeId}/audio-download?format=mp3`);
+          const blob = await fetchAsBlob(`/api/nodes/${nodeId}/audio-download?format=mp3`);
           downloadBlob(blob, `node-${nodeId}-recording.mp3`);
           setLoading(false);
           return;
