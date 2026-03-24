@@ -17,7 +17,9 @@ from backend.celery_app import celery, flask_app
 from backend.models import Node, NodeTranscriptChunk, Draft, APICostLog
 from backend.extensions import db
 from backend.utils.audio_processing import compress_audio_if_needed, get_audio_duration
-from backend.utils.webm_utils import fix_last_chunk_duration, is_ffmpeg_available
+from backend.utils.webm_utils import (
+    fix_last_chunk_duration, is_ffmpeg_available, concat_audio_files,
+)
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.encryption import decrypt_file_to_temp
 from backend.utils.cost import calculate_audio_cost_microdollars
@@ -549,9 +551,6 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
     )
 
     with flask_app.app_context():
-        import subprocess
-        import tempfile
-
         audio_storage_root = pathlib.Path(
             os.environ.get("AUDIO_STORAGE_PATH", "data/audio")
         ).resolve()
@@ -590,52 +589,9 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                     f"indices {chunk_indices}"
                 )
 
-            # Merge audio using ffmpeg concat demuxer
-            merged_path = None
-            if len(decrypted_paths) == 1:
-                # Single chunk — no merge needed
-                merge_input = decrypted_paths[0]
-            else:
-                # Create concat list file
-                concat_fd, concat_list_path = tempfile.mkstemp(
-                    suffix='.txt', prefix='concat_'
-                )
-                try:
-                    with os.fdopen(concat_fd, 'w') as f:
-                        for p in decrypted_paths:
-                            # Escape single quotes in path
-                            escaped = p.replace("'", "'\\''")
-                            f.write(f"file '{escaped}'\n")
-
-                    merged_fd, merged_path = tempfile.mkstemp(
-                        suffix='.webm', prefix='merged_'
-                    )
-                    os.close(merged_fd)
-
-                    cmd = [
-                        'ffmpeg', '-y',
-                        '-f', 'concat', '-safe', '0',
-                        '-i', concat_list_path,
-                        '-c', 'copy',
-                        merged_path
-                    ]
-                    result = subprocess.run(
-                        cmd, capture_output=True, text=True, timeout=120
-                    )
-                    if result.returncode != 0:
-                        logger.error(
-                            f"ffmpeg concat failed: {result.stderr}"
-                        )
-                        raise RuntimeError(
-                            f"ffmpeg concat failed: {result.stderr[:500]}"
-                        )
-
-                    merge_input = merged_path
-                finally:
-                    try:
-                        os.unlink(concat_list_path)
-                    except Exception:
-                        pass
+            # Merge audio chunks into a single file
+            merged_path = concat_audio_files(decrypted_paths)
+            merge_input = merged_path
 
             # Compress if needed (webm -> mp3)
             merge_input_path = pathlib.Path(merge_input)

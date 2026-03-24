@@ -1033,6 +1033,107 @@ def get_audio_chunks(node_id):
     return jsonify({"chunks": chunks}), 200
 
 
+@nodes_bp.route("/<int:node_id>/audio-download", methods=["GET"])
+@login_required
+def download_audio(node_id):
+    """Download all audio chunks merged into a single file.
+
+    Query params:
+        format: 'webm' (default) or 'mp3'
+    """
+    from flask import send_file
+    import subprocess
+    from backend.utils.webm_utils import concat_audio_files
+
+    fmt = request.args.get('format', 'webm').lower()
+    if fmt not in ('webm', 'mp3'):
+        return jsonify({"error": "Unsupported format, use 'webm' or 'mp3'"}), 400
+
+    node = Node.query.get_or_404(node_id)
+
+    if node.privacy_level != "public":
+        if not current_user.has_voice_mode:
+            return jsonify({"error": "Voice mode not enabled"}), 403
+
+    if not node.streaming_transcription:
+        return jsonify({"error": "Not a streaming transcription node"}), 404
+
+    chunk_dir = AUDIO_STORAGE_ROOT / f"nodes/{node.user_id}/{node_id}"
+    if not chunk_dir.exists():
+        return jsonify({"error": "No audio files found"}), 404
+
+    # Collect audio files — same fallback logic as get_audio_chunks
+    chunk_files = sorted(chunk_dir.glob("chunk_*.webm"))
+    chunk_files_enc = sorted(chunk_dir.glob("chunk_*.webm.enc"))
+    if not chunk_files and not chunk_files_enc:
+        chunk_files = sorted(chunk_dir.glob("batch_*.webm"))
+        chunk_files_enc = sorted(chunk_dir.glob("batch_*.webm.enc"))
+    if not chunk_files and chunk_files_enc:
+        chunk_files = chunk_files_enc
+    if not chunk_files:
+        return jsonify({"error": "No audio files found"}), 404
+
+    # Decrypt encrypted files to temp paths
+    temp_files = []
+    try:
+        decrypted_paths = []
+        for f in chunk_files:
+            if f.name.endswith('.enc'):
+                tmp = decrypt_file_to_temp(str(f))
+                temp_files.append(tmp)
+                decrypted_paths.append(tmp)
+            else:
+                decrypted_paths.append(str(f))
+
+        merged_path = concat_audio_files(decrypted_paths)
+        temp_files.append(merged_path)
+
+        output_path = merged_path
+        mimetype = 'audio/webm'
+        ext = 'webm'
+
+        if fmt == 'mp3':
+            import tempfile
+            mp3_fd, mp3_path = tempfile.mkstemp(suffix='.mp3')
+            os.close(mp3_fd)
+            temp_files.append(mp3_path)
+            result = subprocess.run(
+                ['ffmpeg', '-y', '-i', merged_path,
+                 '-c:a', 'libmp3lame', '-q:a', '2', mp3_path],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode != 0:
+                current_app.logger.error(f"ffmpeg mp3 conversion failed: {result.stderr}")
+                return jsonify({"error": "Failed to convert to MP3"}), 500
+            output_path = mp3_path
+            mimetype = 'audio/mpeg'
+            ext = 'mp3'
+
+        resp = send_file(
+            output_path, mimetype=mimetype,
+            as_attachment=True,
+            download_name=f'node-{node_id}-recording.{ext}',
+        )
+
+        @resp.call_on_close
+        def cleanup():
+            for tmp in temp_files:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+
+        return resp
+
+    except Exception:
+        for tmp in temp_files:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        raise
+
+
 @nodes_bp.route("/<int:node_id>/tts", methods=["POST"])
 @login_required
 @voice_mode_required

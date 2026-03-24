@@ -58,33 +58,15 @@ const DownloadAudioIcon = ({ nodeId, isPublic, aiUsage }) => {
         return;
       }
 
-      // Try audio chunks (streaming recordings)
+      // Try audio chunks (streaming recordings) — server merges with ffmpeg
       if (has_audio_chunks) {
         try {
-          const chunksRes = await api.get(`/nodes/${nodeId}/audio-chunks`);
-          if (chunksRes.data.chunks?.length > 0) {
-            const chunkUrls = chunksRes.data.chunks.map(c => {
-              const url = typeof c === 'string' ? c : c.url;
-              return url.startsWith('http') ? url : `${process.env.REACT_APP_BACKEND_URL}${url}`;
-            });
-
-            if (chunkUrls.length === 1) {
-              // Single chunk - download directly
-              const blob = await fetchAsBlob(chunkUrls[0]);
-              downloadBlob(blob, `node-${nodeId}-recording.webm`);
-            } else {
-              // Multiple chunks - concatenate into single blob
-              const blobs = await Promise.all(
-                chunkUrls.map(url => fetch(url, { credentials: 'include' }).then(r => r.blob()))
-              );
-              const combined = new Blob(blobs, { type: 'audio/webm' });
-              downloadBlob(combined, `node-${nodeId}-recording.webm`);
-            }
-            setLoading(false);
-            return;
-          }
+          const blob = await fetchAsBlob(`/nodes/${nodeId}/audio-download?format=mp3`);
+          downloadBlob(blob, `node-${nodeId}-recording.mp3`);
+          setLoading(false);
+          return;
         } catch (chunksErr) {
-          console.error('Error fetching audio chunks for download:', chunksErr);
+          console.error('Error downloading merged audio:', chunksErr);
         }
       }
 
