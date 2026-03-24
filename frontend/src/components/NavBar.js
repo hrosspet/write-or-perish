@@ -203,7 +203,7 @@ function NavBar({ onNewEntryClick }) {
       </Link>
 
       <div style={{ display: "flex", alignItems: "center", gap: "clamp(0.8rem, 2vw, 1.8rem)" }}>
-        {currentPath !== '/reflect' && currentPath !== '/orient' && <GlobalAudioPlayer />}
+        {currentPath !== '/reflect' && currentPath !== '/orient' && currentPath !== '/voice' && <GlobalAudioPlayer />}
 
         {/* About dropdown */}
         <div ref={aboutRef} style={{ position: "relative" }}>

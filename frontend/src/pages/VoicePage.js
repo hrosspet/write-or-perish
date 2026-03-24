@@ -246,22 +246,52 @@ export default function VoicePage() {
   } = useInterruptedRecovery();
 
   const [toolCallsMeta, setToolCallsMeta] = useState(null);
-  const [applied, setApplied] = useState(false);
-  const [applyingTodo, setApplyingTodo] = useState(false);
+  // applyStatus: null | 'started' | 'completed' | 'error'
+  const [applyStatus, setApplyStatus] = useState(null);
   const [parsedResponse, setParsedResponse] = useState(null);
   const setThreadParentIdRef = useRef(null);
   const lastLlmNodeIdRef = useRef(null);
+  const mergePollingRef = useRef(null);
+
+  const pollApplyStatus = useCallback((nodeId) => {
+    mergePollingRef.current = setInterval(async () => {
+      try {
+        const res = await api.get(`/nodes/${nodeId}/llm-status`);
+        const meta = res.data.tool_calls_meta;
+        if (meta) {
+          const todoEntry = meta.find(tc => tc.name === 'update_todo');
+          if (todoEntry?.apply_status === 'completed') {
+            clearInterval(mergePollingRef.current);
+            mergePollingRef.current = null;
+            setApplyStatus('completed');
+          } else if (todoEntry?.apply_status === 'failed') {
+            clearInterval(mergePollingRef.current);
+            mergePollingRef.current = null;
+            setApplyStatus('error');
+          }
+        }
+      } catch { /* keep polling */ }
+    }, 2000);
+  }, []);
 
   const handleApplyTodo = useCallback(async (nodeId) => {
     if (!nodeId) return;
-    setApplyingTodo(true);
+    setApplyStatus('started');
     try {
       await api.post('/todo/apply-draft', { llm_node_id: nodeId });
-      setApplied(true);
+      // Poll tool_calls_meta on the LLM node for apply_status
+      pollApplyStatus(nodeId);
     } catch (err) {
       console.error('Failed to apply todo:', err);
+      setApplyStatus('error');
     }
-    setApplyingTodo(false);
+  }, [pollApplyStatus]);
+
+  // Cleanup polling on unmount
+  useEffect(() => {
+    return () => {
+      if (mergePollingRef.current) clearInterval(mergePollingRef.current);
+    };
   }, []);
 
   const { user } = useUser();
@@ -278,7 +308,7 @@ export default function VoicePage() {
     model: selectedModel,
     onLLMComplete: (nodeId, content, isResume) => {
       lastLlmNodeIdRef.current = nodeId;
-      // Parse orient-style sections from content if present
+      // Parse orient-style sections from LLM text (which IS the summary)
       const parsed = parseOrientResponse(content);
       if (parsed.completed || parsed.newTasks || parsed.priority || parsed.note) {
         setParsedResponse(parsed);
@@ -289,19 +319,13 @@ export default function VoicePage() {
         if (res.data.tool_calls_meta) {
           setToolCallsMeta(res.data.tool_calls_meta);
 
-          // Check if update_todo was called — show parsed summary
-          const todoCall = res.data.tool_calls_meta.find(tc => tc.name === 'update_todo');
-          if (todoCall && todoCall.status === 'success' && todoCall.input?.update_summary) {
-            const summaryParsed = parseOrientResponse(todoCall.input.update_summary);
-            if (summaryParsed.completed || summaryParsed.newTasks || summaryParsed.priority) {
-              setParsedResponse(summaryParsed);
-            }
-          }
-
-          // Check if apply_todo_changes was called
+          // Check if apply_todo_changes was called by LLM
           const applyCall = res.data.tool_calls_meta.find(tc => tc.name === 'apply_todo_changes');
           if (applyCall && applyCall.status === 'success') {
-            setApplied(true);
+            setApplyStatus('started');
+            // Poll for merge completion on the LLM node that
+            // proposed the original update (where apply_status lives)
+            pollApplyStatus(nodeId);
           }
         }
       }).catch(() => { /* non-fatal */ });
@@ -311,9 +335,13 @@ export default function VoicePage() {
   setThreadParentIdRef.current = setThreadParentId;
 
   const voiceReset = useCallback(() => {
-    setApplied(false);
+    setApplyStatus(null);
     setParsedResponse(null);
     setToolCallsMeta(null);
+    if (mergePollingRef.current) {
+      clearInterval(mergePollingRef.current);
+      mergePollingRef.current = null;
+    }
   }, []);
 
   const displayTime = audio.cumulativeTime || 0;
@@ -535,7 +563,7 @@ export default function VoicePage() {
   // --- PLAYBACK STATE ---
   const parsed = parsedResponse || {};
   const hasSections = parsed.completed || parsed.newTasks || parsed.priority || parsed.note;
-  const hasTodoUpdate = toolCallsMeta?.some(tc => tc.name === 'update_todo' && tc.status === 'success');
+  const hasTodoUpdate = toolCallsMeta?.some(tc => tc.name === 'update_todo');
   const hasPrefsUpdate = toolCallsMeta?.some(tc => tc.name === 'update_ai_preferences' && tc.status === 'success');
 
   return (
@@ -735,36 +763,51 @@ export default function VoicePage() {
           )}
 
           {/* Apply button for pending todo changes */}
-          {hasTodoUpdate && !applied && (
-            <button
-              onClick={() => handleApplyTodo(lastLlmNodeIdRef.current)}
-              disabled={applyingTodo}
-              style={{
-                display: 'block',
-                margin: '24px auto 0',
-                padding: '10px 24px',
-                background: 'none',
-                border: '1px solid var(--accent)',
-                borderRadius: '6px',
-                color: 'var(--accent)',
-                fontFamily: 'var(--sans)',
-                fontSize: '0.85rem',
-                fontWeight: 400,
-                cursor: applyingTodo ? 'not-allowed' : 'pointer',
-                opacity: applyingTodo ? 0.6 : 1,
-              }}
-            >
-              {applyingTodo ? 'Applying...' : 'Apply changes to my Todo'}
-            </button>
-          )}
-
-          {applied && (
-            <p style={{
-              fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
-              color: '#4ade80', textAlign: 'center', marginTop: '16px',
-            }}>
-              Todo updated
-            </p>
+          {hasTodoUpdate && (
+            <div style={{ textAlign: 'center', marginTop: '24px' }}>
+              {!applyStatus && (
+                <button
+                  onClick={() => handleApplyTodo(lastLlmNodeIdRef.current)}
+                  style={{
+                    padding: '10px 24px',
+                    background: 'none',
+                    border: '1px solid var(--accent)',
+                    borderRadius: '6px',
+                    color: 'var(--accent)',
+                    fontFamily: 'var(--sans)',
+                    fontSize: '0.85rem',
+                    fontWeight: 400,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Apply changes to my Todo
+                </button>
+              )}
+              {applyStatus === 'started' && (
+                <p style={{
+                  fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
+                  color: 'var(--text-muted)',
+                }}>
+                  Todo update started...
+                </p>
+              )}
+              {applyStatus === 'completed' && (
+                <p style={{
+                  fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
+                  color: '#4ade80',
+                }}>
+                  Todo updated
+                </p>
+              )}
+              {applyStatus === 'error' && (
+                <p style={{
+                  fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
+                  color: 'var(--accent)',
+                }}>
+                  Todo update failed
+                </p>
+              )}
+            </div>
           )}
         </div>
       )}

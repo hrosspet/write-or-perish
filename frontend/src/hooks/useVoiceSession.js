@@ -275,12 +275,13 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     }
   }, [llmStatus, llmData, llmNodeId, audio, ttsTitle, stopSilentAudio]);
 
-  // Safety net: if stuck on "processing" for 15s (e.g. SSE never delivers
+  // Safety net: if stuck on "processing" for 60s (e.g. SSE never delivers
   // chunks), transition to playback anyway. The normal path transitions via
   // onChunkReady above; this only fires if something goes wrong.
+  // Increased from 15s to 60s to accommodate tool-use responses.
   useEffect(() => {
     if (phase === 'processing') {
-      const timer = setTimeout(() => setPhase('playback'), 15000);
+      const timer = setTimeout(() => setPhase('playback'), 60000);
       return () => clearTimeout(timer);
     }
   }, [phase]);

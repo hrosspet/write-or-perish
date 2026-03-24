@@ -49,36 +49,18 @@ VOICE_TOOLS = [
     {
         "name": "update_todo",
         "description": (
-            "Propose changes to the user's todo list based on what they "
-            "shared. Call this when the user mentions completing tasks, "
-            "new tasks they need to do, or wants to reorganize priorities. "
-            "Produces a summary of proposed changes and a full updated "
-            "todo. The changes are NOT applied immediately — the user "
-            "must confirm first."
+            "Signal that your text response contains proposed todo "
+            "changes. Call this when the user mentions completing tasks, "
+            "new tasks they need to do, or wants to reorganize "
+            "priorities. Your text response must include the structured "
+            "update (### Completed, ### New Tasks, ### Priority Order, "
+            "### Note sections). The changes are NOT applied immediately "
+            "— the user must confirm first."
         ),
         "input_schema": {
             "type": "object",
-            "properties": {
-                "update_summary": {
-                    "type": "string",
-                    "description": (
-                        "Structured markdown summary of changes. Use "
-                        "### Completed, ### New Tasks, ### Priority Order "
-                        "sections. Based on what the user shared, "
-                        "cross-referenced with their existing todo."
-                    ),
-                },
-                "updated_todo": {
-                    "type": "string",
-                    "description": (
-                        "Complete updated todo in markdown. Apply all "
-                        "changes: mark completed with [x], add new items "
-                        "as [ ], reorder priorities, preserve unchanged "
-                        "items."
-                    ),
-                },
-            },
-            "required": ["update_summary", "updated_todo"],
+            "properties": {},
+            "required": [],
         },
     },
     {
@@ -172,27 +154,15 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
                 # Find existing pending draft before creating new one
                 existing = _find_pending_todo_draft(node_chain, user_id)
 
-                # Save update_summary as a child node of the LLM node
-                summary_node = Node(
-                    user_id=llm_node.user_id,
-                    human_owner_id=user_id,
-                    parent_id=llm_node.id,
-                    node_type="llm",
-                    llm_model=llm_node.llm_model,
-                    privacy_level="private",
-                    ai_usage="chat",
-                )
-                summary_node.set_content(inp["update_summary"])
-                db.session.add(summary_node)
-                db.session.flush()
-
-                # Save updated_todo as a Draft (not a node)
+                # Create lightweight draft flag on the LLM node.
+                # The LLM's text response IS the update summary —
+                # no separate node needed.
                 draft = Draft(
                     user_id=user_id,
-                    parent_id=summary_node.id,
+                    parent_id=llm_node.id,
                     label='todo_pending',
                 )
-                draft.set_content(inp["updated_todo"])
+                draft.set_content("")  # flag only, content is on LLM node
                 db.session.add(draft)
                 db.session.flush()
 
@@ -202,8 +172,8 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
                     db.session.flush()
 
                 result["status"] = "success"
-                result["summary_node_id"] = summary_node.id
                 result["draft_id"] = draft.id
+                result["apply_status"] = "pending_approval"
 
             elif name == "apply_todo_changes":
                 draft = _find_pending_todo_draft(node_chain, user_id)
@@ -211,17 +181,15 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
                     result["status"] = "error"
                     result["error"] = "No pending todo changes found"
                 else:
-                    new_todo = UserTodo(
-                        user_id=user_id,
-                        generated_by="voice_session",
-                        tokens_used=0,
+                    # Kick off async background merge
+                    from backend.routes.todo import (
+                        _start_todo_merge,
                     )
-                    new_todo.set_content(draft.get_content())
-                    db.session.add(new_todo)
-                    db.session.delete(draft)
-                    db.session.flush()
+                    task_id = _start_todo_merge(
+                        draft, llm_node, user_id
+                    )
                     result["status"] = "success"
-                    result["todo_id"] = new_todo.id
+                    result["apply_task_id"] = task_id
 
             elif name == "update_ai_preferences":
                 prefs = UserAIPreferences(
@@ -556,8 +524,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             prev_meta = json.loads(prev_node.tool_calls_meta)
                             summaries = []
                             for m in prev_meta:
+                                name = m['name']
                                 s = m.get("status", "unknown")
-                                summaries.append(f"{m['name']} {s}")
+                                # Include apply status for update_todo
+                                apply_s = m.get("apply_status")
+                                if apply_s:
+                                    s += f", apply {apply_s}"
+                                summaries.append(f"{name} {s}")
                             prev_tool_note = (
                                 "[Previous tool results: "
                                 + ", ".join(summaries) + "]"

@@ -1,4 +1,6 @@
-from flask import Blueprint, jsonify, request
+import json
+
+from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node, Draft, UserTodo
 from backend.extensions import db
@@ -188,13 +190,86 @@ def revert_todo(version_id):
     }), 200
 
 
+def _find_pending_todo_draft(llm_node_id, user_id):
+    """Find the todo_pending draft by walking ancestor chain from llm_node_id."""
+    llm_node = Node.query.get(llm_node_id)
+    if not llm_node:
+        return None, None
+
+    current_node = llm_node
+    visited = set()
+    while current_node and current_node.id not in visited:
+        visited.add(current_node.id)
+        draft = Draft.query.filter_by(
+            user_id=user_id,
+            parent_id=current_node.id,
+            label='todo_pending',
+        ).first()
+        if draft:
+            return draft, current_node
+        current_node = current_node.parent
+    return None, None
+
+
+def _start_todo_merge(draft, llm_node, user_id):
+    """Kick off async background todo merge. No visible nodes created.
+
+    The merge runs entirely in a Celery task:
+    1. Reads the update summary from the LLM node's content
+    2. Gets the current user todo
+    3. Calls LLM with orient_apply_todo prompt to merge
+    4. Saves result as new UserTodo
+    5. Updates tool_calls_meta on the originating LLM node
+    """
+    merge_model = llm_node.llm_model or current_app.config.get(
+        "DEFAULT_LLM_MODEL", "claude-opus-4.5"
+    )
+
+    # Delete ALL pending todo drafts for this user (not just the one found)
+    all_pending = Draft.query.filter_by(
+        user_id=draft.user_id,
+        label='todo_pending',
+    ).all()
+    for d in all_pending:
+        db.session.delete(d)
+
+    # Update tool_calls_meta on the LLM node to record apply started
+    _update_tool_meta(llm_node, "update_todo", {
+        "apply_status": "started",
+    })
+
+    db.session.commit()
+
+    from backend.tasks.voice_todo_merge import apply_voice_todo
+    task = apply_voice_todo.delay(
+        llm_node.id, merge_model, user_id
+    )
+
+    return task.id
+
+
+def _update_tool_meta(node, tool_name, updates):
+    """Update a specific tool call's metadata in node.tool_calls_meta."""
+    meta = []
+    if node.tool_calls_meta:
+        try:
+            meta = json.loads(node.tool_calls_meta)
+        except (json.JSONDecodeError, TypeError):
+            meta = []
+    for entry in meta:
+        if entry.get("name") == tool_name:
+            entry.update(updates)
+            break
+    node.tool_calls_meta = json.dumps(meta)
+
+
 @todo_bp.route("/apply-draft", methods=["POST"])
 @login_required
 def apply_todo_draft():
     """
     Apply a pending todo draft created by the Voice update_todo tool.
-    Walks ancestor nodes from the given llm_node_id to find the
-    todo_pending draft, creates a new UserTodo, and deletes the draft.
+    Kicks off an async orient_apply_todo LLM merge to apply the
+    proposed changes to the full todo list.
     """
     data = request.get_json() or {}
     llm_node_id = data.get("llm_node_id")
@@ -202,30 +277,7 @@ def apply_todo_draft():
     if not llm_node_id:
         return jsonify({"error": "llm_node_id is required"}), 400
 
-    llm_node = Node.query.get(llm_node_id)
-    if not llm_node:
-        return jsonify({"error": "Node not found"}), 404
-
-    # Walk ancestor chain to find todo_pending draft
-    draft = None
-    current_node = llm_node
-    visited = set()
-    while current_node and current_node.id not in visited:
-        visited.add(current_node.id)
-        # Check children of this node for drafts too (summary node is
-        # a child of the LLM node)
-        child_draft = Draft.query.filter_by(
-            user_id=current_user.id,
-            label='todo_pending',
-        ).filter(
-            Draft.parent_id.in_(
-                [c.id for c in current_node.children] + [current_node.id]
-            )
-        ).first()
-        if child_draft:
-            draft = child_draft
-            break
-        current_node = current_node.parent
+    draft, llm_node = _find_pending_todo_draft(llm_node_id, current_user.id)
 
     if not draft:
         return jsonify({"error": "No pending todo changes found"}), 404
@@ -233,18 +285,10 @@ def apply_todo_draft():
     if draft.user_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
 
-    # Create new UserTodo from draft
-    new_todo = UserTodo(
-        user_id=current_user.id,
-        generated_by="voice_session",
-        tokens_used=0,
-    )
-    new_todo.set_content(draft.get_content())
-    db.session.add(new_todo)
-    db.session.delete(draft)
-    db.session.commit()
+    task_id = _start_todo_merge(draft, llm_node, current_user.id)
 
     return jsonify({
-        "status": "applied",
-        "todo_id": new_todo.id,
-    }), 200
+        "status": "started",
+        "task_id": task_id,
+        "llm_node_id": llm_node.id,
+    }), 202
