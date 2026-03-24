@@ -708,23 +708,11 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                 )
                 db.session.add(cost_log)
 
-            db.session.commit()
-
-            # Reassemble draft.content from all completed chunks
-            completed_chunks = NodeTranscriptChunk.query.filter_by(
-                session_id=session_id,
-                status='completed'
-            ).order_by(NodeTranscriptChunk.chunk_index).all()
-
-            transcripts = [
-                c.get_text() for c in completed_chunks if c.get_text()
-            ]
-            draft.set_content("\n\n".join(transcripts))
-            draft.streaming_completed_chunks = len(completed_chunks)
-            db.session.commit()
-
             # Encrypt the merged audio and store as a batch file;
-            # delete individual chunk .enc files
+            # delete individual chunk .enc files.
+            # IMPORTANT: do this BEFORE committing chunk status to DB,
+            # because finalize_draft_streaming polls for completed chunks
+            # and may move/delete the directory once all are done.
             if merged_path and os.path.exists(merged_path):
                 batch_filename = (
                     f"batch_{min(chunk_indices):04d}-"
@@ -749,6 +737,21 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                                 logger.warning(
                                     f"Failed to delete {p}: {e}"
                                 )
+
+            db.session.commit()
+
+            # Reassemble draft.content from all completed chunks
+            completed_chunks = NodeTranscriptChunk.query.filter_by(
+                session_id=session_id,
+                status='completed'
+            ).order_by(NodeTranscriptChunk.chunk_index).all()
+
+            transcripts = [
+                c.get_text() for c in completed_chunks if c.get_text()
+            ]
+            draft.set_content("\n\n".join(transcripts))
+            draft.streaming_completed_chunks = len(completed_chunks)
+            db.session.commit()
 
             logger.info(
                 f"Batch transcription successful for session {session_id}, "

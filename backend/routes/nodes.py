@@ -921,7 +921,9 @@ def get_audio_urls(node_id):
         if chunk_dir.exists():
             has_chunks = (
                 list(chunk_dir.glob("chunk_*.webm")) or
-                list(chunk_dir.glob("chunk_*.webm.enc"))
+                list(chunk_dir.glob("chunk_*.webm.enc")) or
+                list(chunk_dir.glob("batch_*.webm")) or
+                list(chunk_dir.glob("batch_*.webm.enc"))
             )
             has_audio_chunks = bool(has_chunks)
 
