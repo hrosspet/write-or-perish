@@ -70,7 +70,8 @@ VOICE_TOOLS = [
             "todo list. Call this ONLY when the user explicitly confirms "
             "they want to apply the changes (e.g. 'ok apply those "
             "changes', 'yes update my todo', 'go ahead'). Do NOT call "
-            "proactively."
+            "proactively. Do NOT call if changes were already applied "
+            "(check the context notes for apply status)."
         ),
         "input_schema": {
             "type": "object",
@@ -528,23 +529,24 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 if name == "update_todo" and apply_s:
                                     if apply_s == "completed":
                                         summaries.append(
-                                            "Todo changes have been applied to"
-                                            " user's todo."
+                                            "Todo changes have been "
+                                            "applied to user's todo."
                                         )
                                     elif apply_s == "started":
                                         summaries.append(
-                                            "Todo changes are being applied"
-                                            " right now (merge in progress)."
+                                            "Todo changes are being "
+                                            "applied (merge in progress)."
                                         )
                                     elif apply_s == "pending_approval":
                                         summaries.append(
-                                            "You proposed todo changes that"
-                                            " are waiting for user approval."
+                                            "You proposed todo changes "
+                                            "that are waiting for user "
+                                            "approval."
                                         )
                                     elif apply_s == "failed":
                                         summaries.append(
-                                            "Todo changes failed to apply: "
-                                            + m.get("apply_error", "unknown")
+                                            "Todo changes failed: "
+                                            + m.get("apply_error", "")
                                         )
                                 elif name == "update_ai_preferences":
                                     summaries.append(
@@ -654,9 +656,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # Inject voice context notes as a final user message
                 if is_voice and (pending_draft_note or prev_tool_note):
                     notes = [n for n in [prev_tool_note, pending_draft_note] if n]
+                    injected_text = "\n".join(notes)
+                    logger.debug(f"Voice context injection for node {llm_node_id}: {injected_text}")
                     messages.append({
                         "role": "user",
-                        "content": [{"type": "text", "text": "\n".join(notes)}]
+                        "content": [{"type": "text", "text": injected_text}]
                     })
 
                 # Step 3: Call LLM API
