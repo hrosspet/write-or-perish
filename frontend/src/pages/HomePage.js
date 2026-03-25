@@ -28,7 +28,7 @@ const cards = [
     key: "voice",
     path: "/voice",
     title: "Voice",
-    description: "Speak what's present. Reflect, orient, or both.",
+    description: "Speak what's present. Surface what matters.",
     icon: (
       <img
         src="/loore-logo-transparent.svg"
@@ -38,9 +38,9 @@ const cards = [
     ),
   },
   {
-    key: "converse",
+    key: "text",
     path: "/converse",
-    title: "Converse",
+    title: "Text",
     description: "Ask anything. Think out loud.",
     disabled: true,
     icon: (
@@ -201,7 +201,7 @@ export default function HomePage() {
         gap: "1.5rem",
         flexWrap: "wrap",
         justifyContent: "center",
-        maxWidth: "920px",
+        maxWidth: "580px",
         width: "100%",
       }}>
         {cards.map((card, i) => (
