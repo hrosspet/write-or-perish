@@ -20,29 +20,38 @@ const ModelSelector = ({ nodeId, selectedModel, onModelChange, style: styleProp 
   }, []);
 
   useEffect(() => {
-    const fetchSuggestedModel = async () => {
+    const fetchModel = async () => {
       try {
-        const response = await api.get(`/nodes/${nodeId}/suggested-model`);
-        onModelChange(response.data.suggested_model);
+        if (nodeId) {
+          // Fetch thread-suggested model
+          const response = await api.get(`/nodes/${nodeId}/suggested-model`);
+          // Only override user preference if the suggestion comes from
+          // an actual predecessor LLM node in the thread, not the default
+          if (response.data.source === 'predecessor') {
+            onModelChange(response.data.suggested_model);
+          } else if (!selectedModel) {
+            // Default fallback — only set if nothing selected
+            onModelChange(response.data.suggested_model);
+          }
+        } else if (!selectedModel) {
+          // No node context — fetch backend default
+          const response = await api.get('/nodes/default-model');
+          onModelChange(response.data.suggested_model);
+        }
       } catch (error) {
-        console.error('Error fetching suggested model:', error);
-        onModelChange('claude-opus-4.5'); // Fallback to default
+        console.error('Error fetching model:', error);
       } finally {
         setLoading(false);
       }
     };
 
-    if (nodeId) {
-      fetchSuggestedModel();
-    } else {
-      setLoading(false); // No node, so not loading
-    }
-  }, [nodeId, onModelChange]);
+    fetchModel();
+  }, [nodeId, onModelChange, selectedModel]);
 
   return (
     <select
       className="model-selector-dropdown"
-      value={selectedModel || 'claude-opus-4.5'}
+      value={selectedModel || (models.length > 0 ? models[0].id : '')}
       onChange={(e) => onModelChange(e.target.value)}
       disabled={loading}
       style={{

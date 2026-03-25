@@ -48,7 +48,7 @@ function NodeDetail() {
   const [error, setError] = useState("");
   const [showChildFormOverlay, setShowChildFormOverlay] = useState(false);
   const [showEditOverlay, setShowEditOverlay] = useState(false);
-  const [selectedModel, setSelectedModel] = useState("gpt-5.4");
+  const [selectedModel, setSelectedModel] = useState(currentUser?.preferred_model || null);
   const [llmTaskNodeId, setLlmTaskNodeId] = useState(null);
   const [quotes, setQuotes] = useState({});
   const [pinLoading, setPinLoading] = useState(false);
