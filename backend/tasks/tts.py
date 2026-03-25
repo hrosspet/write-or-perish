@@ -22,6 +22,27 @@ from backend.utils.cost import calculate_audio_cost_microdollars
 
 logger = get_task_logger(__name__)
 
+
+def _strip_heading_sections(text):
+    """Extract only the ### Note section from a structured Voice response.
+
+    Voice tool-use responses follow a fixed structure:
+    ### Completed / ### New Tasks / ### Priority Order / ### Note
+    Only the Note section should be read aloud via TTS. The rest is
+    displayed visually but not spoken.
+    """
+    import re
+    # Find the ### Note section and return its body
+    match = re.search(
+        r'^###\s+Note\s*\n(.*)',
+        text, flags=re.MULTILINE | re.DOTALL
+    )
+    if match:
+        return match.group(1).strip()
+    # Fallback: return full text if no Note section found
+    return text.strip()
+
+
 # Audio storage root path (matches the one in routes/nodes.py)
 import pathlib
 AUDIO_STORAGE_ROOT = pathlib.Path(os.environ.get("AUDIO_STORAGE_PATH", "data/audio")).resolve()
@@ -274,7 +295,33 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str,
 
             text = node.get_content() or ""
             if not text:
-                raise ValueError("No content to generate TTS for")
+                logger.info(f"No text content for node {node_id}, skipping TTS")
+                node.tts_task_status = 'completed'
+                node.tts_task_progress = 100
+                db.session.commit()
+                return {
+                    'node_id': node_id,
+                    'status': 'completed',
+                    'tts_url': None,
+                    'skipped': True,
+                }
+
+            # For Voice tool-use responses: strip structured ### sections
+            # so TTS only reads the conversational note, not the full
+            # todo update. Visual display still shows the full content.
+            if node.tool_calls_meta:
+                text = _strip_heading_sections(text)
+                if not text.strip():
+                    logger.debug(f"No conversational text after stripping sections for node {node_id}, skipping TTS")
+                    node.tts_task_status = 'completed'
+                    node.tts_task_progress = 100
+                    db.session.commit()
+                    return {
+                        'node_id': node_id,
+                        'status': 'completed',
+                        'tts_url': None,
+                        'skipped': True,
+                    }
 
             target_dir = (
                 Path(audio_storage_root)

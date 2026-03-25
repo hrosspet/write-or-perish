@@ -145,6 +145,9 @@ class Node(db.Model):
     # Session ID for streaming upload (groups chunks together)
     streaming_session_id = db.Column(db.String(64), nullable=True)
 
+    # Tool call metadata for LLM nodes (JSON list of tool call logs)
+    tool_calls_meta = db.Column(db.Text, nullable=True)
+
     # Pin-to-profile: surfaces any node on Dashboard & Feed
     pinned_at = db.Column(db.DateTime, nullable=True)
     pinned_by = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
@@ -192,6 +195,8 @@ class Node(db.Model):
             return UserTodo.query.get(row.artifact_id)
         if artifact_type == "recent_context":
             return UserRecentContext.query.get(row.artifact_id)
+        if artifact_type == "ai_preferences":
+            return UserAIPreferences.query.get(row.artifact_id)
         return None
 
     # ----- Content ---------------------------------------------------------
@@ -410,6 +415,25 @@ class UserTodo(db.Model):
     ai_usage = db.Column(db.String(16), nullable=False, default="chat")
 
     user = db.relationship("User", backref="todos")
+
+    def set_content(self, plaintext):
+        self.content = encrypt_content(plaintext)
+
+    def get_content(self):
+        return decrypt_content(self.content)
+
+
+class UserAIPreferences(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    generated_by = db.Column(db.String(64), nullable=False)
+    tokens_used = db.Column(db.Integer, nullable=False, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    privacy_level = db.Column(db.String(16), nullable=False, default="private")
+    ai_usage = db.Column(db.String(16), nullable=False, default="chat")
+
+    user = db.relationship("User", backref="ai_preferences")
 
     def set_content(self, plaintext):
         self.content = encrypt_content(plaintext)

@@ -25,6 +25,10 @@ PROMPT_DEFAULTS = {
         'title': 'Orient: Apply to Todo',
         'file': 'orient_apply_todo.txt',
     },
+    'voice': {
+        'title': 'Voice',
+        'file': 'voice.txt',
+    },
 }
 
 PROMPTS_DIR = os.path.join(

@@ -674,6 +674,13 @@ def get_node(node_id):
         "llm_model": node.llm_model,
         "has_original_audio": bool(node.audio_original_url or node.streaming_transcription),
     }
+    # Include tool call metadata for LLM nodes
+    if node.tool_calls_meta:
+        import json as _json
+        try:
+            node_data["tool_calls_meta"] = _json.loads(node.tool_calls_meta)
+        except (ValueError, TypeError):
+            pass
     node_data.update(_system_prompt_fields(node))
     return jsonify(node_data), 200
 
@@ -1298,6 +1305,16 @@ def get_llm_status(node_id):
     # Include content when completed (needed by ReflectPage polling)
     if node.llm_task_status == 'completed':
         response_data["content"] = node.get_content()
+
+    # Include tool call metadata if present
+    if node.tool_calls_meta:
+        import json
+        try:
+            response_data["tool_calls_meta"] = json.loads(
+                node.tool_calls_meta
+            )
+        except (json.JSONDecodeError, TypeError):
+            pass
 
     if created_node:
         response_data["node"] = created_node

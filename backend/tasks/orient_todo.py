@@ -71,6 +71,25 @@ def save_orient_todo(llm_node_id: int, user_id: int):
         )
         todo.set_content(content)
         db.session.add(todo)
+
+        # Update apply_status on the originating Voice LLM node
+        # Walk up from merge_prompt → LLM node that proposed the update
+        merge_prompt = llm_node.parent
+        if merge_prompt and merge_prompt.parent:
+            voice_llm_node = merge_prompt.parent
+            if voice_llm_node.tool_calls_meta:
+                import json
+                try:
+                    meta = json.loads(voice_llm_node.tool_calls_meta)
+                    for entry in meta:
+                        if entry.get("name") == "update_todo":
+                            entry["apply_status"] = "completed"
+                            entry["todo_id"] = todo.id
+                            break
+                    voice_llm_node.tool_calls_meta = json.dumps(meta)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
         db.session.commit()
 
         logger.info(f"Saved merged todo (id={todo.id}) for user {user_id}")

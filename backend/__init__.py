@@ -140,6 +140,12 @@ def create_app():
     from backend.routes.orient import orient_bp
     app.register_blueprint(orient_bp, url_prefix="/api/orient")
 
+    from backend.routes.voice import voice_bp
+    app.register_blueprint(voice_bp, url_prefix="/api/voice")
+
+    from backend.routes.ai_preferences import ai_preferences_bp
+    app.register_blueprint(ai_preferences_bp, url_prefix="/api/ai-preferences")
+
     from backend.routes.prompts import prompts_bp
     app.register_blueprint(prompts_bp, url_prefix="/api/prompts")
 

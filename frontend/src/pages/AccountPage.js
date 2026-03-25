@@ -1,10 +1,12 @@
 import React, { useState, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import { useUser } from "../contexts/UserContext";
 import ModelSelector from "../components/ModelSelector";
 import api from "../api";
 
 export default function AccountPage() {
   const { user, setUser } = useUser();
+  const navigate = useNavigate();
 
   // Username editing
   const [username, setUsername] = useState(user?.username || "");
@@ -286,6 +288,31 @@ export default function AccountPage() {
         </select>
         <div style={helperStyle}>
           Controls how AI can use your new entries by default.
+        </div>
+      </div>
+
+      <div style={rowStyle}>
+        <div style={labelStyle}>AI Preferences</div>
+        <button
+          onClick={() => navigate("/ai-preferences")}
+          style={{
+            ...inputStyle,
+            cursor: "pointer",
+            textAlign: "left",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+          }}
+        >
+          <span style={{ color: "var(--text-muted)", fontWeight: 300 }}>
+            How AI interacts with you
+          </span>
+          <span style={{ color: "var(--accent)", fontSize: "0.85rem" }}>
+            View
+          </span>
+        </button>
+        <div style={helperStyle}>
+          Tone, style, boundaries. Updated automatically during Voice sessions.
         </div>
       </div>
     </div>
