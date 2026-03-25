@@ -71,7 +71,9 @@ VOICE_TOOLS = [
             "they want to apply the changes (e.g. 'ok apply those "
             "changes', 'yes update my todo', 'go ahead'). Do NOT call "
             "proactively. Do NOT call if changes were already applied "
-            "(check the context notes for apply status)."
+            "(check the context notes for apply status). "
+            "Always produce a text response — the user needs to hear "
+            "what happened as they are interacting via voice."
         ),
         "input_schema": {
             "type": "object",
@@ -89,7 +91,8 @@ VOICE_TOOLS = [
             "'be more direct', 'keep todo updates concise'. The "
             "updated_preferences should be the FULL updated text (not "
             "just the diff), incorporating the new preference into the "
-            "existing ones."
+            "existing ones. Always produce a text response — the user "
+            "needs to hear what happened as they are interacting via voice."
         ),
         "input_schema": {
             "type": "object",
