@@ -247,6 +247,13 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         onLLMCompleteRef.current(llmNodeId, llmData.content, wasInitialResume);
       }
 
+      // If LLM returned no text (tool-only response), skip TTS entirely
+      if (!llmData.content || !llmData.content.trim()) {
+        stopSilentAudio();
+        setPhase('playback');
+        return;
+      }
+
       firstChunkRef.current = true;
       // Await the TTS POST before enabling SSE to avoid the race where
       // the EventSource connects before tts_task_status is set to 'pending'.
