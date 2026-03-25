@@ -59,6 +59,14 @@ After implementing a feature, update the status in these design docs:
 Mark completed items with ✅. For unplanned features, add new numbered entries (e.g. A.10, A.11) following the existing pattern.
 - Always create new commits for fixes and changes.
 
+### Celery Tasks — IMPORTANT
+
+When adding a new Celery task file in `backend/tasks/`, you **MUST** register it in `backend/celery_app.py` by adding an import line:
+```python
+from backend.tasks import your_new_module  # noqa: F401
+```
+Without this, the task will be dispatched to the queue but never picked up by the worker. This has caused bugs before.
+
 ### Local Code Verification
 
 **Backend**: Run from the repo root:
