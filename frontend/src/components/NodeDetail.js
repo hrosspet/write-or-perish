@@ -341,11 +341,15 @@ function NodeDetail() {
                     border: '1px solid var(--border)',
                   }}>
                     {tc.status === 'success' ? '✓' : '✗'}{' '}
-                    {tc.name === 'update_todo' && 'Todo update proposed'}
-                    {tc.name === 'apply_todo_changes' && 'Todo changes applied'}
+                    {tc.name === 'update_todo' && (
+                      <>Todo update proposed{tc.apply_status === 'completed' && ' (applied)'}{tc.apply_status === 'started' && ' (applying...)'}</>
+                    )}
+                    {tc.name === 'apply_todo_changes' && (
+                      tc.status === 'success' ? 'Todo apply requested' : 'Todo apply failed'
+                    )}
                     {tc.name === 'update_ai_preferences' && 'Preferences updated'}
                     {!['update_todo', 'apply_todo_changes', 'update_ai_preferences'].includes(tc.name) && tc.name}
-                    {tc.error && <span style={{ color: 'var(--accent)', marginLeft: '8px' }}>{tc.error}</span>}
+                    {tc.error && <span style={{ color: 'var(--accent)', marginLeft: '8px' }}> — {tc.error}</span>}
                   </div>
                 ))}
               </div>

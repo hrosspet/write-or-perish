@@ -200,7 +200,8 @@ function stripInlineMarkdown(text) {
 
 function parseTodoItems(text) {
   return text.split('\n')
-    .map(l => stripInlineMarkdown(l.replace(/^[-*]\s*/, '').trim()))
+    .map(l => l.replace(/^[-*]\s*/, '').replace(/^\[[ xX]\]\s*/, '').trim())
+    .map(l => stripInlineMarkdown(l))
     .filter(Boolean);
 }
 
@@ -208,7 +209,7 @@ function parsePriorityItems(text) {
   return text.split('\n')
     .filter(l => l.trim())
     .map(l => {
-      const cleaned = l.replace(/^\d+[.)]\s*/, '').trim();
+      const cleaned = l.replace(/^\d+[.)]\s*/, '').replace(/^[-*]\s*/, '').replace(/^\[[ xX]\]\s*/, '').trim();
       const dashMatch = cleaned.match(/^(.+?)\s*[—–]\s*(.+)$/);
       if (dashMatch) return { text: stripInlineMarkdown(dashMatch[1].trim()), hint: dashMatch[2].trim() };
       const parenMatch = cleaned.match(/^(.+?)\s*\(([^)]+)\)\s*$/);

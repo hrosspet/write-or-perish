@@ -517,7 +517,6 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # Inject tool result context from previous LLM node
             prev_tool_note = None
             if is_voice and len(node_chain) >= 2:
-                # Check the previous node (likely the last LLM node)
                 for prev_node in reversed(node_chain):
                     if prev_node.tool_calls_meta:
                         try:
@@ -525,16 +524,36 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             summaries = []
                             for m in prev_meta:
                                 name = m['name']
-                                s = m.get("status", "unknown")
-                                # Include apply status for update_todo
                                 apply_s = m.get("apply_status")
-                                if apply_s:
-                                    s += f", apply {apply_s}"
-                                summaries.append(f"{name} {s}")
-                            prev_tool_note = (
-                                "[Previous tool results: "
-                                + ", ".join(summaries) + "]"
-                            )
+                                if name == "update_todo" and apply_s:
+                                    if apply_s == "completed":
+                                        summaries.append(
+                                            "Todo changes have been applied to"
+                                            " user's todo."
+                                        )
+                                    elif apply_s == "started":
+                                        summaries.append(
+                                            "Todo changes are being applied"
+                                            " right now (merge in progress)."
+                                        )
+                                    elif apply_s == "pending_approval":
+                                        summaries.append(
+                                            "You proposed todo changes that"
+                                            " are waiting for user approval."
+                                        )
+                                    elif apply_s == "failed":
+                                        summaries.append(
+                                            "Todo changes failed to apply: "
+                                            + m.get("apply_error", "unknown")
+                                        )
+                                elif name == "update_ai_preferences":
+                                    summaries.append(
+                                        "AI preferences were updated."
+                                    )
+                            if summaries:
+                                prev_tool_note = (
+                                    "[" + " ".join(summaries) + "]"
+                                )
                         except (json.JSONDecodeError, KeyError):
                             pass
                         break
