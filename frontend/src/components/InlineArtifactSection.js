@@ -8,13 +8,19 @@ import ReactMarkdown from 'react-markdown';
  * Collapsed by default; clicking the header toggles the full content.
  *
  * Props:
- *   type: "profile" | "todo"
+ *   type: "profile" | "todo" | "recent" | "ai_preferences"
  *   artifact: { id, version_number, content } or null
  */
 const InlineArtifactSection = ({ type, artifact }) => {
   const [expanded, setExpanded] = useState(false);
 
-  const label = type === 'profile' ? 'User Profile' : 'User TODO';
+  const LABELS = {
+    profile: 'User Profile',
+    todo: 'User TODO',
+    recent: 'Recent Context',
+    ai_preferences: 'AI Preferences',
+  };
+  const label = LABELS[type] || type;
 
   if (!artifact) {
     return (

@@ -1,6 +1,9 @@
 from flask import Blueprint, request, jsonify, current_app
 from flask_login import login_required, current_user
-from backend.models import Node, NodeVersion, UserPrompt, UserProfile, UserTodo
+from backend.models import (
+    Node, NodeVersion, UserPrompt, UserProfile, UserTodo,
+    UserRecentContext, UserAIPreferences,
+)
 from backend.extensions import db
 from datetime import datetime
 from openai import OpenAI
@@ -367,6 +370,28 @@ def _context_artifact_fields(n):
                         UserTodo.created_at <= todo.created_at,
                     ).count(),
                     "content": todo.get_content(),
+                }
+        elif row.artifact_type == "recent_context":
+            rc = UserRecentContext.query.get(row.artifact_id)
+            if rc:
+                artifacts["recent"] = {
+                    "id": rc.id,
+                    "version_number": UserRecentContext.query.filter(
+                        UserRecentContext.user_id == rc.user_id,
+                        UserRecentContext.created_at <= rc.created_at,
+                    ).count(),
+                    "content": rc.get_content(),
+                }
+        elif row.artifact_type == "ai_preferences":
+            prefs = UserAIPreferences.query.get(row.artifact_id)
+            if prefs:
+                artifacts["ai_preferences"] = {
+                    "id": prefs.id,
+                    "version_number": UserAIPreferences.query.filter(
+                        UserAIPreferences.user_id == prefs.user_id,
+                        UserAIPreferences.created_at <= prefs.created_at,
+                    ).count(),
+                    "content": prefs.get_content(),
                 }
     return artifacts if artifacts else None
 
