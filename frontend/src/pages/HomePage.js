@@ -28,7 +28,7 @@ const cards = [
     key: "voice",
     path: "/voice",
     title: "Voice",
-    description: "Speak what's present. Surface what matters.",
+    description: "Speak what's present.",
     icon: (
       <img
         src="/loore-logo-transparent.svg"
