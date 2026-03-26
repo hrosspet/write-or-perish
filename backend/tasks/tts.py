@@ -24,22 +24,30 @@ logger = get_task_logger(__name__)
 
 
 def _strip_heading_sections(text):
-    """Extract only the ### Note section from a structured Voice response.
+    """Extract spoken parts from a structured Voice response.
 
-    Voice tool-use responses follow a fixed structure:
-    ### Completed / ### New Tasks / ### Priority Order / ### Note
-    Only the Note section should be read aloud via TTS. The rest is
-    displayed visually but not spoken.
+    Voice tool-use responses follow a fixed structure: an intro
+    sentence, then ### Completed / ### New Tasks / ### Priority Order /
+    ### Note sections. TTS should read the intro (text before the first
+    ### heading) and the ### Note section. The structured task lists
+    are displayed visually but not spoken.
     """
     import re
-    # Find the ### Note section and return its body
-    match = re.search(
+    # Extract intro text before the first ### heading
+    first_heading = re.search(r'^###\s+', text, flags=re.MULTILINE)
+    intro = text[:first_heading.start()].strip() if first_heading else ""
+
+    # Extract the ### Note section body
+    note_match = re.search(
         r'^###\s+Note\s*\n(.*)',
         text, flags=re.MULTILINE | re.DOTALL
     )
-    if match:
-        return match.group(1).strip()
-    # Fallback: return full text if no Note section found
+    note = note_match.group(1).strip() if note_match else ""
+
+    parts = [p for p in [intro, note] if p]
+    if parts:
+        return "\n\n".join(parts)
+    # Fallback: return full text if no structure detected
     return text.strip()
 
 
