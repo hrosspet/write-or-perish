@@ -249,6 +249,7 @@ export default function VoicePage() {
   const [toolCallsMeta, setToolCallsMeta] = useState(null);
   // applyStatus: null | 'started' | 'completed' | 'error'
   const [applyStatus, setApplyStatus] = useState(null);
+  const [applyError, setApplyError] = useState(null);
   const [parsedResponse, setParsedResponse] = useState(null);
   const setThreadParentIdRef = useRef(null);
   const lastLlmNodeIdRef = useRef(null);
@@ -269,6 +270,7 @@ export default function VoicePage() {
             clearInterval(mergePollingRef.current);
             mergePollingRef.current = null;
             setApplyStatus('error');
+            setApplyError(todoEntry.apply_error || 'Todo merge failed');
           }
         }
       } catch { /* keep polling */ }
@@ -284,7 +286,9 @@ export default function VoicePage() {
       pollApplyStatus(nodeId);
     } catch (err) {
       console.error('Failed to apply todo:', err);
+      const msg = err?.response?.data?.error || 'Todo update failed';
       setApplyStatus('error');
+      setApplyError(msg);
     }
   }, [pollApplyStatus]);
 
@@ -320,12 +324,23 @@ export default function VoicePage() {
         if (res.data.tool_calls_meta) {
           setToolCallsMeta(res.data.tool_calls_meta);
 
-          // Check if apply_todo_changes was called by LLM
+          // Check if update_todo was called by LLM
+          const todoCall = res.data.tool_calls_meta.find(tc => tc.name === 'update_todo');
+          if (todoCall) {
+            if (todoCall.apply_status === 'completed') {
+              setApplyStatus('completed');
+            } else if (todoCall.apply_status === 'failed') {
+              setApplyStatus('error');
+              setApplyError(todoCall.apply_error || 'Todo merge failed');
+            } else if (todoCall.apply_status === 'started') {
+              setApplyStatus('started');
+              pollApplyStatus(nodeId);
+            }
+          }
+          // Also check legacy apply_todo_changes tool name
           const applyCall = res.data.tool_calls_meta.find(tc => tc.name === 'apply_todo_changes');
-          if (applyCall && applyCall.status === 'success') {
+          if (applyCall && applyCall.status === 'success' && !todoCall) {
             setApplyStatus('started');
-            // Poll for merge completion on the LLM node that
-            // proposed the original update (where apply_status lives)
             pollApplyStatus(nodeId);
           }
         }
@@ -337,6 +352,7 @@ export default function VoicePage() {
 
   const voiceReset = useCallback(() => {
     setApplyStatus(null);
+    setApplyError(null);
     setParsedResponse(null);
     setToolCallsMeta(null);
     if (mergePollingRef.current) {
@@ -805,7 +821,7 @@ export default function VoicePage() {
                   fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
                   color: 'var(--accent)',
                 }}>
-                  Todo update failed
+                  {applyError || 'Todo update failed'}
                 </p>
               )}
             </div>
