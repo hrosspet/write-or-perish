@@ -3,9 +3,10 @@ import api from '../api';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
 
 /**
- * Parse markdown checklist into sections.
+ * Parse markdown checklist into sections with nested items.
  * Sections are delimited by ## headings.
- * Items are lines starting with - [ ] or - [x].
+ * Items are lines matching - [ ] or - [x] at any indentation level.
+ * Indentation determines nesting depth (2 spaces per level).
  */
 function parseTodoSections(content) {
   if (!content) return [];
@@ -21,17 +22,47 @@ function parseTodoSections(content) {
       continue;
     }
 
-    const itemMatch = line.match(/^- \[([ xX])\]\s+(.+)/);
+    const itemMatch = line.match(/^(\s*)- \[([ xX])\]\s+(.+)/);
     if (itemMatch && currentSection) {
-      currentSection.items.push({
-        checked: itemMatch[1] !== ' ',
-        text: itemMatch[2].trim(),
+      const indent = itemMatch[1].length;
+      const depth = Math.floor(indent / 2);
+      const item = {
+        checked: itemMatch[2] !== ' ',
+        text: itemMatch[3].trim(),
         raw: line,
-      });
+        depth,
+        children: [],
+      };
+
+      if (depth === 0) {
+        currentSection.items.push(item);
+      } else {
+        // Find the parent item at (depth - 1) by walking the tree
+        let parent = findParentAtDepth(currentSection.items, depth - 1);
+        if (parent) {
+          parent.children.push(item);
+        } else {
+          // Fallback: treat as top-level if no parent found
+          currentSection.items.push(item);
+        }
+      }
     }
   }
 
   return sections;
+}
+
+/**
+ * Find the last item at the given depth by walking children recursively.
+ */
+function findParentAtDepth(items, targetDepth) {
+  if (items.length === 0) return null;
+  const last = items[items.length - 1];
+  if (last.depth === targetDepth) return last;
+  if (last.children.length > 0) {
+    return findParentAtDepth(last.children, targetDepth);
+  }
+  return null;
 }
 
 /**
@@ -40,52 +71,105 @@ function parseTodoSections(content) {
 function toggleCheckbox(content, itemText, currentChecked) {
   const lines = content.split('\n');
   const newLines = lines.map(line => {
-    const itemMatch = line.match(/^- \[([ xX])\]\s+(.+)/);
-    if (itemMatch && itemMatch[2].trim() === itemText) {
+    const itemMatch = line.match(/^(\s*)- \[([ xX])\]\s+(.+)/);
+    if (itemMatch && itemMatch[3].trim() === itemText) {
+      const indent = itemMatch[1];
       return currentChecked
-        ? `- [ ] ${itemMatch[2]}`
-        : `- [x] ${itemMatch[2]}`;
+        ? `${indent}- [ ] ${itemMatch[3]}`
+        : `${indent}- [x] ${itemMatch[3]}`;
     }
     return line;
   });
   return newLines.join('\n');
 }
 
-function TodoItem({ item, onToggle }) {
+function countAllItems(items) {
+  let count = 0;
+  for (const item of items) {
+    count += 1 + countAllItems(item.children);
+  }
+  return count;
+}
+
+function TodoItem({ item, onToggle, depth = 0 }) {
+  const [collapsed, setCollapsed] = useState(true);
+  const hasChildren = item.children && item.children.length > 0;
+  const childCount = hasChildren ? countAllItems(item.children) : 0;
+
   return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'flex-start',
-        gap: '12px',
-        padding: '12px 0',
-        borderBottom: '1px solid #1e1d1a',
-      }}
-    >
+    <div>
       <div
-        onClick={() => onToggle(item)}
         style={{
-        width: '18px', height: '18px', borderRadius: '50%',
-        border: `1.5px solid ${item.checked ? 'var(--accent-dim)' : 'var(--border-hover)'}`,
-        background: item.checked ? 'var(--accent-dim)' : 'none',
-        flexShrink: 0, marginTop: '2px',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        fontSize: '0.6rem', color: 'var(--bg-deep)', fontWeight: 600,
-        transition: 'all 0.3s', cursor: 'pointer',
-      }}>
-        {item.checked && '✓'}
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: '12px',
+          padding: '12px 0',
+          borderBottom: '1px solid #1e1d1a',
+          paddingLeft: depth * 24,
+        }}
+      >
+        {hasChildren && (
+          <div
+            onClick={() => setCollapsed(!collapsed)}
+            style={{
+              width: '16px', height: '18px',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              cursor: 'pointer', flexShrink: 0, marginTop: '2px',
+              color: 'var(--text-muted)', fontSize: '0.55rem',
+              transition: 'transform 0.2s',
+              transform: collapsed ? 'rotate(0deg)' : 'rotate(90deg)',
+              userSelect: 'none',
+            }}
+          >
+            ▶
+          </div>
+        )}
+        <div
+          onClick={() => onToggle(item)}
+          style={{
+            width: '18px', height: '18px', borderRadius: '50%',
+            border: `1.5px solid ${item.checked ? 'var(--accent-dim)' : 'var(--border-hover)'}`,
+            background: item.checked ? 'var(--accent-dim)' : 'none',
+            flexShrink: 0, marginTop: '2px',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: '0.6rem', color: 'var(--bg-deep)', fontWeight: 600,
+            transition: 'all 0.3s', cursor: 'pointer',
+            marginLeft: !hasChildren && depth > 0 ? '16px' : 0,
+          }}>
+          {item.checked && '✓'}
+        </div>
+        <span style={{
+          fontFamily: 'var(--sans)',
+          fontSize: '0.92rem',
+          fontWeight: 300,
+          color: 'var(--text-secondary)',
+          textDecoration: item.checked ? 'line-through' : 'none',
+          opacity: item.checked ? 0.4 : 1,
+          lineHeight: 1.5,
+        }}>
+          {item.text}
+        </span>
+        {hasChildren && collapsed && (
+          <span
+            onClick={() => setCollapsed(false)}
+            style={{
+              color: 'var(--text-muted)', fontWeight: 300,
+              fontSize: '0.65rem', letterSpacing: '0.05em',
+              marginLeft: '4px', marginTop: '4px',
+              cursor: 'pointer', userSelect: 'none',
+            }}
+          >
+            {childCount}
+          </span>
+        )}
       </div>
-      <span style={{
-        fontFamily: 'var(--sans)',
-        fontSize: '0.92rem',
-        fontWeight: 300,
-        color: 'var(--text-secondary)',
-        textDecoration: item.checked ? 'line-through' : 'none',
-        opacity: item.checked ? 0.4 : 1,
-        lineHeight: 1.5,
-      }}>
-        {item.text}
-      </span>
+      {hasChildren && !collapsed && (
+        <div>
+          {item.children.map((child, k) => (
+            <TodoItem key={k} item={child} onToggle={onToggle} depth={depth + 1} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -384,7 +468,7 @@ export default function TodoPage() {
                   fontSize: '0.65rem', letterSpacing: '0.05em',
                   textTransform: 'none',
                 }}>
-                  {section.items.length}
+                  {countAllItems(section.items)}
                 </span>
               </div>
               {section.items.map((item, j) => (
