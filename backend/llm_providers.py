@@ -142,6 +142,8 @@ class LLMProvider:
                     "input": json.loads(tc.function.arguments),
                 })
 
+        logger.info(f"OpenAI API response: model={model}, input_tokens={response.usage.prompt_tokens}, output_tokens={response.usage.completion_tokens}")
+
         return {
             "content": message.content or "",
             "total_tokens": response.usage.total_tokens,
@@ -242,6 +244,7 @@ class LLMProvider:
 
         # Calculate total tokens (Anthropic reports input/output separately)
         total_tokens = response.usage.input_tokens + response.usage.output_tokens
+        logger.info(f"Anthropic API response: model={model}, input_tokens={response.usage.input_tokens}, output_tokens={response.usage.output_tokens}")
 
         return {
             "content": content,
