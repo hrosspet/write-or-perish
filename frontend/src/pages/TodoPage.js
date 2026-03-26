@@ -109,21 +109,6 @@ function TodoItem({ item, onToggle, depth = 0 }) {
         }}
       >
         <div
-          onClick={hasChildren ? () => setCollapsed(!collapsed) : undefined}
-          style={{
-            width: '16px', height: '18px',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            cursor: hasChildren ? 'pointer' : 'default',
-            flexShrink: 0, marginTop: '2px',
-            color: 'var(--text-muted)', fontSize: '0.55rem',
-            transition: 'transform 0.2s',
-            transform: hasChildren && !collapsed ? 'rotate(90deg)' : 'rotate(0deg)',
-            userSelect: 'none',
-          }}
-        >
-          {hasChildren && '▶'}
-        </div>
-        <div
           onClick={() => onToggle(item)}
           style={{
             width: '18px', height: '18px', borderRadius: '50%',
@@ -147,18 +132,30 @@ function TodoItem({ item, onToggle, depth = 0 }) {
         }}>
           {item.text}
         </span>
-        {hasChildren && collapsed && (
-          <span
-            onClick={() => setCollapsed(false)}
+        {hasChildren && (
+          <div
+            onClick={() => setCollapsed(!collapsed)}
             style={{
-              color: 'var(--text-muted)', fontWeight: 300,
-              fontSize: '0.65rem', letterSpacing: '0.05em',
-              marginLeft: '4px', marginTop: '4px',
+              display: 'flex', alignItems: 'center', gap: '4px',
               cursor: 'pointer', userSelect: 'none',
+              marginTop: '3px',
             }}
           >
-            {childCount}
-          </span>
+            <span style={{
+              color: 'var(--text-muted)', fontSize: '0.55rem',
+              transition: 'transform 0.2s',
+              transform: collapsed ? 'rotate(0deg)' : 'rotate(90deg)',
+              display: 'inline-block',
+            }}>
+              ▶
+            </span>
+            <span style={{
+              color: 'var(--text-muted)', fontWeight: 300,
+              fontSize: '0.65rem', letterSpacing: '0.05em',
+            }}>
+              {childCount}
+            </span>
+          </div>
         )}
       </div>
       {hasChildren && !collapsed && (
