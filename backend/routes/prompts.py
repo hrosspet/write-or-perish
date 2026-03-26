@@ -59,6 +59,8 @@ def list_prompts():
     """List all prompt keys with their latest version for the current user."""
     prompts = []
     for key, meta in PROMPT_DEFAULTS.items():
+        if meta.get('hidden'):
+            continue
         latest = UserPrompt.query.filter_by(
             user_id=current_user.id, prompt_key=key
         ).order_by(UserPrompt.created_at.desc()).first()

@@ -3,8 +3,8 @@ import os
 
 PROMPT_DEFAULTS = {
     'converse': {'title': 'Converse', 'file': 'converse.txt'},
-    'reflect': {'title': 'Reflect', 'file': 'reflect.txt'},
-    'orient': {'title': 'Orient', 'file': 'orient.txt'},
+    'reflect': {'title': 'Reflect', 'file': 'reflect.txt', 'hidden': True},
+    'orient': {'title': 'Orient', 'file': 'orient.txt', 'hidden': True},
     'profile_generation': {
         'title': 'Profile Generation', 'file': 'profile_generation.txt',
     },
