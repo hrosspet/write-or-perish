@@ -472,36 +472,23 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             if needs_profile:
                 user_profile_content = get_user_profile_content(user_id)
-                if user_profile_content:
-                    logger.info(f"Retrieved user profile for {user_id}: {len(user_profile_content)} chars")
-                else:
-                    logger.info(f"No profile with chat permission found for user {user_id}")
 
             if needs_todo:
                 user_todo_content = get_user_todo_content(user_id)
-                if user_todo_content:
-                    logger.info(f"Retrieved user todo for {user_id}: {len(user_todo_content)} chars")
-                else:
-                    logger.info(f"No todo with chat permission found for user {user_id}")
 
             if needs_recent:
                 rc = get_user_recent_content(user_id)
                 if rc:
                     user_recent_content = rc.get_content()
-                    logger.info(f"Retrieved recent context for {user_id}: {len(user_recent_content)} chars")
 
             if needs_recent_raw:
                 raw_cutoff = recent_raw_node.created_at if recent_raw_node else None
                 user_recent_raw_content = get_user_recent_raw_content(
                     user_id, created_before=raw_cutoff
                 )
-                if user_recent_raw_content:
-                    logger.info(f"Retrieved recent raw data for {user_id}: {len(user_recent_raw_content)} chars, cutoff={raw_cutoff}")
 
             if needs_ai_prefs:
                 user_ai_preferences_content = get_user_ai_preferences_content(user_id)
-                if user_ai_preferences_content:
-                    logger.info(f"Retrieved AI preferences for {user_id}: {len(user_ai_preferences_content)} chars")
 
             # Detect if this is a voice session (enables tools)
             is_voice = _is_voice_prompt(node_chain)
