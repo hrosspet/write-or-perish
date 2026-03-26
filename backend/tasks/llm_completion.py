@@ -19,6 +19,7 @@ from backend.utils.tokens import approximate_token_count, reduce_export_tokens
 from backend.utils.quotes import resolve_quotes, has_quotes
 from backend.utils.api_keys import determine_api_key_type, get_api_keys_for_usage
 from backend.utils.cost import calculate_llm_cost_microdollars
+from backend.utils.tool_meta import update_tool_meta, parse_github_issue
 
 logger = get_task_logger(__name__)
 
@@ -76,6 +77,40 @@ VOICE_TOOLS = [
             "changes', 'yes update my todo', 'go ahead'). Do not call "
             "proactively. Do not call if changes were already applied "
             "(check the context notes for apply status). "
+            "Always produce a text response — the user needs to hear "
+            "what happened as they are interacting via voice."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "create_github_issue",
+        "description": (
+            "Signal that your text response contains a proposed GitHub "
+            "issue. Call this when the user describes a bug, feature "
+            "idea, or enhancement they want to file. Your text response "
+            "must use the exact heading structure: ### Issue Title, "
+            "### Description, ### Category (one of: bug, feature, "
+            "enhancement). The issue is not created immediately — the "
+            "user must confirm first."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "apply_github_issue",
+        "description": (
+            "Create the previously proposed GitHub issue. Call this "
+            "ONLY when the user explicitly confirms they want to create "
+            "the issue (e.g. 'yes create it', 'go ahead', 'file that'). "
+            "Do not call proactively. Do not call if the issue was "
+            "already created (check the context notes for apply status). "
             "Always produce a text response — the user needs to hear "
             "what happened as they are interacting via voice."
         ),
@@ -148,6 +183,19 @@ def _find_pending_todo_draft(node_chain, user_id):
     return None
 
 
+def _find_pending_github_issue_draft(node_chain, user_id):
+    """Walk the node chain to find a pending GitHub issue draft."""
+    for node in reversed(node_chain):
+        draft = Draft.query.filter_by(
+            parent_id=node.id,
+            user_id=user_id,
+            label='github_issue_pending',
+        ).first()
+        if draft:
+            return draft
+    return None
+
+
 def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
     """Execute tool calls and return metadata list."""
     tool_results = []
@@ -198,6 +246,91 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
                     )
                     result["status"] = "success"
                     result["apply_task_id"] = task_id
+
+            elif name == "create_github_issue":
+                # Find existing pending draft before creating new one
+                existing = _find_pending_github_issue_draft(
+                    node_chain, user_id
+                )
+
+                draft = Draft(
+                    user_id=user_id,
+                    parent_id=llm_node.id,
+                    label='github_issue_pending',
+                )
+                draft.set_content("")  # flag only
+                db.session.add(draft)
+                db.session.flush()
+
+                if existing:
+                    db.session.delete(existing)
+                    db.session.flush()
+
+                result["status"] = "success"
+                result["draft_id"] = draft.id
+                result["apply_status"] = "pending_approval"
+
+            elif name == "apply_github_issue":
+                draft = _find_pending_github_issue_draft(
+                    node_chain, user_id
+                )
+                if not draft:
+                    result["status"] = "error"
+                    result["error"] = "No pending GitHub issue found"
+                else:
+                    # Find the LLM node that proposed the issue
+                    origin_node = Node.query.get(draft.parent_id)
+                    if not origin_node:
+                        result["status"] = "error"
+                        result["error"] = "Origin node not found"
+                    else:
+                        issue_data = parse_github_issue(
+                            origin_node.get_content() or ""
+                        )
+                        if not issue_data.get("title"):
+                            result["status"] = "error"
+                            result["error"] = (
+                                "Could not parse issue from proposal"
+                            )
+                        else:
+                            from backend.utils.github import (
+                                create_github_issue,
+                            )
+                            user = User.query.get(user_id)
+                            username = (
+                                user.username if user else str(user_id)
+                            )
+                            category = issue_data.get(
+                                "category", "enhancement"
+                            )
+                            if category not in (
+                                "bug", "feature", "enhancement"
+                            ):
+                                category = "enhancement"
+                            gh_result = create_github_issue(
+                                title=issue_data["title"],
+                                description=issue_data.get(
+                                    "description", ""
+                                ),
+                                category=category,
+                                username=username,
+                            )
+                            # Clean up draft
+                            db.session.delete(draft)
+                            db.session.flush()
+                            # Update origin node meta
+                            update_tool_meta(
+                                origin_node,
+                                "create_github_issue",
+                                {
+                                    "apply_status": "completed",
+                                    "issue_url": gh_result["url"],
+                                    "issue_number": gh_result["number"],
+                                },
+                            )
+                            result["status"] = "success"
+                            result["issue_url"] = gh_result["url"]
+                            result["issue_number"] = gh_result["number"]
 
             elif name == "update_ai_preferences":
                 prefs = UserAIPreferences(
@@ -498,7 +631,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             is_voice = _is_voice_prompt(node_chain)
             voice_tools = VOICE_TOOLS if is_voice else None
 
-            # Check for pending todo draft and inject context note
+            # Check for pending drafts and inject context notes
             pending_draft_note = None
             if is_voice:
                 pending = _find_pending_todo_draft(node_chain, user_id)
@@ -508,6 +641,19 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         "confirmation. The user can say 'apply the "
                         "changes' to confirm.]"
                     )
+                pending_issue = _find_pending_github_issue_draft(
+                    node_chain, user_id
+                )
+                if pending_issue:
+                    issue_note = (
+                        "[Note: there is a proposed GitHub issue awaiting "
+                        "confirmation. The user can say 'yes create it' "
+                        "or 'file that issue' to confirm.]"
+                    )
+                    if pending_draft_note:
+                        pending_draft_note += "\n" + issue_note
+                    else:
+                        pending_draft_note = issue_note
 
             # Inject tool result context from previous LLM node
             prev_tool_note = None
@@ -552,6 +698,22 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                         summaries.append(
                                             "Todo changes failed: "
                                             + m.get("apply_error", "")
+                                        )
+                                elif name == "create_github_issue" and apply_s:
+                                    if apply_s == "completed":
+                                        issue_url = m.get(
+                                            "issue_url", "")
+                                        summaries.append(
+                                            "GitHub issue was created"
+                                            + (f": {issue_url}"
+                                               if issue_url else ".")
+                                        )
+                                    elif apply_s == "pending_approval":
+                                        summaries.append(
+                                            "You proposed a GitHub "
+                                            "issue that is waiting "
+                                            "for user approval."
+                                            + truncation_warn
                                         )
                                 elif name == "update_ai_preferences":
                                     summaries.append(

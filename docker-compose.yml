@@ -52,6 +52,8 @@ services:
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
       - LLM_NAME=${LLM_NAME:-claude-opus-4.5}
       - FLASK_ENV=${FLASK_ENV:-production}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - GITHUB_REPO=${GITHUB_REPO}
       - MAIL_SERVER=${MAIL_SERVER}
       - MAIL_PORT=${MAIL_PORT}
       - MAIL_USE_TLS=${MAIL_USE_TLS}
@@ -85,6 +87,8 @@ services:
       - ANTHROPIC_API_KEY_CHAT=${ANTHROPIC_API_KEY_CHAT}
       - ANTHROPIC_API_KEY_TRAIN=${ANTHROPIC_API_KEY_TRAIN}
       - LLM_NAME=${LLM_NAME:-claude-opus-4.5}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - GITHUB_REPO=${GITHUB_REPO}
       - MAIL_SERVER=${MAIL_SERVER}
       - MAIL_PORT=${MAIL_PORT}
       - MAIL_USE_TLS=${MAIL_USE_TLS}

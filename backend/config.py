@@ -140,6 +140,10 @@ class Config:
     CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', 'redis://localhost:6379/0')
     CELERY_RESULT_BACKEND = os.environ.get('CELERY_RESULT_BACKEND', 'redis://localhost:6379/0')
 
+    # GitHub API for issue creation from Voice mode
+    GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
+    GITHUB_REPO = os.environ.get("GITHUB_REPO")
+
     # GCP Cloud KMS configuration for content encryption at rest
     # Format: projects/{project}/locations/{location}/keyRings/{keyring}/cryptoKeys/{key}
     GCP_KMS_KEY_NAME = os.environ.get("GCP_KMS_KEY_NAME")

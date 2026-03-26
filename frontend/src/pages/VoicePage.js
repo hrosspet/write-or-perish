@@ -232,6 +232,9 @@ function parseOrientResponse(text) {
     else if (heading.includes('new task')) sections.newTasks = body;
     else if (heading.includes('priority')) sections.priority = body;
     else if (heading.includes('note')) sections.note = body;
+    else if (heading.includes('issue title') || heading === 'title') sections.issueTitle = body;
+    else if (heading === 'description') sections.issueDescription = body;
+    else if (heading === 'category') sections.issueCategory = body.trim().toLowerCase();
   }
   return sections;
 }
@@ -251,6 +254,10 @@ export default function VoicePage() {
   const [applyStatus, setApplyStatus] = useState(null);
   const [applyError, setApplyError] = useState(null);
   const [parsedResponse, setParsedResponse] = useState(null);
+  // GitHub issue state
+  const [issueApplyStatus, setIssueApplyStatus] = useState(null);
+  const [issueApplyError, setIssueApplyError] = useState(null);
+  const [issueResult, setIssueResult] = useState(null);
   const setThreadParentIdRef = useRef(null);
   const lastLlmNodeIdRef = useRef(null);
   const mergePollingRef = useRef(null);
@@ -291,6 +298,21 @@ export default function VoicePage() {
       setApplyError(msg);
     }
   }, [pollApplyStatus]);
+
+  const handleCreateIssue = useCallback(async (nodeId) => {
+    if (!nodeId) return;
+    setIssueApplyStatus('started');
+    try {
+      const res = await api.post('/github/create-issue', { llm_node_id: nodeId });
+      setIssueApplyStatus('completed');
+      setIssueResult(res.data);
+    } catch (err) {
+      console.error('Failed to create GitHub issue:', err);
+      const msg = err?.response?.data?.error || 'Issue creation failed';
+      setIssueApplyStatus('error');
+      setIssueApplyError(msg);
+    }
+  }, []);
 
   // Cleanup polling on unmount
   useEffect(() => {
@@ -343,6 +365,21 @@ export default function VoicePage() {
             setApplyStatus('started');
             pollApplyStatus(nodeId);
           }
+
+          // Check for create_github_issue tool
+          const issueCall = res.data.tool_calls_meta.find(tc => tc.name === 'create_github_issue');
+          if (issueCall) {
+            if (issueCall.apply_status === 'completed') {
+              setIssueApplyStatus('completed');
+              setIssueResult({ issue_url: issueCall.issue_url, issue_number: issueCall.issue_number });
+            }
+          }
+          // Check for apply_github_issue (voice confirmation)
+          const applyIssueCall = res.data.tool_calls_meta.find(tc => tc.name === 'apply_github_issue');
+          if (applyIssueCall && applyIssueCall.status === 'success') {
+            setIssueApplyStatus('completed');
+            setIssueResult({ issue_url: applyIssueCall.issue_url, issue_number: applyIssueCall.issue_number });
+          }
         }
       }).catch(() => { /* non-fatal */ });
     },
@@ -355,6 +392,9 @@ export default function VoicePage() {
     setApplyError(null);
     setParsedResponse(null);
     setToolCallsMeta(null);
+    setIssueApplyStatus(null);
+    setIssueApplyError(null);
+    setIssueResult(null);
     if (mergePollingRef.current) {
       clearInterval(mergePollingRef.current);
       mergePollingRef.current = null;
@@ -581,6 +621,7 @@ export default function VoicePage() {
   const parsed = parsedResponse || {};
   const hasSections = parsed.completed || parsed.newTasks || parsed.priority || parsed.note;
   const hasTodoUpdate = toolCallsMeta?.some(tc => tc.name === 'update_todo');
+  const hasGithubIssue = toolCallsMeta?.some(tc => tc.name === 'create_github_issue');
   const hasPrefsUpdate = toolCallsMeta?.some(tc => tc.name === 'update_ai_preferences' && tc.status === 'success');
 
   return (
@@ -826,6 +867,93 @@ export default function VoicePage() {
               )}
             </div>
           )}
+        </div>
+      )}
+
+      {/* GitHub issue proposal */}
+      {hasGithubIssue && parsed.issueTitle && (
+        <div style={{ width: '100%', maxWidth: '620px', marginTop: '32px' }}>
+          <div style={sectionLabelStyle}>
+            <AiDot /> GitHub Issue Proposal
+          </div>
+          <div style={{
+            padding: '20px', background: 'var(--bg-card)',
+            border: '1px solid var(--border)', borderRadius: '8px',
+          }}>
+            <h3 style={{
+              fontFamily: 'var(--serif)', fontSize: '1.2rem',
+              color: 'var(--text-primary)', margin: '0 0 12px 0', fontWeight: 400,
+            }}>{parsed.issueTitle}</h3>
+            {parsed.issueDescription && (
+              <p style={{
+                fontFamily: 'var(--sans)', fontSize: '0.88rem', fontWeight: 300,
+                color: 'var(--text-secondary)', lineHeight: 1.7, margin: '0 0 12px 0',
+                whiteSpace: 'pre-wrap',
+              }}>{parsed.issueDescription}</p>
+            )}
+            {parsed.issueCategory && (
+              <span style={{
+                display: 'inline-block', padding: '3px 10px',
+                fontSize: '0.72rem', fontFamily: 'var(--sans)',
+                fontWeight: 400, letterSpacing: '0.08em',
+                textTransform: 'uppercase',
+                borderRadius: '12px',
+                border: '1px solid var(--accent)',
+                color: 'var(--accent)', opacity: 0.8,
+              }}>{parsed.issueCategory}</span>
+            )}
+          </div>
+          <div style={{ textAlign: 'center', marginTop: '16px' }}>
+            {!issueApplyStatus && (
+              <button
+                onClick={() => handleCreateIssue(lastLlmNodeIdRef.current)}
+                style={{
+                  padding: '10px 24px',
+                  background: 'none',
+                  border: '1px solid var(--accent)',
+                  borderRadius: '6px',
+                  color: 'var(--accent)',
+                  fontFamily: 'var(--sans)',
+                  fontSize: '0.85rem',
+                  fontWeight: 400,
+                  cursor: 'pointer',
+                }}
+              >
+                Create GitHub Issue
+              </button>
+            )}
+            {issueApplyStatus === 'started' && (
+              <p style={{
+                fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
+                color: 'var(--text-muted)',
+              }}>
+                Creating issue...
+              </p>
+            )}
+            {issueApplyStatus === 'completed' && (
+              <p style={{
+                fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
+                color: '#4ade80',
+              }}>
+                Issue created{issueResult?.issue_url && (
+                  <> — <a
+                    href={issueResult.issue_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{ color: '#4ade80', textDecoration: 'underline' }}
+                  >#{issueResult.issue_number}</a></>
+                )}
+              </p>
+            )}
+            {issueApplyStatus === 'error' && (
+              <p style={{
+                fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
+                color: 'var(--accent)',
+              }}>
+                {issueApplyError || 'Issue creation failed'}
+              </p>
+            )}
+          </div>
         </div>
       )}
 

@@ -1,9 +1,8 @@
-import json
-
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node, Draft, UserTodo
 from backend.extensions import db
+from backend.utils.tool_meta import update_tool_meta
 
 todo_bp = Blueprint("todo", __name__)
 
@@ -234,7 +233,7 @@ def _start_todo_merge(draft, llm_node, user_id):
         db.session.delete(d)
 
     # Update tool_calls_meta on the LLM node to record apply started
-    _update_tool_meta(llm_node, "update_todo", {
+    update_tool_meta(llm_node, "update_todo", {
         "apply_status": "started",
     })
 
@@ -246,21 +245,6 @@ def _start_todo_merge(draft, llm_node, user_id):
     )
 
     return task.id
-
-
-def _update_tool_meta(node, tool_name, updates):
-    """Update a specific tool call's metadata in node.tool_calls_meta."""
-    meta = []
-    if node.tool_calls_meta:
-        try:
-            meta = json.loads(node.tool_calls_meta)
-        except (json.JSONDecodeError, TypeError):
-            meta = []
-    for entry in meta:
-        if entry.get("name") == tool_name:
-            entry.update(updates)
-            break
-    node.tool_calls_meta = json.dumps(meta)
 
 
 @todo_bp.route("/apply-draft", methods=["POST"])

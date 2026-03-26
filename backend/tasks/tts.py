@@ -4,6 +4,7 @@ Celery task for asynchronous TTS generation.
 Supports streaming playback - each chunk's audio URL is stored in TTSChunk
 and can be played as soon as it's ready, without waiting for all chunks.
 """
+import json
 from celery import Task
 from celery.utils.log import get_task_logger
 from openai import OpenAI
@@ -315,10 +316,16 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str,
                 }
 
             # For Voice tool-use responses: strip structured ### sections
-            # so TTS only reads the conversational note, not the full
-            # todo update. Visual display still shows the full content.
+            # only for todo proposals (TTS reads just the note).
+            # GitHub issue proposals should be read in full.
             if node.tool_calls_meta:
-                text = _strip_heading_sections(text)
+                try:
+                    _meta = json.loads(node.tool_calls_meta)
+                    _tool_names = {m.get('name') for m in _meta}
+                except (json.JSONDecodeError, TypeError):
+                    _tool_names = set()
+                if _tool_names & {'update_todo'}:
+                    text = _strip_heading_sections(text)
                 if not text.strip():
                     logger.debug(f"No conversational text after stripping sections for node {node_id}, skipping TTS")
                     node.tts_task_status = 'completed'
