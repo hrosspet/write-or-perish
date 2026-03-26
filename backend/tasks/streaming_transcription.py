@@ -17,9 +17,7 @@ from backend.celery_app import celery, flask_app
 from backend.models import Node, NodeTranscriptChunk, Draft, APICostLog
 from backend.extensions import db
 from backend.utils.audio_processing import compress_audio_if_needed, get_audio_duration
-from backend.utils.webm_utils import (
-    fix_last_chunk_duration, is_ffmpeg_available, concat_audio_files,
-)
+from backend.utils.webm_utils import concat_audio_files
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.encryption import decrypt_file_to_temp
 from backend.utils.cost import calculate_audio_cost_microdollars
@@ -529,7 +527,8 @@ class BatchTranscriptionTask(Task):
 
 
 @celery.task(base=BatchTranscriptionTask, bind=True)
-def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
+def transcribe_chunk_batch(self, session_id: str, chunk_indices: list,
+                           is_final_batch: bool = False):
     """
     Transcribe a batch of audio chunks by merging them and sending to Whisper.
 
@@ -544,6 +543,9 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
     Args:
         session_id: UUID of the streaming session
         chunk_indices: List of chunk indices to transcribe in this batch
+        is_final_batch: If True, fix the last chunk's WebM duration before
+            merging (MediaRecorder often writes incorrect duration on the
+            final chunk)
     """
     logger.info(
         f"Starting batch transcription for session {session_id}, "
@@ -588,6 +590,21 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                     f"No chunk files found for session {session_id}, "
                     f"indices {chunk_indices}"
                 )
+
+            # Fix the last chunk's WebM duration before merging.
+            # MediaRecorder often writes incorrect/missing duration on the
+            # final recorded chunk, which causes playback issues.
+            if is_final_batch and decrypted_paths:
+                from backend.utils.webm_utils import (
+                    fix_webm_duration, is_ffmpeg_available,
+                )
+                if is_ffmpeg_available():
+                    last_path = decrypted_paths[-1]
+                    success, msg, _ = fix_webm_duration(last_path)
+                    if success:
+                        logger.info(
+                            f"Fixed last chunk duration before merge: {msg}"
+                        )
 
             # Merge audio chunks into a single file
             merged_path = concat_audio_files(decrypted_paths)
@@ -820,7 +837,8 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
             # Queue async and let the polling loop below wait for completion
             batch_task = transcribe_chunk_batch.delay(
                 session_id=session_id,
-                chunk_indices=remaining_indices
+                chunk_indices=remaining_indices,
+                is_final_batch=True,
             )
             for c in stored_chunks:
                 c.status = 'processing'
@@ -906,22 +924,6 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
             else:
                 final_content = full_transcript
 
-        # Fix the duration metadata of the last chunk (WebM files from MediaRecorder
-        # often lack proper duration, which causes playback issues)
-        if is_ffmpeg_available():
-            audio_storage_root = pathlib.Path(
-                os.environ.get("AUDIO_STORAGE_PATH", "data/audio")
-            ).resolve()
-            chunk_dir = audio_storage_root / f"drafts/{draft.user_id}/{session_id}"
-            if chunk_dir.exists():
-                success, message = fix_last_chunk_duration(str(chunk_dir))
-                if success:
-                    logger.info(f"Fixed last chunk duration for session {session_id}: {message}")
-                else:
-                    logger.warning(f"Could not fix last chunk duration for session {session_id}: {message}")
-        else:
-            logger.warning("ffmpeg not available, skipping last chunk duration fix")
-
         # Refresh draft and update content (but don't mark completed yet
         # if we're about to start a server-side LLM chain — we need to set
         # llm_node_id in the same commit so the SSE all_complete event
@@ -985,9 +987,6 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     from backend.utils.prompts import get_user_prompt_record
     from backend.utils.llm_nodes import create_llm_placeholder
     from backend.utils.context_artifacts import attach_context_artifacts
-    from backend.utils.webm_utils import (
-        fix_last_chunk_duration, is_ffmpeg_available,
-    )
     from backend.tasks.llm_completion import generate_llm_response
     from backend.tasks.tts import generate_tts_audio
 
@@ -1038,10 +1037,6 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     draft_audio_dir = audio_storage_root / f"drafts/{user_id}/{session_id}"
 
     if draft_audio_dir.exists():
-        if is_ffmpeg_available():
-            success, msg = fix_last_chunk_duration(str(draft_audio_dir))
-            if success:
-                logger.info(f"Fixed last chunk duration: {msg}")
         node_audio_dir = (
             audio_storage_root / f"nodes/{user_id}/{user_node.id}"
         )
