@@ -9,7 +9,9 @@ import os
 from backend.celery_app import celery, flask_app
 from backend.models import User, UserProfile, APICostLog
 from backend.extensions import db
-from backend.llm_providers import LLMProvider, PromptTooLongError
+from backend.llm_providers import (
+    LLMProvider, PromptTooLongError, DEFAULT_MAX_OUTPUT_TOKENS)
+
 from backend.utils.tokens import approximate_token_count, reduce_export_tokens
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import calculate_llm_cost_microdollars
@@ -388,7 +390,9 @@ def update_user_profile(self, user_id: int, model_id: str,
 
             model_cfg = flask_app.config["SUPPORTED_MODELS"][model_id]
             context_window = model_cfg.get("context_window", 200000)
-            max_output_tokens = 4096
+            max_output_tokens = min(
+                model_cfg.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS),
+                DEFAULT_MAX_OUTPUT_TOKENS)
             api_keys = get_api_keys_for_usage(flask_app.config, 'chat')
 
             if previous_profile_id:

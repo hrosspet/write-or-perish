@@ -75,7 +75,7 @@ def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int):
         api_keys = get_api_keys_for_usage(flask_app.config, "chat")
         try:
             response = LLMProvider.get_completion(
-                model_id, messages, api_keys, max_tokens=4096
+                model_id, messages, api_keys
             )
         except Exception as e:
             logger.error(f"LLM call failed for todo merge: {e}", exc_info=True)

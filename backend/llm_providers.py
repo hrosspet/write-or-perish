@@ -15,6 +15,8 @@ from flask import current_app
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_MAX_OUTPUT_TOKENS = 10000
+
 
 class PromptTooLongError(Exception):
     """Raised when the prompt exceeds the model's context window."""
@@ -60,6 +62,12 @@ class LLMProvider:
         provider = config["provider"]
         api_model = config["api_model"]
 
+        model_max = config.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS)
+        if max_tokens is None:
+            max_tokens = min(model_max, DEFAULT_MAX_OUTPUT_TOKENS)
+        else:
+            max_tokens = min(max_tokens, model_max, DEFAULT_MAX_OUTPUT_TOKENS)
+
         if provider == "openai":
             return LLMProvider._call_openai(
                 api_model, messages, api_keys["openai"], max_tokens,
@@ -92,7 +100,7 @@ class LLMProvider:
             model=model,
             messages=messages,
             temperature=1,
-            max_completion_tokens=max_tokens or 10000,
+            max_completion_tokens=max_tokens or DEFAULT_MAX_OUTPUT_TOKENS,
         )
 
         # Convert Anthropic-format tools to OpenAI format
@@ -189,9 +197,8 @@ class LLMProvider:
         # System parameter must be a list of content blocks
         system_param = [{"type": "text", "text": system_text}] if system_text else []
 
-        # Claude Opus 3 has a lower max_tokens limit than newer models
         if max_tokens is None:
-            max_tokens = 4096 if "claude-3-opus" in model else 10000
+            max_tokens = DEFAULT_MAX_OUTPUT_TOKENS
 
         # Log the actual API call details
         total_input_chars = sum(len(m.get("content", "")) for m in anthropic_messages)

@@ -112,6 +112,7 @@ class Config:
             "api_model": "claude-3-opus-20240229",
             "display_name": "Claude 3 Opus",
             "context_window": 200000,
+            "max_output_tokens": 4096,
             "input_price_per_mtok": 15.00,
             "output_price_per_mtok": 75.00,
         },
