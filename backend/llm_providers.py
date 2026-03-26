@@ -142,7 +142,11 @@ class LLMProvider:
                     "input": json.loads(tc.function.arguments),
                 })
 
-        logger.info(f"OpenAI API response: model={model}, input_tokens={response.usage.prompt_tokens}, output_tokens={response.usage.completion_tokens}")
+        finish_reason = response.choices[0].finish_reason
+        truncated = finish_reason == "length"
+        logger.info(f"OpenAI API response: model={model}, input_tokens={response.usage.prompt_tokens}, output_tokens={response.usage.completion_tokens}, finish_reason={finish_reason}")
+        if truncated:
+            logger.warning(f"OpenAI response truncated (max_tokens reached): model={model}, output_tokens={response.usage.completion_tokens}")
 
         return {
             "content": message.content or "",
@@ -150,6 +154,7 @@ class LLMProvider:
             "input_tokens": response.usage.prompt_tokens,
             "output_tokens": response.usage.completion_tokens,
             "tool_calls": tool_calls,
+            "truncated": truncated,
         }
 
     @staticmethod
@@ -244,7 +249,11 @@ class LLMProvider:
 
         # Calculate total tokens (Anthropic reports input/output separately)
         total_tokens = response.usage.input_tokens + response.usage.output_tokens
-        logger.info(f"Anthropic API response: model={model}, input_tokens={response.usage.input_tokens}, output_tokens={response.usage.output_tokens}")
+        stop_reason = response.stop_reason
+        truncated = stop_reason == "max_tokens"
+        logger.info(f"Anthropic API response: model={model}, input_tokens={response.usage.input_tokens}, output_tokens={response.usage.output_tokens}, stop_reason={stop_reason}")
+        if truncated:
+            logger.warning(f"Anthropic response truncated (max_tokens reached): model={model}, output_tokens={response.usage.output_tokens}")
 
         return {
             "content": content,
@@ -252,4 +261,5 @@ class LLMProvider:
             "input_tokens": response.usage.input_tokens,
             "output_tokens": response.usage.output_tokens,
             "tool_calls": tool_calls,
+            "truncated": truncated,
         }

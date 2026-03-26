@@ -516,11 +516,21 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             for m in prev_meta:
                                 name = m['name']
                                 apply_s = m.get("apply_status")
+                                was_truncated = (
+                                    m.get("apply_truncated")
+                                    or m.get("response_truncated"))
+                                truncation_warn = (
+                                    " WARNING: the LLM response was"
+                                    " truncated due to max_tokens"
+                                    " limit, so the result may be"
+                                    " incomplete."
+                                    if was_truncated else "")
                                 if name == "update_todo" and apply_s:
                                     if apply_s == "completed":
                                         summaries.append(
                                             "Todo changes have been "
                                             "applied to user's todo."
+                                            + truncation_warn
                                         )
                                     elif apply_s == "started":
                                         summaries.append(
@@ -532,6 +542,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                             "You proposed todo changes "
                                             "that are waiting for user "
                                             "approval."
+                                            + truncation_warn
                                         )
                                     elif apply_s == "failed":
                                         summaries.append(
@@ -541,6 +552,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 elif name == "update_ai_preferences":
                                     summaries.append(
                                         "AI preferences were updated."
+                                        + truncation_warn
                                     )
                             if summaries:
                                 prev_tool_note = (
@@ -686,6 +698,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             input_tokens = response.get("input_tokens", 0)
             output_tokens = response.get("output_tokens", 0)
             response_tool_calls = response.get("tool_calls", [])
+            response_truncated = response.get("truncated", False)
 
             logger.info(f"LLM response generated: {len(llm_text)} chars, {total_tokens} tokens, {len(response_tool_calls)} tool calls")
 
@@ -717,6 +730,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 tool_results = _execute_tool_calls(
                     response_tool_calls, llm_node, node_chain, user_id
                 )
+                if response_truncated:
+                    for tr in tool_results:
+                        tr["response_truncated"] = True
                 tool_meta = tool_results
                 llm_node.tool_calls_meta = json.dumps(tool_results)
 

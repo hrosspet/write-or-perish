@@ -111,13 +111,19 @@ def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int):
         db.session.add(new_todo)
 
         # Update apply status
-        _update_apply_status(llm_node, "completed", todo_id=new_todo.id)
+        truncated = response.get("truncated", False)
+        if truncated:
+            logger.warning(f"Todo merge response truncated for node {llm_node_id}")
+        _update_apply_status(
+            llm_node, "completed", todo_id=new_todo.id,
+            truncated=truncated)
 
         db.session.commit()
-        logger.info(f"Voice todo merge completed: todo_id={new_todo.id} for user {user_id}")
+        logger.info(f"Voice todo merge completed: todo_id={new_todo.id} for user {user_id}, truncated={truncated}")
 
 
-def _update_apply_status(llm_node, status, error=None, todo_id=None):
+def _update_apply_status(llm_node, status, error=None, todo_id=None,
+                         truncated=False):
     """Update the apply_status in the LLM node's tool_calls_meta."""
     meta = []
     if llm_node.tool_calls_meta:
@@ -132,6 +138,8 @@ def _update_apply_status(llm_node, status, error=None, todo_id=None):
                 entry["apply_error"] = error
             if todo_id:
                 entry["todo_id"] = todo_id
+            if truncated:
+                entry["apply_truncated"] = True
             break
     llm_node.tool_calls_meta = json.dumps(meta)
     db.session.flush()
