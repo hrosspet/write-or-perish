@@ -108,22 +108,21 @@ function TodoItem({ item, onToggle, depth = 0 }) {
           paddingLeft: depth * 24,
         }}
       >
-        {hasChildren && (
-          <div
-            onClick={() => setCollapsed(!collapsed)}
-            style={{
-              width: '16px', height: '18px',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              cursor: 'pointer', flexShrink: 0, marginTop: '2px',
-              color: 'var(--text-muted)', fontSize: '0.55rem',
-              transition: 'transform 0.2s',
-              transform: collapsed ? 'rotate(0deg)' : 'rotate(90deg)',
-              userSelect: 'none',
-            }}
-          >
-            ▶
-          </div>
-        )}
+        <div
+          onClick={hasChildren ? () => setCollapsed(!collapsed) : undefined}
+          style={{
+            width: '16px', height: '18px',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            cursor: hasChildren ? 'pointer' : 'default',
+            flexShrink: 0, marginTop: '2px',
+            color: 'var(--text-muted)', fontSize: '0.55rem',
+            transition: 'transform 0.2s',
+            transform: hasChildren && !collapsed ? 'rotate(90deg)' : 'rotate(0deg)',
+            userSelect: 'none',
+          }}
+        >
+          {hasChildren && '▶'}
+        </div>
         <div
           onClick={() => onToggle(item)}
           style={{
@@ -134,7 +133,6 @@ function TodoItem({ item, onToggle, depth = 0 }) {
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             fontSize: '0.6rem', color: 'var(--bg-deep)', fontWeight: 600,
             transition: 'all 0.3s', cursor: 'pointer',
-            marginLeft: !hasChildren && depth > 0 ? '16px' : 0,
           }}>
           {item.checked && '✓'}
         </div>
