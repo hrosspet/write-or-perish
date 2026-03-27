@@ -63,7 +63,9 @@ VOICE_TOOLS = [
             "are not applied immediately — the user must confirm first. "
             "If you're already recommending or analyzing specific tasks "
             "in a planning context, propose the todo changes in the "
-            "same response — don't wait for the user to ask."
+            "same response — don't wait for the user to ask. Save the "
+            "restraint for emotional processing where premature action "
+            "steps would be intrusive."
         ),
         "input_schema": {
             "type": "object",
