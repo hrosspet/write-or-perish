@@ -15,6 +15,15 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0' }) => (
       p: ({ node, ...props }) => (
         <p style={{ whiteSpace: 'pre-wrap', overflowWrap: 'break-word', margin: paragraphMargin }} {...props} />
       ),
+      ul: ({ node, ...props }) => (
+        <ul style={{ margin: '4px 0', paddingLeft: '24px' }} {...props} />
+      ),
+      ol: ({ node, ...props }) => (
+        <ol style={{ margin: '4px 0', paddingLeft: '24px' }} {...props} />
+      ),
+      li: ({ node, ...props }) => (
+        <li style={{ whiteSpace: 'normal', overflowWrap: 'break-word', marginBottom: '2px' }} {...props} />
+      ),
       code: ({ node, inline, className, children, ...props }) =>
         inline ? (
           <code style={{ whiteSpace: 'pre-wrap', overflowWrap: 'break-word' }} {...props}>
@@ -25,9 +34,6 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0' }) => (
             <code>{children}</code>
           </pre>
         ),
-      li: ({ node, ...props }) => (
-        <li style={{ whiteSpace: 'pre-wrap', overflowWrap: 'break-word' }} {...props} />
-      ),
     }}>
       {children}
     </ReactMarkdown>

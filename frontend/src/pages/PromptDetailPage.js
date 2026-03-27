@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
+import MarkdownBody from '../components/MarkdownBody';
 import api from '../api';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
 
@@ -369,18 +370,16 @@ export default function PromptDetailPage() {
 
       {/* Display mode */}
       {!editing && (
-        <pre style={{
+        <MarkdownBody style={{
           fontFamily: 'var(--sans)',
           fontSize: '0.85rem',
           fontWeight: 300,
           color: 'var(--text-secondary)',
           lineHeight: 1.7,
-          whiteSpace: 'pre-wrap',
           wordBreak: 'break-word',
-          margin: 0,
         }}>
           {prompt.content}
-        </pre>
+        </MarkdownBody>
       )}
 
       {/* Version History Drawer */}
