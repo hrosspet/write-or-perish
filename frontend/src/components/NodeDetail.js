@@ -54,6 +54,7 @@ function NodeDetail() {
   const [pinLoading, setPinLoading] = useState(false);
   const [voiceLoading, setVoiceLoading] = useState(false);
   const [toolActionsExpanded, setToolActionsExpanded] = useState(false);
+  const [showPromptEditConfirm, setShowPromptEditConfirm] = useState(false);
   const highlightedNodeRef = useRef(null);
 
   // LLM completion polling - enabled automatically when llmTaskNodeId is set
@@ -413,7 +414,13 @@ function NodeDetail() {
               />
             </>
           )}
-          {isOwner && <button onClick={() => setShowEditOverlay(true)}>Edit</button>}
+          {isOwner && <button onClick={() => {
+            if (node.context_artifacts?.prompt) {
+              setShowPromptEditConfirm(true);
+            } else {
+              setShowEditOverlay(true);
+            }
+          }}>Edit</button>}
           {isOwner && <button onClick={handleDelete}>Delete</button>}
         </div>
       </div>
@@ -456,6 +463,71 @@ function NodeDetail() {
         />
       )}
 
+      {showPromptEditConfirm && (
+        <div
+          onClick={() => setShowPromptEditConfirm(false)}
+          style={{
+            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+            backgroundColor: 'rgba(0,0,0,0.7)',
+            backdropFilter: 'blur(8px)',
+            WebkitBackdropFilter: 'blur(8px)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            zIndex: 1000,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: 'var(--bg-card)', border: '1px solid var(--border)',
+              borderRadius: '12px', padding: '2rem', maxWidth: '440px', width: '90vw',
+            }}
+          >
+            <h3 style={{
+              fontFamily: 'var(--serif)', fontWeight: 400, fontSize: '1.15rem',
+              color: 'var(--text-primary)', margin: '0 0 12px 0',
+            }}>Edit prompt for this thread only?</h3>
+            <p style={{
+              fontFamily: 'var(--sans)', fontSize: '0.88rem', fontWeight: 300,
+              color: 'var(--text-secondary)', lineHeight: 1.6, margin: '0 0 16px 0',
+            }}>
+              This changes the system prompt in this conversation only. Future threads
+              won't be affected, and updates to your prompt template won't reach this
+              thread anymore.
+            </p>
+            <p style={{
+              fontFamily: 'var(--sans)', fontSize: '0.82rem', fontWeight: 300,
+              color: 'var(--text-muted)', lineHeight: 1.5, margin: '0 0 20px 0',
+            }}>
+              To edit the template for all future threads, go to{' '}
+              <a href="/prompts" style={{ color: 'var(--accent)', textDecoration: 'underline' }}>Prompts</a>.
+            </p>
+            <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => setShowPromptEditConfirm(false)}
+                style={{
+                  padding: '8px 20px', background: 'none',
+                  border: '1px solid var(--border)', borderRadius: '6px',
+                  color: 'var(--text-secondary)', fontFamily: 'var(--sans)',
+                  fontSize: '0.85rem', cursor: 'pointer',
+                }}
+              >Cancel</button>
+              <button
+                onClick={() => {
+                  setShowPromptEditConfirm(false);
+                  setShowEditOverlay(true);
+                }}
+                style={{
+                  padding: '8px 20px', background: 'none',
+                  border: '1px solid var(--accent)', borderRadius: '6px',
+                  color: 'var(--accent)', fontFamily: 'var(--sans)',
+                  fontSize: '0.85rem', cursor: 'pointer',
+                }}
+              >Edit for this thread</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showEditOverlay && (
         <NodeFormModal
           title="Edit Text"
@@ -466,6 +538,7 @@ function NodeDetail() {
             initialContent: node.content,
             initialPrivacyLevel: node.privacy_level,
             initialAiUsage: node.ai_usage,
+            detachPrompt: !!node.context_artifacts?.prompt,
             onSuccess: (data) => {
               setNode(data.node ? data.node : { ...node, content: data.content });
               setShowEditOverlay(false);

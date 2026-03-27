@@ -9,7 +9,7 @@ import { uploadFileInChunks } from "../utils/chunkedUpload";
 
 const NodeForm = forwardRef(
   (
-    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage },
+    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt },
     ref
   ) => {
     const { user } = useUser();
@@ -240,7 +240,8 @@ const NodeForm = forwardRef(
           response = await api.put(`/nodes/${nodeId}`, {
             content,
             privacy_level: privacyLevel,
-            ai_usage: aiUsage
+            ai_usage: aiUsage,
+            ...(detachPrompt && { detach_prompt: true }),
           });
         } else if (uploadedFile) {
           // Upload audio file

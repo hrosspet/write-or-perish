@@ -625,6 +625,14 @@ def update_node(node_id):
             return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
         node.ai_usage = ai_usage
 
+    # If this node has a prompt artifact and detach_prompt is requested,
+    # remove the artifact so the edited content takes effect.
+    if data.get("detach_prompt"):
+        from backend.models import NodeContextArtifact
+        NodeContextArtifact.query.filter_by(
+            node_id=node.id, artifact_type="prompt"
+        ).delete()
+
     # Save the current version before update.
     version = NodeVersion(node_id=node.id)
     version.set_content(node.get_content())
