@@ -233,18 +233,24 @@ export function useStreamingTranscription(options = {}) {
   }, [transcriptionComplete, finalContent]);
 
   // iOS suspends SSE connections when backgrounded, so the all_complete event
-  // can be missed. When the app is foregrounded, check session status via REST.
+  // can be missed. Poll the status endpoint as a reliable fallback while in
+  // 'finalizing' state. On foreground, poll immediately; otherwise every 5s.
+  // This replaces the old one-shot visibility check which raced with the
+  // stopStreaming promise chain resuming after iOS suspension.
   useEffect(() => {
     if (sessionState !== 'finalizing') return;
+    if (!sessionIdRef.current) return;
 
-    const handleVisibilityChange = async () => {
-      if (document.visibilityState !== 'visible') return;
-      if (!sessionIdRef.current) return;
+    let pollTimer = null;
+    let cancelled = false;
 
+    const checkStatus = async () => {
+      if (cancelled || !sessionIdRef.current) return;
       try {
         const res = await api.get(`/drafts/streaming/${sessionIdRef.current}/status`);
+        if (cancelled) return;
         if (res.data.streaming_status === 'completed' && res.data.content) {
-          console.log('[StreamingTranscription] Foreground recovery: transcription already complete');
+          console.log('[StreamingTranscription] Polling recovery: transcription already complete');
           disconnectSSE();
           setSessionState('complete');
           setTranscript(res.data.content);
@@ -256,14 +262,35 @@ export function useStreamingTranscription(options = {}) {
               llmNodeId: res.data.llm_node_id || null,
             });
           }
+          return; // Done — don't schedule another poll
         }
       } catch (err) {
-        console.error('[StreamingTranscription] Foreground status check failed:', err);
+        console.error('[StreamingTranscription] Polling status check failed:', err);
+      }
+      // Not completed yet — schedule another check
+      if (!cancelled) {
+        pollTimer = setTimeout(checkStatus, 5000);
       }
     };
 
+    // On foreground, poll immediately (iOS resumes JS but SSE is dead)
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') return;
+      // Clear any pending delayed poll and check immediately
+      if (pollTimer) clearTimeout(pollTimer);
+      checkStatus();
+    };
+
     document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+
+    // Start first poll after a short delay (give SSE a chance to deliver first)
+    pollTimer = setTimeout(checkStatus, 5000);
+
+    return () => {
+      cancelled = true;
+      if (pollTimer) clearTimeout(pollTimer);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
   }, [sessionState, disconnectSSE]);
 
   // Online/offline detection and retry failed chunks
