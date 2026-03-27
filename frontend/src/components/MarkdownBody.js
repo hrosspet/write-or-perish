@@ -29,11 +29,11 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0' }) => (
       ),
       code: ({ node, inline, className, children, ...props }) =>
         inline ? (
-          <code style={{ whiteSpace: 'pre-wrap', overflowWrap: 'break-word' }} {...props}>
+          <code style={{ whiteSpace: 'pre-wrap', overflowWrap: 'break-word', fontSize: '0.9em' }} {...props}>
             {children}
           </code>
         ) : (
-          <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'break-word' }} {...props}>
+          <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'break-word', fontSize: '0.9em' }} {...props}>
             <code>{children}</code>
           </pre>
         ),
