@@ -501,7 +501,7 @@ function NodeDetail() {
               To edit the template for all future threads, go to{' '}
               <a href="/prompts" style={{ color: 'var(--accent)', textDecoration: 'underline' }}>Prompts</a>.
             </p>
-            <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
+            <div style={{ display: 'flex', gap: '12px', justifyContent: 'center' }}>
               <button
                 onClick={() => setShowPromptEditConfirm(false)}
                 style={{
