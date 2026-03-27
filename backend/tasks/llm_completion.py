@@ -94,8 +94,11 @@ VOICE_TOOLS = [
             "idea, or enhancement they want to file. Your text response "
             "must use the exact heading structure: ### Issue Title, "
             "### Description, ### Category (one of: bug, feature, "
-            "enhancement). The issue is not created immediately — the "
-            "user must confirm first."
+            "enhancement). Call this tool whenever your response "
+            "contains these headings — the headings alone do nothing; "
+            "without the tool call, the user cannot click to confirm "
+            "the issue. The issue is not created "
+            "immediately — the user must confirm first."
         ),
         "input_schema": {
             "type": "object",
