@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import ReactMarkdown from 'react-markdown';
+import MarkdownBody from '../components/MarkdownBody';
 import api from '../api';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
 import SpeakerIcon from '../components/SpeakerIcon';
@@ -337,7 +337,7 @@ export default function ProfilePage() {
           color: 'var(--text-secondary)',
           lineHeight: 1.7,
         }}>
-          <ReactMarkdown>{profile.content}</ReactMarkdown>
+          <MarkdownBody>{profile.content}</MarkdownBody>
         </div>
       )}
 

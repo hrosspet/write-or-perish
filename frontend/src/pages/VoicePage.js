@@ -5,6 +5,7 @@ import { useVoiceSession } from '../hooks/useVoiceSession';
 import { useUser } from '../contexts/UserContext';
 import { useInterruptedRecovery } from '../hooks/useInterruptedRecovery';
 import RecoveryBanner from '../components/RecoveryBanner';
+import MarkdownBody from '../components/MarkdownBody';
 import api from '../api';
 
 function formatDuration(seconds) {
@@ -885,11 +886,12 @@ export default function VoicePage() {
               color: 'var(--text-primary)', margin: '0 0 12px 0', fontWeight: 400,
             }}>{parsed.issueTitle}</h3>
             {parsed.issueDescription && (
-              <p style={{
+              <MarkdownBody style={{
                 fontFamily: 'var(--sans)', fontSize: '0.88rem', fontWeight: 300,
                 color: 'var(--text-secondary)', lineHeight: 1.7, margin: '0 0 12px 0',
-                whiteSpace: 'pre-wrap',
-              }}>{parsed.issueDescription}</p>
+              }} paragraphMargin="0 0 8px 0">
+                {parsed.issueDescription}
+              </MarkdownBody>
             )}
             {parsed.issueCategory && (
               <span style={{

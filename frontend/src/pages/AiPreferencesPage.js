@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import ReactMarkdown from 'react-markdown';
+import MarkdownBody from '../components/MarkdownBody';
 import api from '../api';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
 
@@ -256,7 +256,7 @@ export default function AiPreferencesPage() {
           color: 'var(--text-secondary)',
           lineHeight: 1.7,
         }}>
-          <ReactMarkdown>{prefs.content}</ReactMarkdown>
+          <MarkdownBody>{prefs.content}</MarkdownBody>
         </div>
       )}
 

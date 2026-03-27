@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import ReactMarkdown from "react-markdown";
+import MarkdownBody from "./MarkdownBody";
 import api from "../api";
 
 import Bubble from "./Bubble";
@@ -478,28 +478,9 @@ function Dashboard() {
                     border-color: var(--border);
                   }
                 `}</style>
-                <ReactMarkdown
-                  components={{
-                    p: ({ node, ...props }) => (
-                      <p style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }} {...props} />
-                    ),
-                    code: ({ node, inline, className, children, ...props }) =>
-                      inline ? (
-                        <code style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }} {...props}>
-                          {children}
-                        </code>
-                      ) : (
-                        <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }} {...props}>
-                          <code>{children}</code>
-                        </pre>
-                      ),
-                    li: ({ node, ...props }) => (
-                      <li style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }} {...props} />
-                    )
-                  }}
-                >
+                <MarkdownBody>
                   {dashboardData.latest_profile.content}
-                </ReactMarkdown>
+                </MarkdownBody>
               </div>
             ) : (
               <p style={{ color: "var(--text-muted)", fontStyle: "italic", fontFamily: "var(--serif)" }}>

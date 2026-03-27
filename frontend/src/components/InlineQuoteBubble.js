@@ -1,5 +1,5 @@
 import React from 'react';
-import ReactMarkdown from 'react-markdown';
+import MarkdownBody from './MarkdownBody';
 import NodeFooter from './NodeFooter';
 
 /**
@@ -26,9 +26,9 @@ const InlineQuoteBubble = ({ quote, onClick }) => {
         Quoted from @{quote.username}
       </div>
       <div style={contentStyle}>
-        <ReactMarkdown components={markdownComponents}>
+        <MarkdownBody paragraphMargin="0">
           {truncatedText}
-        </ReactMarkdown>
+        </MarkdownBody>
       </div>
       <NodeFooter
         username={quote.username}
@@ -39,25 +39,6 @@ const InlineQuoteBubble = ({ quote, onClick }) => {
   );
 };
 
-// Markdown component overrides for consistent styling
-const markdownComponents = {
-  p: ({ node, ...props }) => (
-    <p style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word", margin: 0 }} {...props} />
-  ),
-  code: ({ node, inline, className, children, ...props }) =>
-    inline ? (
-      <code style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }} {...props}>
-        {children}
-      </code>
-    ) : (
-      <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }} {...props}>
-        <code>{children}</code>
-      </pre>
-    ),
-  li: ({ node, ...props }) => (
-    <li style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }} {...props} />
-  ),
-};
 
 const bubbleStyle = {
   display: 'block',

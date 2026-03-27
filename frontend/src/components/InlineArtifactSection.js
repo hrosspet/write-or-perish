@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import ReactMarkdown from 'react-markdown';
+import MarkdownBody from './MarkdownBody';
 
 /**
  * InlineArtifactSection - Collapsible inline section for {user_profile} / {user_todo} placeholders.
@@ -45,20 +45,15 @@ const InlineArtifactSection = ({ type, artifact }) => {
       </div>
       {expanded && (
         <div style={contentStyle}>
-          <ReactMarkdown components={markdownComponents}>
+          <MarkdownBody paragraphMargin="0.3em 0">
             {artifact.content || ''}
-          </ReactMarkdown>
+          </MarkdownBody>
         </div>
       )}
     </div>
   );
 };
 
-const markdownComponents = {
-  p: ({ node, ...props }) => (
-    <p style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word", margin: "0.3em 0" }} {...props} />
-  ),
-};
 
 const containerStyle = {
   display: 'block',

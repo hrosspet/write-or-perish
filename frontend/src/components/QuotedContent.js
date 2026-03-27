@@ -1,5 +1,5 @@
 import React from 'react';
-import ReactMarkdown from 'react-markdown';
+import MarkdownBody from './MarkdownBody';
 import InlineQuoteBubble from './InlineQuoteBubble';
 import InlineArtifactSection from './InlineArtifactSection';
 
@@ -31,9 +31,9 @@ const QuotedContent = ({ content, quotes, contextArtifacts, onQuoteClick }) => {
   // If no special data provided, just render the content as-is with markdown
   if (!hasQuotes && !hasArtifacts && !ARTIFACT_PATTERN.test(content)) {
     return (
-      <ReactMarkdown components={markdownComponents}>
+      <MarkdownBody>
         {content}
-      </ReactMarkdown>
+      </MarkdownBody>
     );
   }
 
@@ -68,9 +68,9 @@ const QuotedContent = ({ content, quotes, contextArtifacts, onQuoteClick }) => {
       {segments.map((segment, index) => {
         if (segment.type === 'text') {
           return (
-            <ReactMarkdown key={index} components={markdownComponents}>
+            <MarkdownBody key={index}>
               {segment.content}
-            </ReactMarkdown>
+            </MarkdownBody>
           );
         } else if (segment.type === 'quote') {
           const quoteData = quotes ? quotes[segment.quoteId] : null;
@@ -99,24 +99,5 @@ const QuotedContent = ({ content, quotes, contextArtifacts, onQuoteClick }) => {
   );
 };
 
-// Markdown component overrides for consistent styling
-const markdownComponents = {
-  p: ({ node, ...props }) => (
-    <p style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }} {...props} />
-  ),
-  code: ({ node, inline, className, children, ...props }) =>
-    inline ? (
-      <code style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }} {...props}>
-        {children}
-      </code>
-    ) : (
-      <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }} {...props}>
-        <code>{children}</code>
-      </pre>
-    ),
-  li: ({ node, ...props }) => (
-    <li style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }} {...props} />
-  ),
-};
 
 export default QuotedContent;
