@@ -337,7 +337,7 @@ export default function VoicePage() {
       lastLlmNodeIdRef.current = nodeId;
       // Parse orient-style sections from LLM text (which IS the summary)
       const parsed = parseOrientResponse(content);
-      if (parsed.completed || parsed.newTasks || parsed.priority || parsed.note) {
+      if (parsed.completed || parsed.newTasks || parsed.priority || parsed.note || parsed.issueTitle) {
         setParsedResponse(parsed);
       }
 
