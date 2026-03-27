@@ -24,6 +24,9 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0' }) => (
       li: ({ node, ...props }) => (
         <li style={{ whiteSpace: 'normal', overflowWrap: 'break-word', marginBottom: '2px' }} {...props} />
       ),
+      hr: ({ node, ...props }) => (
+        <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '20px 0' }} {...props} />
+      ),
       code: ({ node, inline, className, children, ...props }) =>
         inline ? (
           <code style={{ whiteSpace: 'pre-wrap', overflowWrap: 'break-word' }} {...props}>
