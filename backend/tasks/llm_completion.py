@@ -60,7 +60,10 @@ VOICE_TOOLS = [
             "the proposal is silently lost. Omit sections that have no "
             "items, but always include at least one section. Even a "
             "single change needs its section header. The changes "
-            "are not applied immediately — the user must confirm first."
+            "are not applied immediately — the user must confirm first. "
+            "If you're already recommending or analyzing specific tasks "
+            "in a planning context, propose the todo changes in the "
+            "same response — don't wait for the user to ask."
         ),
         "input_schema": {
             "type": "object",
