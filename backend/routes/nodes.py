@@ -326,13 +326,16 @@ def _system_prompt_fields(n):
             "prompt_version_number": _prompt_version_number(prompt),
             "context_artifacts": _context_artifact_fields(n),
         }
+    # No prompt artifact, but other context artifacts may still exist
+    # (e.g. after a per-thread prompt edit detached the prompt artifact)
+    artifacts = _context_artifact_fields(n)
     return {
         "is_system_prompt": False,
         "prompt_title": None,
         "prompt_key": None,
         "user_prompt_id": None,
         "prompt_version_number": None,
-        "context_artifacts": None,
+        "context_artifacts": artifacts if artifacts else None,
     }
 
 
@@ -576,6 +579,12 @@ def create_node():
     )
     node.set_content(content)
     db.session.add(node)
+    db.session.flush()
+
+    # Attach context artifacts for any placeholders in the content
+    from backend.utils.context_artifacts import sync_context_artifacts
+    sync_context_artifacts(node.id, current_user.id, content)
+
     try:
         db.session.commit()
     except Exception:
@@ -632,6 +641,10 @@ def update_node(node_id):
         NodeContextArtifact.query.filter_by(
             node_id=node.id, artifact_type="prompt"
         ).delete()
+
+    # Sync context artifacts to match placeholders in new content
+    from backend.utils.context_artifacts import sync_context_artifacts
+    sync_context_artifacts(node.id, node.user_id, new_content)
 
     # Save the current version before update.
     version = NodeVersion(node_id=node.id)
