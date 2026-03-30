@@ -160,9 +160,9 @@ def _login(client, user_id):
 # ── Feed ─────────────────────────────────────────────────────────────────
 
 class TestFeedPrivacy:
-    """GET /api/feed should only return public nodes + the caller's own nodes."""
+    """GET /api/feed should only return the caller's own nodes (personal log)."""
 
-    def test_feed_hides_other_users_private_nodes(self, app, data):
+    def test_feed_shows_only_own_nodes(self, app, data):
         client = app.test_client()
         _login(client, data["alice_id"])
 
@@ -171,9 +171,9 @@ class TestFeedPrivacy:
         previews = [n["preview"] for n in resp.json["nodes"]]
 
         assert "Alice public post" in previews
-        assert "Alice private post" in previews   # own node
-        assert "Bob public post" in previews
-        assert "Bob private post" not in previews  # someone else's private
+        assert "Alice private post" in previews
+        assert "Bob public post" not in previews   # other user's node
+        assert "Bob private post" not in previews   # other user's node
 
     def test_feed_shows_own_private_nodes(self, app, data):
         client = app.test_client()
@@ -182,17 +182,18 @@ class TestFeedPrivacy:
         resp = client.get("/api/feed")
         previews = [n["preview"] for n in resp.json["nodes"]]
 
-        assert "Bob private post" in previews      # own node
-        assert "Alice private post" not in previews
+        assert "Bob private post" in previews
+        assert "Bob public post" in previews
+        assert "Alice public post" not in previews  # other user's node
 
-    def test_feed_total_count_respects_privacy(self, app, data):
-        """The pagination total must not include inaccessible nodes."""
+    def test_feed_total_count_only_own_nodes(self, app, data):
+        """The pagination total must only include the user's own nodes."""
         client = app.test_client()
         _login(client, data["alice_id"])
 
         resp = client.get("/api/feed")
-        # Alice sees: her 2 nodes + Bob's 1 public node = 3
-        assert resp.json["total"] == 3
+        # Alice sees only her 2 nodes
+        assert resp.json["total"] == 2
 
 
 # ── Public Dashboard ─────────────────────────────────────────────────────

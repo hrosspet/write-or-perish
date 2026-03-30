@@ -87,11 +87,22 @@ function Feed() {
           opacity: 0.5,
         }} />
       </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: "1rem"}}>
-        {feedNodes.map(node => (
-          <Bubble key={node.id} node={node} onClick={handleBubbleClick} />
-        ))}
-      </div>
+      {feedNodes.length === 0 && !loading ? (
+        <p style={{
+          color: "var(--text-muted)",
+          fontFamily: "var(--sans)",
+          fontSize: "0.95rem",
+          lineHeight: 1.6,
+        }}>
+          Your entries will appear here as you share thoughts with Loore.
+        </p>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: "1rem"}}>
+          {feedNodes.map(node => (
+            <Bubble key={node.id} node={node} onClick={handleBubbleClick} />
+          ))}
+        </div>
+      )}
       {loadingMore && <div style={{ padding: "20px", textAlign: "center", color: "var(--text-muted)" }}>Loading more...</div>}
       {hasMore && !loadingMore && (
         <div

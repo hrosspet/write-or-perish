@@ -2,7 +2,6 @@ from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
 from backend.models import Node, User
 from backend.extensions import db
-from backend.utils.privacy import accessible_nodes_filter
 from sqlalchemy import or_, func
 
 feed_bp = Blueprint("feed_bp", __name__)
@@ -11,9 +10,8 @@ feed_bp = Blueprint("feed_bp", __name__)
 @login_required
 def get_feed():
     """
-    Returns top-level nodes and pinned nodes as the global feed.
-    Only shows public nodes and the current user's own nodes.
-    Supports pagination via ?page=1&per_page=20 query params.
+    Returns the current user's personal log: their own top-level and
+    pinned nodes.  Supports pagination via ?page=1&per_page=20.
     """
     page = request.args.get("page", 1, type=int)
     per_page = request.args.get("per_page", 20, type=int)
@@ -21,7 +19,10 @@ def get_feed():
 
     query = Node.query.filter(
         or_(Node.parent_id.is_(None), Node.pinned_at.isnot(None)),
-        accessible_nodes_filter(Node, current_user.id)
+        or_(
+            Node.user_id == current_user.id,
+            Node.human_owner_id == current_user.id,
+        ),
     ).order_by(func.coalesce(Node.pinned_at, Node.created_at).desc())
     pagination = query.paginate(page=page, per_page=per_page, error_out=False)
 
