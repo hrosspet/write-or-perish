@@ -6,6 +6,7 @@ from backend.models import (
     NodeContextArtifact, UserProfile, UserRecentContext, UserTodo,
     UserAIPreferences,
 )
+from backend.utils.privacy import AI_ALLOWED
 
 # Mapping from placeholder name to artifact_type in NodeContextArtifact
 PLACEHOLDER_TO_ARTIFACT = {
@@ -42,7 +43,7 @@ def attach_context_artifacts(node_id, user_id, prompt_record=None):
     profile = (
         UserProfile.query
         .filter_by(user_id=user_id)
-        .filter(UserProfile.ai_usage.in_(["chat", "train"]))
+        .filter(UserProfile.ai_usage.in_(AI_ALLOWED))
         .order_by(UserProfile.created_at.desc())
         .first()
     )
@@ -74,7 +75,7 @@ def attach_context_artifacts(node_id, user_id, prompt_record=None):
     todo = (
         UserTodo.query
         .filter_by(user_id=user_id)
-        .filter(UserTodo.ai_usage.in_(["chat", "train"]))
+        .filter(UserTodo.ai_usage.in_(AI_ALLOWED))
         .order_by(UserTodo.created_at.desc())
         .first()
     )
@@ -89,7 +90,7 @@ def attach_context_artifacts(node_id, user_id, prompt_record=None):
     ai_prefs = (
         UserAIPreferences.query
         .filter_by(user_id=user_id)
-        .filter(UserAIPreferences.ai_usage.in_(["chat", "train"]))
+        .filter(UserAIPreferences.ai_usage.in_(AI_ALLOWED))
         .order_by(UserAIPreferences.created_at.desc())
         .first()
     )
@@ -148,7 +149,7 @@ def _resolve_latest_artifact(artifact_type, user_id):
         row = (
             UserProfile.query
             .filter_by(user_id=user_id)
-            .filter(UserProfile.ai_usage.in_(["chat", "train"]))
+            .filter(UserProfile.ai_usage.in_(AI_ALLOWED))
             .order_by(UserProfile.created_at.desc())
             .first()
         )
@@ -156,7 +157,7 @@ def _resolve_latest_artifact(artifact_type, user_id):
         row = (
             UserTodo.query
             .filter_by(user_id=user_id)
-            .filter(UserTodo.ai_usage.in_(["chat", "train"]))
+            .filter(UserTodo.ai_usage.in_(AI_ALLOWED))
             .order_by(UserTodo.created_at.desc())
             .first()
         )
@@ -164,7 +165,7 @@ def _resolve_latest_artifact(artifact_type, user_id):
         profile = (
             UserProfile.query
             .filter_by(user_id=user_id)
-            .filter(UserProfile.ai_usage.in_(["chat", "train"]))
+            .filter(UserProfile.ai_usage.in_(AI_ALLOWED))
             .order_by(UserProfile.created_at.desc())
             .first()
         )
@@ -179,7 +180,7 @@ def _resolve_latest_artifact(artifact_type, user_id):
         row = (
             UserAIPreferences.query
             .filter_by(user_id=user_id)
-            .filter(UserAIPreferences.ai_usage.in_(["chat", "train"]))
+            .filter(UserAIPreferences.ai_usage.in_(AI_ALLOWED))
             .order_by(UserAIPreferences.created_at.desc())
             .first()
         )

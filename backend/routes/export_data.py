@@ -6,6 +6,7 @@ from backend.models import (
 )
 from backend.extensions import db
 from backend.utils.tokens import approximate_token_count, get_model_context_window
+from backend.utils.privacy import AI_ALLOWED
 from backend.utils.quotes import (
     resolve_quotes, has_quotes, ExportQuoteResolver, resolve_quotes_for_export
 )
@@ -150,7 +151,7 @@ def format_node_tree(
         # Process children
         children = node.children
         if filter_ai_usage:
-            children = [c for c in children if c.ai_usage in ['chat', 'train']]
+            children = [c for c in children if c.ai_usage in AI_ALLOWED]
         if created_before:
             children = [c for c in children if c.created_at < created_before]
         if included_ids is not None:
@@ -194,7 +195,7 @@ def format_node_tree(
     # Also filter by created_before if specified
     children = node.children
     if filter_ai_usage:
-        children = [c for c in children if c.ai_usage in ['chat', 'train']]
+        children = [c for c in children if c.ai_usage in AI_ALLOWED]
     if created_before:
         children = [c for c in children if c.created_at < created_before]
 
@@ -250,7 +251,7 @@ def _collect_all_nodes_in_tree(node, filter_ai_usage=False, created_before=None,
 
     children = node.children
     if filter_ai_usage:
-        children = [c for c in children if c.ai_usage in ['chat', 'train']]
+        children = [c for c in children if c.ai_usage in AI_ALLOWED]
     if created_before:
         children = [c for c in children if c.created_at < created_before]
 
@@ -302,7 +303,7 @@ def build_user_export_content(
 
     # Only filter by AI usage if requested (for AI profile generation)
     if filter_ai_usage:
-        query = query.filter(Node.ai_usage.in_(['chat', 'train']))
+        query = query.filter(Node.ai_usage.in_(AI_ALLOWED))
 
     # Filter by creation timestamp if specified (for {user_export} context limiting)
     if created_before:
@@ -601,10 +602,14 @@ def build_user_export_content(
         latest_ts = max(
             (n.created_at for n in meta_nodes), default=None
         )
+        earliest_ts = min(
+            (n.created_at for n in meta_nodes), default=None
+        )
         return {
             "content": content,
             "token_count": approximate_token_count(content),
             "latest_node_created_at": latest_ts,
+            "earliest_node_created_at": earliest_ts,
             "node_count": len(meta_nodes),
         }
 

@@ -10,6 +10,7 @@ from sqlalchemy import func, or_
 
 from backend.celery_app import celery, flask_app
 from backend.models import User, UserProfile, UserRecentContext, Node, APICostLog
+from backend.utils.privacy import AI_ALLOWED
 from backend.extensions import db
 from backend.llm_providers import LLMProvider, PromptTooLongError
 from backend.utils.tokens import reduce_export_tokens
@@ -29,7 +30,7 @@ def _get_latest_chat_profile(user_id):
     return (
         UserProfile.query
         .filter_by(user_id=user_id)
-        .filter(UserProfile.ai_usage.in_(["chat", "train"]))
+        .filter(UserProfile.ai_usage.in_(AI_ALLOWED))
         .order_by(UserProfile.created_at.desc())
         .first()
     )
@@ -53,7 +54,7 @@ def _count_new_tokens(user_id, since):
         or_(Node.user_id == user_id,
             Node.human_owner_id == user_id),
         Node.created_at >= since,
-        Node.ai_usage.in_(['chat', 'train']),
+        Node.ai_usage.in_(AI_ALLOWED),
         Node.token_count.isnot(None)
     ).scalar()
 
@@ -65,7 +66,7 @@ def _count_total_eligible_tokens(user_id):
     ).filter(
         or_(Node.user_id == user_id,
             Node.human_owner_id == user_id),
-        Node.ai_usage.in_(['chat', 'train']),
+        Node.ai_usage.in_(AI_ALLOWED),
         Node.token_count.isnot(None)
     ).scalar()
 

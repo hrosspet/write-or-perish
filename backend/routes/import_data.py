@@ -2,6 +2,7 @@ from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node, User, UserProfile
 from backend.extensions import db
+from backend.utils.privacy import AI_ALLOWED
 from datetime import datetime
 import zipfile
 import io
@@ -283,7 +284,7 @@ def confirm_import():
 
         # Determine if imported data predates the current profile cutoff
         profile_update_task_id = None
-        if ai_usage in ('chat', 'train'):
+        if ai_usage in AI_ALLOWED:
             try:
                 user_obj = User.query.get(current_user.id)
                 if (user_obj and (user_obj.plan or "free")
@@ -739,7 +740,7 @@ def confirm_claude_import():
 
         # Determine if imported data predates the current profile cutoff
         profile_update_task_id = None
-        if ai_usage in ('chat', 'train'):
+        if ai_usage in AI_ALLOWED:
             try:
                 user_obj = User.query.get(current_user.id)
                 if (user_obj and (user_obj.plan or "free")
@@ -958,7 +959,7 @@ def confirm_twitter_import():
 
         # Determine if imported data predates the current profile cutoff
         profile_update_task_id = None
-        if ai_usage in ('chat', 'train'):
+        if ai_usage in AI_ALLOWED:
             try:
                 user_obj = User.query.get(current_user.id)
                 if (user_obj and (user_obj.plan or "free")
@@ -1348,7 +1349,7 @@ def confirm_chatgpt_import():
 
         # Determine if imported data predates the current profile cutoff
         profile_update_task_id = None
-        if ai_usage in ('chat', 'train'):
+        if ai_usage in AI_ALLOWED:
             try:
                 user_obj = User.query.get(current_user.id)
                 if (user_obj and (user_obj.plan or "free")
