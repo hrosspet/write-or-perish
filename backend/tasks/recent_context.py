@@ -55,7 +55,6 @@ def _count_new_tokens(user_id, since):
             Node.human_owner_id == user_id),
         Node.created_at >= since,
         Node.ai_usage.in_(AI_ALLOWED),
-        Node.token_count.isnot(None)
     ).scalar()
 
 
@@ -67,7 +66,6 @@ def _count_total_eligible_tokens(user_id):
         or_(Node.user_id == user_id,
             Node.human_owner_id == user_id),
         Node.ai_usage.in_(AI_ALLOWED),
-        Node.token_count.isnot(None)
     ).scalar()
 
 

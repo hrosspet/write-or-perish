@@ -1072,7 +1072,6 @@ def maybe_trigger_incremental_profile_update(user):
                     Node.human_owner_id == user.id),
                 Node.updated_at >= cutoff,
                 Node.ai_usage.in_(['chat', 'train']),
-                Node.token_count.isnot(None)
             ).scalar()
         else:
             new_tokens = THRESHOLD_TOKENS  # No cutoff = trigger
@@ -1085,7 +1084,6 @@ def maybe_trigger_incremental_profile_update(user):
             or_(Node.user_id == user.id,
                 Node.human_owner_id == user.id),
             Node.ai_usage.in_(['chat', 'train']),
-            Node.token_count.isnot(None)
         ).scalar()
 
     if new_tokens >= THRESHOLD_TOKENS:
