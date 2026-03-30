@@ -226,6 +226,9 @@ def apply_todo(llm_node_id):
     # to the frontend for correct thread continuation.
     merge_model = llm_node.llm_model
 
+    merge_prompt_content = get_user_prompt(
+        current_user.id, 'orient_apply_todo')
+    from backend.utils.tokens import approximate_token_count
     merge_prompt_node = Node(
         user_id=current_user.id,
         human_owner_id=current_user.id,
@@ -233,10 +236,9 @@ def apply_todo(llm_node_id):
         node_type="user",
         privacy_level="private",
         ai_usage="chat",
+        token_count=approximate_token_count(merge_prompt_content),
     )
-    merge_prompt_node.set_content(
-        get_user_prompt(current_user.id, 'orient_apply_todo')
-    )
+    merge_prompt_node.set_content(merge_prompt_content)
     db.session.add(merge_prompt_node)
     db.session.flush()
 

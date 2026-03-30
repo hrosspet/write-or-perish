@@ -346,15 +346,29 @@ def build_user_export_content(
         # Reserve tokens for header and footer
         header_footer_tokens = 100
 
+        # Pre-select nodes using stored token_count to avoid decrypting
+        # the entire archive.  Walk in sort order and accumulate until we
+        # exceed the budget.  The resolver will re-evaluate after quote
+        # embedding and may drop trailing nodes, so no extra headroom is
+        # needed here.
+        budget = max_tokens - header_footer_tokens
+        running = 0
+        selected_nodes = []
+        for node in all_nodes:
+            if running >= budget:
+                break
+            selected_nodes.append(node)
+            running += node.token_count
+
         # Create resolver with adjusted token budget
         resolver = ExportQuoteResolver(
-            user.id, max_tokens - header_footer_tokens,
+            user.id, budget,
             filter_ai_usage=filter_ai_usage,
             chronological=chronological_order
         )
 
-        # Add all nodes to the resolver
-        for node in all_nodes:
+        # Add only the pre-selected nodes to the resolver (decrypts here)
+        for node in selected_nodes:
             content = node.get_content()
             # Collect artifact tuples from join table
             node_artifacts = [
@@ -372,6 +386,7 @@ def build_user_export_content(
                     node_id=node.id,
                     created_at=node.created_at,
                     content=content,
+                    token_count=node.token_count,
                     user_prompt_id=prompt.id,
                     prompt_content=content,
                     prompt_label=f"{prompt.title} v{version_num}",
@@ -382,6 +397,7 @@ def build_user_export_content(
                     node_id=node.id,
                     created_at=node.created_at,
                     content=content,
+                    token_count=node.token_count,
                     artifacts=node_artifacts,
                 )
 

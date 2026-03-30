@@ -82,7 +82,7 @@ class Node(db.Model):
     # Model used to generate this node (only populated for node_type='llm')
     llm_model = db.Column(db.String(64), nullable=True)
     content = db.Column(db.Text, nullable=True)
-    token_count = db.Column(db.Integer, nullable=True)
+    token_count = db.Column(db.Integer, nullable=False, default=0)
     # NEW: distributed_tokens will hold the portion of an LLM response allocated to this node's author.
     distributed_tokens = db.Column(db.Integer, nullable=False, default=0)
 
