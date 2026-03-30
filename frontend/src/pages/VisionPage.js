@@ -245,8 +245,8 @@ export default function VisionPage() {
             lineHeight: 1.8, color: "var(--text-muted)", maxWidth: 480,
             margin: "2rem auto 2.5rem",
           }}>
-            Empower individuals to awaken themselves — as part of humanity
-            awakening to itself. That's the direction. Journaling is where it starts.
+            Unleash your hidden potential — and watch it ripple outward.
+            Journaling is where it starts.
           </p>
         </Fade>
         <Fade delay={0.32}>
