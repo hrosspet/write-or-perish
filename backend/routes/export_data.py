@@ -10,6 +10,8 @@ from backend.utils.privacy import AI_ALLOWED
 from backend.utils.quotes import (
     resolve_quotes, has_quotes, ExportQuoteResolver, resolve_quotes_for_export
 )
+from sqlalchemy import func
+from sqlalchemy.orm import subqueryload
 from datetime import datetime
 import os
 
@@ -325,40 +327,53 @@ def build_user_export_content(
 
     # If max_tokens is specified, use ExportQuoteResolver for smart quote handling
     if max_tokens:
-        # Collect ALL nodes from all threads
-        all_nodes = []
-        for top_node in all_top_level_nodes:
-            all_nodes.extend(_collect_all_nodes_in_tree(
-                top_node, filter_ai_usage, created_before
-            ))
-
-        # Filter by created_after at the node level too
-        if created_after:
-            all_nodes = [n for n in all_nodes if n.created_at > created_after]
-
-        # Sort: chronological (oldest first) for iterative building,
-        # or reverse-chronological (newest first) for normal truncation
-        all_nodes.sort(
-            key=lambda n: n.created_at,
-            reverse=not chronological_order
-        )
-
         # Reserve tokens for header and footer
         header_footer_tokens = 100
-
-        # Pre-select nodes using stored token_count to avoid decrypting
-        # the entire archive.  Walk in sort order and accumulate until we
-        # exceed the budget.  The resolver will re-evaluate after quote
-        # embedding and may drop trailing nodes, so no extra headroom is
-        # needed here.
         budget = max_tokens - header_footer_tokens
-        running = 0
-        selected_nodes = []
-        for node in all_nodes:
-            if running >= budget:
-                break
-            selected_nodes.append(node)
-            running += node.token_count
+
+        # Pre-select nodes via SQL: cumulative sum of token_count ordered
+        # by created_at, keeping only those that fit within the budget.
+        # This avoids loading + traversing the full node tree in Python.
+        sort_order = (
+            Node.created_at.asc() if chronological_order
+            else Node.created_at.desc()
+        )
+        cumul = func.sum(Node.token_count).over(
+            order_by=sort_order
+        ).label("cumul")
+
+        inner = db.session.query(Node.id, cumul).filter(
+            Node.user_id == user.id,
+        )
+        if filter_ai_usage:
+            inner = inner.filter(Node.ai_usage.in_(AI_ALLOWED))
+        if created_before:
+            inner = inner.filter(Node.created_at < created_before)
+        if created_after:
+            inner = inner.filter(Node.created_at > created_after)
+
+        inner = inner.subquery()
+
+        selected_ids = [
+            row[0] for row in
+            db.session.query(inner.c.id).filter(
+                inner.c.cumul - func.coalesce(
+                    Node.token_count, 0) < budget
+            ).join(Node, Node.id == inner.c.id).all()
+        ]
+
+        # Load selected Node objects with context_artifacts eager-loaded
+        selected_nodes = (
+            Node.query
+            .filter(Node.id.in_(selected_ids))
+            .options(subqueryload(Node.context_artifacts))
+            .all()
+        )
+        # Sort in Python to match the desired order
+        selected_nodes.sort(
+            key=lambda n: n.created_at,
+            reverse=not chronological_order,
+        )
 
         # Create resolver with adjusted token budget
         resolver = ExportQuoteResolver(
@@ -598,12 +613,12 @@ def build_user_export_content(
                 # quote dependencies.
                 included_entries = resolver.get_included_entries()
                 meta_nodes = [
-                    n for n in all_nodes
+                    n for n in selected_nodes
                     if any(e.node_id == n.id for e in included_entries)
                 ]
             else:
                 meta_nodes = [
-                    n for n in all_nodes if n.id in included_ids
+                    n for n in selected_nodes if n.id in included_ids
                 ]
         else:
             meta_nodes = []
