@@ -396,6 +396,22 @@ def _context_artifact_fields(n):
                     ).count(),
                     "content": prefs.get_content(),
                 }
+    # If this is a system prompt node with {user_recent_raw}, compute
+    # the raw data date range (lightweight SQL, no decryption).
+    if artifacts.get("prompt"):
+        content = n.get_content()
+        if "{user_recent_raw}" in content:
+            from backend.routes.export_data import get_raw_data_date_range
+            earliest, latest = get_raw_data_date_range(
+                n.user_id, created_before=n.created_at,
+            )
+            if earliest and latest:
+                fmt = lambda dt: dt.strftime('%Y-%m-%d')  # noqa: E731
+                artifacts["recent_raw"] = {
+                    "covers_start": fmt(earliest),
+                    "covers_end": fmt(latest),
+                }
+
     return artifacts if artifacts else None
 
 

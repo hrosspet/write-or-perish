@@ -265,6 +265,68 @@ def _collect_all_nodes_in_tree(node, filter_ai_usage=False, created_before=None,
     return result
 
 
+def _preselect_node_ids(user_id, budget, filter_ai_usage=False,
+                        created_before=None, created_after=None,
+                        chronological_order=False):
+    """Select node IDs that fit within a token budget using a SQL window function.
+
+    Returns a list of node IDs ordered by created_at (direction controlled
+    by chronological_order).  No nodes are loaded or decrypted.
+    """
+    sort_order = (
+        Node.created_at.asc() if chronological_order
+        else Node.created_at.desc()
+    )
+    cumul = func.sum(Node.token_count).over(
+        order_by=sort_order
+    ).label("cumul")
+
+    inner = db.session.query(Node.id, cumul).filter(
+        Node.user_id == user_id,
+    )
+    if filter_ai_usage:
+        inner = inner.filter(Node.ai_usage.in_(AI_ALLOWED))
+    if created_before:
+        inner = inner.filter(Node.created_at < created_before)
+    if created_after:
+        inner = inner.filter(Node.created_at > created_after)
+
+    inner = inner.subquery()
+
+    return [
+        row[0] for row in
+        db.session.query(inner.c.id).filter(
+            inner.c.cumul - func.coalesce(
+                Node.token_count, 0) < budget
+        ).join(Node, Node.id == inner.c.id).all()
+    ]
+
+
+def get_raw_data_date_range(user_id, max_tokens=10000, created_before=None):
+    """Return (earliest, latest) created_at for the pre-selected raw data window.
+
+    This is an approximation: the resolver may pull in older nodes as quote
+    dependencies, but using those dates would be misleading (e.g. a quote
+    from years back doesn't mean the raw data "covers" that period).  The
+    pre-selection window reflects the actual recent writing period.
+
+    Runs only the SQL window function — no nodes are loaded or decrypted.
+    Returns (None, None) if no nodes qualify.
+    """
+    budget = max_tokens - 100  # header/footer reserve
+    selected_ids = _preselect_node_ids(
+        user_id, budget, filter_ai_usage=True,
+        created_before=created_before, chronological_order=False,
+    )
+    if not selected_ids:
+        return None, None
+
+    row = db.session.query(
+        func.min(Node.created_at), func.max(Node.created_at)
+    ).filter(Node.id.in_(selected_ids)).one()
+    return row[0], row[1]
+
+
 def build_user_export_content(
     user, max_tokens=None, filter_ai_usage=False,
     created_before=None, created_after=None,
@@ -324,6 +386,7 @@ def build_user_export_content(
     included_ids = None
     ai_blocked_ids = None
     resolver = None
+    selected_ids = None
 
     # If max_tokens is specified, use ExportQuoteResolver for smart quote handling
     if max_tokens:
@@ -331,36 +394,12 @@ def build_user_export_content(
         header_footer_tokens = 100
         budget = max_tokens - header_footer_tokens
 
-        # Pre-select nodes via SQL: cumulative sum of token_count ordered
-        # by created_at, keeping only those that fit within the budget.
-        # This avoids loading + traversing the full node tree in Python.
-        sort_order = (
-            Node.created_at.asc() if chronological_order
-            else Node.created_at.desc()
+        # Pre-select node IDs via SQL window function (no loading/decryption)
+        selected_ids = _preselect_node_ids(
+            user.id, budget, filter_ai_usage=filter_ai_usage,
+            created_before=created_before, created_after=created_after,
+            chronological_order=chronological_order,
         )
-        cumul = func.sum(Node.token_count).over(
-            order_by=sort_order
-        ).label("cumul")
-
-        inner = db.session.query(Node.id, cumul).filter(
-            Node.user_id == user.id,
-        )
-        if filter_ai_usage:
-            inner = inner.filter(Node.ai_usage.in_(AI_ALLOWED))
-        if created_before:
-            inner = inner.filter(Node.created_at < created_before)
-        if created_after:
-            inner = inner.filter(Node.created_at > created_after)
-
-        inner = inner.subquery()
-
-        selected_ids = [
-            row[0] for row in
-            db.session.query(inner.c.id).filter(
-                inner.c.cumul - func.coalesce(
-                    Node.token_count, 0) < budget
-            ).join(Node, Node.id == inner.c.id).all()
-        ]
 
         # Load selected Node objects with context_artifacts eager-loaded
         selected_nodes = (
@@ -604,23 +643,16 @@ def build_user_export_content(
     content = "\n".join(export_lines)
 
     if return_metadata:
-        # Determine latest node timestamp and node count from included nodes
-        if included_ids is not None:
-            if chronological_order:
-                # When chronological, use only directly-selected entries
-                # (not embedded dependencies) to avoid inflating the cutoff
-                # with timestamps from newer nodes that were pulled in as
-                # quote dependencies.
-                included_entries = resolver.get_included_entries()
-                meta_nodes = [
-                    n for n in selected_nodes
-                    if any(e.node_id == n.id for e in included_entries)
-                ]
-            else:
-                meta_nodes = [
-                    n for n in selected_nodes if n.id in included_ids
-                ]
+        # Date range from the pre-selected window (not inflated by
+        # quote dependencies the resolver may have pulled in).
+        if selected_ids:
+            row = db.session.query(
+                func.min(Node.created_at), func.max(Node.created_at),
+                func.count(Node.id),
+            ).filter(Node.id.in_(selected_ids)).one()
+            earliest_ts, latest_ts, node_count = row
         else:
+            # No max_tokens path — scan all included nodes
             meta_nodes = []
             for top_node in top_level_nodes:
                 meta_nodes.extend(_collect_all_nodes_in_tree(
@@ -630,18 +662,19 @@ def build_user_export_content(
                 meta_nodes = [
                     n for n in meta_nodes if n.created_at > created_after
                 ]
-        latest_ts = max(
-            (n.created_at for n in meta_nodes), default=None
-        )
-        earliest_ts = min(
-            (n.created_at for n in meta_nodes), default=None
-        )
+            latest_ts = max(
+                (n.created_at for n in meta_nodes), default=None
+            )
+            earliest_ts = min(
+                (n.created_at for n in meta_nodes), default=None
+            )
+            node_count = len(meta_nodes)
         return {
             "content": content,
             "token_count": approximate_token_count(content),
             "latest_node_created_at": latest_ts,
             "earliest_node_created_at": earliest_ts,
-            "node_count": len(meta_nodes),
+            "node_count": node_count,
         }
 
     return content

@@ -19,6 +19,7 @@ const InlineArtifactSection = ({ type, artifact }) => {
     todo: 'User TODO',
     recent: 'Recent Context',
     ai_preferences: 'AI Preferences',
+    recent_raw: 'Recent Raw Data',
   };
   const label = LABELS[type] || type;
 
@@ -26,6 +27,21 @@ const InlineArtifactSection = ({ type, artifact }) => {
     return (
       <div style={notAvailableStyle}>
         [{label} not available]
+      </div>
+    );
+  }
+
+  // Recent raw data: show date range only (content is not loaded)
+  if (type === 'recent_raw') {
+    const dateRange = artifact.covers_start && artifact.covers_end
+      ? `Covers ${artifact.covers_start} to ${artifact.covers_end}`
+      : 'Date range unavailable';
+    return (
+      <div style={containerStyle}>
+        <div style={{ ...headerStyle, cursor: 'default' }}>
+          <span style={chevronStyle}>{'\u25A0'}</span>
+          <span>{label} — {dateRange}</span>
+        </div>
       </div>
     );
   }
