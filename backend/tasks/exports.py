@@ -12,7 +12,9 @@ from backend.extensions import db
 from backend.llm_providers import (
     LLMProvider, PromptTooLongError, DEFAULT_MAX_OUTPUT_TOKENS)
 
-from backend.utils.tokens import approximate_token_count, reduce_export_tokens
+from backend.utils.tokens import (
+    approximate_token_count, reduce_export_tokens, format_date_metadata,
+)
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import calculate_llm_cost_microdollars
 
@@ -190,7 +192,11 @@ def generate_user_profile(self, user_id: int, model_id: str):
                 privacy_level=PrivacyLevel.PRIVATE,
                 ai_usage=AIUsage.CHAT
             )
-            new_profile.set_content(profile_text)
+            new_profile.set_content(
+                format_date_metadata(
+                    covers_end=new_profile.source_data_cutoff,
+                ) + profile_text
+            )
             db.session.add(new_profile)
             db.session.commit()
 
@@ -291,7 +297,9 @@ def _save_profile(user, model_id, profile_text, response,
         generation_type=generation_type,
         parent_profile_id=parent_profile_id,
     )
-    new_profile.set_content(profile_text)
+    new_profile.set_content(
+        format_date_metadata(covers_end=source_data_cutoff) + profile_text
+    )
     db.session.add(new_profile)
     db.session.commit()
     return new_profile

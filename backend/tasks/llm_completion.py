@@ -15,7 +15,9 @@ from backend.models import (
 )
 from backend.extensions import db
 from backend.llm_providers import LLMProvider, PromptTooLongError
-from backend.utils.tokens import approximate_token_count, reduce_export_tokens
+from backend.utils.tokens import (
+    approximate_token_count, reduce_export_tokens, format_date_metadata,
+)
 from backend.utils.quotes import resolve_quotes, has_quotes
 from backend.utils.api_keys import determine_api_key_type, get_api_keys_for_usage
 from backend.utils.cost import calculate_llm_cost_microdollars
@@ -379,19 +381,6 @@ def parse_placeholder_params(match_str):
     return {}
 
 
-def _add_date_metadata(text, covers_start=None, covers_end=None):
-    """Prepend a bracketed date-metadata line to *text*.
-
-    Format: [Covers YYYY-MM-DD to YYYY-MM-DD.] or [Covers data through YYYY-MM-DD.]
-    """
-    fmt = lambda dt: dt.strftime('%Y-%m-%d')  # noqa: E731
-    if covers_start and covers_end:
-        return f"[Covers {fmt(covers_start)} to {fmt(covers_end)}.]\n" + text
-    elif covers_end:
-        return f"[Covers data through {fmt(covers_end)}.]\n" + text
-    return text
-
-
 def build_user_export_content(user, max_tokens=None, filter_ai_usage=False,
                               created_before=None, chronological_order=False):
     """Import the actual implementation from export_data routes."""
@@ -625,10 +614,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             if needs_profile:
                 profile_obj = get_user_profile_content(user_id)
                 if profile_obj:
-                    user_profile_content = _add_date_metadata(
-                        profile_obj.get_content(),
-                        covers_end=profile_obj.source_data_cutoff,
-                    )
+                    # Metadata already baked into stored content
+                    user_profile_content = profile_obj.get_content()
 
             if needs_todo:
                 user_todo_content = get_user_todo_content(user_id)
@@ -636,16 +623,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             if needs_recent:
                 rc = get_user_recent_content(user_id)
                 if rc:
-                    rc_start = (
-                        rc.profile.source_data_cutoff
-                        if rc.profile and rc.profile.source_data_cutoff
-                        else None
-                    )
-                    user_recent_content = _add_date_metadata(
-                        rc.get_content(),
-                        covers_start=rc_start,
-                        covers_end=rc.source_data_cutoff,
-                    )
+                    # Metadata already baked into stored content
+                    user_recent_content = rc.get_content()
 
             if needs_recent_raw:
                 raw_cutoff = recent_raw_node.created_at if recent_raw_node else None
@@ -653,11 +632,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     user_id, created_before=raw_cutoff
                 )
                 if raw_result:
-                    user_recent_raw_content = _add_date_metadata(
-                        raw_result["content"],
+                    # Raw data is dynamic — add metadata on the fly
+                    user_recent_raw_content = format_date_metadata(
                         covers_start=raw_result.get("earliest"),
                         covers_end=raw_result.get("latest"),
-                    )
+                    ) + raw_result["content"]
 
             if needs_ai_prefs:
                 user_ai_preferences_content = get_user_ai_preferences_content(user_id)

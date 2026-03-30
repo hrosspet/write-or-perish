@@ -13,7 +13,7 @@ from backend.models import User, UserProfile, UserRecentContext, Node, APICostLo
 from backend.utils.privacy import AI_ALLOWED
 from backend.extensions import db
 from backend.llm_providers import LLMProvider, PromptTooLongError
-from backend.utils.tokens import reduce_export_tokens
+from backend.utils.tokens import reduce_export_tokens, format_date_metadata
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import calculate_llm_cost_microdollars
 
@@ -335,7 +335,11 @@ def generate_recent_context(user_id, profile_id=None, data_cutoff_iso=None):
             profile_id=pid,
             ai_usage="chat",
         )
-        rc.set_content(summary_text)
+        rc.set_content(
+            format_date_metadata(
+                covers_start=data_cutoff, covers_end=latest_ts,
+            ) + summary_text
+        )
         db.session.add(rc)
         db.session.commit()
 
