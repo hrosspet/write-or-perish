@@ -15,11 +15,14 @@ from backend.models import (
 )
 from backend.extensions import db
 from backend.llm_providers import LLMProvider, PromptTooLongError
-from backend.utils.tokens import approximate_token_count, reduce_export_tokens
+from backend.utils.tokens import (
+    approximate_token_count, reduce_export_tokens, format_date_metadata,
+)
 from backend.utils.quotes import resolve_quotes, has_quotes
 from backend.utils.api_keys import determine_api_key_type, get_api_keys_for_usage
 from backend.utils.cost import calculate_llm_cost_microdollars
 from backend.utils.tool_meta import update_tool_meta, parse_github_issue
+from backend.utils.privacy import AI_ALLOWED
 
 logger = get_task_logger(__name__)
 
@@ -388,17 +391,17 @@ def build_user_export_content(user, max_tokens=None, filter_ai_usage=False,
 
 def get_user_profile_content(user_id):
     """
-    Get the most recent user profile content if AI usage is permitted.
+    Get the most recent user profile if AI usage is permitted.
 
-    Returns the profile content if ai_usage is 'chat' (AI can use for responses),
+    Returns the UserProfile object if ai_usage is 'chat' or 'train',
     otherwise returns None.
     """
     profile = UserProfile.query.filter_by(user_id=user_id).order_by(
         UserProfile.created_at.desc()
     ).first()
 
-    if profile and profile.ai_usage == "chat":
-        return profile.get_content()
+    if profile and profile.ai_usage in AI_ALLOWED:
+        return profile
     return None
 
 
@@ -406,14 +409,14 @@ def get_user_todo_content(user_id):
     """
     Get the most recent user todo content if AI usage is permitted.
 
-    Returns the todo content if ai_usage is 'chat',
+    Returns the todo content if ai_usage permits AI access,
     otherwise returns None.
     """
     todo = UserTodo.query.filter_by(user_id=user_id).order_by(
         UserTodo.created_at.desc()
     ).first()
 
-    if todo and todo.ai_usage == "chat":
+    if todo and todo.ai_usage in AI_ALLOWED:
         return todo.get_content()
     return None
 
@@ -425,7 +428,7 @@ def get_user_recent_content(user_id):
     (from before a profile update) are not returned.
     """
     profile = UserProfile.query.filter_by(user_id=user_id).filter(
-        UserProfile.ai_usage.in_(["chat", "train"])
+        UserProfile.ai_usage.in_(AI_ALLOWED)
     ).order_by(UserProfile.created_at.desc()).first()
 
     profile_id = profile.id if profile else None
@@ -437,43 +440,25 @@ def get_user_recent_content(user_id):
         q = q.filter(UserRecentContext.profile_id.is_(None))
 
     rc = q.order_by(UserRecentContext.created_at.desc()).first()
-    if rc and rc.ai_usage == "chat":
+    if rc and rc.ai_usage in AI_ALLOWED:
         return rc
     return None
 
 
 def get_user_recent_raw_content(user_id, created_before=None):
-    """Get raw user writing since the last recent context summary.
+    """Get the most recent ~10K tokens of raw user writing.
 
-    Falls back to profile cutoff if no recent context exists,
-    or returns None if neither exists.
+    Always returns a fixed window of the last ~10K tokens regardless of
+    when the recent context summary was last generated.  This guarantees
+    a consistent window of high-fidelity recent context.
 
     Args:
         created_before: Upper bound timestamp. Nodes created at/after this
             time are excluded to avoid duplicating current session context.
+
+    Returns:
+        dict with keys (content, earliest, latest) or None if no data.
     """
-    profile = UserProfile.query.filter_by(user_id=user_id).filter(
-        UserProfile.ai_usage.in_(["chat", "train"])
-    ).order_by(UserProfile.created_at.desc()).first()
-
-    profile_id = profile.id if profile else None
-
-    # Find latest recent context for current profile
-    q = UserRecentContext.query.filter_by(user_id=user_id)
-    if profile_id is not None:
-        q = q.filter_by(profile_id=profile_id)
-    else:
-        q = q.filter(UserRecentContext.profile_id.is_(None))
-    rc = q.order_by(UserRecentContext.created_at.desc()).first()
-
-    # Determine cutoff timestamp
-    if rc and rc.source_data_cutoff:
-        created_after = rc.source_data_cutoff
-    elif profile and profile.source_data_cutoff:
-        created_after = profile.source_data_cutoff
-    else:
-        return None
-
     from backend.routes.export_data import (
         build_user_export_content as _build_export,
     )
@@ -481,14 +466,22 @@ def get_user_recent_raw_content(user_id, created_before=None):
     if not user:
         return None
 
-    return _build_export(
+    result = _build_export(
         user,
         max_tokens=10000,
         filter_ai_usage=True,
-        created_after=created_after,
         created_before=created_before,
-        chronological_order=True,
+        chronological_order=False,
+        return_metadata=True,
     )
+    if not result:
+        return None
+
+    return {
+        "content": result["content"],
+        "earliest": result.get("earliest_node_created_at"),
+        "latest": result.get("latest_node_created_at"),
+    }
 
 
 class LLMCompletionTask(Task):
@@ -619,7 +612,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 logger.info("Detected {quote:ID} placeholders in conversation chain")
 
             if needs_profile:
-                user_profile_content = get_user_profile_content(user_id)
+                profile_obj = get_user_profile_content(user_id)
+                if profile_obj:
+                    # Metadata already baked into stored content
+                    user_profile_content = profile_obj.get_content()
 
             if needs_todo:
                 user_todo_content = get_user_todo_content(user_id)
@@ -627,13 +623,20 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             if needs_recent:
                 rc = get_user_recent_content(user_id)
                 if rc:
+                    # Metadata already baked into stored content
                     user_recent_content = rc.get_content()
 
             if needs_recent_raw:
                 raw_cutoff = recent_raw_node.created_at if recent_raw_node else None
-                user_recent_raw_content = get_user_recent_raw_content(
+                raw_result = get_user_recent_raw_content(
                     user_id, created_before=raw_cutoff
                 )
+                if raw_result:
+                    # Raw data is dynamic — add metadata on the fly
+                    user_recent_raw_content = format_date_metadata(
+                        covers_start=raw_result.get("earliest"),
+                        covers_end=raw_result.get("latest"),
+                    ) + raw_result["content"]
 
             if needs_ai_prefs:
                 user_ai_preferences_content = get_user_ai_preferences_content(user_id)

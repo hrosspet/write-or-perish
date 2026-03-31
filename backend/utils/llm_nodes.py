@@ -18,6 +18,8 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
         db.session.add(llm_user)
         db.session.flush()
 
+    from backend.utils.tokens import approximate_token_count
+
     llm_node = Node(
         user_id=llm_user.id,
         parent_id=parent_node_id,
@@ -27,6 +29,7 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
         llm_task_status="pending",
         privacy_level=privacy_level,
         ai_usage=ai_usage,
+        token_count=approximate_token_count(placeholder_text),
     )
     llm_node.set_content(placeholder_text)
     db.session.add(llm_node)

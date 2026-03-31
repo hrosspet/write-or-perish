@@ -35,7 +35,7 @@ Summary of activity since the profile was last updated:
 </user_recent_context>
 
 <recent_raw_data>
-Raw entries since the last summary was generated:
+The last ~10,000 tokens of raw entries (uncompressed). This window may overlap with the recent context summary above — when details differ, prefer the raw data as it is uncompressed and more precise.
 {user_recent_raw}
 </recent_raw_data>
 

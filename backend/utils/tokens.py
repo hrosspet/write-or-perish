@@ -32,6 +32,21 @@ def get_model_context_window(model_id: str) -> int:
     return 200000
 
 
+def format_date_metadata(covers_start=None, covers_end=None):
+    """Return a bracketed date-range line, or empty string if no dates.
+
+    Examples:
+        [Covers data through 2026-03-10.]
+        [Covers 2026-03-10 to 2026-03-28.]
+    """
+    fmt = lambda dt: dt.strftime('%Y-%m-%d')  # noqa: E731
+    if covers_start and covers_end:
+        return f"[Covers {fmt(covers_start)} to {fmt(covers_end)}.]\n"
+    elif covers_end:
+        return f"[Covers data through {fmt(covers_end)}.]\n"
+    return ""
+
+
 def reduce_export_tokens(max_export_tokens, actual_tokens, max_tokens,
                          export_content=None):
     """

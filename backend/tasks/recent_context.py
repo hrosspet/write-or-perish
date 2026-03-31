@@ -10,9 +10,10 @@ from sqlalchemy import func, or_
 
 from backend.celery_app import celery, flask_app
 from backend.models import User, UserProfile, UserRecentContext, Node, APICostLog
+from backend.utils.privacy import AI_ALLOWED
 from backend.extensions import db
 from backend.llm_providers import LLMProvider, PromptTooLongError
-from backend.utils.tokens import reduce_export_tokens
+from backend.utils.tokens import reduce_export_tokens, format_date_metadata
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import calculate_llm_cost_microdollars
 
@@ -29,7 +30,7 @@ def _get_latest_chat_profile(user_id):
     return (
         UserProfile.query
         .filter_by(user_id=user_id)
-        .filter(UserProfile.ai_usage.in_(["chat", "train"]))
+        .filter(UserProfile.ai_usage.in_(AI_ALLOWED))
         .order_by(UserProfile.created_at.desc())
         .first()
     )
@@ -53,8 +54,7 @@ def _count_new_tokens(user_id, since):
         or_(Node.user_id == user_id,
             Node.human_owner_id == user_id),
         Node.created_at >= since,
-        Node.ai_usage.in_(['chat', 'train']),
-        Node.token_count.isnot(None)
+        Node.ai_usage.in_(AI_ALLOWED),
     ).scalar()
 
 
@@ -65,8 +65,7 @@ def _count_total_eligible_tokens(user_id):
     ).filter(
         or_(Node.user_id == user_id,
             Node.human_owner_id == user_id),
-        Node.ai_usage.in_(['chat', 'train']),
-        Node.token_count.isnot(None)
+        Node.ai_usage.in_(AI_ALLOWED),
     ).scalar()
 
 
@@ -334,7 +333,11 @@ def generate_recent_context(user_id, profile_id=None, data_cutoff_iso=None):
             profile_id=pid,
             ai_usage="chat",
         )
-        rc.set_content(summary_text)
+        rc.set_content(
+            format_date_metadata(
+                covers_start=data_cutoff, covers_end=latest_ts,
+            ) + summary_text
+        )
         db.session.add(rc)
         db.session.commit()
 

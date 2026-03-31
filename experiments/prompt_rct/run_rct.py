@@ -163,7 +163,8 @@ def resolve_user_profile(owner_username):
     user = User.query.filter_by(username=owner_username).first()
     if not user:
         return None, None
-    content = get_user_profile_content(user.id)
+    profile = get_user_profile_content(user.id)
+    content = profile.get_content() if profile else None
     return content, user.id
 
 

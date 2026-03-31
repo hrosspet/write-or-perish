@@ -396,6 +396,22 @@ def _context_artifact_fields(n):
                     ).count(),
                     "content": prefs.get_content(),
                 }
+    # If this is a system prompt node with {user_recent_raw}, compute
+    # the raw data date range (lightweight SQL, no decryption).
+    if artifacts.get("prompt"):
+        content = n.get_content()
+        if "{user_recent_raw}" in content:
+            from backend.routes.export_data import get_raw_data_date_range
+            earliest, latest = get_raw_data_date_range(
+                n.user_id, created_before=n.created_at,
+            )
+            if earliest and latest:
+                fmt = lambda dt: dt.strftime('%Y-%m-%d')  # noqa: E731
+                artifacts["recent_raw"] = {
+                    "covers_start": fmt(earliest),
+                    "covers_end": fmt(latest),
+                }
+
     return artifacts if artifacts else None
 
 
@@ -493,6 +509,7 @@ def create_node():
 
         # Placeholder content until transcription is ready.
         placeholder_text = "[Voice note – transcription pending]"
+        from backend.utils.tokens import approximate_token_count as _atc2
 
         node = Node(
             user_id=current_user.id,
@@ -501,7 +518,8 @@ def create_node():
             node_type=node_type,
             transcription_status='pending',  # Set initial status
             privacy_level=privacy_level,
-            ai_usage=ai_usage
+            ai_usage=ai_usage,
+            token_count=_atc2(placeholder_text),
         )
         node.set_content(placeholder_text)
         db.session.add(node)
@@ -906,12 +924,14 @@ def add_linked_node(node_id):
     linked_node = Node.query.get(linked_node_id)
     if not linked_node:
         return jsonify({"error": "Linked node not found"}), 404
+    from backend.utils.tokens import approximate_token_count as _atc5
     new_node = Node(
         user_id=current_user.id,
         human_owner_id=current_user.id,
         parent_id=parent_node.id,
         node_type="link",
-        linked_node_id=linked_node_id
+        linked_node_id=linked_node_id,
+        token_count=_atc5(additional_text),
     )
     new_node.set_content(additional_text)
     db.session.add(new_node)
@@ -1474,6 +1494,7 @@ def init_chunked_upload():
 
     # Create placeholder node
     placeholder_text = "[Voice note – upload in progress]"
+    from backend.utils.tokens import approximate_token_count as _atc3
     node = Node(
         user_id=current_user.id,
         human_owner_id=current_user.id,
@@ -1481,7 +1502,8 @@ def init_chunked_upload():
         node_type=node_type,
         transcription_status='pending',
         privacy_level=privacy_level,
-        ai_usage=ai_usage
+        ai_usage=ai_usage,
+        token_count=_atc3(placeholder_text),
     )
     node.set_content(placeholder_text)
     db.session.add(node)
@@ -1797,6 +1819,7 @@ def init_streaming_transcription():
 
     # Create placeholder node with streaming mode enabled
     placeholder_text = "[Voice note – streaming transcription in progress]"
+    from backend.utils.tokens import approximate_token_count as _atc4
     node = Node(
         user_id=current_user.id,
         human_owner_id=current_user.id,
@@ -1808,7 +1831,8 @@ def init_streaming_transcription():
         streaming_total_chunks=None,  # Unknown until recording stops
         streaming_completed_chunks=0,
         privacy_level=privacy_level,
-        ai_usage=ai_usage
+        ai_usage=ai_usage,
+        token_count=_atc4(placeholder_text),
     )
     node.set_content(placeholder_text)
     db.session.add(node)

@@ -29,6 +29,8 @@ class AIUsage(str, Enum):
 # Valid values for validation
 VALID_PRIVACY_LEVELS = {level.value for level in PrivacyLevel}
 VALID_AI_USAGE = {usage.value for usage in AIUsage}
+# Subset of ai_usage values that permit AI to read the content
+AI_ALLOWED = {AIUsage.CHAT.value, AIUsage.TRAIN.value}
 
 
 def validate_privacy_level(privacy_level: str) -> bool:
