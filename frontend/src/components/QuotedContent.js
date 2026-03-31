@@ -3,10 +3,11 @@ import MarkdownBody from './MarkdownBody';
 import InlineQuoteBubble from './InlineQuoteBubble';
 import InlineArtifactSection from './InlineArtifactSection';
 
-// Pattern to match {user_profile}, {user_todo}, {user_recent}, {user_ai_preferences}, {user_recent_raw} placeholders
-const ARTIFACT_PATTERN = /\{user_(profile|todo|recent|ai_preferences|recent_raw)\}/g;
+// Pattern to match {user_profile}, {user_todo}, {user_recent}, {user_recent_raw}, {user_ai_preferences} placeholders
+// NOTE: recent_raw must come before recent in the alternation to avoid partial matching
+const ARTIFACT_PATTERN = /\{user_(profile|todo|recent_raw|recent|ai_preferences)\}/g;
 // Combined pattern for splitting (quotes + artifacts)
-const COMBINED_PATTERN = /(\{quote:\d+\}|\{user_(?:profile|todo|recent|ai_preferences|recent_raw)\})/g;
+const COMBINED_PATTERN = /(\{quote:\d+\}|\{user_(?:profile|todo|recent_raw|recent|ai_preferences)\})/g;
 
 /**
  * QuotedContent - Renders content with inline quote previews.
