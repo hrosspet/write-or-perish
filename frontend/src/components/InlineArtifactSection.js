@@ -2,24 +2,32 @@ import React, { useState } from 'react';
 import MarkdownBody from './MarkdownBody';
 
 /**
- * InlineArtifactSection - Collapsible inline section for {user_profile} / {user_todo} placeholders.
+ * InlineArtifactSection - Collapsible inline section for context artifact placeholders.
  *
  * Rendered inline where the placeholder appears in system prompt content.
  * Collapsed by default; clicking the header toggles the full content.
  *
  * Props:
- *   type: "profile" | "todo" | "recent" | "ai_preferences"
- *   artifact: { id, version_number, content } or null
+ *   type: "profile" | "todo" | "recent" | "recent_raw" | "ai_preferences"
+ *   artifact: { id, version_number, content, source_tokens, covers_start, covers_end } or null
  */
+
+function formatTokens(n) {
+  if (!n) return null;
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M tokens`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, '')}K tokens`;
+  return `${n} tokens`;
+}
+
 const InlineArtifactSection = ({ type, artifact }) => {
   const [expanded, setExpanded] = useState(false);
 
   const LABELS = {
     profile: 'User Profile',
     todo: 'User TODO',
-    recent: 'Recent Context',
+    recent: 'Recent Context Summary',
     ai_preferences: 'AI Preferences',
-    recent_raw: 'Recent Raw Data',
+    recent_raw: 'Recent Context Raw',
   };
   const label = LABELS[type] || type;
 
@@ -31,10 +39,14 @@ const InlineArtifactSection = ({ type, artifact }) => {
     );
   }
 
+  // Build token suffix like "(10K tokens)"
+  const tokenStr = formatTokens(artifact.source_tokens);
+  const tokenSuffix = tokenStr ? ` (${tokenStr})` : '';
+
   // Recent raw data: show date range only (content is not loaded)
   if (type === 'recent_raw') {
     const dateRange = artifact.covers_start && artifact.covers_end
-      ? `Covers ${artifact.covers_start} to ${artifact.covers_end}`
+      ? `Covers ${artifact.covers_start} to ${artifact.covers_end}${tokenSuffix}`
       : 'Date range unavailable';
     return (
       <div style={containerStyle}>
@@ -46,9 +58,20 @@ const InlineArtifactSection = ({ type, artifact }) => {
     );
   }
 
-  const versionLabel = artifact.version_number
-    ? `${label} v${artifact.version_number}`
-    : label;
+  // Profile: "User Profile v3" (token count is in the content metadata)
+  // Recent context summary: "Recent Context Summary" (same)
+  // Others: "Label vN"
+  let headerLabel;
+  if (type === 'profile') {
+    const version = artifact.version_number ? ` v${artifact.version_number}` : '';
+    headerLabel = `${label}${version}`;
+  } else if (type === 'recent') {
+    headerLabel = label;
+  } else {
+    headerLabel = artifact.version_number
+      ? `${label} v${artifact.version_number}`
+      : label;
+  }
 
   return (
     <div style={containerStyle}>
@@ -57,7 +80,7 @@ const InlineArtifactSection = ({ type, artifact }) => {
         onClick={() => setExpanded(!expanded)}
       >
         <span style={chevronStyle}>{expanded ? '\u25BC' : '\u25B6'}</span>
-        <span>{versionLabel}</span>
+        <span>{headerLabel}</span>
       </div>
       {expanded && (
         <div style={contentStyle}>

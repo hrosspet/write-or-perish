@@ -336,6 +336,7 @@ def generate_recent_context(user_id, profile_id=None, data_cutoff_iso=None):
         rc.set_content(
             format_date_metadata(
                 covers_start=data_cutoff, covers_end=latest_ts,
+                tokens=source_tokens,
             ) + summary_text
         )
         db.session.add(rc)

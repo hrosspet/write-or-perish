@@ -298,7 +298,10 @@ def _save_profile(user, model_id, profile_text, response,
         parent_profile_id=parent_profile_id,
     )
     new_profile.set_content(
-        format_date_metadata(covers_end=source_data_cutoff) + profile_text
+        format_date_metadata(
+            covers_end=source_data_cutoff,
+            tokens=source_tokens_used,
+        ) + profile_text
     )
     db.session.add(new_profile)
     db.session.commit()

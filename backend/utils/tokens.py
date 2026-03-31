@@ -32,18 +32,33 @@ def get_model_context_window(model_id: str) -> int:
     return 200000
 
 
-def format_date_metadata(covers_start=None, covers_end=None):
+def _format_token_count(tokens):
+    """Format a token count for display: 1500000 → '1.5M', 30000 → '30K'."""
+    if not tokens:
+        return None
+    if tokens >= 1_000_000:
+        s = f"{tokens / 1_000_000:.1f}".rstrip('0').rstrip('.')
+        return f"{s}M tokens"
+    if tokens >= 1_000:
+        s = f"{tokens / 1_000:.1f}".rstrip('0').rstrip('.')
+        return f"{s}K tokens"
+    return f"{tokens} tokens"
+
+
+def format_date_metadata(covers_start=None, covers_end=None, tokens=None):
     """Return a bracketed date-range line, or empty string if no dates.
 
     Examples:
-        [Covers data through 2026-03-10.]
-        [Covers 2026-03-10 to 2026-03-28.]
+        [Covers data through 2026-03-10 (1.5M tokens).]
+        [Covers 2026-03-10 to 2026-03-28 (30K tokens).]
     """
     fmt = lambda dt: dt.strftime('%Y-%m-%d')  # noqa: E731
+    tok = _format_token_count(tokens)
+    tok_part = f" ({tok})" if tok else ""
     if covers_start and covers_end:
-        return f"[Covers {fmt(covers_start)} to {fmt(covers_end)}.]\n"
+        return f"[Covers {fmt(covers_start)} to {fmt(covers_end)}{tok_part}]\n"
     elif covers_end:
-        return f"[Covers data through {fmt(covers_end)}.]\n"
+        return f"[Covers data through {fmt(covers_end)}{tok_part}]\n"
     return ""
 
 

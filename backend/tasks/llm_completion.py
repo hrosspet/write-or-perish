@@ -481,6 +481,7 @@ def get_user_recent_raw_content(user_id, created_before=None):
         "content": result["content"],
         "earliest": result.get("earliest_node_created_at"),
         "latest": result.get("latest_node_created_at"),
+        "token_count": result.get("token_count", 0),
     }
 
 
@@ -636,6 +637,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     user_recent_raw_content = format_date_metadata(
                         covers_start=raw_result.get("earliest"),
                         covers_end=raw_result.get("latest"),
+                        tokens=raw_result.get("token_count"),
                     ) + raw_result["content"]
 
             if needs_ai_prefs:

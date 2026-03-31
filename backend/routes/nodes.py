@@ -379,10 +379,6 @@ def _context_artifact_fields(n):
             if rc:
                 artifacts["recent"] = {
                     "id": rc.id,
-                    "version_number": UserRecentContext.query.filter(
-                        UserRecentContext.user_id == rc.user_id,
-                        UserRecentContext.created_at <= rc.created_at,
-                    ).count(),
                     "content": rc.get_content(),
                 }
         elif row.artifact_type == "ai_preferences":
@@ -402,7 +398,7 @@ def _context_artifact_fields(n):
         content = n.get_content()
         if "{user_recent_raw}" in content:
             from backend.routes.export_data import get_raw_data_date_range
-            earliest, latest = get_raw_data_date_range(
+            earliest, latest, total_tokens = get_raw_data_date_range(
                 n.user_id, created_before=n.created_at,
             )
             if earliest and latest:
@@ -410,6 +406,7 @@ def _context_artifact_fields(n):
                 artifacts["recent_raw"] = {
                     "covers_start": fmt(earliest),
                     "covers_end": fmt(latest),
+                    "source_tokens": total_tokens,
                 }
 
     return artifacts if artifacts else None

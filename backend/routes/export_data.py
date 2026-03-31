@@ -311,7 +311,7 @@ def get_raw_data_date_range(user_id, max_tokens=10000, created_before=None):
     pre-selection window reflects the actual recent writing period.
 
     Runs only the SQL window function — no nodes are loaded or decrypted.
-    Returns (None, None) if no nodes qualify.
+    Returns (earliest, latest, total_tokens) or (None, None, 0).
     """
     budget = max_tokens - 100  # header/footer reserve
     selected_ids = _preselect_node_ids(
@@ -319,12 +319,13 @@ def get_raw_data_date_range(user_id, max_tokens=10000, created_before=None):
         created_before=created_before, chronological_order=False,
     )
     if not selected_ids:
-        return None, None
+        return None, None, 0
 
     row = db.session.query(
-        func.min(Node.created_at), func.max(Node.created_at)
+        func.min(Node.created_at), func.max(Node.created_at),
+        func.coalesce(func.sum(Node.token_count), 0),
     ).filter(Node.id.in_(selected_ids)).one()
-    return row[0], row[1]
+    return row[0], row[1], row[2]
 
 
 def build_user_export_content(
