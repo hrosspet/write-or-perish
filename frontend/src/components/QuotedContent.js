@@ -53,7 +53,7 @@ const QuotedContent = ({ content, quotes, contextArtifacts, onQuoteClick }) => {
     }
 
     // Check if this part is an artifact placeholder
-    const artifactMatch = part.match(/^\{user_(profile|todo|recent|ai_preferences)\}$/);
+    const artifactMatch = part.match(/^\{user_(profile|todo|recent_raw|recent|ai_preferences)\}$/);
     if (artifactMatch) {
       segments.push({ type: 'artifact', artifactType: artifactMatch[1] });
       continue;
