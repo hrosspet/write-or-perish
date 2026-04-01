@@ -46,7 +46,8 @@ const ModelSelector = ({ nodeId, selectedModel, onModelChange, style: styleProp 
     };
 
     fetchModel();
-  }, [nodeId, onModelChange, selectedModel]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodeId]);
 
   return (
     <select
