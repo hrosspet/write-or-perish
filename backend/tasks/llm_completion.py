@@ -190,12 +190,15 @@ def _detect_github_issue_proposal(text):
 
 
 def _scan_proposal_statuses(node_chain):
-    """Walk all nodes and collect proposal status notes to inject.
+    """Walk all nodes and collect proposal/tool status notes to inject.
 
     Refreshes each node from the DB (the merge task may have updated
     tool_calls_meta asynchronously). Returns (notes_list, nodes_to_mark)
     where nodes_to_mark is a list of (node, tool_name) tuples whose
     status_reported flag should be set after a successful LLM call.
+
+    Also handles update_ai_preferences with the same status_reported
+    pattern so the LLM is told about preference updates exactly once.
     """
     notes = []
     to_mark = []
@@ -212,27 +215,32 @@ def _scan_proposal_statuses(node_chain):
             continue
         for entry in meta:
             name = entry.get("name")
-            status = entry.get("apply_status")
             reported = entry.get("status_reported")
-            if name not in ("propose_todo", "propose_github_issue"):
-                continue
-            tag = ("todo-proposal" if name == "propose_todo"
-                   else "issue-proposal")
-            if status == "started":
-                notes.append(
-                    f"[{tag}:{node.id}: merge in progress.]"
-                )
-            elif status == "completed" and not reported:
-                notes.append(
-                    f"[{tag}:{node.id}: applied successfully.]"
-                )
+
+            if name in ("propose_todo", "propose_github_issue"):
+                status = entry.get("apply_status")
+                tag = ("todo-proposal" if name == "propose_todo"
+                       else "issue-proposal")
+                if status == "started":
+                    notes.append(
+                        f"[{tag}:{node.id}: merge in progress.]"
+                    )
+                elif status == "completed" and not reported:
+                    notes.append(
+                        f"[{tag}:{node.id}: applied successfully.]"
+                    )
+                    to_mark.append((node, name))
+                elif status == "failed" and not reported:
+                    err = entry.get("apply_error", "unknown error")
+                    notes.append(
+                        f"[{tag}:{node.id}: failed — {err}.]"
+                    )
+                    to_mark.append((node, name))
+
+            elif name == "update_ai_preferences" and not reported:
+                notes.append("[AI preferences were updated.]")
                 to_mark.append((node, name))
-            elif status == "failed" and not reported:
-                err = entry.get("apply_error", "unknown error")
-                notes.append(
-                    f"[{tag}:{node.id}: failed — {err}.]"
-                )
-                to_mark.append((node, name))
+
     return notes, to_mark
 
 
@@ -772,26 +780,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     _scan_proposal_statuses(node_chain)
                 )
 
-            # Inject status for non-proposal tools (only ai_preferences)
-            prev_tool_note = None
-            if is_voice and len(node_chain) >= 2:
-                prev_llm = None
-                for prev_node in reversed(node_chain):
-                    if (prev_node.node_type == "llm"
-                            or prev_node.llm_model is not None):
-                        prev_llm = prev_node
-                        break
-                if prev_llm and prev_llm.tool_calls_meta:
-                    try:
-                        prev_meta = json.loads(prev_llm.tool_calls_meta)
-                        for m in prev_meta:
-                            if m.get("name") == "update_ai_preferences":
-                                prev_tool_note = (
-                                    "[AI preferences were updated.]"
-                                )
-                                break
-                    except (json.JSONDecodeError, KeyError):
-                        pass
+            # (ai_preferences status is now handled by
+            # _scan_proposal_statuses above)
 
             if needs_export:
                 max_export_tokens = None  # Send entire archive; let retry loop converge
@@ -907,7 +897,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # Inject voice context notes as a final user message
                 voice_notes = (
                     proposal_notes
-                    + [n for n in [prev_tool_note, pending_draft_note] if n]
+                    + ([pending_draft_note] if pending_draft_note else [])
                 )
                 if is_voice and voice_notes:
                     injected_text = "\n".join(voice_notes)
