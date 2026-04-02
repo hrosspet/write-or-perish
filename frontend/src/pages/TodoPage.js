@@ -5,7 +5,8 @@ import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
 /**
  * Parse markdown checklist into sections with nested items.
  * Sections are delimited by ## headings.
- * Items are lines matching - [ ] or - [x] at any indentation level.
+ * Items can be checkbox lines (- [ ] or - [x]) or plain list items (- text).
+ * Plain items act as category headers — they nest children but have no checkbox.
  * Indentation determines nesting depth (2 spaces per level).
  */
 function parseTodoSections(content) {
@@ -22,17 +23,30 @@ function parseTodoSections(content) {
       continue;
     }
 
-    const itemMatch = line.match(/^(\s*)- \[([ xX])\]\s+(.+)/);
+    // Match checkbox items: - [ ] text or - [x] text
+    const checkboxMatch = line.match(/^(\s*)- \[([ xX])\]\s+(.+)/);
+    // Match plain list items: - text (but not checkbox lines)
+    const plainMatch = !checkboxMatch && line.match(/^(\s*)- (.+)/);
+
+    const itemMatch = checkboxMatch || plainMatch;
     if (itemMatch && currentSection) {
       const indent = itemMatch[1].length;
       const depth = Math.floor(indent / 2);
-      const item = {
-        checked: itemMatch[2] !== ' ',
-        text: itemMatch[3].trim(),
-        raw: line,
-        depth,
-        children: [],
-      };
+      const item = checkboxMatch
+        ? {
+            checked: checkboxMatch[2] !== ' ',
+            text: checkboxMatch[3].trim(),
+            raw: line,
+            depth,
+            children: [],
+          }
+        : {
+            checked: null, // plain item, no checkbox
+            text: plainMatch[2].trim(),
+            raw: line,
+            depth,
+            children: [],
+          };
 
       if (depth === 0) {
         currentSection.items.push(item);
@@ -108,24 +122,28 @@ function TodoItem({ item, onToggle, depth = 0 }) {
           paddingLeft: depth * 24,
         }}
       >
-        <div
-          onClick={() => onToggle(item)}
-          style={{
-            width: '18px', height: '18px', borderRadius: '50%',
-            border: `1.5px solid ${item.checked ? 'var(--accent-dim)' : 'var(--border-hover)'}`,
-            background: item.checked ? 'var(--accent-dim)' : 'none',
-            flexShrink: 0, marginTop: '2px',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: '0.6rem', color: 'var(--bg-deep)', fontWeight: 600,
-            transition: 'all 0.3s', cursor: 'pointer',
-          }}>
-          {item.checked && '✓'}
-        </div>
+        {item.checked !== null ? (
+          <div
+            onClick={() => onToggle(item)}
+            style={{
+              width: '18px', height: '18px', borderRadius: '50%',
+              border: `1.5px solid ${item.checked ? 'var(--accent-dim)' : 'var(--border-hover)'}`,
+              background: item.checked ? 'var(--accent-dim)' : 'none',
+              flexShrink: 0, marginTop: '2px',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: '0.6rem', color: 'var(--bg-deep)', fontWeight: 600,
+              transition: 'all 0.3s', cursor: 'pointer',
+            }}>
+            {item.checked && '✓'}
+          </div>
+        ) : (
+          <div style={{ width: '18px', flexShrink: 0 }} />
+        )}
         <span style={{
           fontFamily: 'var(--sans)',
           fontSize: '0.92rem',
-          fontWeight: 300,
-          color: 'var(--text-secondary)',
+          fontWeight: item.checked === null ? 400 : 300,
+          color: item.checked === null ? 'var(--text-primary)' : 'var(--text-secondary)',
           textDecoration: item.checked ? 'line-through' : 'none',
           opacity: item.checked ? 0.4 : 1,
           lineHeight: 1.5,
