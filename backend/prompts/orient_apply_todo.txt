@@ -6,4 +6,5 @@ Rules:
 - New tasks you identified: add them as `- [ ]` in an appropriate section
 - Keep ALL existing items not mentioned in your update — do not remove anything
 - Preserve the original structure, sections, and formatting
+- The todo uses `## Group Name` headers for categorization. When the proposal groups items under bold headers (e.g. **Development**) or other grouping indicators, convert those to `## headers` matching the existing todo structure. Create new `## sections` if the group doesn't exist yet
 - Return ONLY the complete updated todo list — no commentary

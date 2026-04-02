@@ -82,7 +82,7 @@ def save_orient_todo(llm_node_id: int, user_id: int):
                 try:
                     meta = json.loads(voice_llm_node.tool_calls_meta)
                     for entry in meta:
-                        if entry.get("name") == "update_todo":
+                        if entry.get("name") == "propose_todo":
                             entry["apply_status"] = "completed"
                             entry["todo_id"] = todo.id
                             break

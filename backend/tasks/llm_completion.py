@@ -51,42 +51,6 @@ USER_AI_PREFERENCES_PLACEHOLDER = "{user_ai_preferences}"
 
 VOICE_TOOLS = [
     {
-        "name": "update_todo",
-        "description": (
-            "Propose todo changes. How it works: calling this tool "
-            "attaches a todo_pending flag to your response node. The "
-            "UI checks for this flag to decide whether to show the "
-            "user a 'Confirm changes' button. Your text response "
-            "provides the actual proposal content (parsed from "
-            "headings below), while the tool call provides the flag "
-            "that makes the button appear. Both are required — a "
-            "proposal without the tool call has no confirm button, "
-            "and a tool call without the headings has no content to "
-            "apply. This is per-response: each response that "
-            "contains a proposal needs its own tool call, including "
-            "revised or corrected proposals from earlier turns. "
-            "Structure: ### Completed (tasks done), ### New Tasks "
-            "(new items to add), ### Priority Order (suggested "
-            "ordering with reasoning), ### Note (2-3 sentence "
-            "personal observation). Omit sections with no items, "
-            "but always include at least one section. Even a single "
-            "change needs its section header. Rules: list items as "
-            "plain text (e.g. '- Clean the kitchen'), not with "
-            "checkbox brackets like '- [ ]' or '- [x]' — the UI "
-            "renders completion state separately. If you're already "
-            "recommending or analyzing specific tasks in a planning "
-            "context, propose the todo changes in the same response "
-            "— don't wait for the user to ask. Save the restraint "
-            "for emotional processing where premature action steps "
-            "would be intrusive."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
-    },
-    {
         "name": "apply_todo_changes",
         "description": (
             "Apply previously proposed todo changes to the user's actual "
@@ -97,26 +61,6 @@ VOICE_TOOLS = [
             "(check the context notes for apply status). "
             "Always produce a text response — the user needs to hear "
             "what happened as they are interacting via voice."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
-    },
-    {
-        "name": "create_github_issue",
-        "description": (
-            "Propose a GitHub issue. When the user describes a "
-            "bug, feature idea, or enhancement they want to file, "
-            "call this tool. Same mechanism as update_todo: calling "
-            "this tool attaches a flag to the response node that "
-            "makes a 'Create issue' button appear in the UI. Your "
-            "text provides the content (### Issue Title, "
-            "### Description in markdown, ### Category — one of: "
-            "bug, feature, enhancement), the tool call provides the "
-            "flag. Both are needed. The issue is not created "
-            "immediately — the user must confirm first."
         ),
         "input_schema": {
             "type": "object",
@@ -217,6 +161,195 @@ def _find_pending_github_issue_draft(node_chain, user_id):
     return None
 
 
+def _detect_todo_proposal(text):
+    """Check if LLM text contains todo proposal headings.
+
+    Requires at least one task-specific heading (Completed, New Tasks,
+    Priority). A standalone ### Note is not enough — it's too generic.
+    """
+    if not text:
+        return False
+    headings = [h.lower() for h in re.findall(
+        r'^###\s+(.+)', text, re.MULTILINE)]
+    task_keywords = {'completed', 'new task', 'new tasks', 'priority'}
+    return any(
+        any(kw in h for kw in task_keywords) for h in headings
+    )
+
+
+def _detect_github_issue_proposal(text):
+    """Check if LLM text contains GitHub issue proposal headings."""
+    if not text:
+        return False
+    headings = [h.lower() for h in re.findall(
+        r'^###\s+(.+)', text, re.MULTILINE)]
+    has_title = any(
+        'issue title' in h or h.strip() == 'title' for h in headings)
+    has_desc = any('description' in h for h in headings)
+    return has_title and has_desc
+
+
+def _scan_proposal_statuses(node_chain):
+    """Walk all nodes and collect proposal/tool status notes to inject.
+
+    Refreshes each node from the DB (the merge task may have updated
+    tool_calls_meta asynchronously). Returns (notes_list, nodes_to_mark)
+    where nodes_to_mark is a list of (node, tool_name) tuples whose
+    status_reported flag should be set after a successful LLM call.
+
+    Also handles update_ai_preferences with the same status_reported
+    pattern so the LLM is told about preference updates exactly once.
+    """
+    notes = []
+    to_mark = []
+    for node in node_chain:
+        if not node.tool_calls_meta:
+            continue
+        # Refresh from DB to pick up async merge updates
+        db.session.refresh(node)
+        if not node.tool_calls_meta:
+            continue
+        try:
+            meta = json.loads(node.tool_calls_meta)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        for entry in meta:
+            name = entry.get("name")
+            reported = entry.get("status_reported")
+
+            if name in ("propose_todo", "propose_github_issue"):
+                status = entry.get("apply_status")
+                tag = ("todo-proposal" if name == "propose_todo"
+                       else "issue-proposal")
+                if status == "started":
+                    notes.append(
+                        f"[{tag}:{node.id}: merge in progress.]"
+                    )
+                elif status == "completed" and not reported:
+                    notes.append(
+                        f"[{tag}:{node.id}: applied successfully.]"
+                    )
+                    to_mark.append((node, name))
+                elif status == "failed" and not reported:
+                    err = entry.get("apply_error", "unknown error")
+                    notes.append(
+                        f"[{tag}:{node.id}: failed — {err}.]"
+                    )
+                    to_mark.append((node, name))
+
+            elif name == "update_ai_preferences" and not reported:
+                notes.append("[AI preferences were updated.]")
+                to_mark.append((node, name))
+
+    return notes, to_mark
+
+
+def _mark_status_reported(to_mark):
+    """Set status_reported=true on proposal entries after LLM success."""
+    for node, tool_name in to_mark:
+        try:
+            meta = json.loads(node.tool_calls_meta)
+            for entry in meta:
+                if entry.get("name") == tool_name:
+                    entry["status_reported"] = True
+            node.tool_calls_meta = json.dumps(meta)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+
+def _supersede_old_proposals(node_chain, tool_name, exclude_node_id):
+    """Mark old pending_approval proposals as superseded.
+
+    Only supersedes entries matching *tool_name* (scoped by type).
+    Proposals already in 'started' or later states are left alone.
+    """
+    for node in node_chain:
+        if node.id == exclude_node_id or not node.tool_calls_meta:
+            continue
+        try:
+            meta = json.loads(node.tool_calls_meta)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        changed = False
+        for entry in meta:
+            if (entry.get("name") == tool_name
+                    and entry.get("apply_status") == "pending_approval"):
+                entry["apply_status"] = "superseded"
+                changed = True
+        if changed:
+            node.tool_calls_meta = json.dumps(meta)
+
+
+def _auto_create_drafts(llm_text, llm_node, node_chain, user_id):
+    """Auto-detect proposals in LLM text and create draft flags.
+
+    Returns list of auto-created draft metadata (same shape as tool results)
+    so the frontend can show accept buttons.
+    """
+    results = []
+
+    if _detect_todo_proposal(llm_text):
+        # Skip if a draft already exists on this node (e.g. from a
+        # stale update_todo tool call that was also processed)
+        already = Draft.query.filter_by(
+            parent_id=llm_node.id, user_id=user_id,
+            label='todo_pending',
+        ).first()
+        if not already:
+            existing = _find_pending_todo_draft(node_chain, user_id)
+            draft = Draft(
+                user_id=user_id,
+                parent_id=llm_node.id,
+                label='todo_pending',
+            )
+            draft.set_content("")
+            db.session.add(draft)
+            db.session.flush()
+            if existing:
+                db.session.delete(existing)
+                db.session.flush()
+            # Supersede old pending_approval update_todo proposals
+            _supersede_old_proposals(
+                node_chain, "propose_todo", llm_node.id)
+            results.append({
+                "name": "propose_todo",
+                "status": "success",
+                "draft_id": draft.id,
+                "apply_status": "pending_approval",
+            })
+
+    if _detect_github_issue_proposal(llm_text):
+        already = Draft.query.filter_by(
+            parent_id=llm_node.id, user_id=user_id,
+            label='github_issue_pending',
+        ).first()
+        if not already:
+            existing = _find_pending_github_issue_draft(
+                node_chain, user_id)
+            draft = Draft(
+                user_id=user_id,
+                parent_id=llm_node.id,
+                label='github_issue_pending',
+            )
+            draft.set_content("")
+            db.session.add(draft)
+            db.session.flush()
+            if existing:
+                db.session.delete(existing)
+                db.session.flush()
+            # Supersede old pending_approval issue proposals
+            _supersede_old_proposals(
+                node_chain, "propose_github_issue", llm_node.id)
+            results.append({
+                "name": "propose_github_issue",
+                "status": "success",
+                "draft_id": draft.id,
+                "apply_status": "pending_approval",
+            })
+
+    return results
+
+
 def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
     """Execute tool calls and return metadata list."""
     tool_results = []
@@ -227,69 +360,24 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
         result = {"name": name, "input": inp}
 
         try:
-            if name == "update_todo":
-                # Find existing pending draft before creating new one
-                existing = _find_pending_todo_draft(node_chain, user_id)
-
-                # Create lightweight draft flag on the LLM node.
-                # The LLM's text response IS the update summary —
-                # no separate node needed.
-                draft = Draft(
-                    user_id=user_id,
-                    parent_id=llm_node.id,
-                    label='todo_pending',
-                )
-                draft.set_content("")  # flag only, content is on LLM node
-                db.session.add(draft)
-                db.session.flush()
-
-                # Delete previous pending draft now that new one exists
-                if existing:
-                    db.session.delete(existing)
-                    db.session.flush()
-
-                result["status"] = "success"
-                result["draft_id"] = draft.id
-                result["apply_status"] = "pending_approval"
-
-            elif name == "apply_todo_changes":
+            if name == "apply_todo_changes":
                 draft = _find_pending_todo_draft(node_chain, user_id)
                 if not draft:
                     result["status"] = "error"
                     result["error"] = "No pending todo changes found"
                 else:
-                    # Kick off async background merge
+                    # Kick off async background merge using the
+                    # proposal node (where the draft originated)
                     from backend.routes.todo import (
                         _start_todo_merge,
                     )
+                    proposal_node = Node.query.get(draft.parent_id)
                     task_id = _start_todo_merge(
-                        draft, llm_node, user_id
+                        draft, proposal_node or llm_node, user_id,
+                        confirm_node_id=llm_node.id,
                     )
                     result["status"] = "success"
                     result["apply_task_id"] = task_id
-
-            elif name == "create_github_issue":
-                # Find existing pending draft before creating new one
-                existing = _find_pending_github_issue_draft(
-                    node_chain, user_id
-                )
-
-                draft = Draft(
-                    user_id=user_id,
-                    parent_id=llm_node.id,
-                    label='github_issue_pending',
-                )
-                draft.set_content("")  # flag only
-                db.session.add(draft)
-                db.session.flush()
-
-                if existing:
-                    db.session.delete(existing)
-                    db.session.flush()
-
-                result["status"] = "success"
-                result["draft_id"] = draft.id
-                result["apply_status"] = "pending_approval"
 
             elif name == "apply_github_issue":
                 draft = _find_pending_github_issue_draft(
@@ -342,7 +430,7 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
                             # Update origin node meta
                             update_tool_meta(
                                 origin_node,
-                                "create_github_issue",
+                                "propose_github_issue",
                                 {
                                     "apply_status": "completed",
                                     "issue_url": gh_result["url"],
@@ -365,6 +453,10 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
                 result["status"] = "success"
                 result["preferences_id"] = prefs.id
 
+            elif name in ("propose_todo", "propose_github_issue"):
+                # These are no longer tools — proposals are auto-detected
+                # from headings. Ignore gracefully if LLM still calls them.
+                result["status"] = "ignored"
             else:
                 result["status"] = "error"
                 result["error"] = f"Unknown tool: {name}"
@@ -660,96 +752,36 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 pending = _find_pending_todo_draft(node_chain, user_id)
                 if pending:
                     pending_draft_note = (
-                        "[Note: there are pending todo changes awaiting "
-                        "confirmation. The user can say 'apply the "
-                        "changes' to confirm.]"
+                        f"[todo-proposal:{pending.parent_id}: pending "
+                        f"confirmation. The user can say 'apply the "
+                        f"changes' to confirm.]"
                     )
                 pending_issue = _find_pending_github_issue_draft(
                     node_chain, user_id
                 )
                 if pending_issue:
                     issue_note = (
-                        "[Note: there is a proposed GitHub issue awaiting "
-                        "confirmation. The user can say 'yes create it' "
-                        "or 'file that issue' to confirm.]"
+                        f"[issue-proposal:{pending_issue.parent_id}: "
+                        f"pending confirmation. The user can say "
+                        f"'yes create it' or 'file that issue' "
+                        f"to confirm.]"
                     )
                     if pending_draft_note:
                         pending_draft_note += "\n" + issue_note
                     else:
                         pending_draft_note = issue_note
 
-            # Inject tool result context from previous LLM node
-            prev_tool_note = None
-            if is_voice and len(node_chain) >= 2:
-                for prev_node in reversed(node_chain):
-                    if prev_node.tool_calls_meta:
-                        try:
-                            prev_meta = json.loads(prev_node.tool_calls_meta)
-                            summaries = []
-                            for m in prev_meta:
-                                name = m['name']
-                                apply_s = m.get("apply_status")
-                                was_truncated = (
-                                    m.get("apply_truncated")
-                                    or m.get("response_truncated"))
-                                truncation_warn = (
-                                    " WARNING: the LLM response was"
-                                    " truncated due to max_tokens"
-                                    " limit, so the result may be"
-                                    " incomplete."
-                                    if was_truncated else "")
-                                if name == "update_todo" and apply_s:
-                                    if apply_s == "completed":
-                                        summaries.append(
-                                            "Todo changes have been "
-                                            "applied to user's todo."
-                                            + truncation_warn
-                                        )
-                                    elif apply_s == "started":
-                                        summaries.append(
-                                            "Todo changes are being "
-                                            "applied (merge in progress)."
-                                        )
-                                    elif apply_s == "pending_approval":
-                                        summaries.append(
-                                            "You proposed todo changes "
-                                            "that are waiting for user "
-                                            "approval."
-                                            + truncation_warn
-                                        )
-                                    elif apply_s == "failed":
-                                        summaries.append(
-                                            "Todo changes failed: "
-                                            + m.get("apply_error", "")
-                                        )
-                                elif name == "create_github_issue" and apply_s:
-                                    if apply_s == "completed":
-                                        issue_url = m.get(
-                                            "issue_url", "")
-                                        summaries.append(
-                                            "GitHub issue was created"
-                                            + (f": {issue_url}"
-                                               if issue_url else ".")
-                                        )
-                                    elif apply_s == "pending_approval":
-                                        summaries.append(
-                                            "You proposed a GitHub "
-                                            "issue that is waiting "
-                                            "for user approval."
-                                            + truncation_warn
-                                        )
-                                elif name == "update_ai_preferences":
-                                    summaries.append(
-                                        "AI preferences were updated."
-                                        + truncation_warn
-                                    )
-                            if summaries:
-                                prev_tool_note = (
-                                    "[" + " ".join(summaries) + "]"
-                                )
-                        except (json.JSONDecodeError, KeyError):
-                            pass
-                        break
+            # Scan all proposals across the chain for status injection.
+            # Refreshes from DB to pick up async merge updates.
+            proposal_notes = []
+            proposal_to_mark = []
+            if is_voice:
+                proposal_notes, proposal_to_mark = (
+                    _scan_proposal_statuses(node_chain)
+                )
+
+            # (ai_preferences status is now handled by
+            # _scan_proposal_statuses above)
 
             if needs_export:
                 max_export_tokens = None  # Send entire archive; let retry loop converge
@@ -794,6 +826,24 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     if is_llm_node:
                         role = "assistant"
                         message_text = node_content
+                        # Tag proposals with node ID for tracking
+                        if is_voice and node.tool_calls_meta:
+                            try:
+                                tcm = json.loads(node.tool_calls_meta)
+                                for entry in tcm:
+                                    ename = entry.get("name")
+                                    if ename == "propose_todo":
+                                        message_text += (
+                                            f"\n\n[todo-proposal:"
+                                            f"{node.id}]"
+                                        )
+                                    elif ename == "propose_github_issue":
+                                        message_text += (
+                                            f"\n\n[issue-proposal:"
+                                            f"{node.id}]"
+                                        )
+                            except (json.JSONDecodeError, TypeError):
+                                pass
                     else:
                         role = "user"
                         message_text = f"author {author}: {node_content}"
@@ -845,9 +895,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     })
 
                 # Inject voice context notes as a final user message
-                if is_voice and (pending_draft_note or prev_tool_note):
-                    notes = [n for n in [prev_tool_note, pending_draft_note] if n]
-                    injected_text = "\n".join(notes)
+                voice_notes = (
+                    proposal_notes
+                    + ([pending_draft_note] if pending_draft_note else [])
+                )
+                if is_voice and voice_notes:
+                    injected_text = "\n".join(voice_notes)
                     logger.debug(f"Voice context injection for node {llm_node_id}: {injected_text}")
                     messages.append({
                         "role": "user",
@@ -923,7 +976,24 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     for tr in tool_results:
                         tr["response_truncated"] = True
                 tool_meta = tool_results
-                llm_node.tool_calls_meta = json.dumps(tool_results)
+
+            # Step 5c: Auto-detect proposals in LLM text (Voice sessions)
+            if is_voice:
+                auto_drafts = _auto_create_drafts(
+                    llm_text, llm_node, node_chain, user_id
+                )
+                if auto_drafts:
+                    if tool_meta is None:
+                        tool_meta = []
+                    tool_meta.extend(auto_drafts)
+
+            if tool_meta:
+                llm_node.tool_calls_meta = json.dumps(tool_meta)
+
+            # Mark proposal statuses as reported (deferred until
+            # after LLM success so they re-inject on retry)
+            if proposal_to_mark:
+                _mark_status_reported(proposal_to_mark)
 
             llm_node.llm_task_status = 'completed'
             llm_node.llm_task_progress = 100

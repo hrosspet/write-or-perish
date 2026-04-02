@@ -34,5 +34,7 @@ def parse_github_issue(content):
         elif heading == 'description':
             result['description'] = body
         elif heading == 'category':
-            result['category'] = body.strip().lower()
+            # Take only the first line to avoid trailing tags
+            first_line = body.split('\n')[0].strip().lower()
+            result['category'] = first_line
     return result

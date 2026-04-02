@@ -324,7 +324,7 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str,
                     _tool_names = {m.get('name') for m in _meta}
                 except (json.JSONDecodeError, TypeError):
                     _tool_names = set()
-                if _tool_names & {'update_todo'}:
+                if _tool_names & {'propose_todo', 'propose_github_issue'}:
                     text = _strip_heading_sections(text)
                 if not text.strip():
                     logger.debug(f"No conversational text after stripping sections for node {node_id}, skipping TTS")
