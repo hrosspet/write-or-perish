@@ -23,6 +23,12 @@ function parseTodoSections(content) {
       continue;
     }
 
+    // Auto-create a default section if items appear before any heading
+    if (!currentSection && (line.match(/^(\s*)- \[([ xX])\]\s+(.+)/) || line.match(/^(\s*)- (.+)/))) {
+      currentSection = { title: '', items: [] };
+      sections.push(currentSection);
+    }
+
     // Match checkbox items: - [ ] text or - [x] text
     const checkboxMatch = line.match(/^(\s*)- \[([ xX])\]\s+(.+)/);
     // Match plain list items: - text (but not checkbox lines)
