@@ -340,6 +340,8 @@ export default function VoicePage() {
       const parsed = parseOrientResponse(content);
       if (parsed.completed || parsed.newTasks || parsed.priority || parsed.note || parsed.issueTitle) {
         setParsedResponse(parsed);
+      } else {
+        setParsedResponse(null);
       }
 
       // Fetch tool call metadata (for apply actions and auto-detected drafts)
