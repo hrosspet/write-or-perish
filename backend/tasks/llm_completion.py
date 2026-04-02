@@ -909,7 +909,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 )
                 if is_voice and voice_notes:
                     injected_text = "\n".join(voice_notes)
-                    logger.debug(f"Voice context injection for node {llm_node_id}: {injected_text}")
+                    logger.info(f"Voice context injection for node {llm_node_id}: {injected_text}")
                     messages.append({
                         "role": "user",
                         "content": [{"type": "text", "text": injected_text}]
