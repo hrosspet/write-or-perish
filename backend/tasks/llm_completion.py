@@ -744,18 +744,19 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 pending = _find_pending_todo_draft(node_chain, user_id)
                 if pending:
                     pending_draft_note = (
-                        "[Note: there are pending todo changes awaiting "
-                        "confirmation. The user can say 'apply the "
-                        "changes' to confirm.]"
+                        f"[todo-proposal:{pending.parent_id}: pending "
+                        f"confirmation. The user can say 'apply the "
+                        f"changes' to confirm.]"
                     )
                 pending_issue = _find_pending_github_issue_draft(
                     node_chain, user_id
                 )
                 if pending_issue:
                     issue_note = (
-                        "[Note: there is a proposed GitHub issue awaiting "
-                        "confirmation. The user can say 'yes create it' "
-                        "or 'file that issue' to confirm.]"
+                        f"[issue-proposal:{pending_issue.parent_id}: "
+                        f"pending confirmation. The user can say "
+                        f"'yes create it' or 'file that issue' "
+                        f"to confirm.]"
                     )
                     if pending_draft_note:
                         pending_draft_note += "\n" + issue_note
