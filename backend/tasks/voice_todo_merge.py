@@ -53,6 +53,7 @@ def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int,
             logger.error(f"LLM node {llm_node_id} has no content")
             _update_apply_status(llm_node, "failed", error="No update summary",
                                 confirm_node_id=confirm_node_id)
+            db.session.commit()
             return
 
         # Acquire per-user Redis lock to serialize concurrent merges.
@@ -137,6 +138,7 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
         logger.error(f"LLM call failed for todo merge: {e}", exc_info=True)
         _update_apply_status(llm_node, "failed", error=str(e),
                             confirm_node_id=confirm_node_id)
+        db.session.commit()
         return
 
     merged_todo = response["content"]
@@ -144,6 +146,7 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
         logger.warning(f"LLM returned empty merged todo for node {llm_node_id}")
         _update_apply_status(llm_node, "failed", error="Empty merge result",
                             confirm_node_id=confirm_node_id)
+        db.session.commit()
         return
 
     # Log cost
