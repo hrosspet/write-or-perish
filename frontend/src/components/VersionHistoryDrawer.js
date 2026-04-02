@@ -37,6 +37,7 @@ export default function VersionHistoryDrawer({
     if (g === 'user' || g === 'manual') return 'Manual edit';
     if (g === 'revert') return 'Reverted';
     if (g === 'orient_session') return 'Orient session';
+    if (g === 'voice_session') return 'Voice';
     if (g === 'import') return 'Imported';
     if (genType === 'update') return `Auto-updated (${g})`;
     if (genType === 'iterative') return `Iterative build (${g})`;

@@ -306,6 +306,7 @@ export default function TodoPage() {
   const generatedByLabel = (g) => {
     if (g === 'user' || g === 'manual') return 'edited manually';
     if (g === 'orient_session') return 'Orient session';
+    if (g === 'voice_session') return 'Voice';
     if (g === 'revert') return 'reverted';
     if (g === 'import') return 'imported';
     return g;
