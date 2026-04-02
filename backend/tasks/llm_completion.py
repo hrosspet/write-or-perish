@@ -365,7 +365,8 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
                     )
                     proposal_node = Node.query.get(draft.parent_id)
                     task_id = _start_todo_merge(
-                        draft, proposal_node or llm_node, user_id
+                        draft, proposal_node or llm_node, user_id,
+                        confirm_node_id=llm_node.id,
                     )
                     result["status"] = "success"
                     result["apply_task_id"] = task_id

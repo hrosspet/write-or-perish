@@ -210,7 +210,7 @@ def _find_pending_todo_draft(llm_node_id, user_id):
     return None, None
 
 
-def _start_todo_merge(draft, llm_node, user_id):
+def _start_todo_merge(draft, llm_node, user_id, confirm_node_id=None):
     """Kick off async background todo merge. No visible nodes created.
 
     The merge runs entirely in a Celery task:
@@ -219,6 +219,11 @@ def _start_todo_merge(draft, llm_node, user_id):
     3. Calls LLM with orient_apply_todo prompt to merge
     4. Saves result as new UserTodo
     5. Updates tool_calls_meta on the originating LLM node
+
+    Args:
+        confirm_node_id: Optional ID of the node where the user confirmed
+            (apply_todo_changes). If provided, its meta is also updated
+            with the final outcome.
     """
     merge_model = llm_node.llm_model or current_app.config.get(
         "DEFAULT_LLM_MODEL", "claude-opus-4.5"
@@ -241,7 +246,7 @@ def _start_todo_merge(draft, llm_node, user_id):
 
     from backend.tasks.voice_todo_merge import apply_voice_todo
     task = apply_voice_todo.delay(
-        llm_node.id, merge_model, user_id
+        llm_node.id, merge_model, user_id, confirm_node_id
     )
 
     return task.id

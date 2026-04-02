@@ -343,13 +343,22 @@ function NodeDetail() {
                   }}>
                     {tc.status === 'success' ? '✓' : '✗'}{' '}
                     {tc.name === 'propose_todo' && (
-                      <>Todo update proposed{tc.apply_status === 'completed' && ' (applied)'}{tc.apply_status === 'started' && ' (applying...)'}</>
+                      <>Todo update proposed{tc.apply_status === 'completed' && ' (applied)'}{tc.apply_status === 'started' && ' (applying...)'}{tc.apply_status === 'failed' && ' (failed)'}</>
+                    )}
+                    {tc.name === 'propose_github_issue' && (
+                      <>Issue proposed{tc.apply_status === 'completed' && ' (created)'}{tc.apply_status === 'failed' && ' (failed)'}</>
                     )}
                     {tc.name === 'apply_todo_changes' && (
-                      tc.status === 'success' ? 'Todo apply requested' : 'Todo apply failed'
+                      tc.status !== 'success' ? 'Todo apply failed'
+                        : tc.apply_status === 'completed' ? 'Todo changes applied'
+                        : tc.apply_status === 'failed' ? `Todo apply failed${tc.apply_error ? ': ' + tc.apply_error : ''}`
+                        : 'Todo apply in progress...'
+                    )}
+                    {tc.name === 'apply_github_issue' && (
+                      tc.status === 'success' ? 'Issue creation confirmed' : 'Issue creation failed'
                     )}
                     {tc.name === 'update_ai_preferences' && 'Preferences updated'}
-                    {!['propose_todo', 'apply_todo_changes', 'update_ai_preferences'].includes(tc.name) && tc.name}
+                    {!['propose_todo', 'propose_github_issue', 'apply_todo_changes', 'apply_github_issue', 'update_ai_preferences'].includes(tc.name) && tc.name}
                     {tc.error && <span style={{ color: 'var(--accent)', marginLeft: '8px' }}> — {tc.error}</span>}
                   </div>
                 ))}

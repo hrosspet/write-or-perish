@@ -20,7 +20,8 @@ logger = get_task_logger(__name__)
 
 
 @celery.task(bind=True)
-def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int):
+def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int,
+                     confirm_node_id: int = None):
     """
     Merge the Voice todo update into the user's full todo list.
 
@@ -39,7 +40,8 @@ def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int):
         update_summary = llm_node.get_content()
         if not update_summary:
             logger.error(f"LLM node {llm_node_id} has no content")
-            _update_apply_status(llm_node, "failed", error="No update summary")
+            _update_apply_status(llm_node, "failed", error="No update summary",
+                                confirm_node_id=confirm_node_id)
             return
 
         # Get current todo
@@ -79,13 +81,15 @@ def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int):
             )
         except Exception as e:
             logger.error(f"LLM call failed for todo merge: {e}", exc_info=True)
-            _update_apply_status(llm_node, "failed", error=str(e))
+            _update_apply_status(llm_node, "failed", error=str(e),
+                                confirm_node_id=confirm_node_id)
             return
 
         merged_todo = response["content"]
         if not merged_todo or not merged_todo.strip():
             logger.warning(f"LLM returned empty merged todo for node {llm_node_id}")
-            _update_apply_status(llm_node, "failed", error="Empty merge result")
+            _update_apply_status(llm_node, "failed", error="Empty merge result",
+                                confirm_node_id=confirm_node_id)
             return
 
         # Log cost
@@ -116,15 +120,19 @@ def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int):
             logger.warning(f"Todo merge response truncated for node {llm_node_id}")
         _update_apply_status(
             llm_node, "completed", todo_id=new_todo.id,
-            truncated=truncated)
+            truncated=truncated, confirm_node_id=confirm_node_id)
 
         db.session.commit()
         logger.info(f"Voice todo merge completed: todo_id={new_todo.id} for user {user_id}, truncated={truncated}")
 
 
 def _update_apply_status(llm_node, status, error=None, todo_id=None,
-                         truncated=False):
-    """Update the apply_status in the LLM node's tool_calls_meta."""
+                         truncated=False, confirm_node_id=None):
+    """Update the apply_status in the LLM node's tool_calls_meta.
+
+    Also updates the confirmation node (where apply_todo_changes lives)
+    if confirm_node_id is provided.
+    """
     meta = []
     if llm_node.tool_calls_meta:
         try:
@@ -142,4 +150,21 @@ def _update_apply_status(llm_node, status, error=None, todo_id=None,
                 entry["apply_truncated"] = True
             break
     llm_node.tool_calls_meta = json.dumps(meta)
+
+    # Mirror status onto the confirmation node's apply_todo_changes entry
+    if confirm_node_id:
+        confirm_node = Node.query.get(confirm_node_id)
+        if confirm_node and confirm_node.tool_calls_meta:
+            try:
+                cmeta = json.loads(confirm_node.tool_calls_meta)
+                for entry in cmeta:
+                    if entry.get("name") == "apply_todo_changes":
+                        entry["apply_status"] = status
+                        if error:
+                            entry["apply_error"] = error
+                        break
+                confirm_node.tool_calls_meta = json.dumps(cmeta)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
     db.session.flush()
