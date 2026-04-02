@@ -132,7 +132,7 @@ def _update_apply_status(llm_node, status, error=None, todo_id=None,
         except (json.JSONDecodeError, TypeError):
             meta = []
     for entry in meta:
-        if entry.get("name") == "update_todo":
+        if entry.get("name") == "propose_todo":
             entry["apply_status"] = status
             if error:
                 entry["apply_error"] = error

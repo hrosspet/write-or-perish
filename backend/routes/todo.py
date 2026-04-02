@@ -233,7 +233,7 @@ def _start_todo_merge(draft, llm_node, user_id):
         db.session.delete(d)
 
     # Update tool_calls_meta on the LLM node to record apply started
-    update_tool_meta(llm_node, "update_todo", {
+    update_tool_meta(llm_node, "propose_todo", {
         "apply_status": "started",
     })
 

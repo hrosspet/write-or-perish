@@ -269,7 +269,7 @@ export default function VoicePage() {
         const res = await api.get(`/nodes/${nodeId}/llm-status`);
         const meta = res.data.tool_calls_meta;
         if (meta) {
-          const todoEntry = meta.find(tc => tc.name === 'update_todo');
+          const todoEntry = meta.find(tc => tc.name === 'propose_todo');
           if (todoEntry?.apply_status === 'completed') {
             clearInterval(mergePollingRef.current);
             mergePollingRef.current = null;
@@ -342,40 +342,36 @@ export default function VoicePage() {
         setParsedResponse(parsed);
       }
 
-      // Fetch tool call metadata
+      // Fetch tool call metadata (for apply actions and auto-detected drafts)
       api.get(`/nodes/${nodeId}/llm-status`).then(res => {
         if (res.data.tool_calls_meta) {
           setToolCallsMeta(res.data.tool_calls_meta);
 
-          // Check if update_todo was called by LLM
-          const todoCall = res.data.tool_calls_meta.find(tc => tc.name === 'update_todo');
-          if (todoCall) {
-            if (todoCall.apply_status === 'completed') {
+          // Check todo draft status (auto-detected or from apply_todo_changes)
+          const todoEntry = res.data.tool_calls_meta.find(tc => tc.name === 'propose_todo');
+          if (todoEntry) {
+            if (todoEntry.apply_status === 'completed') {
               setApplyStatus('completed');
-            } else if (todoCall.apply_status === 'failed') {
+            } else if (todoEntry.apply_status === 'failed') {
               setApplyStatus('error');
-              setApplyError(todoCall.apply_error || 'Todo merge failed');
-            } else if (todoCall.apply_status === 'started') {
+              setApplyError(todoEntry.apply_error || 'Todo merge failed');
+            } else if (todoEntry.apply_status === 'started') {
               setApplyStatus('started');
               pollApplyStatus(nodeId);
             }
           }
-          // Also check legacy apply_todo_changes tool name
           const applyCall = res.data.tool_calls_meta.find(tc => tc.name === 'apply_todo_changes');
-          if (applyCall && applyCall.status === 'success' && !todoCall) {
+          if (applyCall && applyCall.status === 'success' && !todoEntry) {
             setApplyStatus('started');
             pollApplyStatus(nodeId);
           }
 
-          // Check for create_github_issue tool
-          const issueCall = res.data.tool_calls_meta.find(tc => tc.name === 'create_github_issue');
-          if (issueCall) {
-            if (issueCall.apply_status === 'completed') {
-              setIssueApplyStatus('completed');
-              setIssueResult({ issue_url: issueCall.issue_url, issue_number: issueCall.issue_number });
-            }
+          // Check GitHub issue status
+          const issueEntry = res.data.tool_calls_meta.find(tc => tc.name === 'propose_github_issue');
+          if (issueEntry && issueEntry.apply_status === 'completed') {
+            setIssueApplyStatus('completed');
+            setIssueResult({ issue_url: issueEntry.issue_url, issue_number: issueEntry.issue_number });
           }
-          // Check for apply_github_issue (voice confirmation)
           const applyIssueCall = res.data.tool_calls_meta.find(tc => tc.name === 'apply_github_issue');
           if (applyIssueCall && applyIssueCall.status === 'success') {
             setIssueApplyStatus('completed');
@@ -621,8 +617,9 @@ export default function VoicePage() {
   // --- PLAYBACK STATE ---
   const parsed = parsedResponse || {};
   const hasSections = parsed.completed || parsed.newTasks || parsed.priority || parsed.note;
-  const hasTodoUpdate = toolCallsMeta?.some(tc => tc.name === 'update_todo');
-  const hasGithubIssue = toolCallsMeta?.some(tc => tc.name === 'create_github_issue');
+  // Detect proposals from heading structure (primary) or tool_calls_meta (fallback)
+  const hasTodoUpdate = hasSections || toolCallsMeta?.some(tc => tc.name === 'propose_todo');
+  const hasGithubIssue = (parsed.issueTitle && parsed.issueDescription) || toolCallsMeta?.some(tc => tc.name === 'propose_github_issue');
   const hasPrefsUpdate = toolCallsMeta?.some(tc => tc.name === 'update_ai_preferences' && tc.status === 'success');
 
   return (

@@ -70,7 +70,7 @@ def create_issue():
     db.session.delete(draft)
 
     # Update tool_calls_meta on the origin node
-    update_tool_meta(origin_node, "create_github_issue", {
+    update_tool_meta(origin_node, "propose_github_issue", {
         "apply_status": "completed",
         "issue_url": gh_result["url"],
         "issue_number": gh_result["number"],
