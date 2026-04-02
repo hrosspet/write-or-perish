@@ -1,3 +1,4 @@
+import json
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node, Draft, UserTodo
@@ -241,6 +242,26 @@ def _start_todo_merge(draft, llm_node, user_id, confirm_node_id=None):
     update_tool_meta(llm_node, "propose_todo", {
         "apply_status": "started",
     })
+
+    # When confirmed via UI button (no separate confirmation node),
+    # add an apply_todo_changes entry on the proposal node itself
+    # so NodeDetail shows the confirmation action.
+    if not confirm_node_id:
+        confirm_node_id = llm_node.id
+        meta = []
+        if llm_node.tool_calls_meta:
+            try:
+                meta = json.loads(llm_node.tool_calls_meta)
+            except (json.JSONDecodeError, TypeError):
+                meta = []
+        # Only add if not already present
+        if not any(e.get("name") == "apply_todo_changes" for e in meta):
+            meta.append({
+                "name": "apply_todo_changes",
+                "status": "success",
+                "apply_status": "started",
+            })
+            llm_node.tool_calls_meta = json.dumps(meta)
 
     db.session.commit()
 
