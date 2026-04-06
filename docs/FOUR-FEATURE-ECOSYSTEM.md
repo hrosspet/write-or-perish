@@ -1,8 +1,11 @@
 # The Four-Feature Distributed Intelligence Network
 
 **Date:** November 21, 2025
-**Status:** Ideation / Brainstorming Phase
+**Last updated:** April 6, 2026
+**Status:** Feature 1 in alpha (live at loore.org), Features 2–4 in design phase
 **Vision:** A complete ecosystem for thinking, learning, creating, and connecting
+
+**Purpose of this document:** Product vision and feature design. Describes what Loore is and where it's going from a user's perspective. Features 2–4 are detailed design specs for future work. Use this to understand the "why" and "what" — for the "how", see TECHNICAL-ROADMAP.md.
 
 ---
 
@@ -26,19 +29,19 @@ Write or Perish evolves from journaling app to **distributed intelligence networ
 **Purpose:** Capture thoughts with zero friction.
 
 **Current State:**
-- Text + voice input with tab-kill resumability for voice workflows
-- Tree-structured conversations with LLMs
-- Multi-model support (GPT-4o, GPT-4o-mini, Claude Sonnet 4.6, Claude Opus 4.6)
-- Async processing for transcription, LLM, TTS (with SSE streaming for TTS)
-- Version history
-- **Reflect/Orient workflows** - Structured voice-first interaction modes for self-reflection and goal-setting with LLM-generated todos (#70). Converse workflow implemented but untested and currently disabled.
-- **Iterative profile generation** - AI-powered analysis of user's full writing archive, with automatic profile updates after new entries (#71)
-- **System prompt management** - Prompts page for viewing and editing AI system prompts (#72), with FK-linked prompt nodes (#73)
-- **Cmd+K keyword search** - Global search with date filtering, diacritics-insensitive matching, and infinite scroll pagination
-- **Claude data export import** - Import conversation history from Claude (#64)
-- **Dollar-cost tracking** - Per-user API cost tracking via APICostLog (#61)
-- **Pin-to-profile** - Pin selected nodes to user profile (#60)
-- **Cmd+Click** to open nodes in new tab across all previews
+- ✅ **Text + voice journaling** — Write or speak your thoughts, with resilient voice recording that survives interruptions and tab closures
+- ✅ **Tree-structured conversations with AI** — Hierarchical threads with multiple LLM models (GPT-5.4, Claude 4.6 Sonnet/Opus) and up to 1M context windows
+- ✅ **Agentic Voice workflow** — Single voice-first mode where AI actively helps during conversation: creates and manages todos, proposes changes, creates GitHub issues — all hands-free
+- ✅ **AI-generated user profile** — Automatic analysis of your full writing archive, kept fresh as you add new entries
+- ✅ **Todo management** — AI-proposed actionable tasks with collapsible nested lists, arising naturally from voice and text conversations
+- ✅ **Global search (Cmd+K)** — Search across all entries with date filtering
+- ✅ **Text-to-speech** — Listen to any entry or your AI profile read aloud
+- ✅ **Audio download** — Download voice sessions as mp3
+- ✅ **Customizable AI prompts** — View and edit the system prompts that guide AI behavior, with per-thread overrides
+- ✅ **Data import** — Import conversation history from Claude
+- ✅ **Pin to profile** — Curate your profile by pinning selected entries
+- ✅ **Version history** — All artifacts versioned behind the scenes (not yet exposed in UI)
+- ✅ **Personal Log** — Private chronological view of all your entries
 
 **Status:** ✅ Production-ready, actively used, significantly expanded beyond basic journaling
 

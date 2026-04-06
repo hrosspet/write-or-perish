@@ -1,8 +1,10 @@
 # Technical Roadmap: Loore Four-Feature Ecosystem
 
 **Date:** November 24, 2025
-**Status:** Planning Phase
-**Purpose:** Technical infrastructure roadmap to build the distributed intelligence network
+**Last updated:** April 6, 2026
+**Status:** Alpha (live at loore.org) — Phase -1 complete, Phase 0 in progress
+
+**Purpose of this document:** Technical infrastructure roadmap. Details what has been built, what infrastructure gaps remain, and the phased build sequence for each feature. This is the implementation-level reference — for product vision see FOUR-FEATURE-ECOSYSTEM.md, for parallelization strategy see ACCELERATED-DEVELOPMENT-ROADMAP.md.
 
 ---
 
@@ -25,10 +27,14 @@ These technical capabilities are production-ready and form the foundation:
 
 ### Core Features
 - **Asynchronous processing via Celery** - Long-running tasks (transcription, LLM, TTS) run in background with polling
-- **Multi-model LLM provider abstraction** - Unified interface for OpenAI and Anthropic (GPT-4o, GPT-4o-mini, Claude Sonnet 4.6, Claude Opus 4.6) with centralized model config, automatic routing, and shared LLM factory
-- **Iterative profile generation with automatic updates** - AI-powered analysis of user's full writing archive in chunks, with automatic profile regeneration after new entries and profile integration step (#71)
-- **Reflect/Orient workflow pages** - Structured voice-first interaction modes: Reflect (self-reflection), Orient (goal-setting with LLM-generated todos and todo merge) (#70). Converse (open conversation) implemented but untested and currently disabled. Includes tab-kill resumability via URL param sync, audio chunk flushing on pause, and TTS resume from Log.
-- **System prompt management** - Prompts page for viewing and editing AI system prompts (#72). System prompt nodes linked via FK instead of duplicating content (#73). Default prompt propagation to existing users.
+- **Multi-model LLM provider abstraction** - Unified interface for OpenAI and Anthropic (GPT-5.4, Claude 4.6 Sonnet, Claude 4.6 Opus, Claude 4.5 Opus) with centralized model config (up to 1M context windows), automatic routing, shared LLM factory, centralized max_output_tokens (10k cap), and response truncation detection
+- **Unified agentic Voice workflow** (#81, supersedes Reflect/Orient #70) - Single voice-first mode where AI can use tools (create todos, create GitHub issues) during conversation. Includes proposal tracking with explicit IDs and lifecycle statuses, confirmation nodes for merge outcomes, serialized concurrent todo merges, proactive todo proposals when AI is in planning mode, tab-kill resumability via URL param sync, audio chunk flushing on pause, and TTS resume from Log.
+- **Iterative profile generation with automatic updates** - AI-powered analysis of user's full writing archive in ~100k token chunks, with automatic profile regeneration after new entries, profile integration step, and recent context summaries for profile freshness (#71, #80)
+- **Context artifact tracking** - Unified context artifact system for system nodes with URL-style params for user_export placeholder, collapsible sections for context data in detailed node view (#77, #79)
+- **Frequent audio upload + batched transcription** (#74) - 15-second upload intervals with batched transcription and draft recovery for resilient voice recording
+- **Audio download** - Server-side audio download with ffmpeg merge and mp3 conversion
+- **System prompt management** - Prompts page for viewing and editing AI system prompts (#72). System prompt nodes linked via FK instead of duplicating content (#73). One-off system prompt edits per thread with confirmation dialog. Default prompt propagation to existing users.
+- **Todo page** - Collapsible nested sub-lists, improved parsing, voice label display ("Voice" instead of "voice_session")
 - **Cmd+K keyword search** - Global search with date filtering, diacritics-insensitive matching, and infinite scroll pagination
 - **OAuth authentication flow** - Twitter login with approval/whitelist system
 - **Tree-structured node system** - Hierarchical content organization with parent/child relationships, denormalized `human_owner_id` for efficient access control
@@ -354,14 +360,11 @@ Based on current project state, dependencies, and strategic value, here's the re
 11. ✅ **Tests** - Comprehensive unit tests for privacy validation, authorization, and AI usage checks (backend/tests/)
 12. ✅ **Profile generation filtering** - Only include nodes with ai_usage='chat' or 'train' in AI-generated profiles, while user data exports include all nodes (#37)
 
-### Remaining Tasks (Still Blocking):
+### Previously Blocking (Now Complete):
 
-- ✅ **Separate API keys for chat vs train** - COMPLETED: Different OpenAI/Anthropic API keys used based on node ai_usage setting (#39)
-
-### Alpha Blockers (New):
-
-- ✅ **GCP KMS encryption** - COMPLETED: Envelope encryption with AES-256-GCM + KMS-wrapped DEKs. All existing content migrated. Paginated Feed and Dashboard with infinite scroll to handle large node counts.
-- ✅ **Rebrand to Loore** - COMPLETED: Application renamed to Loore, domain switched to loore.org, all branding updated (landing page, login page, email templates, icons, navbar logo with waveform icon)
+- ✅ Separate API keys for chat vs train (#39)
+- ✅ GCP KMS encryption — envelope encryption for all content + audio at rest
+- ✅ Rebrand to Loore (loore.org)
 
 ### NOT Implemented (Future Work):
 
@@ -755,15 +758,23 @@ This roadmap prioritizes **privacy & encryption first** (Phase -1), then **found
 5. ✅ **COMPLETED:** Full UI redesign with warm literary design system
 6. ✅ **COMPLETED:** User plan tier standardization with admin management
 7. ✅ **COMPLETED:** Docker Compose local development + staging environment (#68, #69)
-8. ✅ **COMPLETED:** Reflect/Orient workflow pages (#70) (Converse implemented but untested/disabled)
+8. ✅ **COMPLETED:** Unified agentic Voice workflow (#81, supersedes Reflect/Orient #70)
 9. ✅ **COMPLETED:** Iterative profile generation with automatic updates (#71)
 10. ✅ **COMPLETED:** System prompt management (Prompts page) (#72, #73)
 11. ✅ **COMPLETED:** Cmd+K keyword search with date filtering and infinite scroll
 12. ✅ **COMPLETED:** Dollar-cost tracking via APICostLog (#61)
 13. ✅ **COMPLETED:** Claude data export import (#64)
-14. **NOW:** Sentry integration + health check endpoints (Phase 0 items)
-15. **NEXT:** Testing infrastructure (Phase 0) + alpha documentation
-16. Iterate based on learnings at each phase
+14. ✅ **COMPLETED:** Unified Voice workflow with tool use (#81), including GitHub issue creation from voice
+15. ✅ **COMPLETED:** Frequent audio upload (15s) + batched transcription + draft recovery (#74)
+16. ✅ **COMPLETED:** Context artifact tracking (#77) + URL-style export params (#79)
+17. ✅ **COMPLETED:** Hierarchical context freshness (#80, #84, #86)
+19. ✅ **COMPLETED:** Proposal tracking with explicit IDs and lifecycle statuses, confirmation nodes
+20. **NOW:** Stabilize Voice/Todo workflow — open bugs: todo merge hangs (#87), checkbox UX (#93, #94), interactive proposal editing (#89), completed item deletion (#97)
+21. **NOW:** Protected usernames list (#91) — critical before expanding alpha
+22. **NOW:** Anthropic API spend monitoring and alerts (#85)
+23. **NEXT:** Sentry integration + health check endpoints (Phase 0 items)
+24. **NEXT:** Testing infrastructure (Phase 0) + alpha documentation
+25. Iterate based on learnings at each phase
 
 This is ambitious but achievable. Each phase delivers value, and the foundation work (especially privacy) ensures sustainable velocity and user trust throughout.
 

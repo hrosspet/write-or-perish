@@ -1,7 +1,9 @@
 # Accelerated Development Roadmap
 
 **Date:** January 21, 2026
-**Purpose:** Optimized task ordering for rapid alpha release, development automation, and parallel AI agent development
+**Last updated:** April 6, 2026
+
+**Purpose of this document:** Development execution plan. Defines task ordering, parallelization strategy, and current priorities for shipping Loore with multiple AI agents working on separate branches. Tracks what's done, what's next, and what's blocking. For product vision see FOUR-FEATURE-ECOSYSTEM.md, for technical details see TECHNICAL-ROADMAP.md.
 
 **Development Model:** Single human (you) + multiple AI agents working on parallel branches
 
@@ -9,199 +11,99 @@
 
 ## Goals (in priority order)
 
-1. **Alpha Release ASAP** - Current functionality + privacy features for friends
-2. **Development Automation** - Reduce friction, enable fast iteration
-3. **Parallel Development** - Multiple agents/branches working independently
+1. ✅ **Alpha Released** — Live at loore.org with privacy guarantees, encryption, and core journaling features
+2. **Stabilize & expand alpha** — Fix Voice/Todo bugs, monitoring, protected usernames, then invite ~10 more users
+3. **Development Automation** — Reduce friction, enable fast iteration (tests, monitoring)
+4. **Parallel Development** — Multiple agents/branches working independently
 
 ---
 
 ## Current State Assessment
 
 ### Already Done
-- **Core journaling** (Feature 1) - Production-ready
-- **Privacy infrastructure** (Phase -1) - Two-column privacy system implemented, privacy filtering enforced on feed/dashboard/node detail, recursive human owner resolution for LLM access control
-- **GCP KMS encryption** (A.4) - Envelope encryption for all content + audio at rest
-- **API key separation for chat vs train** (#39) - Complete
-- **Magic link email authentication** (#54) - Passwordless login via email, replacing Twitter-only OAuth
-- **Dedicated login page** (#53) - Standalone login page with redirect flow
-- **Rebrand to Loore** (A.5) - Complete: domain (loore.org), all branding, icons, emails, landing page
-- **Full UI redesign** (#56) - Warm literary design system across all pages, dark theme, responsive mobile
-- **User plan tiers** - Standardized (free/alpha/pro) with admin dashboard management and migration scripts
-- **Multi-model LLM updates** - Claude Opus 4.6 support, centralized model config
-- **CI/CD pipeline** - GitHub Actions runs tests, deploys to production, path-based job skipping
-- **Docker Compose local dev + staging** - Verified and working: `make dev` for full local stack, staging environment on same VM via Docker Compose (#68, #69)
-- **Reflect/Orient workflows** - Structured voice-first interaction modes with tab-kill resumability, LLM-generated todos, todo merge (#70). Converse implemented but untested and currently disabled.
-- **Iterative profile generation** - AI-powered analysis of full writing archive in chunks, with automatic profile updates after new entries (#71)
-- **System prompt management** - Prompts page for viewing/editing AI system prompts, FK-linked prompt nodes (#72, #73)
-- **Cmd+K keyword search** - Global search with date filtering, diacritics-insensitive matching, infinite scroll pagination
-- **Dollar-cost tracking** - Per-user API cost tracking via APICostLog, replacing token-based tracking (#61)
-- **Claude data export import** - Import conversation history from Claude (#64)
-- **Pin-to-profile** - Pin selected nodes to user profile (#60)
-- **Welcome & onboarding flow** - Public about pages, alpha thank-you page, welcome page with admin welcome flow (#59)
-- **TTS SSE streaming** - Text-to-speech via Server-Sent Events instead of polling (#67)
-- **Backend tests** - Privacy-related tests only (~3 test files)
-- **Frontend tests** - Placeholder only
-- **Terms of service** - Acceptance tracking with admin reset on account deactivation
+
+Feature 1 (Journaling) is production-ready and significantly expanded — see FOUR-FEATURE-ECOSYSTEM.md for the full feature list. Key infrastructure milestones completed:
+
+| Area | Status |
+|------|--------|
+| Privacy & encryption | Two-column privacy system + GCP KMS envelope encryption for all content and audio at rest |
+| Authentication | Magic link email login, user plan tiers (free/alpha/pro), terms of service |
+| Branding & UX | Rebrand to Loore (loore.org), full UI redesign, welcome & onboarding flow |
+| Voice workflow | Unified agentic Voice mode with AI tool use, resilient recording, todo management |
+| AI features | Iterative profile generation, hierarchical context freshness, customizable system prompts |
+| Search & navigation | Cmd+K global search, pin-to-profile, data import from Claude |
+| DevOps | CI/CD pipeline, Docker Compose local dev + staging, automated deployment |
+| Testing | Privacy tests only (~3 backend test files), frontend placeholder only |
 
 ### Alpha Blockers (Critical)
 - ⚠️ **A.2 Basic Monitoring** - Sentry integration + health check endpoint + request logging not yet implemented
 - ⚠️ **A.3 Alpha Documentation** - In progress: privacy promise docs, user guide, known limitations
+- ⚠️ **Protected usernames list** (#91) - Critical before expanding alpha to ~10 new users
+- ⚠️ **Anthropic API spend monitoring** (#85) - Alert before hitting spending limit (silent failures)
+
+### Active Development: Voice/Todo Workflow Stabilization
+The Voice workflow with tool use (#81) is functional but has several open bugs that need fixing:
+- Todo merge hangs for 7+ minutes (#87)
+- Completed todo items not removed when proposed for deletion (#97)
+- Todo checkbox toggle ~1s delay (#94) and hit target too small (#93)
+- Make proposed todo changes interactive/editable before applying (#89)
+- Voice recording drops last chunk on lock screen after phone call (#88)
+- Block SPA navigation during active recording (#78)
 
 ### Development Velocity Blockers
-- ~~Docker setup unverified~~ ✅ Resolved: Docker Compose verified and working (#68, #69)
 - Minimal test coverage (risky for parallel development)
 - No API documentation (frontend/backend disconnect risk)
 
 ---
 
-## Phase A: Alpha Release (1-2 weeks)
+## Phase A: Alpha Release
 
 **Goal:** Ship current functionality to friends with privacy guarantees.
 
-### A.1 API Key Separation ✅ COMPLETE
+### Completed Items
 
-**What:** Use different OpenAI/Anthropic API keys based on `ai_usage` setting.
+| # | Item | Notes |
+|---|------|-------|
+| A.1 | API key separation | Separate keys for chat vs train |
+| A.4 | GCP KMS encryption | Envelope encryption for all content + audio at rest. See `docs/GCP-KMS-SETUP.md` |
+| A.5 | Rebrand to Loore | Domain, branding, icons, emails, landing page |
+| A.6 | Full UI redesign | Dark literary theme, responsive mobile, typography system |
+| A.7 | Magic link auth | Passwordless email login, replaces Twitter-only OAuth |
+| A.8 | User plan tiers | free/alpha/pro with admin management |
+| A.10 | Reflect/Orient workflows | Superseded by A.17 (unified Voice) |
+| A.11 | Iterative profile generation | AI analysis of full archive in chunks, auto-updates on new entries |
+| A.12 | System prompt management | View/edit AI prompts, per-thread overrides |
+| A.13 | Cmd+K search | Global search with date filtering |
+| A.14 | Dollar-cost tracking | Per-user API cost tracking |
+| A.15 | Claude data import | Import conversation history from Claude exports |
+| A.16 | Welcome & onboarding | About pages, welcome flow, admin tools |
+| A.17 | Unified agentic Voice | AI tool use in voice sessions (todos, GitHub issues), proposal tracking |
+| A.18 | Resilient audio recording | 15s upload intervals, batched transcription, draft recovery |
+| A.19 | Hierarchical context freshness | Context artifacts, recent summaries, profile freshness |
 
-**Status:** Implemented. Separate API keys now used for chat vs train operations.
+### Remaining Items
 
-### A.2 Basic Monitoring (Alpha Requirement)
+#### A.2 Basic Monitoring (Alpha Requirement)
 
 **What:** Minimal monitoring to catch issues before users report them.
 
-**Why:** Alpha users are friends - you don't want them debugging your app for you.
+**Why:** Alpha users are friends — you don't want them debugging your app for you.
 
 **Implementation:**
-- Sentry integration (backend + frontend) - ~1 day
-- Health check endpoint (`/health`) - ~1 hour
-- Basic request logging with request IDs - ~1 day
+- Sentry integration (backend + frontend)
+- Health check endpoint (`/health`)
+- Basic request logging with request IDs
 
-**Scope:** Backend + minimal frontend, configuration-heavy.
-
-### A.3 Alpha Documentation
+#### A.3 Alpha Documentation
 
 **What:** User-facing docs for alpha testers.
 
-**Why:** Friends need to understand privacy guarantees and basic usage.
-
 **Implementation:**
 - Privacy promise documentation (what's encrypted, what's stored, what AI can see)
-- Basic user guide (how to create nodes, set privacy levels)
+- Basic user guide
 - Known limitations list
 
-**Scope:** Documentation only, no code.
-
-### A.4 Application-Level Encryption with GCP KMS ✅ COMPLETE
-
-**What:** Encrypt sensitive user data at rest using Google Cloud KMS.
-
-**Why:** Defense in depth - even if database is compromised, encrypted fields remain protected. Critical for user trust and privacy guarantees.
-
-**Status:** Implemented. Key technical decisions and details:
-- **Envelope encryption (v2):** Random AES-256 DEK per record, KMS only wraps/unwraps the 32-byte DEK (bypasses 64KB KMS plaintext limit)
-- **Format:** `ENC:v2:<base64-wrapped-dek>:<base64(nonce + ciphertext + tag)>`
-- **REST transport:** KMS client uses REST instead of gRPC to avoid gevent monkey-patching deadlocks
-- **DEK cache:** In-memory LRU cache (4096 entries) avoids repeated KMS calls for already-decrypted content
-- **Migration script:** `scripts/encrypt_existing_content.py` encrypts all existing nodes, versions, drafts, profiles, and transcript chunks
-- **Audio file encryption:** All audio files (uploads, streaming chunks, TTS output) encrypted at rest via `encrypt_file()`. DB URLs stored without `.enc` — media route handles `.enc` fallback transparently. Transcription tasks decrypt to temp files before sending to OpenAI.
-- **Paginated Feed/Dashboard:** Infinite scroll (20 nodes per page) to avoid decrypting too many nodes at once
-- **VM Workload Identity:** Service account attached to VM, no JSON key files needed
-- **Setup docs:** `docs/GCP-KMS-SETUP.md` covers full GCP configuration
-- **Dependencies added:** `google-cloud-kms>=2.0.0`, `cryptography>=41.0.0`
-
-### A.5 Rebrand to Loore ✅ COMPLETE
-
-**What:** Rename the application from "Write or Perish" to "Loore".
-
-**Status:** Implemented. Key changes:
-- **Domain:** loore.org (production)
-- **Frontend:** All pages rebranded, landing page rewritten with new Loore vision and copy
-- **Icons:** Redesigned app icons with new branding
-- **Navbar:** Enlarged logo text with waveform icon
-- **Email:** Sign-in email redesigned to match Loore branding
-- **Login page:** Rebranded and redesigned
-
-**Alpha Deliverable:** ✅ Shipped to friends with privacy guarantees + monitoring + encryption + Loore branding.
-
-### A.6 Full UI Redesign ✅ COMPLETE (Unplanned)
-
-**What:** Complete redesign of all app pages to a warm literary design system.
-
-**Status:** Implemented (#56 + follow-up commits). Key changes:
-- Dark theme with warm literary aesthetic across all pages
-- Login page redesigned with branded sign-in email
-- Contrast and readability improvements throughout
-- Privacy selectors, write modal, and feed card spacing refined
-- Browser autofill styling overridden to preserve dark theme
-- Typography: switched to Outfit (sans-serif) for body text readability
-- Font weight increases for write textarea and card titles
-- Responsive: mobile button wrapping, modal height constraints, wider desktop modals (780px→1170px)
-
-### A.7 Magic Link Email Authentication ✅ COMPLETE (Unplanned)
-
-**What:** Passwordless authentication via email magic links (#54).
-
-**Status:** Implemented. Replaces Twitter-only OAuth as primary auth method. Includes dedicated login page with redirect flow (#53). Partial email infrastructure now in place (basic SMTP).
-
-### A.8 User Plan Tier Standardization ✅ COMPLETE (Unplanned)
-
-**What:** Standardized plan tiers (free/alpha/pro) with admin management.
-
-**Status:** Implemented. All existing users migrated to alpha plan. Admin dashboard has plan dropdown. Feature gating via `User.has_voice_mode` and plan-based decorators.
-
-### A.10 Reflect/Orient Workflows ✅ COMPLETE (Unplanned)
-
-**What:** Structured voice-first interaction modes for the app (#70).
-
-**Status:** Implemented. Two active workflow pages:
-- **Reflect** — Self-reflection with guided prompts, voice recording, and LLM feedback
-- **Orient** — Goal-setting with LLM-generated todos, todo merge step, and actionable next steps
-- **Converse** — Open conversation mode with LLMs (implemented but untested and currently disabled)
-- Tab-kill resumability via URL param sync and audio chunk flushing on pause
-- TTS playback resume from Log page
-- Voice notes labeled as Reflect/Orient in the Log
-
-### A.11 Iterative Profile Generation ✅ COMPLETE (Unplanned)
-
-**What:** AI-powered profile generation from user's full writing archive (#71).
-
-**Status:** Implemented. Key features:
-- Processes full archive in chunks (handles large archives without token limits)
-- Automatic profile updates triggered after new journal entries
-- Profile integration step: unifies iterative versions into single coherent profile
-- Retry logic with reduced export size for prompt-too-long errors
-- Profile TTS via SSE streaming (#67)
-
-### A.12 System Prompt Management ✅ COMPLETE (Unplanned)
-
-**What:** Admin/user-facing page for viewing and editing AI system prompts (#72).
-
-**Status:** Implemented. System prompt nodes linked via FK instead of duplicating content (#73). Default system prompt updates propagated to existing users.
-
-### A.13 Cmd+K Keyword Search ✅ COMPLETE (Unplanned)
-
-**What:** Global keyword search with date filtering.
-
-**Status:** Implemented. Includes diacritics-insensitive matching, infinite scroll pagination for results, and Cmd+Click to open nodes in new tab.
-
-### A.14 Dollar-Cost Tracking ✅ COMPLETE (Unplanned)
-
-**What:** Per-user API cost tracking replacing token-based tracking (#61).
-
-**Status:** Implemented via APICostLog model. Tracks dollar costs per API call per user.
-
-### A.15 Claude Data Import ✅ COMPLETE (Unplanned)
-
-**What:** Import conversation history from Claude data export files (#64).
-
-**Status:** Implemented. Uses synthetic user for assistant nodes. Includes one-time cleanup script for re-import.
-
-### A.16 Welcome & Onboarding Flow ✅ COMPLETE (Unplanned)
-
-**What:** Public about pages, alpha thank-you page, welcome page, and admin welcome flow (#59).
-
-**Status:** Implemented. Admin can trigger welcome emails, welcome link expiry extended to 30 days.
-
-### A.9 License & Legal Compliance (Beta Blocker)
+#### A.9 License & Legal Compliance (Beta Blocker)
 
 **What:** Address legal and compliance gaps in the terms of service before moving beyond the alpha circle.
 
@@ -238,15 +140,7 @@
 
 ### B.1 Docker Verification and Fixes ✅ COMPLETE
 
-**What:** Verify Docker setup works end-to-end, fix any issues.
-
-**Status:** Implemented (#68, #69). Docker Compose fully verified and working:
-- `make dev` starts full local stack (PostgreSQL, Redis, Celery, Flask, React)
-- Hot reload works for both backend (Flask dev server) and frontend (React HMR)
-- Database migrations work in Docker
-- Staging environment deployed on same VM via Docker Compose with separate ports
-- Frontend built in CI for staging (VM runs out of memory during `npm ci`)
-- Multiple deploy fixes resolved (permission errors, frontend build conflicts, DB schema resets)
+Docker Compose fully verified (#68, #69): `make dev` for local stack, staging on same VM.
 
 ### B.2 Backend Test Coverage Expansion
 
@@ -258,7 +152,7 @@
 1. Node CRUD operations (create, read, update, delete)
 2. LLM provider abstraction (mock API calls)
 3. Celery task execution (mock async processing)
-4. Audio upload/transcription flow (mock Whisper)
+4. Audio upload/transcription flow
 5. Authentication/authorization
 
 **Why this order:**
@@ -611,24 +505,15 @@ claude  # "Working on Intention Market feature..."
 
 ## Next Actions
 
-1. ✅ **COMPLETED:** A.1 (API key separation)
-2. ✅ **COMPLETED:** A.4 (GCP KMS encryption)
-3. ✅ **COMPLETED:** A.5 (Rebrand to Loore)
-4. ✅ **COMPLETED:** A.6 (Full UI redesign)
-5. ✅ **COMPLETED:** A.7 (Magic link email authentication)
-6. ✅ **COMPLETED:** A.8 (User plan tier standardization)
-7. ✅ **COMPLETED:** A.10 (Reflect/Orient workflows; Converse implemented but disabled)
-8. ✅ **COMPLETED:** A.11 (Iterative profile generation)
-9. ✅ **COMPLETED:** A.12 (System prompt management)
-10. ✅ **COMPLETED:** A.13 (Cmd+K keyword search)
-11. ✅ **COMPLETED:** A.14 (Dollar-cost tracking)
-12. ✅ **COMPLETED:** A.15 (Claude data import)
-13. ✅ **COMPLETED:** A.16 (Welcome & onboarding flow)
-14. ✅ **COMPLETED:** B.1 (Docker verification + staging environment)
-15. **NOW:** A.2 (Sentry integration) + A.3 (Alpha docs)
-16. **NEXT:** A.9 (License & legal compliance for beta) - code items can parallel with Phase B
-17. **THEN:** Phase B remaining (B.2 backend tests + B.3 frontend tests) - can run parallel
-18. **THEN:** Phase C infrastructure, leading to Phase D parallelization
+Phase A (A.1–A.19) and B.1 are complete — see tables above for details.
+
+1. **NOW:** Stabilize Voice/Todo workflow — fix open bugs (#87, #89, #93, #94, #97)
+2. **NOW:** Protected usernames list (#91) — critical before expanding alpha
+3. **NOW:** Anthropic API spend monitoring (#85)
+4. **NEXT:** A.2 (Sentry integration) + A.3 (Alpha docs)
+5. **NEXT:** A.9 (License & legal compliance for beta) — code items can parallel with Phase B
+6. **THEN:** Phase B remaining (B.2 backend tests + B.3 frontend tests) — can run parallel
+7. **THEN:** Phase C infrastructure, leading to Phase D parallelization
 
 ---
 
