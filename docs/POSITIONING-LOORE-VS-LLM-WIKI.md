@@ -22,7 +22,9 @@ His approach is power-user, research-oriented, and manual-setup (Obsidian + CLI 
 
 ## What Loore Already Is
 
-Loore is the **productized, personal-life version** of what Karpathy describes. Mapping the concepts:
+Karpathy described a **general idea** — LLM-maintained knowledge bases — in a form that's currently accessible only to power users (file systems, CLI, Obsidian, agent configuration). Loore is a **specific instance** of that idea — a personal knowledge base for your life — built to be effortless and useful for mainstream users, not just power users. We picked one domain and spent months making it work great.
+
+Mapping the concepts:
 
 | Karpathy's LLM Wiki | Loore |
 |---|---|
