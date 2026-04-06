@@ -769,12 +769,15 @@ This roadmap prioritizes **privacy & encryption first** (Phase -1), then **found
 16. ✅ **COMPLETED:** Context artifact tracking (#77) + URL-style export params (#79)
 17. ✅ **COMPLETED:** Hierarchical context freshness (#80, #84, #86)
 19. ✅ **COMPLETED:** Proposal tracking with explicit IDs and lifecycle statuses, confirmation nodes
-20. **NOW:** Stabilize Voice/Todo workflow — open bugs: todo merge hangs (#87), checkbox UX (#93, #94), interactive proposal editing (#89), completed item deletion (#97)
-21. **NOW:** Protected usernames list (#91) — critical before expanding alpha
-22. **NOW:** Anthropic API spend monitoring and alerts (#85)
-23. **NEXT:** Sentry integration + health check endpoints (Phase 0 items)
-24. **NEXT:** Testing infrastructure (Phase 0) + alpha documentation
-25. Iterate based on learnings at each phase
+20. **NOW:** Implement text mode — last major feature before expanding alpha to ~10 users
+21. **NOW:** Stabilize Voice/Todo workflow — open bugs: todo merge hangs (#87), checkbox UX (#93, #94), interactive proposal editing (#89), completed item deletion (#97)
+22. **NOW:** Protected usernames (#91) + Anthropic API spend monitoring (#85)
+23. **NOW:** Sentry integration + health check endpoints + security hardening (Phase 0)
+24. **NEXT:** Onboarding flow + About page updates for alpha expansion
+25. **NEXT:** Expand agentic tool use — intentions, feedback, memory/artifacts, long-running thread UX
+26. **NEXT:** RAG / semantic search — embeddings, chat with archive, community archive (Phase 1)
+27. **THEN:** Testing infrastructure (Phase 0) + legal compliance
+28. Iterate based on learnings at each phase
 
 This is ambitious but achievable. Each phase delivers value, and the foundation work (especially privacy) ensures sustainable velocity and user trust throughout.
 

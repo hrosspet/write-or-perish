@@ -35,20 +35,36 @@ Feature 1 (Journaling) is production-ready and significantly expanded — see FO
 | DevOps | CI/CD pipeline, Docker Compose local dev + staging, automated deployment |
 | Testing | Privacy tests only (~3 backend test files), frontend placeholder only |
 
-### Alpha Blockers (Critical)
-- ⚠️ **A.2 Basic Monitoring** - Sentry integration + health check endpoint + request logging not yet implemented
-- ⚠️ **A.3 Alpha Documentation** - In progress: privacy promise docs, user guide, known limitations
-- ⚠️ **Protected usernames list** (#91) - Critical before expanding alpha to ~10 new users
-- ⚠️ **Anthropic API spend monitoring** (#85) - Alert before hitting spending limit (silent failures)
+### Blockers Before Expanding Alpha (~10 new users)
+- ⚠️ **Text mode** — Last major feature before wider alpha. Users need a non-voice way to interact with Loore's agentic features.
+- ⚠️ **Protected usernames list** (#91) — Critical before new signups
+- ⚠️ **Anthropic API spend monitoring** (#85) — Alert at 80%/95% thresholds before spending limit (silent failures)
+- ⚠️ **A.2 Basic Monitoring** — Sentry integration + health check endpoint + request logging
+- ⚠️ **Onboarding flow** — Update About pages, design first-login walkthrough (privacy/AI settings, core UX, Craft mode, feedback channel), review default settings
+- ⚠️ **Security hardening** — Remove server version header from nginx, security & privacy audit
 
 ### Active Development: Voice/Todo Workflow Stabilization
-The Voice workflow with tool use (#81) is functional but has several open bugs that need fixing:
 - Todo merge hangs for 7+ minutes (#87)
 - Completed todo items not removed when proposed for deletion (#97)
 - Todo checkbox toggle ~1s delay (#94) and hit target too small (#93)
 - Make proposed todo changes interactive/editable before applying (#89)
 - Voice recording drops last chunk on lock screen after phone call (#88)
 - Block SPA navigation during active recording (#78)
+- Proposal tag / note ID leaking into UI display
+- iPhone: todo form zoom on focus
+- Todo empty update issue on smaller models (Sonnet)
+
+### Other Known Bugs
+- Landing page arrow barely visible / off-screen (#98)
+- Profile TTS privacy/ai-usage handling unclear (#99)
+- Node deletion UX needs redesign (#100)
+- Favicon square background in Chrome tab (#101)
+- Safari TTS chunk playback broken (#102)
+- Android voice recording not working (#103)
+- `_call_llm_with_retries` missing max_tokens (#104)
+- Proposal tag / note ID leaking into UI (#105)
+- iPhone todo form zoom on focus (#106)
+- Todo empty update on smaller models (#107)
 
 ### Development Velocity Blockers
 - Minimal test coverage (risky for parallel development)
@@ -507,13 +523,19 @@ claude  # "Working on Intention Market feature..."
 
 Phase A (A.1–A.19) and B.1 are complete — see tables above for details.
 
-1. **NOW:** Stabilize Voice/Todo workflow — fix open bugs (#87, #89, #93, #94, #97)
-2. **NOW:** Protected usernames list (#91) — critical before expanding alpha
-3. **NOW:** Anthropic API spend monitoring (#85)
-4. **NEXT:** A.2 (Sentry integration) + A.3 (Alpha docs)
-5. **NEXT:** A.9 (License & legal compliance for beta) — code items can parallel with Phase B
-6. **THEN:** Phase B remaining (B.2 backend tests + B.3 frontend tests) — can run parallel
-7. **THEN:** Phase C infrastructure, leading to Phase D parallelization
+### Before alpha expansion (~10 users)
+1. **NOW:** Implement text mode — last major feature gap
+2. **NOW:** Stabilize Voice/Todo workflow — fix open bugs (#87, #89, #93, #94, #97)
+3. **NOW:** Protected usernames (#91) + API spend monitoring (#85)
+4. **NOW:** A.2 (Sentry + monitoring) + security hardening
+5. **NEXT:** Onboarding flow + About page updates
+6. **NEXT:** Expand agentic tool use — intentions tracking, feedback submission, memory/artifacts management, long-running thread UX (soft nudge to start fresh vs. agentic retrieval)
+
+### After alpha expansion
+7. **NEXT:** A.9 (License & legal compliance for beta)
+8. **NEXT:** RAG / semantic search — chat with archive, community archive via vector DB, agentic search
+9. **THEN:** Phase B remaining (B.2 backend tests + B.3 frontend tests) — can run parallel
+10. **THEN:** Phase C infrastructure, leading to Phase D parallelization
 
 ---
 

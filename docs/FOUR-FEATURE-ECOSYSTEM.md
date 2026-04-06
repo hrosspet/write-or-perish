@@ -43,7 +43,12 @@ Write or Perish evolves from journaling app to **distributed intelligence networ
 - ✅ **Version history** — All artifacts versioned behind the scenes (not yet exposed in UI)
 - ✅ **Personal Log** — Private chronological view of all your entries
 
-**Status:** ✅ Production-ready, actively used, significantly expanded beyond basic journaling
+**In Progress:**
+- 🔧 **Text mode** — Non-voice agentic interaction for text-first users (last major feature before wider alpha)
+- 🔧 **Onboarding flow** — First-login walkthrough for privacy settings, core UX, and feedback channel
+- 🔧 **Expanded agentic tool use** — Intentions tracking, feedback submission, memory/artifact management
+
+**Status:** ✅ Production-ready, actively used. Voice workflow stabilization and text mode in progress before expanding alpha.
 
 ---
 
