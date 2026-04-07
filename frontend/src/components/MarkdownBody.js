@@ -38,8 +38,8 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0' }) => (
             <code>{children}</code>
           </pre>
         ),
-      a: ({ node, ...props }) => (
-        <a style={{ color: 'var(--accent)', textDecoration: 'underline' }} target="_blank" rel="noopener noreferrer" {...props} />
+      a: ({ node, children, ...props }) => (
+        <a style={{ color: 'var(--accent)', textDecoration: 'underline' }} target="_blank" rel="noopener noreferrer" {...props}>{children}</a>
       ),
       table: ({ node, ...props }) => (
         <div style={{ overflowX: 'auto', margin: '8px 0' }}>
