@@ -17,6 +17,7 @@
     "react-markdown": "^10.1.0",
     "react-router-dom": "^6.28.0",
     "react-scripts": "5.0.1",
+    "remark-gfm": "^4.0.1",
     "web-vitals": "^2.1.4"
   },
   "scripts": {
@@ -45,7 +46,7 @@
   },
   "jest": {
     "transformIgnorePatterns": [
-      "node_modules/(?!(axios|react-markdown|unist-.*|mdast-.*|remark-.*|micromark.*|decode-named-character-reference|character-entities|property-information|hast-util-.*|space-separated-tokens|comma-separated-tokens|vfile|vfile-message|bail|is-plain-obj|trough|unified|devlop)/)"
+      "node_modules/(?!(axios|react-markdown|remark-gfm|unist-.*|mdast-.*|remark-.*|micromark.*|decode-named-character-reference|character-entities|property-information|hast-util-.*|space-separated-tokens|comma-separated-tokens|vfile|vfile-message|bail|is-plain-obj|trough|unified|devlop|ccount|escape-string-regexp)/)"
     ]
   }
 }

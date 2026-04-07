@@ -1,5 +1,6 @@
 import React from 'react';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 /**
  * MarkdownBody — shared ReactMarkdown wrapper with consistent styling.
@@ -11,7 +12,7 @@ import ReactMarkdown from 'react-markdown';
  */
 const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0' }) => (
   <div style={style}>
-    <ReactMarkdown components={{
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={{
       p: ({ node, ...props }) => (
         <p style={{ whiteSpace: 'pre-wrap', overflowWrap: 'break-word', margin: paragraphMargin }} {...props} />
       ),
@@ -37,6 +38,23 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0' }) => (
             <code>{children}</code>
           </pre>
         ),
+      a: ({ node, ...props }) => (
+        <a style={{ color: 'var(--accent)', textDecoration: 'underline' }} target="_blank" rel="noopener noreferrer" {...props} />
+      ),
+      table: ({ node, ...props }) => (
+        <div style={{ overflowX: 'auto', margin: '8px 0' }}>
+          <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: '0.9em' }} {...props} />
+        </div>
+      ),
+      thead: ({ node, ...props }) => (
+        <thead style={{ borderBottom: '2px solid var(--border)' }} {...props} />
+      ),
+      th: ({ node, ...props }) => (
+        <th style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 600, whiteSpace: 'nowrap' }} {...props} />
+      ),
+      td: ({ node, ...props }) => (
+        <td style={{ padding: '6px 10px', borderTop: '1px solid var(--border)' }} {...props} />
+      ),
     }}>
       {children}
     </ReactMarkdown>
