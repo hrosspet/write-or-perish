@@ -68,7 +68,7 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', onCheckbox
 
       if (isTask && onCheckboxToggle) {
         const itemText = extractText(liChildren).trim();
-        const { children: filteredChildren, checked } = replaceCheckboxes(
+        const { children: filteredChildren } = replaceCheckboxes(
           liChildren,
           (isChecked) => (
             <span
