@@ -227,7 +227,7 @@ function parsePriorityItems(text) {
  * (e.g. 'completed', 'new task').
  * `itemText` is the stripped display text to match against raw lines.
  */
-function moveProposalItem(content, itemText, fromSection, toSection) {
+function moveProposalItem(content, itemText, fromSection, toSection, { prepend = false } = {}) {
   const lines = content.split('\n');
   const sectionRegex = /^###\s+(.+)/;
 
@@ -270,10 +270,12 @@ function moveProposalItem(content, itemText, fromSection, toSection) {
     for (let i = 0; i < lines.length; i++) {
       const m = lines[i].match(sectionRegex);
       if (m && m[1].trim().toLowerCase().includes(toSection)) {
-        // Insert after the heading line (and any existing items)
         toInsert = i + 1;
-        while (toInsert < lines.length && !lines[toInsert].match(sectionRegex) && lines[toInsert].trim()) {
-          toInsert++;
+        if (!prepend) {
+          // Append: skip past existing items
+          while (toInsert < lines.length && !lines[toInsert].match(sectionRegex) && lines[toInsert].trim()) {
+            toInsert++;
+          }
         }
         break;
       }
@@ -470,10 +472,10 @@ export default function VoicePage() {
     }
   }, []);
 
-  const handleProposalToggle = useCallback((itemText, fromSection, toSection) => {
+  const handleProposalToggle = useCallback((itemText, fromSection, toSection, opts) => {
     if (!llmContent || !lastLlmNodeIdRef.current) return;
     const prevContent = llmContent;
-    const newContent = moveProposalItem(llmContent, itemText, fromSection, toSection);
+    const newContent = moveProposalItem(llmContent, itemText, fromSection, toSection, opts);
     if (newContent === prevContent) return;
     // Optimistic update
     setLlmContent(newContent);
@@ -827,7 +829,7 @@ export default function VoicePage() {
                   padding: '12px 0', borderBottom: '1px solid #1e1d1a',
                 }}>
                   <div
-                    onClick={() => handleProposalToggle(item, 'completed', 'new task')}
+                    onClick={() => handleProposalToggle(item, 'completed', 'new task', { prepend: true })}
                     style={{
                       width: '18px', height: '18px', borderRadius: '50%',
                       border: '1.5px solid var(--accent-dim)', background: 'var(--accent-dim)',
