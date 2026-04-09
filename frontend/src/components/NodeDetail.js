@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { FaThumbtack } from "react-icons/fa";
 import NodeFooter from "./NodeFooter";
@@ -8,6 +8,7 @@ import ModelSelector from "./ModelSelector";
 import { useUser } from "../contexts/UserContext";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 import api from "../api";
+import { useCheckboxToggle } from "../utils/markdown";
 import NodeFormModal from "./NodeFormModal";
 import Bubble from "./Bubble";
 import QuotedContent from "./QuotedContent";
@@ -133,6 +134,12 @@ function NodeDetail() {
       setLlmTaskNodeId(null);
     }
   }, [llmStatus, llmData, llmError, navigate]);
+
+  const handleCheckboxToggle = useCheckboxToggle(
+    useCallback(() => node?.content, [node]),
+    useCallback((newContent) => setNode(prev => ({ ...prev, content: newContent })), []),
+    useCallback((newContent) => api.put(`/nodes/${id}`, { content: newContent }), [id]),
+  );
 
   if (loading) return <div style={{ color: "var(--text-muted)", padding: "20px" }}>Loading node...</div>;
   if (error) return <div style={{ color: "var(--accent)", padding: "20px" }}>{error}</div>;
@@ -321,6 +328,7 @@ function NodeDetail() {
           quotes={quotes}
           contextArtifacts={node.context_artifacts || null}
           onQuoteClick={handleBubbleClick}
+          onCheckboxToggle={isOwner ? handleCheckboxToggle : undefined}
         />
         {node.tool_calls_meta && node.tool_calls_meta.length > 0 && (
           <div style={{ marginTop: '12px', borderTop: '1px solid var(--border)', paddingTop: '8px' }}>

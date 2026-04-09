@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import api from '../api';
+import { useCheckboxToggle } from '../utils/markdown';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
 
 /**
@@ -83,24 +84,6 @@ function findParentAtDepth(items, targetDepth) {
     return findParentAtDepth(last.children, targetDepth);
   }
   return null;
-}
-
-/**
- * Toggle a checkbox in the raw markdown content.
- */
-function toggleCheckbox(content, itemText, currentChecked) {
-  const lines = content.split('\n');
-  const newLines = lines.map(line => {
-    const itemMatch = line.match(/^(\s*)- \[([ xX])\]\s+(.+)/);
-    if (itemMatch && itemMatch[3].trim() === itemText) {
-      const indent = itemMatch[1];
-      return currentChecked
-        ? `${indent}- [ ] ${itemMatch[3]}`
-        : `${indent}- [x] ${itemMatch[3]}`;
-    }
-    return line;
-  });
-  return newLines.join('\n');
 }
 
 function countAllItems(items) {
@@ -224,18 +207,17 @@ export default function TodoPage() {
     fetchTodo();
   }, [fetchTodo]);
 
-  const handleToggle = async (item) => {
-    if (!todo) return;
-    const newContent = toggleCheckbox(todo.content, item.text, item.checked);
-    try {
-      const res = await api.patch('/todo', {
-        content: newContent,
-      });
-      setTodo(res.data.todo);
-      setEditContent(res.data.todo.content);
-    } catch (err) {
-      console.error('Failed to toggle item:', err);
-    }
+  const checkboxToggle = useCheckboxToggle(
+    useCallback(() => todo?.content, [todo]),
+    useCallback((newContent) => {
+      setTodo(prev => prev ? { ...prev, content: newContent } : prev);
+      setEditContent(newContent);
+    }, []),
+    useCallback((newContent) => api.patch('/todo', { content: newContent }), []),
+  );
+
+  const handleToggle = (item) => {
+    checkboxToggle(item.text, item.checked);
   };
 
   const handleSave = async () => {

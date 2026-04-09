@@ -21,7 +21,7 @@ const COMBINED_PATTERN = /(\{quote:\d+\}|\{user_(?:profile|todo|recent_raw|recen
  *   contextArtifacts: Object with "profile" and/or "todo" keys containing artifact data
  *   onQuoteClick: Callback when a quote is clicked (receives quote ID)
  */
-const QuotedContent = ({ content, quotes, contextArtifacts, onQuoteClick }) => {
+const QuotedContent = ({ content, quotes, contextArtifacts, onQuoteClick, onCheckboxToggle }) => {
   if (!content) {
     return null;
   }
@@ -32,7 +32,7 @@ const QuotedContent = ({ content, quotes, contextArtifacts, onQuoteClick }) => {
   // If no special data provided, just render the content as-is with markdown
   if (!hasQuotes && !hasArtifacts && !ARTIFACT_PATTERN.test(content)) {
     return (
-      <MarkdownBody>
+      <MarkdownBody onCheckboxToggle={onCheckboxToggle}>
         {content}
       </MarkdownBody>
     );
@@ -69,7 +69,7 @@ const QuotedContent = ({ content, quotes, contextArtifacts, onQuoteClick }) => {
       {segments.map((segment, index) => {
         if (segment.type === 'text') {
           return (
-            <MarkdownBody key={index}>
+            <MarkdownBody key={index} onCheckboxToggle={onCheckboxToggle}>
               {segment.content}
             </MarkdownBody>
           );
