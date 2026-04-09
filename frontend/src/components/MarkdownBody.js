@@ -18,6 +18,32 @@ function extractText(children) {
 }
 
 /**
+ * Recursively replace checkbox inputs in React children tree.
+ * Handles both tight lists (checkbox is direct child of li)
+ * and loose lists (checkbox is inside a <p> wrapper).
+ * Returns { children, checked }.
+ */
+function replaceCheckboxes(children, renderToggle) {
+  let checked = false;
+  const mapped = React.Children.map(children, child => {
+    if (child && child.props && child.props.type === 'checkbox') {
+      checked = !!child.props.checked;
+      return renderToggle(checked);
+    }
+    // Recurse into wrapper elements like <p>
+    if (child && child.props && child.props.children) {
+      const inner = replaceCheckboxes(child.props.children, renderToggle);
+      if (inner.checked !== false) {
+        checked = inner.checked;
+        return React.cloneElement(child, {}, inner.children);
+      }
+    }
+    return child;
+  });
+  return { children: mapped, checked };
+}
+
+/**
  * MarkdownBody — shared ReactMarkdown wrapper with consistent styling.
  *
  * Props:
@@ -41,54 +67,47 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', onCheckbox
       const isTask = props.className === 'task-list-item';
 
       if (isTask && onCheckboxToggle) {
-        // Find the checkbox input among children to get checked state
-        let checked = false;
-        const filteredChildren = React.Children.map(liChildren, child => {
-          if (child && child.props && child.props.type === 'checkbox') {
-            checked = !!child.props.checked;
-            // Replace default checkbox with round toggle
-            return (
-              <span
-                onClick={(e) => {
+        const itemText = extractText(liChildren).trim();
+        const { children: filteredChildren, checked } = replaceCheckboxes(
+          liChildren,
+          (isChecked) => (
+            <span
+              onClick={(e) => {
+                e.preventDefault();
+                onCheckboxToggle(itemText, isChecked);
+              }}
+              role="checkbox"
+              aria-checked={isChecked}
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
                   e.preventDefault();
-                  const text = extractText(liChildren).trim();
-                  onCheckboxToggle(text, checked);
-                }}
-                role="checkbox"
-                aria-checked={checked}
-                tabIndex={0}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    const text = extractText(liChildren).trim();
-                    onCheckboxToggle(text, checked);
-                  }
-                }}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  width: '18px',
-                  height: '18px',
-                  borderRadius: '50%',
-                  border: `1.5px solid ${checked ? 'var(--accent-dim)' : 'var(--border-hover)'}`,
-                  background: checked ? 'var(--accent-dim)' : 'none',
-                  flexShrink: 0,
-                  marginRight: '8px',
-                  fontSize: '0.6rem',
-                  color: 'var(--bg-deep)',
-                  fontWeight: 600,
-                  transition: 'all 0.3s',
-                  cursor: 'pointer',
-                  verticalAlign: 'middle',
-                }}
-              >
-                {checked && '✓'}
-              </span>
-            );
-          }
-          return child;
-        });
+                  onCheckboxToggle(itemText, isChecked);
+                }
+              }}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                width: '18px',
+                height: '18px',
+                borderRadius: '50%',
+                border: `1.5px solid ${isChecked ? 'var(--accent-dim)' : 'var(--border-hover)'}`,
+                background: isChecked ? 'var(--accent-dim)' : 'none',
+                flexShrink: 0,
+                marginRight: '8px',
+                fontSize: '0.6rem',
+                color: 'var(--bg-deep)',
+                fontWeight: 600,
+                transition: 'all 0.3s',
+                cursor: 'pointer',
+                verticalAlign: 'middle',
+              }}
+            >
+              {isChecked && '✓'}
+            </span>
+          ),
+        );
 
         return (
           <li
