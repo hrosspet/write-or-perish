@@ -21,26 +21,26 @@ function extractText(children) {
  * Recursively replace checkbox inputs in React children tree.
  * Handles both tight lists (checkbox is direct child of li)
  * and loose lists (checkbox is inside a <p> wrapper).
- * Returns { children, checked }.
+ * Returns { children, found }.
  */
 function replaceCheckboxes(children, renderToggle) {
-  let checked = false;
+  let found = false;
   const mapped = React.Children.map(children, child => {
     if (child && child.props && child.props.type === 'checkbox') {
-      checked = !!child.props.checked;
-      return renderToggle(checked);
+      found = true;
+      return renderToggle(!!child.props.checked);
     }
     // Recurse into wrapper elements like <p>
     if (child && child.props && child.props.children) {
       const inner = replaceCheckboxes(child.props.children, renderToggle);
-      if (inner.checked !== false) {
-        checked = inner.checked;
+      if (inner.found) {
+        found = true;
         return React.cloneElement(child, {}, inner.children);
       }
     }
     return child;
   });
-  return { children: mapped, checked };
+  return { children: mapped, found };
 }
 
 /**
