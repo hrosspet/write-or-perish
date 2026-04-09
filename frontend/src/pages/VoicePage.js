@@ -6,6 +6,7 @@ import { useUser } from '../contexts/UserContext';
 import { useInterruptedRecovery } from '../hooks/useInterruptedRecovery';
 import RecoveryBanner from '../components/RecoveryBanner';
 import MarkdownBody from '../components/MarkdownBody';
+import { useToast } from '../contexts/ToastContext';
 import api from '../api';
 
 function formatDuration(seconds) {
@@ -220,6 +221,71 @@ function parsePriorityItems(text) {
     .filter(item => item.text);
 }
 
+/**
+ * Move an item between ### sections in the raw orient response.
+ * `fromSection` / `toSection` are lowercase substrings matched against headings
+ * (e.g. 'completed', 'new task').
+ * `itemText` is the stripped display text to match against raw lines.
+ */
+function moveProposalItem(content, itemText, fromSection, toSection) {
+  const lines = content.split('\n');
+  const sectionRegex = /^###\s+(.+)/;
+
+  // Find section ranges: { heading, start, end } (end is exclusive)
+  const sections = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(sectionRegex);
+    if (m) {
+      if (sections.length > 0) sections[sections.length - 1].end = i;
+      sections.push({ heading: m[1].trim().toLowerCase(), start: i, end: lines.length });
+    }
+  }
+  if (sections.length > 0) sections[sections.length - 1].end = lines.length;
+
+  const from = sections.find(s => s.heading.includes(fromSection));
+  const to = sections.find(s => s.heading.includes(toSection));
+  if (!from) return content;
+
+  // Find the matching line in the 'from' section
+  let matchIdx = -1;
+  let rawLine = null;
+  for (let i = from.start + 1; i < from.end; i++) {
+    const stripped = stripInlineMarkdown(
+      lines[i].replace(/^[-*]\s*/, '').replace(/^\[[ xX]\]\s*/, '').replace(/^\d+[.)]\s*/, '').trim()
+    );
+    if (stripped === itemText) {
+      matchIdx = i;
+      rawLine = lines[i];
+      break;
+    }
+  }
+  if (matchIdx < 0) return content;
+
+  // Remove the line from 'from' section
+  lines.splice(matchIdx, 1);
+
+  if (to) {
+    // Re-find 'to' section after splice (indices shifted if from was before to)
+    let toInsert = -1;
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(sectionRegex);
+      if (m && m[1].trim().toLowerCase().includes(toSection)) {
+        // Insert after the heading line (and any existing items)
+        toInsert = i + 1;
+        while (toInsert < lines.length && !lines[toInsert].match(sectionRegex) && lines[toInsert].trim()) {
+          toInsert++;
+        }
+        break;
+      }
+    }
+    if (toInsert >= 0) {
+      lines.splice(toInsert, 0, rawLine);
+    }
+  }
+
+  return lines.join('\n');
+}
+
 function parseOrientResponse(text) {
   const sections = {};
   const parts = text.split(/^###\s+/m);
@@ -255,6 +321,8 @@ export default function VoicePage() {
   const [applyStatus, setApplyStatus] = useState(null);
   const [applyError, setApplyError] = useState(null);
   const [parsedResponse, setParsedResponse] = useState(null);
+  const [llmContent, setLlmContent] = useState(null);
+  const { addToast } = useToast();
   // GitHub issue state
   const [issueApplyStatus, setIssueApplyStatus] = useState(null);
   const [issueApplyError, setIssueApplyError] = useState(null);
@@ -336,6 +404,7 @@ export default function VoicePage() {
     model: selectedModel,
     onLLMComplete: (nodeId, content, isResume) => {
       lastLlmNodeIdRef.current = nodeId;
+      setLlmContent(content);
       // Parse orient-style sections from LLM text (which IS the summary)
       const parsed = parseOrientResponse(content);
       if (parsed.completed || parsed.newTasks || parsed.priority || parsed.note || parsed.issueTitle) {
@@ -390,6 +459,7 @@ export default function VoicePage() {
     setApplyStatus(null);
     setApplyError(null);
     setParsedResponse(null);
+    setLlmContent(null);
     setToolCallsMeta(null);
     setIssueApplyStatus(null);
     setIssueApplyError(null);
@@ -399,6 +469,23 @@ export default function VoicePage() {
       mergePollingRef.current = null;
     }
   }, []);
+
+  const handleProposalToggle = useCallback((itemText, fromSection, toSection) => {
+    if (!llmContent || !lastLlmNodeIdRef.current) return;
+    const prevContent = llmContent;
+    const newContent = moveProposalItem(llmContent, itemText, fromSection, toSection);
+    if (newContent === prevContent) return;
+    // Optimistic update
+    setLlmContent(newContent);
+    setParsedResponse(parseOrientResponse(newContent));
+    api.put(`/nodes/${lastLlmNodeIdRef.current}`, { content: newContent }).catch((err) => {
+      console.error('Failed to toggle proposal item:', err);
+      setLlmContent(prevContent);
+      setParsedResponse(parseOrientResponse(prevContent));
+      const reason = err.response?.data?.error || err.response?.statusText || err.message || 'Unknown error';
+      addToast(`Couldn't save change — reverted (${reason})`);
+    });
+  }, [llmContent, addToast]);
 
   const displayTime = audio.cumulativeTime || 0;
   const displayDuration = audio.totalDuration || 0;
@@ -739,13 +826,16 @@ export default function VoicePage() {
                   display: 'flex', alignItems: 'flex-start', gap: '12px',
                   padding: '12px 0', borderBottom: '1px solid #1e1d1a',
                 }}>
-                  <div style={{
-                    width: '18px', height: '18px', borderRadius: '50%',
-                    border: '1.5px solid var(--accent-dim)', background: 'var(--accent-dim)',
-                    flexShrink: 0, marginTop: '2px',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontSize: '0.6rem', color: 'var(--bg-deep)', fontWeight: 600,
-                  }}>✓</div>
+                  <div
+                    onClick={() => handleProposalToggle(item, 'completed', 'new task')}
+                    style={{
+                      width: '18px', height: '18px', borderRadius: '50%',
+                      border: '1.5px solid var(--accent-dim)', background: 'var(--accent-dim)',
+                      flexShrink: 0, marginTop: '2px',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      fontSize: '0.6rem', color: 'var(--bg-deep)', fontWeight: 600,
+                      cursor: 'pointer', transition: 'all 0.3s',
+                    }}>✓</div>
                   <div style={{
                     fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.92rem',
                     color: 'var(--text-secondary)', lineHeight: 1.5,
@@ -758,11 +848,14 @@ export default function VoicePage() {
                   display: 'flex', alignItems: 'flex-start', gap: '12px',
                   padding: '12px 0', borderBottom: '1px solid #1e1d1a',
                 }}>
-                  <div style={{
-                    width: '18px', height: '18px', borderRadius: '50%',
-                    border: '1.5px solid var(--border-hover)',
-                    flexShrink: 0, marginTop: '2px',
-                  }} />
+                  <div
+                    onClick={() => handleProposalToggle(item, 'new task', 'completed')}
+                    style={{
+                      width: '18px', height: '18px', borderRadius: '50%',
+                      border: '1.5px solid var(--border-hover)',
+                      flexShrink: 0, marginTop: '2px',
+                      cursor: 'pointer', transition: 'all 0.3s',
+                    }} />
                   <div style={{
                     fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.92rem',
                     color: 'var(--text-secondary)', lineHeight: 1.5,
