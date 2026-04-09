@@ -80,7 +80,9 @@ function NodeDetail() {
       })
       .catch((err) => {
         console.error(err);
-        if (err.response && err.response.status === 403) {
+        if (err.response && err.response.status === 404) {
+          setError("This node no longer exists or was deleted.");
+        } else if (err.response && err.response.status === 403) {
           setError("You don't have access to this node.");
         } else {
           setError("Error fetching node details.");

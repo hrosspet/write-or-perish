@@ -679,7 +679,9 @@ def update_node(node_id):
 @nodes_bp.route("/<int:node_id>", methods=["GET"])
 @login_required
 def get_node(node_id):
-    node = Node.query.get_or_404(node_id)
+    node = Node.query.get(node_id)
+    if node is None:
+        return jsonify({"error": "Node not found"}), 404
 
     # Check if user has permission to access this node
     if not can_user_access_node(node, current_user.id):
