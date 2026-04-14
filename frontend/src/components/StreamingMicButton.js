@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useStreamingTranscription } from '../hooks/useStreamingTranscription';
+import { useOnlineStatus } from '../hooks/useOnlineStatus';
 
 /**
  * StreamingMicButton - A microphone button that supports real-time streaming transcription.
@@ -45,6 +46,9 @@ export default function StreamingMicButton({
     onComplete,
     onError,
   });
+
+  const isOnline = useOnlineStatus();
+  const isIdleOffline = !isOnline && sessionState === 'idle';
 
   // Preserve the recorded blob so the download button stays visible after auto-reset
   const [lastMediaBlob, setLastMediaBlob] = useState(null);
@@ -119,7 +123,7 @@ export default function StreamingMicButton({
         return (
           <>
             <MicIcon />
-            <span>Record</span>
+            <span>{isIdleOffline ? 'Offline' : 'Record'}</span>
           </>
         );
       case 'initializing':
@@ -189,14 +193,14 @@ export default function StreamingMicButton({
         <button
           type="button"
           onClick={handleClick}
-          disabled={disabled || sessionState === 'initializing' || sessionState === 'finalizing'}
+          disabled={disabled || isIdleOffline || sessionState === 'initializing' || sessionState === 'finalizing'}
           style={{
             display: 'flex',
             alignItems: 'center',
             gap: '6px',
             padding: '8px 16px',
-            cursor: disabled || sessionState === 'initializing' || sessionState === 'finalizing' ? 'not-allowed' : 'pointer',
-            opacity: disabled ? 0.35 : 1,
+            cursor: disabled || isIdleOffline || sessionState === 'initializing' || sessionState === 'finalizing' ? 'not-allowed' : 'pointer',
+            opacity: disabled || isIdleOffline ? 0.35 : 1,
           }}
         >
           {getButtonContent()}
