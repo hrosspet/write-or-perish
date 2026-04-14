@@ -473,6 +473,7 @@ const NodeForm = forwardRef(
                 borderColor: 'var(--accent)',
                 color: 'var(--accent)',
                 opacity: !isOnline ? 0.35 : 1,
+                cursor: loading || !isOnline ? 'not-allowed' : 'pointer',
               }}
             >
               {isUploading
