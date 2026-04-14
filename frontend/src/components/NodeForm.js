@@ -4,6 +4,7 @@ import { useDraft } from "../hooks/useDraft";
 import { useUser } from "../contexts/UserContext";
 import StreamingMicButton from "./StreamingMicButton";
 import PrivacySelector from "./PrivacySelector";
+import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import api from "../api";
 import { uploadFileInChunks } from "../utils/chunkedUpload";
 
@@ -13,6 +14,7 @@ const NodeForm = forwardRef(
     ref
   ) => {
     const { user } = useUser();
+    const isOnline = useOnlineStatus();
     const [content, setContent] = useState(initialContent || "");
     const [error, setError] = useState("");
     const [loading, setLoading] = useState(false);
@@ -406,6 +408,7 @@ const NodeForm = forwardRef(
           </div>
         )}
 
+        {!isOnline && <div style={{ color: "var(--text-muted)", fontFamily: "var(--sans)", fontSize: "0.85rem", opacity: 0.8 }}>You're offline</div>}
         {error && <div style={{ color: "var(--accent)", fontFamily: "var(--sans)", fontSize: "0.9rem" }}>{error}</div>}
 
         {/* Auto-save status indicator */}
@@ -465,10 +468,11 @@ const NodeForm = forwardRef(
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '8px' }}>
             <button
               type="submit"
-              disabled={loading}
+              disabled={loading || !isOnline}
               style={{
                 borderColor: 'var(--accent)',
                 color: 'var(--accent)',
+                opacity: !isOnline ? 0.35 : 1,
               }}
             >
               {isUploading
@@ -540,8 +544,8 @@ const NodeForm = forwardRef(
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  disabled={isStreamingRecording || aiUsage === 'none'}
-                  style={{ padding: '8px 16px', cursor: isStreamingRecording || aiUsage === 'none' ? 'not-allowed' : 'pointer', opacity: aiUsage === 'none' ? 0.35 : 1 }}
+                  disabled={isStreamingRecording || aiUsage === 'none' || !isOnline}
+                  style={{ padding: '8px 16px', cursor: isStreamingRecording || aiUsage === 'none' || !isOnline ? 'not-allowed' : 'pointer', opacity: aiUsage === 'none' || !isOnline ? 0.35 : 1 }}
                 >
                   Upload
                 </button>
