@@ -143,13 +143,11 @@ def magic_link_verify():
 
     user = User.query.filter_by(email=email).first()
     if user:
-        # Single-use check: hash must match
+        # Check token hash matches (but don't clear it — let the token
+        # remain valid until its natural expiry so that email-client
+        # prefetch doesn't consume it before the user clicks)
         if user.magic_link_token_hash != token_h:
             return redirect(f"{frontend_url}/login?error=link_already_used")
-        # Clear the token
-        user.magic_link_token_hash = None
-        user.magic_link_expires_at = None
-        db.session.commit()
     else:
         # New user — create account
         username = generate_unique_username(email)
