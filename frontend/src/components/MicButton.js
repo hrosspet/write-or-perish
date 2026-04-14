@@ -1,5 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { useUser } from '../contexts/UserContext';
+import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import { FaMicrophone, FaStop, FaPlay, FaRedo } from 'react-icons/fa';
 import AudioPlayer from './AudioPlayer';
 
@@ -30,6 +31,7 @@ const MicButton = ({ status, mediaUrl, duration, startRecording, stopRecording, 
   const onAudioPause = () => setPlaying(false);
   const onAudioEnded = () => setPlaying(false);
 
+  const isOnline = useOnlineStatus();
   const { user } = useUser();
   // Show only if voice mode enabled for current user
   if (!user || !user.voice_mode_enabled) {
@@ -37,7 +39,17 @@ const MicButton = ({ status, mediaUrl, duration, startRecording, stopRecording, 
   }
   switch (status) {
     case 'idle':
-      return <button type="button" onClick={startRecording} title="Record audio"><FaMicrophone /></button>;
+      return (
+        <button
+          type="button"
+          onClick={startRecording}
+          disabled={!isOnline}
+          title={isOnline ? 'Record audio' : "You're offline"}
+          style={{ opacity: isOnline ? 1 : 0.4, cursor: isOnline ? 'pointer' : 'not-allowed' }}
+        >
+          <FaMicrophone />
+        </button>
+      );
     case 'recording':
       return <button type="button" onClick={stopRecording} title="Stop recording"><FaStop color="red" /></button>;
     case 'recorded':

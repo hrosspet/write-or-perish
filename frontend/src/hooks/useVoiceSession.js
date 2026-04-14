@@ -4,6 +4,7 @@ import { useAsyncTaskPolling } from './useAsyncTaskPolling';
 import { useTTSStreamSSE } from './useSSE';
 import { useAudio } from '../contexts/AudioContext';
 import { useMediaSession } from './useMediaSession';
+import { useOnlineStatus } from './useOnlineStatus';
 import api from '../api';
 
 // iOS devices can't autoplay audio regardless of warmup, and playing silent audio
@@ -30,8 +31,9 @@ const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
  * @param {number|null} options.initialLlmNodeId - Resume in processing phase, polling this LLM node
  * @param {number|null} options.initialParentId - Resume in ready phase with thread parent pre-set
  */
-export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete, initialLlmNodeId = null, initialParentId = null, model = null }) {
+export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete, initialLlmNodeId = null, initialParentId = null, model = null, aiUsage = 'none' }) {
   const audio = useAudio();
+  const isOnline = useOnlineStatus();
   const [phase, setPhase] = useState(initialLlmNodeId ? 'processing' : 'ready');
   const [llmNodeId, setLlmNodeId] = useState(initialLlmNodeId);
   const [isStopping, setIsStopping] = useState(false);
@@ -133,7 +135,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   const workflowLabel = apiEndpoint ? apiEndpoint.replace('/', '').charAt(0).toUpperCase() + apiEndpoint.replace('/', '').slice(1) : null;
   const streaming = useStreamingTranscription({
     privacyLevel: 'private',
-    aiUsage: 'chat',
+    aiUsage,
     label: workflowLabel,
     onTranscriptUpdate: (text) => {
       transcriptRef.current = text;
@@ -163,6 +165,9 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         const payload = { content: finalTranscript };
         if (model) {
           payload.model = model;
+        }
+        if (aiUsage) {
+          payload.ai_usage = aiUsage;
         }
         if (threadParentIdRef.current) {
           payload.parent_id = threadParentIdRef.current;
@@ -425,6 +430,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     isStopping,
     isPaused: streaming.isPaused,
     hasError,
+    isOnline,
     llmData,
     streaming,
     audio,

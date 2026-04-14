@@ -6,6 +6,7 @@ import { useUser } from '../contexts/UserContext';
 import { useInterruptedRecovery } from '../hooks/useInterruptedRecovery';
 import RecoveryBanner from '../components/RecoveryBanner';
 import MarkdownBody from '../components/MarkdownBody';
+import OfflineBanner from '../components/OfflineBanner';
 import { useToast } from '../contexts/ToastContext';
 import api from '../api';
 
@@ -396,7 +397,7 @@ export default function VoicePage() {
   const selectedModel = user?.preferred_model || null;
 
   const {
-    phase, isStopping, hasError, streaming, audio, handleStart, handleStop,
+    phase, isStopping, hasError, isOnline, streaming, audio, handleStart, handleStop,
     handleContinue, handleResumeSession, handleCancelProcessing, setThreadParentId,
   } = useVoiceSession({
     apiEndpoint: '/voice',
@@ -404,6 +405,7 @@ export default function VoicePage() {
     initialLlmNodeId: resumeId ? Number(resumeId) : null,
     initialParentId: parentId ? Number(parentId) : null,
     model: selectedModel,
+    aiUsage: user?.default_ai_usage || 'none',
     onLLMComplete: (nodeId, content, isResume) => {
       lastLlmNodeIdRef.current = nodeId;
       setLlmContent(content);
@@ -617,6 +619,8 @@ export default function VoicePage() {
           </p>
         )}
 
+        {phase === 'ready' && <OfflineBanner />}
+
         {hasError && phase === 'ready' && (
           <div style={{ marginBottom: '16px' }}>
             <PulsingDot color="var(--error, #e74c3c)" />
@@ -626,16 +630,18 @@ export default function VoicePage() {
         {phase === 'ready' && (
           <button
             onClick={handleStart}
+            disabled={!isOnline}
             style={{
               width: '72px', height: '72px', borderRadius: '50%',
-              border: '2px solid var(--accent)',
+              border: `2px solid ${isOnline ? 'var(--accent)' : 'var(--text-muted)'}`,
               background: 'transparent',
-              cursor: 'pointer',
+              cursor: isOnline ? 'pointer' : 'not-allowed',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               transition: 'all 0.2s ease',
+              opacity: isOnline ? 1 : 0.4,
             }}
           >
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="var(--accent)">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill={isOnline ? 'var(--accent)' : 'var(--text-muted)'}>
               <circle cx="12" cy="12" r="8" />
             </svg>
           </button>
@@ -1065,23 +1071,26 @@ export default function VoicePage() {
 
       <div style={{ height: '32px' }} />
 
+      <OfflineBanner style={{ marginBottom: '8px' }} />
+
       {/* Record button to continue */}
       <button
         onClick={() => handleContinue(voiceReset)}
-        title="Continue"
+        disabled={!isOnline}
+        title={isOnline ? 'Continue' : "You're offline"}
         style={{
           width: '56px', height: '56px', borderRadius: '50%',
-          border: '2px solid var(--accent)',
+          border: `2px solid ${isOnline ? 'var(--accent)' : 'var(--text-muted)'}`,
           background: 'transparent',
-          cursor: 'pointer',
+          cursor: isOnline ? 'pointer' : 'not-allowed',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           transition: 'all 0.2s ease',
-          opacity: 0.7,
+          opacity: isOnline ? 0.7 : 0.3,
         }}
-        onMouseEnter={(e) => e.currentTarget.style.opacity = '1'}
-        onMouseLeave={(e) => e.currentTarget.style.opacity = '0.7'}
+        onMouseEnter={(e) => { if (isOnline) e.currentTarget.style.opacity = '1'; }}
+        onMouseLeave={(e) => { if (isOnline) e.currentTarget.style.opacity = '0.7'; }}
       >
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="var(--accent)">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill={isOnline ? 'var(--accent)' : 'var(--text-muted)'}>
           <circle cx="12" cy="12" r="8" />
         </svg>
       </button>
