@@ -122,10 +122,8 @@ function App() {
           <Route path="/alpha-thank-you" element={<AlphaThankYouPage />} />
           {/* Welcome - protected (for newly approved users) */}
           <Route path="/welcome" element={<ProtectedRoute><WelcomePage onNewEntryClick={() => setShowNewEntry(true)} /></ProtectedRoute>} />
-          {/* New workflow routes */}
+          {/* Workflow routes */}
           <Route path="/voice" element={<ProtectedRoute><VoicePage /></ProtectedRoute>} />
-          <Route path="/reflect" element={<ProtectedRoute><RedirectToVoice /></ProtectedRoute>} />
-          <Route path="/orient" element={<ProtectedRoute><RedirectToVoice /></ProtectedRoute>} />
           <Route path="/converse" element={<ProtectedRoute><ConversePage /></ProtectedRoute>} />
           {/* Profile and Todo */}
           <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
@@ -133,6 +131,8 @@ function App() {
           {/* Log (renamed from feed) */}
           <Route path="/log" element={<ProtectedRoute><Feed /></ProtectedRoute>} />
           {/* Backward compatibility redirects */}
+          <Route path="/reflect" element={<ProtectedRoute><RedirectToVoice /></ProtectedRoute>} />
+          <Route path="/orient" element={<ProtectedRoute><RedirectToVoice /></ProtectedRoute>} />
           <Route path="/feed" element={<Navigate to="/log" replace />} />
           <Route path="/dashboard" element={<Navigate to="/profile" replace />} />
           {/* Public profile view */}

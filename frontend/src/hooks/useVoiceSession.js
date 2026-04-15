@@ -13,20 +13,14 @@ const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
 /**
- * Shared hook for voice-based conversation workflows (Reflect, Orient, etc.).
+ * Hook for voice conversation workflow.
  *
  * Manages the full cycle: recording → transcription → LLM → TTS playback.
- * Pages provide their own UI and any workflow-specific logic via callbacks.
+ * VoicePage provides UI and workflow-specific logic via callbacks.
  *
  * @param {Object} options
- * @param {string} options.apiEndpoint - API path to post transcripts to ('/reflect', '/orient')
- * @param {string} options.ttsTitle - Label for the audio player ('Reflection', 'Orient')
- * @param {Function} options.onLLMComplete - Called with (nodeId, content) when LLM response is ready
- */
-/**
- * @param {Object} options
- * @param {string} options.apiEndpoint - API path to post transcripts to ('/reflect', '/orient')
- * @param {string} options.ttsTitle - Label for the audio player ('Reflection', 'Orient')
+ * @param {string} options.apiEndpoint - API path to post transcripts to ('/voice')
+ * @param {string} options.ttsTitle - Label for the audio player
  * @param {Function} options.onLLMComplete - Called with (nodeId, content) when LLM response is ready
  * @param {number|null} options.initialLlmNodeId - Resume in processing phase, polling this LLM node
  * @param {number|null} options.initialParentId - Resume in ready phase with thread parent pre-set

@@ -130,15 +130,9 @@ def create_app():
     from backend.routes.todo import todo_bp
     app.register_blueprint(todo_bp, url_prefix="/api/todo")
 
-    from backend.routes.reflect import reflect_bp
-    app.register_blueprint(reflect_bp, url_prefix="/api/reflect")
-
     # Converse disabled for now
     # from backend.routes.converse import converse_bp
     # app.register_blueprint(converse_bp, url_prefix="/api/converse")
-
-    from backend.routes.orient import orient_bp
-    app.register_blueprint(orient_bp, url_prefix="/api/orient")
 
     from backend.routes.voice import voice_bp
     app.register_blueprint(voice_bp, url_prefix="/api/voice")

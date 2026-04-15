@@ -1,14 +1,14 @@
-"""Tests for POST /reflect/from-node/<node_id> and /orient/from-node/<node_id>.
+"""Tests for POST /voice/from-node/<node_id>.
 
 Verifies the 4-case behavior matrix:
   prompt present + user node  → processing (LLM placeholder created)
-  prompt present + LLM node   → recording  (parent_id = context node)
+  prompt present + LLM node   → processing (TTS playback)
   no prompt      + user node  → processing (system prompt + LLM placeholder)
-  no prompt      + LLM node   → recording  (system prompt created, parent_id = it)
+  no prompt      + LLM node   → processing (system prompt created)
 
 Also verifies authorization and ancestor-walking prompt detection.
 
-NOTE: This file is named test_from_node_* (not test_reflect_*) so that it
+NOTE: This file is named test_from_node_* (not test_voice_*) so that it
 is collected alphabetically before test_quotes.py, which replaces
 backend.models with a MagicMock at module level.  The force-import pattern
 used here (shared with test_audio_access.py) cannot recover from that.
@@ -33,7 +33,7 @@ sys.modules.setdefault("celery.result", MagicMock())
 sys.modules.setdefault("ffmpeg", MagicMock())
 
 # Pre-mock the LLM task module so the lazy import inside
-# _create_llm_placeholder gets our mock instead of triggering
+# create_llm_placeholder_node gets our mock instead of triggering
 # the full celery/ffmpeg import chain.
 _mock_llm_task_module = MagicMock()
 _mock_task_result = MagicMock()
@@ -82,10 +82,8 @@ def _make_app():
     def load_user(user_id):
         return User.query.get(int(user_id))
 
-    from backend.routes.reflect import reflect_bp
-    from backend.routes.orient import orient_bp
-    app.register_blueprint(reflect_bp, url_prefix="/api/reflect")
-    app.register_blueprint(orient_bp, url_prefix="/api/orient")
+    from backend.routes.voice import voice_bp
+    app.register_blueprint(voice_bp, url_prefix="/api/voice")
 
     return app
 
@@ -170,10 +168,10 @@ def _make_prompt_node(user, prompt_key, parent_id=None):
     return n
 
 
-# ── Tests: Reflect from-node ─────────────────────────────────────────────
+# ── Tests: Voice from-node ─────────────────────────────────────────────
 
-class TestReflectFromNodeMatrix:
-    """Test the 4-case behavior matrix for reflect."""
+class TestVoiceFromNodeMatrix:
+    """Test the 4-case behavior matrix for voice."""
 
     def test_prompt_present_user_node_returns_processing(self, app):
         """User node in a thread with prompt → create LLM child → processing."""
@@ -182,14 +180,14 @@ class TestReflectFromNodeMatrix:
         alice = _make_user("alice")
 
         # Build chain: prompt_node → user_node
-        prompt_node = _make_prompt_node(alice, "reflect")
+        prompt_node = _make_prompt_node(alice, "voice")
         user_node = _make_node(alice, parent_id=prompt_node.id,
                                content="my thoughts")
         _db.session.commit()
 
         _login(client, alice.id)
         resp = client.post(
-            f"/api/reflect/from-node/{user_node.id}",
+            f"/api/voice/from-node/{user_node.id}",
             json={"model": "gpt-5"},
         )
 
@@ -212,7 +210,7 @@ class TestReflectFromNodeMatrix:
         llm_user = _make_user("gpt-5", twitter_id="llm-gpt-5")
 
         # Build chain: prompt_node → user_node → llm_node
-        prompt_node = _make_prompt_node(alice, "reflect")
+        prompt_node = _make_prompt_node(alice, "voice")
         user_node = _make_node(alice, parent_id=prompt_node.id,
                                content="my thoughts")
         llm_node = _make_node(llm_user, parent_id=user_node.id,
@@ -222,7 +220,7 @@ class TestReflectFromNodeMatrix:
 
         _login(client, alice.id)
         resp = client.post(
-            f"/api/reflect/from-node/{llm_node.id}",
+            f"/api/voice/from-node/{llm_node.id}",
             json={"model": "gpt-5"},
         )
 
@@ -245,7 +243,7 @@ class TestReflectFromNodeMatrix:
 
         _login(client, alice.id)
         resp = client.post(
-            f"/api/reflect/from-node/{user_node.id}",
+            f"/api/voice/from-node/{user_node.id}",
             json={"model": "gpt-5"},
         )
 
@@ -265,7 +263,7 @@ class TestReflectFromNodeMatrix:
         ).first()
         assert prompt_artifact is not None
         linked_prompt = UserPrompt.query.get(prompt_artifact.artifact_id)
-        assert linked_prompt.prompt_key == "reflect"
+        assert linked_prompt.prompt_key == "voice"
 
     def test_no_prompt_llm_node_creates_system_prompt_and_processing(
         self, app
@@ -285,7 +283,7 @@ class TestReflectFromNodeMatrix:
 
         _login(client, alice.id)
         resp = client.post(
-            f"/api/reflect/from-node/{llm_node.id}",
+            f"/api/voice/from-node/{llm_node.id}",
             json={"model": "gpt-5"},
         )
 
@@ -300,10 +298,10 @@ class TestReflectFromNodeMatrix:
         assert system_node.is_system_prompt
         assert system_node.content is None
         linked_prompt = system_node.get_artifact("prompt")
-        assert linked_prompt.prompt_key == "reflect"
+        assert linked_prompt.prompt_key == "voice"
 
 
-class TestReflectFromNodeAncestorWalking:
+class TestVoiceFromNodeAncestorWalking:
     """Test that prompt detection walks the full ancestor chain."""
 
     def test_prompt_detected_at_root(self, app):
@@ -313,7 +311,7 @@ class TestReflectFromNodeAncestorWalking:
         alice = _make_user("alice")
 
         # Deep chain: prompt → n1 → n2 → n3
-        prompt_node = _make_prompt_node(alice, "reflect")
+        prompt_node = _make_prompt_node(alice, "voice")
         n1 = _make_node(alice, parent_id=prompt_node.id, content="a")
         n2 = _make_node(alice, parent_id=n1.id, content="b")
         n3 = _make_node(alice, parent_id=n2.id, content="c")
@@ -321,7 +319,7 @@ class TestReflectFromNodeAncestorWalking:
 
         _login(client, alice.id)
         resp = client.post(
-            f"/api/reflect/from-node/{n3.id}",
+            f"/api/voice/from-node/{n3.id}",
             json={"model": "gpt-5"},
         )
 
@@ -337,7 +335,7 @@ class TestReflectFromNodeAncestorWalking:
 
         # Chain: regular → prompt → user_node
         regular = _make_node(alice, content="original text")
-        prompt_node = _make_prompt_node(alice, "reflect",
+        prompt_node = _make_prompt_node(alice, "voice",
                                         parent_id=regular.id)
         user_node = _make_node(alice, parent_id=prompt_node.id,
                                content="reflecting")
@@ -345,7 +343,7 @@ class TestReflectFromNodeAncestorWalking:
 
         _login(client, alice.id)
         resp = client.post(
-            f"/api/reflect/from-node/{user_node.id}",
+            f"/api/voice/from-node/{user_node.id}",
             json={"model": "gpt-5"},
         )
 
@@ -353,11 +351,11 @@ class TestReflectFromNodeAncestorWalking:
         assert resp.get_json()["mode"] == "processing"
 
 
-class TestReflectFromNodeAuth:
+class TestVoiceFromNodeAuth:
     """Test authorization for from-node endpoint."""
 
     def test_unauthorized_user_rejected(self, app):
-        """User cannot start reflect from someone else's node."""
+        """User cannot start voice from someone else's node."""
         client = app.test_client()
 
         alice = _make_user("alice")
@@ -367,14 +365,14 @@ class TestReflectFromNodeAuth:
 
         _login(client, bob.id)
         resp = client.post(
-            f"/api/reflect/from-node/{alice_node.id}",
+            f"/api/voice/from-node/{alice_node.id}",
             json={"model": "gpt-5"},
         )
 
         assert resp.status_code == 403
 
     def test_llm_node_authorized_via_parent(self, app):
-        """User can reflect from an LLM node if parent belongs to them."""
+        """User can start voice from an LLM node if parent belongs to them."""
         client = app.test_client()
 
         alice = _make_user("alice")
@@ -388,11 +386,11 @@ class TestReflectFromNodeAuth:
 
         _login(client, alice.id)
         resp = client.post(
-            f"/api/reflect/from-node/{llm_node.id}",
+            f"/api/voice/from-node/{llm_node.id}",
             json={"model": "gpt-5"},
         )
 
-        # Should succeed (recording mode, no prompt)
+        # Should succeed (processing mode, no prompt)
         assert resp.status_code == 200
 
     def test_nonexistent_node_404(self, app):
@@ -403,7 +401,7 @@ class TestReflectFromNodeAuth:
 
         _login(client, alice.id)
         resp = client.post(
-            "/api/reflect/from-node/99999",
+            "/api/voice/from-node/99999",
             json={"model": "gpt-5"},
         )
 
@@ -413,117 +411,35 @@ class TestReflectFromNodeAuth:
         """Unauthenticated user is rejected."""
         client = app.test_client()
         resp = client.post(
-            "/api/reflect/from-node/1",
+            "/api/voice/from-node/1",
             json={"model": "gpt-5"},
         )
         assert resp.status_code in (401, 302)
 
 
-# ── Tests: Orient from-node ──────────────────────────────────────────────
+class TestVoiceFromNodeAiUsageInheritance:
+    """Test that ai_usage is inherited from the target node."""
 
-class TestOrientFromNodeMatrix:
-    """Test the 4-case behavior matrix for orient (mirrors reflect)."""
-
-    def test_prompt_present_user_node_returns_processing(self, app):
+    def test_inherits_ai_usage_from_target_node(self, app):
+        """New nodes should inherit ai_usage from the target node."""
         client = app.test_client()
 
         alice = _make_user("alice")
-
-        prompt_node = _make_prompt_node(alice, "orient")
-        user_node = _make_node(alice, parent_id=prompt_node.id,
-                               content="my priorities")
+        # Node with ai_usage="train"
+        user_node = _make_node(alice, content="trainable content",
+                               ai_usage="train")
         _db.session.commit()
 
         _login(client, alice.id)
         resp = client.post(
-            f"/api/orient/from-node/{user_node.id}",
+            f"/api/voice/from-node/{user_node.id}",
             json={"model": "gpt-5"},
         )
 
         assert resp.status_code == 202
         data = resp.get_json()
-        assert data["mode"] == "processing"
-        assert "llm_node_id" in data
 
-    def test_prompt_present_llm_node_returns_processing(self, app):
-        client = app.test_client()
-
-        alice = _make_user("alice")
-        llm_user = _make_user("gpt-5", twitter_id="llm-gpt-5")
-
-        prompt_node = _make_prompt_node(alice, "orient")
-        user_node = _make_node(alice, parent_id=prompt_node.id,
-                               content="my priorities")
-        llm_node = _make_node(llm_user, parent_id=user_node.id,
-                              content="AI orient", node_type="llm",
-                              llm_model="gpt-5")
-        _db.session.commit()
-
-        _login(client, alice.id)
-        resp = client.post(
-            f"/api/orient/from-node/{llm_node.id}",
-            json={"model": "gpt-5"},
-        )
-
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert data["mode"] == "processing"
-        assert data["llm_node_id"] == llm_node.id
-        assert data["parent_id"] == llm_node.id
-
-    def test_no_prompt_user_node_creates_system_prompt_and_processing(
-        self, app
-    ):
-        client = app.test_client()
-
-        alice = _make_user("alice")
-        user_node = _make_node(alice, content="just some text")
-        _db.session.commit()
-
-        _login(client, alice.id)
-        resp = client.post(
-            f"/api/orient/from-node/{user_node.id}",
-            json={"model": "gpt-5"},
-        )
-
-        assert resp.status_code == 202
-        data = resp.get_json()
-        assert data["mode"] == "processing"
-
-        # Verify system prompt is the orient prompt
+        # The system prompt node should inherit ai_usage from the target
         llm_node = Node.query.get(data["llm_node_id"])
         system_node = Node.query.get(llm_node.parent_id)
-        assert system_node.is_system_prompt
-        assert system_node.content is None
-        linked_prompt = system_node.get_artifact("prompt")
-        assert linked_prompt.prompt_key == "orient"
-
-    def test_no_prompt_llm_node_creates_system_prompt_and_processing(
-        self, app
-    ):
-        client = app.test_client()
-
-        alice = _make_user("alice")
-        llm_user = _make_user("gpt-5", twitter_id="llm-gpt-5")
-        user_node = _make_node(alice, content="some text")
-        llm_node = _make_node(llm_user, parent_id=user_node.id,
-                              content="AI reply", node_type="llm",
-                              llm_model="gpt-5")
-        _db.session.commit()
-
-        _login(client, alice.id)
-        resp = client.post(
-            f"/api/orient/from-node/{llm_node.id}",
-            json={"model": "gpt-5"},
-        )
-
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert data["mode"] == "processing"
-        assert data["llm_node_id"] == llm_node.id
-
-        system_node = Node.query.get(data["parent_id"])
-        assert system_node.is_system_prompt
-        assert system_node.content is None
-        linked_prompt = system_node.get_artifact("prompt")
-        assert linked_prompt.prompt_key == "orient"
+        assert system_node.ai_usage == "train"

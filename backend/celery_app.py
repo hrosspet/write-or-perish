@@ -47,6 +47,5 @@ from backend.tasks import llm_completion  # noqa: F401
 from backend.tasks import tts  # noqa: F401
 from backend.tasks import exports  # noqa: F401
 from backend.tasks import streaming_transcription  # noqa: F401
-from backend.tasks import orient_todo  # noqa: F401
 from backend.tasks import voice_todo_merge  # noqa: F401
 from backend.tasks import recent_context  # noqa: F401

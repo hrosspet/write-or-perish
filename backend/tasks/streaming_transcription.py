@@ -800,13 +800,13 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
     as each chunk completes.
 
     If user_id, parent_id, and model are provided and the label is a
-    workflow type (Reflect/Orient), server-side LLM + TTS generation is
+    workflow type (Voice), server-side LLM + TTS generation is
     kicked off so the response is ready when the user returns to the app.
 
     Args:
         session_id: UUID of the streaming session
         total_chunks: Total number of chunks expected
-        label: Optional title label (e.g. "Reflect", "Orient").
+        label: Optional title label (e.g. "Voice").
                Defaults to "Voice note" when None.
         user_id: ID of the user (for server-side LLM chain)
         parent_id: Thread parent node ID (for server-side LLM chain)
@@ -933,7 +933,7 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         draft.streaming_completed_chunks = len(completed_chunks)
 
         should_chain = (user_id and model and full_transcript.strip()
-                        and label in ('Reflect', 'Orient', 'Voice'))
+                        and label == 'Voice')
 
         if should_chain:
             try:
@@ -973,7 +973,7 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     """
     Create nodes and kick off LLM + TTS generation server-side.
 
-    Mirrors the logic in orient.py / reflect.py POST handlers:
+    Mirrors the logic in voice.py POST handler:
     1. If no parent_id → create system node (with workflow prompt)
     2. Create user node with transcript
     3. Move streaming audio to user node (without deleting draft)
@@ -990,7 +990,7 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     from backend.tasks.llm_completion import generate_llm_response
     from backend.tasks.tts import generate_tts_audio
 
-    prompt_key = label.lower()  # 'reflect' or 'orient'
+    prompt_key = label.lower()  # 'voice'
 
     if parent_id:
         # Inherit ai_usage from parent node in the thread

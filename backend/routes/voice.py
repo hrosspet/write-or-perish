@@ -5,8 +5,8 @@ from backend.extensions import db
 from backend.utils.prompts import get_user_prompt_record
 from backend.utils.llm_nodes import create_llm_placeholder
 from backend.utils.context_artifacts import attach_context_artifacts
-from backend.routes.reflect import (
-    _ancestors_have_prompt, _is_llm_node, _create_llm_placeholder,
+from backend.utils.session_helpers import (
+    ancestors_have_prompt, is_llm_node, create_llm_placeholder_node,
 )
 
 voice_bp = Blueprint("voice", __name__)
@@ -38,11 +38,11 @@ def create_voice_from_node(node_id):
     # Inherit ai_usage from the target node
     ai_usage = node.ai_usage or current_user.default_ai_usage
 
-    has_prompt = _ancestors_have_prompt(node, current_user.id, PROMPT_KEY)
-    is_llm = _is_llm_node(node)
+    has_prompt = ancestors_have_prompt(node, current_user.id, PROMPT_KEY)
+    is_llm = is_llm_node(node)
 
     if has_prompt and not is_llm:
-        llm_node = _create_llm_placeholder(
+        llm_node = create_llm_placeholder_node(
             node.id, model_id, current_user.id,
             ai_usage=ai_usage,
         )
@@ -76,7 +76,7 @@ def create_voice_from_node(node_id):
             system_node.id, current_user.id, prompt_record=prompt_record,
         )
 
-        llm_node = _create_llm_placeholder(
+        llm_node = create_llm_placeholder_node(
             system_node.id, model_id, current_user.id,
             ai_usage=ai_usage,
         )
