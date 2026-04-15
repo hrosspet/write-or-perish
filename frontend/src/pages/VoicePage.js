@@ -223,7 +223,7 @@ function parsePriorityItems(text) {
 }
 
 /**
- * Move an item between ### sections in the raw orient response.
+ * Move an item between ### sections in the raw voice response.
  * `fromSection` / `toSection` are lowercase substrings matched against headings
  * (e.g. 'completed', 'new task').
  * `itemText` is the stripped display text to match against raw lines.

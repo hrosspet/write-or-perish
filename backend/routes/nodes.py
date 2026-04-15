@@ -1367,7 +1367,7 @@ def get_llm_status(node_id):
         "task_info": task_info
     }
 
-    # Include content when completed (needed by ReflectPage polling)
+    # Include content when completed (needed by VoicePage polling)
     if node.llm_task_status == 'completed':
         response_data["content"] = node.get_content()
 

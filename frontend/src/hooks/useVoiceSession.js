@@ -125,7 +125,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   }, [onLLMComplete]);
 
   // Streaming transcription
-  // Derive label from apiEndpoint: '/reflect' → 'Reflect', '/orient' → 'Orient'
+  // Derive label from apiEndpoint: '/voice' → 'Voice'
   const workflowLabel = apiEndpoint ? apiEndpoint.replace('/', '').charAt(0).toUpperCase() + apiEndpoint.replace('/', '').slice(1) : null;
   const streaming = useStreamingTranscription({
     privacyLevel: 'private',

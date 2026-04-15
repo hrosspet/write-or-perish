@@ -1,7 +1,7 @@
 """
 Shared helper for moving streaming audio chunks from a draft session
-to a node.  Used by reflect / orient routes so that the original
-voice recording is available for playback in the Log view.
+to a node.  Used by voice route so that the original recording is
+available for playback in the Log view.
 """
 import os
 import pathlib
