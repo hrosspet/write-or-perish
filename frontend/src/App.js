@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
+import { Routes, Route, Navigate, useNavigate } from 'react-router-dom';
 import LandingPage from "./components/LandingPage";
 import Dashboard from "./components/Dashboard";
 import Feed from "./components/Feed";
@@ -28,11 +28,6 @@ import PromptDetailPage from "./pages/PromptDetailPage";
 import SearchModal from "./components/SearchModal";
 import { useUser } from "./contexts/UserContext";
 import { AudioProvider } from "./contexts/AudioContext";
-
-function RedirectToVoice() {
-  const location = useLocation();
-  return <Navigate to={'/voice' + location.search} replace />;
-}
 
 function RootRoute() {
   const { user, loading } = useUser();
@@ -131,8 +126,6 @@ function App() {
           {/* Log (renamed from feed) */}
           <Route path="/log" element={<ProtectedRoute><Feed /></ProtectedRoute>} />
           {/* Backward compatibility redirects */}
-          <Route path="/reflect" element={<ProtectedRoute><RedirectToVoice /></ProtectedRoute>} />
-          <Route path="/orient" element={<ProtectedRoute><RedirectToVoice /></ProtectedRoute>} />
           <Route path="/feed" element={<Navigate to="/log" replace />} />
           <Route path="/dashboard" element={<Navigate to="/profile" replace />} />
           {/* Public profile view */}
