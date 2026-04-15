@@ -13,7 +13,9 @@ export function useConversation({ aiUsage = 'none' } = {}) {
   const [isWaitingForAI, setIsWaitingForAI] = useState(false);
   const [latestLlmNodeId, setLatestLlmNodeId] = useState(null);
   const [pendingLlmNodeId, setPendingLlmNodeId] = useState(null);
+  const [toolCallsMeta, setToolCallsMeta] = useState(null);
   const conversationIdRef = useRef(null);
+  const latestLlmNodeIdRef = useRef(null);
 
   // Poll for LLM completion when waiting
   const { data: llmData, status: llmStatus } = useAsyncTaskPolling(
@@ -30,6 +32,8 @@ export function useConversation({ aiUsage = 'none' } = {}) {
           : m
       ));
       setLatestLlmNodeId(pendingLlmNodeId);
+      latestLlmNodeIdRef.current = pendingLlmNodeId;
+      setToolCallsMeta(llmData.tool_calls_meta || null);
       setPendingLlmNodeId(null);
       setIsWaitingForAI(false);
     } else if (llmStatus === 'failed') {
@@ -60,13 +64,17 @@ export function useConversation({ aiUsage = 'none' } = {}) {
       let res;
       if (!conversationIdRef.current) {
         // Start new conversation
-        res = await api.post('/converse/start', { content, ai_usage: aiUsage });
+        res = await api.post('/textmode/start', { content, ai_usage: aiUsage });
         const convId = res.data.conversation_id;
         setConversationId(convId);
         conversationIdRef.current = convId;
       } else {
-        // Continue conversation
-        res = await api.post(`/converse/${conversationIdRef.current}/message`, { content });
+        // Continue conversation — pass parent_id to target the correct branch
+        const payload = { content };
+        if (latestLlmNodeIdRef.current) {
+          payload.parent_id = latestLlmNodeIdRef.current;
+        }
+        res = await api.post(`/textmode/${conversationIdRef.current}/message`, payload);
       }
 
       const { user_node_id, llm_node_id } = res.data;
@@ -98,13 +106,38 @@ export function useConversation({ aiUsage = 'none' } = {}) {
     }
   }, [aiUsage]);
 
+  const loadExistingThread = useCallback(async (nodeId, { fromNode = false } = {}) => {
+    try {
+      const url = fromNode
+        ? `/textmode/from-node/${nodeId}`
+        : `/textmode/${nodeId}`;
+      const res = await api.get(url);
+      const convId = res.data.conversation_id;
+      const msgs = res.data.messages || [];
+      setConversationId(convId);
+      conversationIdRef.current = convId;
+      setMessages(msgs);
+      // Find the latest completed LLM node
+      const llmMsgs = msgs.filter(m => m.role === 'assistant' && m.llm_task_status === 'completed');
+      if (llmMsgs.length > 0) {
+        const lastId = llmMsgs[llmMsgs.length - 1].id;
+        setLatestLlmNodeId(lastId);
+        latestLlmNodeIdRef.current = lastId;
+      }
+    } catch (err) {
+      console.error('Failed to load thread:', err);
+    }
+  }, []);
+
   const reset = useCallback(() => {
     setConversationId(null);
     conversationIdRef.current = null;
     setMessages([]);
     setIsWaitingForAI(false);
     setLatestLlmNodeId(null);
+    latestLlmNodeIdRef.current = null;
     setPendingLlmNodeId(null);
+    setToolCallsMeta(null);
   }, []);
 
   return {
@@ -112,7 +145,9 @@ export function useConversation({ aiUsage = 'none' } = {}) {
     messages,
     isWaitingForAI,
     latestLlmNodeId,
+    toolCallsMeta,
     sendMessage,
+    loadExistingThread,
     reset,
   };
 }

@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import { FaPlay, FaPause, FaUndo, FaRedo } from 'react-icons/fa';
 import { useVoiceSession } from '../hooks/useVoiceSession';
 import { useUser } from '../contexts/UserContext';
@@ -311,6 +311,7 @@ function parseOrientResponse(text) {
 
 export default function VoicePage() {
   const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
   const resumeId = searchParams.get('resume');
   const parentId = searchParams.get('parent');
 
@@ -727,7 +728,38 @@ export default function VoicePage() {
       minHeight: 'calc(100vh - 120px)',
       padding: '40px 24px',
       background: 'radial-gradient(ellipse at 50% 40%, rgba(196,149,106,0.06) 0%, transparent 70%)',
+      position: 'relative',
     }}>
+      {/* Text Mode switch */}
+      <button
+        onClick={() => {
+          const nodeId = lastLlmNodeIdRef.current;
+          if (nodeId) {
+            navigate(`/textmode?resume=${nodeId}`);
+          } else {
+            navigate('/textmode');
+          }
+        }}
+        style={{
+          position: 'absolute',
+          top: '12px',
+          right: '12px',
+          background: 'none',
+          border: 'none',
+          fontFamily: 'var(--sans)',
+          fontSize: '0.75rem',
+          color: 'var(--text-muted)',
+          cursor: 'pointer',
+          padding: '4px 8px',
+          opacity: 0.6,
+          transition: 'opacity 0.2s',
+        }}
+        onMouseEnter={(e) => e.target.style.opacity = '1'}
+        onMouseLeave={(e) => e.target.style.opacity = '0.6'}
+      >
+        Text Mode
+      </button>
+
       <EcgAnimation
         active={audio.isPlaying}
         dim={!audio.isPlaying}

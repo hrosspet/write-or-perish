@@ -27,7 +27,11 @@ PROMPT_DEFAULTS = {
     },
     'voice': {
         'title': 'Voice',
-        'file': 'voice.txt',
+        'file': 'agentic.txt',
+    },
+    'textmode': {
+        'title': 'Text Mode',
+        'file': 'agentic.txt',
     },
 }
 

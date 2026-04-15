@@ -45,6 +45,7 @@ def create_voice_from_node(node_id):
         llm_node = create_llm_placeholder_node(
             node.id, model_id, current_user.id,
             ai_usage=ai_usage,
+            source_mode='voice',
         )
         return jsonify({
             "mode": "processing",
@@ -79,6 +80,7 @@ def create_voice_from_node(node_id):
         llm_node = create_llm_placeholder_node(
             system_node.id, model_id, current_user.id,
             ai_usage=ai_usage,
+            source_mode='voice',
         )
         return jsonify({
             "mode": "processing",
@@ -187,6 +189,7 @@ def create_voice_session():
     llm_node, task_id = create_llm_placeholder(
         user_node.id, model_id, current_user.id,
         ai_usage=ai_usage,
+        source_mode='voice',
     )
 
     current_app.logger.info(

@@ -24,12 +24,13 @@ def is_llm_node(node):
 
 
 def create_llm_placeholder_node(parent_node_id, model_id, requesting_user_id,
-                                ai_usage=None):
+                                ai_usage=None, source_mode=None):
     """Create an LLM placeholder node and enqueue the generation task."""
     if ai_usage is None:
         ai_usage = current_user.default_ai_usage
     llm_node, _ = create_llm_placeholder(
         parent_node_id, model_id, requesting_user_id,
         ai_usage=ai_usage,
+        source_mode=source_mode,
     )
     return llm_node
