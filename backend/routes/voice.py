@@ -21,10 +21,8 @@ def create_voice_from_node(node_id):
     node = Node.query.get(node_id)
     if not node:
         return jsonify({"error": "Node not found"}), 404
-    if node.user_id != current_user.id:
-        parent = Node.query.get(node.parent_id) if node.parent_id else None
-        if not parent or parent.user_id != current_user.id:
-            return jsonify({"error": "Unauthorized"}), 403
+    if node.human_owner_id != current_user.id:
+        return jsonify({"error": "Unauthorized"}), 403
 
     data = request.get_json() or {}
     model_id = data.get("model")
@@ -143,6 +141,8 @@ def create_voice_session():
         parent_node = Node.query.get(parent_id)
         if not parent_node:
             return jsonify({"error": "Parent node not found"}), 404
+        if parent_node.human_owner_id != current_user.id:
+            return jsonify({"error": "Unauthorized"}), 403
         # Inherit ai_usage from parent node in the thread
         ai_usage = parent_node.ai_usage or current_user.default_ai_usage
         user_parent_id = parent_id
