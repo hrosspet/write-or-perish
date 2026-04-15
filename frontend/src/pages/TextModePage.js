@@ -369,7 +369,7 @@ function ProposalInline({ content, nodeId, toolCallsMeta }) {
   );
 }
 
-function Message({ message, toolCallsMeta, isLatest }) {
+function Message({ message }) {
   const isUser = message.role === 'user';
   const isPending = message.llm_task_status === 'pending' || message.llm_task_status === 'processing';
   const hasProposal = !isUser && message.content && hasProposalSections(message.content);
@@ -444,7 +444,7 @@ function Message({ message, toolCallsMeta, isLatest }) {
               <ProposalInline
                 content={message.content}
                 nodeId={message.id}
-                toolCallsMeta={isLatest ? toolCallsMeta : null}
+                toolCallsMeta={message.tool_calls_meta}
               />
             )}
           </>
@@ -462,7 +462,7 @@ export default function TextModePage() {
   const { user } = useUser();
   const {
     messages, isWaitingForAI, latestLlmNodeId,
-    toolCallsMeta, sendMessage, loadExistingThread,
+    sendMessage, loadExistingThread,
   } = useConversation({ aiUsage: user?.default_ai_usage || 'none' });
   const [inputText, setInputText] = useState('');
   const [isVoiceRecording, setIsVoiceRecording] = useState(false);
@@ -474,7 +474,7 @@ export default function TextModePage() {
   useEffect(() => {
     if (resumeConvId && !resumeLoadedRef.current) {
       resumeLoadedRef.current = true;
-      loadExistingThread(Number(resumeConvId), { fromNode: true });
+      loadExistingThread(Number(resumeConvId));
     }
   }, [resumeConvId, loadExistingThread]);
 
@@ -525,12 +525,16 @@ export default function TextModePage() {
     },
   });
 
-  const handleVoiceToggle = () => {
+  const handleVoiceToggle = async () => {
     if (isVoiceRecording) {
       voiceStreaming.stopStreaming();
     } else {
-      setIsVoiceRecording(true);
-      voiceStreaming.startStreaming();
+      try {
+        setIsVoiceRecording(true);
+        await voiceStreaming.startStreaming();
+      } catch {
+        setIsVoiceRecording(false);
+      }
     }
   };
 
@@ -613,13 +617,8 @@ export default function TextModePage() {
           </div>
         )}
 
-        {messages.map((msg, idx) => (
-          <Message
-            key={msg.id}
-            message={msg}
-            toolCallsMeta={toolCallsMeta}
-            isLatest={msg.id === latestLlmNodeId}
-          />
+        {messages.map((msg) => (
+          <Message key={msg.id} message={msg} />
         ))}
         <div ref={messagesEndRef} />
       </div>

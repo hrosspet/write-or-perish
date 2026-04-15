@@ -1078,7 +1078,8 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     # Chain: LLM generation → TTS generation
     celery_chain(
         generate_llm_response.si(
-            user_node.id, llm_node.id, model, user_id
+            user_node.id, llm_node.id, model, user_id,
+            source_mode='voice',
         ),
         generate_tts_audio.si(
             llm_node.id, str(audio_storage_root),

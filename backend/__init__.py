@@ -130,7 +130,7 @@ def create_app():
     from backend.routes.todo import todo_bp
     app.register_blueprint(todo_bp, url_prefix="/api/todo")
 
-    from backend.routes.converse import textmode_bp
+    from backend.routes.textmode import textmode_bp
     app.register_blueprint(textmode_bp, url_prefix="/api/textmode")
 
     from backend.routes.voice import voice_bp

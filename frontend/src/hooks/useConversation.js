@@ -13,7 +13,6 @@ export function useConversation({ aiUsage = 'none' } = {}) {
   const [isWaitingForAI, setIsWaitingForAI] = useState(false);
   const [latestLlmNodeId, setLatestLlmNodeId] = useState(null);
   const [pendingLlmNodeId, setPendingLlmNodeId] = useState(null);
-  const [toolCallsMeta, setToolCallsMeta] = useState(null);
   const conversationIdRef = useRef(null);
   const latestLlmNodeIdRef = useRef(null);
 
@@ -28,12 +27,16 @@ export function useConversation({ aiUsage = 'none' } = {}) {
     if (llmStatus === 'completed' && llmData?.content) {
       setMessages(prev => prev.map(m =>
         m.id === pendingLlmNodeId
-          ? { ...m, content: llmData.content, llm_task_status: 'completed' }
+          ? {
+              ...m,
+              content: llmData.content,
+              llm_task_status: 'completed',
+              tool_calls_meta: llmData.tool_calls_meta || null,
+            }
           : m
       ));
       setLatestLlmNodeId(pendingLlmNodeId);
       latestLlmNodeIdRef.current = pendingLlmNodeId;
-      setToolCallsMeta(llmData.tool_calls_meta || null);
       setPendingLlmNodeId(null);
       setIsWaitingForAI(false);
     } else if (llmStatus === 'failed') {
@@ -106,12 +109,9 @@ export function useConversation({ aiUsage = 'none' } = {}) {
     }
   }, [aiUsage]);
 
-  const loadExistingThread = useCallback(async (nodeId, { fromNode = false } = {}) => {
+  const loadExistingThread = useCallback(async (nodeId) => {
     try {
-      const url = fromNode
-        ? `/textmode/from-node/${nodeId}`
-        : `/textmode/${nodeId}`;
-      const res = await api.get(url);
+      const res = await api.get(`/textmode/from-node/${nodeId}`);
       const convId = res.data.conversation_id;
       const msgs = res.data.messages || [];
       setConversationId(convId);
@@ -137,7 +137,6 @@ export function useConversation({ aiUsage = 'none' } = {}) {
     setLatestLlmNodeId(null);
     latestLlmNodeIdRef.current = null;
     setPendingLlmNodeId(null);
-    setToolCallsMeta(null);
   }, []);
 
   return {
@@ -145,7 +144,6 @@ export function useConversation({ aiUsage = 'none' } = {}) {
     messages,
     isWaitingForAI,
     latestLlmNodeId,
-    toolCallsMeta,
     sendMessage,
     loadExistingThread,
     reset,
