@@ -199,6 +199,7 @@ export default function ReflectPage() {
     initialLlmNodeId: resumeId ? Number(resumeId) : null,
     initialParentId: parentId ? Number(parentId) : null,
     model: selectedModel,
+    aiUsage: user?.default_ai_usage || 'none',
   });
 
   // Progress bar helpers

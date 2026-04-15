@@ -194,6 +194,7 @@ export default function OrientPage() {
     initialLlmNodeId: resumeId ? Number(resumeId) : null,
     initialParentId: parentId ? Number(parentId) : null,
     model: selectedModel,
+    aiUsage: user?.default_ai_usage || 'none',
     onLLMComplete: (nodeId, content, isResume) => {
       setParsedResponse(parseOrientResponse(content));
       // Auto-trigger todo merge. Skip on initial resume (replayed node may

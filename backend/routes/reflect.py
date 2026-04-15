@@ -29,10 +29,14 @@ def _is_llm_node(node):
     return node.node_type == 'llm' or bool(node.llm_model)
 
 
-def _create_llm_placeholder(parent_node_id, model_id, requesting_user_id):
+def _create_llm_placeholder(parent_node_id, model_id, requesting_user_id,
+                            ai_usage=None):
     """Create an LLM placeholder node and enqueue the generation task."""
+    if ai_usage is None:
+        ai_usage = current_user.default_ai_usage
     llm_node, _ = create_llm_placeholder(
-        parent_node_id, model_id, requesting_user_id
+        parent_node_id, model_id, requesting_user_id,
+        ai_usage=ai_usage,
     )
     return llm_node
 
@@ -91,7 +95,7 @@ def create_reflect_from_node(node_id):
             parent_id=node.id,
             node_type="user",
             privacy_level="private",
-            ai_usage="chat",
+            ai_usage=current_user.default_ai_usage,
 
         )
         db.session.add(system_node)
@@ -119,7 +123,7 @@ def create_reflect_from_node(node_id):
         parent_id=node.id,
         node_type="user",
         privacy_level="private",
-        ai_usage="chat",
+        ai_usage=current_user.default_ai_usage,
     )
     db.session.add(system_node)
     db.session.flush()
@@ -152,6 +156,7 @@ def create_reflect_session():
     model_id = data.get("model")
     parent_id = data.get("parent_id")
     session_id = data.get("session_id")
+    ai_usage = data.get("ai_usage") or current_user.default_ai_usage
 
     if not content or not content.strip():
         return jsonify({"error": "Content is required"}), 400
@@ -179,7 +184,7 @@ def create_reflect_session():
             parent_id=None,
             node_type="user",
             privacy_level="private",
-            ai_usage="chat",
+            ai_usage=ai_usage,
 
         )
         db.session.add(system_node)
@@ -197,7 +202,7 @@ def create_reflect_session():
         parent_id=user_parent_id,
         node_type="user",
         privacy_level="private",
-        ai_usage="chat",
+        ai_usage=ai_usage,
         token_count=approximate_token_count(content),
     )
     user_node.set_content(content)
@@ -215,7 +220,8 @@ def create_reflect_session():
 
     # 3. Create placeholder LLM node and enqueue task
     llm_node, task_id = create_llm_placeholder(
-        user_node.id, model_id, current_user.id
+        user_node.id, model_id, current_user.id,
+        ai_usage=ai_usage,
     )
 
     current_app.logger.info(

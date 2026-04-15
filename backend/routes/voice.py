@@ -35,12 +35,16 @@ def create_voice_from_node(node_id):
     if model_id not in current_app.config["SUPPORTED_MODELS"]:
         return jsonify({"error": f"Unsupported model: {model_id}"}), 400
 
+    # Inherit ai_usage from the target node
+    ai_usage = node.ai_usage or current_user.default_ai_usage
+
     has_prompt = _ancestors_have_prompt(node, current_user.id, PROMPT_KEY)
     is_llm = _is_llm_node(node)
 
     if has_prompt and not is_llm:
         llm_node = _create_llm_placeholder(
-            node.id, model_id, current_user.id
+            node.id, model_id, current_user.id,
+            ai_usage=ai_usage,
         )
         return jsonify({
             "mode": "processing",
@@ -64,7 +68,7 @@ def create_voice_from_node(node_id):
             parent_id=node.id,
             node_type="user",
             privacy_level="private",
-            ai_usage="chat",
+            ai_usage=ai_usage,
         )
         db.session.add(system_node)
         db.session.flush()
@@ -73,7 +77,8 @@ def create_voice_from_node(node_id):
         )
 
         llm_node = _create_llm_placeholder(
-            system_node.id, model_id, current_user.id
+            system_node.id, model_id, current_user.id,
+            ai_usage=ai_usage,
         )
         return jsonify({
             "mode": "processing",
@@ -90,7 +95,7 @@ def create_voice_from_node(node_id):
         parent_id=node.id,
         node_type="user",
         privacy_level="private",
-        ai_usage="chat",
+        ai_usage=ai_usage,
     )
     db.session.add(system_node)
     db.session.flush()
@@ -121,7 +126,6 @@ def create_voice_session():
     model_id = data.get("model")
     parent_id = data.get("parent_id")
     session_id = data.get("session_id")
-
     if not content or not content.strip():
         return jsonify({"error": "Content is required"}), 400
 
@@ -137,8 +141,11 @@ def create_voice_session():
         parent_node = Node.query.get(parent_id)
         if not parent_node:
             return jsonify({"error": "Parent node not found"}), 404
+        # Inherit ai_usage from parent node in the thread
+        ai_usage = parent_node.ai_usage or current_user.default_ai_usage
         user_parent_id = parent_id
     else:
+        ai_usage = data.get("ai_usage") or current_user.default_ai_usage
         prompt_record = get_user_prompt_record(current_user.id, PROMPT_KEY)
         system_node = Node(
             user_id=current_user.id,
@@ -146,7 +153,7 @@ def create_voice_session():
             parent_id=None,
             node_type="user",
             privacy_level="private",
-            ai_usage="chat",
+            ai_usage=ai_usage,
         )
         db.session.add(system_node)
         db.session.flush()
@@ -162,7 +169,7 @@ def create_voice_session():
         parent_id=user_parent_id,
         node_type="user",
         privacy_level="private",
-        ai_usage="chat",
+        ai_usage=ai_usage,
         token_count=approximate_token_count(content),
     )
     user_node.set_content(content)
@@ -178,7 +185,8 @@ def create_voice_session():
         )
 
     llm_node, task_id = create_llm_placeholder(
-        user_node.id, model_id, current_user.id
+        user_node.id, model_id, current_user.id,
+        ai_usage=ai_usage,
     )
 
     current_app.logger.info(

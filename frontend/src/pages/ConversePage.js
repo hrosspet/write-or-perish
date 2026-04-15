@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useConversation } from '../hooks/useConversation';
 import { useStreamingTTS } from '../hooks/useStreamingTTS';
 import { useStreamingTranscription } from '../hooks/useStreamingTranscription';
+import { useUser } from '../contexts/UserContext';
 
 function Message({ message }) {
   const isUser = message.role === 'user';
@@ -58,7 +59,8 @@ function Message({ message }) {
 }
 
 export default function ConversePage() {
-  const { messages, isWaitingForAI, latestLlmNodeId, sendMessage } = useConversation();
+  const { user } = useUser();
+  const { messages, isWaitingForAI, latestLlmNodeId, sendMessage } = useConversation({ aiUsage: user?.default_ai_usage || 'none' });
   const [inputText, setInputText] = useState('');
   const [isVoiceRecording, setIsVoiceRecording] = useState(false);
   const messagesEndRef = useRef(null);
@@ -112,7 +114,7 @@ export default function ConversePage() {
   // Voice input via streaming transcription
   const voiceStreaming = useStreamingTranscription({
     privacyLevel: 'private',
-    aiUsage: 'chat',
+    aiUsage: user?.default_ai_usage || 'none',
     onTranscriptUpdate: (text) => {
       setInputText(text);
     },

@@ -46,6 +46,7 @@ def start_conversation():
     data = request.get_json() or {}
     content = data.get("content")
     model_id = data.get("model")
+    ai_usage = data.get("ai_usage") or current_user.default_ai_usage
 
     if not content or not content.strip():
         return jsonify({"error": "Content is required"}), 400
@@ -66,7 +67,7 @@ def start_conversation():
         parent_id=None,
         node_type="user",
         privacy_level="private",
-        ai_usage="chat",
+        ai_usage=ai_usage,
 
     )
     db.session.add(system_node)
@@ -83,7 +84,7 @@ def start_conversation():
         parent_id=system_node.id,
         node_type="user",
         privacy_level="private",
-        ai_usage="chat",
+        ai_usage=ai_usage,
         token_count=approximate_token_count(content),
     )
     user_node.set_content(content)
@@ -92,7 +93,8 @@ def start_conversation():
 
     # 3. Placeholder LLM node and enqueue task
     llm_node, task_id = create_llm_placeholder(
-        user_node.id, model_id, current_user.id
+        user_node.id, model_id, current_user.id,
+        ai_usage=ai_usage,
     )
 
     return jsonify({
@@ -113,7 +115,6 @@ def add_message(conversation_id):
     data = request.get_json() or {}
     content = data.get("content")
     model_id = data.get("model")
-
     if not content or not content.strip():
         return jsonify({"error": "Content is required"}), 400
 
@@ -129,8 +130,9 @@ def add_message(conversation_id):
     if model_id not in current_app.config["SUPPORTED_MODELS"]:
         return jsonify({"error": f"Unsupported model: {model_id}"}), 400
 
-    # Find the last node in the chain
+    # Find the last node in the chain and inherit its ai_usage
     last_node = _get_last_node_in_chain(system_node)
+    ai_usage = last_node.ai_usage or current_user.default_ai_usage
 
     # Create user message node
     from backend.utils.tokens import approximate_token_count
@@ -140,7 +142,7 @@ def add_message(conversation_id):
         parent_id=last_node.id,
         node_type="user",
         privacy_level="private",
-        ai_usage="chat",
+        ai_usage=ai_usage,
         token_count=approximate_token_count(content),
     )
     user_node.set_content(content)
@@ -149,7 +151,8 @@ def add_message(conversation_id):
 
     # Create placeholder LLM node and enqueue task
     llm_node, task_id = create_llm_placeholder(
-        user_node.id, model_id, current_user.id
+        user_node.id, model_id, current_user.id,
+        ai_usage=ai_usage,
     )
 
     return jsonify({

@@ -335,7 +335,7 @@ class UserProfile(db.Model):
     privacy_level = db.Column(db.String(16), nullable=False, default="private")
 
     # AI usage permission: controls how AI can use this profile's content
-    # Default for profiles is 'chat' (AI can use for responses)
+    # Default is 'chat' — profiles are AI-generated and need to be readable by AI
     ai_usage = db.Column(db.String(16), nullable=False, default="chat")
 
     # Cumulative source data tokens the profile is based on
@@ -390,6 +390,7 @@ class UserRecentContext(db.Model):
     profile_id = db.Column(
         db.Integer, db.ForeignKey("user_profile.id"), nullable=True
     )
+    # AI-generated context summary — needs to be readable by AI
     ai_usage = db.Column(db.String(16), nullable=False, default="chat")
 
     user = db.relationship("User", backref="recent_contexts")
@@ -412,6 +413,7 @@ class UserTodo(db.Model):
     tokens_used = db.Column(db.Integer, nullable=False, default=0)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     privacy_level = db.Column(db.String(16), nullable=False, default="private")
+    # Todo is used as AI context in Voice sessions — must be AI-readable
     ai_usage = db.Column(db.String(16), nullable=False, default="chat")
 
     user = db.relationship("User", backref="todos")
@@ -431,6 +433,7 @@ class UserAIPreferences(db.Model):
     tokens_used = db.Column(db.Integer, nullable=False, default=0)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     privacy_level = db.Column(db.String(16), nullable=False, default="private")
+    # AI preferences are used as context in LLM calls — must be AI-readable
     ai_usage = db.Column(db.String(16), nullable=False, default="chat")
 
     user = db.relationship("User", backref="ai_preferences")

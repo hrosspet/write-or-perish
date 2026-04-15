@@ -31,6 +31,7 @@ def create_orient_session():
     model_id = data.get("model")
     parent_id = data.get("parent_id")
     session_id = data.get("session_id")
+    ai_usage = data.get("ai_usage") or current_user.default_ai_usage
 
     if not content or not content.strip():
         return jsonify({"error": "Content is required"}), 400
@@ -58,7 +59,7 @@ def create_orient_session():
             parent_id=None,
             node_type="user",
             privacy_level="private",
-            ai_usage="chat",
+            ai_usage=ai_usage,
 
         )
         db.session.add(system_node)
@@ -76,7 +77,7 @@ def create_orient_session():
         parent_id=user_parent_id,
         node_type="user",
         privacy_level="private",
-        ai_usage="chat",
+        ai_usage=ai_usage,
         token_count=approximate_token_count(content),
     )
     user_node.set_content(content)
@@ -94,7 +95,8 @@ def create_orient_session():
 
     # 3. Placeholder LLM node and enqueue task
     llm_node, task_id = create_llm_placeholder(
-        user_node.id, model_id, current_user.id
+        user_node.id, model_id, current_user.id,
+        ai_usage=ai_usage,
     )
 
     current_app.logger.info(
@@ -161,7 +163,7 @@ def create_orient_from_node(node_id):
             parent_id=node.id,
             node_type="user",
             privacy_level="private",
-            ai_usage="chat",
+            ai_usage=current_user.default_ai_usage,
 
         )
         db.session.add(system_node)
@@ -189,7 +191,7 @@ def create_orient_from_node(node_id):
         parent_id=node.id,
         node_type="user",
         privacy_level="private",
-        ai_usage="chat",
+        ai_usage=current_user.default_ai_usage,
     )
     db.session.add(system_node)
     db.session.flush()
@@ -229,13 +231,16 @@ def apply_todo(llm_node_id):
     merge_prompt_content = get_user_prompt(
         current_user.id, 'orient_apply_todo')
     from backend.utils.tokens import approximate_token_count
+    # Inherit ai_usage from the LLM node in the thread
+    ai_usage = llm_node.ai_usage or current_user.default_ai_usage
+
     merge_prompt_node = Node(
         user_id=current_user.id,
         human_owner_id=current_user.id,
         parent_id=llm_node_id,
         node_type="user",
         privacy_level="private",
-        ai_usage="chat",
+        ai_usage=ai_usage,
         token_count=approximate_token_count(merge_prompt_content),
     )
     merge_prompt_node.set_content(merge_prompt_content)
@@ -246,6 +251,7 @@ def apply_todo(llm_node_id):
         merge_prompt_node.id, merge_model, current_user.id,
         placeholder_text="[Merging todo...]",
         enqueue=False,
+        ai_usage=ai_usage,
     )
 
     db.session.commit()

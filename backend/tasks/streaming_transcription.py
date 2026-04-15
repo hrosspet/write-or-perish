@@ -993,17 +993,22 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     prompt_key = label.lower()  # 'reflect' or 'orient'
 
     if parent_id:
+        # Inherit ai_usage from parent node in the thread
+        parent_node = Node.query.get(parent_id)
+        ai_usage = (parent_node.ai_usage if parent_node
+                    else draft.ai_usage) or "none"
         user_parent_id = parent_id
     else:
         # New thread — create system node with workflow prompt
         prompt_record = get_user_prompt_record(user_id, prompt_key)
+        ai_usage = draft.ai_usage or "none"
         system_node = Node(
             user_id=user_id,
             human_owner_id=user_id,
             parent_id=None,
             node_type="user",
             privacy_level="private",
-            ai_usage="chat",
+            ai_usage=ai_usage,
 
         )
         db.session.add(system_node)
@@ -1021,7 +1026,7 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
         parent_id=user_parent_id,
         node_type="user",
         privacy_level="private",
-        ai_usage="chat",
+        ai_usage=ai_usage,
         token_count=approximate_token_count(transcript),
     )
     user_node.set_content(transcript)
@@ -1057,6 +1062,7 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     # LLM placeholder (don't enqueue yet — we'll chain it)
     llm_node, _ = create_llm_placeholder(
         user_node.id, model, user_id, enqueue=False,
+        ai_usage=ai_usage,
     )
 
     # Mark TTS as pending now so the frontend's POST /tts endpoint

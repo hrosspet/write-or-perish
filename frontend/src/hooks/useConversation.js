@@ -7,7 +7,7 @@ import api from '../api';
  *
  * Returns: { messages, conversationId, isWaitingForAI, latestLlmNodeId, sendMessage, reset }
  */
-export function useConversation() {
+export function useConversation({ aiUsage = 'none' } = {}) {
   const [conversationId, setConversationId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [isWaitingForAI, setIsWaitingForAI] = useState(false);
@@ -60,7 +60,7 @@ export function useConversation() {
       let res;
       if (!conversationIdRef.current) {
         // Start new conversation
-        res = await api.post('/converse/start', { content });
+        res = await api.post('/converse/start', { content, ai_usage: aiUsage });
         const convId = res.data.conversation_id;
         setConversationId(convId);
         conversationIdRef.current = convId;
