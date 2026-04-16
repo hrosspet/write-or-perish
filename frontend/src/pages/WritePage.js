@@ -53,6 +53,7 @@ export default function WritePage() {
           parentId={null}
           initialAiUsage="chat"
           hidePowerFeatures={!craftMode}
+          hideAudioUpload={!craftMode}
           placeholder="Type what's on your mind…"
           submitLabel="Send"
           onSubmitOverride={handleSubmit}

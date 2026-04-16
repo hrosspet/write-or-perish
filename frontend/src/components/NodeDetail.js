@@ -727,6 +727,8 @@ function NodeDetail() {
             key={`inline-${id}`}
             parentId={parseInt(id, 10)}
             hidePowerFeatures={!craftMode}
+            hideAudioUpload={!craftMode}
+            compact
             placeholder="Type what's on your mind…"
             submitLabel="Send"
             onSuccess={handleInlineSuccess}

@@ -10,7 +10,7 @@ import { uploadFileInChunks } from "../utils/chunkedUpload";
 
 const NodeForm = forwardRef(
   (
-    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, submitLabel = "Submit", onSubmitOverride },
+    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, submitLabel = "Submit", onSubmitOverride, compact = false, hideAudioUpload = false },
     ref
   ) => {
     const { user } = useUser();
@@ -377,7 +377,7 @@ const NodeForm = forwardRef(
               setUploadedFile(null);
             }
           }}
-          rows={6}
+          rows={compact ? 3 : 6}
           style={{
             width: "100%",
             backgroundColor: "var(--bg-input)",
@@ -389,8 +389,8 @@ const NodeForm = forwardRef(
             fontWeight: 300,
             color: "var(--text-primary)",
             lineHeight: 1.6,
-            height: "clamp(120px, 40vh, 400px)",
-            minHeight: "120px",
+            height: compact ? "auto" : "clamp(120px, 40vh, 400px)",
+            minHeight: compact ? "90px" : "120px",
             boxSizing: "border-box",
             transition: "border-color 0.3s ease",
             resize: "vertical",
@@ -553,21 +553,25 @@ const NodeForm = forwardRef(
                   }}
                   disabled={loading || uploadedFile || aiUsage === 'none'}
                 />
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept=".mp3,.wav,.m4a,.webm,.ogg,.oga,.flac,.aac,.mp4,.mpeg,.mpga,audio/*"
-                  onChange={handleFileSelect}
-                  style={{ display: 'none' }}
-                />
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={isStreamingRecording || aiUsage === 'none' || !isOnline}
-                  style={{ padding: '8px 16px', cursor: isStreamingRecording || aiUsage === 'none' || !isOnline ? 'not-allowed' : 'pointer', opacity: aiUsage === 'none' || !isOnline ? 0.35 : 1 }}
-                >
-                  Upload
-                </button>
+                {!hideAudioUpload && (
+                  <>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".mp3,.wav,.m4a,.webm,.ogg,.oga,.flac,.aac,.mp4,.mpeg,.mpga,audio/*"
+                      onChange={handleFileSelect}
+                      style={{ display: 'none' }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={isStreamingRecording || aiUsage === 'none' || !isOnline}
+                      style={{ padding: '8px 16px', cursor: isStreamingRecording || aiUsage === 'none' || !isOnline ? 'not-allowed' : 'pointer', opacity: aiUsage === 'none' || !isOnline ? 0.35 : 1 }}
+                    >
+                      Upload
+                    </button>
+                  </>
+                )}
               </>
             )}
           </div>
