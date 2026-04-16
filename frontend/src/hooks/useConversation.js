@@ -96,7 +96,7 @@ export function useConversation({ aiUsage = 'none' } = {}) {
       setMessages(prev => prev.filter(m => m.id !== tempUserMsg.id));
       setIsWaitingForAI(false);
     }
-  }, []);
+  }, [aiUsage]);
 
   const reset = useCallback(() => {
     setConversationId(null);
