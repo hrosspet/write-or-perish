@@ -735,6 +735,7 @@ def get_node(node_id):
         # Pin-to-profile
         "pinned_at": node.pinned_at.isoformat() if node.pinned_at else None,
         "llm_model": node.llm_model,
+        "llm_task_status": node.llm_task_status,
         "has_original_audio": bool(node.audio_original_url or node.streaming_transcription),
     }
     # Include tool call metadata for LLM nodes

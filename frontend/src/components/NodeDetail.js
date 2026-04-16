@@ -5,7 +5,7 @@ import NodeFooter from "./NodeFooter";
 import SpeakerIcon from "./SpeakerIcon";
 import DownloadAudioIcon from "./DownloadAudioIcon";
 import ModelSelector from "./ModelSelector";
-import StreamingMicButton from "./StreamingMicButton";
+import NodeForm from "./NodeForm";
 import ProposalInline, { hasProposalSections, stripProposalSections } from "./ProposalInline";
 import { useUser } from "../contexts/UserContext";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
@@ -59,12 +59,22 @@ function NodeDetail() {
   const [voiceLoading, setVoiceLoading] = useState(false);
   const [toolActionsExpanded, setToolActionsExpanded] = useState(false);
   const [showPromptEditConfirm, setShowPromptEditConfirm] = useState(false);
-  const [autoGenerate, setAutoGenerate] = useState(true);
+  // autoGenerate is shared across the whole text-mode experience — the
+  // NodeDetailWrapper uses `key={id}` which remounts NodeDetail on every
+  // node navigation, so local useState would reset the toggle. Persist to
+  // localStorage so it survives the remount.
+  const [autoGenerate, setAutoGenerateState] = useState(() => {
+    const stored = localStorage.getItem('loore_auto_generate');
+    return stored === null ? true : stored === 'true';
+  });
+  const setAutoGenerate = useCallback((next) => {
+    setAutoGenerateState(prev => {
+      const resolved = typeof next === 'function' ? next(prev) : next;
+      localStorage.setItem('loore_auto_generate', String(resolved));
+      return resolved;
+    });
+  }, []);
   const [showKebabMenu, setShowKebabMenu] = useState(false);
-  const [inlineContent, setInlineContent] = useState("");
-  const [inlineSubmitting, setInlineSubmitting] = useState(false);
-  const inlineTextareaRef = useRef(null);
-  const inlinePreStreamingRef = useRef('');
   const highlightedNodeRef = useRef(null);
   const kebabMenuRef = useRef(null);
 
@@ -193,27 +203,6 @@ function NodeDetail() {
     useCallback((newContent) => api.put(`/nodes/${id}`, { content: newContent }), [id]),
   );
 
-  // Mic callbacks — stable identity to avoid invalidating StreamingMicButton deps on every render.
-  const handleInlineMicStart = useCallback(() => {
-    inlinePreStreamingRef.current = inlineContent;
-  }, [inlineContent]);
-
-  const handleInlineMicTranscript = useCallback((transcript) => {
-    const prefix = inlinePreStreamingRef.current;
-    const sep = prefix && transcript ? '\n\n' : '';
-    setInlineContent(prefix + sep + transcript);
-  }, []);
-
-  const handleInlineMicComplete = useCallback((data) => {
-    const prefix = inlinePreStreamingRef.current;
-    const sep = prefix && data?.content ? '\n\n' : '';
-    setInlineContent(prefix + sep + (data?.content || ''));
-  }, []);
-
-  const handleInlineMicError = useCallback((err) => {
-    setError(err?.message || 'Mic error');
-  }, []);
-
   if (loading) return <div style={{ color: "var(--text-muted)", padding: "20px" }}>Loading node...</div>;
   if (error) return <div style={{ color: "var(--accent)", padding: "20px" }}>{error}</div>;
   if (!node) return <div style={{ color: "var(--text-muted)", padding: "20px" }}>No node found.</div>;
@@ -295,25 +284,17 @@ function NodeDetail() {
       });
   };
 
-  const handleInlineSubmit = async (e) => {
-    if (e && e.preventDefault) e.preventDefault();
-    const text = inlineContent.trim();
-    if (!text || inlineSubmitting) return;
-    setInlineSubmitting(true);
+  // Called by NodeForm after it successfully POSTs /nodes/.
+  // `data` is the newly-created child node from the backend.
+  const handleInlineSuccess = async (data) => {
+    const newNodeId = data?.id;
+    if (!newNodeId) return;
     setError("");
     try {
-      const res = await api.post("/nodes/", {
-        content: text,
-        parent_id: parseInt(id, 10),
-        privacy_level: node.privacy_level,
-        ai_usage: node.ai_usage,
-      });
-      const newNodeId = res.data.id;
-      setInlineContent("");
       if (autoGenerateActive && node.ai_usage !== 'none') {
         const llmNodeId = await requestLlmFor(newNodeId);
         // Navigate directly to the pending LLM node so the inline input
-        // stays below it throughout generation (no post-completion jump).
+        // stays anchored below it throughout generation.
         navigate(`/node/${llmNodeId}?awaitLlm=${llmNodeId}`);
       } else {
         navigate(`/node/${newNodeId}`);
@@ -321,8 +302,6 @@ function NodeDetail() {
     } catch (err) {
       console.error(err);
       setError(err.response?.data?.error || err.message || "Error sending message.");
-    } finally {
-      setInlineSubmitting(false);
     }
   };
 
@@ -736,71 +715,22 @@ function NodeDetail() {
         )}
       </div>
       {showInlineInput && (
-        <div style={{ marginLeft: '20px', marginRight: '20px', marginTop: '4px', marginBottom: '12px' }}>
-          <form onSubmit={handleInlineSubmit}>
-            <textarea
-              ref={inlineTextareaRef}
-              value={inlineContent}
-              onChange={(e) => setInlineContent(e.target.value)}
-              onKeyDown={(e) => {
-                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-                  e.preventDefault();
-                  handleInlineSubmit();
-                }
-              }}
-              placeholder="Type what's on your mind…"
-              rows={3}
-              disabled={inlineSubmitting || !!llmTaskNodeId}
-              style={{
-                width: '100%',
-                boxSizing: 'border-box',
-                padding: '12px 14px',
-                background: 'var(--bg-card)',
-                color: 'var(--text-primary)',
-                border: '1px solid var(--border)',
-                borderRadius: '8px',
-                fontFamily: 'var(--sans)',
-                fontSize: '0.92rem',
-                fontWeight: 300,
-                resize: 'vertical',
-                outline: 'none',
-              }}
-            />
-            <div style={{
-              marginTop: '6px',
-              display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap',
-            }}>
-              <button
-                type="submit"
-                disabled={!inlineContent.trim() || inlineSubmitting || !!llmTaskNodeId}
-                style={{
-                  padding: '8px 18px',
-                  background: 'var(--accent)',
-                  color: 'var(--bg-deep)',
-                  border: 'none',
-                  borderRadius: '6px',
-                  fontFamily: 'var(--sans)',
-                  fontSize: '0.85rem',
-                  fontWeight: 400,
-                  cursor: (!inlineContent.trim() || inlineSubmitting || !!llmTaskNodeId)
-                    ? 'not-allowed' : 'pointer',
-                  opacity: (!inlineContent.trim() || inlineSubmitting || !!llmTaskNodeId) ? 0.5 : 1,
-                }}
-              >
-                {inlineSubmitting ? 'Sending…' : 'Send'}
-              </button>
-              <StreamingMicButton
-                parentId={parseInt(id, 10)}
-                privacyLevel={node.privacy_level}
-                aiUsage={node.ai_usage}
-                disabled={inlineSubmitting || !!llmTaskNodeId}
-                onRecordingStart={handleInlineMicStart}
-                onTranscriptUpdate={handleInlineMicTranscript}
-                onComplete={handleInlineMicComplete}
-                onError={handleInlineMicError}
-              />
-            </div>
-          </form>
+        <div style={{
+          width: '95%',
+          maxWidth: '1500px',
+          marginLeft: '20px',
+          marginRight: 'auto',
+          marginTop: '4px',
+          marginBottom: '12px',
+        }}>
+          <NodeForm
+            key={`inline-${id}`}
+            parentId={parseInt(id, 10)}
+            hidePowerFeatures={!craftMode}
+            placeholder="Type what's on your mind…"
+            submitLabel="Send"
+            onSuccess={handleInlineSuccess}
+          />
         </div>
       )}
       <hr style={{ borderColor: "var(--border)" }} />
