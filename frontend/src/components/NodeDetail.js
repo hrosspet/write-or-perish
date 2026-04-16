@@ -137,6 +137,8 @@ function NodeDetail() {
 
   // If we arrived with ?awaitLlm=NID (e.g. from WritePage), pick up the
   // pending LLM task and let the polling navigate to it on completion.
+  // Re-runs when `id` changes so internal navigations to another node
+  // with ?awaitLlm= also take effect (react-router reuses the component).
   useEffect(() => {
     const awaitLlm = searchParams.get('awaitLlm');
     if (awaitLlm) {
@@ -146,7 +148,7 @@ function NodeDetail() {
       setSearchParams(next, { replace: true });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [id]);
 
   // Close kebab menu on outside click
   useEffect(() => {
@@ -179,6 +181,27 @@ function NodeDetail() {
     useCallback((newContent) => setNode(prev => ({ ...prev, content: newContent })), []),
     useCallback((newContent) => api.put(`/nodes/${id}`, { content: newContent }), [id]),
   );
+
+  // Mic callbacks — stable identity to avoid invalidating StreamingMicButton deps on every render.
+  const handleInlineMicStart = useCallback(() => {
+    inlinePreStreamingRef.current = inlineContent;
+  }, [inlineContent]);
+
+  const handleInlineMicTranscript = useCallback((transcript) => {
+    const prefix = inlinePreStreamingRef.current;
+    const sep = prefix && transcript ? '\n\n' : '';
+    setInlineContent(prefix + sep + transcript);
+  }, []);
+
+  const handleInlineMicComplete = useCallback((data) => {
+    const prefix = inlinePreStreamingRef.current;
+    const sep = prefix && data?.content ? '\n\n' : '';
+    setInlineContent(prefix + sep + (data?.content || ''));
+  }, []);
+
+  const handleInlineMicError = useCallback((err) => {
+    setError(err?.message || 'Mic error');
+  }, []);
 
   if (loading) return <div style={{ color: "var(--text-muted)", padding: "20px" }}>Loading node...</div>;
   if (error) return <div style={{ color: "var(--accent)", padding: "20px" }}>{error}</div>;
@@ -334,7 +357,8 @@ function NodeDetail() {
     borderRadius: "10px",
     width: "95%",
     maxWidth: "1500px",
-    marginLeft: "20px"
+    marginLeft: "20px",
+    position: "relative",
   };
 
   const actionContainerStyle = {
@@ -529,7 +553,11 @@ function NodeDetail() {
             toolCallsMeta={node.tool_calls_meta}
           />
         )}
-        {node.tool_calls_meta && node.tool_calls_meta.length > 0 && (
+        {(() => {
+          const visibleTools = (node.tool_calls_meta || [])
+            .filter(tc => !tc.name || !tc.name.startsWith('_'));
+          if (visibleTools.length === 0) return null;
+          return (
           <div style={{ marginTop: '12px', borderTop: '1px solid var(--border)', paddingTop: '8px' }}>
             <button
               onClick={() => setToolActionsExpanded(!toolActionsExpanded)}
@@ -539,11 +567,11 @@ function NodeDetail() {
                 color: 'var(--text-muted)',
               }}
             >
-              {toolActionsExpanded ? '▾' : '▸'} Actions taken ({node.tool_calls_meta.length})
+              {toolActionsExpanded ? '▾' : '▸'} Actions taken ({visibleTools.length})
             </button>
             {toolActionsExpanded && (
               <div style={{ marginTop: '8px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                {node.tool_calls_meta.map((tc, i) => (
+                {visibleTools.map((tc, i) => (
                   <div key={i} style={{
                     fontFamily: 'var(--sans)', fontSize: '0.78rem', fontWeight: 300,
                     color: 'var(--text-secondary)', padding: '6px 10px',
@@ -574,7 +602,8 @@ function NodeDetail() {
               </div>
             )}
           </div>
-        )}
+          );
+        })()}
       </div>
       <div style={actionContainerStyle}>
         <NodeFooter
@@ -701,18 +730,10 @@ function NodeDetail() {
                 privacyLevel={node.privacy_level}
                 aiUsage={node.ai_usage}
                 disabled={inlineSubmitting || !!llmTaskNodeId}
-                onRecordingStart={() => { inlinePreStreamingRef.current = inlineContent; }}
-                onTranscriptUpdate={(transcript) => {
-                  const prefix = inlinePreStreamingRef.current;
-                  const sep = prefix && transcript ? '\n\n' : '';
-                  setInlineContent(prefix + sep + transcript);
-                }}
-                onComplete={(data) => {
-                  const prefix = inlinePreStreamingRef.current;
-                  const sep = prefix && data?.content ? '\n\n' : '';
-                  setInlineContent(prefix + sep + (data?.content || ''));
-                }}
-                onError={(err) => setError(err?.message || 'Mic error')}
+                onRecordingStart={handleInlineMicStart}
+                onTranscriptUpdate={handleInlineMicTranscript}
+                onComplete={handleInlineMicComplete}
+                onError={handleInlineMicError}
               />
             </div>
           </form>

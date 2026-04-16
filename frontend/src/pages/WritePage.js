@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import StreamingMicButton from '../components/StreamingMicButton';
 import PrivacySelector from '../components/PrivacySelector';
@@ -21,6 +21,26 @@ export default function WritePage() {
     if (textareaRef.current) textareaRef.current.focus();
   }, []);
 
+  const handleMicStart = useCallback(() => {
+    preStreamingRef.current = content;
+  }, [content]);
+
+  const handleMicTranscript = useCallback((transcript) => {
+    const prefix = preStreamingRef.current;
+    const sep = prefix && transcript ? '\n\n' : '';
+    setContent(prefix + sep + transcript);
+  }, []);
+
+  const handleMicComplete = useCallback((data) => {
+    const prefix = preStreamingRef.current;
+    const sep = prefix && data?.content ? '\n\n' : '';
+    setContent(prefix + sep + (data?.content || ''));
+  }, []);
+
+  const handleMicError = useCallback((err) => {
+    setError(err?.message || 'Mic error');
+  }, []);
+
   const handleSubmit = async (e) => {
     if (e && e.preventDefault) e.preventDefault();
     const text = content.trim();
@@ -31,6 +51,7 @@ export default function WritePage() {
       const res = await api.post('/textmode/start', {
         content: text,
         ai_usage: aiUsage,
+        privacy_level: privacyLevel,
       });
       const { user_node_id, llm_node_id } = res.data;
       navigate(`/node/${user_node_id}?awaitLlm=${llm_node_id}`);
@@ -143,18 +164,10 @@ export default function WritePage() {
             privacyLevel={privacyLevel}
             aiUsage={aiUsage}
             disabled={submitting}
-            onRecordingStart={() => { preStreamingRef.current = content; }}
-            onTranscriptUpdate={(transcript) => {
-              const prefix = preStreamingRef.current;
-              const sep = prefix && transcript ? '\n\n' : '';
-              setContent(prefix + sep + transcript);
-            }}
-            onComplete={(data) => {
-              const prefix = preStreamingRef.current;
-              const sep = prefix && data?.content ? '\n\n' : '';
-              setContent(prefix + sep + (data?.content || ''));
-            }}
-            onError={(err) => setError(err?.message || 'Mic error')}
+            onRecordingStart={handleMicStart}
+            onTranscriptUpdate={handleMicTranscript}
+            onComplete={handleMicComplete}
+            onError={handleMicError}
           />
         </div>
       </form>

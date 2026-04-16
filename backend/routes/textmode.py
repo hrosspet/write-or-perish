@@ -1,3 +1,5 @@
+import json
+
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node
@@ -13,7 +15,6 @@ PROMPT_KEY = 'textmode'
 
 def _serialize_message(node):
     """Serialize a node as a conversation message."""
-    import json as _json
     is_llm = node.node_type == "llm" or node.llm_model is not None
     msg = {
         "id": node.id,
@@ -25,10 +26,13 @@ def _serialize_message(node):
     }
     if is_llm and node.tool_calls_meta:
         try:
-            msg["tool_calls_meta"] = _json.loads(node.tool_calls_meta)
+            msg["tool_calls_meta"] = json.loads(node.tool_calls_meta)
         except (ValueError, TypeError):
             pass
     return msg
+
+
+VALID_PRIVACY_LEVELS = {"private", "anonymous", "public"}
 
 
 @textmode_bp.route("/start", methods=["POST"])
@@ -36,15 +40,23 @@ def _serialize_message(node):
 def start_conversation():
     """
     Start a new conversation.
-    Body: { content: string, model?: string }
+    Body: { content: string, model?: string, ai_usage?: string, privacy_level?: string }
     """
     data = request.get_json() or {}
     content = data.get("content")
     model_id = data.get("model")
     ai_usage = data.get("ai_usage") or current_user.default_ai_usage
+    privacy_level = (
+        data.get("privacy_level")
+        or getattr(current_user, "default_privacy_level", None)
+        or "private"
+    )
 
     if not content or not content.strip():
         return jsonify({"error": "Content is required"}), 400
+
+    if privacy_level not in VALID_PRIVACY_LEVELS:
+        return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
 
     if not model_id:
         model_id = current_app.config.get(
@@ -61,9 +73,8 @@ def start_conversation():
         human_owner_id=current_user.id,
         parent_id=None,
         node_type="user",
-        privacy_level="private",
+        privacy_level=privacy_level,
         ai_usage=ai_usage,
-
     )
     db.session.add(system_node)
     db.session.flush()
@@ -78,7 +89,7 @@ def start_conversation():
         human_owner_id=current_user.id,
         parent_id=system_node.id,
         node_type="user",
-        privacy_level="private",
+        privacy_level=privacy_level,
         ai_usage=ai_usage,
         token_count=approximate_token_count(content),
     )
@@ -89,6 +100,7 @@ def start_conversation():
     # 3. Placeholder LLM node and enqueue task
     llm_node, task_id = create_llm_placeholder(
         user_node.id, model_id, current_user.id,
+        privacy_level=privacy_level,
         ai_usage=ai_usage,
         source_mode='textmode',
     )
@@ -133,10 +145,16 @@ def add_message(conversation_id):
     if not last_node or last_node.human_owner_id != current_user.id:
         return jsonify({"error": "Invalid parent_id"}), 400
 
-    # Verify parent_id is a descendant of conversation_id
+    # Verify parent_id is a descendant of conversation_id.
+    # Cycle-safe: bail out if we revisit a node or exceed a sane hop limit.
     ancestor = last_node
     is_descendant = False
-    while ancestor is not None:
+    visited = set()
+    MAX_HOPS = 1000
+    for _ in range(MAX_HOPS):
+        if ancestor is None or ancestor.id in visited:
+            break
+        visited.add(ancestor.id)
         if ancestor.id == system_node.id:
             is_descendant = True
             break
@@ -145,6 +163,7 @@ def add_message(conversation_id):
         return jsonify({"error": "parent_id does not belong to this conversation"}), 400
 
     ai_usage = last_node.ai_usage or current_user.default_ai_usage
+    privacy_level = last_node.privacy_level or "private"
 
     # Create user message node
     from backend.utils.tokens import approximate_token_count
@@ -153,7 +172,7 @@ def add_message(conversation_id):
         human_owner_id=current_user.id,
         parent_id=last_node.id,
         node_type="user",
-        privacy_level="private",
+        privacy_level=privacy_level,
         ai_usage=ai_usage,
         token_count=approximate_token_count(content),
     )
@@ -164,6 +183,7 @@ def add_message(conversation_id):
     # Create placeholder LLM node and enqueue task
     llm_node, task_id = create_llm_placeholder(
         user_node.id, model_id, current_user.id,
+        privacy_level=privacy_level,
         ai_usage=ai_usage,
         source_mode='textmode',
     )
@@ -185,10 +205,16 @@ def get_conversation_from_node(node_id):
     if node.human_owner_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
 
-    # Collect ancestor chain (including target node, excluding root)
+    # Collect ancestor chain (including target node, excluding root).
+    # Cycle-safe: stop if we revisit a node or exceed a sane hop limit.
     chain = []
     current = node
-    while current is not None:
+    visited = set()
+    MAX_HOPS = 1000
+    for _ in range(MAX_HOPS):
+        if current is None or current.id in visited:
+            break
+        visited.add(current.id)
         chain.append(current)
         if current.parent_id is None:
             break
