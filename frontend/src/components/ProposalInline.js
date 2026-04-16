@@ -149,8 +149,188 @@ export function stripProposalSections(text) {
   return result.join('\n').trim();
 }
 
-export default function ProposalInline({ content, nodeId, toolCallsMeta, onContentChange }) {
-  const parsed = parseOrientResponse(content);
+// Decorative pulsing dot rendered next to section labels in the roomy
+// variant. Inline keyframes keep the component self-contained.
+function AiDot() {
+  return (
+    <span style={{
+      display: 'inline-block',
+      width: '6px',
+      height: '6px',
+      borderRadius: '50%',
+      background: 'var(--accent)',
+      animation: 'proposalAiDotPulse 2s ease infinite',
+    }}>
+      <style>{`
+        @keyframes proposalAiDotPulse {
+          0%, 100% { opacity: 0.4; }
+          50% { opacity: 1; box-shadow: 0 0 8px var(--accent-glow); }
+        }
+      `}</style>
+    </span>
+  );
+}
+
+// Per-variant styling. Compact (default) suits inline rendering under a
+// highlighted card in NodeDetail. Roomy matches Voice mode's larger,
+// more breathable layout for "playing back" a response at arm's length.
+function sizeStyles(size) {
+  const roomy = size === 'roomy';
+  return {
+    roomy,
+    wrapper: roomy
+      ? { width: '100%', maxWidth: '620px', marginTop: '32px' }
+      : { marginTop: '8px', width: '100%' },
+    sectionWrapper: roomy
+      ? { marginBottom: '2.5rem' }
+      : { marginBottom: '1rem' },
+    sectionLabel: {
+      fontSize: '0.68rem', letterSpacing: '0.18em', textTransform: 'uppercase',
+      color: 'var(--accent)', opacity: 0.6,
+      marginBottom: roomy ? '1.2rem' : '0.8rem',
+      marginTop: roomy ? undefined : '1rem',
+      display: 'flex', alignItems: 'center', gap: '8px',
+      fontFamily: 'var(--sans)',
+    },
+    row: {
+      display: 'flex', alignItems: 'flex-start',
+      gap: roomy ? '12px' : '10px',
+      padding: roomy ? '12px 0' : '8px 0',
+      borderBottom: roomy ? '1px solid #1e1d1a' : '1px solid var(--border)',
+    },
+    circleBase: {
+      width: roomy ? '18px' : '16px',
+      height: roomy ? '18px' : '16px',
+      borderRadius: '50%',
+      flexShrink: 0,
+      marginTop: '2px',
+      transition: 'all 0.3s',
+    },
+    circleCompletedExtra: {
+      border: '1.5px solid var(--accent-dim)',
+      background: 'var(--accent-dim)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      fontSize: roomy ? '0.6rem' : '0.55rem',
+      color: 'var(--bg-deep)', fontWeight: 600,
+    },
+    circleNewExtra: {
+      border: '1.5px solid var(--border-hover)',
+    },
+    itemText: {
+      fontFamily: 'var(--sans)', fontWeight: 300,
+      fontSize: roomy ? '0.92rem' : '0.85rem',
+      color: 'var(--text-secondary)', lineHeight: 1.5,
+    },
+    priorityCard: {
+      display: 'flex', alignItems: 'center',
+      gap: roomy ? '14px' : '10px',
+      padding: roomy ? '14px 16px' : '10px 12px',
+      background: 'var(--bg-card)',
+      border: '1px solid var(--border)',
+      borderRadius: roomy ? '8px' : '6px',
+      marginBottom: roomy ? '8px' : '6px',
+      transition: roomy ? 'all 0.3s' : undefined,
+      cursor: 'default',
+      overflow: roomy ? 'hidden' : undefined,
+    },
+    priorityNumber: {
+      fontFamily: 'var(--serif)',
+      fontSize: roomy ? '1.4rem' : '1.1rem',
+      color: 'var(--accent-dim)', opacity: 0.6,
+      width: roomy ? '24px' : '20px',
+      textAlign: 'center', flexShrink: 0,
+    },
+    priorityText: {
+      fontFamily: 'var(--sans)', fontWeight: 300,
+      fontSize: roomy ? '0.92rem' : '0.85rem',
+      color: 'var(--text-primary)', lineHeight: 1.4,
+      flex: '1 1 auto',
+      minWidth: roomy ? '40%' : undefined,
+      overflowWrap: roomy ? 'break-word' : undefined,
+    },
+    priorityHint: {
+      fontSize: roomy ? '0.75rem' : '0.72rem',
+      color: 'var(--text-muted)',
+      flex: roomy ? '0 1 auto' : undefined,
+      minWidth: roomy ? 0 : undefined,
+      overflowWrap: roomy ? 'break-word' : undefined,
+    },
+    noteText: {
+      fontFamily: 'var(--sans)', fontWeight: 300,
+      fontSize: roomy ? '0.88rem' : '0.82rem',
+      lineHeight: 1.7, color: 'var(--text-muted)',
+      marginTop: roomy ? '2rem' : undefined,
+      marginBottom: roomy ? undefined : '0.8rem',
+    },
+    applyWrapper: roomy
+      ? { textAlign: 'center', marginTop: '24px' }
+      : { marginTop: '8px' },
+    button: {
+      padding: roomy ? '10px 24px' : '7px 18px',
+      background: 'none',
+      border: '1px solid var(--accent)',
+      borderRadius: '6px',
+      color: 'var(--accent)',
+      fontFamily: 'var(--sans)',
+      fontSize: roomy ? '0.85rem' : '0.8rem',
+      fontWeight: 400,
+      cursor: 'pointer',
+    },
+    statusText: roomy
+      ? { fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300 }
+      : { fontFamily: 'var(--sans)', fontSize: '0.72rem' },
+    statusTag: roomy ? 'p' : 'span',
+    issueWrapper: roomy
+      ? { width: '100%', maxWidth: '620px', marginTop: '32px' }
+      : { marginTop: '12px' },
+    issueCard: {
+      padding: roomy ? '20px' : '14px',
+      background: 'var(--bg-card)',
+      border: '1px solid var(--border)',
+      borderRadius: roomy ? '8px' : '6px',
+    },
+    issueTitleStyle: {
+      fontFamily: 'var(--serif)',
+      fontSize: roomy ? '1.2rem' : '1rem',
+      color: 'var(--text-primary)',
+      margin: roomy ? '0 0 12px 0' : '0 0 8px 0',
+      fontWeight: 400,
+    },
+    issueDescStyle: {
+      fontFamily: 'var(--sans)',
+      fontSize: roomy ? '0.88rem' : '0.82rem',
+      fontWeight: 300,
+      color: 'var(--text-secondary)',
+      lineHeight: 1.7,
+      margin: roomy ? '0 0 12px 0' : undefined,
+    },
+    issueCategory: {
+      display: 'inline-block',
+      padding: roomy ? '3px 10px' : '2px 8px',
+      fontSize: roomy ? '0.72rem' : '0.68rem',
+      fontFamily: 'var(--sans)',
+      fontWeight: 400, letterSpacing: '0.08em',
+      textTransform: 'uppercase',
+      borderRadius: roomy ? '12px' : '10px',
+      border: '1px solid var(--accent)',
+      color: 'var(--accent)', opacity: 0.8,
+      marginTop: roomy ? undefined : '6px',
+    },
+    issueButtonWrapper: roomy
+      ? { textAlign: 'center', marginTop: '16px' }
+      : { marginTop: '8px' },
+  };
+}
+
+export default function ProposalInline({
+  content,
+  nodeId,
+  toolCallsMeta,
+  onContentChange,
+  onError,
+  size = 'compact',
+}) {
+  const parsed = parseOrientResponse(content || '');
   const hasTodo = parsed.completed || parsed.newTasks || parsed.priority || parsed.note;
   const hasIssue = parsed.issueTitle && parsed.issueDescription;
   const [applyStatus, setApplyStatus] = useState(null);
@@ -159,8 +339,7 @@ export default function ProposalInline({ content, nodeId, toolCallsMeta, onConte
   const [issueApplyError, setIssueApplyError] = useState(null);
   const [issueResult, setIssueResult] = useState(null);
   const mergePollingRef = useRef(null);
-  // Interactive toggles are only enabled when the parent supplies an
-  // onContentChange callback AND the proposal hasn't been applied yet.
+  const styles = sizeStyles(size);
   const toggleable = typeof onContentChange === 'function'
     && applyStatus !== 'completed'
     && applyStatus !== 'started';
@@ -169,18 +348,22 @@ export default function ProposalInline({ content, nodeId, toolCallsMeta, onConte
     if (!toggleable || !nodeId) return;
     const newContent = moveProposalItem(content, itemText, fromSection, toSection, opts);
     if (newContent === content) return;
-    // Optimistic update; parent updates its copy of the content.
     const prevContent = content;
     onContentChange(newContent);
     api.put(`/nodes/${nodeId}`, { content: newContent }).catch((err) => {
       console.error('Failed to toggle proposal item:', err);
       onContentChange(prevContent);
+      if (onError) {
+        const reason = err.response?.data?.error || err.response?.statusText || err.message || 'Unknown error';
+        onError(`Couldn't save change — reverted (${reason})`);
+      }
     });
-  }, [content, nodeId, onContentChange, toggleable]);
+  }, [content, nodeId, onContentChange, onError, toggleable]);
 
   useEffect(() => {
     if (!toolCallsMeta) return;
     const todoEntry = toolCallsMeta.find(tc => tc.name === 'propose_todo');
+    const applyTodoCall = toolCallsMeta.find(tc => tc.name === 'apply_todo_changes');
     if (todoEntry) {
       if (todoEntry.apply_status === 'completed') setApplyStatus('completed');
       else if (todoEntry.apply_status === 'failed') {
@@ -189,11 +372,18 @@ export default function ProposalInline({ content, nodeId, toolCallsMeta, onConte
       } else if (todoEntry.apply_status === 'started') {
         setApplyStatus('started');
       }
+    } else if (applyTodoCall && applyTodoCall.status === 'success') {
+      // Direct apply without a preceding proposal.
+      setApplyStatus('completed');
     }
     const issueEntry = toolCallsMeta.find(tc => tc.name === 'propose_github_issue');
+    const applyIssueCall = toolCallsMeta.find(tc => tc.name === 'apply_github_issue');
     if (issueEntry && issueEntry.apply_status === 'completed') {
       setIssueApplyStatus('completed');
       setIssueResult({ issue_url: issueEntry.issue_url, issue_number: issueEntry.issue_number });
+    } else if (applyIssueCall && applyIssueCall.status === 'success') {
+      setIssueApplyStatus('completed');
+      setIssueResult({ issue_url: applyIssueCall.issue_url, issue_number: applyIssueCall.issue_number });
     }
   }, [toolCallsMeta]);
 
@@ -252,100 +442,80 @@ export default function ProposalInline({ content, nodeId, toolCallsMeta, onConte
 
   const hasTodoUpdate = hasTodo || toolCallsMeta?.some(tc => tc.name === 'propose_todo');
   const hasGithubIssue = hasIssue || toolCallsMeta?.some(tc => tc.name === 'propose_github_issue');
+  const hasPrefsUpdate = toolCallsMeta?.some(
+    tc => tc.name === 'update_ai_preferences' && tc.status === 'success'
+  );
 
-  if (!hasTodoUpdate && !hasGithubIssue) return null;
+  if (!hasTodoUpdate && !hasGithubIssue && !hasPrefsUpdate) return null;
 
-  const sectionLabelStyle = {
-    fontSize: '0.68rem', letterSpacing: '0.18em', textTransform: 'uppercase',
-    color: 'var(--accent)', opacity: 0.6, marginBottom: '0.8rem', marginTop: '1rem',
-    display: 'flex', alignItems: 'center', gap: '8px',
-    fontFamily: 'var(--sans)',
-  };
+  const StatusTag = styles.statusTag;
+  const sectionLabel = (text) => (
+    <div style={styles.sectionLabel}>
+      {styles.roomy && <AiDot />}
+      {text}
+    </div>
+  );
 
   return (
-    <div style={{ marginTop: '8px', width: '100%' }}>
+    <div style={styles.wrapper}>
       {hasTodo && (
         <div>
           {(parsed.completed || parsed.newTasks) && (
-            <div style={{ marginBottom: '1rem' }}>
-              <div style={sectionLabelStyle}>Updated from your sharing</div>
+            <div style={styles.sectionWrapper}>
+              {sectionLabel('Updated from your sharing')}
               {parsed.completed && parseTodoItems(parsed.completed).map((item, i) => (
-                <div key={`done-${i}`} style={{
-                  display: 'flex', alignItems: 'flex-start', gap: '10px',
-                  padding: '8px 0', borderBottom: '1px solid var(--border)',
-                }}>
+                <div key={`done-${i}`} style={styles.row}>
                   <div
                     onClick={toggleable
                       ? () => handleToggleItem(item, 'completed', 'new task', { prepend: true })
                       : undefined}
                     title={toggleable ? 'Unmark as done' : undefined}
                     style={{
-                      width: '16px', height: '16px', borderRadius: '50%',
-                      border: '1.5px solid var(--accent-dim)', background: 'var(--accent-dim)',
-                      flexShrink: 0, marginTop: '2px',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      fontSize: '0.55rem', color: 'var(--bg-deep)', fontWeight: 600,
+                      ...styles.circleBase,
+                      ...styles.circleCompletedExtra,
                       cursor: toggleable ? 'pointer' : 'default',
-                      transition: 'all 0.2s',
                     }}
                   >✓</div>
                   <div style={{
-                    fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.85rem',
-                    color: 'var(--text-secondary)', lineHeight: 1.5,
+                    ...styles.itemText,
                     textDecoration: 'line-through', opacity: 0.4,
                   }}>{item}</div>
                 </div>
               ))}
               {parsed.newTasks && parseTodoItems(parsed.newTasks).map((item, i) => (
-                <div key={`new-${i}`} style={{
-                  display: 'flex', alignItems: 'flex-start', gap: '10px',
-                  padding: '8px 0', borderBottom: '1px solid var(--border)',
-                }}>
+                <div key={`new-${i}`} style={styles.row}>
                   <div
                     onClick={toggleable
                       ? () => handleToggleItem(item, 'new task', 'completed')
                       : undefined}
                     title={toggleable ? 'Mark as done' : undefined}
                     style={{
-                      width: '16px', height: '16px', borderRadius: '50%',
-                      border: '1.5px solid var(--border-hover)',
-                      flexShrink: 0, marginTop: '2px',
+                      ...styles.circleBase,
+                      ...styles.circleNewExtra,
                       cursor: toggleable ? 'pointer' : 'default',
-                      transition: 'all 0.2s',
                     }}
                   />
-                  <div style={{
-                    fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.85rem',
-                    color: 'var(--text-secondary)', lineHeight: 1.5,
-                  }}>{item}</div>
+                  <div style={styles.itemText}>{item}</div>
                 </div>
               ))}
             </div>
           )}
 
           {parsed.priority && (
-            <div style={{ marginBottom: '1rem' }}>
-              <div style={sectionLabelStyle}>Suggested priority order</div>
+            <div style={styles.sectionWrapper}>
+              {sectionLabel('Suggested priority order')}
               {parsePriorityItems(parsed.priority).map((item, i) => (
-                <div key={`pri-${i}`} style={{
-                  display: 'flex', alignItems: 'center', gap: '10px',
-                  padding: '10px 12px', background: 'var(--bg-card)',
-                  border: '1px solid var(--border)', borderRadius: '6px',
-                  marginBottom: '6px',
-                }}>
-                  <span style={{
-                    fontFamily: 'var(--serif)', fontSize: '1.1rem',
-                    color: 'var(--accent-dim)', opacity: 0.6,
-                    width: '20px', textAlign: 'center', flexShrink: 0,
-                  }}>{i + 1}</span>
-                  <span style={{
-                    fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.85rem',
-                    color: 'var(--text-primary)', lineHeight: 1.4, flex: '1 1 auto',
-                  }}>{item.text}</span>
+                <div key={`pri-${i}`} style={styles.priorityCard}>
+                  <span style={styles.priorityNumber}>{i + 1}</span>
+                  <span style={styles.priorityText}>{item.text}</span>
                   {item.hint && (
+                    <span style={styles.priorityHint}>{item.hint}</span>
+                  )}
+                  {styles.roomy && (
                     <span style={{
-                      fontSize: '0.72rem', color: 'var(--text-muted)',
-                    }}>{item.hint}</span>
+                      color: 'var(--text-muted)', opacity: 0.3,
+                      fontSize: '0.9rem', letterSpacing: '2px', flexShrink: 0,
+                    }}>⋮⋮</span>
                   )}
                 </div>
               ))}
@@ -353,11 +523,7 @@ export default function ProposalInline({ content, nodeId, toolCallsMeta, onConte
           )}
 
           {parsed.note && (
-            <div style={{
-              fontFamily: 'var(--sans)', fontWeight: 300,
-              fontSize: '0.82rem', lineHeight: 1.7, color: 'var(--text-muted)',
-              marginBottom: '0.8rem',
-            }}>
+            <div style={styles.noteText}>
               <span style={{ color: 'var(--text-secondary)' }}>A note: </span>
               {parsed.note}
             </div>
@@ -366,102 +532,88 @@ export default function ProposalInline({ content, nodeId, toolCallsMeta, onConte
       )}
 
       {hasTodoUpdate && (
-        <div style={{ marginTop: '8px' }}>
+        <div style={styles.applyWrapper}>
           {!applyStatus && (
-            <button
-              onClick={handleApplyTodo}
-              style={{
-                padding: '7px 18px', background: 'none',
-                border: '1px solid var(--accent)', borderRadius: '6px',
-                color: 'var(--accent)', fontFamily: 'var(--sans)',
-                fontSize: '0.8rem', fontWeight: 400, cursor: 'pointer',
-              }}
-            >
-              Confirm changes
+            <button onClick={handleApplyTodo} style={styles.button}>
+              Apply changes to my Todo
             </button>
           )}
           {applyStatus === 'started' && (
-            <span style={{ fontFamily: 'var(--sans)', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-              Applying...
-            </span>
+            <StatusTag style={{ ...styles.statusText, color: 'var(--text-muted)' }}>
+              Todo update started…
+            </StatusTag>
           )}
           {applyStatus === 'completed' && (
-            <span style={{ fontFamily: 'var(--sans)', fontSize: '0.72rem', color: '#4ade80' }}>
+            <StatusTag style={{ ...styles.statusText, color: '#4ade80' }}>
               Todo updated
-            </span>
+            </StatusTag>
           )}
           {applyStatus === 'error' && (
-            <span style={{ fontFamily: 'var(--sans)', fontSize: '0.72rem', color: 'var(--accent)' }}>
-              {applyError || 'Update failed'}
-            </span>
+            <StatusTag style={{ ...styles.statusText, color: 'var(--accent)' }}>
+              {applyError || 'Todo update failed'}
+            </StatusTag>
           )}
         </div>
       )}
 
       {hasGithubIssue && parsed.issueTitle && (
-        <div style={{ marginTop: '12px' }}>
-          <div style={sectionLabelStyle}>GitHub Issue</div>
-          <div style={{
-            padding: '14px', background: 'var(--bg-card)',
-            border: '1px solid var(--border)', borderRadius: '6px',
-          }}>
-            <h4 style={{
-              fontFamily: 'var(--serif)', fontSize: '1rem',
-              color: 'var(--text-primary)', margin: '0 0 8px 0', fontWeight: 400,
-            }}>{parsed.issueTitle}</h4>
+        <div style={styles.issueWrapper}>
+          {sectionLabel(styles.roomy ? 'GitHub Issue Proposal' : 'GitHub Issue')}
+          <div style={styles.issueCard}>
+            <h3 style={styles.issueTitleStyle}>{parsed.issueTitle}</h3>
             {parsed.issueDescription && (
-              <MarkdownBody style={{
-                fontFamily: 'var(--sans)', fontSize: '0.82rem', fontWeight: 300,
-                color: 'var(--text-secondary)', lineHeight: 1.7,
-              }} paragraphMargin="0 0 6px 0">
+              <MarkdownBody
+                style={styles.issueDescStyle}
+                paragraphMargin={styles.roomy ? '0 0 8px 0' : '0 0 6px 0'}
+              >
                 {parsed.issueDescription}
               </MarkdownBody>
             )}
             {parsed.issueCategory && (
-              <span style={{
-                display: 'inline-block', padding: '2px 8px',
-                fontSize: '0.68rem', fontFamily: 'var(--sans)',
-                fontWeight: 400, letterSpacing: '0.08em',
-                textTransform: 'uppercase', borderRadius: '10px',
-                border: '1px solid var(--accent)',
-                color: 'var(--accent)', opacity: 0.8, marginTop: '6px',
-              }}>{parsed.issueCategory}</span>
+              <span style={styles.issueCategory}>{parsed.issueCategory}</span>
             )}
           </div>
-          <div style={{ marginTop: '8px' }}>
+          <div style={styles.issueButtonWrapper}>
             {!issueApplyStatus && (
-              <button
-                onClick={handleCreateIssue}
-                style={{
-                  padding: '7px 18px', background: 'none',
-                  border: '1px solid var(--accent)', borderRadius: '6px',
-                  color: 'var(--accent)', fontFamily: 'var(--sans)',
-                  fontSize: '0.8rem', fontWeight: 400, cursor: 'pointer',
-                }}
-              >
-                Create issue
+              <button onClick={handleCreateIssue} style={styles.button}>
+                {styles.roomy ? 'Create GitHub Issue' : 'Create issue'}
               </button>
             )}
             {issueApplyStatus === 'started' && (
-              <span style={{ fontFamily: 'var(--sans)', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                Creating...
-              </span>
+              <StatusTag style={{ ...styles.statusText, color: 'var(--text-muted)' }}>
+                Creating issue…
+              </StatusTag>
             )}
             {issueApplyStatus === 'completed' && (
-              <span style={{ fontFamily: 'var(--sans)', fontSize: '0.72rem', color: '#4ade80' }}>
+              <StatusTag style={{ ...styles.statusText, color: '#4ade80' }}>
                 Issue created{issueResult?.issue_url && (
-                  <> — <a href={issueResult.issue_url} target="_blank" rel="noopener noreferrer"
-                    style={{ color: '#4ade80', textDecoration: 'underline' }}>#{issueResult.issue_number}</a></>
+                  <> — <a
+                    href={issueResult.issue_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{ color: '#4ade80', textDecoration: 'underline' }}
+                  >#{issueResult.issue_number}</a></>
                 )}
-              </span>
+              </StatusTag>
             )}
             {issueApplyStatus === 'error' && (
-              <span style={{ fontFamily: 'var(--sans)', fontSize: '0.72rem', color: 'var(--accent)' }}>
+              <StatusTag style={{ ...styles.statusText, color: 'var(--accent)' }}>
                 {issueApplyError || 'Issue creation failed'}
-              </span>
+              </StatusTag>
             )}
           </div>
         </div>
+      )}
+
+      {hasPrefsUpdate && (
+        <p style={{
+          fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
+          color: '#4ade80',
+          textAlign: styles.roomy ? 'center' : 'left',
+          marginTop: '16px',
+        }}>
+          Preferences updated
+        </p>
       )}
     </div>
   );
