@@ -41,7 +41,7 @@ const cards = [
     key: "textmode",
     path: "/textmode",
     title: "Text Mode",
-    description: "Ask anything. Think out loud.",
+    description: "Type what's on your mind.",
     icon: (
       <svg width="42" height="42" viewBox="0 0 42 42" fill="none">
         <path d="M8 12 C8 9.8 9.8 8 12 8 L30 8 C32.2 8 34 9.8 34 12 L34 24 C34 26.2 32.2 28 30 28 L16 28 L10 33 L10 28 L12 28 C9.8 28 8 26.2 8 24 Z"

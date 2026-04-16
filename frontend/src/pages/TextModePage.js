@@ -612,7 +612,7 @@ export default function TextModePage() {
               color: 'var(--text-muted)',
               marginTop: '16px',
             }}>
-              Ask anything. Think out loud.
+              Type what's on your mind.
             </p>
           </div>
         )}
