@@ -484,6 +484,44 @@ export default function VoicePage() {
     background: 'radial-gradient(ellipse at 50% 40%, rgba(196,149,106,0.06) 0%, transparent 70%)',
   };
 
+  // Rendered in every phase so the user can escape to Text Mode at any
+  // time. Position: fixed so it anchors to the viewport regardless of
+  // which return branch is active.
+  const textModeButton = (
+    <button
+      key="text-mode-btn"
+      onClick={() => {
+        if (lastLlmNodeIdRef.current) {
+          navigate(`/node/${lastLlmNodeIdRef.current}`);
+        } else {
+          navigate('/textmode');
+        }
+      }}
+      title="Continue in Text Mode"
+      style={{
+        position: 'fixed',
+        top: '72px',
+        right: '20px',
+        background: 'none',
+        border: '1px solid var(--border)',
+        borderRadius: '6px',
+        padding: '6px 12px',
+        color: 'var(--text-muted)',
+        fontFamily: 'var(--sans)',
+        fontSize: '0.78rem',
+        fontWeight: 300,
+        cursor: 'pointer',
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: '6px',
+        zIndex: 50,
+      }}
+    >
+      <FaKeyboard size={11} />
+      <span>Text Mode</span>
+    </button>
+  );
+
   const controlButtonStyle = (active = true) => ({
     background: 'none',
     border: 'none',
@@ -518,12 +556,13 @@ export default function VoicePage() {
   }, [showRecovery, audio]);
 
   if (!recoveryChecked) {
-    return <div style={containerStyle} />;
+    return <div style={containerStyle}>{textModeButton}</div>;
   }
 
   if (showRecovery) {
     return (
       <div style={containerStyle}>
+        {textModeButton}
         <RecoveryBanner
           draft={interruptedDraft}
           onContinue={() => {
@@ -548,6 +587,7 @@ export default function VoicePage() {
   if (phase === 'ready' || phase === 'recording') {
     return (
       <div style={containerStyle}>
+        {textModeButton}
         <p style={{
           fontFamily: 'var(--serif)',
           fontStyle: 'italic',
@@ -639,6 +679,7 @@ export default function VoicePage() {
   if (phase === 'processing') {
     return (
       <div style={containerStyle}>
+        {textModeButton}
         <EcgAnimation active={true} showScanline={false} />
         <PulsingDot />
         <p style={{
@@ -691,37 +732,7 @@ export default function VoicePage() {
       background: 'radial-gradient(ellipse at 50% 40%, rgba(196,149,106,0.06) 0%, transparent 70%)',
       position: 'relative',
     }}>
-      <button
-        onClick={() => {
-          if (lastLlmNodeIdRef.current) {
-            navigate(`/node/${lastLlmNodeIdRef.current}`);
-          } else {
-            navigate('/textmode');
-          }
-        }}
-        title="Continue in Text Mode"
-        style={{
-          position: 'absolute',
-          top: '24px',
-          right: '24px',
-          background: 'none',
-          border: '1px solid var(--border)',
-          borderRadius: '6px',
-          padding: '6px 12px',
-          color: 'var(--text-muted)',
-          fontFamily: 'var(--sans)',
-          fontSize: '0.78rem',
-          fontWeight: 300,
-          cursor: 'pointer',
-          display: 'inline-flex',
-          alignItems: 'center',
-          gap: '6px',
-          zIndex: 2,
-        }}
-      >
-        <FaKeyboard size={11} />
-        <span>Text Mode</span>
-      </button>
+      {textModeButton}
       <EcgAnimation
         active={audio.isPlaying}
         dim={!audio.isPlaying}

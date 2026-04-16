@@ -414,3 +414,85 @@ class TestVoiceFromNodeAiUsageInheritance:
         llm_node = Node.query.get(data["llm_node_id"])
         system_node = Node.query.get(llm_node.parent_id)
         assert system_node.ai_usage == "train"
+
+
+class TestVoiceFromNodeAgenticAncestryBridge:
+    """Verify that a `textmode` prompt in ancestry counts as an agentic
+    prompt being present — switching from text mode to voice mode must
+    NOT re-attach a voice prompt node (the two keys share agentic.txt).
+    """
+
+    def _count_prompt_ancestors(self, node_id):
+        """Walk up from node_id counting nodes that link a UserPrompt."""
+        count = 0
+        current = Node.query.get(node_id)
+        while current is not None:
+            prompt = current.get_artifact("prompt")
+            if prompt is not None:
+                count += 1
+            if current.parent_id is None:
+                break
+            current = Node.query.get(current.parent_id)
+        return count
+
+    def test_textmode_prompt_satisfies_voice_check_on_user_node(self, app):
+        """Textmode prompt + user node → voice endpoint creates an LLM
+        placeholder directly, does NOT append a second prompt node."""
+        client = app.test_client()
+        alice = _make_user("alice")
+
+        textmode_root = _make_prompt_node(alice, "textmode")
+        user_msg = _make_node(
+            alice, parent_id=textmode_root.id, content="typed",
+        )
+        _db.session.commit()
+
+        before = self._count_prompt_ancestors(user_msg.id)
+        assert before == 1  # just the textmode root
+
+        _login(client, alice.id)
+        resp = client.post(
+            f"/api/voice/from-node/{user_msg.id}",
+            json={"model": "gpt-5"},
+        )
+        assert resp.status_code == 202
+        data = resp.get_json()
+
+        llm_node = Node.query.get(data["llm_node_id"])
+        # LLM should be child of user_msg (no new prompt node in between)
+        assert llm_node.parent_id == user_msg.id
+        assert self._count_prompt_ancestors(llm_node.id) == 1
+
+    def test_textmode_prompt_satisfies_voice_check_on_llm_node(self, app):
+        """Textmode prompt + LLM node → voice endpoint re-plays (mode =
+        processing, llm_node_id = the existing node) without appending
+        a new prompt."""
+        client = app.test_client()
+        alice = _make_user("alice")
+        llm_user = _make_user("gpt-5", twitter_id="llm-gpt-5")
+
+        textmode_root = _make_prompt_node(alice, "textmode")
+        user_msg = _make_node(
+            alice, parent_id=textmode_root.id, content="typed",
+        )
+        llm_node = _make_node(
+            llm_user, parent_id=user_msg.id, content="reply",
+            node_type="llm", llm_model="gpt-5", human_owner=alice,
+        )
+        _db.session.commit()
+
+        before = self._count_prompt_ancestors(llm_node.id)
+        assert before == 1
+
+        _login(client, alice.id)
+        resp = client.post(
+            f"/api/voice/from-node/{llm_node.id}",
+            json={"model": "gpt-5"},
+        )
+        # Existing LLM + prompt present → 200 processing (TTS playback)
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["mode"] == "processing"
+        assert data["llm_node_id"] == llm_node.id
+        # No new prompt node should have been appended anywhere in the tree
+        assert self._count_prompt_ancestors(llm_node.id) == 1

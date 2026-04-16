@@ -12,6 +12,11 @@ from backend.utils.session_helpers import (
 voice_bp = Blueprint("voice", __name__)
 
 PROMPT_KEY = 'voice'
+# Keys that share the unified agentic.txt template. Any of these counts
+# as "an agentic prompt is already attached" when walking ancestry, so
+# bridging a text thread into voice mode (or vice-versa) doesn't append
+# a second prompt node.
+AGENTIC_PROMPT_KEYS = ('voice', 'textmode')
 
 
 @voice_bp.route("/from-node/<int:node_id>", methods=["POST"])
@@ -36,7 +41,7 @@ def create_voice_from_node(node_id):
     # Inherit ai_usage from the target node
     ai_usage = node.ai_usage or current_user.default_ai_usage
 
-    has_prompt = ancestors_have_prompt(node, current_user.id, PROMPT_KEY)
+    has_prompt = ancestors_have_prompt(node, current_user.id, AGENTIC_PROMPT_KEYS)
     is_llm = is_llm_node(node)
 
     if has_prompt and not is_llm:
