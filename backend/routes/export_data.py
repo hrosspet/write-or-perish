@@ -6,7 +6,7 @@ from backend.models import (
 )
 from backend.extensions import db
 from backend.utils.tokens import approximate_token_count, get_model_context_window
-from backend.utils.privacy import AI_ALLOWED
+from backend.utils.privacy import AI_ALLOWED, accessible_nodes_filter, can_user_access_node
 from backend.utils.quotes import (
     resolve_quotes, has_quotes, ExportQuoteResolver, resolve_quotes_for_export
 )
@@ -102,15 +102,17 @@ def format_node_tree(
     header_level = min(depth + 1, 6)  # +1 because thread title uses #
     header_prefix = "#" * header_level
 
-    author = node.user.username if node.user else "Unknown"
-    node_type_display = "AI" if node.node_type == "llm" else "User"
-    if node.node_type == "llm" and node.llm_model:
-        node_type_display = f"AI ({node.llm_model})"
-
     timestamp = node.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
 
+    # Build author label: "User (username)" or "AI (model)" (no redundant repetition)
+    if node.node_type == "llm":
+        author_label = f"AI ({node.llm_model})" if node.llm_model else "AI (unknown)"
+    else:
+        author = node.user.username if node.user else "Unknown"
+        author_label = f"User ({author})"
+
     # Build the node text - no content indentation for token efficiency
-    result = f"{header_prefix} [{index_path}] {node_type_display} ({author}) - {timestamp}\n"
+    result = f"{header_prefix} [{index_path}] {author_label} - {timestamp}\n"
 
     # System prompt nodes: emit reference instead of full content
     # Check new artifact system first, then legacy FK
@@ -164,6 +166,48 @@ def format_node_tree(
             child_index = f"{index_path}.{i+1}"
             if len(children) > 1 and i > 0:
                 result += "---\n**BRANCH**\n---\n\n"
+
+            # Privacy check: replace inaccessible node content with
+            # placeholder but still recurse into accessible children.
+            if user_id and not can_user_access_node(child, user_id):
+                child_depth = len(child_index.split('.'))
+                child_header = "#" * min(child_depth + 1, 6)
+                if child.node_type == "llm":
+                    child_label = f"AI ({child.llm_model})" if child.llm_model else "AI (unknown)"
+                else:
+                    ca = child.user.username if child.user else "Unknown"
+                    child_label = f"User ({ca})"
+                child_ts = child.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+                result += (
+                    f"{child_header} [{child_index}] {child_label}"
+                    f" - {child_ts}\n"
+                    f"[Content not accessible — private node by another user]\n\n"
+                )
+                # Still recurse into children (they may be accessible)
+                processed_nodes.add(child.id)
+                grandchildren = child.children
+                if filter_ai_usage:
+                    grandchildren = [c for c in grandchildren if c.ai_usage in AI_ALLOWED]
+                if created_before:
+                    grandchildren = [c for c in grandchildren if c.created_at < created_before]
+                if included_ids is not None:
+                    grandchildren = [c for c in grandchildren
+                                     if c.id in included_ids]
+                grandchildren = sorted(grandchildren, key=lambda c: c.created_at)
+                for j, gc in enumerate(grandchildren):
+                    gc_index = f"{child_index}.{j+1}"
+                    result += format_node_tree(
+                        gc, index_path=gc_index,
+                        processed_nodes=processed_nodes,
+                        filter_ai_usage=filter_ai_usage,
+                        user_id=user_id,
+                        created_before=created_before,
+                        embedded_quotes=embedded_quotes,
+                        included_ids=included_ids,
+                        ai_blocked_ids=ai_blocked_ids,
+                    )
+                continue
+
             result += format_node_tree(
                 child, index_path=child_index,
                 processed_nodes=processed_nodes,
@@ -214,6 +258,47 @@ def format_node_tree(
         if len(children) > 1 and i > 0:
             result += "---\n**BRANCH**\n---\n\n"
 
+        # Privacy check: replace inaccessible node content with
+        # placeholder but still recurse into accessible children.
+        if user_id and not can_user_access_node(child, user_id):
+            child_depth = len(child_index.split('.'))
+            child_header = "#" * min(child_depth + 1, 6)
+            if child.node_type == "llm":
+                child_label = f"AI ({child.llm_model})" if child.llm_model else "AI (unknown)"
+            else:
+                ca = child.user.username if child.user else "Unknown"
+                child_label = f"User ({ca})"
+            child_ts = child.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+            result += (
+                f"{child_header} [{child_index}] {child_label}"
+                f" - {child_ts}\n"
+                f"[Content not accessible — private node by another user]\n\n"
+            )
+            # Still recurse into children (they may be accessible)
+            processed_nodes.add(child.id)
+            grandchildren = child.children
+            if filter_ai_usage:
+                grandchildren = [c for c in grandchildren if c.ai_usage in AI_ALLOWED]
+            if created_before:
+                grandchildren = [c for c in grandchildren if c.created_at < created_before]
+            if included_ids is not None:
+                grandchildren = [c for c in grandchildren
+                                 if c.id in included_ids]
+            grandchildren = sorted(grandchildren, key=lambda c: c.created_at)
+            for j, gc in enumerate(grandchildren):
+                gc_index = f"{child_index}.{j+1}"
+                result += format_node_tree(
+                    gc, index_path=gc_index,
+                    processed_nodes=processed_nodes,
+                    filter_ai_usage=filter_ai_usage,
+                    user_id=user_id,
+                    created_before=created_before,
+                    embedded_quotes=embedded_quotes,
+                    included_ids=included_ids,
+                    ai_blocked_ids=ai_blocked_ids,
+                )
+            continue
+
         result += format_node_tree(
             child,
             index_path=child_index,
@@ -229,15 +314,18 @@ def format_node_tree(
     return result
 
 
-def _collect_all_nodes_in_tree(node, filter_ai_usage=False, created_before=None, collected=None):
+def _collect_all_nodes_in_tree(node, filter_ai_usage=False, created_before=None,
+                               collected=None, user_id=None):
     """
-    Recursively collect all nodes in a tree.
+    Recursively collect all accessible nodes in a tree.
 
     Args:
         node: Root node of the tree
         filter_ai_usage: If True, only include nodes where ai_usage is 'chat' or 'train'
         created_before: Optional datetime filter
         collected: Set of already collected node IDs (to avoid duplicates)
+        user_id: If provided, skip inaccessible nodes but still recurse
+                into their children (which may be accessible).
 
     Returns:
         List of Node objects in the tree
@@ -249,7 +337,12 @@ def _collect_all_nodes_in_tree(node, filter_ai_usage=False, created_before=None,
         return []
 
     collected.add(node.id)
-    result = [node]
+
+    # Only include the node itself if it's accessible (or no user_id check)
+    if user_id and not can_user_access_node(node, user_id):
+        result = []
+    else:
+        result = [node]
 
     children = node.children
     if filter_ai_usage:
@@ -259,7 +352,7 @@ def _collect_all_nodes_in_tree(node, filter_ai_usage=False, created_before=None,
 
     for child in children:
         result.extend(_collect_all_nodes_in_tree(
-            child, filter_ai_usage, created_before, collected
+            child, filter_ai_usage, created_before, collected, user_id
         ))
 
     return result
@@ -270,9 +363,23 @@ def _preselect_node_ids(user_id, budget, filter_ai_usage=False,
                         chronological_order=False):
     """Select node IDs that fit within a token budget using a SQL window function.
 
-    Returns a list of node IDs ordered by created_at (direction controlled
-    by chronological_order).  No nodes are loaded or decrypted.
+    Uses a recursive CTE to find all descendants of the user's top-level
+    threads, then filters to accessible nodes only.  Returns a list of
+    node IDs ordered by created_at (direction controlled by
+    chronological_order).  No nodes are loaded or decrypted.
     """
+    # Recursive CTE: all node IDs in the user's thread trees
+    base = db.session.query(Node.id).filter(
+        Node.user_id == user_id,
+        Node.parent_id.is_(None),
+    ).cte(name="thread_nodes", recursive=True)
+
+    thread_child = db.aliased(Node, flat=True)
+    recursive = db.session.query(thread_child.id).join(
+        base, thread_child.parent_id == base.c.id
+    )
+    thread_cte = base.union_all(recursive)
+
     sort_order = (
         Node.created_at.asc() if chronological_order
         else Node.created_at.desc()
@@ -282,7 +389,8 @@ def _preselect_node_ids(user_id, budget, filter_ai_usage=False,
     ).label("cumul")
 
     inner = db.session.query(Node.id, cumul).filter(
-        Node.user_id == user_id,
+        Node.id.in_(db.session.query(thread_cte.c.id)),
+        accessible_nodes_filter(Node, user_id),
     )
     if filter_ai_usage:
         inner = inner.filter(Node.ai_usage.in_(AI_ALLOWED))
@@ -504,7 +612,8 @@ def build_user_export_content(
         ai_prefs_versions = {}
         for top_node in top_level_nodes:
             tree_nodes = _collect_all_nodes_in_tree(
-                top_node, filter_ai_usage, created_before
+                top_node, filter_ai_usage, created_before,
+                user_id=user.id,
             )
             for n in tree_nodes:
                 # Prompt artifacts
@@ -657,7 +766,8 @@ def build_user_export_content(
             meta_nodes = []
             for top_node in top_level_nodes:
                 meta_nodes.extend(_collect_all_nodes_in_tree(
-                    top_node, filter_ai_usage, created_before
+                    top_node, filter_ai_usage, created_before,
+                    user_id=user.id,
                 ))
             if created_after:
                 meta_nodes = [
