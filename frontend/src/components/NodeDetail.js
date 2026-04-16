@@ -8,6 +8,7 @@ import ModelSelector from "./ModelSelector";
 import NodeForm from "./NodeForm";
 import ProposalInline, { hasProposalSections, stripProposalSections } from "./ProposalInline";
 import { useUser } from "../contexts/UserContext";
+import { useToast } from "../contexts/ToastContext";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 import api from "../api";
 import { useCheckboxToggle } from "../utils/markdown";
@@ -47,6 +48,7 @@ function NodeDetail() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { user: currentUser } = useUser();
+  const { addToast } = useToast();
   const craftMode = !!currentUser?.craft_mode;
   const [node, setNode] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -598,6 +600,7 @@ function NodeDetail() {
             onContentChange={isOwner
               ? (newContent) => setNode(prev => prev ? { ...prev, content: newContent } : prev)
               : undefined}
+            onError={(msg) => addToast(msg)}
           />
         )}
         {(() => {
