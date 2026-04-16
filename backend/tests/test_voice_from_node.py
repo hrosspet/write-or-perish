@@ -7,11 +7,6 @@ Verifies the 4-case behavior matrix:
   no prompt      + LLM node   → processing (system prompt created)
 
 Also verifies authorization and ancestor-walking prompt detection.
-
-NOTE: This file is named test_from_node_* (not test_voice_*) so that it
-is collected alphabetically before test_quotes.py, which replaces
-backend.models with a MagicMock at module level.  The force-import pattern
-used here (shared with test_audio_access.py) cannot recover from that.
 """
 
 import os
@@ -47,19 +42,17 @@ import pytest  # noqa: E402
 from flask import Flask  # noqa: E402
 
 # ── Force-import real modules ────────────────────────────────────────────
-for _mod in [k for k in list(sys.modules)
-             if k == "flask_login" or k.startswith("backend.")]:
-    _m = sys.modules[_mod]
-    if isinstance(_m, MagicMock):
+# Only evict specific mocks that other test files may have installed.
+# Do NOT blanket-remove all backend.* mocks — this file legitimately mocks
+# backend.tasks.llm_completion above and that must be preserved.
+for _mod in ["flask_login", "backend.models", "backend.extensions"]:
+    if _mod in sys.modules and isinstance(sys.modules[_mod], MagicMock):
         del sys.modules[_mod]
 
 import flask_login as _real_flask_login          # noqa: E402
 from backend.extensions import db as _db         # noqa: E402
 from backend.models import User, Node, NodeContextArtifact, UserPrompt  # noqa: E402
 import backend.models as _real_backend_models    # noqa: E402
-
-# Re-register task mock after force-import loop
-sys.modules["backend.tasks.llm_completion"] = _mock_llm_task_module
 
 
 def _make_app():

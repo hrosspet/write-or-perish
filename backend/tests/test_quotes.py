@@ -14,9 +14,10 @@ sys.modules['celery'] = mock_celery
 sys.modules['celery.utils'] = MagicMock()
 sys.modules['celery.utils.log'] = MagicMock()
 
-# Mock backend.models for tests that need Node
+# Mock backend.models so the import of quotes.py doesn't pull in
+# SQLAlchemy models, but keep it as a module-level variable only —
+# do NOT insert it into sys.modules (that breaks other test files).
 mock_models = MagicMock()
-sys.modules['backend.models'] = mock_models
 
 from backend.utils.quotes import (  # noqa: E402
     find_quote_ids,
@@ -422,10 +423,19 @@ class TestResolveQuotesForExport:
 
     def setup_method(self):
         """Set up mock Node for each test."""
+        # Patch backend.models in sys.modules so that lazy imports
+        # inside resolve_quotes_for_export pick up the mock.
+        self._patcher = patch.dict(
+            sys.modules, {'backend.models': mock_models}
+        )
+        self._patcher.start()
         # Configure the mock Node in backend.models
         self.mock_node = MagicMock()
         self.mock_node.user.username = "alice"
         mock_models.Node.query.get.return_value = self.mock_node
+
+    def teardown_method(self):
+        self._patcher.stop()
 
     def test_no_quotes_unchanged(self):
         """Test that content without quotes is unchanged."""
@@ -639,11 +649,9 @@ class TestAiUsageFiltering:
         # Node 1 quotes external Node 99 (ai_usage='none')
         resolver.add_node(1, now, "A says {quote:99}")
 
-        # Mock _get_node_metadata for the external node
-        original_get_metadata = resolver._get_node_metadata
-
+        # Replace _get_node_metadata entirely — the original would hit the DB
         def mock_get_metadata(node_id):
-            cached = original_get_metadata(node_id)
+            cached = resolver._node_cache.get(node_id)
             if cached is not None:
                 return cached
             if node_id == 99:
@@ -701,10 +709,11 @@ class TestAiUsageFiltering:
         }
 
         content = "See {quote:10}"
-        result = resolve_quotes_for_export(
-            content, node_id=1, embedded_quotes=embedded_quotes,
-            user_id=1, ai_blocked_ids=None
-        )
+        with patch.dict(sys.modules, {'backend.models': mock_models}):
+            result = resolve_quotes_for_export(
+                content, node_id=1, embedded_quotes=embedded_quotes,
+                user_id=1, ai_blocked_ids=None
+            )
 
         assert "Embedded content" in result
         assert "AI usage not permitted" not in result
@@ -849,7 +858,8 @@ class TestExportPromptResolver:
         assert "reflective writing coach" in preamble
         assert "ref #42" in preamble
 
-    def test_artifacts_tracked_in_referenced(self):
+    @patch.object(ExportQuoteResolver, '_load_artifact_content', return_value="mocked")
+    def test_artifacts_tracked_in_referenced(self, _mock_load):
         """Artifact tuples are tracked in referenced_artifacts after resolve."""
         resolver = ExportQuoteResolver(user_id=1, max_tokens=500)
 
@@ -869,7 +879,8 @@ class TestExportPromptResolver:
         assert 7 in resolver.referenced_artifacts["profile"]
         assert 3 in resolver.referenced_artifacts["todo"]
 
-    def test_artifacts_not_referenced_when_truncated(self):
+    @patch.object(ExportQuoteResolver, '_load_artifact_content', return_value="mocked")
+    def test_artifacts_not_referenced_when_truncated(self, _mock_load):
         """Artifacts from truncated nodes are not in referenced_artifacts."""
         resolver = ExportQuoteResolver(user_id=1, max_tokens=30)
 

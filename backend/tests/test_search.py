@@ -26,11 +26,12 @@ import pytest
 from flask import Flask
 
 # ── Force-import real modules ────────────────────────────────────────────
-_SENTINEL = object()
-for _mod in [k for k in list(sys.modules)
-             if k == "flask_login" or k.startswith("backend.")]:
-    _m = sys.modules[_mod]
-    if isinstance(_m, MagicMock):
+# Only evict specific mocks that test_quotes.py may have installed.
+# Do NOT blanket-remove all backend.* mocks — other test files (e.g.
+# test_voice_from_node.py) legitimately mock backend.tasks.* modules
+# and removing those breaks their tests.
+for _mod in ["flask_login", "backend.models", "backend.extensions"]:
+    if _mod in sys.modules and isinstance(sys.modules[_mod], MagicMock):
         del sys.modules[_mod]
 
 import flask_login as _real_flask_login  # noqa: E402
