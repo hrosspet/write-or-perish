@@ -55,6 +55,55 @@ def export_data():
     return jsonify(user_data), 200
 
 
+def _node_author_label(node):
+    """Return a compact author label like 'User (alice)' or 'AI (claude-opus-4.6)'."""
+    if node.node_type == "llm":
+        return f"AI ({node.llm_model})" if node.llm_model else "AI (unknown)"
+    author = node.user.username if node.user else "Unknown"
+    return f"User ({author})"
+
+
+def _render_inaccessible_node(
+    node, index_path, processed_nodes, filter_ai_usage,
+    user_id, created_before, embedded_quotes, included_ids,
+    ai_blocked_ids,
+):
+    """Emit a privacy placeholder for an inaccessible node and recurse
+    into its children (which may themselves be accessible)."""
+    depth = len(index_path.split('.'))
+    header = "#" * min(depth + 1, 6)
+    ts = node.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+    result = (
+        f"{header} [{index_path}] {_node_author_label(node)}"
+        f" - {ts}\n"
+        f"[Content not accessible — private node by another user]\n\n"
+    )
+
+    processed_nodes.add(node.id)
+    children = node.children
+    if filter_ai_usage:
+        children = [c for c in children if c.ai_usage in AI_ALLOWED]
+    if created_before:
+        children = [c for c in children if c.created_at < created_before]
+    if included_ids is not None:
+        children = [c for c in children if c.id in included_ids]
+    children = sorted(children, key=lambda c: c.created_at)
+
+    for j, gc in enumerate(children):
+        gc_index = f"{index_path}.{j+1}"
+        result += format_node_tree(
+            gc, index_path=gc_index,
+            processed_nodes=processed_nodes,
+            filter_ai_usage=filter_ai_usage,
+            user_id=user_id,
+            created_before=created_before,
+            embedded_quotes=embedded_quotes,
+            included_ids=included_ids,
+            ai_blocked_ids=ai_blocked_ids,
+        )
+    return result
+
+
 def format_node_tree(
     node,
     index_path="1",
@@ -104,15 +153,8 @@ def format_node_tree(
 
     timestamp = node.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    # Build author label: "User (username)" or "AI (model)" (no redundant repetition)
-    if node.node_type == "llm":
-        author_label = f"AI ({node.llm_model})" if node.llm_model else "AI (unknown)"
-    else:
-        author = node.user.username if node.user else "Unknown"
-        author_label = f"User ({author})"
-
     # Build the node text - no content indentation for token efficiency
-    result = f"{header_prefix} [{index_path}] {author_label} - {timestamp}\n"
+    result = f"{header_prefix} [{index_path}] {_node_author_label(node)} - {timestamp}\n"
 
     # System prompt nodes: emit reference instead of full content
     # Check new artifact system first, then legacy FK
@@ -167,45 +209,12 @@ def format_node_tree(
             if len(children) > 1 and i > 0:
                 result += "---\n**BRANCH**\n---\n\n"
 
-            # Privacy check: replace inaccessible node content with
-            # placeholder but still recurse into accessible children.
             if user_id and not can_user_access_node(child, user_id):
-                child_depth = len(child_index.split('.'))
-                child_header = "#" * min(child_depth + 1, 6)
-                if child.node_type == "llm":
-                    child_label = f"AI ({child.llm_model})" if child.llm_model else "AI (unknown)"
-                else:
-                    ca = child.user.username if child.user else "Unknown"
-                    child_label = f"User ({ca})"
-                child_ts = child.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-                result += (
-                    f"{child_header} [{child_index}] {child_label}"
-                    f" - {child_ts}\n"
-                    f"[Content not accessible — private node by another user]\n\n"
+                result += _render_inaccessible_node(
+                    child, child_index, processed_nodes,
+                    filter_ai_usage, user_id, created_before,
+                    embedded_quotes, included_ids, ai_blocked_ids,
                 )
-                # Still recurse into children (they may be accessible)
-                processed_nodes.add(child.id)
-                grandchildren = child.children
-                if filter_ai_usage:
-                    grandchildren = [c for c in grandchildren if c.ai_usage in AI_ALLOWED]
-                if created_before:
-                    grandchildren = [c for c in grandchildren if c.created_at < created_before]
-                if included_ids is not None:
-                    grandchildren = [c for c in grandchildren
-                                     if c.id in included_ids]
-                grandchildren = sorted(grandchildren, key=lambda c: c.created_at)
-                for j, gc in enumerate(grandchildren):
-                    gc_index = f"{child_index}.{j+1}"
-                    result += format_node_tree(
-                        gc, index_path=gc_index,
-                        processed_nodes=processed_nodes,
-                        filter_ai_usage=filter_ai_usage,
-                        user_id=user_id,
-                        created_before=created_before,
-                        embedded_quotes=embedded_quotes,
-                        included_ids=included_ids,
-                        ai_blocked_ids=ai_blocked_ids,
-                    )
                 continue
 
             result += format_node_tree(
@@ -258,45 +267,12 @@ def format_node_tree(
         if len(children) > 1 and i > 0:
             result += "---\n**BRANCH**\n---\n\n"
 
-        # Privacy check: replace inaccessible node content with
-        # placeholder but still recurse into accessible children.
         if user_id and not can_user_access_node(child, user_id):
-            child_depth = len(child_index.split('.'))
-            child_header = "#" * min(child_depth + 1, 6)
-            if child.node_type == "llm":
-                child_label = f"AI ({child.llm_model})" if child.llm_model else "AI (unknown)"
-            else:
-                ca = child.user.username if child.user else "Unknown"
-                child_label = f"User ({ca})"
-            child_ts = child.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-            result += (
-                f"{child_header} [{child_index}] {child_label}"
-                f" - {child_ts}\n"
-                f"[Content not accessible — private node by another user]\n\n"
+            result += _render_inaccessible_node(
+                child, child_index, processed_nodes,
+                filter_ai_usage, user_id, created_before,
+                embedded_quotes, included_ids, ai_blocked_ids,
             )
-            # Still recurse into children (they may be accessible)
-            processed_nodes.add(child.id)
-            grandchildren = child.children
-            if filter_ai_usage:
-                grandchildren = [c for c in grandchildren if c.ai_usage in AI_ALLOWED]
-            if created_before:
-                grandchildren = [c for c in grandchildren if c.created_at < created_before]
-            if included_ids is not None:
-                grandchildren = [c for c in grandchildren
-                                 if c.id in included_ids]
-            grandchildren = sorted(grandchildren, key=lambda c: c.created_at)
-            for j, gc in enumerate(grandchildren):
-                gc_index = f"{child_index}.{j+1}"
-                result += format_node_tree(
-                    gc, index_path=gc_index,
-                    processed_nodes=processed_nodes,
-                    filter_ai_usage=filter_ai_usage,
-                    user_id=user_id,
-                    created_before=created_before,
-                    embedded_quotes=embedded_quotes,
-                    included_ids=included_ids,
-                    ai_blocked_ids=ai_blocked_ids,
-                )
             continue
 
         result += format_node_tree(
