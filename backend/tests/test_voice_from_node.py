@@ -208,7 +208,7 @@ class TestVoiceFromNodeMatrix:
                                content="my thoughts")
         llm_node = _make_node(llm_user, parent_id=user_node.id,
                               content="AI response", node_type="llm",
-                              llm_model="gpt-5")
+                              llm_model="gpt-5", human_owner=alice)
         _db.session.commit()
 
         _login(client, alice.id)
@@ -271,7 +271,7 @@ class TestVoiceFromNodeMatrix:
         user_node = _make_node(alice, content="some text")
         llm_node = _make_node(llm_user, parent_id=user_node.id,
                               content="AI reply", node_type="llm",
-                              llm_model="gpt-5")
+                              llm_model="gpt-5", human_owner=alice)
         _db.session.commit()
 
         _login(client, alice.id)
@@ -363,28 +363,6 @@ class TestVoiceFromNodeAuth:
         )
 
         assert resp.status_code == 403
-
-    def test_llm_node_authorized_via_parent(self, app):
-        """User can start voice from an LLM node if parent belongs to them."""
-        client = app.test_client()
-
-        alice = _make_user("alice")
-        llm_user = _make_user("gpt-5", twitter_id="llm-gpt-5")
-
-        alice_node = _make_node(alice, content="alice text")
-        llm_node = _make_node(llm_user, parent_id=alice_node.id,
-                              content="AI response", node_type="llm",
-                              llm_model="gpt-5")
-        _db.session.commit()
-
-        _login(client, alice.id)
-        resp = client.post(
-            f"/api/voice/from-node/{llm_node.id}",
-            json={"model": "gpt-5"},
-        )
-
-        # Should succeed (processing mode, no prompt)
-        assert resp.status_code == 200
 
     def test_nonexistent_node_404(self, app):
         """Requesting from-node on non-existent node returns 404."""

@@ -126,11 +126,30 @@ def get_user_ai_preferences_content(user_id):
     return None
 
 
-def _is_voice_prompt(node_chain):
-    """Check if this conversation has a voice prompt in its chain."""
+def _get_previous_source_mode(node_chain):
+    """Find the source_mode of the most recent LLM node in the chain.
+
+    Returns None if no previous LLM node has a stored source_mode
+    (i.e. this is the first agentic turn in the thread).
+    """
+    for node in reversed(node_chain):
+        if not node.tool_calls_meta:
+            continue
+        try:
+            meta = json.loads(node.tool_calls_meta)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        for entry in meta:
+            if entry.get("name") == "_mode":
+                return entry.get("source_mode")
+    return None
+
+
+def _is_agentic_prompt(node_chain):
+    """Check if this conversation has an agentic prompt (voice/textmode)."""
     for node in node_chain:
         prompt = node.get_artifact("prompt") if hasattr(node, 'get_artifact') else None
-        if prompt is not None and prompt.prompt_key == 'voice':
+        if prompt is not None and prompt.prompt_key in ('voice', 'textmode'):
             return True
     return False
 
@@ -604,7 +623,7 @@ class LLMCompletionTask(Task):
 
 
 @celery.task(base=LLMCompletionTask, bind=True)
-def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id: str, user_id: int):
+def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id: str, user_id: int, source_mode: str = None):
     """
     Asynchronously generate an LLM response and update a placeholder node.
 
@@ -613,6 +632,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
         llm_node_id: ID of the placeholder 'llm' node to update.
         model_id: Model identifier (e.g., "gpt-5", "claude-sonnet-4.5").
         user_id: ID of the user requesting the completion.
+        source_mode: 'voice' or 'textmode' — which mode triggered this call.
     """
     logger.info(f"Starting LLM completion task for parent {parent_node_id}, updating node {llm_node_id}, model={model_id}")
 
@@ -742,13 +762,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             if needs_ai_prefs:
                 user_ai_preferences_content = get_user_ai_preferences_content(user_id)
 
-            # Detect if this is a voice session (enables tools)
-            is_voice = _is_voice_prompt(node_chain)
-            voice_tools = VOICE_TOOLS if is_voice else None
+            # Detect if this is an agentic session (enables tools)
+            is_agentic = _is_agentic_prompt(node_chain)
+            agentic_tools = VOICE_TOOLS if is_agentic else None
 
             # Check for pending drafts and inject context notes
             pending_draft_note = None
-            if is_voice:
+            if is_agentic:
                 pending = _find_pending_todo_draft(node_chain, user_id)
                 if pending:
                     pending_draft_note = (
@@ -775,7 +795,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # Refreshes from DB to pick up async merge updates.
             proposal_notes = []
             proposal_to_mark = []
-            if is_voice:
+            if is_agentic:
                 proposal_notes, proposal_to_mark = (
                     _scan_proposal_statuses(node_chain)
                 )
@@ -817,6 +837,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         )
                         logger.info(f"Built user export for {user_id}: {len(user_export_content or '')} chars, ~{approximate_token_count(user_export_content or '')} tokens, cutoff={created_before} (attempt {attempt + 1})")
 
+                # Track which heavy-context placeholders have been replaced
+                # so subsequent occurrences get emptied (dedup).
+                # user_todo and user_ai_preferences are NOT deduped — the
+                # user may re-inject them mid-thread for a fresh snapshot.
+                replaced_profile = False
+                replaced_recent = False
+                replaced_recent_raw = False
+
                 messages = []
                 for node in node_chain:
                     author = node.user.username if node.user else "Unknown"
@@ -827,7 +855,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         role = "assistant"
                         message_text = node_content
                         # Tag proposals with node ID for tracking
-                        if is_voice and node.tool_calls_meta:
+                        if is_agentic and node.tool_calls_meta:
                             try:
                                 tcm = json.loads(node.tool_calls_meta)
                                 for entry in tcm:
@@ -853,31 +881,53 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 export_placeholder_match,
                                 user_export_content
                             )
-                        # Replace {user_profile} placeholder if present
+                        # Replace {user_profile} — first occurrence
+                        # gets content, subsequent get emptied (dedup)
                         if USER_PROFILE_PLACEHOLDER in message_text:
-                            message_text = message_text.replace(
-                                USER_PROFILE_PLACEHOLDER,
-                                user_profile_content or ""
-                            )
-                        # Replace {user_todo} placeholder if present
+                            if not replaced_profile:
+                                message_text = message_text.replace(
+                                    USER_PROFILE_PLACEHOLDER,
+                                    user_profile_content or ""
+                                )
+                                replaced_profile = True
+                            else:
+                                message_text = message_text.replace(
+                                    USER_PROFILE_PLACEHOLDER,
+                                    "(see profile above)"
+                                )
+                        # Replace {user_todo} — always fresh (no dedup)
                         if USER_TODO_PLACEHOLDER in message_text:
                             message_text = message_text.replace(
                                 USER_TODO_PLACEHOLDER,
                                 user_todo_content or ""
                             )
-                        # Replace {user_recent} placeholder if present
+                        # Replace {user_recent} — first occurrence only
                         if USER_RECENT_PLACEHOLDER in message_text:
-                            message_text = message_text.replace(
-                                USER_RECENT_PLACEHOLDER,
-                                user_recent_content or ""
-                            )
-                        # Replace {user_recent_raw} placeholder if present
+                            if not replaced_recent:
+                                message_text = message_text.replace(
+                                    USER_RECENT_PLACEHOLDER,
+                                    user_recent_content or ""
+                                )
+                                replaced_recent = True
+                            else:
+                                message_text = message_text.replace(
+                                    USER_RECENT_PLACEHOLDER,
+                                    "(see recent context above)"
+                                )
+                        # Replace {user_recent_raw} — first occurrence only
                         if USER_RECENT_RAW_PLACEHOLDER in message_text:
-                            message_text = message_text.replace(
-                                USER_RECENT_RAW_PLACEHOLDER,
-                                user_recent_raw_content or ""
-                            )
-                        # Replace {user_ai_preferences} placeholder
+                            if not replaced_recent_raw:
+                                message_text = message_text.replace(
+                                    USER_RECENT_RAW_PLACEHOLDER,
+                                    user_recent_raw_content or ""
+                                )
+                                replaced_recent_raw = True
+                            else:
+                                message_text = message_text.replace(
+                                    USER_RECENT_RAW_PLACEHOLDER,
+                                    "(see recent raw data above)"
+                                )
+                        # Replace {user_ai_preferences} — always fresh
                         if USER_AI_PREFERENCES_PLACEHOLDER in message_text:
                             message_text = message_text.replace(
                                 USER_AI_PREFERENCES_PLACEHOLDER,
@@ -894,14 +944,35 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         "content": [{"type": "text", "text": message_text}]
                     })
 
-                # Inject voice context notes as a final user message
-                voice_notes = (
+                # Inject agentic context notes as a final user message
+                agentic_notes = (
                     proposal_notes
                     + ([pending_draft_note] if pending_draft_note else [])
                 )
-                if is_voice and voice_notes:
-                    injected_text = "\n".join(voice_notes)
-                    logger.debug(f"Voice context injection for node {llm_node_id}: {injected_text}")
+                # Inject mode indicator only when the mode changes
+                # (or on the first turn to establish the initial mode).
+                if is_agentic and source_mode:
+                    prev_mode = _get_previous_source_mode(node_chain)
+                    if prev_mode != source_mode:
+                        mode_labels = {
+                            'voice': (
+                                "[Mode: Voice. The user is speaking "
+                                "and hears your response via TTS. "
+                                "Keep responses concise and natural "
+                                "for listening.]"
+                            ),
+                            'textmode': (
+                                "[Mode: Text. The user is typing and "
+                                "reads your response. Use formatting "
+                                "(markdown, lists, headers) freely.]"
+                            ),
+                        }
+                        mode_note = mode_labels.get(source_mode)
+                        if mode_note:
+                            agentic_notes.append(mode_note)
+                if is_agentic and agentic_notes:
+                    injected_text = "\n".join(agentic_notes)
+                    logger.debug(f"Agentic context injection for node {llm_node_id}: {injected_text}")
                     messages.append({
                         "role": "user",
                         "content": [{"type": "text", "text": injected_text}]
@@ -920,7 +991,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 try:
                     response = LLMProvider.get_completion(
                         model_id, messages, api_keys,
-                        tools=voice_tools,
+                        tools=agentic_tools,
                     )
                     break  # Success
                 except PromptTooLongError as e:
@@ -978,7 +1049,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 tool_meta = tool_results
 
             # Step 5c: Auto-detect proposals in LLM text (Voice sessions)
-            if is_voice:
+            if is_agentic:
                 auto_drafts = _auto_create_drafts(
                     llm_text, llm_node, node_chain, user_id
                 )
@@ -986,6 +1057,15 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     if tool_meta is None:
                         tool_meta = []
                     tool_meta.extend(auto_drafts)
+
+            # Store source_mode for future mode-switch detection
+            if is_agentic and source_mode:
+                if tool_meta is None:
+                    tool_meta = []
+                tool_meta.append({
+                    "name": "_mode",
+                    "source_mode": source_mode,
+                })
 
             if tool_meta:
                 llm_node.tool_calls_meta = json.dumps(tool_meta)
