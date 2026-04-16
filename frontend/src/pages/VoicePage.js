@@ -1,12 +1,18 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { useSearchParams } from 'react-router-dom';
-import { FaPlay, FaPause, FaUndo, FaRedo } from 'react-icons/fa';
+import { useSearchParams, useNavigate } from 'react-router-dom';
+import { FaPlay, FaPause, FaUndo, FaRedo, FaKeyboard } from 'react-icons/fa';
 import { useVoiceSession } from '../hooks/useVoiceSession';
 import { useUser } from '../contexts/UserContext';
 import { useInterruptedRecovery } from '../hooks/useInterruptedRecovery';
 import RecoveryBanner from '../components/RecoveryBanner';
 import MarkdownBody from '../components/MarkdownBody';
 import OfflineBanner from '../components/OfflineBanner';
+import {
+  stripInlineMarkdown,
+  parseTodoItems,
+  parsePriorityItems,
+  parseOrientResponse,
+} from '../components/ProposalInline';
 import { useToast } from '../contexts/ToastContext';
 import api from '../api';
 
@@ -197,31 +203,6 @@ function AiDot() {
   );
 }
 
-function stripInlineMarkdown(text) {
-  return text.replace(/\*\*(.+?)\*\*/g, '$1').replace(/__(.+?)__/g, '$1');
-}
-
-function parseTodoItems(text) {
-  return text.split('\n')
-    .map(l => l.replace(/^[-*]\s*/, '').replace(/^\[[ xX]\]\s*/, '').trim())
-    .map(l => stripInlineMarkdown(l))
-    .filter(Boolean);
-}
-
-function parsePriorityItems(text) {
-  return text.split('\n')
-    .filter(l => l.trim())
-    .map(l => {
-      const cleaned = l.replace(/^\d+[.)]\s*/, '').replace(/^[-*]\s*/, '').replace(/^\[[ xX]\]\s*/, '').trim();
-      const dashMatch = cleaned.match(/^(.+?)\s*[—–]\s*(.+)$/);
-      if (dashMatch) return { text: stripInlineMarkdown(dashMatch[1].trim()), hint: dashMatch[2].trim() };
-      const parenMatch = cleaned.match(/^(.+?)\s*\(([^)]+)\)\s*$/);
-      if (parenMatch) return { text: stripInlineMarkdown(parenMatch[1].trim()), hint: parenMatch[2].trim() };
-      return { text: stripInlineMarkdown(cleaned), hint: '' };
-    })
-    .filter(item => item.text);
-}
-
 /**
  * Move an item between ### sections in the raw voice response.
  * `fromSection` / `toSection` are lowercase substrings matched against headings
@@ -289,27 +270,8 @@ function moveProposalItem(content, itemText, fromSection, toSection, { prepend =
   return lines.join('\n');
 }
 
-function parseOrientResponse(text) {
-  const sections = {};
-  const parts = text.split(/^###\s+/m);
-  for (const part of parts) {
-    if (!part.trim()) continue;
-    const firstNewline = part.indexOf('\n');
-    if (firstNewline < 0) continue;
-    const heading = part.slice(0, firstNewline).trim().toLowerCase();
-    const body = part.slice(firstNewline + 1).trim();
-    if (heading.includes('completed')) sections.completed = body;
-    else if (heading.includes('new task')) sections.newTasks = body;
-    else if (heading.includes('priority')) sections.priority = body;
-    else if (heading.includes('note')) sections.note = body.replace(/\s*\[\w+-proposal:[^\]]*\]/g, '');
-    else if (heading.includes('issue title') || heading === 'title') sections.issueTitle = body;
-    else if (heading === 'description') sections.issueDescription = body;
-    else if (heading === 'category') sections.issueCategory = body.trim().toLowerCase();
-  }
-  return sections;
-}
-
 export default function VoicePage() {
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const resumeId = searchParams.get('resume');
   const parentId = searchParams.get('parent');
@@ -727,7 +689,39 @@ export default function VoicePage() {
       minHeight: 'calc(100vh - 120px)',
       padding: '40px 24px',
       background: 'radial-gradient(ellipse at 50% 40%, rgba(196,149,106,0.06) 0%, transparent 70%)',
+      position: 'relative',
     }}>
+      <button
+        onClick={() => {
+          if (lastLlmNodeIdRef.current) {
+            navigate(`/node/${lastLlmNodeIdRef.current}`);
+          } else {
+            navigate('/textmode');
+          }
+        }}
+        title="Continue in Text Mode"
+        style={{
+          position: 'absolute',
+          top: '24px',
+          right: '24px',
+          background: 'none',
+          border: '1px solid var(--border)',
+          borderRadius: '6px',
+          padding: '6px 12px',
+          color: 'var(--text-muted)',
+          fontFamily: 'var(--sans)',
+          fontSize: '0.78rem',
+          fontWeight: 300,
+          cursor: 'pointer',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: '6px',
+          zIndex: 2,
+        }}
+      >
+        <FaKeyboard size={11} />
+        <span>Text Mode</span>
+      </button>
       <EcgAnimation
         active={audio.isPlaying}
         dim={!audio.isPlaying}

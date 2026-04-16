@@ -879,6 +879,7 @@ def request_llm_response(node_id):
     # Get and validate the model from request body
     data = request.get_json() or {}
     model_id = data.get("model")
+    source_mode = data.get("source_mode")
 
     if not model_id:
         # Fall back to default model for backward compatibility
@@ -897,6 +898,7 @@ def request_llm_response(node_id):
         parent_node.id, model_id, current_user.id,
         privacy_level=parent_node.privacy_level,
         ai_usage=parent_node.ai_usage,
+        source_mode=source_mode,
     )
 
     current_app.logger.info(f"Enqueued LLM completion task {task_id} for parent node {parent_node.id}, new node {llm_node.id}")

@@ -10,7 +10,7 @@ import { uploadFileInChunks } from "../utils/chunkedUpload";
 
 const NodeForm = forwardRef(
   (
-    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt },
+    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder },
     ref
   ) => {
     const { user } = useUser();
@@ -379,18 +379,20 @@ const NodeForm = forwardRef(
             transition: "border-color 0.3s ease",
             resize: "vertical",
           }}
-          placeholder="What's present for you right now..."
+          placeholder={placeholder || "What's present for you right now..."}
           disabled={!editMode && uploadedFile}
         />
 
         {/* Privacy Settings */}
-        <PrivacySelector
-          privacyLevel={privacyLevel}
-          aiUsage={aiUsage}
-          onPrivacyChange={setPrivacyLevel}
-          onAIUsageChange={setAiUsage}
-          disabled={loading}
-        />
+        {!hidePowerFeatures && (
+          <PrivacySelector
+            privacyLevel={privacyLevel}
+            aiUsage={aiUsage}
+            onPrivacyChange={setPrivacyLevel}
+            onAIUsageChange={setAiUsage}
+            disabled={loading}
+          />
+        )}
 
         {isRecoveringAudio && (
           <div style={{

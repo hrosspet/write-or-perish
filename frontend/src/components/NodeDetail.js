@@ -1,10 +1,12 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { useParams, useNavigate } from "react-router-dom";
-import { FaThumbtack } from "react-icons/fa";
+import { useParams, useNavigate, useSearchParams } from "react-router-dom";
+import { FaThumbtack, FaMicrophone, FaEllipsisV } from "react-icons/fa";
 import NodeFooter from "./NodeFooter";
 import SpeakerIcon from "./SpeakerIcon";
 import DownloadAudioIcon from "./DownloadAudioIcon";
 import ModelSelector from "./ModelSelector";
+import StreamingMicButton from "./StreamingMicButton";
+import ProposalInline, { hasProposalSections, stripProposalSections } from "./ProposalInline";
 import { useUser } from "../contexts/UserContext";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 import api from "../api";
@@ -43,7 +45,9 @@ function RenderChildTree({ nodes, onBubbleClick }) {
 function NodeDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { user: currentUser } = useUser();
+  const craftMode = !!currentUser?.craft_mode;
   const [node, setNode] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -56,7 +60,17 @@ function NodeDetail() {
   const [voiceLoading, setVoiceLoading] = useState(false);
   const [toolActionsExpanded, setToolActionsExpanded] = useState(false);
   const [showPromptEditConfirm, setShowPromptEditConfirm] = useState(false);
+  const [autoGenerate, setAutoGenerate] = useState(true);
+  const [showKebabMenu, setShowKebabMenu] = useState(false);
+  const [inlineContent, setInlineContent] = useState("");
+  const [inlineSubmitting, setInlineSubmitting] = useState(false);
+  const inlineTextareaRef = useRef(null);
+  const inlinePreStreamingRef = useRef('');
   const highlightedNodeRef = useRef(null);
+  const kebabMenuRef = useRef(null);
+
+  // Auto-generate is forced ON when Craft mode is OFF (no toggle shown).
+  const autoGenerateActive = !craftMode || autoGenerate;
 
   // LLM completion polling - enabled automatically when llmTaskNodeId is set
   const {
@@ -120,6 +134,31 @@ function NodeDetail() {
       highlightedNodeRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
   }, [loading, node]);
+
+  // If we arrived with ?awaitLlm=NID (e.g. from WritePage), pick up the
+  // pending LLM task and let the polling navigate to it on completion.
+  useEffect(() => {
+    const awaitLlm = searchParams.get('awaitLlm');
+    if (awaitLlm) {
+      setLlmTaskNodeId(parseInt(awaitLlm, 10));
+      const next = new URLSearchParams(searchParams);
+      next.delete('awaitLlm');
+      setSearchParams(next, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Close kebab menu on outside click
+  useEffect(() => {
+    if (!showKebabMenu) return;
+    const handler = (e) => {
+      if (kebabMenuRef.current && !kebabMenuRef.current.contains(e.target)) {
+        setShowKebabMenu(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [showKebabMenu]);
 
   // Handle LLM completion
   useEffect(() => {
@@ -202,25 +241,53 @@ function NodeDetail() {
     }
   };
 
+  const requestLlmFor = async (parentNodeId) => {
+    const response = await api.post(`/nodes/${parentNodeId}/llm`, {
+      model: selectedModel,
+      source_mode: 'textmode',
+    });
+    const newNodeId = response.data.node_id;
+    if (!newNodeId) throw new Error("Failed to get a task ID for the new LLM node.");
+    return newNodeId;
+  };
+
   const handleLLMResponse = () => {
-    setError(""); // Clear previous errors
-    api
-      .post(`/nodes/${id}/llm`, { model: selectedModel })
-      .then((response) => {
-        // The backend now creates a placeholder and returns its ID.
-        // We use this ID for polling.
-        const newNodeId = response.data.node_id;
-        if (newNodeId) {
-          setLlmTaskNodeId(newNodeId);
-        } else {
-          // Fallback or error for safety, though the backend should always return it
-          setError("Failed to get a task ID for the new LLM node.");
-        }
-      })
+    setError("");
+    requestLlmFor(id)
+      .then((newNodeId) => setLlmTaskNodeId(newNodeId))
       .catch((err) => {
         console.error(err);
-        setError("Error requesting LLM response.");
+        setError(err.response?.data?.error || err.message || "Error requesting LLM response.");
       });
+  };
+
+  const handleInlineSubmit = async (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+    const text = inlineContent.trim();
+    if (!text || inlineSubmitting) return;
+    setInlineSubmitting(true);
+    setError("");
+    try {
+      const res = await api.post("/nodes/", {
+        content: text,
+        parent_id: parseInt(id, 10),
+        privacy_level: node.privacy_level,
+        ai_usage: node.ai_usage,
+      });
+      const newNodeId = res.data.id;
+      setInlineContent("");
+      if (autoGenerateActive && node.ai_usage !== 'none') {
+        const llmNodeId = await requestLlmFor(newNodeId);
+        navigate(`/node/${newNodeId}?awaitLlm=${llmNodeId}`);
+      } else {
+        navigate(`/node/${newNodeId}`);
+      }
+    } catch (err) {
+      console.error(err);
+      setError(err.response?.data?.error || err.message || "Error sending message.");
+    } finally {
+      setInlineSubmitting(false);
+    }
   };
 
   const handleSessionFromNode = (sessionType) => {
@@ -295,10 +362,135 @@ function NodeDetail() {
       : null)
     : null;
 
+  const isLlmNode = node.node_type === "llm" || !!node.llm_model;
+  const showProposal = isLlmNode && node.content && hasProposalSections(node.content);
+  const displayContent = showProposal ? stripProposalSections(node.content) : node.content;
+  const showInlineInput = isOwner && !craftMode && node.ai_usage !== 'none';
+  const showCraftBar = isOwner && craftMode && !autoGenerate && node.ai_usage !== 'none';
+
+  const topRightButtonStyle = {
+    background: 'none',
+    border: '1px solid var(--border)',
+    borderRadius: '6px',
+    padding: '6px 12px',
+    color: 'var(--text-muted)',
+    fontFamily: 'var(--sans)',
+    fontSize: '0.78rem',
+    fontWeight: 300,
+    cursor: 'pointer',
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '6px',
+  };
+
   const highlightedNodeSection = (
-    <div ref={highlightedNodeRef}>
+    <div ref={highlightedNodeRef} style={{ position: 'relative' }}>
       <hr style={{ borderColor: "var(--border)" }} />
+      {isOwner && node.ai_usage !== 'none' && (
+        <div style={{
+          position: 'absolute',
+          top: '14px',
+          right: '20px',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'flex-end',
+          gap: '8px',
+          zIndex: 2,
+        }}>
+          <button
+            onClick={() => handleSessionFromNode('voice')}
+            disabled={voiceLoading}
+            style={topRightButtonStyle}
+            title="Continue this conversation by voice"
+          >
+            <FaMicrophone size={11} />
+            <span>{voiceLoading ? 'Starting…' : 'Voice Mode'}</span>
+          </button>
+          {craftMode && (
+            <label style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              fontFamily: 'var(--sans)',
+              fontSize: '0.74rem',
+              fontWeight: 300,
+              color: 'var(--text-muted)',
+              cursor: 'pointer',
+            }}>
+              <input
+                type="checkbox"
+                checked={autoGenerate}
+                onChange={(e) => setAutoGenerate(e.target.checked)}
+                style={{ accentColor: 'var(--accent)' }}
+              />
+              Auto-generate
+            </label>
+          )}
+        </div>
+      )}
       <div style={highlightedTextStyle}>
+        {isOwner && (
+          <div ref={kebabMenuRef} style={{
+            position: 'absolute',
+            top: '10px',
+            right: '10px',
+          }}>
+            <button
+              onClick={() => setShowKebabMenu((v) => !v)}
+              title="More actions"
+              style={{
+                background: 'none', border: 'none', cursor: 'pointer',
+                color: 'var(--text-muted)', padding: '4px 6px',
+                display: 'inline-flex', alignItems: 'center',
+              }}
+            >
+              <FaEllipsisV size={14} />
+            </button>
+            {showKebabMenu && (
+              <div style={{
+                position: 'absolute',
+                top: '100%',
+                right: 0,
+                marginTop: '4px',
+                background: 'var(--bg-card)',
+                border: '1px solid var(--border)',
+                borderRadius: '6px',
+                boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
+                minWidth: '120px',
+                zIndex: 5,
+                overflow: 'hidden',
+              }}>
+                <button
+                  onClick={() => {
+                    setShowKebabMenu(false);
+                    if (node.context_artifacts?.prompt) {
+                      setShowPromptEditConfirm(true);
+                    } else {
+                      setShowEditOverlay(true);
+                    }
+                  }}
+                  style={{
+                    display: 'block', width: '100%', textAlign: 'left',
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    padding: '8px 12px',
+                    fontFamily: 'var(--sans)', fontSize: '0.85rem', fontWeight: 300,
+                    color: 'var(--text-primary)',
+                  }}
+                >Edit</button>
+                <button
+                  onClick={() => { setShowKebabMenu(false); handleDelete(); }}
+                  style={{
+                    display: 'block', width: '100%', textAlign: 'left',
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    padding: '8px 12px',
+                    fontFamily: 'var(--sans)', fontSize: '0.85rem', fontWeight: 300,
+                    color: 'var(--accent)',
+                  }}
+                >Delete</button>
+              </div>
+            )}
+          </div>
+        )}
         {node.is_system_prompt && node.prompt_title && (
           <div style={{
             fontFamily: "var(--sans)",
@@ -324,12 +516,19 @@ function NodeDetail() {
           </div>
         )}
         <QuotedContent
-          content={node.content}
+          content={displayContent}
           quotes={quotes}
           contextArtifacts={node.context_artifacts || null}
           onQuoteClick={handleBubbleClick}
           onCheckboxToggle={isOwner ? handleCheckboxToggle : undefined}
         />
+        {showProposal && (
+          <ProposalInline
+            content={node.content}
+            nodeId={node.id}
+            toolCallsMeta={node.tool_calls_meta}
+          />
+        )}
         {node.tool_calls_meta && node.tool_calls_meta.length > 0 && (
           <div style={{ marginTop: '12px', borderTop: '1px solid var(--border)', paddingTop: '8px' }}>
             <button
@@ -410,39 +609,115 @@ function NodeDetail() {
           <SpeakerIcon nodeId={node.id} content={node.content} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} />
           <DownloadAudioIcon nodeId={node.id} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} />
         </NodeFooter>
-        <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-          <button onClick={() => setShowChildFormOverlay(true)}>Add Text</button>
-          {isOwner && node.ai_usage !== 'none' && (
-            <>
-              <button onClick={handleLLMResponse} disabled={!!llmTaskNodeId}>
-                {llmTaskNodeId && llmStatus === 'processing' && llmProgress > 0
-                  ? `Generating... ${llmProgress}%`
-                  : llmTaskNodeId && llmStatus === 'pending'
-                  ? "Waiting for AI..."
-                  : llmTaskNodeId
-                  ? "Generating..."
-                  : "LLM Response"}
-              </button>
-              <button onClick={() => handleSessionFromNode('voice')} disabled={voiceLoading}>
-                {voiceLoading ? "Starting..." : "Voice"}
-              </button>
-              <ModelSelector
-                nodeId={node.id}
-                selectedModel={selectedModel}
-                onModelChange={setSelectedModel}
-              />
-            </>
-          )}
-          {isOwner && <button onClick={() => {
-            if (node.context_artifacts?.prompt) {
-              setShowPromptEditConfirm(true);
-            } else {
-              setShowEditOverlay(true);
-            }
-          }}>Edit</button>}
-          {isOwner && <button onClick={handleDelete}>Delete</button>}
-        </div>
+        {showCraftBar && (
+          <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+            <button onClick={() => setShowChildFormOverlay(true)}>Add Text</button>
+            <button onClick={handleLLMResponse} disabled={!!llmTaskNodeId}>
+              {llmTaskNodeId && llmStatus === 'processing' && llmProgress > 0
+                ? `Generating... ${llmProgress}%`
+                : llmTaskNodeId && llmStatus === 'pending'
+                ? "Waiting for AI..."
+                : llmTaskNodeId
+                ? "Generating..."
+                : "LLM Response"}
+            </button>
+            <ModelSelector
+              nodeId={node.id}
+              selectedModel={selectedModel}
+              onModelChange={setSelectedModel}
+            />
+          </div>
+        )}
+        {llmTaskNodeId && !showCraftBar && (
+          <div style={{
+            marginTop: '8px',
+            fontFamily: 'var(--sans)', fontSize: '0.78rem', fontWeight: 300,
+            color: 'var(--text-muted)',
+          }}>
+            {llmStatus === 'processing' && llmProgress > 0
+              ? `Generating… ${llmProgress}%`
+              : llmStatus === 'pending'
+              ? 'Waiting for AI…'
+              : 'Generating…'}
+          </div>
+        )}
       </div>
+      {showInlineInput && (
+        <div style={{ marginLeft: '20px', marginRight: '20px', marginTop: '4px', marginBottom: '12px' }}>
+          <form onSubmit={handleInlineSubmit}>
+            <textarea
+              ref={inlineTextareaRef}
+              value={inlineContent}
+              onChange={(e) => setInlineContent(e.target.value)}
+              onKeyDown={(e) => {
+                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                  e.preventDefault();
+                  handleInlineSubmit();
+                }
+              }}
+              placeholder="Type what's on your mind…"
+              rows={3}
+              disabled={inlineSubmitting || !!llmTaskNodeId}
+              style={{
+                width: '100%',
+                boxSizing: 'border-box',
+                padding: '12px 14px',
+                background: 'var(--bg-card)',
+                color: 'var(--text-primary)',
+                border: '1px solid var(--border)',
+                borderRadius: '8px',
+                fontFamily: 'var(--sans)',
+                fontSize: '0.92rem',
+                fontWeight: 300,
+                resize: 'vertical',
+                outline: 'none',
+              }}
+            />
+            <div style={{
+              marginTop: '6px',
+              display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap',
+            }}>
+              <button
+                type="submit"
+                disabled={!inlineContent.trim() || inlineSubmitting || !!llmTaskNodeId}
+                style={{
+                  padding: '8px 18px',
+                  background: 'var(--accent)',
+                  color: 'var(--bg-deep)',
+                  border: 'none',
+                  borderRadius: '6px',
+                  fontFamily: 'var(--sans)',
+                  fontSize: '0.85rem',
+                  fontWeight: 400,
+                  cursor: (!inlineContent.trim() || inlineSubmitting || !!llmTaskNodeId)
+                    ? 'not-allowed' : 'pointer',
+                  opacity: (!inlineContent.trim() || inlineSubmitting || !!llmTaskNodeId) ? 0.5 : 1,
+                }}
+              >
+                {inlineSubmitting ? 'Sending…' : 'Send'}
+              </button>
+              <StreamingMicButton
+                parentId={parseInt(id, 10)}
+                privacyLevel={node.privacy_level}
+                aiUsage={node.ai_usage}
+                disabled={inlineSubmitting || !!llmTaskNodeId}
+                onRecordingStart={() => { inlinePreStreamingRef.current = inlineContent; }}
+                onTranscriptUpdate={(transcript) => {
+                  const prefix = inlinePreStreamingRef.current;
+                  const sep = prefix && transcript ? '\n\n' : '';
+                  setInlineContent(prefix + sep + transcript);
+                }}
+                onComplete={(data) => {
+                  const prefix = inlinePreStreamingRef.current;
+                  const sep = prefix && data?.content ? '\n\n' : '';
+                  setInlineContent(prefix + sep + (data?.content || ''));
+                }}
+                onError={(err) => setError(err?.message || 'Mic error')}
+              />
+            </div>
+          </form>
+        </div>
+      )}
       <hr style={{ borderColor: "var(--border)" }} />
     </div>
   );
