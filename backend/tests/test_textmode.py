@@ -425,3 +425,184 @@ class TestNodesLlmSourceMode:
             assert resp.status_code == 202
             kwargs = mock_create.call_args.kwargs
             assert kwargs.get("source_mode") is None
+
+    def test_invalid_source_mode_rejected(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        parent = _make_node(alice, content="parent")
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.post(
+            f"/api/nodes/{parent.id}/llm",
+            json={"model": "gpt-5", "source_mode": "hack"},
+        )
+        assert resp.status_code == 400
+        assert "source_mode" in resp.get_json()["error"].lower()
+
+
+# ── Cycle guard on ancestor walks ────────────────────────────────────────
+
+class TestTextmodeCycleGuard:
+    def test_self_referential_parent_does_not_hang_message(self, app):
+        """parent_id whose ancestor chain loops back on itself must return
+        in finite time — visited-set + MAX_HOPS prevent infinite looping."""
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+
+        # Legitimate conversation root
+        system_node = _make_node(alice, content="(system)")
+        _db.session.commit()
+
+        # Create a second node and force a self-loop: node.parent_id = node.id
+        loop_node = _make_node(alice, parent_id=system_node.id, content="loop")
+        _db.session.commit()
+        loop_node.parent_id = loop_node.id
+        _db.session.commit()
+
+        _login(client, alice.id)
+
+        # add_message must walk from loop_node up to system_node, see the
+        # cycle, and reject rather than hang.
+        import signal
+
+        def _timeout(signum, frame):
+            raise TimeoutError("cycle guard did not return in finite time")
+
+        old_handler = signal.signal(signal.SIGALRM, _timeout)
+        signal.alarm(5)
+        try:
+            resp = client.post(
+                f"/api/textmode/{system_node.id}/message",
+                json={"content": "x", "parent_id": loop_node.id},
+            )
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
+
+        # Cycle means we never reach system_node → not-a-descendant 400.
+        assert resp.status_code == 400
+
+    def test_self_referential_parent_does_not_hang_from_node(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+
+        loop_node = _make_node(alice, content="self-loop")
+        _db.session.commit()
+        loop_node.parent_id = loop_node.id
+        _db.session.commit()
+
+        _login(client, alice.id)
+
+        import signal
+
+        def _timeout(signum, frame):
+            raise TimeoutError("from-node cycle guard hung")
+
+        old_handler = signal.signal(signal.SIGALRM, _timeout)
+        signal.alarm(5)
+        try:
+            resp = client.get(f"/api/textmode/from-node/{loop_node.id}")
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
+
+        # The walk terminates (single-node chain where the loop is caught
+        # on the second iteration); the node is treated as its own root.
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["conversation_id"] == loop_node.id
+
+
+# ── _get_previous_source_mode ────────────────────────────────────────────
+
+def _load_real_get_previous_source_mode():
+    """Load the real _get_previous_source_mode function from
+    backend/tasks/llm_completion.py without triggering the full Celery +
+    llm-providers import chain. We extract the function source and exec
+    it in a minimal namespace."""
+    import ast
+    import os as _os
+    src_path = _os.path.join(
+        _os.path.dirname(__file__), "..", "tasks", "llm_completion.py",
+    )
+    with open(src_path) as f:
+        tree = ast.parse(f.read())
+    for node in tree.body:
+        if (isinstance(node, ast.FunctionDef)
+                and node.name == "_get_previous_source_mode"):
+            ns = {"json": __import__("json")}
+            exec(compile(ast.Module(body=[node], type_ignores=[]),
+                         src_path, "exec"), ns)
+            return ns["_get_previous_source_mode"]
+    raise RuntimeError("_get_previous_source_mode not found in source")
+
+
+class TestGetPreviousSourceMode:
+    def test_returns_none_when_no_llm_nodes(self, app):
+        fn = _load_real_get_previous_source_mode()
+        alice = _make_user("alice")
+        _db.session.commit()
+        chain = [
+            _make_node(alice, content="root"),
+            _make_node(alice, content="child"),
+        ]
+        assert fn(chain) is None
+
+    def test_finds_most_recent_mode_marker(self, app):
+        """_get_previous_source_mode should walk the chain in reverse and
+        return the source_mode of the nearest LLM node that stored one."""
+        import json as _json
+        fn = _load_real_get_previous_source_mode()
+
+        alice = _make_user("alice")
+        llm_user = _make_user("gpt-5", twitter_id="llm-gpt-5")
+        _db.session.commit()
+
+        root = _make_node(alice, content="root")
+        older_llm = _make_node(
+            llm_user, parent_id=root.id, content="older",
+            node_type="llm", llm_model="gpt-5",
+        )
+        older_llm.tool_calls_meta = _json.dumps([
+            {"name": "_mode", "source_mode": "voice"},
+        ])
+        user_msg = _make_node(
+            alice, parent_id=older_llm.id, content="reply",
+        )
+        newer_llm = _make_node(
+            llm_user, parent_id=user_msg.id, content="newer",
+            node_type="llm", llm_model="gpt-5",
+        )
+        newer_llm.tool_calls_meta = _json.dumps([
+            {"name": "_mode", "source_mode": "textmode"},
+        ])
+        _db.session.commit()
+
+        chain = [root, older_llm, user_msg, newer_llm]
+        assert fn(chain) == "textmode"
+        # Truncate the chain to before newer_llm: should fall back to voice.
+        assert fn(chain[:3]) == "voice"
+
+    def test_ignores_llm_nodes_without_mode_marker(self, app):
+        import json as _json
+        fn = _load_real_get_previous_source_mode()
+
+        alice = _make_user("alice")
+        llm_user = _make_user("gpt-5", twitter_id="llm-gpt-5")
+        _db.session.commit()
+
+        root = _make_node(alice, content="root")
+        llm_no_mode = _make_node(
+            llm_user, parent_id=root.id, content="old, no marker",
+            node_type="llm", llm_model="gpt-5",
+        )
+        llm_no_mode.tool_calls_meta = _json.dumps([
+            {"name": "propose_todo", "status": "success"},
+        ])
+        _db.session.commit()
+
+        assert fn([root, llm_no_mode]) is None

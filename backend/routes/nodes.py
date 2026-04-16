@@ -881,6 +881,9 @@ def request_llm_response(node_id):
     model_id = data.get("model")
     source_mode = data.get("source_mode")
 
+    if source_mode is not None and source_mode not in ("voice", "textmode"):
+        return jsonify({"error": f"Invalid source_mode: {source_mode}"}), 400
+
     if not model_id:
         # Fall back to default model for backward compatibility
         model_id = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.5")

@@ -220,6 +220,9 @@ def get_conversation_from_node(node_id):
             break
         current = Node.query.get(current.parent_id)
 
+    if not chain:
+        return jsonify({"error": "Unable to resolve conversation chain"}), 404
+
     # Last element is the root (system node)
     root = chain[-1]
     # Reverse to chronological, skip root
