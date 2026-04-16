@@ -10,7 +10,7 @@ import { uploadFileInChunks } from "../utils/chunkedUpload";
 
 const NodeForm = forwardRef(
   (
-    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, submitLabel = "Submit" },
+    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, submitLabel = "Submit", onSubmitOverride },
     ref
   ) => {
     const { user } = useUser();
@@ -222,6 +222,22 @@ const NodeForm = forwardRef(
       setError("");
       try {
         let response;
+
+        // Custom submit (e.g. /textmode/start). Skips /nodes/ POST entirely
+        // and still handles draft cleanup + onSuccess for the caller.
+        if (onSubmitOverride && !editMode && !uploadedFile && !streamingSessionId) {
+          const data = await onSubmitOverride({
+            content,
+            parent_id: parentId,
+            privacy_level: privacyLevel,
+            ai_usage: aiUsage,
+          });
+          deleteDraft();
+          setHasDraft(false);
+          onSuccess(data);
+          setLoading(false);
+          return;
+        }
 
         // Handle streaming transcription completion - draft exists, create node from it
         if (streamingSessionId) {
