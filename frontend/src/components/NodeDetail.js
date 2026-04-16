@@ -51,7 +51,6 @@ function NodeDetail() {
   const [node, setNode] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [showChildFormOverlay, setShowChildFormOverlay] = useState(false);
   const [showEditOverlay, setShowEditOverlay] = useState(false);
   const [selectedModel, setSelectedModel] = useState(currentUser?.preferred_model || null);
   const [llmTaskNodeId, setLlmTaskNodeId] = useState(null);
@@ -165,16 +164,28 @@ function NodeDetail() {
   // Handle LLM completion
   useEffect(() => {
     if (llmStatus === 'completed' && llmData) {
-      const newNodeId = llmData.node?.id;
-      if (newNodeId) {
-        navigate(`/node/${newNodeId}`);
+      // Prefer the id of the node returned in payload; fall back to the
+      // polled node id (llmTaskNodeId).
+      const completedId = llmData.node?.id || llmTaskNodeId;
+      if (completedId && String(completedId) === String(id)) {
+        // We're already viewing the pending LLM node — patch its state
+        // in place so the rendered content switches from "Thinking…" to
+        // the final response without a navigation jump.
+        setNode(prev => prev ? {
+          ...prev,
+          content: llmData.content ?? prev.content,
+          tool_calls_meta: llmData.tool_calls_meta ?? prev.tool_calls_meta,
+          llm_task_status: 'completed',
+        } : prev);
+      } else if (completedId) {
+        navigate(`/node/${completedId}`);
       }
       setLlmTaskNodeId(null);
     } else if (llmStatus === 'failed') {
       setError(llmError || 'LLM response generation failed');
       setLlmTaskNodeId(null);
     }
-  }, [llmStatus, llmData, llmError, navigate]);
+  }, [llmStatus, llmData, llmError, navigate, id, llmTaskNodeId]);
 
   const handleCheckboxToggle = useCheckboxToggle(
     useCallback(() => node?.content, [node]),
@@ -301,7 +312,9 @@ function NodeDetail() {
       setInlineContent("");
       if (autoGenerateActive && node.ai_usage !== 'none') {
         const llmNodeId = await requestLlmFor(newNodeId);
-        navigate(`/node/${newNodeId}?awaitLlm=${llmNodeId}`);
+        // Navigate directly to the pending LLM node so the inline input
+        // stays below it throughout generation (no post-completion jump).
+        navigate(`/node/${llmNodeId}?awaitLlm=${llmNodeId}`);
       } else {
         navigate(`/node/${newNodeId}`);
       }
@@ -387,9 +400,16 @@ function NodeDetail() {
     : null;
 
   const isLlmNode = node.node_type === "llm" || !!node.llm_model;
-  const showProposal = isLlmNode && node.content && hasProposalSections(node.content);
+  const isLlmPending = isLlmNode && (
+    node.llm_task_status === 'pending'
+    || node.llm_task_status === 'processing'
+  );
+  const showProposal = isLlmNode && !isLlmPending && node.content
+    && hasProposalSections(node.content);
   const displayContent = showProposal ? stripProposalSections(node.content) : node.content;
-  const showInlineInput = isOwner && !craftMode && node.ai_usage !== 'none';
+  // Inline input shows whenever the user owns the thread and AI is allowed.
+  // Craft mode does NOT hide it — it only adds extra buttons.
+  const showInlineInput = isOwner && node.ai_usage !== 'none';
   const showCraftBar = isOwner && craftMode && !autoGenerate && node.ai_usage !== 'none';
 
   const topRightButtonStyle = {
@@ -412,14 +432,14 @@ function NodeDetail() {
       <hr style={{ borderColor: "var(--border)" }} />
       {isOwner && node.ai_usage !== 'none' && (
         <div style={{
-          position: 'absolute',
-          top: '14px',
+          position: 'fixed',
+          top: '72px',
           right: '20px',
           display: 'flex',
           flexDirection: 'column',
           alignItems: 'flex-end',
-          gap: '8px',
-          zIndex: 2,
+          gap: '10px',
+          zIndex: 50,
         }}>
           <button
             onClick={() => handleSessionFromNode('voice')}
@@ -431,24 +451,42 @@ function NodeDetail() {
             <span>{voiceLoading ? 'Starting…' : 'Voice Mode'}</span>
           </button>
           {craftMode && (
-            <label style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '6px',
-              fontFamily: 'var(--sans)',
-              fontSize: '0.74rem',
-              fontWeight: 300,
-              color: 'var(--text-muted)',
-              cursor: 'pointer',
-            }}>
-              <input
-                type="checkbox"
-                checked={autoGenerate}
-                onChange={(e) => setAutoGenerate(e.target.checked)}
-                style={{ accentColor: 'var(--accent)' }}
-              />
-              Auto-generate
-            </label>
+            <button
+              type="button"
+              onClick={() => setAutoGenerate(v => !v)}
+              title={autoGenerate ? 'Auto-generate is on — click to turn off' : 'Auto-generate is off — click to turn on'}
+              style={{
+                background: 'none',
+                border: 'none',
+                padding: '4px 2px',
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+                color: 'var(--text-muted)',
+                fontFamily: 'var(--sans)',
+                fontSize: '0.74rem',
+                fontWeight: 300,
+              }}
+            >
+              <span style={{
+                width: '16px',
+                height: '16px',
+                borderRadius: '50%',
+                border: `1.5px solid ${autoGenerate ? 'var(--accent)' : 'var(--border-hover)'}`,
+                background: autoGenerate ? 'var(--accent)' : 'transparent',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: '0.55rem',
+                color: 'var(--bg-deep)',
+                fontWeight: 600,
+                flexShrink: 0,
+              }}>
+                {autoGenerate ? '✓' : ''}
+              </span>
+              <span>Auto-generate</span>
+            </button>
           )}
         </div>
       )}
@@ -539,13 +577,40 @@ function NodeDetail() {
             )}
           </div>
         )}
-        <QuotedContent
-          content={displayContent}
-          quotes={quotes}
-          contextArtifacts={node.context_artifacts || null}
-          onQuoteClick={handleBubbleClick}
-          onCheckboxToggle={isOwner ? handleCheckboxToggle : undefined}
-        />
+        {isLlmPending ? (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: '10px',
+            color: 'var(--text-muted)',
+            fontFamily: 'var(--sans)', fontSize: '0.95rem', fontWeight: 300,
+            fontStyle: 'italic',
+            padding: '8px 0',
+          }}>
+            <span>Thinking</span>
+            <span style={{ display: 'inline-flex', gap: '3px' }}>
+              {[0, 1, 2].map(i => (
+                <span key={i} style={{
+                  width: '5px', height: '5px', borderRadius: '50%',
+                  background: 'var(--text-muted)',
+                  animation: `wopPulseDot 1.2s ease-in-out ${i * 0.15}s infinite`,
+                }} />
+              ))}
+            </span>
+            <style>{`
+              @keyframes wopPulseDot {
+                0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+                30% { opacity: 1; transform: translateY(-2px); }
+              }
+            `}</style>
+          </div>
+        ) : (
+          <QuotedContent
+            content={displayContent}
+            quotes={quotes}
+            contextArtifacts={node.context_artifacts || null}
+            onQuoteClick={handleBubbleClick}
+            onCheckboxToggle={isOwner ? handleCheckboxToggle : undefined}
+          />
+        )}
         {showProposal && (
           <ProposalInline
             content={node.content}
@@ -640,7 +705,6 @@ function NodeDetail() {
         </NodeFooter>
         {showCraftBar && (
           <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-            <button onClick={() => setShowChildFormOverlay(true)}>Add Text</button>
             <button onClick={handleLLMResponse} disabled={!!llmTaskNodeId}>
               {llmTaskNodeId && llmStatus === 'processing' && llmProgress > 0
                 ? `Generating... ${llmProgress}%`
@@ -763,20 +827,6 @@ function NodeDetail() {
       {ancestorsSection}
       {highlightedNodeSection}
       {childrenSection}
-
-      {showChildFormOverlay && (
-        <NodeFormModal
-          title="Add Text"
-          onClose={() => setShowChildFormOverlay(false)}
-          nodeFormProps={{
-            parentId: node.id,
-            onSuccess: (data) => {
-              navigate(`/node/${data.id}`);
-              setShowChildFormOverlay(false);
-            },
-          }}
-        />
-      )}
 
       {showPromptEditConfirm && (
         <div

@@ -53,8 +53,10 @@ export default function WritePage() {
         ai_usage: aiUsage,
         privacy_level: privacyLevel,
       });
-      const { user_node_id, llm_node_id } = res.data;
-      navigate(`/node/${user_node_id}?awaitLlm=${llm_node_id}`);
+      const { llm_node_id } = res.data;
+      // Navigate directly to the pending LLM node so NodeDetail's inline
+      // input anchors below it and stays there through generation.
+      navigate(`/node/${llm_node_id}?awaitLlm=${llm_node_id}`);
     } catch (err) {
       console.error(err);
       setError(err.response?.data?.error || err.message || 'Error sending message.');
