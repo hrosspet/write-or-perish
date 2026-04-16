@@ -8,10 +8,10 @@ import RecoveryBanner from '../components/RecoveryBanner';
 import MarkdownBody from '../components/MarkdownBody';
 import OfflineBanner from '../components/OfflineBanner';
 import {
-  stripInlineMarkdown,
   parseTodoItems,
   parsePriorityItems,
   parseOrientResponse,
+  moveProposalItem,
 } from '../components/ProposalInline';
 import { useToast } from '../contexts/ToastContext';
 import api from '../api';
@@ -201,73 +201,6 @@ function AiDot() {
       `}</style>
     </span>
   );
-}
-
-/**
- * Move an item between ### sections in the raw voice response.
- * `fromSection` / `toSection` are lowercase substrings matched against headings
- * (e.g. 'completed', 'new task').
- * `itemText` is the stripped display text to match against raw lines.
- */
-function moveProposalItem(content, itemText, fromSection, toSection, { prepend = false } = {}) {
-  const lines = content.split('\n');
-  const sectionRegex = /^###\s+(.+)/;
-
-  // Find section ranges: { heading, start, end } (end is exclusive)
-  const sections = [];
-  for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(sectionRegex);
-    if (m) {
-      if (sections.length > 0) sections[sections.length - 1].end = i;
-      sections.push({ heading: m[1].trim().toLowerCase(), start: i, end: lines.length });
-    }
-  }
-  if (sections.length > 0) sections[sections.length - 1].end = lines.length;
-
-  const from = sections.find(s => s.heading.includes(fromSection));
-  const to = sections.find(s => s.heading.includes(toSection));
-  if (!from) return content;
-
-  // Find the matching line in the 'from' section
-  let matchIdx = -1;
-  let rawLine = null;
-  for (let i = from.start + 1; i < from.end; i++) {
-    const stripped = stripInlineMarkdown(
-      lines[i].replace(/^[-*]\s*/, '').replace(/^\[[ xX]\]\s*/, '').replace(/^\d+[.)]\s*/, '').trim()
-    );
-    if (stripped === itemText) {
-      matchIdx = i;
-      rawLine = lines[i];
-      break;
-    }
-  }
-  if (matchIdx < 0) return content;
-
-  // Remove the line from 'from' section
-  lines.splice(matchIdx, 1);
-
-  if (to) {
-    // Re-find 'to' section after splice (indices shifted if from was before to)
-    let toInsert = -1;
-    for (let i = 0; i < lines.length; i++) {
-      const m = lines[i].match(sectionRegex);
-      if (m && m[1].trim().toLowerCase().includes(toSection)) {
-        toInsert = i + 1;
-        if (!prepend) {
-          // Append: skip past existing items
-          while (toInsert < lines.length && !lines[toInsert].match(sectionRegex) && lines[toInsert].trim()) {
-            toInsert++;
-          }
-        }
-        break;
-      }
-    }
-    if (toInsert >= 0) {
-      lines.splice(toInsert, 0, rawLine);
-    }
-  }
-
-  return lines.join('\n');
 }
 
 export default function VoicePage() {

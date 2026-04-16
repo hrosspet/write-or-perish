@@ -595,6 +595,9 @@ function NodeDetail() {
             content={node.content}
             nodeId={node.id}
             toolCallsMeta={node.tool_calls_meta}
+            onContentChange={isOwner
+              ? (newContent) => setNode(prev => prev ? { ...prev, content: newContent } : prev)
+              : undefined}
           />
         )}
         {(() => {

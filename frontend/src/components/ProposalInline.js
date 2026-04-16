@@ -57,6 +57,73 @@ export function hasProposalSections(text) {
   return hasTodo || hasIssue;
 }
 
+/**
+ * Move a todo-list item between `###` sections in raw LLM content.
+ * Used by the interactive proposal toggles to flip a task between
+ * "completed" and "new task" (or back again) and have the LLM content
+ * reflect that decision so subsequent turns see the edited state.
+ *
+ * `fromSection` / `toSection` are lowercase substrings matched against
+ * heading text (e.g. 'completed', 'new task').
+ * `itemText` is the stripped display text to match raw lines against.
+ * Returns the original content unchanged if the item can't be found.
+ */
+export function moveProposalItem(content, itemText, fromSection, toSection, { prepend = false } = {}) {
+  const lines = content.split('\n');
+  const sectionRegex = /^###\s+(.+)/;
+
+  const sections = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(sectionRegex);
+    if (m) {
+      if (sections.length > 0) sections[sections.length - 1].end = i;
+      sections.push({ heading: m[1].trim().toLowerCase(), start: i, end: lines.length });
+    }
+  }
+  if (sections.length > 0) sections[sections.length - 1].end = lines.length;
+
+  const from = sections.find(s => s.heading.includes(fromSection));
+  const to = sections.find(s => s.heading.includes(toSection));
+  if (!from) return content;
+
+  let matchIdx = -1;
+  let rawLine = null;
+  for (let i = from.start + 1; i < from.end; i++) {
+    const stripped = stripInlineMarkdown(
+      lines[i].replace(/^[-*]\s*/, '').replace(/^\[[ xX]\]\s*/, '').replace(/^\d+[.)]\s*/, '').trim()
+    );
+    if (stripped === itemText) {
+      matchIdx = i;
+      rawLine = lines[i];
+      break;
+    }
+  }
+  if (matchIdx < 0) return content;
+
+  lines.splice(matchIdx, 1);
+
+  if (to) {
+    let toInsert = -1;
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(sectionRegex);
+      if (m && m[1].trim().toLowerCase().includes(toSection)) {
+        toInsert = i + 1;
+        if (!prepend) {
+          while (toInsert < lines.length && !lines[toInsert].match(sectionRegex) && lines[toInsert].trim()) {
+            toInsert++;
+          }
+        }
+        break;
+      }
+    }
+    if (toInsert >= 0) {
+      lines.splice(toInsert, 0, rawLine);
+    }
+  }
+
+  return lines.join('\n');
+}
+
 export function stripProposalSections(text) {
   if (!text) return text;
   const lines = text.split('\n');
@@ -82,7 +149,7 @@ export function stripProposalSections(text) {
   return result.join('\n').trim();
 }
 
-export default function ProposalInline({ content, nodeId, toolCallsMeta }) {
+export default function ProposalInline({ content, nodeId, toolCallsMeta, onContentChange }) {
   const parsed = parseOrientResponse(content);
   const hasTodo = parsed.completed || parsed.newTasks || parsed.priority || parsed.note;
   const hasIssue = parsed.issueTitle && parsed.issueDescription;
@@ -92,6 +159,24 @@ export default function ProposalInline({ content, nodeId, toolCallsMeta }) {
   const [issueApplyError, setIssueApplyError] = useState(null);
   const [issueResult, setIssueResult] = useState(null);
   const mergePollingRef = useRef(null);
+  // Interactive toggles are only enabled when the parent supplies an
+  // onContentChange callback AND the proposal hasn't been applied yet.
+  const toggleable = typeof onContentChange === 'function'
+    && applyStatus !== 'completed'
+    && applyStatus !== 'started';
+
+  const handleToggleItem = useCallback((itemText, fromSection, toSection, opts) => {
+    if (!toggleable || !nodeId) return;
+    const newContent = moveProposalItem(content, itemText, fromSection, toSection, opts);
+    if (newContent === content) return;
+    // Optimistic update; parent updates its copy of the content.
+    const prevContent = content;
+    onContentChange(newContent);
+    api.put(`/nodes/${nodeId}`, { content: newContent }).catch((err) => {
+      console.error('Failed to toggle proposal item:', err);
+      onContentChange(prevContent);
+    });
+  }, [content, nodeId, onContentChange, toggleable]);
 
   useEffect(() => {
     if (!toolCallsMeta) return;
@@ -189,13 +274,21 @@ export default function ProposalInline({ content, nodeId, toolCallsMeta }) {
                   display: 'flex', alignItems: 'flex-start', gap: '10px',
                   padding: '8px 0', borderBottom: '1px solid var(--border)',
                 }}>
-                  <div style={{
-                    width: '16px', height: '16px', borderRadius: '50%',
-                    border: '1.5px solid var(--accent-dim)', background: 'var(--accent-dim)',
-                    flexShrink: 0, marginTop: '2px',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontSize: '0.55rem', color: 'var(--bg-deep)', fontWeight: 600,
-                  }}>✓</div>
+                  <div
+                    onClick={toggleable
+                      ? () => handleToggleItem(item, 'completed', 'new task', { prepend: true })
+                      : undefined}
+                    title={toggleable ? 'Unmark as done' : undefined}
+                    style={{
+                      width: '16px', height: '16px', borderRadius: '50%',
+                      border: '1.5px solid var(--accent-dim)', background: 'var(--accent-dim)',
+                      flexShrink: 0, marginTop: '2px',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      fontSize: '0.55rem', color: 'var(--bg-deep)', fontWeight: 600,
+                      cursor: toggleable ? 'pointer' : 'default',
+                      transition: 'all 0.2s',
+                    }}
+                  >✓</div>
                   <div style={{
                     fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.85rem',
                     color: 'var(--text-secondary)', lineHeight: 1.5,
@@ -208,11 +301,19 @@ export default function ProposalInline({ content, nodeId, toolCallsMeta }) {
                   display: 'flex', alignItems: 'flex-start', gap: '10px',
                   padding: '8px 0', borderBottom: '1px solid var(--border)',
                 }}>
-                  <div style={{
-                    width: '16px', height: '16px', borderRadius: '50%',
-                    border: '1.5px solid var(--border-hover)',
-                    flexShrink: 0, marginTop: '2px',
-                  }} />
+                  <div
+                    onClick={toggleable
+                      ? () => handleToggleItem(item, 'new task', 'completed')
+                      : undefined}
+                    title={toggleable ? 'Mark as done' : undefined}
+                    style={{
+                      width: '16px', height: '16px', borderRadius: '50%',
+                      border: '1.5px solid var(--border-hover)',
+                      flexShrink: 0, marginTop: '2px',
+                      cursor: toggleable ? 'pointer' : 'default',
+                      transition: 'all 0.2s',
+                    }}
+                  />
                   <div style={{
                     fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.85rem',
                     color: 'var(--text-secondary)', lineHeight: 1.5,
