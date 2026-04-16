@@ -61,7 +61,7 @@ jobs:
 
       - name: Run backend tests
         run: |
-          pytest backend/tests || echo "No tests found - skipping"
+          pytest backend/tests
 
   test-frontend:
     needs: changes
