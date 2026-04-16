@@ -301,7 +301,7 @@ function parseOrientResponse(text) {
     if (heading.includes('completed')) sections.completed = body;
     else if (heading.includes('new task')) sections.newTasks = body;
     else if (heading.includes('priority')) sections.priority = body;
-    else if (heading.includes('note')) sections.note = body;
+    else if (heading.includes('note')) sections.note = body.replace(/\s*\[\w+-proposal:[^\]]*\]/g, '');
     else if (heading.includes('issue title') || heading === 'title') sections.issueTitle = body;
     else if (heading === 'description') sections.issueDescription = body;
     else if (heading === 'category') sections.issueCategory = body.trim().toLowerCase();
