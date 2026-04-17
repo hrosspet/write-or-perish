@@ -501,7 +501,7 @@ function NodeDetail() {
 
   const highlightedNodeSection = (
     <div ref={highlightedNodeRef} style={{ position: 'relative' }}>
-      <hr style={{ borderColor: "var(--border)" }} />
+      <hr style={{ borderColor: "var(--border)", margin: 0 }} />
       <div style={highlightedTextStyle}>
         {isOwner && (
           <div ref={kebabMenuRef} style={{
@@ -785,7 +785,7 @@ function NodeDetail() {
   );
 
   return (
-    <div style={{ padding: "12px" }}>
+    <div style={{ padding: "8px 12px 12px" }}>
       <div style={{
         display: "flex",
         justifyContent: "space-between",
