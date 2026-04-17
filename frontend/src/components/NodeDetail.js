@@ -445,7 +445,13 @@ function NodeDetail() {
             title="Continue this conversation by voice"
           >
             <span>{voiceLoading ? 'Starting…' : 'Voice Mode'}</span>
-            <span style={{ display: 'inline-flex', alignItems: 'center', lineHeight: 0 }}>
+            <span style={{
+              width: '32px',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              lineHeight: 0,
+            }}>
               <FaMicrophone size={12} />
             </span>
           </button>
