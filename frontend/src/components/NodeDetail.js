@@ -349,12 +349,11 @@ function NodeDetail() {
   };
 
   // Ancestors section rendered as a list of bubbles.
-  const ancestorsSection = (
+  const ancestorsSection = node.ancestors && node.ancestors.length > 0 && (
     <div style={{ display: "flex", flexDirection: "column", marginBottom: "10px" }}>
-      {node.ancestors &&
-        node.ancestors.map((ancestor) => (
-          <Bubble key={ancestor.id} node={ancestor} onClick={handleBubbleClick} leftAlign={true} />
-        ))}
+      {node.ancestors.map((ancestor) => (
+        <Bubble key={ancestor.id} node={ancestor} onClick={handleBubbleClick} leftAlign={true} />
+      ))}
     </div>
   );
 
