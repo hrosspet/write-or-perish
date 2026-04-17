@@ -785,13 +785,13 @@ function NodeDetail() {
   );
 
   return (
-    <div style={{ padding: "20px" }}>
+    <div style={{ padding: "12px" }}>
       <div style={{
         display: "flex",
         justifyContent: "space-between",
-        alignItems: "flex-start",
+        alignItems: "center",
         gap: "16px",
-        marginBottom: "16px",
+        marginBottom: "12px",
       }}>
         <h2 style={{
           fontFamily: "var(--serif)",
