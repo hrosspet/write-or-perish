@@ -449,10 +449,10 @@ const NodeForm = forwardRef(
               onClick={() => setUseAgenticPrompt(v => !v)}
               disabled={loading}
               style={{
-                width: '100%',
-                display: 'flex',
-                justifyContent: 'space-between',
+                display: 'inline-flex',
+                justifyContent: 'flex-start',
                 alignItems: 'center',
+                gap: '12px',
                 background: 'none',
                 border: 'none',
                 padding: 0,
