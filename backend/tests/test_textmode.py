@@ -204,6 +204,31 @@ class TestTextmodeStart:
         assert resp.status_code == 400
         assert "ai_usage" in resp.get_json()["error"].lower()
 
+    def test_auto_generate_false_skips_llm_placeholder(self, app):
+        """auto_generate=False creates the system + user nodes but no
+        LLM placeholder — lets the caller attach the agentic prompt
+        without committing to an immediate reply."""
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        resp = client.post(
+            "/api/textmode/start",
+            json={"content": "think on this", "auto_generate": False},
+        )
+        assert resp.status_code == 202
+        data = resp.get_json()
+        assert "conversation_id" in data
+        assert "user_node_id" in data
+        # No LLM placeholder created, no task enqueued
+        assert "llm_node_id" not in data
+        assert "task_id" not in data
+        # The user node exists but has no LLM child
+        user_node = Node.query.get(data["user_node_id"])
+        assert user_node is not None
+        assert len(user_node.children) == 0
+
     def test_rejects_ai_usage_none(self, app):
         """Text mode is specifically for agentic conversations — ai_usage
         'none' contradicts the endpoint's purpose. Frontend should pick a

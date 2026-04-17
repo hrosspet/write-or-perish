@@ -20,7 +20,8 @@ export default function WritePage() {
     // user lands on the new node.
     if (!isAiAllowed(ai_usage)) {
       addToast(
-        'Turning off auto-generate. AI usage on some nodes is turned off.'
+        'Turning off auto-generate. AI usage on some nodes is turned off.',
+        8000,
       );
       const res = await api.post('/nodes/', {
         content, privacy_level, ai_usage,

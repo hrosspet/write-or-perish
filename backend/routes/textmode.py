@@ -52,6 +52,12 @@ def start_conversation():
         or getattr(current_user, "default_privacy_level", None)
         or "private"
     )
+    # Optional: skip the LLM placeholder, creating only the system
+    # + user nodes. Lets callers attach the agentic prompt without
+    # committing to an immediate LLM reply (Agentic Reply ON +
+    # Auto-generate OFF on the Write New Entry modal). Default true
+    # preserves the existing always-generates behavior.
+    auto_generate = data.get("auto_generate", True)
 
     if not content or not content.strip():
         return jsonify({"error": "Content is required"}), 400
@@ -110,19 +116,27 @@ def start_conversation():
     db.session.add(user_node)
     db.session.flush()
 
-    # 3. Placeholder LLM node and enqueue task
-    llm_node, task_id = create_llm_placeholder(
-        user_node.id, model_id, current_user.id,
-        privacy_level=privacy_level,
-        ai_usage=ai_usage,
-        source_mode='textmode',
-    )
+    # 3. Placeholder LLM node and enqueue task — unless the caller
+    # explicitly opted out (Agentic Reply ON + Auto-generate OFF).
+    if auto_generate:
+        llm_node, task_id = create_llm_placeholder(
+            user_node.id, model_id, current_user.id,
+            privacy_level=privacy_level,
+            ai_usage=ai_usage,
+            source_mode='textmode',
+        )
+        db.session.commit()
+        return jsonify({
+            "conversation_id": system_node.id,
+            "user_node_id": user_node.id,
+            "llm_node_id": llm_node.id,
+            "task_id": task_id,
+        }), 202
 
+    db.session.commit()
     return jsonify({
         "conversation_id": system_node.id,
         "user_node_id": user_node.id,
-        "llm_node_id": llm_node.id,
-        "task_id": task_id,
     }), 202
 
 

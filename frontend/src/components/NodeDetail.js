@@ -313,7 +313,8 @@ function NodeDetail() {
       } else {
         if (autoGenerateActive && !aiAllowed) {
           addToast(
-            'Turning off auto-generate. AI usage on some nodes is turned off.'
+            'Turning off auto-generate. AI usage on some nodes is turned off.',
+            8000,
           );
         }
         navigate(`/node/${newNodeId}`);
