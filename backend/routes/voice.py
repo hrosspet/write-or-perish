@@ -12,6 +12,11 @@ from backend.utils.session_helpers import (
 voice_bp = Blueprint("voice", __name__)
 
 PROMPT_KEY = 'voice'
+# Keys that share the unified agentic.txt template. Any of these counts
+# as "an agentic prompt is already attached" when walking ancestry, so
+# bridging a text thread into voice mode (or vice-versa) doesn't append
+# a second prompt node.
+AGENTIC_PROMPT_KEYS = ('voice', 'textmode')
 
 
 @voice_bp.route("/from-node/<int:node_id>", methods=["POST"])
@@ -21,10 +26,8 @@ def create_voice_from_node(node_id):
     node = Node.query.get(node_id)
     if not node:
         return jsonify({"error": "Node not found"}), 404
-    if node.user_id != current_user.id:
-        parent = Node.query.get(node.parent_id) if node.parent_id else None
-        if not parent or parent.user_id != current_user.id:
-            return jsonify({"error": "Unauthorized"}), 403
+    if node.human_owner_id != current_user.id:
+        return jsonify({"error": "Unauthorized"}), 403
 
     data = request.get_json() or {}
     model_id = data.get("model")
@@ -38,13 +41,14 @@ def create_voice_from_node(node_id):
     # Inherit ai_usage from the target node
     ai_usage = node.ai_usage or current_user.default_ai_usage
 
-    has_prompt = ancestors_have_prompt(node, current_user.id, PROMPT_KEY)
+    has_prompt = ancestors_have_prompt(node, current_user.id, AGENTIC_PROMPT_KEYS)
     is_llm = is_llm_node(node)
 
     if has_prompt and not is_llm:
         llm_node = create_llm_placeholder_node(
             node.id, model_id, current_user.id,
             ai_usage=ai_usage,
+            source_mode='voice',
         )
         return jsonify({
             "mode": "processing",
@@ -79,6 +83,7 @@ def create_voice_from_node(node_id):
         llm_node = create_llm_placeholder_node(
             system_node.id, model_id, current_user.id,
             ai_usage=ai_usage,
+            source_mode='voice',
         )
         return jsonify({
             "mode": "processing",
@@ -141,6 +146,8 @@ def create_voice_session():
         parent_node = Node.query.get(parent_id)
         if not parent_node:
             return jsonify({"error": "Parent node not found"}), 404
+        if parent_node.human_owner_id != current_user.id:
+            return jsonify({"error": "Unauthorized"}), 403
         # Inherit ai_usage from parent node in the thread
         ai_usage = parent_node.ai_usage or current_user.default_ai_usage
         user_parent_id = parent_id
@@ -187,6 +194,7 @@ def create_voice_session():
     llm_node, task_id = create_llm_placeholder(
         user_node.id, model_id, current_user.id,
         ai_usage=ai_usage,
+        source_mode='voice',
     )
 
     current_app.logger.info(

@@ -6,11 +6,24 @@ from backend.utils.llm_nodes import create_llm_placeholder
 
 
 def ancestors_have_prompt(node, user_id, prompt_key):
-    """Walk up ancestors and check if any node links to a UserPrompt with this key."""
+    """Walk up ancestors and check if any node links to a UserPrompt
+    whose key matches. `prompt_key` may be a single string or an iterable
+    of strings — any match returns True.
+
+    Passing multiple keys lets callers treat different prompt keys that
+    share the same template (e.g. 'voice' + 'textmode' both pointing at
+    agentic.txt) as equivalent for ancestry purposes, so mode switches
+    within an existing agentic thread don't re-attach a fresh prompt
+    node.
+    """
+    if isinstance(prompt_key, str):
+        keys = {prompt_key}
+    else:
+        keys = set(prompt_key)
     current = node
     while current:
         prompt = current.get_artifact("prompt")
-        if prompt is not None and prompt.prompt_key == prompt_key:
+        if prompt is not None and prompt.prompt_key in keys:
             return True
         if current.parent_id:
             current = Node.query.get(current.parent_id)
@@ -24,12 +37,13 @@ def is_llm_node(node):
 
 
 def create_llm_placeholder_node(parent_node_id, model_id, requesting_user_id,
-                                ai_usage=None):
+                                ai_usage=None, source_mode=None):
     """Create an LLM placeholder node and enqueue the generation task."""
     if ai_usage is None:
         ai_usage = current_user.default_ai_usage
     llm_node, _ = create_llm_placeholder(
         parent_node_id, model_id, requesting_user_id,
         ai_usage=ai_usage,
+        source_mode=source_mode,
     )
     return llm_node

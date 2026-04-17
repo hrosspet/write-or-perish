@@ -1,14 +1,18 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { useParams, useNavigate } from "react-router-dom";
-import { FaThumbtack } from "react-icons/fa";
+import { useParams, useNavigate, useSearchParams } from "react-router-dom";
+import { FaThumbtack, FaMicrophone, FaEllipsisV } from "react-icons/fa";
 import NodeFooter from "./NodeFooter";
 import SpeakerIcon from "./SpeakerIcon";
 import DownloadAudioIcon from "./DownloadAudioIcon";
 import ModelSelector from "./ModelSelector";
+import NodeForm from "./NodeForm";
+import ProposalInline, { hasProposalSections, stripProposalSections } from "./ProposalInline";
 import { useUser } from "../contexts/UserContext";
+import { useToast } from "../contexts/ToastContext";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 import api from "../api";
 import { useCheckboxToggle } from "../utils/markdown";
+import { contextAllowsAi } from "../utils/aiUsage";
 import NodeFormModal from "./NodeFormModal";
 import Bubble from "./Bubble";
 import QuotedContent from "./QuotedContent";
@@ -43,11 +47,13 @@ function RenderChildTree({ nodes, onBubbleClick }) {
 function NodeDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { user: currentUser } = useUser();
+  const { addToast } = useToast();
+  const craftMode = !!currentUser?.craft_mode;
   const [node, setNode] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [showChildFormOverlay, setShowChildFormOverlay] = useState(false);
   const [showEditOverlay, setShowEditOverlay] = useState(false);
   const [selectedModel, setSelectedModel] = useState(currentUser?.preferred_model || null);
   const [llmTaskNodeId, setLlmTaskNodeId] = useState(null);
@@ -56,7 +62,31 @@ function NodeDetail() {
   const [voiceLoading, setVoiceLoading] = useState(false);
   const [toolActionsExpanded, setToolActionsExpanded] = useState(false);
   const [showPromptEditConfirm, setShowPromptEditConfirm] = useState(false);
+  // autoGenerate is shared across the whole text-mode experience — the
+  // NodeDetailWrapper uses `key={id}` which remounts NodeDetail on every
+  // node navigation, so local useState would reset the toggle. Persist to
+  // localStorage so it survives the remount.
+  const [autoGenerate, setAutoGenerateState] = useState(() => {
+    const stored = localStorage.getItem('loore_auto_generate');
+    return stored === null ? true : stored === 'true';
+  });
+  const setAutoGenerate = useCallback((next) => {
+    setAutoGenerateState(prev => {
+      const resolved = typeof next === 'function' ? next(prev) : next;
+      localStorage.setItem('loore_auto_generate', String(resolved));
+      return resolved;
+    });
+  }, []);
+  const [showKebabMenu, setShowKebabMenu] = useState(false);
   const highlightedNodeRef = useRef(null);
+  const kebabMenuRef = useRef(null);
+
+  // `autoGenerate` is the single source of truth. Defaults to true on
+  // a fresh install (see useState initializer) and persists across
+  // remounts via localStorage. The toggle is only visible in Craft
+  // mode, but the stored preference governs behavior in both modes so
+  // the UI state always matches observed behavior.
+  const autoGenerateActive = autoGenerate;
 
   // LLM completion polling - enabled automatically when llmTaskNodeId is set
   const {
@@ -121,19 +151,58 @@ function NodeDetail() {
     }
   }, [loading, node]);
 
+  // If we arrived with ?awaitLlm=NID (e.g. from WritePage), pick up the
+  // pending LLM task and let the polling navigate to it on completion.
+  // Re-runs when `id` changes so internal navigations to another node
+  // with ?awaitLlm= also take effect (react-router reuses the component).
+  useEffect(() => {
+    const awaitLlm = searchParams.get('awaitLlm');
+    if (awaitLlm) {
+      setLlmTaskNodeId(parseInt(awaitLlm, 10));
+      const next = new URLSearchParams(searchParams);
+      next.delete('awaitLlm');
+      setSearchParams(next, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
+  // Close kebab menu on outside click
+  useEffect(() => {
+    if (!showKebabMenu) return;
+    const handler = (e) => {
+      if (kebabMenuRef.current && !kebabMenuRef.current.contains(e.target)) {
+        setShowKebabMenu(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [showKebabMenu]);
+
   // Handle LLM completion
   useEffect(() => {
     if (llmStatus === 'completed' && llmData) {
-      const newNodeId = llmData.node?.id;
-      if (newNodeId) {
-        navigate(`/node/${newNodeId}`);
+      // Prefer the id of the node returned in payload; fall back to the
+      // polled node id (llmTaskNodeId).
+      const completedId = llmData.node?.id || llmTaskNodeId;
+      if (completedId && String(completedId) === String(id)) {
+        // We're already viewing the pending LLM node — patch its state
+        // in place so the rendered content switches from "Thinking…" to
+        // the final response without a navigation jump.
+        setNode(prev => prev ? {
+          ...prev,
+          content: llmData.content ?? prev.content,
+          tool_calls_meta: llmData.tool_calls_meta ?? prev.tool_calls_meta,
+          llm_task_status: 'completed',
+        } : prev);
+      } else if (completedId) {
+        navigate(`/node/${completedId}`);
       }
       setLlmTaskNodeId(null);
     } else if (llmStatus === 'failed') {
       setError(llmError || 'LLM response generation failed');
       setLlmTaskNodeId(null);
     }
-  }, [llmStatus, llmData, llmError, navigate]);
+  }, [llmStatus, llmData, llmError, navigate, id, llmTaskNodeId]);
 
   const handleCheckboxToggle = useCheckboxToggle(
     useCallback(() => node?.content, [node]),
@@ -202,25 +271,58 @@ function NodeDetail() {
     }
   };
 
+  const requestLlmFor = async (parentNodeId) => {
+    const response = await api.post(`/nodes/${parentNodeId}/llm`, {
+      model: selectedModel,
+      source_mode: 'textmode',
+    });
+    const newNodeId = response.data.node_id;
+    if (!newNodeId) throw new Error("Failed to get a task ID for the new LLM node.");
+    return newNodeId;
+  };
+
   const handleLLMResponse = () => {
-    setError(""); // Clear previous errors
-    api
-      .post(`/nodes/${id}/llm`, { model: selectedModel })
-      .then((response) => {
-        // The backend now creates a placeholder and returns its ID.
-        // We use this ID for polling.
-        const newNodeId = response.data.node_id;
-        if (newNodeId) {
-          setLlmTaskNodeId(newNodeId);
-        } else {
-          // Fallback or error for safety, though the backend should always return it
-          setError("Failed to get a task ID for the new LLM node.");
-        }
-      })
+    setError("");
+    requestLlmFor(id)
+      .then((newNodeId) => setLlmTaskNodeId(newNodeId))
       .catch((err) => {
         console.error(err);
-        setError("Error requesting LLM response.");
+        setError(err.response?.data?.error || err.message || "Error requesting LLM response.");
       });
+  };
+
+  // Called by NodeForm after it successfully POSTs /nodes/.
+  // `data` is the newly-created child node from the backend.
+  const handleInlineSuccess = async (data) => {
+    const newNodeId = data?.id;
+    if (!newNodeId) return;
+    setError("");
+    try {
+      // Re-check context at submit time (not just on mount): if ANY node
+      // in the current thread ancestry has `ai_usage` outside
+      // {chat, train}, auto-generate silently skips and toasts the user.
+      // Prevents firing an LLM call that would omit parts of the thread
+      // from context and produce partial / confusing replies.
+      const chain = [node, ...(node.ancestors || [])];
+      const aiAllowed = contextAllowsAi(chain);
+      if (autoGenerateActive && aiAllowed) {
+        const llmNodeId = await requestLlmFor(newNodeId);
+        // Navigate directly to the pending LLM node so the inline input
+        // stays anchored below it throughout generation.
+        navigate(`/node/${llmNodeId}?awaitLlm=${llmNodeId}`);
+      } else {
+        if (autoGenerateActive && !aiAllowed) {
+          addToast(
+            'Turning off auto-generate. AI usage on some nodes is turned off.',
+            8000,
+          );
+        }
+        navigate(`/node/${newNodeId}`);
+      }
+    } catch (err) {
+      console.error(err);
+      setError(err.response?.data?.error || err.message || "Error sending message.");
+    }
   };
 
   const handleSessionFromNode = (sessionType) => {
@@ -267,7 +369,8 @@ function NodeDetail() {
     borderRadius: "10px",
     width: "95%",
     maxWidth: "1500px",
-    marginLeft: "20px"
+    marginLeft: "20px",
+    position: "relative",
   };
 
   const actionContainerStyle = {
@@ -295,10 +398,172 @@ function NodeDetail() {
       : null)
     : null;
 
+  const isLlmNode = node.node_type === "llm" || !!node.llm_model;
+  const isLlmPending = isLlmNode && (
+    node.llm_task_status === 'pending'
+    || node.llm_task_status === 'processing'
+  );
+  const showProposal = isLlmNode && !isLlmPending && node.content
+    && hasProposalSections(node.content);
+  const displayContent = showProposal ? stripProposalSections(node.content) : node.content;
+  // Inline input is always available to any viewer (reply + branch from
+  // someone else's public node → new thread owned by the replier). The
+  // only way to add a child text node since "Add Text" was removed. On
+  // `ai_usage='none'` nodes the submit path skips the LLM request.
+  // Ownership gates apply elsewhere: Voice Mode (backend 403s non-owners
+  // via /voice/from-node), Craft-bar LLM Response + ModelSelector, and
+  // the kebab Edit/Delete menu.
+  const showInlineInput = !!currentUser;
+  const showCraftBar = isOwner && craftMode && !autoGenerate && node.ai_usage !== 'none';
+
+  // Shared shell for the top-right controls. Voice Mode + Auto-generate
+  // share padding/border/typography; Auto-generate uses `space-between`
+  // (label left, pill right) to match the Craft-mode toggle in the
+  // NavBar overflow menu. They sit side-by-side in a single row so the
+  // fixed strip stays above the Thread / ancestor hr separator.
+  const topRightButtonStyle = {
+    background: 'none',
+    border: '1px solid var(--border)',
+    borderRadius: '6px',
+    padding: '0 12px',
+    color: 'var(--text-muted)',
+    fontFamily: 'var(--sans)',
+    fontSize: '0.78rem',
+    fontWeight: 300,
+    cursor: 'pointer',
+    display: 'inline-flex',
+    alignItems: 'center',
+    width: '160px',
+    height: '32px',
+    boxSizing: 'border-box',
+  };
+
   const highlightedNodeSection = (
-    <div ref={highlightedNodeRef}>
+    <div ref={highlightedNodeRef} style={{ position: 'relative' }}>
       <hr style={{ borderColor: "var(--border)" }} />
+      {isOwner && node.ai_usage !== 'none' && (
+        <div style={{
+          position: 'fixed',
+          top: '68px',
+          right: '20px',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'flex-end',
+          gap: '6px',
+          zIndex: 50,
+        }}>
+          <button
+            onClick={() => handleSessionFromNode('voice')}
+            disabled={voiceLoading}
+            style={{ ...topRightButtonStyle, justifyContent: 'space-between' }}
+            title="Continue this conversation by voice"
+          >
+            <span>{voiceLoading ? 'Starting…' : 'Voice Mode'}</span>
+            <span style={{
+              width: '32px',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              lineHeight: 0,
+            }}>
+              <FaMicrophone size={12} />
+            </span>
+          </button>
+          {craftMode && (
+            <button
+              type="button"
+              onClick={() => setAutoGenerate(v => !v)}
+              title={autoGenerate ? 'Auto-generate is on — click to turn off' : 'Auto-generate is off — click to turn on'}
+              style={{ ...topRightButtonStyle, justifyContent: 'space-between' }}
+            >
+              <span>Auto-generate</span>
+              <span style={{
+                width: '32px',
+                height: '18px',
+                borderRadius: '9px',
+                background: autoGenerate ? 'var(--accent)' : 'var(--border)',
+                position: 'relative',
+                transition: 'background 0.2s ease',
+                flexShrink: 0,
+              }}>
+                <span style={{
+                  width: '14px',
+                  height: '14px',
+                  borderRadius: '50%',
+                  background: 'var(--text-primary)',
+                  position: 'absolute',
+                  top: '2px',
+                  left: autoGenerate ? '16px' : '2px',
+                  transition: 'left 0.2s ease',
+                }} />
+              </span>
+            </button>
+          )}
+        </div>
+      )}
       <div style={highlightedTextStyle}>
+        {isOwner && (
+          <div ref={kebabMenuRef} style={{
+            position: 'absolute',
+            top: '10px',
+            right: '10px',
+          }}>
+            <button
+              onClick={() => setShowKebabMenu((v) => !v)}
+              title="More actions"
+              style={{
+                background: 'none', border: 'none', cursor: 'pointer',
+                color: 'var(--text-muted)', padding: '4px 6px',
+                display: 'inline-flex', alignItems: 'center',
+              }}
+            >
+              <FaEllipsisV size={14} />
+            </button>
+            {showKebabMenu && (
+              <div style={{
+                position: 'absolute',
+                top: '100%',
+                right: 0,
+                marginTop: '4px',
+                background: 'var(--bg-card)',
+                border: '1px solid var(--border)',
+                borderRadius: '6px',
+                boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
+                minWidth: '120px',
+                zIndex: 5,
+                overflow: 'hidden',
+              }}>
+                <button
+                  onClick={() => {
+                    setShowKebabMenu(false);
+                    if (node.context_artifacts?.prompt) {
+                      setShowPromptEditConfirm(true);
+                    } else {
+                      setShowEditOverlay(true);
+                    }
+                  }}
+                  style={{
+                    display: 'block', width: '100%', textAlign: 'left',
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    padding: '8px 12px',
+                    fontFamily: 'var(--sans)', fontSize: '0.85rem', fontWeight: 300,
+                    color: 'var(--text-primary)',
+                  }}
+                >Edit</button>
+                <button
+                  onClick={() => { setShowKebabMenu(false); handleDelete(); }}
+                  style={{
+                    display: 'block', width: '100%', textAlign: 'left',
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    padding: '8px 12px',
+                    fontFamily: 'var(--sans)', fontSize: '0.85rem', fontWeight: 300,
+                    color: 'var(--accent)',
+                  }}
+                >Delete</button>
+              </div>
+            )}
+          </div>
+        )}
         {node.is_system_prompt && node.prompt_title && (
           <div style={{
             fontFamily: "var(--sans)",
@@ -323,14 +588,56 @@ function NodeDetail() {
             )}
           </div>
         )}
-        <QuotedContent
-          content={node.content}
-          quotes={quotes}
-          contextArtifacts={node.context_artifacts || null}
-          onQuoteClick={handleBubbleClick}
-          onCheckboxToggle={isOwner ? handleCheckboxToggle : undefined}
-        />
-        {node.tool_calls_meta && node.tool_calls_meta.length > 0 && (
+        {isLlmPending ? (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: '10px',
+            color: 'var(--text-muted)',
+            fontFamily: 'var(--sans)', fontSize: '0.95rem', fontWeight: 300,
+            fontStyle: 'italic',
+            padding: '8px 0',
+          }}>
+            <span>Thinking</span>
+            <span style={{ display: 'inline-flex', gap: '3px' }}>
+              {[0, 1, 2].map(i => (
+                <span key={i} style={{
+                  width: '5px', height: '5px', borderRadius: '50%',
+                  background: 'var(--text-muted)',
+                  animation: `wopPulseDot 1.2s ease-in-out ${i * 0.15}s infinite`,
+                }} />
+              ))}
+            </span>
+            <style>{`
+              @keyframes wopPulseDot {
+                0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+                30% { opacity: 1; transform: translateY(-2px); }
+              }
+            `}</style>
+          </div>
+        ) : (
+          <QuotedContent
+            content={displayContent}
+            quotes={quotes}
+            contextArtifacts={node.context_artifacts || null}
+            onQuoteClick={handleBubbleClick}
+            onCheckboxToggle={isOwner ? handleCheckboxToggle : undefined}
+          />
+        )}
+        {showProposal && (
+          <ProposalInline
+            content={node.content}
+            nodeId={node.id}
+            toolCallsMeta={node.tool_calls_meta}
+            onContentChange={isOwner
+              ? (newContent) => setNode(prev => prev ? { ...prev, content: newContent } : prev)
+              : undefined}
+            onError={(msg) => addToast(msg)}
+          />
+        )}
+        {(() => {
+          const visibleTools = (node.tool_calls_meta || [])
+            .filter(tc => !tc.name || !tc.name.startsWith('_'));
+          if (visibleTools.length === 0) return null;
+          return (
           <div style={{ marginTop: '12px', borderTop: '1px solid var(--border)', paddingTop: '8px' }}>
             <button
               onClick={() => setToolActionsExpanded(!toolActionsExpanded)}
@@ -340,11 +647,11 @@ function NodeDetail() {
                 color: 'var(--text-muted)',
               }}
             >
-              {toolActionsExpanded ? '▾' : '▸'} Actions taken ({node.tool_calls_meta.length})
+              {toolActionsExpanded ? '▾' : '▸'} Actions taken ({visibleTools.length})
             </button>
             {toolActionsExpanded && (
               <div style={{ marginTop: '8px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                {node.tool_calls_meta.map((tc, i) => (
+                {visibleTools.map((tc, i) => (
                   <div key={i} style={{
                     fontFamily: 'var(--sans)', fontSize: '0.78rem', fontWeight: 300,
                     color: 'var(--text-secondary)', padding: '6px 10px',
@@ -375,7 +682,8 @@ function NodeDetail() {
               </div>
             )}
           </div>
-        )}
+          );
+        })()}
       </div>
       <div style={actionContainerStyle}>
         <NodeFooter
@@ -410,39 +718,59 @@ function NodeDetail() {
           <SpeakerIcon nodeId={node.id} content={node.content} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} />
           <DownloadAudioIcon nodeId={node.id} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} />
         </NodeFooter>
-        <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-          <button onClick={() => setShowChildFormOverlay(true)}>Add Text</button>
-          {isOwner && node.ai_usage !== 'none' && (
-            <>
-              <button onClick={handleLLMResponse} disabled={!!llmTaskNodeId}>
-                {llmTaskNodeId && llmStatus === 'processing' && llmProgress > 0
-                  ? `Generating... ${llmProgress}%`
-                  : llmTaskNodeId && llmStatus === 'pending'
-                  ? "Waiting for AI..."
-                  : llmTaskNodeId
-                  ? "Generating..."
-                  : "LLM Response"}
-              </button>
-              <button onClick={() => handleSessionFromNode('voice')} disabled={voiceLoading}>
-                {voiceLoading ? "Starting..." : "Voice"}
-              </button>
-              <ModelSelector
-                nodeId={node.id}
-                selectedModel={selectedModel}
-                onModelChange={setSelectedModel}
-              />
-            </>
-          )}
-          {isOwner && <button onClick={() => {
-            if (node.context_artifacts?.prompt) {
-              setShowPromptEditConfirm(true);
-            } else {
-              setShowEditOverlay(true);
-            }
-          }}>Edit</button>}
-          {isOwner && <button onClick={handleDelete}>Delete</button>}
-        </div>
+        {showCraftBar && (
+          <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+            <button onClick={handleLLMResponse} disabled={!!llmTaskNodeId}>
+              {llmTaskNodeId && llmStatus === 'processing' && llmProgress > 0
+                ? `Generating... ${llmProgress}%`
+                : llmTaskNodeId && llmStatus === 'pending'
+                ? "Waiting for AI..."
+                : llmTaskNodeId
+                ? "Generating..."
+                : "LLM Response"}
+            </button>
+            <ModelSelector
+              nodeId={node.id}
+              selectedModel={selectedModel}
+              onModelChange={setSelectedModel}
+            />
+          </div>
+        )}
+        {llmTaskNodeId && !showCraftBar && (
+          <div style={{
+            marginTop: '8px',
+            fontFamily: 'var(--sans)', fontSize: '0.78rem', fontWeight: 300,
+            color: 'var(--text-muted)',
+          }}>
+            {llmStatus === 'processing' && llmProgress > 0
+              ? `Generating… ${llmProgress}%`
+              : llmStatus === 'pending'
+              ? 'Waiting for AI…'
+              : 'Generating…'}
+          </div>
+        )}
       </div>
+      {showInlineInput && (
+        <div style={{
+          width: '95%',
+          maxWidth: '1500px',
+          marginLeft: '20px',
+          marginRight: 'auto',
+          marginTop: '4px',
+          marginBottom: '12px',
+        }}>
+          <NodeForm
+            key={`inline-${id}`}
+            parentId={parseInt(id, 10)}
+            hidePowerFeatures={!craftMode}
+            hideAudioUpload={!craftMode}
+            compact
+            placeholder="Type what's on your mind…"
+            submitLabel="Send"
+            onSuccess={handleInlineSuccess}
+          />
+        </div>
+      )}
       <hr style={{ borderColor: "var(--border)" }} />
     </div>
   );
@@ -457,30 +785,17 @@ function NodeDetail() {
   );
 
   return (
-    <div style={{ padding: "20px" }}>
+    <div style={{ padding: "20px", paddingTop: "56px" }}>
       <h2 style={{
         fontFamily: "var(--serif)",
         fontWeight: 300,
         fontSize: "1.8rem",
         color: "var(--text-primary)",
+        marginTop: 0,
       }}>Thread</h2>
       {ancestorsSection}
       {highlightedNodeSection}
       {childrenSection}
-
-      {showChildFormOverlay && (
-        <NodeFormModal
-          title="Add Text"
-          onClose={() => setShowChildFormOverlay(false)}
-          nodeFormProps={{
-            parentId: node.id,
-            onSuccess: (data) => {
-              navigate(`/node/${data.id}`);
-              setShowChildFormOverlay(false);
-            },
-          }}
-        />
-      )}
 
       {showPromptEditConfirm && (
         <div

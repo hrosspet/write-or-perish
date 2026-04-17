@@ -1,12 +1,12 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { useSearchParams } from 'react-router-dom';
-import { FaPlay, FaPause, FaUndo, FaRedo } from 'react-icons/fa';
+import { useSearchParams, useNavigate } from 'react-router-dom';
+import { FaPlay, FaPause, FaUndo, FaRedo, FaKeyboard } from 'react-icons/fa';
 import { useVoiceSession } from '../hooks/useVoiceSession';
 import { useUser } from '../contexts/UserContext';
 import { useInterruptedRecovery } from '../hooks/useInterruptedRecovery';
 import RecoveryBanner from '../components/RecoveryBanner';
-import MarkdownBody from '../components/MarkdownBody';
 import OfflineBanner from '../components/OfflineBanner';
+import ProposalInline from '../components/ProposalInline';
 import { useToast } from '../contexts/ToastContext';
 import api from '../api';
 
@@ -177,139 +177,8 @@ function Spinner() {
   );
 }
 
-function AiDot() {
-  return (
-    <span style={{
-      display: 'inline-block',
-      width: '6px',
-      height: '6px',
-      borderRadius: '50%',
-      background: 'var(--accent)',
-      animation: 'aiDotPulseVoice 2s ease infinite',
-    }}>
-      <style>{`
-        @keyframes aiDotPulseVoice {
-          0%, 100% { opacity: 0.4; }
-          50% { opacity: 1; box-shadow: 0 0 8px var(--accent-glow); }
-        }
-      `}</style>
-    </span>
-  );
-}
-
-function stripInlineMarkdown(text) {
-  return text.replace(/\*\*(.+?)\*\*/g, '$1').replace(/__(.+?)__/g, '$1');
-}
-
-function parseTodoItems(text) {
-  return text.split('\n')
-    .map(l => l.replace(/^[-*]\s*/, '').replace(/^\[[ xX]\]\s*/, '').trim())
-    .map(l => stripInlineMarkdown(l))
-    .filter(Boolean);
-}
-
-function parsePriorityItems(text) {
-  return text.split('\n')
-    .filter(l => l.trim())
-    .map(l => {
-      const cleaned = l.replace(/^\d+[.)]\s*/, '').replace(/^[-*]\s*/, '').replace(/^\[[ xX]\]\s*/, '').trim();
-      const dashMatch = cleaned.match(/^(.+?)\s*[—–]\s*(.+)$/);
-      if (dashMatch) return { text: stripInlineMarkdown(dashMatch[1].trim()), hint: dashMatch[2].trim() };
-      const parenMatch = cleaned.match(/^(.+?)\s*\(([^)]+)\)\s*$/);
-      if (parenMatch) return { text: stripInlineMarkdown(parenMatch[1].trim()), hint: parenMatch[2].trim() };
-      return { text: stripInlineMarkdown(cleaned), hint: '' };
-    })
-    .filter(item => item.text);
-}
-
-/**
- * Move an item between ### sections in the raw voice response.
- * `fromSection` / `toSection` are lowercase substrings matched against headings
- * (e.g. 'completed', 'new task').
- * `itemText` is the stripped display text to match against raw lines.
- */
-function moveProposalItem(content, itemText, fromSection, toSection, { prepend = false } = {}) {
-  const lines = content.split('\n');
-  const sectionRegex = /^###\s+(.+)/;
-
-  // Find section ranges: { heading, start, end } (end is exclusive)
-  const sections = [];
-  for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(sectionRegex);
-    if (m) {
-      if (sections.length > 0) sections[sections.length - 1].end = i;
-      sections.push({ heading: m[1].trim().toLowerCase(), start: i, end: lines.length });
-    }
-  }
-  if (sections.length > 0) sections[sections.length - 1].end = lines.length;
-
-  const from = sections.find(s => s.heading.includes(fromSection));
-  const to = sections.find(s => s.heading.includes(toSection));
-  if (!from) return content;
-
-  // Find the matching line in the 'from' section
-  let matchIdx = -1;
-  let rawLine = null;
-  for (let i = from.start + 1; i < from.end; i++) {
-    const stripped = stripInlineMarkdown(
-      lines[i].replace(/^[-*]\s*/, '').replace(/^\[[ xX]\]\s*/, '').replace(/^\d+[.)]\s*/, '').trim()
-    );
-    if (stripped === itemText) {
-      matchIdx = i;
-      rawLine = lines[i];
-      break;
-    }
-  }
-  if (matchIdx < 0) return content;
-
-  // Remove the line from 'from' section
-  lines.splice(matchIdx, 1);
-
-  if (to) {
-    // Re-find 'to' section after splice (indices shifted if from was before to)
-    let toInsert = -1;
-    for (let i = 0; i < lines.length; i++) {
-      const m = lines[i].match(sectionRegex);
-      if (m && m[1].trim().toLowerCase().includes(toSection)) {
-        toInsert = i + 1;
-        if (!prepend) {
-          // Append: skip past existing items
-          while (toInsert < lines.length && !lines[toInsert].match(sectionRegex) && lines[toInsert].trim()) {
-            toInsert++;
-          }
-        }
-        break;
-      }
-    }
-    if (toInsert >= 0) {
-      lines.splice(toInsert, 0, rawLine);
-    }
-  }
-
-  return lines.join('\n');
-}
-
-function parseOrientResponse(text) {
-  const sections = {};
-  const parts = text.split(/^###\s+/m);
-  for (const part of parts) {
-    if (!part.trim()) continue;
-    const firstNewline = part.indexOf('\n');
-    if (firstNewline < 0) continue;
-    const heading = part.slice(0, firstNewline).trim().toLowerCase();
-    const body = part.slice(firstNewline + 1).trim();
-    if (heading.includes('completed')) sections.completed = body;
-    else if (heading.includes('new task')) sections.newTasks = body;
-    else if (heading.includes('priority')) sections.priority = body;
-    else if (heading.includes('note')) sections.note = body.replace(/\s*\[\w+-proposal:[^\]]*\]/g, '');
-    else if (heading.includes('issue title') || heading === 'title') sections.issueTitle = body;
-    else if (heading === 'description') sections.issueDescription = body;
-    else if (heading === 'category') sections.issueCategory = body.trim().toLowerCase();
-  }
-  return sections;
-}
-
 export default function VoicePage() {
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const resumeId = searchParams.get('resume');
   const parentId = searchParams.get('parent');
@@ -320,78 +189,10 @@ export default function VoicePage() {
   } = useInterruptedRecovery();
 
   const [toolCallsMeta, setToolCallsMeta] = useState(null);
-  // applyStatus: null | 'started' | 'completed' | 'error'
-  const [applyStatus, setApplyStatus] = useState(null);
-  const [applyError, setApplyError] = useState(null);
-  const [parsedResponse, setParsedResponse] = useState(null);
   const [llmContent, setLlmContent] = useState(null);
   const { addToast } = useToast();
-  // GitHub issue state
-  const [issueApplyStatus, setIssueApplyStatus] = useState(null);
-  const [issueApplyError, setIssueApplyError] = useState(null);
-  const [issueResult, setIssueResult] = useState(null);
   const setThreadParentIdRef = useRef(null);
   const lastLlmNodeIdRef = useRef(null);
-  const mergePollingRef = useRef(null);
-
-  const pollApplyStatus = useCallback((nodeId) => {
-    mergePollingRef.current = setInterval(async () => {
-      try {
-        const res = await api.get(`/nodes/${nodeId}/llm-status`);
-        const meta = res.data.tool_calls_meta;
-        if (meta) {
-          const todoEntry = meta.find(tc => tc.name === 'propose_todo');
-          if (todoEntry?.apply_status === 'completed') {
-            clearInterval(mergePollingRef.current);
-            mergePollingRef.current = null;
-            setApplyStatus('completed');
-          } else if (todoEntry?.apply_status === 'failed') {
-            clearInterval(mergePollingRef.current);
-            mergePollingRef.current = null;
-            setApplyStatus('error');
-            setApplyError(todoEntry.apply_error || 'Todo merge failed');
-          }
-        }
-      } catch { /* keep polling */ }
-    }, 2000);
-  }, []);
-
-  const handleApplyTodo = useCallback(async (nodeId) => {
-    if (!nodeId) return;
-    setApplyStatus('started');
-    try {
-      await api.post('/todo/apply-draft', { llm_node_id: nodeId });
-      // Poll tool_calls_meta on the LLM node for apply_status
-      pollApplyStatus(nodeId);
-    } catch (err) {
-      console.error('Failed to apply todo:', err);
-      const msg = err?.response?.data?.error || 'Todo update failed';
-      setApplyStatus('error');
-      setApplyError(msg);
-    }
-  }, [pollApplyStatus]);
-
-  const handleCreateIssue = useCallback(async (nodeId) => {
-    if (!nodeId) return;
-    setIssueApplyStatus('started');
-    try {
-      const res = await api.post('/github/create-issue', { llm_node_id: nodeId });
-      setIssueApplyStatus('completed');
-      setIssueResult(res.data);
-    } catch (err) {
-      console.error('Failed to create GitHub issue:', err);
-      const msg = err?.response?.data?.error || 'Issue creation failed';
-      setIssueApplyStatus('error');
-      setIssueApplyError(msg);
-    }
-  }, []);
-
-  // Cleanup polling on unmount
-  useEffect(() => {
-    return () => {
-      if (mergePollingRef.current) clearInterval(mergePollingRef.current);
-    };
-  }, []);
 
   const { user } = useUser();
   const selectedModel = user?.preferred_model || null;
@@ -409,49 +210,11 @@ export default function VoicePage() {
     onLLMComplete: (nodeId, content, isResume) => {
       lastLlmNodeIdRef.current = nodeId;
       setLlmContent(content);
-      // Parse orient-style sections from LLM text (which IS the summary)
-      const parsed = parseOrientResponse(content);
-      if (parsed.completed || parsed.newTasks || parsed.priority || parsed.note || parsed.issueTitle) {
-        setParsedResponse(parsed);
-      } else {
-        setParsedResponse(null);
-      }
-
-      // Fetch tool call metadata (for apply actions and auto-detected drafts)
+      // ProposalInline handles its own parsing + apply-status derivation
+      // from tool_calls_meta. We just feed it the raw content + meta.
       api.get(`/nodes/${nodeId}/llm-status`).then(res => {
         if (res.data.tool_calls_meta) {
           setToolCallsMeta(res.data.tool_calls_meta);
-
-          // Check todo draft status (auto-detected or from apply_todo_changes)
-          const todoEntry = res.data.tool_calls_meta.find(tc => tc.name === 'propose_todo');
-          if (todoEntry) {
-            if (todoEntry.apply_status === 'completed') {
-              setApplyStatus('completed');
-            } else if (todoEntry.apply_status === 'failed') {
-              setApplyStatus('error');
-              setApplyError(todoEntry.apply_error || 'Todo merge failed');
-            } else if (todoEntry.apply_status === 'started') {
-              setApplyStatus('started');
-              pollApplyStatus(nodeId);
-            }
-          }
-          const applyCall = res.data.tool_calls_meta.find(tc => tc.name === 'apply_todo_changes');
-          if (applyCall && applyCall.status === 'success' && !todoEntry) {
-            setApplyStatus('started');
-            pollApplyStatus(nodeId);
-          }
-
-          // Check GitHub issue status
-          const issueEntry = res.data.tool_calls_meta.find(tc => tc.name === 'propose_github_issue');
-          if (issueEntry && issueEntry.apply_status === 'completed') {
-            setIssueApplyStatus('completed');
-            setIssueResult({ issue_url: issueEntry.issue_url, issue_number: issueEntry.issue_number });
-          }
-          const applyIssueCall = res.data.tool_calls_meta.find(tc => tc.name === 'apply_github_issue');
-          if (applyIssueCall && applyIssueCall.status === 'success') {
-            setIssueApplyStatus('completed');
-            setIssueResult({ issue_url: applyIssueCall.issue_url, issue_number: applyIssueCall.issue_number });
-          }
         }
       }).catch(() => { /* non-fatal */ });
     },
@@ -460,36 +223,9 @@ export default function VoicePage() {
   setThreadParentIdRef.current = setThreadParentId;
 
   const voiceReset = useCallback(() => {
-    setApplyStatus(null);
-    setApplyError(null);
-    setParsedResponse(null);
     setLlmContent(null);
     setToolCallsMeta(null);
-    setIssueApplyStatus(null);
-    setIssueApplyError(null);
-    setIssueResult(null);
-    if (mergePollingRef.current) {
-      clearInterval(mergePollingRef.current);
-      mergePollingRef.current = null;
-    }
   }, []);
-
-  const handleProposalToggle = useCallback((itemText, fromSection, toSection, opts) => {
-    if (!llmContent || !lastLlmNodeIdRef.current) return;
-    const prevContent = llmContent;
-    const newContent = moveProposalItem(llmContent, itemText, fromSection, toSection, opts);
-    if (newContent === prevContent) return;
-    // Optimistic update
-    setLlmContent(newContent);
-    setParsedResponse(parseOrientResponse(newContent));
-    api.put(`/nodes/${lastLlmNodeIdRef.current}`, { content: newContent }).catch((err) => {
-      console.error('Failed to toggle proposal item:', err);
-      setLlmContent(prevContent);
-      setParsedResponse(parseOrientResponse(prevContent));
-      const reason = err.response?.data?.error || err.response?.statusText || err.message || 'Unknown error';
-      addToast(`Couldn't save change — reverted (${reason})`);
-    });
-  }, [llmContent, addToast]);
 
   const displayTime = audio.cumulativeTime || 0;
   const displayDuration = audio.totalDuration || 0;
@@ -522,6 +258,44 @@ export default function VoicePage() {
     background: 'radial-gradient(ellipse at 50% 40%, rgba(196,149,106,0.06) 0%, transparent 70%)',
   };
 
+  // Rendered in every phase so the user can escape to Text Mode at any
+  // time. Position: fixed so it anchors to the viewport regardless of
+  // which return branch is active.
+  const textModeButton = (
+    <button
+      key="text-mode-btn"
+      onClick={() => {
+        if (lastLlmNodeIdRef.current) {
+          navigate(`/node/${lastLlmNodeIdRef.current}`);
+        } else {
+          navigate('/textmode');
+        }
+      }}
+      title="Continue in Text Mode"
+      style={{
+        position: 'fixed',
+        top: '72px',
+        right: '20px',
+        background: 'none',
+        border: '1px solid var(--border)',
+        borderRadius: '6px',
+        padding: '6px 12px',
+        color: 'var(--text-muted)',
+        fontFamily: 'var(--sans)',
+        fontSize: '0.78rem',
+        fontWeight: 300,
+        cursor: 'pointer',
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: '6px',
+        zIndex: 50,
+      }}
+    >
+      <FaKeyboard size={11} />
+      <span>Text Mode</span>
+    </button>
+  );
+
   const controlButtonStyle = (active = true) => ({
     background: 'none',
     border: 'none',
@@ -534,13 +308,6 @@ export default function VoicePage() {
     justifyContent: 'center',
     transition: 'opacity 0.2s',
   });
-
-  const sectionLabelStyle = {
-    fontSize: '0.68rem', letterSpacing: '0.18em', textTransform: 'uppercase',
-    color: 'var(--accent)', opacity: 0.6, marginBottom: '1.2rem',
-    display: 'flex', alignItems: 'center', gap: '8px',
-    fontFamily: 'var(--sans)',
-  };
 
   // Pause audio while recovery banner is visible
   const showRecovery = interruptedDraft && phase !== 'recording';
@@ -556,12 +323,13 @@ export default function VoicePage() {
   }, [showRecovery, audio]);
 
   if (!recoveryChecked) {
-    return <div style={containerStyle} />;
+    return <div style={containerStyle}>{textModeButton}</div>;
   }
 
   if (showRecovery) {
     return (
       <div style={containerStyle}>
+        {textModeButton}
         <RecoveryBanner
           draft={interruptedDraft}
           onContinue={() => {
@@ -586,6 +354,7 @@ export default function VoicePage() {
   if (phase === 'ready' || phase === 'recording') {
     return (
       <div style={containerStyle}>
+        {textModeButton}
         <p style={{
           fontFamily: 'var(--serif)',
           fontStyle: 'italic',
@@ -677,6 +446,7 @@ export default function VoicePage() {
   if (phase === 'processing') {
     return (
       <div style={containerStyle}>
+        {textModeButton}
         <EcgAnimation active={true} showScanline={false} />
         <PulsingDot />
         <p style={{
@@ -712,12 +482,6 @@ export default function VoicePage() {
   }
 
   // --- PLAYBACK STATE ---
-  const parsed = parsedResponse || {};
-  const hasSections = parsed.completed || parsed.newTasks || parsed.priority || parsed.note;
-  // Detect proposals from heading structure (primary) or tool_calls_meta (fallback)
-  const hasTodoUpdate = hasSections || toolCallsMeta?.some(tc => tc.name === 'propose_todo');
-  const hasGithubIssue = (parsed.issueTitle && parsed.issueDescription) || toolCallsMeta?.some(tc => tc.name === 'propose_github_issue');
-  const hasPrefsUpdate = toolCallsMeta?.some(tc => tc.name === 'update_ai_preferences' && tc.status === 'success');
 
   return (
     <div style={{
@@ -727,7 +491,9 @@ export default function VoicePage() {
       minHeight: 'calc(100vh - 120px)',
       padding: '40px 24px',
       background: 'radial-gradient(ellipse at 50% 40%, rgba(196,149,106,0.06) 0%, transparent 70%)',
+      position: 'relative',
     }}>
+      {textModeButton}
       <EcgAnimation
         active={audio.isPlaying}
         dim={!audio.isPlaying}
@@ -821,253 +587,14 @@ export default function VoicePage() {
         </div>
       </div>
 
-      {/* Todo update sections */}
-      {hasSections && (
-        <div style={{ width: '100%', maxWidth: '620px', marginTop: '32px' }}>
-          {(parsed.completed || parsed.newTasks) && (
-            <div style={{ marginBottom: '2.5rem' }}>
-              <div style={sectionLabelStyle}>
-                <AiDot /> Updated from your sharing
-              </div>
-              {parsed.completed && parseTodoItems(parsed.completed).map((item, i) => (
-                <div key={`done-${i}`} style={{
-                  display: 'flex', alignItems: 'flex-start', gap: '12px',
-                  padding: '12px 0', borderBottom: '1px solid #1e1d1a',
-                }}>
-                  <div
-                    onClick={() => handleProposalToggle(item, 'completed', 'new task', { prepend: true })}
-                    style={{
-                      width: '18px', height: '18px', borderRadius: '50%',
-                      border: '1.5px solid var(--accent-dim)', background: 'var(--accent-dim)',
-                      flexShrink: 0, marginTop: '2px',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      fontSize: '0.6rem', color: 'var(--bg-deep)', fontWeight: 600,
-                      cursor: 'pointer', transition: 'all 0.3s',
-                    }}>✓</div>
-                  <div style={{
-                    fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.92rem',
-                    color: 'var(--text-secondary)', lineHeight: 1.5,
-                    textDecoration: 'line-through', opacity: 0.4,
-                  }}>{item}</div>
-                </div>
-              ))}
-              {parsed.newTasks && parseTodoItems(parsed.newTasks).map((item, i) => (
-                <div key={`new-${i}`} style={{
-                  display: 'flex', alignItems: 'flex-start', gap: '12px',
-                  padding: '12px 0', borderBottom: '1px solid #1e1d1a',
-                }}>
-                  <div
-                    onClick={() => handleProposalToggle(item, 'new task', 'completed')}
-                    style={{
-                      width: '18px', height: '18px', borderRadius: '50%',
-                      border: '1.5px solid var(--border-hover)',
-                      flexShrink: 0, marginTop: '2px',
-                      cursor: 'pointer', transition: 'all 0.3s',
-                    }} />
-                  <div style={{
-                    fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.92rem',
-                    color: 'var(--text-secondary)', lineHeight: 1.5,
-                  }}>{item}</div>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {parsed.priority && (
-            <div style={{ marginBottom: '2.5rem' }}>
-              <div style={sectionLabelStyle}>
-                <AiDot /> Suggested priority order
-              </div>
-              {parsePriorityItems(parsed.priority).map((item, i) => (
-                <div key={`pri-${i}`} style={{
-                  display: 'flex', alignItems: 'center', gap: '14px',
-                  padding: '14px 16px', background: 'var(--bg-card)',
-                  border: '1px solid var(--border)', borderRadius: '8px',
-                  marginBottom: '8px', transition: 'all 0.3s',
-                  cursor: 'default', overflow: 'hidden',
-                }}>
-                  <span style={{
-                    fontFamily: 'var(--serif)', fontSize: '1.4rem',
-                    color: 'var(--accent-dim)', opacity: 0.6,
-                    width: '24px', textAlign: 'center', flexShrink: 0,
-                  }}>{i + 1}</span>
-                  <span style={{
-                    fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.92rem',
-                    color: 'var(--text-primary)', lineHeight: 1.4, flex: '1 1 auto',
-                    minWidth: '40%', overflowWrap: 'break-word',
-                  }}>{item.text}</span>
-                  {item.hint && (
-                    <span style={{
-                      fontSize: '0.75rem', color: 'var(--text-muted)',
-                      flex: '0 1 auto', minWidth: 0, overflowWrap: 'break-word',
-                    }}>{item.hint}</span>
-                  )}
-                  <span style={{
-                    color: 'var(--text-muted)', opacity: 0.3,
-                    fontSize: '0.9rem', letterSpacing: '2px', flexShrink: 0,
-                  }}>⋮⋮</span>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {parsed.note && (
-            <div style={{
-              marginTop: '2rem', fontFamily: 'var(--sans)', fontWeight: 300,
-              fontSize: '0.88rem', lineHeight: 1.7, color: 'var(--text-muted)',
-            }}>
-              <span style={{ color: 'var(--text-secondary)' }}>A note: </span>
-              {parsed.note}
-            </div>
-          )}
-
-          {/* Apply button for pending todo changes */}
-          {hasTodoUpdate && (
-            <div style={{ textAlign: 'center', marginTop: '24px' }}>
-              {!applyStatus && (
-                <button
-                  onClick={() => handleApplyTodo(lastLlmNodeIdRef.current)}
-                  style={{
-                    padding: '10px 24px',
-                    background: 'none',
-                    border: '1px solid var(--accent)',
-                    borderRadius: '6px',
-                    color: 'var(--accent)',
-                    fontFamily: 'var(--sans)',
-                    fontSize: '0.85rem',
-                    fontWeight: 400,
-                    cursor: 'pointer',
-                  }}
-                >
-                  Apply changes to my Todo
-                </button>
-              )}
-              {applyStatus === 'started' && (
-                <p style={{
-                  fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
-                  color: 'var(--text-muted)',
-                }}>
-                  Todo update started...
-                </p>
-              )}
-              {applyStatus === 'completed' && (
-                <p style={{
-                  fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
-                  color: '#4ade80',
-                }}>
-                  Todo updated
-                </p>
-              )}
-              {applyStatus === 'error' && (
-                <p style={{
-                  fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
-                  color: 'var(--accent)',
-                }}>
-                  {applyError || 'Todo update failed'}
-                </p>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* GitHub issue proposal */}
-      {hasGithubIssue && parsed.issueTitle && (
-        <div style={{ width: '100%', maxWidth: '620px', marginTop: '32px' }}>
-          <div style={sectionLabelStyle}>
-            <AiDot /> GitHub Issue Proposal
-          </div>
-          <div style={{
-            padding: '20px', background: 'var(--bg-card)',
-            border: '1px solid var(--border)', borderRadius: '8px',
-          }}>
-            <h3 style={{
-              fontFamily: 'var(--serif)', fontSize: '1.2rem',
-              color: 'var(--text-primary)', margin: '0 0 12px 0', fontWeight: 400,
-            }}>{parsed.issueTitle}</h3>
-            {parsed.issueDescription && (
-              <MarkdownBody style={{
-                fontFamily: 'var(--sans)', fontSize: '0.88rem', fontWeight: 300,
-                color: 'var(--text-secondary)', lineHeight: 1.7, margin: '0 0 12px 0',
-              }} paragraphMargin="0 0 8px 0">
-                {parsed.issueDescription}
-              </MarkdownBody>
-            )}
-            {parsed.issueCategory && (
-              <span style={{
-                display: 'inline-block', padding: '3px 10px',
-                fontSize: '0.72rem', fontFamily: 'var(--sans)',
-                fontWeight: 400, letterSpacing: '0.08em',
-                textTransform: 'uppercase',
-                borderRadius: '12px',
-                border: '1px solid var(--accent)',
-                color: 'var(--accent)', opacity: 0.8,
-              }}>{parsed.issueCategory}</span>
-            )}
-          </div>
-          <div style={{ textAlign: 'center', marginTop: '16px' }}>
-            {!issueApplyStatus && (
-              <button
-                onClick={() => handleCreateIssue(lastLlmNodeIdRef.current)}
-                style={{
-                  padding: '10px 24px',
-                  background: 'none',
-                  border: '1px solid var(--accent)',
-                  borderRadius: '6px',
-                  color: 'var(--accent)',
-                  fontFamily: 'var(--sans)',
-                  fontSize: '0.85rem',
-                  fontWeight: 400,
-                  cursor: 'pointer',
-                }}
-              >
-                Create GitHub Issue
-              </button>
-            )}
-            {issueApplyStatus === 'started' && (
-              <p style={{
-                fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
-                color: 'var(--text-muted)',
-              }}>
-                Creating issue...
-              </p>
-            )}
-            {issueApplyStatus === 'completed' && (
-              <p style={{
-                fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
-                color: '#4ade80',
-              }}>
-                Issue created{issueResult?.issue_url && (
-                  <> — <a
-                    href={issueResult.issue_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    style={{ color: '#4ade80', textDecoration: 'underline' }}
-                  >#{issueResult.issue_number}</a></>
-                )}
-              </p>
-            )}
-            {issueApplyStatus === 'error' && (
-              <p style={{
-                fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
-                color: 'var(--accent)',
-              }}>
-                {issueApplyError || 'Issue creation failed'}
-              </p>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Preferences update indicator */}
-      {hasPrefsUpdate && (
-        <p style={{
-          fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
-          color: '#4ade80', textAlign: 'center', marginTop: '16px',
-        }}>
-          Preferences updated
-        </p>
-      )}
+      <ProposalInline
+        size="roomy"
+        content={llmContent}
+        nodeId={lastLlmNodeIdRef.current}
+        toolCallsMeta={toolCallsMeta}
+        onContentChange={setLlmContent}
+        onError={(msg) => addToast(msg)}
+      />
 
       <div style={{ height: '32px' }} />
 

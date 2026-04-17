@@ -7,7 +7,7 @@ from backend.extensions import db
 def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
                            privacy_level="private", ai_usage="chat",
                            placeholder_text="[LLM response generation pending...]",
-                           enqueue=True):
+                           enqueue=True, source_mode=None):
     """Create an LLM placeholder node, optionally enqueue generation task.
 
     Returns (llm_node, task_id) -- task_id is None if enqueue=False.
@@ -39,7 +39,8 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     if enqueue:
         from backend.tasks.llm_completion import generate_llm_response
         task = generate_llm_response.delay(
-            parent_node_id, llm_node.id, model_id, human_owner_id
+            parent_node_id, llm_node.id, model_id, human_owner_id,
+            source_mode=source_mode,
         )
         llm_node.llm_task_id = task.id
         db.session.commit()

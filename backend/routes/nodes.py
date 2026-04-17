@@ -735,6 +735,7 @@ def get_node(node_id):
         # Pin-to-profile
         "pinned_at": node.pinned_at.isoformat() if node.pinned_at else None,
         "llm_model": node.llm_model,
+        "llm_task_status": node.llm_task_status,
         "has_original_audio": bool(node.audio_original_url or node.streaming_transcription),
     }
     # Include tool call metadata for LLM nodes
@@ -879,6 +880,10 @@ def request_llm_response(node_id):
     # Get and validate the model from request body
     data = request.get_json() or {}
     model_id = data.get("model")
+    source_mode = data.get("source_mode")
+
+    if source_mode is not None and source_mode not in ("voice", "textmode"):
+        return jsonify({"error": f"Invalid source_mode: {source_mode}"}), 400
 
     if not model_id:
         # Fall back to default model for backward compatibility
@@ -897,6 +902,7 @@ def request_llm_response(node_id):
         parent_node.id, model_id, current_user.id,
         privacy_level=parent_node.privacy_level,
         ai_usage=parent_node.ai_usage,
+        source_mode=source_mode,
     )
 
     current_app.logger.info(f"Enqueued LLM completion task {task_id} for parent node {parent_node.id}, new node {llm_node.id}")

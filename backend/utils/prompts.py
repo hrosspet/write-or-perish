@@ -2,7 +2,6 @@ import hashlib
 import os
 
 PROMPT_DEFAULTS = {
-    'converse': {'title': 'Converse', 'file': 'converse.txt'},
     'reflect': {'title': 'Reflect', 'file': 'reflect.txt', 'hidden': True},
     'orient': {'title': 'Orient', 'file': 'orient.txt', 'hidden': True},
     'profile_generation': {
@@ -22,12 +21,16 @@ PROMPT_DEFAULTS = {
         'file': 'letter_from_the_future.txt',
     },
     'orient_apply_todo': {
-        'title': 'Orient: Apply to Todo',
+        'title': 'Apply to Todo',
         'file': 'orient_apply_todo.txt',
     },
     'voice': {
-        'title': 'Voice',
-        'file': 'voice.txt',
+        'title': 'Voice Mode',
+        'file': 'agentic.txt',
+    },
+    'textmode': {
+        'title': 'Text Mode',
+        'file': 'agentic.txt',
     },
 }
 

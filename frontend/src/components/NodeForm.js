@@ -10,7 +10,7 @@ import { uploadFileInChunks } from "../utils/chunkedUpload";
 
 const NodeForm = forwardRef(
   (
-    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt },
+    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, submitLabel = "Submit", onSubmitOverride, compact = false, hideAudioUpload = false, allowAgenticPrompt = false },
     ref
   ) => {
     const { user } = useUser();
@@ -28,6 +28,34 @@ const NodeForm = forwardRef(
     // For new nodes with a parent, we'll update these after fetching the parent.
     const [privacyLevel, setPrivacyLevel] = useState(initialPrivacyLevel || user?.default_privacy_level || "private");
     const [aiUsage, setAiUsage] = useState(initialAiUsage || user?.default_ai_usage || "none");
+    // "Agentic Reply" — opt-in to attaching the textmode system prompt
+    // (profile + recent + todo + prefs as context). Local state, OFF by
+    // default — deliberate and distinct from "auto-generate".
+    const [useAgenticPrompt, setUseAgenticPrompt] = useState(false);
+
+    // "Auto-generate" — does an LLM reply fire automatically on submit,
+    // so the user doesn't have to click LLM Response manually on the
+    // resulting node? Tied to the same `loore_auto_generate`
+    // localStorage key that NodeDetail reads, so there's ONE preference
+    // for "auto-generate after submit" across the app. Default true on
+    // a fresh install. Orthogonal to Agentic Reply: if Agentic is ON
+    // the LLM fires via /textmode/start regardless; if Agentic is OFF
+    // and Auto-generate is ON we follow the /nodes/ POST with an
+    // explicit /nodes/<id>/llm call.
+    const [useAutoGenerate, setUseAutoGenerateState] = useState(() => {
+      if (!allowAgenticPrompt) return false;
+      const stored = localStorage.getItem('loore_auto_generate');
+      return stored === null ? true : stored === 'true';
+    });
+    const setUseAutoGenerate = useCallback((next) => {
+      setUseAutoGenerateState(prev => {
+        const resolved = typeof next === 'function' ? next(prev) : next;
+        if (allowAgenticPrompt) {
+          localStorage.setItem('loore_auto_generate', String(resolved));
+        }
+        return resolved;
+      });
+    }, [allowAgenticPrompt]);
 
     // Draft auto-save hook
     const {
@@ -223,6 +251,55 @@ const NodeForm = forwardRef(
       try {
         let response;
 
+        // Custom submit (e.g. /textmode/start). Skips /nodes/ POST entirely
+        // and still handles draft cleanup + onSuccess for the caller.
+        if (onSubmitOverride && !editMode && !uploadedFile && !streamingSessionId) {
+          const data = await onSubmitOverride({
+            content,
+            parent_id: parentId,
+            privacy_level: privacyLevel,
+            ai_usage: aiUsage,
+          });
+          deleteDraft();
+          setHasDraft(false);
+          onSuccess(data);
+          setLoading(false);
+          return;
+        }
+
+        // Opt-in agentic top-level entry: route through /textmode/start
+        // so the new thread gets a system node with the textmode prompt
+        // attached. Whether an LLM placeholder is also created depends
+        // on the independent Auto-generate toggle — when it's off, the
+        // backend skips the LLM and returns only conversation/user IDs,
+        // letting the user click LLM Response manually later after any
+        // edits or follow-up nodes they want to add first.
+        if (useAgenticPrompt && !editMode && !uploadedFile
+            && !streamingSessionId && !parentId && aiUsage !== 'none') {
+          const res = await api.post('/textmode/start', {
+            content,
+            privacy_level: privacyLevel,
+            ai_usage: aiUsage,
+            auto_generate: useAutoGenerate,
+          });
+          deleteDraft();
+          setHasDraft(false);
+          if (res.data.llm_node_id) {
+            onSuccess({
+              id: res.data.llm_node_id,
+              awaitLlm: res.data.llm_node_id,
+              ...res.data,
+            });
+          } else {
+            onSuccess({
+              id: res.data.user_node_id,
+              ...res.data,
+            });
+          }
+          setLoading(false);
+          return;
+        }
+
         // Handle streaming transcription completion - draft exists, create node from it
         if (streamingSessionId) {
           // Save the streaming draft as a node with any edits the user made
@@ -316,6 +393,40 @@ const NodeForm = forwardRef(
         // Delete draft after successful save
         deleteDraft();
         setHasDraft(false);
+
+        // Auto-generate path (without Agentic Reply): after creating
+        // the plain /nodes/ entry, trigger an LLM response so the user
+        // doesn't have to click LLM Response manually. Only fires when
+        // the toggle is visible (top-level text entry with AI allowed).
+        const shouldAutoGenerate = useAutoGenerate
+          && allowAgenticPrompt
+          && !editMode
+          && !uploadedFile
+          && !streamingSessionId
+          && !parentId
+          && aiUsage !== 'none'
+          && !useAgenticPrompt  // agentic path already fires via /textmode/start
+          && response?.data?.id;
+        if (shouldAutoGenerate) {
+          try {
+            const llmRes = await api.post(
+              `/nodes/${response.data.id}/llm`,
+              { source_mode: 'textmode' },
+            );
+            onSuccess({
+              ...response.data,
+              id: llmRes.data.node_id,
+              awaitLlm: llmRes.data.node_id,
+            });
+            setLoading(false);
+            return;
+          } catch (llmErr) {
+            // LLM trigger failed — still fall through to plain success
+            // so the user at least keeps their entry.
+            console.error('Auto-generate LLM trigger failed:', llmErr);
+          }
+        }
+
         onSuccess(response.data);
         setLoading(false);
       } catch (err) {
@@ -361,7 +472,7 @@ const NodeForm = forwardRef(
               setUploadedFile(null);
             }
           }}
-          rows={6}
+          rows={compact ? 3 : 6}
           style={{
             width: "100%",
             backgroundColor: "var(--bg-input)",
@@ -373,24 +484,166 @@ const NodeForm = forwardRef(
             fontWeight: 300,
             color: "var(--text-primary)",
             lineHeight: 1.6,
-            height: "clamp(120px, 40vh, 400px)",
-            minHeight: "120px",
+            height: compact ? "auto" : "clamp(120px, 40vh, 400px)",
+            minHeight: compact ? "90px" : "120px",
             boxSizing: "border-box",
             transition: "border-color 0.3s ease",
             resize: "vertical",
           }}
-          placeholder="What's present for you right now..."
+          placeholder={placeholder || "What's present for you right now..."}
           disabled={!editMode && uploadedFile}
         />
 
         {/* Privacy Settings */}
-        <PrivacySelector
-          privacyLevel={privacyLevel}
-          aiUsage={aiUsage}
-          onPrivacyChange={setPrivacyLevel}
-          onAIUsageChange={setAiUsage}
-          disabled={loading}
-        />
+        {!hidePowerFeatures && (
+          <PrivacySelector
+            privacyLevel={privacyLevel}
+            aiUsage={aiUsage}
+            onPrivacyChange={setPrivacyLevel}
+            onAIUsageChange={setAiUsage}
+            disabled={loading}
+          />
+        )}
+
+        {/* Agentic reply opt-in — only for new top-level text entries
+            where AI is allowed. Mirrors the Craft-mode toggle visual
+            from the NavBar. */}
+        {allowAgenticPrompt && !editMode && !parentId && !hidePowerFeatures
+            && aiUsage !== 'none' && (
+          <div style={{ marginTop: '12px', marginBottom: '12px' }}>
+            <button
+              type="button"
+              onClick={() => setUseAgenticPrompt(v => !v)}
+              disabled={loading}
+              style={{
+                display: 'inline-flex',
+                justifyContent: 'flex-start',
+                alignItems: 'center',
+                gap: '12px',
+                background: 'none',
+                border: 'none',
+                padding: 0,
+                cursor: loading ? 'not-allowed' : 'pointer',
+                textAlign: 'left',
+              }}
+            >
+              <label style={{
+                display: 'block',
+                fontFamily: 'var(--sans)',
+                fontWeight: 400,
+                fontSize: '0.7rem',
+                textTransform: 'uppercase',
+                letterSpacing: '0.14em',
+                color: 'var(--text-muted)',
+                cursor: 'inherit',
+              }}>
+                Agentic Reply
+              </label>
+              <span style={{
+                width: '32px',
+                height: '18px',
+                borderRadius: '9px',
+                background: useAgenticPrompt ? 'var(--accent)' : 'var(--border)',
+                position: 'relative',
+                transition: 'background 0.2s ease',
+                flexShrink: 0,
+              }}>
+                <span style={{
+                  width: '14px',
+                  height: '14px',
+                  borderRadius: '50%',
+                  background: 'var(--text-primary)',
+                  position: 'absolute',
+                  top: '2px',
+                  left: useAgenticPrompt ? '16px' : '2px',
+                  transition: 'left 0.2s ease',
+                }} />
+              </span>
+            </button>
+            <div style={{
+              fontSize: '0.8rem',
+              color: 'var(--text-muted)',
+              marginTop: '4px',
+              fontFamily: 'var(--sans)',
+              fontWeight: 300,
+            }}>
+              {useAgenticPrompt
+                ? 'AI will include your profile, recent entries, todos and preferences as context.'
+                : 'No agentic context. AI replies only see this entry.'}
+            </div>
+          </div>
+        )}
+
+        {/* Auto-generate — fire an LLM reply after the entry is saved,
+            so the user doesn't have to click LLM Response manually.
+            Shares the `loore_auto_generate` localStorage key with
+            NodeDetail's inline toggle so there's one "auto-generate
+            after submit" preference across the app. */}
+        {allowAgenticPrompt && !editMode && !parentId && !hidePowerFeatures
+            && aiUsage !== 'none' && (
+          <div style={{ marginTop: '12px', marginBottom: '12px' }}>
+            <button
+              type="button"
+              onClick={() => setUseAutoGenerate(v => !v)}
+              disabled={loading}
+              style={{
+                display: 'inline-flex',
+                justifyContent: 'flex-start',
+                alignItems: 'center',
+                gap: '12px',
+                background: 'none',
+                border: 'none',
+                padding: 0,
+                cursor: loading ? 'not-allowed' : 'pointer',
+                textAlign: 'left',
+              }}
+            >
+              <label style={{
+                display: 'block',
+                fontFamily: 'var(--sans)',
+                fontWeight: 400,
+                fontSize: '0.7rem',
+                textTransform: 'uppercase',
+                letterSpacing: '0.14em',
+                color: 'var(--text-muted)',
+                cursor: 'inherit',
+              }}>
+                Auto-generate
+              </label>
+              <span style={{
+                width: '32px',
+                height: '18px',
+                borderRadius: '9px',
+                background: useAutoGenerate ? 'var(--accent)' : 'var(--border)',
+                position: 'relative',
+                transition: 'background 0.2s ease',
+                flexShrink: 0,
+              }}>
+                <span style={{
+                  width: '14px',
+                  height: '14px',
+                  borderRadius: '50%',
+                  background: 'var(--text-primary)',
+                  position: 'absolute',
+                  top: '2px',
+                  left: useAutoGenerate ? '16px' : '2px',
+                  transition: 'left 0.2s ease',
+                }} />
+              </span>
+            </button>
+            <div style={{
+              fontSize: '0.8rem',
+              color: 'var(--text-muted)',
+              marginTop: '4px',
+              fontFamily: 'var(--sans)',
+              fontWeight: 300,
+            }}>
+              {useAutoGenerate
+                ? 'AI will reply automatically after you submit.'
+                : 'No AI reply. You can click LLM Response on the created node later.'}
+            </div>
+          </div>
+        )}
 
         {isRecoveringAudio && (
           <div style={{
@@ -484,7 +737,7 @@ const NodeForm = forwardRef(
                 ? "Waiting to transcribe..."
                 : loading
                 ? "Submitting..."
-                : "Submit"}
+                : submitLabel}
             </button>
             {hasDraft && (
               <button
@@ -535,21 +788,25 @@ const NodeForm = forwardRef(
                   }}
                   disabled={loading || uploadedFile || aiUsage === 'none'}
                 />
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept=".mp3,.wav,.m4a,.webm,.ogg,.oga,.flac,.aac,.mp4,.mpeg,.mpga,audio/*"
-                  onChange={handleFileSelect}
-                  style={{ display: 'none' }}
-                />
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={isStreamingRecording || aiUsage === 'none' || !isOnline}
-                  style={{ padding: '8px 16px', cursor: isStreamingRecording || aiUsage === 'none' || !isOnline ? 'not-allowed' : 'pointer', opacity: aiUsage === 'none' || !isOnline ? 0.35 : 1 }}
-                >
-                  Upload
-                </button>
+                {!hideAudioUpload && (
+                  <>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".mp3,.wav,.m4a,.webm,.ogg,.oga,.flac,.aac,.mp4,.mpeg,.mpga,audio/*"
+                      onChange={handleFileSelect}
+                      style={{ display: 'none' }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={isStreamingRecording || aiUsage === 'none' || !isOnline}
+                      style={{ padding: '8px 16px', cursor: isStreamingRecording || aiUsage === 'none' || !isOnline ? 'not-allowed' : 'pointer', opacity: aiUsage === 'none' || !isOnline ? 0.35 : 1 }}
+                    >
+                      Upload
+                    </button>
+                  </>
+                )}
               </>
             )}
           </div>

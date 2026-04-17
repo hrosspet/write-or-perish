@@ -130,9 +130,8 @@ def create_app():
     from backend.routes.todo import todo_bp
     app.register_blueprint(todo_bp, url_prefix="/api/todo")
 
-    # Converse disabled for now
-    # from backend.routes.converse import converse_bp
-    # app.register_blueprint(converse_bp, url_prefix="/api/converse")
+    from backend.routes.textmode import textmode_bp
+    app.register_blueprint(textmode_bp, url_prefix="/api/textmode")
 
     from backend.routes.voice import voice_bp
     app.register_blueprint(voice_bp, url_prefix="/api/voice")
@@ -161,11 +160,9 @@ def create_app():
     # Register CLI commands
     from backend.init_db import (
         init_db_command, backfill_human_owner_command,
-        backfill_prompt_refs_command,
     )
     app.cli.add_command(init_db_command)
     app.cli.add_command(backfill_human_owner_command)
-    app.cli.add_command(backfill_prompt_refs_command)
 
     try:
         from experiments.prompt_rct.run_rct import rct_cli
