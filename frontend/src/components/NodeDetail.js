@@ -438,69 +438,74 @@ function NodeDetail() {
     boxSizing: 'border-box',
   };
 
+  // Top-right controls (Voice Mode + Auto-generate). Rendered at the
+  // page root so they stay anchored at the top of the page (scrolls
+  // away with content), independent of where the highlighted node
+  // lands after ancestors are rendered.
+  const topRightControls = isOwner && node.ai_usage !== 'none' && (
+    <div style={{
+      position: 'absolute',
+      top: '56px',
+      right: '20px',
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'flex-end',
+      gap: '6px',
+      zIndex: 2,
+    }}>
+      <button
+        onClick={() => handleSessionFromNode('voice')}
+        disabled={voiceLoading}
+        style={{ ...topRightButtonStyle, justifyContent: 'space-between' }}
+        title="Continue this conversation by voice"
+      >
+        <span>{voiceLoading ? 'Starting…' : 'Voice Mode'}</span>
+        <span style={{
+          width: '32px',
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          lineHeight: 0,
+        }}>
+          <FaMicrophone size={12} />
+        </span>
+      </button>
+      {craftMode && (
+        <button
+          type="button"
+          onClick={() => setAutoGenerate(v => !v)}
+          title={autoGenerate ? 'Auto-generate is on — click to turn off' : 'Auto-generate is off — click to turn on'}
+          style={{ ...topRightButtonStyle, justifyContent: 'space-between' }}
+        >
+          <span>Auto-generate</span>
+          <span style={{
+            width: '32px',
+            height: '18px',
+            borderRadius: '9px',
+            background: autoGenerate ? 'var(--accent)' : 'var(--border)',
+            position: 'relative',
+            transition: 'background 0.2s ease',
+            flexShrink: 0,
+          }}>
+            <span style={{
+              width: '14px',
+              height: '14px',
+              borderRadius: '50%',
+              background: 'var(--text-primary)',
+              position: 'absolute',
+              top: '2px',
+              left: autoGenerate ? '16px' : '2px',
+              transition: 'left 0.2s ease',
+            }} />
+          </span>
+        </button>
+      )}
+    </div>
+  );
+
   const highlightedNodeSection = (
     <div ref={highlightedNodeRef} style={{ position: 'relative' }}>
       <hr style={{ borderColor: "var(--border)" }} />
-      {isOwner && node.ai_usage !== 'none' && (
-        <div style={{
-          position: 'absolute',
-          top: '8px',
-          right: '20px',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'flex-end',
-          gap: '6px',
-          zIndex: 2,
-        }}>
-          <button
-            onClick={() => handleSessionFromNode('voice')}
-            disabled={voiceLoading}
-            style={{ ...topRightButtonStyle, justifyContent: 'space-between' }}
-            title="Continue this conversation by voice"
-          >
-            <span>{voiceLoading ? 'Starting…' : 'Voice Mode'}</span>
-            <span style={{
-              width: '32px',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              lineHeight: 0,
-            }}>
-              <FaMicrophone size={12} />
-            </span>
-          </button>
-          {craftMode && (
-            <button
-              type="button"
-              onClick={() => setAutoGenerate(v => !v)}
-              title={autoGenerate ? 'Auto-generate is on — click to turn off' : 'Auto-generate is off — click to turn on'}
-              style={{ ...topRightButtonStyle, justifyContent: 'space-between' }}
-            >
-              <span>Auto-generate</span>
-              <span style={{
-                width: '32px',
-                height: '18px',
-                borderRadius: '9px',
-                background: autoGenerate ? 'var(--accent)' : 'var(--border)',
-                position: 'relative',
-                transition: 'background 0.2s ease',
-                flexShrink: 0,
-              }}>
-                <span style={{
-                  width: '14px',
-                  height: '14px',
-                  borderRadius: '50%',
-                  background: 'var(--text-primary)',
-                  position: 'absolute',
-                  top: '2px',
-                  left: autoGenerate ? '16px' : '2px',
-                  transition: 'left 0.2s ease',
-                }} />
-              </span>
-            </button>
-          )}
-        </div>
-      )}
       <div style={highlightedTextStyle}>
         {isOwner && (
           <div ref={kebabMenuRef} style={{
@@ -785,7 +790,8 @@ function NodeDetail() {
   );
 
   return (
-    <div style={{ padding: "20px", paddingTop: "56px" }}>
+    <div style={{ padding: "20px", paddingTop: "56px", position: "relative" }}>
+      {topRightControls}
       <h2 style={{
         fontFamily: "var(--serif)",
         fontWeight: 300,
