@@ -7,6 +7,7 @@ from backend.extensions import db
 from backend.utils.prompts import get_user_prompt_record
 from backend.utils.llm_nodes import create_llm_placeholder
 from backend.utils.context_artifacts import attach_context_artifacts
+from backend.utils.privacy import validate_ai_usage
 
 textmode_bp = Blueprint("textmode", __name__)
 
@@ -57,6 +58,18 @@ def start_conversation():
 
     if privacy_level not in VALID_PRIVACY_LEVELS:
         return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
+
+    if not validate_ai_usage(ai_usage):
+        return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
+
+    # /textmode/start exists specifically to start an agentic text
+    # conversation (system prompt attached + LLM response fired). An
+    # ai_usage of 'none' contradicts that intent — the frontend is
+    # expected to pick a different endpoint (/nodes/) in that case.
+    if ai_usage == 'none':
+        return jsonify({
+            "error": "Text mode requires ai_usage of 'chat' or 'train'",
+        }), 400
 
     if not model_id:
         model_id = current_app.config.get(

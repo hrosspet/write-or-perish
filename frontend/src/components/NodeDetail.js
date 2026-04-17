@@ -12,6 +12,7 @@ import { useToast } from "../contexts/ToastContext";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 import api from "../api";
 import { useCheckboxToggle } from "../utils/markdown";
+import { contextAllowsAi } from "../utils/aiUsage";
 import NodeFormModal from "./NodeFormModal";
 import Bubble from "./Bubble";
 import QuotedContent from "./QuotedContent";
@@ -297,12 +298,24 @@ function NodeDetail() {
     if (!newNodeId) return;
     setError("");
     try {
-      if (autoGenerateActive && node.ai_usage !== 'none') {
+      // Re-check context at submit time (not just on mount): if ANY node
+      // in the current thread ancestry has `ai_usage` outside
+      // {chat, train}, auto-generate silently skips and toasts the user.
+      // Prevents firing an LLM call that would omit parts of the thread
+      // from context and produce partial / confusing replies.
+      const chain = [node, ...(node.ancestors || [])];
+      const aiAllowed = contextAllowsAi(chain);
+      if (autoGenerateActive && aiAllowed) {
         const llmNodeId = await requestLlmFor(newNodeId);
         // Navigate directly to the pending LLM node so the inline input
         // stays anchored below it throughout generation.
         navigate(`/node/${llmNodeId}?awaitLlm=${llmNodeId}`);
       } else {
+        if (autoGenerateActive && !aiAllowed) {
+          addToast(
+            'Turning off auto-generate. AI usage on some nodes is turned off.'
+          );
+        }
         navigate(`/node/${newNodeId}`);
       }
     } catch (err) {

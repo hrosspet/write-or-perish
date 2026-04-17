@@ -2,18 +2,33 @@ import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import NodeForm from '../components/NodeForm';
 import { useUser } from '../contexts/UserContext';
+import { useToast } from '../contexts/ToastContext';
+import { isAiAllowed } from '../utils/aiUsage';
 import api from '../api';
 
 export default function WritePage() {
   const navigate = useNavigate();
   const { user } = useUser();
+  const { addToast } = useToast();
   const craftMode = !!user?.craft_mode;
 
   const handleSubmit = async ({ content, privacy_level, ai_usage }) => {
+    // Auto-generate requires AI-allowed ai_usage. Craft-mode users who
+    // switch ai_usage to 'none' (or anything outside AI_ALLOWED) get a
+    // graceful fallback to a plain entry (POST /nodes/) instead of the
+    // agentic /textmode/start flow — no LLM fires, the note is saved,
+    // user lands on the new node.
+    if (!isAiAllowed(ai_usage)) {
+      addToast(
+        'Turning off auto-generate. AI usage on some nodes is turned off.'
+      );
+      const res = await api.post('/nodes/', {
+        content, privacy_level, ai_usage,
+      });
+      return { id: res.data.id };
+    }
     const res = await api.post('/textmode/start', {
-      content,
-      privacy_level,
-      ai_usage,
+      content, privacy_level, ai_usage,
     });
     return res.data;
   };
@@ -24,6 +39,10 @@ export default function WritePage() {
       // Land directly on the pending LLM node so NodeDetail anchors the
       // inline input below it and flips to the response in place.
       navigate(`/node/${llmNodeId}?awaitLlm=${llmNodeId}`);
+    } else if (data?.id) {
+      // Fallback path (ai_usage not chat/train) — navigate to the plain
+      // entry without the awaitLlm query param.
+      navigate(`/node/${data.id}`);
     }
   };
 

@@ -191,6 +191,36 @@ class TestTextmodeStart:
         assert resp.status_code == 400
         assert "privacy" in resp.get_json()["error"].lower()
 
+    def test_rejects_invalid_ai_usage(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        resp = client.post(
+            "/api/textmode/start",
+            json={"content": "hi", "ai_usage": "pineapple"},
+        )
+        assert resp.status_code == 400
+        assert "ai_usage" in resp.get_json()["error"].lower()
+
+    def test_rejects_ai_usage_none(self, app):
+        """Text mode is specifically for agentic conversations — ai_usage
+        'none' contradicts the endpoint's purpose. Frontend should pick a
+        different endpoint (/nodes/) in that case; this is defense-in-
+        depth against misbehaving clients."""
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        resp = client.post(
+            "/api/textmode/start",
+            json={"content": "hi", "ai_usage": "none"},
+        )
+        assert resp.status_code == 400
+        assert "chat" in resp.get_json()["error"].lower()
+
     def test_honors_privacy_level_and_ai_usage(self, app):
         client = app.test_client()
         alice = _make_user("alice")
@@ -202,7 +232,7 @@ class TestTextmodeStart:
             json={
                 "content": "public thought",
                 "privacy_level": "public",
-                "ai_usage": "none",
+                "ai_usage": "chat",
             },
         )
         assert resp.status_code == 202
@@ -211,7 +241,7 @@ class TestTextmodeStart:
         user_node = Node.query.get(data["user_node_id"])
         assert system.privacy_level == "public"
         assert user_node.privacy_level == "public"
-        assert user_node.ai_usage == "none"
+        assert user_node.ai_usage == "chat"
 
     def test_rejects_unauthenticated(self, app):
         client = app.test_client()
