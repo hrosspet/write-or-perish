@@ -71,7 +71,6 @@ export default function WritePage() {
       <div style={{ width: '100%', maxWidth: '640px' }}>
         <NodeForm
           parentId={null}
-          initialAiUsage="chat"
           hidePowerFeatures={!craftMode}
           hideAudioUpload={!craftMode}
           placeholder="Type what's on your mind…"

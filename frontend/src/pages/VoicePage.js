@@ -256,11 +256,12 @@ export default function VoicePage() {
     minHeight: 'calc(100vh - 120px)',
     padding: '40px 24px',
     background: 'radial-gradient(ellipse at 50% 40%, rgba(196,149,106,0.06) 0%, transparent 70%)',
+    position: 'relative',
   };
 
-  // Rendered in every phase so the user can escape to Text Mode at any
-  // time. Position: fixed so it anchors to the viewport regardless of
-  // which return branch is active.
+  // Rendered in every phase so the user can escape to Text Mode. Anchored
+  // to the top of the container (position: absolute) so it scrolls with
+  // content instead of overlaying notes on small screens.
   const textModeButton = (
     <button
       key="text-mode-btn"
@@ -273,8 +274,8 @@ export default function VoicePage() {
       }}
       title="Continue in Text Mode"
       style={{
-        position: 'fixed',
-        top: '72px',
+        position: 'absolute',
+        top: '12px',
         right: '20px',
         background: 'none',
         border: '1px solid var(--border)',

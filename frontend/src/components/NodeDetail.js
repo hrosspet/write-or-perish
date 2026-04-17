@@ -443,14 +443,14 @@ function NodeDetail() {
       <hr style={{ borderColor: "var(--border)" }} />
       {isOwner && node.ai_usage !== 'none' && (
         <div style={{
-          position: 'fixed',
-          top: '68px',
+          position: 'absolute',
+          top: '8px',
           right: '20px',
           display: 'flex',
           flexDirection: 'column',
           alignItems: 'flex-end',
           gap: '6px',
-          zIndex: 50,
+          zIndex: 2,
         }}>
           <button
             onClick={() => handleSessionFromNode('voice')}
