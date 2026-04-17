@@ -45,9 +45,9 @@ const cards = [
     icon: (
       <svg width="42" height="42" viewBox="0 0 42 42" fill="none">
         <path d="M8 12 C8 9.8 9.8 8 12 8 L30 8 C32.2 8 34 9.8 34 12 L34 24 C34 26.2 32.2 28 30 28 L16 28 L10 33 L10 28 L12 28 C9.8 28 8 26.2 8 24 Z"
-              stroke="#c4956a" strokeWidth="1.2" opacity="0.4" fill="none"/>
-        <line x1="14" y1="15" x2="28" y2="15" stroke="#c4956a" strokeWidth="1.2" strokeLinecap="round" opacity="0.3"/>
-        <line x1="14" y1="20" x2="23" y2="20" stroke="#c4956a" strokeWidth="1.2" strokeLinecap="round" opacity="0.3"/>
+              stroke="#c4956a" strokeWidth="1.4" fill="none"/>
+        <line x1="14" y1="15" x2="28" y2="15" stroke="#c4956a" strokeWidth="1.4" strokeLinecap="round"/>
+        <line x1="14" y1="20" x2="23" y2="20" stroke="#c4956a" strokeWidth="1.4" strokeLinecap="round"/>
       </svg>
     ),
   },
