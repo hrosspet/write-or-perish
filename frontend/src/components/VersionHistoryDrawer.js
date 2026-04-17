@@ -29,6 +29,9 @@ export default function VersionHistoryDrawer({
   }, [isOpen, onClose]);
 
   const formatDate = (iso) => {
+    // Synthetic "v0 = file default" entries arrive with null created_at.
+    // Rendering that as `new Date(null) → Jan 1, 1970` is confusing.
+    if (!iso) return 'File default';
     const d = new Date(iso);
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   };
