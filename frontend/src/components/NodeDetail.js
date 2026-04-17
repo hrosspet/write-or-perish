@@ -388,9 +388,12 @@ function NodeDetail() {
   const showProposal = isLlmNode && !isLlmPending && node.content
     && hasProposalSections(node.content);
   const displayContent = showProposal ? stripProposalSections(node.content) : node.content;
-  // Inline input shows whenever the user owns the thread and AI is allowed.
-  // Craft mode does NOT hide it — it only adds extra buttons.
-  const showInlineInput = isOwner && node.ai_usage !== 'none';
+  // Inline input is always available to the owner — the only way to add
+  // a child text node since "Add Text" was removed. It still works on
+  // `ai_usage='none'` nodes (no LLM call fires in that branch of the
+  // submit handler, we just navigate to the new child). Craft mode does
+  // NOT hide it — it only adds extra buttons.
+  const showInlineInput = isOwner;
   const showCraftBar = isOwner && craftMode && !autoGenerate && node.ai_usage !== 'none';
 
   const topRightButtonStyle = {
