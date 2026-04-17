@@ -361,7 +361,7 @@ function NodeDetail() {
   const highlightedTextStyle = {
     boxSizing: "border-box",
     padding: "1.8rem 2rem",
-    margin: "10px 0",
+    margin: "18px 0 10px 0",
     backgroundColor: "var(--bg-card)",
     border: "1px solid var(--border)",
     borderLeft: "3px solid var(--accent)",
