@@ -10,7 +10,7 @@ import { uploadFileInChunks } from "../utils/chunkedUpload";
 
 const NodeForm = forwardRef(
   (
-    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, submitLabel = "Submit", onSubmitOverride, compact = false, hideAudioUpload = false },
+    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, submitLabel = "Submit", onSubmitOverride, compact = false, hideAudioUpload = false, allowAgenticPrompt = false },
     ref
   ) => {
     const { user } = useUser();
@@ -28,6 +28,10 @@ const NodeForm = forwardRef(
     // For new nodes with a parent, we'll update these after fetching the parent.
     const [privacyLevel, setPrivacyLevel] = useState(initialPrivacyLevel || user?.default_privacy_level || "private");
     const [aiUsage, setAiUsage] = useState(initialAiUsage || user?.default_ai_usage || "none");
+    // Opt-in to the agentic prompt (profile + recent + todo + prefs as
+    // context). Only meaningful for new top-level text entries where AI
+    // is allowed.
+    const [useAgenticPrompt, setUseAgenticPrompt] = useState(false);
 
     // Draft auto-save hook
     const {
@@ -239,6 +243,30 @@ const NodeForm = forwardRef(
           return;
         }
 
+        // Opt-in agentic top-level entry: route through /textmode/start so
+        // the new thread gets a system node with the textmode prompt
+        // attached + an LLM placeholder (same as the Homepage Text card
+        // flow). Normalizes the response so onSuccess still receives
+        // `{id}` — the LLM node id, so callers navigate to the pending
+        // reply and NodeDetail picks it up with awaitLlm-style polling.
+        if (useAgenticPrompt && !editMode && !uploadedFile
+            && !streamingSessionId && !parentId && aiUsage !== 'none') {
+          const res = await api.post('/textmode/start', {
+            content,
+            privacy_level: privacyLevel,
+            ai_usage: aiUsage,
+          });
+          deleteDraft();
+          setHasDraft(false);
+          onSuccess({
+            id: res.data.llm_node_id,
+            awaitLlm: res.data.llm_node_id,
+            ...res.data,
+          });
+          setLoading(false);
+          return;
+        }
+
         // Handle streaming transcription completion - draft exists, create node from it
         if (streamingSessionId) {
           // Save the streaming draft as a node with any edits the user made
@@ -408,6 +436,75 @@ const NodeForm = forwardRef(
             onAIUsageChange={setAiUsage}
             disabled={loading}
           />
+        )}
+
+        {/* Agentic reply opt-in — only for new top-level text entries
+            where AI is allowed. Mirrors the Craft-mode toggle visual
+            from the NavBar. */}
+        {allowAgenticPrompt && !editMode && !parentId && !hidePowerFeatures
+            && aiUsage !== 'none' && (
+          <div style={{ marginTop: '12px', marginBottom: '12px' }}>
+            <button
+              type="button"
+              onClick={() => setUseAgenticPrompt(v => !v)}
+              disabled={loading}
+              style={{
+                width: '100%',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                background: 'none',
+                border: 'none',
+                padding: 0,
+                cursor: loading ? 'not-allowed' : 'pointer',
+                textAlign: 'left',
+              }}
+            >
+              <label style={{
+                display: 'block',
+                fontFamily: 'var(--sans)',
+                fontWeight: 400,
+                fontSize: '0.7rem',
+                textTransform: 'uppercase',
+                letterSpacing: '0.14em',
+                color: 'var(--text-muted)',
+                cursor: 'inherit',
+              }}>
+                Agentic Reply
+              </label>
+              <span style={{
+                width: '32px',
+                height: '18px',
+                borderRadius: '9px',
+                background: useAgenticPrompt ? 'var(--accent)' : 'var(--border)',
+                position: 'relative',
+                transition: 'background 0.2s ease',
+                flexShrink: 0,
+              }}>
+                <span style={{
+                  width: '14px',
+                  height: '14px',
+                  borderRadius: '50%',
+                  background: 'var(--text-primary)',
+                  position: 'absolute',
+                  top: '2px',
+                  left: useAgenticPrompt ? '16px' : '2px',
+                  transition: 'left 0.2s ease',
+                }} />
+              </span>
+            </button>
+            <div style={{
+              fontSize: '0.8rem',
+              color: 'var(--text-muted)',
+              marginTop: '4px',
+              fontFamily: 'var(--sans)',
+              fontWeight: 300,
+            }}>
+              {useAgenticPrompt
+                ? 'AI will include your profile, recent entries, todos and preferences as context.'
+                : 'No agentic context. AI replies only see this entry.'}
+            </div>
+          </div>
         )}
 
         {isRecoveringAudio && (

@@ -82,9 +82,14 @@ function App() {
             nodeFormProps={{
               ref: nodeFormRef,
               parentId: null,
+              allowAgenticPrompt: true,
               onSuccess: (data) => {
                 setShowNewEntry(false);
-                navigate(`/node/${data.id}`);
+                // When the entry went through /textmode/start, data
+                // carries `awaitLlm` so NodeDetail picks up the pending
+                // LLM response on the highlighted node.
+                const suffix = data.awaitLlm ? `?awaitLlm=${data.awaitLlm}` : '';
+                navigate(`/node/${data.id}${suffix}`);
               },
             }}
           />
