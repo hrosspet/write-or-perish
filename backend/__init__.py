@@ -160,11 +160,9 @@ def create_app():
     # Register CLI commands
     from backend.init_db import (
         init_db_command, backfill_human_owner_command,
-        backfill_prompt_refs_command,
     )
     app.cli.add_command(init_db_command)
     app.cli.add_command(backfill_human_owner_command)
-    app.cli.add_command(backfill_prompt_refs_command)
 
     try:
         from experiments.prompt_rct.run_rct import rct_cli
