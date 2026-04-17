@@ -411,7 +411,7 @@ function NodeDetail() {
     background: 'none',
     border: '1px solid var(--border)',
     borderRadius: '6px',
-    padding: '5px 12px',
+    padding: '0 12px',
     color: 'var(--text-muted)',
     fontFamily: 'var(--sans)',
     fontSize: '0.78rem',
@@ -420,6 +420,7 @@ function NodeDetail() {
     display: 'inline-flex',
     alignItems: 'center',
     width: '160px',
+    height: '32px',
     boxSizing: 'border-box',
   };
 
@@ -444,7 +445,9 @@ function NodeDetail() {
             title="Continue this conversation by voice"
           >
             <span>{voiceLoading ? 'Starting…' : 'Voice Mode'}</span>
-            <FaMicrophone size={12} />
+            <span style={{ display: 'inline-flex', alignItems: 'center', lineHeight: 0 }}>
+              <FaMicrophone size={12} />
+            </span>
           </button>
           {craftMode && (
             <button
