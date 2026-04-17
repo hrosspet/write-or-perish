@@ -80,8 +80,12 @@ function NodeDetail() {
   const highlightedNodeRef = useRef(null);
   const kebabMenuRef = useRef(null);
 
-  // Auto-generate is forced ON when Craft mode is OFF (no toggle shown).
-  const autoGenerateActive = !craftMode || autoGenerate;
+  // `autoGenerate` is the single source of truth. Defaults to true on
+  // a fresh install (see useState initializer) and persists across
+  // remounts via localStorage. The toggle is only visible in Craft
+  // mode, but the stored preference governs behavior in both modes so
+  // the UI state always matches observed behavior.
+  const autoGenerateActive = autoGenerate;
 
   // LLM completion polling - enabled automatically when llmTaskNodeId is set
   const {
@@ -436,11 +440,11 @@ function NodeDetail() {
           <button
             onClick={() => handleSessionFromNode('voice')}
             disabled={voiceLoading}
-            style={{ ...topRightButtonStyle, gap: '8px' }}
+            style={{ ...topRightButtonStyle, justifyContent: 'space-between' }}
             title="Continue this conversation by voice"
           >
-            <FaMicrophone size={12} />
             <span>{voiceLoading ? 'Starting…' : 'Voice Mode'}</span>
+            <FaMicrophone size={12} />
           </button>
           {craftMode && (
             <button
