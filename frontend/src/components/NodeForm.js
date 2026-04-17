@@ -10,7 +10,7 @@ import { uploadFileInChunks } from "../utils/chunkedUpload";
 
 const NodeForm = forwardRef(
   (
-    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, submitLabel = "Submit", onSubmitOverride, compact = false, hideAudioUpload = false, allowAgenticPrompt = false },
+    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, compact = false, hideAudioUpload = false, allowAgenticPrompt = false },
     ref
   ) => {
     const { user } = useUser();
@@ -736,8 +736,8 @@ const NodeForm = forwardRef(
                 : loading && transcriptionStatus === 'pending'
                 ? "Waiting to transcribe..."
                 : loading
-                ? "Submitting..."
-                : submitLabel}
+                ? "Sending..."
+                : "Send"}
             </button>
             {hasDraft && (
               <button

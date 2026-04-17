@@ -438,20 +438,16 @@ function NodeDetail() {
     boxSizing: 'border-box',
   };
 
-  // Top-right controls (Voice Mode + Auto-generate). Rendered at the
-  // page root so they stay anchored at the top of the page (scrolls
-  // away with content), independent of where the highlighted node
-  // lands after ancestors are rendered.
+  // Top-right controls (Voice Mode + Auto-generate). Rendered in the
+  // same flex row as the Thread heading so they align vertically and
+  // scroll away with content (no absolute positioning / viewport
+  // anchoring).
   const topRightControls = isOwner && node.ai_usage !== 'none' && (
     <div style={{
-      position: 'absolute',
-      top: '56px',
-      right: '20px',
       display: 'flex',
       flexDirection: 'column',
       alignItems: 'flex-end',
       gap: '6px',
-      zIndex: 2,
     }}>
       <button
         onClick={() => handleSessionFromNode('voice')}
@@ -771,7 +767,6 @@ function NodeDetail() {
             hideAudioUpload={!craftMode}
             compact
             placeholder="Type what's on your mind…"
-            submitLabel="Send"
             onSuccess={handleInlineSuccess}
           />
         </div>
@@ -790,15 +785,23 @@ function NodeDetail() {
   );
 
   return (
-    <div style={{ padding: "20px", paddingTop: "56px", position: "relative" }}>
-      {topRightControls}
-      <h2 style={{
-        fontFamily: "var(--serif)",
-        fontWeight: 300,
-        fontSize: "1.8rem",
-        color: "var(--text-primary)",
-        marginTop: 0,
-      }}>Thread</h2>
+    <div style={{ padding: "20px", paddingTop: "56px" }}>
+      <div style={{
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        gap: "16px",
+        marginBottom: "16px",
+      }}>
+        <h2 style={{
+          fontFamily: "var(--serif)",
+          fontWeight: 300,
+          fontSize: "1.8rem",
+          color: "var(--text-primary)",
+          margin: 0,
+        }}>Thread</h2>
+        {topRightControls}
+      </div>
       {ancestorsSection}
       {highlightedNodeSection}
       {childrenSection}

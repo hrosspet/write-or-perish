@@ -68,13 +68,12 @@ export default function WritePage() {
         What's on your mind?
       </h1>
 
-      <div style={{ width: '100%', maxWidth: '640px' }}>
+      <div style={{ width: '1170px', maxWidth: '90vw' }}>
         <NodeForm
           parentId={null}
           hidePowerFeatures={!craftMode}
           hideAudioUpload={!craftMode}
           placeholder="Type what's on your mind…"
-          submitLabel="Send"
           onSubmitOverride={handleSubmit}
           onSuccess={handleSuccess}
         />
