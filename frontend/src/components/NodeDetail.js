@@ -398,11 +398,16 @@ function NodeDetail() {
   const showInlineInput = !!currentUser;
   const showCraftBar = isOwner && craftMode && !autoGenerate && node.ai_usage !== 'none';
 
+  // Shared shell for the top-right controls. Voice Mode + Auto-generate
+  // share padding/border/typography; Auto-generate uses `space-between`
+  // (label left, pill right) to match the Craft-mode toggle in the
+  // NavBar overflow menu. They sit side-by-side in a single row so the
+  // fixed strip stays above the Thread / ancestor hr separator.
   const topRightButtonStyle = {
     background: 'none',
     border: '1px solid var(--border)',
     borderRadius: '6px',
-    padding: '6px 12px',
+    padding: '5px 12px',
     color: 'var(--text-muted)',
     fontFamily: 'var(--sans)',
     fontSize: '0.78rem',
@@ -410,7 +415,8 @@ function NodeDetail() {
     cursor: 'pointer',
     display: 'inline-flex',
     alignItems: 'center',
-    gap: '6px',
+    width: '160px',
+    boxSizing: 'border-box',
   };
 
   const highlightedNodeSection = (
@@ -419,21 +425,21 @@ function NodeDetail() {
       {isOwner && node.ai_usage !== 'none' && (
         <div style={{
           position: 'fixed',
-          top: '72px',
+          top: '68px',
           right: '20px',
           display: 'flex',
           flexDirection: 'column',
           alignItems: 'flex-end',
-          gap: '10px',
+          gap: '6px',
           zIndex: 50,
         }}>
           <button
             onClick={() => handleSessionFromNode('voice')}
             disabled={voiceLoading}
-            style={topRightButtonStyle}
+            style={{ ...topRightButtonStyle, gap: '8px' }}
             title="Continue this conversation by voice"
           >
-            <FaMicrophone size={11} />
+            <FaMicrophone size={12} />
             <span>{voiceLoading ? 'Starting…' : 'Voice Mode'}</span>
           </button>
           {craftMode && (
@@ -441,37 +447,29 @@ function NodeDetail() {
               type="button"
               onClick={() => setAutoGenerate(v => !v)}
               title={autoGenerate ? 'Auto-generate is on — click to turn off' : 'Auto-generate is off — click to turn on'}
-              style={{
-                background: 'none',
-                border: 'none',
-                padding: '4px 2px',
-                cursor: 'pointer',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '8px',
-                color: 'var(--text-muted)',
-                fontFamily: 'var(--sans)',
-                fontSize: '0.74rem',
-                fontWeight: 300,
-              }}
+              style={{ ...topRightButtonStyle, justifyContent: 'space-between' }}
             >
+              <span>Auto-generate</span>
               <span style={{
-                width: '16px',
-                height: '16px',
-                borderRadius: '50%',
-                border: `1.5px solid ${autoGenerate ? 'var(--accent)' : 'var(--border-hover)'}`,
-                background: autoGenerate ? 'var(--accent)' : 'transparent',
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontSize: '0.55rem',
-                color: 'var(--bg-deep)',
-                fontWeight: 600,
+                width: '32px',
+                height: '18px',
+                borderRadius: '9px',
+                background: autoGenerate ? 'var(--accent)' : 'var(--border)',
+                position: 'relative',
+                transition: 'background 0.2s ease',
                 flexShrink: 0,
               }}>
-                {autoGenerate ? '✓' : ''}
+                <span style={{
+                  width: '14px',
+                  height: '14px',
+                  borderRadius: '50%',
+                  background: 'var(--text-primary)',
+                  position: 'absolute',
+                  top: '2px',
+                  left: autoGenerate ? '16px' : '2px',
+                  transition: 'left 0.2s ease',
+                }} />
               </span>
-              <span>Auto-generate</span>
             </button>
           )}
         </div>
@@ -760,12 +758,13 @@ function NodeDetail() {
   );
 
   return (
-    <div style={{ padding: "20px" }}>
+    <div style={{ padding: "20px", paddingTop: "56px" }}>
       <h2 style={{
         fontFamily: "var(--serif)",
         fontWeight: 300,
         fontSize: "1.8rem",
         color: "var(--text-primary)",
+        marginTop: 0,
       }}>Thread</h2>
       {ancestorsSection}
       {highlightedNodeSection}
