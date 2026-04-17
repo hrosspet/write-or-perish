@@ -785,11 +785,11 @@ function NodeDetail() {
   );
 
   return (
-    <div style={{ padding: "20px", paddingTop: "56px" }}>
+    <div style={{ padding: "20px" }}>
       <div style={{
         display: "flex",
         justifyContent: "space-between",
-        alignItems: "center",
+        alignItems: "flex-start",
         gap: "16px",
         marginBottom: "16px",
       }}>
