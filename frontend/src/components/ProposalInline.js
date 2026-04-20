@@ -6,6 +6,10 @@ export function stripInlineMarkdown(text) {
   return text.replace(/\*\*(.+?)\*\*/g, '$1').replace(/__(.+?)__/g, '$1');
 }
 
+export function stripProposalTag(text) {
+  return text.replace(/\s*\[\w+-proposal:[^\]]*\]/g, '');
+}
+
 export function parseTodoItems(text) {
   return text.split('\n')
     .map(l => l.replace(/^[-*]\s*/, '').replace(/^\[[ xX]\]\s*/, '').trim())
@@ -39,10 +43,10 @@ export function parseOrientResponse(text) {
     if (heading.includes('completed')) sections.completed = body;
     else if (heading.includes('new task')) sections.newTasks = body;
     else if (heading.includes('priority')) sections.priority = body;
-    else if (heading.includes('note')) sections.note = body.replace(/\s*\[\w+-proposal:[^\]]*\]/g, '');
-    else if (heading.includes('issue title') || heading === 'title') sections.issueTitle = body;
-    else if (heading === 'description') sections.issueDescription = body;
-    else if (heading === 'category') sections.issueCategory = body.trim().toLowerCase();
+    else if (heading.includes('note')) sections.note = stripProposalTag(body);
+    else if (heading.includes('issue title') || heading === 'title') sections.issueTitle = stripProposalTag(body).trim();
+    else if (heading === 'description') sections.issueDescription = stripProposalTag(body).trim();
+    else if (heading === 'category') sections.issueCategory = stripProposalTag(body).trim().toLowerCase();
   }
   return sections;
 }
