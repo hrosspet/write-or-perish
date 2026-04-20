@@ -47,13 +47,19 @@ def _get_latest_recent_context(user_id, profile_id=None):
 
 
 def _count_new_tokens(user_id, since):
-    """Count tokens of nodes owned by user created at/after *since*."""
+    """Count tokens of nodes owned by user created strictly after *since*.
+
+    *since* is the `created_at` of the last node already summarized, so the
+    boundary node itself must be excluded — otherwise its own `token_count`
+    keeps the threshold tripped on static data and the summary regenerates
+    on every beat.
+    """
     return db.session.query(
         func.coalesce(func.sum(Node.token_count), 0)
     ).filter(
         or_(Node.user_id == user_id,
             Node.human_owner_id == user_id),
-        Node.created_at >= since,
+        Node.created_at > since,
         Node.ai_usage.in_(AI_ALLOWED),
     ).scalar()
 
