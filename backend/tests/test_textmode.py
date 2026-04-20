@@ -423,6 +423,43 @@ class TestTextmodeFromNode:
         assert contents == ["child", "grandchild"]  # root excluded
 
 
+# ── GET /nodes/<id> ancestor serialization ──────────────────────────────
+
+class TestNodeGetAncestorSerialization:
+    def test_ancestors_include_ai_usage(self, app):
+        """Issue #114: the frontend auto-generate guard checks
+        ai_usage across [highlighted, ...ancestors]. Without ai_usage
+        in the ancestor payload the guard sees undefined on every
+        ancestor and disables auto-generate on every follow-up
+        message."""
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+
+        root = _make_node(alice, content="system", ai_usage="chat")
+        user_node = _make_node(
+            alice, parent_id=root.id, content="hi", ai_usage="chat",
+        )
+        llm_user = _make_user("gpt-5", twitter_id="llm-gpt-5")
+        llm_node = _make_node(
+            llm_user, parent_id=user_node.id, content="hello back",
+            node_type="llm", llm_model="gpt-5", human_owner=alice,
+            ai_usage="chat",
+        )
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.get(f"/api/nodes/{llm_node.id}")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["ai_usage"] == "chat"
+        assert len(data["ancestors"]) == 2
+        for a in data["ancestors"]:
+            assert a["ai_usage"] == "chat", (
+                f"ancestor {a['id']} missing ai_usage: {a}"
+            )
+
+
 # ── POST /nodes/<id>/llm source_mode propagation ─────────────────────────
 
 class TestNodesLlmSourceMode:

@@ -703,7 +703,12 @@ def get_node(node_id):
                 "preview": make_preview(current.get_content()),
                 "node_type": current.node_type,
                 "child_count": len(current.children),
-                "created_at": current.created_at.isoformat()
+                "created_at": current.created_at.isoformat(),
+                # Needed by the frontend auto-generate guard, which
+                # checks ai_usage across [node, ...ancestors] before
+                # firing an LLM reply. Without it ancestors look like
+                # ai_usage=undefined and the guard silently fails.
+                "ai_usage": current.ai_usage,
             }
             ancestor_data.update(_system_prompt_fields(current))
             ancestors.insert(0, ancestor_data)
