@@ -241,6 +241,23 @@ def generate_recent_context(user_id, profile_id=None, data_cutoff_iso=None):
         source_tokens = export_result["token_count"]
         latest_ts = export_result["latest_node_created_at"]
 
+        # Belt-and-suspenders guard: if the export's newest node has not
+        # advanced past the previous RC's cutoff, the LLM call would
+        # regenerate on identical data. `_count_new_tokens` can still
+        # return ≥ threshold when the user has replied in pre-profile-
+        # cutoff top-level threads — those replies are counted but the
+        # export filters their top-level ancestor out, so they never
+        # land in `recent_data`. Skip before paying for the LLM call.
+        if (latest_rc and latest_rc.source_data_cutoff
+                and latest_ts
+                and latest_ts <= latest_rc.source_data_cutoff):
+            logger.info(
+                f"User {user_id}: export latest_ts ({latest_ts}) has not "
+                f"advanced past previous RC cutoff "
+                f"({latest_rc.source_data_cutoff}); skipping regen"
+            )
+            return
+
         # Load prompt template
         prompt_template = _load_prompt("recent_context.txt", user_id=user_id)
 
