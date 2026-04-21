@@ -1,32 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 
 /**
- * Extract the WebM header (initialization segment) from an ArrayBuffer.
- * The header includes EBML, Segment, Info, and Tracks elements.
- * Everything before the first Cluster element (ID: 0x1F 0x43 0xB6 0x75) is the header.
- *
- * @param {ArrayBuffer} buffer - The first chunk's data
- * @returns {ArrayBuffer} - The header bytes
- */
-function extractWebMHeader(buffer) {
-  const data = new Uint8Array(buffer);
-
-  // WebM Cluster element ID: 0x1F 0x43 0xB6 0x75
-  // Find the first occurrence of this sequence
-  for (let i = 0; i < data.length - 3; i++) {
-    if (data[i] === 0x1F && data[i + 1] === 0x43 && data[i + 2] === 0xB6 && data[i + 3] === 0x75) {
-      // Found the Cluster element - everything before it is the header
-      return buffer.slice(0, i);
-    }
-  }
-
-  // If no Cluster found, return a reasonable portion as header (first 4KB)
-  // This shouldn't happen in normal recordings
-  console.warn('WebM Cluster element not found, using first 4KB as header');
-  return buffer.slice(0, Math.min(4096, buffer.byteLength));
-}
-
-/**
  * useStreamingMediaRecorder hook for recording audio with real-time chunk emission.
  *
  * This hook uses MediaRecorder with timeslice to emit audio chunks at regular intervals
@@ -51,7 +25,6 @@ export function useStreamingMediaRecorder({
   const chunksRef = useRef([]); // All chunks for final assembly
   const chunkIndexRef = useRef(0);
   const durationIntervalRef = useRef(null);
-  const webmHeaderRef = useRef(null); // Store WebM header from first chunk
   const stopResolveRef = useRef(null); // Resolve fn for the stop promise
   const dataAvailableFiredRef = useRef(false); // Track if ondataavailable ran during stop
   const pausedAtRef = useRef(null); // Timestamp when paused
@@ -89,7 +62,6 @@ export function useStreamingMediaRecorder({
     streamRef.current = null;
     chunksRef.current = [];
     chunkIndexRef.current = 0;
-    webmHeaderRef.current = null;
     pausedAtRef.current = null;
     totalPausedMsRef.current = 0;
     setMediaBlob(null);
@@ -121,53 +93,34 @@ export function useStreamingMediaRecorder({
       chunksRef.current = [];
       chunkIndexRef.current = startingChunkIndex;
 
-      mediaRecorder.ondataavailable = async (e) => {
+      // MediaRecorder with a timeslice emits Matroska *fragments* of one
+      // continuous stream — only chunk 0 has an EBML header; chunks 1+ are
+      // header-less cluster data whose timestamps are absolute to the
+      // original recording. These fragments, concatenated in order as raw
+      // bytes on the server, form exactly one valid WebM. So we upload each
+      // blob verbatim and let the backend do the binary concat + a single
+      // remux pass to rewrite duration metadata.
+      mediaRecorder.ondataavailable = (e) => {
         const recorderState = recorderRef.current?.state || 'unknown';
         console.log(`[StreamingRecorder] ondataavailable fired: size=${e.data?.size || 0}, recorderState=${recorderState}, timeSinceStart=${Date.now() - startTimeRef.current}ms`);
 
-        // Flag set synchronously so onstop knows we ran (before any await)
         dataAvailableFiredRef.current = true;
 
         if (e.data && e.data.size > 0) {
           chunksRef.current.push(e.data);
 
-          // Call the onChunkReady callback for streaming transcription
-          // Upload ALL chunks including the final one - needed for short recordings
           if (onChunkReady) {
             const chunkIndex = chunkIndexRef.current;
             chunkIndexRef.current += 1;
             setChunkCount(prev => prev + 1);
 
-            let chunkBlob;
-
-            if (chunkIndex === 0) {
-              // First chunk contains the WebM header - extract and store it
-              // The header includes EBML, Segment, Info, and Tracks elements
-              const arrayBuffer = await e.data.arrayBuffer();
-              const header = extractWebMHeader(arrayBuffer);
-              webmHeaderRef.current = header;
-
-              // First chunk is already valid, use as-is
-              chunkBlob = new Blob([e.data], { type: mediaRecorder.mimeType });
-            } else {
-              // Subsequent chunks need the header prepended to be valid WebM files
-              if (webmHeaderRef.current) {
-                chunkBlob = new Blob([webmHeaderRef.current, e.data], { type: mediaRecorder.mimeType });
-              } else {
-                // Fallback if header extraction failed
-                chunkBlob = new Blob([e.data], { type: mediaRecorder.mimeType });
-              }
-            }
-
-            console.log(`[StreamingRecorder] Chunk ${chunkIndex} ready: blobSize=${chunkBlob.size}, rawSize=${e.data.size}, totalChunks=${chunksRef.current.length}`);
-            onChunkReady(chunkBlob, chunkIndex);
+            console.log(`[StreamingRecorder] Chunk ${chunkIndex} ready: size=${e.data.size}, totalChunks=${chunksRef.current.length}`);
+            onChunkReady(e.data, chunkIndex);
           }
         } else {
           console.warn(`[StreamingRecorder] ondataavailable with empty data: size=${e.data?.size}, recorderState=${recorderState}`);
         }
 
-        // If we're stopping, the final chunk has been processed and upload enqueued.
-        // Resolve the stop promise so stopStreaming knows it's safe to finalize.
         if (stopResolveRef.current) {
           stopResolveRef.current();
           stopResolveRef.current = null;
