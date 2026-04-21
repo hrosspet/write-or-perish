@@ -437,6 +437,56 @@ def fix_last_chunk_duration(chunk_dir: str) -> Tuple[bool, str]:
         return False, f"Failed to fix {os.path.basename(last_chunk)}: {message}"
 
 
+def concat_webm_fragments(paths: list, output_suffix: str = '.webm') -> str:
+    """Concatenate MediaRecorder timeslice fragments into one valid WebM.
+
+    MediaRecorder with a timeslice emits Matroska *fragments* of a single
+    continuous stream — only the first blob carries the EBML/Segment/Tracks
+    header; subsequent blobs are header-less cluster data with timestamps
+    absolute to the original recording. Per the MSE byte-stream format, those
+    fragments concatenated in order as raw bytes form exactly one valid
+    Matroska file. This function does that append, then runs a single ffmpeg
+    remux pass to rewrite the container's Duration/Cues so the output is
+    seekable and reports the correct length.
+    """
+    if not paths:
+        raise ValueError("No fragments to concatenate")
+
+    # Step 1: binary-append fragments in order
+    fd, raw_path = tempfile.mkstemp(suffix=output_suffix, prefix='frag_raw_')
+    os.close(fd)
+    try:
+        with open(raw_path, 'wb') as out:
+            for p in paths:
+                with open(p, 'rb') as src:
+                    shutil.copyfileobj(src, out)
+
+        # Step 2: remux so Duration/Cues reflect all clusters, not just the
+        # first (MediaRecorder never writes a final Duration element, and
+        # browsers/Whisper rely on it).
+        fd, out_path = tempfile.mkstemp(suffix=output_suffix, prefix='merged_')
+        os.close(fd)
+        result = subprocess.run(
+            ['ffmpeg', '-y', '-fflags', '+genpts',
+             '-i', raw_path, '-c', 'copy', out_path],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0:
+            try:
+                os.unlink(out_path)
+            except OSError:
+                pass
+            raise RuntimeError(
+                f"ffmpeg remux failed: {result.stderr[:500]}"
+            )
+        return out_path
+    finally:
+        try:
+            os.unlink(raw_path)
+        except OSError:
+            pass
+
+
 def concat_audio_files(paths: list, output_suffix: str = '.webm') -> str:
     """Concatenate multiple audio files using ffmpeg concat demuxer.
 
