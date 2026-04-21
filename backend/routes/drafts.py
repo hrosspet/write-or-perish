@@ -454,6 +454,27 @@ def upload_streaming_chunk(session_id):
     chunk_path = chunk_dir / chunk_filename
     chunk_file.save(chunk_path)
 
+    # Chunk 0 carries the EBML/Segment/Tracks init segment — the bytes that
+    # every later batch needs as a prefix to remain a valid WebM (chunks 1+
+    # are raw cluster fragments with no header). Extract and persist it now,
+    # before encrypt_file() deletes the plaintext chunk. Never changes for
+    # the rest of the recording.
+    if chunk_index == 0:
+        from backend.utils.webm_utils import extract_webm_init_segment
+        try:
+            with open(chunk_path, 'rb') as f:
+                init_bytes = extract_webm_init_segment(f.read())
+        except Exception as exc:
+            current_app.logger.warning(
+                f"Failed to extract init segment from chunk 0 of "
+                f"session {session_id}: {exc}"
+            )
+        else:
+            init_path = chunk_dir / "init.webm"
+            with open(init_path, 'wb') as f:
+                f.write(init_bytes)
+            encrypt_file(str(init_path))
+
     # Encrypt the audio chunk at rest
     encrypted_path = encrypt_file(str(chunk_path))
 

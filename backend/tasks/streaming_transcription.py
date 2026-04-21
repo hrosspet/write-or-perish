@@ -583,10 +583,33 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                     f"indices {chunk_indices}"
                 )
 
+            # If this batch doesn't include chunk 0, decrypt the cached
+            # init segment so concat_webm_fragments can prepend it — only
+            # chunk 0 carries the EBML/Segment/Tracks header, so later
+            # batches would otherwise be header-less cluster data that
+            # ffmpeg can't remux.
+            init_segment_path = None
+            if chunk_indices and min(chunk_indices) > 0:
+                init_enc = chunk_dir / "init.webm.enc"
+                init_plain = chunk_dir / "init.webm"
+                if init_enc.exists():
+                    init_segment_path = decrypt_file_to_temp(str(init_enc))
+                    temp_files.append(init_segment_path)
+                elif init_plain.exists():
+                    init_segment_path = str(init_plain)
+                else:
+                    logger.warning(
+                        f"No init segment found for session {session_id} "
+                        f"batch starting at chunk {min(chunk_indices)}; "
+                        "concat will likely fail"
+                    )
+
             # Merge MediaRecorder fragments into a single valid WebM.
             # Binary-append the fragments and remux — see
             # concat_webm_fragments for the full rationale.
-            merged_path = concat_webm_fragments(decrypted_paths)
+            merged_path = concat_webm_fragments(
+                decrypted_paths, init_segment_path=init_segment_path,
+            )
             merge_input = merged_path
 
             # Compress if needed (webm -> mp3)

@@ -437,7 +437,126 @@ def fix_last_chunk_duration(chunk_dir: str) -> Tuple[bool, str]:
         return False, f"Failed to fix {os.path.basename(last_chunk)}: {message}"
 
 
-def concat_webm_fragments(paths: list, output_suffix: str = '.webm') -> str:
+# Matroska element IDs we care about for init-segment extraction.
+_EBML_ID_SEGMENT = 0x18538067
+_EBML_ID_CLUSTER = 0x1F43B675
+
+
+def _ebml_read_vint(data: bytes, offset: int, keep_marker: bool):
+    """Read an EBML variable-length integer at `offset`.
+
+    With `keep_marker=True` the full VINT bytes are returned verbatim as the
+    value — used for element IDs, whose canonical form keeps the length
+    marker bit. With `keep_marker=False` the marker is stripped — used for
+    element sizes.
+
+    Returns (value, bytes_consumed, is_unknown_size). `is_unknown_size` is
+    only meaningful for size fields (keep_marker=False) and is True when all
+    data bits are set, which the spec reserves for "size unknown" (e.g.
+    MediaRecorder emits this for its open-ended Segment element).
+    """
+    if offset >= len(data):
+        raise ValueError(f"VINT read past end of buffer at offset {offset}")
+    first = data[offset]
+    if first == 0:
+        # Would imply a VINT longer than 8 bytes; invalid for our purposes.
+        raise ValueError(f"Invalid VINT at offset {offset}: first byte is 0")
+
+    length = 1
+    mask = 0x80
+    while (first & mask) == 0:
+        length += 1
+        mask >>= 1
+        if length > 8:
+            raise ValueError(f"VINT too long at offset {offset}")
+    if offset + length > len(data):
+        raise ValueError(f"VINT truncated at offset {offset}")
+
+    if keep_marker:
+        value = 0
+        for i in range(length):
+            value = (value << 8) | data[offset + i]
+        is_unknown = False
+    else:
+        value = first & (mask - 1)
+        for i in range(1, length):
+            value = (value << 8) | data[offset + i]
+        # Unknown-size marker: all data bits set (2^(7N) - 1 for length N)
+        is_unknown = value == ((1 << (7 * length)) - 1)
+
+    return value, length, is_unknown
+
+
+def find_first_cluster_offset(data: bytes) -> int:
+    """Return the byte offset of the first Matroska Cluster element.
+
+    Walks the EBML element tree — top-level elements, then the Segment's
+    children — and stops at the first element with ID 0x1F43B675. Does *not*
+    do a byte-pattern search, so magic bytes that happen to occur inside
+    other elements (CodecPrivate, track UIDs) are ignored.
+
+    Raises ValueError on malformed EBML or if no Cluster is found.
+    """
+    offset = 0
+    while offset < len(data):
+        id_val, id_len, _ = _ebml_read_vint(data, offset, keep_marker=True)
+        offset += id_len
+        size_val, size_len, size_unknown = _ebml_read_vint(
+            data, offset, keep_marker=False,
+        )
+        offset += size_len
+
+        if id_val == _EBML_ID_SEGMENT:
+            # Parse children of Segment linearly. MediaRecorder emits the
+            # Segment with unknown size; in that case walk until we run out
+            # of bytes or hit a Cluster.
+            seg_end = len(data) if size_unknown else offset + size_val
+            while offset < seg_end:
+                child_id, child_id_len, _ = _ebml_read_vint(
+                    data, offset, keep_marker=True,
+                )
+                if child_id == _EBML_ID_CLUSTER:
+                    return offset
+                offset += child_id_len
+                child_size, child_size_len, child_unknown = _ebml_read_vint(
+                    data, offset, keep_marker=False,
+                )
+                offset += child_size_len
+                if child_unknown:
+                    raise ValueError(
+                        "Unexpected unknown-size element inside Segment "
+                        "before first Cluster"
+                    )
+                offset += child_size
+            raise ValueError("No Cluster element found inside Segment")
+
+        # Top-level non-Segment element (typically just the EBML header);
+        # skip its body entirely.
+        if size_unknown:
+            raise ValueError(
+                "Unexpected unknown-size top-level element before Segment"
+            )
+        offset += size_val
+
+    raise ValueError("No Segment element found in buffer")
+
+
+def extract_webm_init_segment(data: bytes) -> bytes:
+    """Return the init segment of a MediaRecorder WebM blob.
+
+    Everything up to the first Matroska Cluster is the init segment
+    (EBML header + Segment header + SeekHead? + Info + Tracks). Those bytes
+    never change over the lifetime of a single MediaRecorder recording, so
+    we persist them once and prepend to future batches that don't start at
+    chunk 0 — otherwise those batches would be header-less cluster data
+    that ffmpeg can't remux.
+    """
+    return data[:find_first_cluster_offset(data)]
+
+
+def concat_webm_fragments(paths: list,
+                          init_segment_path: Optional[str] = None,
+                          output_suffix: str = '.webm') -> str:
     """Concatenate MediaRecorder timeslice fragments into one valid WebM.
 
     MediaRecorder with a timeslice emits Matroska *fragments* of a single
@@ -448,15 +567,23 @@ def concat_webm_fragments(paths: list, output_suffix: str = '.webm') -> str:
     Matroska file. This function does that append, then runs a single ffmpeg
     remux pass to rewrite the container's Duration/Cues so the output is
     seekable and reports the correct length.
+
+    For batches that don't include the first fragment of the recording,
+    pass `init_segment_path` pointing at a previously-extracted init segment
+    (see `extract_webm_init_segment`). Its bytes are binary-prepended so the
+    resulting file has a valid EBML/Segment/Tracks prefix.
     """
     if not paths:
         raise ValueError("No fragments to concatenate")
 
-    # Step 1: binary-append fragments in order
+    # Step 1: binary-append init segment (if any) + fragments in order
     fd, raw_path = tempfile.mkstemp(suffix=output_suffix, prefix='frag_raw_')
     os.close(fd)
     try:
         with open(raw_path, 'wb') as out:
+            if init_segment_path:
+                with open(init_segment_path, 'rb') as src:
+                    shutil.copyfileobj(src, out)
             for p in paths:
                 with open(p, 'rb') as src:
                     shutil.copyfileobj(src, out)
