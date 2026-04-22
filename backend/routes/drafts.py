@@ -3,7 +3,6 @@ from flask_login import login_required, current_user
 from backend.models import Draft, Node, NodeTranscriptChunk
 from backend.extensions import db
 from backend.utils.privacy import can_user_edit_node
-from backend.utils.webm_utils import fix_last_chunk_duration, is_ffmpeg_available
 import uuid
 import pathlib
 import os
@@ -457,8 +456,7 @@ def upload_streaming_chunk(session_id):
     # Chunk 0 carries the EBML/Segment/Tracks init segment — the bytes that
     # every later batch needs as a prefix to remain a valid WebM (chunks 1+
     # are raw cluster fragments with no header). Extract and persist it now,
-    # before encrypt_file() deletes the plaintext chunk. Never changes for
-    # the rest of the recording.
+    # before encrypt_file() deletes the plaintext chunk.
     #
     # Reject the upload if extraction fails: batch 1 (chunks 0..19) would
     # still succeed because chunk 0 carries its own header, but any batch
@@ -466,10 +464,9 @@ def upload_streaming_chunk(session_id):
     # Better to surface the problem on the first chunk than silently lose
     # later audio.
     if chunk_index == 0:
-        from backend.utils.webm_utils import extract_webm_init_segment
+        from backend.utils.webm_utils import persist_init_segment
         try:
-            with open(chunk_path, 'rb') as f:
-                init_bytes = extract_webm_init_segment(f.read())
+            persist_init_segment(chunk_path, chunk_dir)
         except Exception as exc:
             current_app.logger.error(
                 f"Failed to extract init segment from chunk 0 of "
@@ -482,11 +479,8 @@ def upload_streaming_chunk(session_id):
             return jsonify({
                 "error": "Could not parse WebM header from first chunk",
                 "detail": str(exc),
+                "code": "webm_header_parse_failed",
             }), 500
-        init_path = chunk_dir / "init.webm"
-        with open(init_path, 'wb') as f:
-            f.write(init_bytes)
-        encrypt_file(str(init_path))
 
     # Encrypt the audio chunk at rest
     encrypted_path = encrypt_file(str(chunk_path))
@@ -815,20 +809,15 @@ def save_streaming_as_node(session_id):
     node_audio_dir = AUDIO_STORAGE_ROOT / f"nodes/{current_user.id}/{node.id}"
 
     if draft_audio_dir.exists():
-        # Fix the last chunk's duration metadata before moving (if not already fixed during finalization)
-        if is_ffmpeg_available():
-            success, message = fix_last_chunk_duration(str(draft_audio_dir))
-            if success:
-                current_app.logger.info(f"Fixed last chunk duration: {message}")
-            else:
-                current_app.logger.warning(f"Could not fix last chunk duration: {message}")
-
         try:
             # Create node audio directory
             node_audio_dir.mkdir(parents=True, exist_ok=True)
 
-            # Move all files
+            # Move all files (init.webm is ephemeral — drop instead of move)
             for file_path in draft_audio_dir.iterdir():
+                if file_path.name.startswith("init.webm"):
+                    file_path.unlink()
+                    continue
                 shutil.move(str(file_path), str(node_audio_dir / file_path.name))
 
             # Remove the empty draft directory

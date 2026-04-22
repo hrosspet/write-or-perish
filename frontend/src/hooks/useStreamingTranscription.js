@@ -91,7 +91,10 @@ export function useStreamingTranscription(options = {}) {
 
   /**
    * Upload a single chunk with exponential backoff retry.
-   * Returns true on success, false if all retries exhausted.
+   * Returns { success: true } on success, or { success: false, fatalError?: string }
+   * on failure. `fatalError` is set when the server returned a deterministic
+   * error (e.g. chunk 0's WebM header didn't parse) where retrying wouldn't
+   * help — retries are skipped and the caller surfaces a distinct message.
    */
   const uploadChunkWithRetry = useCallback(async (blob, chunkIndex, sessionId) => {
     const maxRetries = 4;
@@ -109,19 +112,34 @@ export function useStreamingTranscription(options = {}) {
         });
 
         console.log(`[StreamingTranscription] Upload complete: chunk=${chunkIndex}` + (attempt > 0 ? ` (after ${attempt} retries)` : ''));
-        return true;
+        return { success: true };
       } catch (err) {
+        // Server rejected chunk 0 because it couldn't parse the WebM header
+        // (MediaRecorder on this browser produced bytes we don't recognize).
+        // Retrying will yield the exact same bytes, so short-circuit with a
+        // fatal-error message the caller can surface distinctly from
+        // ordinary network flakiness.
+        const serverCode = err.response?.data?.code;
+        if (err.response?.status === 500 && serverCode === 'webm_header_parse_failed') {
+          const detail = err.response?.data?.detail || 'unknown parse error';
+          console.error(`[StreamingTranscription] Fatal: server could not parse chunk ${chunkIndex}'s WebM header (${detail}); not retrying`);
+          return {
+            success: false,
+            fatalError: `Your browser produced an audio format we can't process. Please try a different browser or device. (${detail})`,
+          };
+        }
+
         if (attempt < maxRetries) {
           const delay = baseDelay * Math.pow(2, attempt); // 2s, 4s, 8s, 16s
           console.warn(`[StreamingTranscription] Upload failed (attempt ${attempt + 1}/${maxRetries + 1}): chunk=${chunkIndex}, retrying in ${delay}ms...`, err.message);
           await new Promise(resolve => setTimeout(resolve, delay));
         } else {
           console.error(`[StreamingTranscription] Upload FAILED after ${maxRetries + 1} attempts: chunk=${chunkIndex}`, err);
-          return false;
+          return { success: false };
         }
       }
     }
-    return false;
+    return { success: false };
   }, []);
 
   // Handle chunk upload
@@ -135,17 +153,22 @@ export function useStreamingTranscription(options = {}) {
     console.log(`[StreamingTranscription] Starting upload: chunk=${chunkIndex}, blobSize=${blob.size}, session=${sessionId}`);
 
     const uploadPromise = (async () => {
-      const success = await uploadChunkWithRetry(blob, chunkIndex, sessionId);
+      const result = await uploadChunkWithRetry(blob, chunkIndex, sessionId);
 
-      if (success) {
+      if (result.success) {
         setUploadedChunks(prev => prev + 1);
         totalChunksRef.current = Math.max(totalChunksRef.current, chunkIndex + 1);
       } else {
-        // Store failed chunk for retry when network returns
+        // Store failed chunk for retry when network returns. (Pointless for
+        // the fatal-error case, but keeping the same path for simplicity —
+        // the fatalError branch just doesn't wait for network.)
         failedChunksRef.current.push({ blob, chunkIndex, sessionId });
         playErrorSound();
         if (onError) {
-          onError(new Error(`Failed to upload chunk ${chunkIndex} after retries`));
+          onError(new Error(
+            result.fatalError
+            || `Failed to upload chunk ${chunkIndex} after retries`
+          ));
         }
       }
     })();
