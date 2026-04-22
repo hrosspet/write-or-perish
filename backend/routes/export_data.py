@@ -499,16 +499,22 @@ def get_raw_data_date_range(user_id, max_tokens=10000, created_before=None):
     return row[0], row[1], row[2]
 
 
-def _entry_point_top_level_started(node):
+def _entry_point_top_level_started(node, user_id):
     """Walk node.parent until parent_id IS NULL; return that root's
-    created_at. Falls back to None if the walk hits a missing parent.
+    created_at IFF the root is accessible to user_id. Falls back to
+    None if the walk hits a missing parent, a cycle, or an
+    inaccessible root — the caller renders a generic preamble
+    without the date in that case.
 
-    Used only by the incremental export to render the preamble's
-    "Continuation of thread started <date>" hint. O(depth) ORM lookups
-    per entry point — N+1 potential, fine for typical thread depths
+    Checking accessibility prevents leaking the start-date of a
+    private foreign thread whose root was excluded by
+    accessible_nodes_filter during the CTE walk.
+
+    Used only by the incremental export. O(depth) ORM lookups per
+    entry point — N+1 potential, fine for typical thread depths
     (≤ ~10) and small entry-point counts. If that ever proves too
-    expensive (many deep threads with many entries), batch the
-    ancestor lookup with a single recursive CTE keyed by entry id.
+    expensive, batch the ancestor lookup with a single recursive
+    CTE keyed by entry id.
     """
     cur = node
     seen = set()
@@ -518,6 +524,8 @@ def _entry_point_top_level_started(node):
         seen.add(cur.id)
         cur = cur.parent
     if cur is None:
+        return None
+    if not can_user_access_node(cur, user_id):
         return None
     return cur.created_at
 
@@ -573,9 +581,16 @@ def _build_user_export_incremental(
         header_footer_tokens = 100
         budget = max_tokens - header_footer_tokens
 
-        # Apply budget windowing to CTE rows. Mirrors `_preselect_node_ids`'s
-        # window logic but seeded from the incremental CTE rows instead of
-        # the user's whole tree.
+        # Apply budget windowing to CTE rows. Semantics differ slightly
+        # from `_preselect_node_ids`'s SQL window: this loop stops
+        # BEFORE a row that would overshoot the budget (strict fit),
+        # while the SQL version includes the overshooting row (its
+        # predicate is `cumul - token_count < budget`, which is true
+        # for the row that straddles the boundary). The strict-fit
+        # variant keeps budgeted recent-context calls closer to the
+        # caller's stated ceiling and is simpler to reason about.
+        # Intentional difference; if callers ever need the old
+        # overshoot semantic, add a flag.
         ordered = sorted(
             cte_rows,
             key=lambda r: r.created_at,
@@ -705,7 +720,7 @@ def _build_user_export_incremental(
 
     for thread_num, entry in enumerate(entry_nodes, 1):
         if entry.parent_id is not None:
-            top_started = _entry_point_top_level_started(entry)
+            top_started = _entry_point_top_level_started(entry, user.id)
             export_lines.append(_format_preamble(top_started))
             export_lines.append("")
 

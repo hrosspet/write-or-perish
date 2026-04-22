@@ -600,8 +600,11 @@ class TestPrivateForeignAncestorExclusion:
         # Bob's private content NOT included (accessible_nodes_filter)
         assert "bob's private reply" not in content
         assert "bob's private root" not in content
-        # Preamble appears for alice's entry point
-        assert "Continuation of thread started" in content
+        # Preamble appears for alice's entry point — but the date of
+        # Bob's private root must NOT leak (it's metadata about content
+        # Alice can't see). Generic preamble only.
+        assert "Continuation of thread" in content
+        assert "2025-12-15" not in content
         assert alice_reply.id in result["node_ids"]
         assert bob_private_root.id not in result["node_ids"]
         assert bob_private_reply.id not in result["node_ids"]
