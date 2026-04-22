@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import ReactDOM from "react-dom";
+import JSZip from "jszip";
 import api from "../api";
 import PrivacySelector from "./PrivacySelector";
 
@@ -232,15 +233,40 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     setClaudeImportData(null);
   };
 
-  const handleChatGPTImportFile = (event) => {
+  const handleChatGPTImportFile = async (event) => {
     const file = event.target.files[0];
+    event.target.value = "";
     if (!file) return;
-
-    const formData = new FormData();
-    formData.append("zip_file", file);
 
     setImporting(true);
     setShowPicker(false);
+
+    let conversationsBlob;
+    try {
+      const zip = await JSZip.loadAsync(file);
+      const entry = Object.values(zip.files).find(
+        (f) => !f.dir && f.name.endsWith("conversations.json")
+      );
+      if (!entry) {
+        setError(
+          "Could not find conversations.json in the zip archive. Please upload the original ChatGPT data export."
+        );
+        setImporting(false);
+        return;
+      }
+      conversationsBlob = await entry.async("blob");
+    } catch (err) {
+      console.error("Error reading ChatGPT export zip:", err);
+      setError(
+        "Could not read the zip file. Please make sure it's a valid ChatGPT data export."
+      );
+      setImporting(false);
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append("conversations_file", conversationsBlob, "conversations.json");
+
     api.post("/import/chatgpt/analyze", formData, {
       headers: { "Content-Type": "multipart/form-data" }
     })
@@ -260,17 +286,15 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
             ? `${data.error}: ${data.details}`
             : backendMsg;
         } else if (status === 413) {
-          msg = "File too large. ChatGPT export exceeds the 200MB upload limit.";
+          msg = "conversations.json is too large to upload. Please contact support.";
         } else if (status) {
           msg = `Error analyzing ChatGPT export (HTTP ${status}). Please try again.`;
         } else {
-          msg = "Error analyzing ChatGPT export. The request did not reach the server — check your connection or try a smaller file.";
+          msg = "Error analyzing ChatGPT export. The request did not reach the server — check your connection.";
         }
         setError(msg);
         setImporting(false);
       });
-
-    event.target.value = "";
   };
 
   const handleConfirmChatGPTImport = () => {

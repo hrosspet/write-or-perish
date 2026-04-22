@@ -1105,11 +1105,15 @@ def _linearize_chatgpt_messages(mapping):
 @login_required
 def analyze_chatgpt_import():
     """
-    Analyze a ChatGPT data export zip file.
+    Analyze a ChatGPT conversations.json file.
+
+    The client extracts conversations.json from the ChatGPT export zip
+    in the browser and uploads only that file, so the full (multi-GB)
+    export with images/audio never has to traverse the network.
 
     Expects:
-        - multipart/form-data with 'zip_file' field containing a ChatGPT
-          data export (contains conversations.json)
+        - multipart/form-data with 'conversations_file' field containing
+          the conversations.json extracted from a ChatGPT data export
 
     Returns:
         {
@@ -1120,40 +1124,22 @@ def analyze_chatgpt_import():
             "total_size": N
         }
     """
-    if 'zip_file' not in request.files:
-        return jsonify({"error": "No zip_file provided"}), 400
+    if 'conversations_file' not in request.files:
+        return jsonify({"error": "No conversations_file provided"}), 400
 
-    zip_file = request.files['zip_file']
+    conv_file = request.files['conversations_file']
 
-    if zip_file.filename == '':
+    if conv_file.filename == '':
         return jsonify({"error": "No file selected"}), 400
 
-    if not zip_file.filename.lower().endswith('.zip'):
-        return jsonify({"error": "File must be a .zip file"}), 400
-
     try:
-        zip_data = zip_file.read()
+        conversations_bytes = conv_file.read()
         current_app.logger.info(
-            "ChatGPT import: filename=%s size_bytes=%d user_id=%s",
-            zip_file.filename,
-            len(zip_data),
+            "ChatGPT import: size_bytes=%d user_id=%s",
+            len(conversations_bytes),
             getattr(current_user, 'id', None),
         )
-        zip_bytes = io.BytesIO(zip_data)
-
-        conversations_json = None
-
-        with zipfile.ZipFile(zip_bytes, 'r') as zip_ref:
-            for name in zip_ref.namelist():
-                if name.endswith('conversations.json'):
-                    conversations_json = zip_ref.read(name).decode('utf-8')
-                    break
-
-        if conversations_json is None:
-            return jsonify({
-                "error": "Could not find conversations.json in the zip "
-                         "archive. Please upload a ChatGPT data export."
-            }), 400
+        conversations_json = conversations_bytes.decode('utf-8')
 
         raw_conversations = json.loads(conversations_json)
 
@@ -1217,8 +1203,11 @@ def analyze_chatgpt_import():
             "total_size": total_size,
         }), 200
 
-    except zipfile.BadZipFile:
-        return jsonify({"error": "Invalid zip file"}), 400
+    except UnicodeDecodeError as e:
+        return jsonify({
+            "error": "conversations.json is not valid UTF-8",
+            "details": str(e)
+        }), 400
     except json.JSONDecodeError as e:
         return jsonify({
             "error": "Failed to parse conversations JSON",
