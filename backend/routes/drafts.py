@@ -7,6 +7,7 @@ import uuid
 import pathlib
 import os
 import shutil
+from backend.utils.audio_storage import move_draft_audio_to_node_dir
 from backend.utils.encryption import encrypt_file
 from backend.utils.webm_utils import persist_init_segment
 
@@ -482,11 +483,14 @@ def upload_streaming_chunk(session_id):
                 chunk_path.unlink()
             except OSError:
                 pass
+            # 400 Bad Request: the client sent bytes the server can't
+            # parse. Not a server failure, so it shouldn't count in the
+            # 5xx alert dashboards.
             return jsonify({
                 "error": "Could not parse WebM header from first chunk",
                 "detail": str(exc),
                 "code": "webm_header_parse_failed",
-            }), 500
+            }), 400
 
     # Encrypt the audio chunk at rest
     encrypted_path = encrypt_file(str(chunk_path))
@@ -814,7 +818,6 @@ def save_streaming_as_node(session_id):
     draft_audio_dir = AUDIO_STORAGE_ROOT / f"drafts/{current_user.id}/{session_id}"
     node_audio_dir = AUDIO_STORAGE_ROOT / f"nodes/{current_user.id}/{node.id}"
 
-    from backend.utils.audio_storage import move_draft_audio_to_node_dir
     move_draft_audio_to_node_dir(
         draft_audio_dir, node_audio_dir, current_app.logger,
     )
