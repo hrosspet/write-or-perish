@@ -588,8 +588,9 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
             # chunk 0 carries the EBML/Segment/Tracks header, so later
             # batches would otherwise be header-less cluster data that
             # ffmpeg can't remux.
+            first_chunk = min(chunk_indices) if chunk_indices else 0
             init_segment_path = None
-            if chunk_indices and min(chunk_indices) > 0:
+            if first_chunk > 0:
                 init_enc = chunk_dir / "init.webm.enc"
                 init_plain = chunk_dir / "init.webm"
                 if init_enc.exists():
@@ -600,7 +601,7 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                 else:
                     logger.warning(
                         f"No init segment found for session {session_id} "
-                        f"batch starting at chunk {min(chunk_indices)}; "
+                        f"batch starting at chunk {first_chunk}; "
                         "concat will likely fail"
                     )
 
@@ -1049,6 +1050,10 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
         try:
             node_audio_dir.mkdir(parents=True, exist_ok=True)
             for fp in draft_audio_dir.iterdir():
+                # init.webm is ephemeral (see audio_storage.py)
+                if fp.name.startswith("init.webm"):
+                    fp.unlink()
+                    continue
                 shutil.move(str(fp), str(node_audio_dir / fp.name))
             draft_audio_dir.rmdir()
         except Exception as e:

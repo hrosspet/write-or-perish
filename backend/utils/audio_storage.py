@@ -11,7 +11,6 @@ from flask import current_app
 
 from backend.extensions import db
 from backend.models import Draft, NodeTranscriptChunk
-from backend.utils.webm_utils import fix_last_chunk_duration, is_ffmpeg_available
 
 AUDIO_STORAGE_ROOT = pathlib.Path(
     os.environ.get("AUDIO_STORAGE_PATH", "data/audio")
@@ -42,24 +41,18 @@ def attach_streaming_audio_to_node(session_id, node, user_id):
     draft_audio_dir = AUDIO_STORAGE_ROOT / f"drafts/{user_id}/{session_id}"
 
     if draft_audio_dir.exists():
-        # Fix last-chunk WebM duration metadata if possible
-        if is_ffmpeg_available():
-            success, message = fix_last_chunk_duration(str(draft_audio_dir))
-            if success:
-                current_app.logger.info(
-                    f"Fixed last chunk duration: {message}"
-                )
-            else:
-                current_app.logger.warning(
-                    f"Could not fix last chunk duration: {message}"
-                )
-
         node_audio_dir = (
             AUDIO_STORAGE_ROOT / f"nodes/{user_id}/{node.id}"
         )
         try:
             node_audio_dir.mkdir(parents=True, exist_ok=True)
             for file_path in draft_audio_dir.iterdir():
+                # init.webm is ephemeral — used only during batch
+                # transcription to prepend the EBML header to batches that
+                # don't start at chunk 0. It has no purpose on the node side.
+                if file_path.name.startswith("init.webm"):
+                    file_path.unlink()
+                    continue
                 shutil.move(
                     str(file_path),
                     str(node_audio_dir / file_path.name),

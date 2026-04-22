@@ -18,7 +18,9 @@ import pytest
 from backend.utils.webm_utils import (
     concat_webm_fragments,
     extract_webm_init_segment,
+    find_all_cluster_offsets,
     find_first_cluster_offset,
+    persist_init_segment,
 )
 
 
@@ -134,6 +136,38 @@ def test_raises_on_buffer_with_no_segment():
         find_first_cluster_offset(header)
 
 
+def test_extract_init_rejects_segment_missing_tracks():
+    """A malformed chunk 0 with no Tracks element would pass the cluster walk
+    but produce a WebM with no decodable stream. extract_webm_init_segment
+    must refuse it so the upload fails on chunk 0 rather than at batch 2
+    ffmpeg remux time."""
+    info = _element(INFO_ID, b'\x00' * 5)
+    cluster = _element(CLUSTER_ID, b'\x00' * 10)
+    segment = _element(SEGMENT_ID, info + cluster)  # No Tracks
+    header = _element(EBML_HEADER_ID, b'\x00' * 4)
+    buf = header + segment
+
+    with pytest.raises(ValueError, match="Tracks"):
+        extract_webm_init_segment(buf)
+
+
+def test_find_all_cluster_offsets_multi_cluster():
+    info = _element(INFO_ID, b'\x00' * 4)
+    tracks = _element(TRACKS_ID, b'\x00' * 4)
+    c1 = _element(CLUSTER_ID, b'\xAA' * 6)
+    c2 = _element(CLUSTER_ID, b'\xBB' * 6)
+    c3 = _element(CLUSTER_ID, b'\xCC' * 6)
+    segment = _element(SEGMENT_ID, info + tracks + c1 + c2 + c3)
+    header = _element(EBML_HEADER_ID, b'\x00' * 4)
+    buf = header + segment
+
+    offsets = find_all_cluster_offsets(buf)
+    assert len(offsets) == 3
+    # Each offset should land on the Cluster element's ID bytes
+    for off in offsets:
+        assert buf[off:off + 4] == bytes.fromhex(CLUSTER_ID)
+
+
 def test_raises_on_segment_with_no_cluster():
     info = _element(INFO_ID, b'\x00' * 5)
     tracks = _element(TRACKS_ID, b'\x00' * 5)
@@ -165,59 +199,129 @@ def _ffprobe_duration(path: str) -> float:
 
 @pytest.fixture
 def webm_fixture(tmp_path):
-    """Produce a real WebM bytestring via ffmpeg. 3 s sine wave, Opus/WebM —
-    mirrors the codec MediaRecorder uses in Chrome."""
+    """Produce a real multi-cluster WebM bytestring via ffmpeg.
+
+    Uses -cluster_time_limit 1000 (ms) so the 5-second source is emitted as
+    multiple ~1-second Clusters, matching what a real 15s-timeslice
+    MediaRecorder session looks like (one Cluster per timeslice fragment).
+    """
     out_path = tmp_path / "source.webm"
     subprocess.run(
         ['ffmpeg', '-y', '-f', 'lavfi', '-i',
-         'sine=frequency=440:duration=3',
-         '-c:a', 'libopus', '-b:a', '64k', str(out_path)],
+         'sine=frequency=440:duration=5',
+         '-c:a', 'libopus', '-b:a', '64k',
+         '-cluster_time_limit', '1000',
+         str(out_path)],
         capture_output=True, check=True,
     )
-    return out_path.read_bytes()
+    data = out_path.read_bytes()
+    # Sanity: the fixture is only useful if it exercises multi-cluster
+    # concat. If ffmpeg ever collapses to a single cluster, tests below
+    # would silently degenerate — fail loudly here instead.
+    assert len(find_all_cluster_offsets(data)) >= 3, (
+        f"fixture has only {len(find_all_cluster_offsets(data))} clusters; "
+        "multi-cluster concat not exercised"
+    )
+    return data
 
 
 @requires_ffmpeg
 def test_concat_single_fragment_including_init(tmp_path, webm_fixture):
     """Batch-1 path: the fragment list includes chunk 0, so no separate init
-    segment needs prepending. concat_webm_fragments should produce a valid
-    WebM whose duration matches the source."""
+    segment needs prepending. Whole source as one file in, valid WebM out
+    with duration matching the source."""
     chunk_0 = tmp_path / "chunk_0000.webm"
     chunk_0.write_bytes(webm_fixture)
 
     out = concat_webm_fragments([str(chunk_0)])
 
-    assert _ffprobe_duration(out) == pytest.approx(3.0, abs=0.2)
+    assert _ffprobe_duration(out) == pytest.approx(5.0, abs=0.3)
 
 
 @requires_ffmpeg
-def test_concat_with_init_segment_for_batch_without_chunk_zero(
-        tmp_path, webm_fixture):
-    """Batch-2+ path: the fragment list does NOT include chunk 0, so the
-    caller supplies init_segment_path with the cached header. Split the
-    source at the first-cluster boundary to simulate this: `init.webm`
-    holds everything up to the first Cluster; `body.webm` holds the
-    cluster data. Feeding body alone would fail; feeding body with the
-    init segment prepended must produce a valid WebM."""
-    split = find_first_cluster_offset(webm_fixture)
+def test_concat_multi_cluster_batch_with_init_segment(tmp_path, webm_fixture):
+    """Batch-2+ path, real shape: the fragment list is multiple cluster-only
+    files (one per real MediaRecorder chunk), none of them contain an EBML
+    header, and the caller supplies init_segment_path with the cached
+    chunk-0 prefix. Splits the multi-cluster fixture at each Cluster
+    boundary so each fragment is exactly one Cluster — matching the
+    real-world 20-fragments-per-batch shape."""
+    cluster_offsets = find_all_cluster_offsets(webm_fixture)
+    assert len(cluster_offsets) >= 3
+
     init_path = tmp_path / "init.webm"
-    body_path = tmp_path / "chunk_0020.webm"
-    init_path.write_bytes(webm_fixture[:split])
-    body_path.write_bytes(webm_fixture[split:])
+    init_path.write_bytes(webm_fixture[:cluster_offsets[0]])
+
+    # One file per cluster. Element boundaries are at cluster_offsets[i];
+    # the last cluster runs to end of buffer.
+    fragment_paths = []
+    boundaries = cluster_offsets + [len(webm_fixture)]
+    for i in range(len(cluster_offsets)):
+        fpath = tmp_path / f"chunk_{i + 20:04d}.webm"
+        fpath.write_bytes(webm_fixture[boundaries[i]:boundaries[i + 1]])
+        fragment_paths.append(str(fpath))
 
     out = concat_webm_fragments(
-        [str(body_path)], init_segment_path=str(init_path),
+        fragment_paths, init_segment_path=str(init_path),
     )
 
-    assert _ffprobe_duration(out) == pytest.approx(3.0, abs=0.2)
+    # Duration should cover all clusters — i.e. the full source
+    assert _ffprobe_duration(out) == pytest.approx(5.0, abs=0.3)
+
+
+@requires_ffmpeg
+def test_persist_init_segment_writes_init_file(tmp_path, webm_fixture):
+    """Happy path for the chunk-0 upload glue: given a real WebM blob,
+    persist_init_segment must write an init.webm(.enc) file on disk. Guards
+    against mutations that drop the write or the encrypt_file call."""
+    chunk_path = tmp_path / "chunk_0000.webm"
+    chunk_path.write_bytes(webm_fixture)
+
+    persist_init_segment(chunk_path, tmp_path)
+
+    init_files = list(tmp_path.glob("init.webm*"))
+    assert len(init_files) == 1, (
+        f"expected exactly one init.webm file, got {init_files}"
+    )
+    assert init_files[0].stat().st_size > 0
+
+
+def test_persist_init_segment_raises_on_unparseable_bytes(tmp_path):
+    """Error path for the chunk-0 upload glue: if the file doesn't parse as
+    WebM, persist_init_segment must raise rather than silently succeed."""
+    chunk_path = tmp_path / "chunk_0000.webm"
+    chunk_path.write_bytes(b"this is not a webm file")
+
+    with pytest.raises(ValueError):
+        persist_init_segment(chunk_path, tmp_path)
+
+    # And no init file should have been left behind
+    assert not list(tmp_path.glob("init.webm*"))
+
+
+def test_persist_init_segment_raises_on_missing_tracks(tmp_path):
+    """Chunk 0 with a Segment but no Tracks element must be rejected by
+    persist_init_segment even though the Cluster walk would succeed — the
+    resulting init segment has no decodable stream description."""
+    info = _element(INFO_ID, b'\x00' * 4)
+    cluster = _element(CLUSTER_ID, b'\x00' * 8)
+    segment = _element(SEGMENT_ID, info + cluster)
+    header = _element(EBML_HEADER_ID, b'\x00' * 4)
+    chunk_path = tmp_path / "chunk_0000.webm"
+    chunk_path.write_bytes(header + segment)
+
+    with pytest.raises(ValueError, match="Tracks"):
+        persist_init_segment(chunk_path, tmp_path)
 
 
 @requires_ffmpeg
 def test_concat_without_init_on_body_only_input_fails(
         tmp_path, webm_fixture):
-    """Guard: confirm the batch-boundary scenario genuinely requires the
-    init prepend. A body-only input (no EBML header) should fail the
-    ffmpeg remux — otherwise Test B's success would be unconvincing."""
+    """Guard: confirm the batch-boundary test actually exercises the init
+    prepend. A fragment list of cluster-only bytes with no init_segment_path
+    must fail the ffmpeg remux — otherwise the previous test's success
+    could come from ffmpeg being lenient rather than from the prepend doing
+    its job."""
     split = find_first_cluster_offset(webm_fixture)
     body_path = tmp_path / "chunk_0020.webm"
     body_path.write_bytes(webm_fixture[split:])
