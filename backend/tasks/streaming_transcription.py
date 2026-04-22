@@ -17,6 +17,7 @@ from backend.celery_app import celery, flask_app
 from backend.models import Node, NodeTranscriptChunk, Draft, APICostLog
 from backend.extensions import db
 from backend.utils.audio_processing import compress_audio_if_needed, get_audio_duration
+from backend.utils.audio_storage import move_draft_audio_to_node_dir
 from backend.utils.webm_utils import concat_webm_fragments
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.encryption import decrypt_file_to_temp
@@ -1044,7 +1045,6 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     draft_audio_dir = audio_storage_root / f"drafts/{user_id}/{session_id}"
 
     node_audio_dir = audio_storage_root / f"nodes/{user_id}/{user_node.id}"
-    from backend.utils.audio_storage import move_draft_audio_to_node_dir
     move_draft_audio_to_node_dir(draft_audio_dir, node_audio_dir, logger)
 
     # Point transcript-chunk rows at the node

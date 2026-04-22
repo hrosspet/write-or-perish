@@ -133,9 +133,20 @@ def persist_init_segment(
     init_path = chunk_dir / "init.webm"
     with open(init_path, 'wb') as f:
         f.write(init_bytes)
-    # encrypt_file is a no-op returning the original path when encryption
-    # is disabled; no return value to track.
-    encrypt_file(str(init_path))
+    try:
+        # encrypt_file is a no-op returning the original path when
+        # encryption is disabled; no return value to track. On success it
+        # removes the plaintext init.webm and writes init.webm.enc.
+        encrypt_file(str(init_path))
+    except Exception:
+        # KMS outage or any other encrypt failure — don't leave a
+        # plaintext init.webm on disk for a subsequent batch to pick up
+        # and mistakenly treat as its own (unencrypted) init segment.
+        try:
+            init_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def _walk_segment_children(data: bytes):

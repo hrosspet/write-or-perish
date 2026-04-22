@@ -124,9 +124,9 @@ export function useStreamingTranscription(options = {}) {
         // (MediaRecorder on this browser produced bytes we don't recognize).
         // Retrying will yield the exact same bytes, so short-circuit with a
         // fatal-error message the caller can surface distinctly from
-        // ordinary network flakiness.
-        const serverCode = err.response?.data?.code;
-        if (err.response?.status === 500 && serverCode === 'webm_header_parse_failed') {
+        // ordinary network flakiness. Key only on the stable code field so
+        // the status code can change without regressing this check.
+        if (err.response?.data?.code === 'webm_header_parse_failed') {
           const detail = err.response?.data?.detail || 'unknown parse error';
           console.error(`[StreamingTranscription] Fatal: server could not parse chunk ${chunkIndex}'s WebM header (${detail}); not retrying`);
           return {
