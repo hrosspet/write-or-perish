@@ -1132,7 +1132,14 @@ def analyze_chatgpt_import():
         return jsonify({"error": "File must be a .zip file"}), 400
 
     try:
-        zip_bytes = io.BytesIO(zip_file.read())
+        zip_data = zip_file.read()
+        current_app.logger.info(
+            "ChatGPT import: filename=%s size_bytes=%d user_id=%s",
+            zip_file.filename,
+            len(zip_data),
+            getattr(current_user, 'id', None),
+        )
+        zip_bytes = io.BytesIO(zip_data)
 
         conversations_json = None
 

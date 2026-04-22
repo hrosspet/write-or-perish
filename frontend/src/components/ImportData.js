@@ -251,7 +251,22 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
       })
       .catch((err) => {
         console.error("Error analyzing ChatGPT import:", err);
-        setError(err.response?.data?.error || "Error analyzing ChatGPT export. Please try again.");
+        const status = err.response?.status;
+        const data = err.response?.data;
+        const backendMsg = data?.error || data?.details;
+        let msg;
+        if (backendMsg) {
+          msg = data?.details && data?.error
+            ? `${data.error}: ${data.details}`
+            : backendMsg;
+        } else if (status === 413) {
+          msg = "File too large. ChatGPT export exceeds the 200MB upload limit.";
+        } else if (status) {
+          msg = `Error analyzing ChatGPT export (HTTP ${status}). Please try again.`;
+        } else {
+          msg = "Error analyzing ChatGPT export. The request did not reach the server — check your connection or try a smaller file.";
+        }
+        setError(msg);
         setImporting(false);
       });
 
