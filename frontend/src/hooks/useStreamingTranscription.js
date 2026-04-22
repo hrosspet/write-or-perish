@@ -86,12 +86,21 @@ export function useStreamingTranscription(options = {}) {
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
 
+  // Indirection ref: uploadChunk (defined below) needs to stop the recorder
+  // on a fatal upload error, but the recorder's reset fn isn't in scope yet
+  // because useStreamingMediaRecorder is called *after* uploadChunk. Wire it
+  // up via a ref that gets populated once the recorder hook has returned.
+  const resetMediaRecorderRef = useRef(null);
+
   // Network status
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
 
   /**
    * Upload a single chunk with exponential backoff retry.
-   * Returns true on success, false if all retries exhausted.
+   * Returns { success: true } on success, or { success: false, fatalError?: string }
+   * on failure. `fatalError` is set when the server returned a deterministic
+   * error (e.g. chunk 0's WebM header didn't parse) where retrying wouldn't
+   * help — retries are skipped and the caller surfaces a distinct message.
    */
   const uploadChunkWithRetry = useCallback(async (blob, chunkIndex, sessionId) => {
     const maxRetries = 4;
@@ -109,19 +118,34 @@ export function useStreamingTranscription(options = {}) {
         });
 
         console.log(`[StreamingTranscription] Upload complete: chunk=${chunkIndex}` + (attempt > 0 ? ` (after ${attempt} retries)` : ''));
-        return true;
+        return { success: true };
       } catch (err) {
+        // Server rejected chunk 0 because it couldn't parse the WebM header
+        // (MediaRecorder on this browser produced bytes we don't recognize).
+        // Retrying will yield the exact same bytes, so short-circuit with a
+        // fatal-error message the caller can surface distinctly from
+        // ordinary network flakiness. Key only on the stable code field so
+        // the status code can change without regressing this check.
+        if (err.response?.data?.code === 'webm_header_parse_failed') {
+          const detail = err.response?.data?.detail || 'unknown parse error';
+          console.error(`[StreamingTranscription] Fatal: server could not parse chunk ${chunkIndex}'s WebM header (${detail}); not retrying`);
+          return {
+            success: false,
+            fatalError: `Your browser produced an audio format we can't process. Please try a different browser or device. (${detail})`,
+          };
+        }
+
         if (attempt < maxRetries) {
           const delay = baseDelay * Math.pow(2, attempt); // 2s, 4s, 8s, 16s
           console.warn(`[StreamingTranscription] Upload failed (attempt ${attempt + 1}/${maxRetries + 1}): chunk=${chunkIndex}, retrying in ${delay}ms...`, err.message);
           await new Promise(resolve => setTimeout(resolve, delay));
         } else {
           console.error(`[StreamingTranscription] Upload FAILED after ${maxRetries + 1} attempts: chunk=${chunkIndex}`, err);
-          return false;
+          return { success: false };
         }
       }
     }
-    return false;
+    return { success: false };
   }, []);
 
   // Handle chunk upload
@@ -135,17 +159,34 @@ export function useStreamingTranscription(options = {}) {
     console.log(`[StreamingTranscription] Starting upload: chunk=${chunkIndex}, blobSize=${blob.size}, session=${sessionId}`);
 
     const uploadPromise = (async () => {
-      const success = await uploadChunkWithRetry(blob, chunkIndex, sessionId);
+      const result = await uploadChunkWithRetry(blob, chunkIndex, sessionId);
 
-      if (success) {
+      if (result.success) {
         setUploadedChunks(prev => prev + 1);
         totalChunksRef.current = Math.max(totalChunksRef.current, chunkIndex + 1);
       } else {
-        // Store failed chunk for retry when network returns
-        failedChunksRef.current.push({ blob, chunkIndex, sessionId });
+        // Queue for reconnect retry only if the failure wasn't fatal —
+        // retrying a parse-failed chunk will produce the same bytes and
+        // the same 500, so it would just loop on every online event.
+        if (!result.fatalError) {
+          failedChunksRef.current.push({ blob, chunkIndex, sessionId });
+        } else {
+          // Stop the MediaRecorder so the mic turns off and no further
+          // chunks are recorded into a doomed session. The user has already
+          // been shown a device-compatibility error; letting them keep
+          // talking into the void would be worse than silent.
+          if (resetMediaRecorderRef.current) {
+            resetMediaRecorderRef.current();
+          }
+          setSessionState('error');
+          setErrorMessage(result.fatalError);
+        }
         playErrorSound();
         if (onError) {
-          onError(new Error(`Failed to upload chunk ${chunkIndex} after retries`));
+          onError(new Error(
+            result.fatalError
+            || `Failed to upload chunk ${chunkIndex} after retries`
+          ));
         }
       }
     })();
@@ -172,6 +213,11 @@ export function useStreamingTranscription(options = {}) {
     chunkIntervalMs,
     onChunkReady: uploadChunk,
   });
+
+  // Populate the indirection ref so uploadChunk can stop the recorder
+  // on a fatal upload error (declared above, resetMediaRecorder not yet
+  // in scope there).
+  resetMediaRecorderRef.current = resetMediaRecorder;
 
   // SSE subscription for transcription updates (draft-based)
   const {
@@ -306,12 +352,14 @@ export function useStreamingTranscription(options = {}) {
         failedChunksRef.current = [];
 
         for (const { blob, chunkIndex, sessionId } of chunksToRetry) {
-          const success = await uploadChunkWithRetry(blob, chunkIndex, sessionId);
-          if (success) {
+          const result = await uploadChunkWithRetry(blob, chunkIndex, sessionId);
+          if (result.success) {
             setUploadedChunks(prev => prev + 1);
             totalChunksRef.current = Math.max(totalChunksRef.current, chunkIndex + 1);
-          } else {
-            // Still failing — put it back
+          } else if (!result.fatalError) {
+            // Still failing for a retryable reason — put it back for the
+            // next online event. Fatal errors (e.g. webm_header_parse_failed)
+            // are deterministic, so we drop them rather than loop.
             failedChunksRef.current.push({ blob, chunkIndex, sessionId });
           }
         }

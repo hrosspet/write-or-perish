@@ -82,7 +82,6 @@ def get_audio_duration(file_path: pathlib.Path, logger=None) -> float:
 
     # Fallback: remux with ffmpeg (stream copy, no re-encoding) to produce
     # a file with correct duration metadata, then read it with ffprobe.
-    # Same approach used in webm_utils.fix_webm_duration().
     from backend.utils.webm_utils import get_webm_duration
     try:
         fd, temp_path = tempfile.mkstemp(suffix=file_path.suffix)

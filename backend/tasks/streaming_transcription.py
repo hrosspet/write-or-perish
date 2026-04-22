@@ -17,7 +17,8 @@ from backend.celery_app import celery, flask_app
 from backend.models import Node, NodeTranscriptChunk, Draft, APICostLog
 from backend.extensions import db
 from backend.utils.audio_processing import compress_audio_if_needed, get_audio_duration
-from backend.utils.webm_utils import concat_audio_files
+from backend.utils.audio_storage import move_draft_audio_to_node_dir
+from backend.utils.webm_utils import concat_webm_fragments
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.encryption import decrypt_file_to_temp
 from backend.utils.cost import calculate_audio_cost_microdollars
@@ -527,25 +528,17 @@ class BatchTranscriptionTask(Task):
 
 
 @celery.task(base=BatchTranscriptionTask, bind=True)
-def transcribe_chunk_batch(self, session_id: str, chunk_indices: list,
-                           is_final_batch: bool = False):
+def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
     """
     Transcribe a batch of audio chunks by merging them and sending to Whisper.
 
     Instead of transcribing each 15s chunk individually, this task:
     1. Decrypts all chunk files in the batch
-    2. Merges audio using ffmpeg concat demuxer
+    2. Merges MediaRecorder fragments into one valid WebM
     3. Sends merged audio to Whisper (gpt-4o-transcribe)
     4. Stores transcript, marks all chunks as completed
     5. Reassembles draft.content from all completed chunks
     6. Encrypts the merged audio and deletes individual chunk files
-
-    Args:
-        session_id: UUID of the streaming session
-        chunk_indices: List of chunk indices to transcribe in this batch
-        is_final_batch: If True, fix the last chunk's WebM duration before
-            merging (MediaRecorder often writes incorrect duration on the
-            final chunk)
     """
     logger.info(
         f"Starting batch transcription for session {session_id}, "
@@ -591,23 +584,34 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list,
                     f"indices {chunk_indices}"
                 )
 
-            # Fix the last chunk's WebM duration before merging.
-            # MediaRecorder often writes incorrect/missing duration on the
-            # final recorded chunk, which causes playback issues.
-            if is_final_batch and decrypted_paths:
-                from backend.utils.webm_utils import (
-                    fix_webm_duration, is_ffmpeg_available,
-                )
-                if is_ffmpeg_available():
-                    last_path = decrypted_paths[-1]
-                    success, msg, _ = fix_webm_duration(last_path)
-                    if success:
-                        logger.info(
-                            f"Fixed last chunk duration before merge: {msg}"
-                        )
+            # If this batch doesn't include chunk 0, decrypt the cached
+            # init segment so concat_webm_fragments can prepend it — only
+            # chunk 0 carries the EBML/Segment/Tracks header, so later
+            # batches would otherwise be header-less cluster data that
+            # ffmpeg can't remux.
+            first_chunk = min(chunk_indices) if chunk_indices else 0
+            init_segment_path = None
+            if first_chunk > 0:
+                init_enc = chunk_dir / "init.webm.enc"
+                init_plain = chunk_dir / "init.webm"
+                if init_enc.exists():
+                    init_segment_path = decrypt_file_to_temp(str(init_enc))
+                    temp_files.append(init_segment_path)
+                elif init_plain.exists():
+                    init_segment_path = str(init_plain)
+                else:
+                    logger.warning(
+                        f"No init segment found for session {session_id} "
+                        f"batch starting at chunk {first_chunk}; "
+                        "concat will likely fail"
+                    )
 
-            # Merge audio chunks into a single file
-            merged_path = concat_audio_files(decrypted_paths)
+            # Merge MediaRecorder fragments into a single valid WebM.
+            # Binary-append the fragments and remux — see
+            # concat_webm_fragments for the full rationale.
+            merged_path = concat_webm_fragments(
+                decrypted_paths, init_segment_path=init_segment_path,
+            )
             merge_input = merged_path
 
             # Compress if needed (webm -> mp3)
@@ -838,7 +842,6 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
             batch_task = transcribe_chunk_batch.delay(
                 session_id=session_id,
                 chunk_indices=remaining_indices,
-                is_final_batch=True,
             )
             for c in stored_chunks:
                 c.status = 'processing'
@@ -1041,17 +1044,8 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     ).resolve()
     draft_audio_dir = audio_storage_root / f"drafts/{user_id}/{session_id}"
 
-    if draft_audio_dir.exists():
-        node_audio_dir = (
-            audio_storage_root / f"nodes/{user_id}/{user_node.id}"
-        )
-        try:
-            node_audio_dir.mkdir(parents=True, exist_ok=True)
-            for fp in draft_audio_dir.iterdir():
-                shutil.move(str(fp), str(node_audio_dir / fp.name))
-            draft_audio_dir.rmdir()
-        except Exception as e:
-            logger.warning(f"Failed to move audio files: {e}")
+    node_audio_dir = audio_storage_root / f"nodes/{user_id}/{user_node.id}"
+    move_draft_audio_to_node_dir(draft_audio_dir, node_audio_dir, logger)
 
     # Point transcript-chunk rows at the node
     NodeTranscriptChunk.query.filter_by(
