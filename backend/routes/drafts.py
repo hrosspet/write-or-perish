@@ -8,6 +8,7 @@ import pathlib
 import os
 import shutil
 from backend.utils.encryption import encrypt_file
+from backend.utils.webm_utils import persist_init_segment
 
 drafts_bp = Blueprint("drafts_bp", __name__)
 
@@ -464,7 +465,6 @@ def upload_streaming_chunk(session_id):
     # Better to surface the problem on the first chunk than silently lose
     # later audio.
     if chunk_index == 0:
-        from backend.utils.webm_utils import persist_init_segment
         # Narrow to the failure modes that actually signal "bad browser
         # output": ValueError from the EBML walker and OSError from the
         # file write. Anything else (e.g. KMS outage in encrypt_file) is
@@ -814,26 +814,10 @@ def save_streaming_as_node(session_id):
     draft_audio_dir = AUDIO_STORAGE_ROOT / f"drafts/{current_user.id}/{session_id}"
     node_audio_dir = AUDIO_STORAGE_ROOT / f"nodes/{current_user.id}/{node.id}"
 
-    if draft_audio_dir.exists():
-        try:
-            # Create node audio directory
-            node_audio_dir.mkdir(parents=True, exist_ok=True)
-
-            # Move all files (init.webm is ephemeral — drop instead of move)
-            for file_path in draft_audio_dir.iterdir():
-                if file_path.name.startswith("init.webm"):
-                    file_path.unlink()
-                    continue
-                shutil.move(str(file_path), str(node_audio_dir / file_path.name))
-
-            # Remove the empty draft directory
-            draft_audio_dir.rmdir()
-
-            current_app.logger.info(
-                f"Moved audio files from {draft_audio_dir} to {node_audio_dir}"
-            )
-        except Exception as e:
-            current_app.logger.warning(f"Failed to move audio files: {e}")
+    from backend.utils.audio_storage import move_draft_audio_to_node_dir
+    move_draft_audio_to_node_dir(
+        draft_audio_dir, node_audio_dir, current_app.logger,
+    )
 
     # Update transcript chunks to reference the node
     NodeTranscriptChunk.query.filter_by(session_id=session_id).update({
