@@ -9,9 +9,14 @@ be fooled by those bytes appearing inside other EBML elements. These tests
 pin the structural-parse behavior.
 """
 
+import json
+import shutil
+import subprocess
+
 import pytest
 
 from backend.utils.webm_utils import (
+    concat_webm_fragments,
     extract_webm_init_segment,
     find_first_cluster_offset,
 )
@@ -138,3 +143,84 @@ def test_raises_on_segment_with_no_cluster():
 
     with pytest.raises(ValueError, match="No Cluster"):
         find_first_cluster_offset(buf)
+
+
+# --- integration tests for concat_webm_fragments -----------------------------
+# These exercise the full binary-append + ffmpeg remux pipeline and require
+# ffmpeg on PATH; skipped locally if absent. CI installs ffmpeg (see ci.yml).
+
+requires_ffmpeg = pytest.mark.skipif(
+    shutil.which('ffmpeg') is None or shutil.which('ffprobe') is None,
+    reason="ffmpeg/ffprobe not available on PATH",
+)
+
+
+def _ffprobe_duration(path: str) -> float:
+    out = subprocess.run(
+        ['ffprobe', '-v', 'error', '-show_format', '-of', 'json', path],
+        capture_output=True, text=True, check=True,
+    )
+    return float(json.loads(out.stdout)['format']['duration'])
+
+
+@pytest.fixture
+def webm_fixture(tmp_path):
+    """Produce a real WebM bytestring via ffmpeg. 3 s sine wave, Opus/WebM —
+    mirrors the codec MediaRecorder uses in Chrome."""
+    out_path = tmp_path / "source.webm"
+    subprocess.run(
+        ['ffmpeg', '-y', '-f', 'lavfi', '-i',
+         'sine=frequency=440:duration=3',
+         '-c:a', 'libopus', '-b:a', '64k', str(out_path)],
+        capture_output=True, check=True,
+    )
+    return out_path.read_bytes()
+
+
+@requires_ffmpeg
+def test_concat_single_fragment_including_init(tmp_path, webm_fixture):
+    """Batch-1 path: the fragment list includes chunk 0, so no separate init
+    segment needs prepending. concat_webm_fragments should produce a valid
+    WebM whose duration matches the source."""
+    chunk_0 = tmp_path / "chunk_0000.webm"
+    chunk_0.write_bytes(webm_fixture)
+
+    out = concat_webm_fragments([str(chunk_0)])
+
+    assert _ffprobe_duration(out) == pytest.approx(3.0, abs=0.2)
+
+
+@requires_ffmpeg
+def test_concat_with_init_segment_for_batch_without_chunk_zero(
+        tmp_path, webm_fixture):
+    """Batch-2+ path: the fragment list does NOT include chunk 0, so the
+    caller supplies init_segment_path with the cached header. Split the
+    source at the first-cluster boundary to simulate this: `init.webm`
+    holds everything up to the first Cluster; `body.webm` holds the
+    cluster data. Feeding body alone would fail; feeding body with the
+    init segment prepended must produce a valid WebM."""
+    split = find_first_cluster_offset(webm_fixture)
+    init_path = tmp_path / "init.webm"
+    body_path = tmp_path / "chunk_0020.webm"
+    init_path.write_bytes(webm_fixture[:split])
+    body_path.write_bytes(webm_fixture[split:])
+
+    out = concat_webm_fragments(
+        [str(body_path)], init_segment_path=str(init_path),
+    )
+
+    assert _ffprobe_duration(out) == pytest.approx(3.0, abs=0.2)
+
+
+@requires_ffmpeg
+def test_concat_without_init_on_body_only_input_fails(
+        tmp_path, webm_fixture):
+    """Guard: confirm the batch-boundary scenario genuinely requires the
+    init prepend. A body-only input (no EBML header) should fail the
+    ffmpeg remux — otherwise Test B's success would be unconvincing."""
+    split = find_first_cluster_offset(webm_fixture)
+    body_path = tmp_path / "chunk_0020.webm"
+    body_path.write_bytes(webm_fixture[split:])
+
+    with pytest.raises(RuntimeError, match="ffmpeg"):
+        concat_webm_fragments([str(body_path)])
