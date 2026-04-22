@@ -159,10 +159,12 @@ export function useStreamingTranscription(options = {}) {
         setUploadedChunks(prev => prev + 1);
         totalChunksRef.current = Math.max(totalChunksRef.current, chunkIndex + 1);
       } else {
-        // Store failed chunk for retry when network returns. (Pointless for
-        // the fatal-error case, but keeping the same path for simplicity —
-        // the fatalError branch just doesn't wait for network.)
-        failedChunksRef.current.push({ blob, chunkIndex, sessionId });
+        // Queue for reconnect retry only if the failure wasn't fatal —
+        // retrying a parse-failed chunk will produce the same bytes and
+        // the same 500, so it would just loop on every online event.
+        if (!result.fatalError) {
+          failedChunksRef.current.push({ blob, chunkIndex, sessionId });
+        }
         playErrorSound();
         if (onError) {
           onError(new Error(
@@ -329,12 +331,14 @@ export function useStreamingTranscription(options = {}) {
         failedChunksRef.current = [];
 
         for (const { blob, chunkIndex, sessionId } of chunksToRetry) {
-          const success = await uploadChunkWithRetry(blob, chunkIndex, sessionId);
-          if (success) {
+          const result = await uploadChunkWithRetry(blob, chunkIndex, sessionId);
+          if (result.success) {
             setUploadedChunks(prev => prev + 1);
             totalChunksRef.current = Math.max(totalChunksRef.current, chunkIndex + 1);
-          } else {
-            // Still failing — put it back
+          } else if (!result.fatalError) {
+            // Still failing for a retryable reason — put it back for the
+            // next online event. Fatal errors (e.g. webm_header_parse_failed)
+            // are deterministic, so we drop them rather than loop.
             failedChunksRef.current.push({ blob, chunkIndex, sessionId });
           }
         }

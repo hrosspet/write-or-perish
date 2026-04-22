@@ -18,6 +18,7 @@ Covers:
 
 import logging
 import os
+import pathlib
 import shutil
 import subprocess
 import tempfile
@@ -80,7 +81,9 @@ def _ebml_read_vint(data: bytes, offset: int, keep_marker: bool):
         raise ValueError(f"VINT read past end of buffer at offset {offset}")
     first = data[offset]
     if first == 0:
-        # Would imply a VINT longer than 8 bytes; invalid for our purposes.
+        # A first byte of 0x00 would indicate a VINT of 9+ bytes (per the
+        # spec, the length is derived from the leading zeros before the
+        # first set bit). EBML caps VINT length at 8, so 0x00 is invalid.
         raise ValueError(f"Invalid VINT at offset {offset}: first byte is 0")
 
     length = 1
@@ -108,7 +111,9 @@ def _ebml_read_vint(data: bytes, offset: int, keep_marker: bool):
     return value, length, is_unknown
 
 
-def persist_init_segment(chunk_path, chunk_dir) -> None:
+def persist_init_segment(
+    chunk_path: pathlib.Path, chunk_dir: pathlib.Path,
+) -> None:
     """Extract the init segment from a chunk-0 file on disk and persist it
     at `chunk_dir/init.webm.enc` (or `init.webm` if encryption is disabled).
 
@@ -262,6 +267,9 @@ def concat_webm_fragments(paths: list,
     pass `init_segment_path` pointing at a previously-extracted init segment
     (see `extract_webm_init_segment`). Its bytes are binary-prepended so the
     resulting file has a valid EBML/Segment/Tracks prefix.
+
+    Returns the path to the merged output file. Caller is responsible for
+    cleaning it up (parity with `concat_audio_files`).
     """
     if not paths:
         raise ValueError("No fragments to concatenate")

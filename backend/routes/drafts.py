@@ -465,9 +465,15 @@ def upload_streaming_chunk(session_id):
     # later audio.
     if chunk_index == 0:
         from backend.utils.webm_utils import persist_init_segment
+        # Narrow to the failure modes that actually signal "bad browser
+        # output": ValueError from the EBML walker and OSError from the
+        # file write. Anything else (e.g. KMS outage in encrypt_file) is
+        # not the client's fault and should propagate as a 500 by the
+        # usual Flask error path rather than getting misattributed to a
+        # parse failure the user can't do anything about.
         try:
             persist_init_segment(chunk_path, chunk_dir)
-        except Exception as exc:
+        except (ValueError, OSError) as exc:
             current_app.logger.error(
                 f"Failed to extract init segment from chunk 0 of "
                 f"session {session_id}: {exc}"
