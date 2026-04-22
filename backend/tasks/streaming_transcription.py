@@ -1043,21 +1043,9 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     ).resolve()
     draft_audio_dir = audio_storage_root / f"drafts/{user_id}/{session_id}"
 
-    if draft_audio_dir.exists():
-        node_audio_dir = (
-            audio_storage_root / f"nodes/{user_id}/{user_node.id}"
-        )
-        try:
-            node_audio_dir.mkdir(parents=True, exist_ok=True)
-            for fp in draft_audio_dir.iterdir():
-                # init.webm is ephemeral (see audio_storage.py)
-                if fp.name.startswith("init.webm"):
-                    fp.unlink()
-                    continue
-                shutil.move(str(fp), str(node_audio_dir / fp.name))
-            draft_audio_dir.rmdir()
-        except Exception as e:
-            logger.warning(f"Failed to move audio files: {e}")
+    node_audio_dir = audio_storage_root / f"nodes/{user_id}/{user_node.id}"
+    from backend.utils.audio_storage import move_draft_audio_to_node_dir
+    move_draft_audio_to_node_dir(draft_audio_dir, node_audio_dir, logger)
 
     # Point transcript-chunk rows at the node
     NodeTranscriptChunk.query.filter_by(
