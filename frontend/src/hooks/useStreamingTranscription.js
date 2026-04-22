@@ -86,6 +86,12 @@ export function useStreamingTranscription(options = {}) {
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
 
+  // Indirection ref: uploadChunk (defined below) needs to stop the recorder
+  // on a fatal upload error, but the recorder's reset fn isn't in scope yet
+  // because useStreamingMediaRecorder is called *after* uploadChunk. Wire it
+  // up via a ref that gets populated once the recorder hook has returned.
+  const resetMediaRecorderRef = useRef(null);
+
   // Network status
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
 
@@ -164,6 +170,16 @@ export function useStreamingTranscription(options = {}) {
         // the same 500, so it would just loop on every online event.
         if (!result.fatalError) {
           failedChunksRef.current.push({ blob, chunkIndex, sessionId });
+        } else {
+          // Stop the MediaRecorder so the mic turns off and no further
+          // chunks are recorded into a doomed session. The user has already
+          // been shown a device-compatibility error; letting them keep
+          // talking into the void would be worse than silent.
+          if (resetMediaRecorderRef.current) {
+            resetMediaRecorderRef.current();
+          }
+          setSessionState('error');
+          setErrorMessage(result.fatalError);
         }
         playErrorSound();
         if (onError) {
@@ -197,6 +213,11 @@ export function useStreamingTranscription(options = {}) {
     chunkIntervalMs,
     onChunkReady: uploadChunk,
   });
+
+  // Populate the indirection ref so uploadChunk can stop the recorder
+  // on a fatal upload error (declared above, resetMediaRecorder not yet
+  // in scope there).
+  resetMediaRecorderRef.current = resetMediaRecorder;
 
   // SSE subscription for transcription updates (draft-based)
   const {
