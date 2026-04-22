@@ -10,7 +10,7 @@ from backend.utils.privacy import AI_ALLOWED, accessible_nodes_filter, can_user_
 from backend.utils.quotes import (
     resolve_quotes, has_quotes, ExportQuoteResolver, resolve_quotes_for_export
 )
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import subqueryload
 from datetime import datetime
 import os
@@ -334,6 +334,93 @@ def _collect_all_nodes_in_tree(node, filter_ai_usage=False, created_before=None,
     return result
 
 
+def _select_incremental_rows(user_id, filter_ai_usage=False,
+                             created_before=None, created_after=None):
+    """Return rows for the incremental-export scope.
+
+    Used when build_user_export_content is called with `created_after`.
+    Returns a list of namedtuple-like rows with .id, .parent_id,
+    .created_at, .token_count for nodes in the target user's
+    "conversational scope":
+
+      - Anchors: target's own or addressed nodes
+        (`user_id == uid OR human_owner_id == uid`) that pass the
+        usual filters (accessible, ai_usage, created_before/after).
+      - Climb up from anchors: include parents that pass the same
+        filters. Stops when an ancestor fails (typically pre-cutoff).
+      - Climb down from anchors: include descendants that pass the
+        same filters.
+
+    Foreign post-cutoff ancestors that pass `accessible_nodes_filter`
+    are included (the conversation the target is responding to).
+    Foreign siblings of anchors are NOT included (they are neither
+    ancestors nor descendants of any anchor).
+
+    Implementation note: iterates BFS in Python over indexed SQL
+    queries (one per depth layer in each direction). Typical
+    user-tree depths are <10, so this is a small number of fast
+    queries. Could be folded into a single recursive CTE if profiling
+    ever shows it matters; kept iterative for portability between
+    PostgreSQL and the SQLite test database.
+    """
+    cols = (Node.id, Node.parent_id, Node.created_at, Node.token_count)
+
+    def _general_filter():
+        clauses = [accessible_nodes_filter(Node, user_id)]
+        if filter_ai_usage:
+            clauses.append(Node.ai_usage.in_(AI_ALLOWED))
+        if created_before is not None:
+            clauses.append(Node.created_at < created_before)
+        if created_after is not None:
+            clauses.append(Node.created_at > created_after)
+        return clauses
+
+    # 1. Anchors: target-owned/addressed AND pass general filters.
+    anchor_rows = db.session.query(*cols).filter(
+        or_(Node.user_id == user_id, Node.human_owner_id == user_id),
+        *_general_filter(),
+    ).all()
+
+    rows_by_id = {r.id: r for r in anchor_rows}
+
+    # 2. Climb UP from anchors. Each iteration: fetch parents matching
+    #    filters that we haven't seen yet. Stop when no new parents.
+    pending_parent_ids = {
+        r.parent_id for r in anchor_rows if r.parent_id is not None
+    } - rows_by_id.keys()
+    while pending_parent_ids:
+        parent_rows = db.session.query(*cols).filter(
+            Node.id.in_(pending_parent_ids),
+            *_general_filter(),
+        ).all()
+        next_pending = set()
+        for pr in parent_rows:
+            if pr.id in rows_by_id:
+                continue
+            rows_by_id[pr.id] = pr
+            if pr.parent_id is not None:
+                next_pending.add(pr.parent_id)
+        pending_parent_ids = next_pending - rows_by_id.keys()
+
+    # 3. Climb DOWN from anchors. Each iteration: fetch children whose
+    #    parent is in the current frontier and that pass filters.
+    frontier_ids = {r.id for r in anchor_rows}
+    while frontier_ids:
+        child_rows = db.session.query(*cols).filter(
+            Node.parent_id.in_(frontier_ids),
+            *_general_filter(),
+        ).all()
+        next_frontier = set()
+        for cr in child_rows:
+            if cr.id in rows_by_id:
+                continue
+            rows_by_id[cr.id] = cr
+            next_frontier.add(cr.id)
+        frontier_ids = next_frontier
+
+    return list(rows_by_id.values())
+
+
 def _preselect_node_ids(user_id, budget, filter_ai_usage=False,
                         created_before=None, created_after=None,
                         chronological_order=False):
@@ -412,6 +499,273 @@ def get_raw_data_date_range(user_id, max_tokens=10000, created_before=None):
     return row[0], row[1], row[2]
 
 
+def _entry_point_top_level_started(node, user_id):
+    """Walk node.parent until parent_id IS NULL; return that root's
+    created_at IFF the root is accessible to user_id. Falls back to
+    None if the walk hits a missing parent, a cycle, or an
+    inaccessible root — the caller renders a generic preamble
+    without the date in that case.
+
+    Checking accessibility prevents leaking the start-date of a
+    private foreign thread whose root was excluded by
+    accessible_nodes_filter during the CTE walk.
+
+    Used only by the incremental export. O(depth) ORM lookups per
+    entry point — N+1 potential, fine for typical thread depths
+    (≤ ~10) and small entry-point counts. If that ever proves too
+    expensive, batch the ancestor lookup with a single recursive
+    CTE keyed by entry id.
+    """
+    cur = node
+    seen = set()
+    while cur is not None and cur.parent_id is not None:
+        if cur.id in seen:  # defensive: avoid cycles
+            return None
+        seen.add(cur.id)
+        cur = cur.parent
+    if cur is None:
+        return None
+    if not can_user_access_node(cur, user_id):
+        return None
+    return cur.created_at
+
+
+PREAMBLE_PREFIX = "> [Continuation of thread"
+
+
+def _format_preamble(top_started_at):
+    """Render the entry-point preamble. If we know when the thread
+    started, include the date so the summarizer can distinguish
+    multiple older-thread continuations."""
+    if top_started_at is not None:
+        date_str = top_started_at.strftime("%Y-%m-%d")
+        return (
+            f"{PREAMBLE_PREFIX} started {date_str} — earlier context "
+            f"in this thread is not shown.]"
+        )
+    return (
+        f"{PREAMBLE_PREFIX} — earlier context in this thread is not shown.]"
+    )
+
+
+def _build_user_export_incremental(
+    user, max_tokens, filter_ai_usage, created_before, created_after,
+    chronological_order, return_metadata, collapse_artifacts,
+):
+    """Incremental export path (created_after is set). See
+    `build_user_export_content` docstring for behavior. The CTE row
+    set defines `included_ids`; entry points are CTE rows whose
+    parent is not in scope (preamble emitted if parent exists).
+    """
+    cte_rows = _select_incremental_rows(
+        user.id, filter_ai_usage=filter_ai_usage,
+        created_before=created_before, created_after=created_after,
+    )
+    cte_row_ids = {r.id for r in cte_rows}
+
+    if not cte_rows:
+        return None
+
+    # Variables for smart quote resolution (used when max_tokens is set).
+    embedded_quotes = None
+    ai_blocked_ids = None
+    resolver = None
+    selected_ids = None
+    # `render_included_ids` is what `format_node_tree` filters children
+    # by. In the no-budget case it equals the CTE set. In the budgeted
+    # case it equals the resolver's set (which may include quoted
+    # pre-cutoff nodes for embedding).
+    render_included_ids = set(cte_row_ids)
+
+    if max_tokens:
+        header_footer_tokens = 100
+        budget = max_tokens - header_footer_tokens
+
+        # Apply budget windowing to CTE rows. Semantics differ slightly
+        # from `_preselect_node_ids`'s SQL window: this loop stops
+        # BEFORE a row that would overshoot the budget (strict fit),
+        # while the SQL version includes the overshooting row (its
+        # predicate is `cumul - token_count < budget`, which is true
+        # for the row that straddles the boundary). The strict-fit
+        # variant keeps budgeted recent-context calls closer to the
+        # caller's stated ceiling and is simpler to reason about.
+        # Intentional difference; if callers ever need the old
+        # overshoot semantic, add a flag.
+        ordered = sorted(
+            cte_rows,
+            key=lambda r: r.created_at,
+            reverse=not chronological_order,
+        )
+        cumulative = 0
+        selected_ids = []
+        for r in ordered:
+            tk = r.token_count or 0
+            if cumulative + tk > budget and cumulative > 0:
+                break
+            selected_ids.append(r.id)
+            cumulative += tk
+
+        if not selected_ids:
+            return None
+
+        selected_nodes = (
+            Node.query
+            .filter(Node.id.in_(selected_ids))
+            .options(subqueryload(Node.context_artifacts))
+            .all()
+        )
+        selected_nodes.sort(
+            key=lambda n: n.created_at,
+            reverse=not chronological_order,
+        )
+
+        resolver = ExportQuoteResolver(
+            user.id, budget,
+            filter_ai_usage=filter_ai_usage,
+            chronological=chronological_order
+        )
+        for node in selected_nodes:
+            content = node.get_content()
+            node_artifacts = [
+                (a.artifact_type, a.artifact_id)
+                for a in node.context_artifacts
+            ]
+            prompt = node.get_artifact("prompt")
+            if prompt is not None:
+                version_num = UserPrompt.query.filter(
+                    UserPrompt.user_id == prompt.user_id,
+                    UserPrompt.prompt_key == prompt.prompt_key,
+                    UserPrompt.created_at <= prompt.created_at,
+                ).count()
+                resolver.add_node(
+                    node_id=node.id,
+                    created_at=node.created_at,
+                    content=content,
+                    token_count=node.token_count,
+                    user_prompt_id=prompt.id,
+                    prompt_content=content,
+                    prompt_label=f"{prompt.title} v{version_num}",
+                    artifacts=node_artifacts,
+                )
+            else:
+                resolver.add_node(
+                    node_id=node.id,
+                    created_at=node.created_at,
+                    content=content,
+                    token_count=node.token_count,
+                    artifacts=node_artifacts,
+                )
+
+        resolver.resolve()
+        included_ids, embedded_quotes, ai_blocked_ids = (
+            resolver.get_resolution_result()
+        )
+        render_included_ids = included_ids
+
+    # Entry points. Iterate CTE rows so quoted-pre-cutoff embeds added
+    # by the resolver can never be entry candidates. Parent membership
+    # is checked against `render_included_ids` so a budget-ejected
+    # parent correctly leaves its surviving child as an entry point.
+    entry_rows = [
+        r for r in cte_rows
+        if r.id in render_included_ids
+        and (r.parent_id is None
+             or r.parent_id not in render_included_ids)
+    ]
+    entry_rows.sort(
+        key=lambda r: r.created_at,
+        reverse=not chronological_order,
+    )
+
+    if not entry_rows:
+        return None
+
+    entry_nodes_by_id = {
+        n.id: n for n in Node.query.filter(
+            Node.id.in_([r.id for r in entry_rows])
+        ).all()
+    }
+    entry_nodes = [
+        entry_nodes_by_id[r.id]
+        for r in entry_rows
+        if r.id in entry_nodes_by_id
+    ]
+
+    # Build the export content using Markdown format
+    export_lines = []
+    export_lines.append("# Loore - Thread Export")
+    export_lines.append("")
+    export_lines.append(f"**User:** {user.username}")
+    export_lines.append(
+        f"**Export Date:** "
+        f"{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"
+    )
+    export_lines.append(f"**Entry Points:** {len(entry_nodes)}")
+    if max_tokens:
+        export_lines.append(f"*(Limited to ~{max_tokens:,} tokens)*")
+    export_lines.append("")
+    export_lines.append("---")
+    export_lines.append("")
+
+    # Artifact preambles. Mirrors the legacy path's behavior but driven
+    # by entry_nodes instead of top_level_nodes.
+    if collapse_artifacts:
+        pass
+    elif resolver is not None:
+        preamble = resolver.get_artifacts_preamble()
+        if preamble:
+            export_lines.append(preamble)
+            export_lines.append("---")
+            export_lines.append("")
+
+    for thread_num, entry in enumerate(entry_nodes, 1):
+        if entry.parent_id is not None:
+            top_started = _entry_point_top_level_started(entry, user.id)
+            export_lines.append(_format_preamble(top_started))
+            export_lines.append("")
+
+        export_lines.append(f"# Thread {thread_num}")
+        export_lines.append(
+            f"**Started:** "
+            f"{entry.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')}"
+        )
+        export_lines.append("")
+
+        thread_text = format_node_tree(
+            entry,
+            index_path=str(thread_num),
+            filter_ai_usage=filter_ai_usage,
+            user_id=user.id,
+            created_before=created_before,
+            embedded_quotes=embedded_quotes,
+            included_ids=render_included_ids,
+            ai_blocked_ids=ai_blocked_ids,
+        )
+        export_lines.append(thread_text)
+        export_lines.append("---")
+        export_lines.append("")
+
+    export_lines.append("*End of Export*")
+    content = "\n".join(export_lines)
+
+    if return_metadata:
+        # Use CTE rows for metadata. They already have created_after
+        # applied in SQL.
+        timestamps = [r.created_at for r in cte_rows]
+        latest_ts = max(timestamps) if timestamps else None
+        earliest_ts = min(timestamps) if timestamps else None
+        return {
+            "content": content,
+            "token_count": approximate_token_count(content),
+            "latest_node_created_at": latest_ts,
+            "earliest_node_created_at": earliest_ts,
+            "node_count": len(cte_rows),
+            "node_ids": cte_row_ids,
+        }
+
+    return content
+
+
 def build_user_export_content(
     user, max_tokens=None, filter_ai_usage=False,
     created_before=None, created_after=None,
@@ -419,32 +773,63 @@ def build_user_export_content(
     collapse_artifacts=False
 ):
     """
-    Core export logic: Build a human-readable text export of all threads for a given user.
+    Core export logic: Build a human-readable text export of threads for a user.
 
-    When max_tokens is specified, uses the ExportQuoteResolver for smart quote resolution
-    that ensures quoted content is available even when the export is truncated.
+    Two modes:
+      - **Legacy (default, `created_after is None`)**: includes top-level
+        threads owned by the user (`Node.user_id == user.id`,
+        `parent_id IS NULL`) and walks their accessible descendants.
+        Used for user-facing data export and full-archive profile gen.
+      - **Incremental (`created_after is not None`)**: includes the user's
+        post-cutoff "anchors" (own or addressed nodes) plus their accessible
+        post-cutoff ancestors and descendants. Foreign post-cutoff ancestors
+        the target replied to are pulled in (conversational context);
+        foreign siblings the target never engaged with are excluded.
+        Renders entry points (a node in scope whose parent is not in scope)
+        with a short preamble when the entry point sits beneath a pre-cutoff
+        / out-of-scope parent. Used by `recent_context` and iterative
+        profile regen.
+
+    When `max_tokens` is specified, uses `ExportQuoteResolver` for smart
+    quote resolution. The resolver may pull in pre-cutoff quoted nodes for
+    embedding; those never become entry points (entry-point membership is
+    decided from the CTE rows, not from the resolver's mutated set).
 
     Args:
         user: User object to export threads for
-        max_tokens: Optional maximum token count. If provided, only includes most recent
-                   threads that fit within this limit, and uses smart quote resolution.
-        filter_ai_usage: If True, only include nodes where ai_usage is 'chat' or 'train'.
-                        Use True for AI profile generation, False for user data export.
-        created_before: Optional datetime. If provided, only includes threads (and nodes within
-                       threads) created before this timestamp.
-        created_after: Optional datetime. If provided, only includes nodes created at or
-                      after this timestamp. Used for incremental profile updates.
-        chronological_order: If True and max_tokens is set, select oldest nodes first
-                           (for iterative profile building).
-        return_metadata: If True, return a dict with content, token_count,
-                        latest_node_created_at, and node_count instead of just the string.
+        max_tokens: Optional maximum token count. If provided, only includes
+                   most recent threads that fit within this limit, and uses
+                   smart quote resolution.
+        filter_ai_usage: If True, only include nodes where ai_usage is
+                        'chat' or 'train'. Use True for AI profile
+                        generation, False for user data export.
+        created_before: Optional datetime. If provided, only includes
+                       nodes created before this timestamp.
+        created_after: Optional datetime. If provided, switches to the
+                      incremental mode described above.
+        chronological_order: If True and max_tokens is set, select oldest
+                           nodes first (for iterative profile building).
+        return_metadata: If True, return a dict with `content`,
+                        `token_count`, `latest_node_created_at`,
+                        `earliest_node_created_at`, `node_count`, and
+                        `node_ids` (set of in-scope node IDs).
+        collapse_artifacts: If True, suppress full artifact preambles
+                           (artifact ID refs are still inlined).
 
     Returns:
         str or dict: Formatted export content (or None if no threads found).
-                    If return_metadata=True, returns dict with keys:
-                    content, token_count, latest_node_created_at, node_count
+                    If return_metadata=True, returns the dict described above.
     """
-    # Get all top-level nodes (threads) created by the user, ordered by most recent first
+    if created_after is not None:
+        return _build_user_export_incremental(
+            user, max_tokens=max_tokens, filter_ai_usage=filter_ai_usage,
+            created_before=created_before, created_after=created_after,
+            chronological_order=chronological_order,
+            return_metadata=return_metadata,
+            collapse_artifacts=collapse_artifacts,
+        )
+
+    # Legacy path: top-level threads owned by the user.
     query = Node.query.filter_by(
         user_id=user.id,
         parent_id=None
@@ -454,12 +839,12 @@ def build_user_export_content(
     if filter_ai_usage:
         query = query.filter(Node.ai_usage.in_(AI_ALLOWED))
 
-    # Filter by creation timestamp if specified (for {user_export} context limiting)
+    # Filter by creation timestamp if specified (for {user_export} context
+    # limiting). `created_after` is intercepted by the dispatcher above and
+    # is always None on the legacy path; we leave the parameter in the
+    # signature for backward compatibility with callers that pass it.
     if created_before:
         query = query.filter(Node.created_at < created_before)
-
-    if created_after:
-        query = query.filter(Node.created_at > created_after)
 
     all_top_level_nodes = query.order_by(Node.created_at.desc()).all()
 
@@ -737,6 +1122,7 @@ def build_user_export_content(
                 func.count(Node.id),
             ).filter(Node.id.in_(selected_ids)).one()
             earliest_ts, latest_ts, node_count = row
+            node_ids = set(selected_ids)
         else:
             # No max_tokens path — scan all included nodes
             meta_nodes = []
@@ -745,10 +1131,6 @@ def build_user_export_content(
                     top_node, filter_ai_usage, created_before,
                     user_id=user.id,
                 ))
-            if created_after:
-                meta_nodes = [
-                    n for n in meta_nodes if n.created_at > created_after
-                ]
             latest_ts = max(
                 (n.created_at for n in meta_nodes), default=None
             )
@@ -756,12 +1138,14 @@ def build_user_export_content(
                 (n.created_at for n in meta_nodes), default=None
             )
             node_count = len(meta_nodes)
+            node_ids = {n.id for n in meta_nodes}
         return {
             "content": content,
             "token_count": approximate_token_count(content),
             "latest_node_created_at": latest_ts,
             "earliest_node_created_at": earliest_ts,
             "node_count": node_count,
+            "node_ids": node_ids,
         }
 
     return content
