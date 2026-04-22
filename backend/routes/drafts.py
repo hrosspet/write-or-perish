@@ -459,21 +459,34 @@ def upload_streaming_chunk(session_id):
     # are raw cluster fragments with no header). Extract and persist it now,
     # before encrypt_file() deletes the plaintext chunk. Never changes for
     # the rest of the recording.
+    #
+    # Reject the upload if extraction fails: batch 1 (chunks 0..19) would
+    # still succeed because chunk 0 carries its own header, but any batch
+    # starting at chunk 20+ would fail silently for want of an init segment.
+    # Better to surface the problem on the first chunk than silently lose
+    # later audio.
     if chunk_index == 0:
         from backend.utils.webm_utils import extract_webm_init_segment
         try:
             with open(chunk_path, 'rb') as f:
                 init_bytes = extract_webm_init_segment(f.read())
         except Exception as exc:
-            current_app.logger.warning(
+            current_app.logger.error(
                 f"Failed to extract init segment from chunk 0 of "
                 f"session {session_id}: {exc}"
             )
-        else:
-            init_path = chunk_dir / "init.webm"
-            with open(init_path, 'wb') as f:
-                f.write(init_bytes)
-            encrypt_file(str(init_path))
+            try:
+                chunk_path.unlink()
+            except OSError:
+                pass
+            return jsonify({
+                "error": "Could not parse WebM header from first chunk",
+                "detail": str(exc),
+            }), 500
+        init_path = chunk_dir / "init.webm"
+        with open(init_path, 'wb') as f:
+            f.write(init_bytes)
+        encrypt_file(str(init_path))
 
     # Encrypt the audio chunk at rest
     encrypted_path = encrypt_file(str(chunk_path))
