@@ -191,7 +191,7 @@ export default function HowToPage() {
         <Fade delay={0.14}>
           <WorkflowCard
             title="Chat with your archive"
-            description="Use the user_export keyword to bring your full archive into a conversation. Ask Loore to assess your personal type (e.g. Enneagram, MBTI, or any typology of your choosing) with reasoning, find recurring themes across months of entries, or surface connections between experiences you hadn't noticed."
+            description="Use the user_export keyword to bring everything you've engaged with — your own threads plus public threads you replied to — into a conversation. Tune scope with modifiers like {user_export?keep=newest&max_export_tokens=100000}. Ask Loore to assess your personal type (e.g. Enneagram, MBTI, or any typology of your choosing) with reasoning, find recurring themes across months of entries, or surface connections between experiences you hadn't noticed."
             steps={["Your archive", "A question", "Deep analysis"]}
           />
         </Fade>
