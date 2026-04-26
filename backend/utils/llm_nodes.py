@@ -2,6 +2,7 @@
 
 from backend.models import Node, User
 from backend.extensions import db
+from backend.utils.placeholders import validate_user_export_placeholders
 
 
 def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
@@ -11,7 +12,21 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     """Create an LLM placeholder node, optionally enqueue generation task.
 
     Returns (llm_node, task_id) -- task_id is None if enqueue=False.
+
+    Raises UserExportValidationError if the parent node's content
+    contains a {user_export} placeholder with unrecognized param keys.
+    Validation runs BEFORE any DB writes so a misconfigured placeholder
+    never produces an orphan LLM node and never incurs LLM API spend.
     """
+    # Pre-flight: validate any {user_export} placeholders in the parent's
+    # content. Misconfigured placeholders previously fell back silently
+    # to "no token cap" and cost real $$$ on a single request.
+    parent = Node.query.get(parent_node_id)
+    if parent is not None:
+        validate_user_export_placeholders(
+            parent.get_content(), user_id=human_owner_id,
+        )
+
     llm_user = User.query.filter_by(username=model_id).first()
     if not llm_user:
         llm_user = User(twitter_id=f"llm-{model_id}", username=model_id)

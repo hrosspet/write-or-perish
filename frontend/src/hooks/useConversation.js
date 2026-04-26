@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { useAsyncTaskPolling } from './useAsyncTaskPolling';
+import { useLlmTaskWarnings } from './useLlmTaskWarnings';
 import api from '../api';
 
 /**
@@ -20,6 +21,9 @@ export function useConversation({ aiUsage = 'none' } = {}) {
     pendingLlmNodeId ? `/nodes/${pendingLlmNodeId}/llm-status` : null,
     { enabled: !!pendingLlmNodeId, interval: 1500 }
   );
+
+  // Surface server-side warnings (e.g. typoed {user_export} keys) as toasts
+  useLlmTaskWarnings(llmData, llmStatus);
 
   // When LLM completes, update messages
   useEffect(() => {

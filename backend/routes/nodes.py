@@ -29,6 +29,7 @@ from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.webm_utils import get_webm_duration
 from backend.utils.encryption import encrypt_file, decrypt_file_to_temp
 from backend.utils.llm_nodes import create_llm_placeholder
+from backend.utils.placeholders import UserExportValidationError
 
 # ---------------------------------------------------------------------------
 # Voice‑Mode helpers
@@ -903,12 +904,18 @@ def request_llm_response(node_id):
 
     # Create placeholder LLM node and enqueue task
     # AI nodes inherit privacy settings from their parent node
-    llm_node, task_id = create_llm_placeholder(
-        parent_node.id, model_id, current_user.id,
-        privacy_level=parent_node.privacy_level,
-        ai_usage=parent_node.ai_usage,
-        source_mode=source_mode,
-    )
+    try:
+        llm_node, task_id = create_llm_placeholder(
+            parent_node.id, model_id, current_user.id,
+            privacy_level=parent_node.privacy_level,
+            ai_usage=parent_node.ai_usage,
+            source_mode=source_mode,
+        )
+    except UserExportValidationError as e:
+        # Misconfigured {user_export} placeholder — abort BEFORE creating
+        # any LLM node so the user's feed isn't polluted with a stub
+        # failed response. Frontend surfaces this message as a toast.
+        return jsonify({"error": str(e)}), 400
 
     current_app.logger.info(f"Enqueued LLM completion task {task_id} for parent node {parent_node.id}, new node {llm_node.id}")
 
@@ -1391,6 +1398,12 @@ def get_llm_status(node_id):
             )
         except (json.JSONDecodeError, TypeError):
             pass
+
+    # Include user-facing task warnings (rendered as toasts by
+    # frontend useLlmTaskWarnings hook). Always include the key so the
+    # client can rely on its presence.
+    from backend.utils.task_warnings import load_task_warnings
+    response_data["warnings"] = load_task_warnings(node)
 
     if created_node:
         response_data["node"] = created_node

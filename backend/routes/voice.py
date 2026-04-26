@@ -4,6 +4,7 @@ from backend.models import Node
 from backend.extensions import db
 from backend.utils.prompts import get_user_prompt_record
 from backend.utils.llm_nodes import create_llm_placeholder
+from backend.utils.placeholders import UserExportValidationError
 from backend.utils.context_artifacts import attach_context_artifacts
 from backend.utils.session_helpers import (
     ancestors_have_prompt, is_llm_node, create_llm_placeholder_node,
@@ -191,11 +192,14 @@ def create_voice_session():
             session_id, user_node, current_user.id
         )
 
-    llm_node, task_id = create_llm_placeholder(
-        user_node.id, model_id, current_user.id,
-        ai_usage=ai_usage,
-        source_mode='voice',
-    )
+    try:
+        llm_node, task_id = create_llm_placeholder(
+            user_node.id, model_id, current_user.id,
+            ai_usage=ai_usage,
+            source_mode='voice',
+        )
+    except UserExportValidationError as e:
+        return jsonify({"error": str(e)}), 400
 
     current_app.logger.info(
         f"Voice session: parent={user_parent_id}, "

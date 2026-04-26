@@ -414,6 +414,11 @@ def draft_transcription_stream(session_id):
                         # Node already exists — draft only lingered for this event.
                         db.session.delete(current_draft)
                         db.session.commit()
+                    if current_draft.streaming_warning:
+                        # Carry user-facing warning to the frontend so it
+                        # can render a toast even when no LLM follow-up
+                        # was dispatched (e.g. misconfigured placeholder).
+                        complete_data["warning"] = current_draft.streaming_warning
                     yield format_sse_message(complete_data, event="all_complete")
                     break
 

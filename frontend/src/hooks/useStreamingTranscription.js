@@ -202,6 +202,10 @@ export function useStreamingTranscription(options = {}) {
           sessionId: sessionIdRef.current,
           content: data.content,
           llmNodeId: data.llm_node_id || null,
+          // Server-side warning (e.g. misconfigured {user_export}
+          // placeholder rejected before LLM dispatch). Voice session
+          // surfaces this as a toast.
+          warning: data.warning || null,
         });
       }
     },

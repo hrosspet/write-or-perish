@@ -1,10 +1,12 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { useStreamingTranscription } from './useStreamingTranscription';
 import { useAsyncTaskPolling } from './useAsyncTaskPolling';
+import { useLlmTaskWarnings } from './useLlmTaskWarnings';
 import { useTTSStreamSSE } from './useSSE';
 import { useAudio } from '../contexts/AudioContext';
 import { useMediaSession } from './useMediaSession';
 import { useOnlineStatus } from './useOnlineStatus';
+import { useToast } from '../contexts/ToastContext';
 import api from '../api';
 
 // iOS devices can't autoplay audio regardless of warmup, and playing silent audio
@@ -36,6 +38,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   const threadParentIdRef = useRef(initialParentId);
   const lastUserNodeIdRef = useRef(null);
   const initialResumeRef = useRef(initialLlmNodeId != null);
+  const { addToast } = useToast();
 
   // Keep URL params in sync so a page refresh resumes correctly
   useEffect(() => {
@@ -146,6 +149,16 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         return;
       }
 
+      // Server-side validation rejected the request (e.g. misconfigured
+      // {user_export}). No LLM node was created — surface the toast and
+      // return to ready so the user can re-record without seeing a stub
+      // failed response.
+      if (data.warning) {
+        addToast(data.warning, 8000);
+        setPhase('ready');
+        return;
+      }
+
       // Server-side LLM chain: if the finalize task already created the LLM
       // node, skip the frontend POST and use the server-provided node ID.
       if (data.llmNodeId) {
@@ -175,6 +188,14 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         lastUserNodeIdRef.current = res.data.user_node_id;
       } catch (err) {
         console.error(`${apiEndpoint} API error:`, err);
+        // Server returned a structured validation error (400) — surface
+        // the message as a toast so the user knows what to fix.
+        const apiErr = err?.response?.data?.error;
+        if (apiErr) {
+          addToast(apiErr, 8000);
+          setPhase('ready');
+          return;
+        }
         setHasError(true);
         setPhase('ready');
       }
@@ -189,6 +210,9 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     llmNodeId ? `/nodes/${llmNodeId}/llm-status` : null,
     { enabled: !!llmNodeId, interval: 1500 }
   );
+
+  // Surface server-side warnings (e.g. typoed {user_export} keys) as toasts
+  useLlmTaskWarnings(llmData, llmStatus);
 
   // TTS SSE subscription
   const ttsSSE = useTTSStreamSSE(llmNodeId, {

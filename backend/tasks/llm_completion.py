@@ -26,6 +26,7 @@ from backend.utils.placeholders import (
     USER_EXPORT_PATTERN,
     parse_placeholder_params,
     parse_max_export_tokens,
+    warn_unknown_user_export_keys,
 )
 
 logger = get_task_logger(__name__)
@@ -794,6 +795,18 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # _scan_proposal_statuses above)
 
             if needs_export:
+                # Defense-in-depth log only: validate_user_export_placeholders
+                # runs upstream in create_llm_placeholder and aborts the
+                # request before this task is dispatched. Reaching this
+                # branch with unknown keys would mean someone bypassed
+                # the factory — log so it's visible, but proceed
+                # (engaged_threads + None budget is the safe default).
+                warn_unknown_user_export_keys(
+                    export_params,
+                    user_id=user_id,
+                    placeholder=export_placeholder_match,
+                    log=logger,
+                )
                 # None = full archive; the retry loop converges if the
                 # prompt overflows. A user-supplied max_export_tokens
                 # becomes the initial budget instead.

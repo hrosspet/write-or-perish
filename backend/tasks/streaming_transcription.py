@@ -1059,11 +1059,34 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     ).update({"node_id": user_node.id})
     user_node.streaming_transcription = True
 
-    # LLM placeholder (don't enqueue yet — we'll chain it)
-    llm_node, _ = create_llm_placeholder(
-        user_node.id, model, user_id, enqueue=False,
-        ai_usage=ai_usage,
-    )
+    # LLM placeholder (don't enqueue yet — we'll chain it).
+    # If the transcript contains a misconfigured {user_export}
+    # placeholder, abort BEFORE creating the LLM node and before any
+    # LLM/TTS dispatch. The user_node already exists (the audio is
+    # real and the user wants it kept); record a warning on it so the
+    # voice frontend can surface a toast.
+    from backend.utils.placeholders import UserExportValidationError
+    from backend.utils.task_warnings import record_task_warning
+    try:
+        llm_node, _ = create_llm_placeholder(
+            user_node.id, model, user_id, enqueue=False,
+            ai_usage=ai_usage,
+        )
+    except UserExportValidationError as e:
+        logger.warning(
+            "Voice transcription aborted LLM dispatch: %s "
+            "(session_id=%s user_id=%s)",
+            e, session_id, user_id,
+        )
+        record_task_warning(user_node, str(e))
+        # Mark draft as completed (audio + transcript are real and
+        # belong to the user) but with no llm_node_id. The
+        # streaming_warning travels through SSE all_complete to the
+        # voice frontend, which surfaces it as a toast.
+        draft.streaming_status = 'completed'
+        draft.streaming_warning = str(e)
+        db.session.commit()
+        return
 
     # Mark TTS as pending now so the frontend's POST /tts endpoint
     # detects the in-progress chain and skips duplicate enqueue.

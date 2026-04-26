@@ -129,6 +129,12 @@ class Node(db.Model):
     llm_task_status = db.Column(db.String(20), nullable=True)  # pending, processing, completed, failed
     llm_task_progress = db.Column(db.Integer, default=0)
     llm_task_error = db.Column(db.Text, nullable=True)
+    # JSON list of user-facing warnings emitted during the task
+    # (e.g. unrecognized {user_export} param keys). Surfaced to the
+    # frontend via /nodes/<id>/llm-status and rendered as toasts by
+    # useLlmTaskWarnings. Generic — any future task can append via
+    # backend.utils.task_warnings.record_task_warning.
+    llm_task_warnings = db.Column(db.Text, nullable=True)
 
     # TTS generation task tracking
     tts_task_id = db.Column(db.String(255), nullable=True)
@@ -303,6 +309,13 @@ class Draft(db.Model):
     # Server-side LLM generation: stores the LLM node ID when the finalize
     # task kicks off LLM + TTS server-side (lock-screen workflow).
     llm_node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True)
+
+    # User-facing warning emitted during the streaming finalize task —
+    # e.g. a misconfigured {user_export} placeholder rejected before LLM
+    # dispatch. Surfaced via the SSE all_complete event and rendered as
+    # a toast by the voice frontend. Generic; any abort-with-message
+    # condition can use it.
+    streaming_warning = db.Column(db.Text, nullable=True)
 
     # Relationships
     user = db.relationship("User", backref="drafts")
