@@ -59,6 +59,19 @@ def parse_placeholder_params(match_str):
 # the handler to log a warning when an unrecognized key appears
 # (catches typos like `max-export-tokens` that whitespace stripping
 # alone wouldn't fix).
+#
+# Future param-bearing placeholders: the silent-fallback bug class
+# (typoed key → ignored → default behavior, which once shipped 1M+
+# tokens to the LLM at $5.71/request) is general, not specific to
+# {user_export}. When you add a new parameterized placeholder, grow a
+# sibling pattern: a separate KNOWN_KEYS frozenset + a validator
+# function that mirrors validate_user_export_placeholders, called from
+# create_llm_placeholder. Don't just append the new placeholder's keys
+# to this set — that would also let `{user_export?your_key=...}`
+# validate as "known", reintroducing the bug for the original
+# placeholder. Today's bare-string placeholders ({user_profile},
+# {user_todo}, {user_recent}, etc.) don't take params and aren't
+# vulnerable, but the next param-bearing one will be.
 USER_EXPORT_KNOWN_KEYS = frozenset({"keep", "max_export_tokens"})
 
 

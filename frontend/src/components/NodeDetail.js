@@ -287,7 +287,18 @@ function NodeDetail() {
       .then((newNodeId) => setLlmTaskNodeId(newNodeId))
       .catch((err) => {
         console.error(err);
-        setError(err.response?.data?.error || err.message || "Error requesting LLM response.");
+        // 400 = user-correctable validation (e.g. misconfigured
+        // {user_export} placeholder). Surface as a toast so the page
+        // stays intact; setError() at this level replaces the whole
+        // node view with the message, which feels destructive for
+        // something the user just needs to fix and resend.
+        const status = err?.response?.status;
+        const apiErr = err?.response?.data?.error;
+        if (status === 400 && apiErr) {
+          addToast(apiErr, 8000);
+          return;
+        }
+        setError(apiErr || err.message || "Error requesting LLM response.");
       });
   };
 
