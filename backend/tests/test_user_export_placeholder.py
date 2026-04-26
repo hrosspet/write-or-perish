@@ -5,9 +5,13 @@ Covers:
 - parse_max_export_tokens: int conversion + structured-warning behavior on
   non-numeric / negative values.
 - USER_EXPORT_PATTERN: regex matches new modifier forms.
+- Wiring regression: the placeholder handler in llm_completion.py
+  passes include_strategy="engaged_threads".
 """
 
+import ast
 import logging
+import os
 
 import pytest
 
@@ -136,4 +140,112 @@ class TestUserExportPattern:
         assert m is not None
         assert m.group(0) == (
             "{user_export?keep=newest&max_export_tokens=50000}"
+        )
+
+
+# ── wiring regression ──────────────────────────────────────────────────
+
+class TestPlaceholderHandlerWiring:
+    """Regression guards for the one-line wiring in llm_completion.py.
+
+    We parse the source file with `ast` (rather than importing the
+    module, whose Celery + LLM-providers chain is too heavy and conflicts
+    with sys.modules mocks in other test files) and scan for the
+    relevant Call nodes.
+    """
+
+    @pytest.fixture(scope="class")
+    def llm_completion_ast(self):
+        path = os.path.join(
+            os.path.dirname(__file__),
+            "..", "tasks", "llm_completion.py",
+        )
+        with open(path) as f:
+            return ast.parse(f.read())
+
+    @staticmethod
+    def _calls_named(tree, name):
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            actual = (
+                func.attr if isinstance(func, ast.Attribute)
+                else func.id if isinstance(func, ast.Name)
+                else None
+            )
+            if actual == name:
+                yield node
+
+    @staticmethod
+    def _kwarg_constant(call, name):
+        for kw in call.keywords:
+            if kw.arg == name and isinstance(kw.value, ast.Constant):
+                return kw.value.value
+        return None
+
+    def test_placeholder_handler_passes_engaged_threads(
+        self, llm_completion_ast
+    ):
+        """The {user_export} handler must pass
+        include_strategy='engaged_threads' to build_user_export_content.
+        Catches accidental removal of the literal arg."""
+        engaged_calls = [
+            c for c in self._calls_named(
+                llm_completion_ast, "build_user_export_content"
+            )
+            if self._kwarg_constant(c, "include_strategy")
+            == "engaged_threads"
+        ]
+        assert engaged_calls, (
+            "Expected at least one call to build_user_export_content "
+            "with include_strategy='engaged_threads' in "
+            "backend/tasks/llm_completion.py"
+        )
+
+    def test_placeholder_handler_threads_max_export_tokens(
+        self, llm_completion_ast
+    ):
+        """The handler must thread the parsed max_export_tokens into
+        build_user_export_content via the max_tokens kwarg. Verifies the
+        call uses the local `max_export_tokens` variable (not a literal,
+        not None)."""
+        for call in self._calls_named(
+            llm_completion_ast, "build_user_export_content"
+        ):
+            if (
+                self._kwarg_constant(call, "include_strategy")
+                != "engaged_threads"
+            ):
+                continue
+            for kw in call.keywords:
+                if kw.arg == "max_tokens":
+                    assert isinstance(kw.value, ast.Name), (
+                        "max_tokens should be passed as a variable "
+                        "(the parsed budget), not a literal"
+                    )
+                    assert kw.value.id == "max_export_tokens"
+                    return
+            pytest.fail(
+                "build_user_export_content call missing max_tokens kwarg"
+            )
+        pytest.fail("No engaged_threads call found")
+
+    def test_parse_max_export_tokens_called_with_logger(
+        self, llm_completion_ast
+    ):
+        """The handler must pass log=logger to parse_max_export_tokens
+        so warnings go to the Celery task logger, not the helper's
+        default stdlib logger."""
+        for call in self._calls_named(
+            llm_completion_ast, "parse_max_export_tokens"
+        ):
+            for kw in call.keywords:
+                if kw.arg == "log":
+                    assert isinstance(kw.value, ast.Name)
+                    assert kw.value.id == "logger"
+                    return
+        pytest.fail(
+            "Expected parse_max_export_tokens(..., log=logger) call in "
+            "backend/tasks/llm_completion.py"
         )
