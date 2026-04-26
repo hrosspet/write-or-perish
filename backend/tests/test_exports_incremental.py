@@ -701,3 +701,244 @@ class TestFullArchiveRegression:
             assert f"thread {i} marker text" in result
         # Legacy path doesn't emit the Layer 2 preamble
         assert "Continuation of thread" not in result
+
+
+# ── 15. engaged_threads strategy (created_after=None, anchor-based) ─────
+
+class TestEngagedThreadsStrategy:
+    def test_user_owned_tree_fully_covered_when_only_root_anchor(self, app):
+        """Alice owns a root; Bob posts an accessible public reply; Alice
+        never engages further. With engaged_threads + no cutoff, climb-down
+        from Alice's root anchor must still include Bob's reply (parity
+        with authored_threads on user-owned subtrees)."""
+        alice = _make_user("alice")
+        bob = _make_user("bob")
+        _db.session.commit()
+
+        root = _make_node(
+            alice, content="alice owned root marker",
+            privacy_level="public", ai_usage="chat",
+            token_count=100, created_at=DEC_15,
+        )
+        bob_reply = _make_node(
+            bob, parent_id=root.id,
+            content="bob foreign public reply marker",
+            privacy_level="public", ai_usage="chat",
+            token_count=80, created_at=APR_18,
+        )
+        _db.session.commit()
+
+        result = _build(
+            alice, filter_ai_usage=True,
+            include_strategy="engaged_threads",
+            return_metadata=True,
+        )
+        assert result is not None
+        content = result["content"]
+
+        assert "alice owned root marker" in content
+        assert "bob foreign public reply marker" in content
+        assert {root.id, bob_reply.id}.issubset(result["node_ids"])
+
+    def test_foreign_public_thread_included_when_user_replied_no_cutoff(self, app):
+        """Bob's public thread; Alice replied. Without a cutoff, Alice's
+        reply is an anchor; climb-up must reach Bob's accessible public
+        root."""
+        alice = _make_user("alice")
+        bob = _make_user("bob")
+        _db.session.commit()
+
+        bob_root = _make_node(
+            bob, content="bob public root marker",
+            privacy_level="public", ai_usage="chat",
+            token_count=100, created_at=DEC_15,
+        )
+        bob_reply = _make_node(
+            bob, parent_id=bob_root.id,
+            content="bob public reply marker",
+            privacy_level="public", ai_usage="chat",
+            token_count=80, created_at=APR_18,
+        )
+        alice_reply = _make_node(
+            alice, parent_id=bob_reply.id,
+            content="alice reply marker",
+            privacy_level="public", ai_usage="chat",
+            token_count=60, created_at=APR_19,
+        )
+        _db.session.commit()
+
+        result = _build(
+            alice, filter_ai_usage=True,
+            include_strategy="engaged_threads",
+            return_metadata=True,
+        )
+        assert result is not None
+        content = result["content"]
+
+        assert "bob public root marker" in content
+        assert "bob public reply marker" in content
+        assert "alice reply marker" in content
+        assert {bob_root.id, bob_reply.id, alice_reply.id}.issubset(
+            result["node_ids"]
+        )
+
+    def test_private_foreign_ancestor_blocks_climb_no_cutoff(self, app):
+        """Bob's private root; Alice replies inside. Climb-up must stop
+        at the private parent — content & date must not leak."""
+        alice = _make_user("alice")
+        bob = _make_user("bob")
+        _db.session.commit()
+
+        bob_private_root = _make_node(
+            bob, content="bob private root secret",
+            privacy_level="private", ai_usage="chat",
+            token_count=100, created_at=DEC_15,
+        )
+        bob_private_reply = _make_node(
+            bob, parent_id=bob_private_root.id,
+            content="bob private reply secret",
+            privacy_level="private", ai_usage="chat",
+            token_count=80, created_at=APR_18,
+        )
+        alice_reply = _make_node(
+            alice, parent_id=bob_private_reply.id,
+            content="alice in private marker",
+            privacy_level="private", ai_usage="chat",
+            token_count=60, created_at=APR_19,
+        )
+        _db.session.commit()
+
+        result = _build(
+            alice, filter_ai_usage=True,
+            include_strategy="engaged_threads",
+            return_metadata=True,
+        )
+        content = result["content"]
+
+        assert "alice in private marker" in content
+        assert "bob private root secret" not in content
+        assert "bob private reply secret" not in content
+        # Bob's private root date must NOT leak
+        assert "2025-12-15" not in content
+        assert alice_reply.id in result["node_ids"]
+        assert bob_private_root.id not in result["node_ids"]
+        assert bob_private_reply.id not in result["node_ids"]
+
+    def test_max_tokens_with_engaged_threads_keeps_newest(self, app):
+        """With engaged_threads + a small max_tokens budget and
+        chronological_order=False, newest anchors win."""
+        alice = _make_user("alice")
+        _db.session.commit()
+
+        old_root = _make_node(
+            alice, content="OLD anchor marker",
+            ai_usage="chat", token_count=200, created_at=DEC_15,
+        )
+        new_root = _make_node(
+            alice, content="NEW anchor marker",
+            ai_usage="chat", token_count=200,
+            created_at=APR_22,
+        )
+        _db.session.commit()
+
+        # Budget that fits one root but not both (200 tokens each + 100
+        # header_footer reserve; budget = 250 → only newest fits).
+        result = _build(
+            alice, filter_ai_usage=True,
+            include_strategy="engaged_threads",
+            max_tokens=350,
+            chronological_order=False,
+            return_metadata=True,
+        )
+        assert result is not None
+        content = result["content"]
+        assert "NEW anchor marker" in content
+        assert "OLD anchor marker" not in content
+        # node_ids reflects the full CTE row set (pre-budget); selected_ids
+        # (post-budget) drives rendering. Content is the truth-source for
+        # what the budget kept, so no node_ids assertion here.
+
+    def test_invalid_include_strategy_raises(self, app):
+        alice = _make_user("alice")
+        _db.session.commit()
+        with pytest.raises(ValueError):
+            _build(alice, include_strategy="bogus")
+
+    def test_authored_threads_default_byte_identical_to_legacy(
+        self, app, monkeypatch
+    ):
+        """Default (no include_strategy arg) must produce byte-identical
+        output to explicit include_strategy='authored_threads'. Freeze
+        utcnow so the **Export Date:** field doesn't drift between the
+        two calls."""
+        from backend.routes import export_data as ed
+
+        frozen = datetime(2026, 4, 26, 12, 0, 0)
+
+        class _FrozenDT(datetime):
+            @classmethod
+            def utcnow(cls):
+                return frozen
+
+        monkeypatch.setattr(ed, "datetime", _FrozenDT)
+
+        alice = _make_user("alice")
+        _db.session.commit()
+
+        for i in range(2):
+            _make_node(
+                alice, content=f"thread {i} marker text",
+                ai_usage="chat", token_count=100,
+                created_at=DEC_15 + timedelta(days=i),
+            )
+        _db.session.commit()
+
+        default_result = _build(alice, filter_ai_usage=True)
+        explicit_result = _build(
+            alice, filter_ai_usage=True,
+            include_strategy="authored_threads",
+        )
+
+        assert default_result == explicit_result
+
+    def test_created_after_overrides_authored_threads(self, app):
+        """When created_after is set, the function takes the anchor-based
+        incremental path regardless of include_strategy. Verify by using
+        a fixture that exercises the foreign-ancestor climb (which only
+        the incremental path does)."""
+        alice = _make_user("alice")
+        bob = _make_user("bob")
+        _db.session.commit()
+
+        bob_root = _make_node(
+            bob, content="bob pre-cutoff public root",
+            privacy_level="public", ai_usage="chat",
+            token_count=100, created_at=DEC_15,
+        )
+        bob_post = _make_node(
+            bob, parent_id=bob_root.id,
+            content="bob april public reply marker",
+            privacy_level="public", ai_usage="chat",
+            token_count=80, created_at=APR_18,
+        )
+        alice_post = _make_node(
+            alice, parent_id=bob_post.id,
+            content="alice april reply marker",
+            privacy_level="public", ai_usage="chat",
+            token_count=60, created_at=APR_19,
+        )
+        _db.session.commit()
+
+        # Even with include_strategy='authored_threads', created_after
+        # forces the incremental path → climb-up picks up bob_post.
+        result = _build(
+            alice, filter_ai_usage=True,
+            include_strategy="authored_threads",
+            created_after=APR_07,
+            return_metadata=True,
+        )
+        assert result is not None
+        content = result["content"]
+        assert "bob april public reply marker" in content
+        assert "alice april reply marker" in content
+        assert {bob_post.id, alice_post.id}.issubset(result["node_ids"])

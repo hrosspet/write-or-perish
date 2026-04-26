@@ -770,25 +770,36 @@ def build_user_export_content(
     user, max_tokens=None, filter_ai_usage=False,
     created_before=None, created_after=None,
     chronological_order=False, return_metadata=False,
-    collapse_artifacts=False
+    collapse_artifacts=False,
+    include_strategy="authored_threads",
 ):
     """
     Core export logic: Build a human-readable text export of threads for a user.
 
-    Two modes:
-      - **Legacy (default, `created_after is None`)**: includes top-level
-        threads owned by the user (`Node.user_id == user.id`,
-        `parent_id IS NULL`) and walks their accessible descendants.
-        Used for user-facing data export and full-archive profile gen.
-      - **Incremental (`created_after is not None`)**: includes the user's
-        post-cutoff "anchors" (own or addressed nodes) plus their accessible
-        post-cutoff ancestors and descendants. Foreign post-cutoff ancestors
-        the target replied to are pulled in (conversational context);
-        foreign siblings the target never engaged with are excluded.
-        Renders entry points (a node in scope whose parent is not in scope)
-        with a short preamble when the entry point sits beneath a pre-cutoff
-        / out-of-scope parent. Used by `recent_context` and iterative
-        profile regen.
+    Two scope topologies, selected by `include_strategy`:
+      - **`authored_threads`** (default): includes top-level threads owned by
+        the user (`Node.user_id == user.id`, `parent_id IS NULL`) and walks
+        their accessible descendants top-down via `format_node_tree`. The
+        user does not need to author every node — replies from others on
+        their threads are included if accessible. Does NOT include foreign
+        threads the user replied to. Matches the user-facing `/export/threads`
+        data dump.
+      - **`engaged_threads`**: anchored on every node where the user is author
+        or `human_owner_id`. From each anchor, climb up through accessible
+        parents to the root or first inaccessible node, and climb down
+        through all accessible descendants. For user-rooted subtrees this is
+        a superset of `authored_threads` (climb-down from the owned root
+        picks up every accessible descendant). For foreign-rooted threads it
+        includes only the climb-up + climb-down path through user replies —
+        foreign sibling branches off the foreign root that the user did not
+        engage with are excluded. Used by `{user_export}` placeholder and
+        `recent_context` summaries.
+
+    NOTE: `include_strategy` is only consulted when `created_after` is None.
+    If `created_after` is set, the function always routes to the anchor-based
+    incremental path regardless of `include_strategy` (the time-floor
+    semantics imply the anchor topology). Preserves backwards compat with
+    existing recent_context callers.
 
     When `max_tokens` is specified, uses `ExportQuoteResolver` for smart
     quote resolution. The resolver may pull in pre-cutoff quoted nodes for
@@ -805,8 +816,9 @@ def build_user_export_content(
                         generation, False for user data export.
         created_before: Optional datetime. If provided, only includes
                        nodes created before this timestamp.
-        created_after: Optional datetime. If provided, switches to the
-                      incremental mode described above.
+        created_after: Optional datetime. If provided, forces the anchor-based
+                      incremental path with a time floor on anchors,
+                      regardless of `include_strategy`.
         chronological_order: If True and max_tokens is set, select oldest
                            nodes first (for iterative profile building).
         return_metadata: If True, return a dict with `content`,
@@ -815,12 +827,22 @@ def build_user_export_content(
                         `node_ids` (set of in-scope node IDs).
         collapse_artifacts: If True, suppress full artifact preambles
                            (artifact ID refs are still inlined).
+        include_strategy: Scope topology when `created_after` is None.
+                         "authored_threads" (default) or "engaged_threads".
+                         Any other value raises ValueError. See module
+                         docstring above for details.
 
     Returns:
         str or dict: Formatted export content (or None if no threads found).
                     If return_metadata=True, returns the dict described above.
     """
-    if created_after is not None:
+    if include_strategy not in ("authored_threads", "engaged_threads"):
+        raise ValueError(
+            f"include_strategy must be 'authored_threads' or "
+            f"'engaged_threads', got {include_strategy!r}"
+        )
+
+    if created_after is not None or include_strategy == "engaged_threads":
         return _build_user_export_incremental(
             user, max_tokens=max_tokens, filter_ai_usage=filter_ai_usage,
             created_before=created_before, created_after=created_after,

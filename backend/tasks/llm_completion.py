@@ -6,7 +6,6 @@ import re
 from celery import Task
 from celery.utils.log import get_task_logger
 from datetime import datetime
-from urllib.parse import parse_qs
 
 from backend.celery_app import celery, flask_app
 from backend.models import (
@@ -23,20 +22,17 @@ from backend.utils.api_keys import determine_api_key_type, get_api_keys_for_usag
 from backend.utils.cost import calculate_llm_cost_microdollars
 from backend.utils.tool_meta import update_tool_meta, parse_github_issue
 from backend.utils.privacy import AI_ALLOWED
+from backend.utils.placeholders import (
+    USER_EXPORT_PATTERN,
+    parse_placeholder_params,
+    parse_max_export_tokens,
+)
 
 logger = get_task_logger(__name__)
 
-# Pattern for detecting {user_export} with optional URL-style params.
-#
-# Syntax: {user_export} or {user_export?param=value&param2=value2}
-#
-# Supported params:
-#   keep=oldest  - When truncating to fit the context window, keep the oldest
-#                  threads instead of the newest (default). Useful for tasks
-#                  that need early/foundational writing.
-#   keep=newest  - Explicit default: keep the newest threads when truncating.
-#
-USER_EXPORT_PATTERN = re.compile(r"\{user_export(\?[^}]*)?\}")
+# See backend/utils/placeholders.py for USER_EXPORT_PATTERN and the
+# {user_export} placeholder syntax/modifier reference.
+
 # Placeholder for injecting user's AI-generated profile into messages
 USER_PROFILE_PLACEHOLDER = "{user_profile}"
 # Placeholder for injecting user's todo list into messages
@@ -491,20 +487,14 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
     return tool_results
 
 
-def parse_placeholder_params(match_str):
-    """Parse URL-style params from a placeholder like {user_export?keep=oldest}."""
-    if '?' in match_str:
-        qs = match_str.split('?', 1)[1].rstrip('}')
-        return {k: v[0] for k, v in parse_qs(qs).items()}
-    return {}
-
-
 def build_user_export_content(user, max_tokens=None, filter_ai_usage=False,
-                              created_before=None, chronological_order=False):
+                              created_before=None, chronological_order=False,
+                              include_strategy="authored_threads"):
     """Import the actual implementation from export_data routes."""
     from backend.routes.export_data import build_user_export_content as _build
     return _build(user, max_tokens, filter_ai_usage, created_before,
-                  chronological_order=chronological_order)
+                  chronological_order=chronological_order,
+                  include_strategy=include_strategy)
 
 
 def get_user_profile_content(user_id):
@@ -804,7 +794,15 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # _scan_proposal_statuses above)
 
             if needs_export:
-                max_export_tokens = None  # Send entire archive; let retry loop converge
+                # None = full archive; the retry loop converges if the
+                # prompt overflows. A user-supplied max_export_tokens
+                # becomes the initial budget instead.
+                max_export_tokens = parse_max_export_tokens(
+                    export_params.get('max_export_tokens'),
+                    user_id=user_id,
+                    placeholder=export_placeholder_match,
+                    log=logger,
+                )
 
             # Determine which API key to use based on ai_usage settings
             key_type = determine_api_key_type(node_chain, logger=logger)
@@ -833,9 +831,19 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             max_tokens=max_export_tokens,
                             filter_ai_usage=True,
                             created_before=created_before,
-                            chronological_order=chronological
+                            chronological_order=chronological,
+                            include_strategy="engaged_threads",
                         )
-                        logger.info(f"Built user export for {user_id}: {len(user_export_content or '')} chars, ~{approximate_token_count(user_export_content or '')} tokens, cutoff={created_before} (attempt {attempt + 1})")
+                        requested_max = export_params.get('max_export_tokens')
+                        logger.info(
+                            f"Built user export for {user_id}: "
+                            f"{len(user_export_content or '')} chars, "
+                            f"~{approximate_token_count(user_export_content or '')} tokens, "
+                            f"cutoff={created_before}, "
+                            f"strategy=engaged_threads, "
+                            f"requested_max={requested_max} "
+                            f"(attempt {attempt + 1})"
+                        )
 
                 # Track which heavy-context placeholders have been replaced
                 # so subsequent occurrences get emptied (dedup).
