@@ -9,6 +9,7 @@ import pathlib
 import os
 import shutil
 from backend.utils.encryption import encrypt_file
+from backend.utils.llm_nodes import pick_model_for_generation
 
 drafts_bp = Blueprint("drafts_bp", __name__)
 
@@ -574,7 +575,10 @@ def finalize_streaming(session_id):
     parent_id = data.get("parent_id")  # thread parent for LLM chain
     model = data.get("model")  # LLM model for server-side generation
     if not model and label in ("Reflect", "Orient"):
-        model = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.5")
+        # Walks ancestry from parent_id (if any) → user.preferred_model
+        # → DEFAULT.
+        parent_node = Node.query.get(parent_id) if parent_id else None
+        model = pick_model_for_generation(parent_node, current_user)
 
     if total_chunks is None:
         return jsonify({"error": "Missing total_chunks"}), 400

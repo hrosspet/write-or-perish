@@ -28,7 +28,9 @@ from backend.utils.quotes import find_quote_ids, get_quote_data, has_quotes
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.webm_utils import get_webm_duration
 from backend.utils.encryption import encrypt_file, decrypt_file_to_temp
-from backend.utils.llm_nodes import create_llm_placeholder
+from backend.utils.llm_nodes import (
+    create_llm_placeholder, pick_model_for_generation,
+)
 from backend.utils.placeholders import UserExportValidationError
 
 # ---------------------------------------------------------------------------
@@ -827,7 +829,21 @@ def get_models():
 @nodes_bp.route("/default-model", methods=["GET"])
 @login_required
 def get_default_model():
-    """Return the default LLM model from server config."""
+    """Return the LLM model that would be used for a fresh thread.
+
+    Falls through user.preferred_model → server config DEFAULT_LLM_MODEL,
+    matching the backend's actual selection logic when no parent context
+    exists (see ``pick_model_for_generation``).
+    """
+    supported = current_app.config["SUPPORTED_MODELS"]
+    pref = getattr(current_user, "preferred_model", None)
+    if pref:
+        cfg = supported.get(pref)
+        if cfg and not cfg.get("deprecated"):
+            return jsonify({
+                "suggested_model": pref,
+                "source": "user_preference",
+            }), 200
     default_model = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.5")
     return jsonify({
         "suggested_model": default_model,
@@ -863,12 +879,22 @@ def get_suggested_model(node_id):
                     "suggested_model": current.llm_model,
                     "source": "predecessor"
                 }), 200
-            # Deprecated or legacy model — fall through to default
+            # Deprecated or legacy model — fall through
             elif cfg or current.llm_model == "gpt-4.5-preview":
                 break
         current = current.parent
 
-    # No predecessor found or legacy model - return default
+    # No usable predecessor — try the user's account preference
+    pref = getattr(current_user, "preferred_model", None)
+    if pref:
+        cfg = supported.get(pref)
+        if cfg and not cfg.get("deprecated"):
+            return jsonify({
+                "suggested_model": pref,
+                "source": "user_preference",
+            }), 200
+
+    # Fall back to server default
     default_model = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.5")
     return jsonify({
         "suggested_model": default_model,
@@ -892,8 +918,8 @@ def request_llm_response(node_id):
         return jsonify({"error": f"Invalid source_mode: {source_mode}"}), 400
 
     if not model_id:
-        # Fall back to default model for backward compatibility
-        model_id = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.5")
+        # Walks ancestry from parent_node → user.preferred_model → DEFAULT.
+        model_id = pick_model_for_generation(parent_node, current_user)
 
     # Validate model is supported
     if model_id not in current_app.config["SUPPORTED_MODELS"]:

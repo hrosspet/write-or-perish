@@ -1,8 +1,57 @@
 """Shared factory for creating LLM placeholder nodes."""
 
+from flask import current_app
+
 from backend.models import Node, User
 from backend.extensions import db
 from backend.utils.placeholders import validate_user_export_placeholders
+
+
+_MAX_ANCESTRY_HOPS = 1000
+
+
+def pick_model_for_generation(parent_node, user):
+    """Pick the LLM model for an auto-generated response when the caller
+    has not supplied an explicit model.
+
+    Priority:
+      1. Closest ancestor LLM node's ``llm_model`` (active, non-deprecated).
+      2. ``user.preferred_model`` from the Account page (active,
+         non-deprecated).
+      3. ``DEFAULT_LLM_MODEL`` from the Flask config / env.
+
+    Cycle-safe walk up to ``_MAX_ANCESTRY_HOPS`` parents.
+    """
+    supported = current_app.config.get("SUPPORTED_MODELS", {})
+
+    def _is_active(model_id):
+        cfg = supported.get(model_id)
+        return cfg is not None and not cfg.get("deprecated")
+
+    if parent_node is not None:
+        current = parent_node
+        visited = set()
+        for _ in range(_MAX_ANCESTRY_HOPS):
+            if current is None or current.id in visited:
+                break
+            visited.add(current.id)
+            if (
+                current.node_type == "llm"
+                and current.llm_model
+                and _is_active(current.llm_model)
+            ):
+                return current.llm_model
+            current = (
+                Node.query.get(current.parent_id)
+                if current.parent_id else None
+            )
+
+    if user is not None:
+        pref = getattr(user, "preferred_model", None)
+        if pref and _is_active(pref):
+            return pref
+
+    return current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.5")
 
 
 def create_llm_placeholder(parent_node_id, model_id, human_owner_id,

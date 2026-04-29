@@ -3,7 +3,9 @@ from flask_login import login_required, current_user
 from backend.models import Node
 from backend.extensions import db
 from backend.utils.prompts import get_user_prompt_record
-from backend.utils.llm_nodes import create_llm_placeholder
+from backend.utils.llm_nodes import (
+    create_llm_placeholder, pick_model_for_generation,
+)
 from backend.utils.placeholders import UserExportValidationError
 from backend.utils.context_artifacts import attach_context_artifacts
 from backend.utils.session_helpers import (
@@ -33,9 +35,8 @@ def create_voice_from_node(node_id):
     data = request.get_json() or {}
     model_id = data.get("model")
     if not model_id:
-        model_id = current_app.config.get(
-            "DEFAULT_LLM_MODEL", "claude-opus-4.5"
-        )
+        # Walks ancestry from `node` → user.preferred_model → DEFAULT.
+        model_id = pick_model_for_generation(node, current_user)
     if model_id not in current_app.config["SUPPORTED_MODELS"]:
         return jsonify({"error": f"Unsupported model: {model_id}"}), 400
 
@@ -135,14 +136,7 @@ def create_voice_session():
     if not content or not content.strip():
         return jsonify({"error": "Content is required"}), 400
 
-    if not model_id:
-        model_id = current_app.config.get(
-            "DEFAULT_LLM_MODEL", "claude-opus-4.5"
-        )
-
-    if model_id not in current_app.config["SUPPORTED_MODELS"]:
-        return jsonify({"error": f"Unsupported model: {model_id}"}), 400
-
+    parent_node = None
     if parent_id:
         parent_node = Node.query.get(parent_id)
         if not parent_node:
@@ -152,7 +146,16 @@ def create_voice_session():
         # Inherit ai_usage from parent node in the thread
         ai_usage = parent_node.ai_usage or current_user.default_ai_usage
         user_parent_id = parent_id
-    else:
+
+    if not model_id:
+        # Walks ancestry from parent_node (or skips ancestry for fresh
+        # sessions) → user.preferred_model → DEFAULT.
+        model_id = pick_model_for_generation(parent_node, current_user)
+
+    if model_id not in current_app.config["SUPPORTED_MODELS"]:
+        return jsonify({"error": f"Unsupported model: {model_id}"}), 400
+
+    if not parent_id:
         ai_usage = data.get("ai_usage") or current_user.default_ai_usage
         prompt_record = get_user_prompt_record(current_user.id, PROMPT_KEY)
         system_node = Node(

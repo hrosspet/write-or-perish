@@ -5,7 +5,9 @@ from flask_login import login_required, current_user
 from backend.models import Node
 from backend.extensions import db
 from backend.utils.prompts import get_user_prompt_record
-from backend.utils.llm_nodes import create_llm_placeholder
+from backend.utils.llm_nodes import (
+    create_llm_placeholder, pick_model_for_generation,
+)
 from backend.utils.context_artifacts import attach_context_artifacts
 from backend.utils.privacy import validate_ai_usage
 
@@ -78,9 +80,9 @@ def start_conversation():
         }), 400
 
     if not model_id:
-        model_id = current_app.config.get(
-            "DEFAULT_LLM_MODEL", "claude-opus-4.5"
-        )
+        # /textmode/start has no parent — ancestry is empty, so the
+        # helper falls through to user.preferred_model, then DEFAULT.
+        model_id = pick_model_for_generation(None, current_user)
 
     if model_id not in current_app.config["SUPPORTED_MODELS"]:
         return jsonify({"error": f"Unsupported model: {model_id}"}), 400
@@ -160,17 +162,16 @@ def add_message(conversation_id):
     if system_node.user_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
 
-    if not model_id:
-        model_id = current_app.config.get(
-            "DEFAULT_LLM_MODEL", "claude-opus-4.5"
-        )
-
-    if model_id not in current_app.config["SUPPORTED_MODELS"]:
-        return jsonify({"error": f"Unsupported model: {model_id}"}), 400
-
     last_node = Node.query.get(parent_id)
     if not last_node or last_node.human_owner_id != current_user.id:
         return jsonify({"error": "Invalid parent_id"}), 400
+
+    if not model_id:
+        # Walks ancestry from last_node → user.preferred_model → DEFAULT.
+        model_id = pick_model_for_generation(last_node, current_user)
+
+    if model_id not in current_app.config["SUPPORTED_MODELS"]:
+        return jsonify({"error": f"Unsupported model: {model_id}"}), 400
 
     # Verify parent_id is a descendant of conversation_id.
     # Cycle-safe: bail out if we revisit a node or exceed a sane hop limit.
