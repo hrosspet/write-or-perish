@@ -222,7 +222,12 @@ export const AudioProvider = ({ children }) => {
     audioQueueRef.current = urls.slice(chunkIndex + 1);
 
     // Reuse preloaded element (already fetching), gesture-activated warmup
-    // element (Safari autoplay), or create a fresh one.
+    // element (Safari autoplay), or — for chunks chained from `onended` —
+    // the existing element so user-gesture autoplay permission carries
+    // over. iOS Safari ties autoplay to a specific HTMLMediaElement; a
+    // fresh Audio() created mid-playback has no gesture context and
+    // play() rejects with NotAllowedError, so the next batch never
+    // starts and playback appears to pause at chunk boundaries.
     const chunkUrl = urls[chunkIndex];
     let audio;
     if (preloadedElement) {
@@ -231,6 +236,10 @@ export const AudioProvider = ({ children }) => {
       audio = warmedAudioRef.current;
       warmedAudioRef.current = null;
       audio.src = chunkUrl;
+    } else if (audioRef.current) {
+      audio = audioRef.current;
+      audio.src = chunkUrl;
+      audio.load();
     } else {
       audio = new Audio(chunkUrl);
     }
