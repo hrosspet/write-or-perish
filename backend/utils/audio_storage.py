@@ -11,11 +11,45 @@ from flask import current_app
 
 from backend.extensions import db
 from backend.models import Draft, NodeTranscriptChunk
-from backend.utils.webm_utils import fix_last_chunk_duration, is_ffmpeg_available
 
 AUDIO_STORAGE_ROOT = pathlib.Path(
     os.environ.get("AUDIO_STORAGE_PATH", "data/audio")
 ).resolve()
+
+
+def move_draft_audio_to_node_dir(
+    draft_audio_dir: pathlib.Path,
+    node_audio_dir: pathlib.Path,
+    logger,
+) -> None:
+    """Move every audio file from a streaming-session draft dir into the
+    node's permanent audio dir, then remove the emptied draft dir.
+
+    Skips `init.webm` (and `init.webm.enc`) — that file is the extracted
+    EBML/Segment/Tracks prefix cached on chunk-0 upload so later batches
+    can remux into valid WebM, and has no purpose in node storage.
+    Callers pass their own logger so the messages land with the right
+    request/task context.
+
+    Best-effort: exceptions are logged at warning level rather than
+    raised, since by the time this is called the DB record has already
+    been committed and a move failure shouldn't undo that.
+    """
+    if not draft_audio_dir.exists():
+        return
+    try:
+        node_audio_dir.mkdir(parents=True, exist_ok=True)
+        for fp in draft_audio_dir.iterdir():
+            if fp.name.startswith("init.webm"):
+                fp.unlink()
+                continue
+            shutil.move(str(fp), str(node_audio_dir / fp.name))
+        draft_audio_dir.rmdir()
+        logger.info(
+            f"Moved audio from {draft_audio_dir} -> {node_audio_dir}"
+        )
+    except Exception as e:
+        logger.warning(f"Failed to move audio files: {e}")
 
 
 def attach_streaming_audio_to_node(session_id, node, user_id):
@@ -41,37 +75,10 @@ def attach_streaming_audio_to_node(session_id, node, user_id):
 
     draft_audio_dir = AUDIO_STORAGE_ROOT / f"drafts/{user_id}/{session_id}"
 
-    if draft_audio_dir.exists():
-        # Fix last-chunk WebM duration metadata if possible
-        if is_ffmpeg_available():
-            success, message = fix_last_chunk_duration(str(draft_audio_dir))
-            if success:
-                current_app.logger.info(
-                    f"Fixed last chunk duration: {message}"
-                )
-            else:
-                current_app.logger.warning(
-                    f"Could not fix last chunk duration: {message}"
-                )
-
-        node_audio_dir = (
-            AUDIO_STORAGE_ROOT / f"nodes/{user_id}/{node.id}"
-        )
-        try:
-            node_audio_dir.mkdir(parents=True, exist_ok=True)
-            for file_path in draft_audio_dir.iterdir():
-                shutil.move(
-                    str(file_path),
-                    str(node_audio_dir / file_path.name),
-                )
-            draft_audio_dir.rmdir()
-            current_app.logger.info(
-                f"Moved audio from {draft_audio_dir} -> {node_audio_dir}"
-            )
-        except Exception as e:
-            current_app.logger.warning(
-                f"Failed to move audio files: {e}"
-            )
+    node_audio_dir = AUDIO_STORAGE_ROOT / f"nodes/{user_id}/{node.id}"
+    move_draft_audio_to_node_dir(
+        draft_audio_dir, node_audio_dir, current_app.logger,
+    )
 
     # Point transcript-chunk rows at the node
     NodeTranscriptChunk.query.filter_by(
