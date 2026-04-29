@@ -655,6 +655,45 @@ class TestModelSelectionPriority:
         llm_node = Node.query.get(resp.get_json()["llm_node_id"])
         assert llm_node.llm_model == "gpt-5.1"
 
+    def test_deprecated_closest_ancestor_falls_through_to_preference(self, app):
+        """If the closest LLM ancestor used a now-deprecated model, the
+        walker must stop there and fall through to user.preferred_model
+        — silently skipping past it to an older active ancestor would
+        diverge from /suggested-model and override the user's current
+        account preference."""
+        client = app.test_client()
+        alice = _make_user("alice", preferred_model="claude-opus-4.7")
+        _db.session.commit()
+
+        # Chain: root -> active_llm(gpt-5.1) -> middle -> deprecated_llm
+        # If the helper walked past the deprecated ancestor it would
+        # surface gpt-5.1; with the alignment fix it surfaces the user
+        # preference (claude-opus-4.7).
+        root = _make_node(alice, content="root")
+        older_llm_user = _make_user(
+            "gpt-5.1", twitter_id="llm-gpt-5.1-deptest",
+        )
+        older_llm = _make_node(
+            older_llm_user, parent_id=root.id, content="older",
+            node_type="llm", llm_model="gpt-5.1", human_owner=alice,
+        )
+        middle = _make_node(alice, parent_id=older_llm.id, content="mid")
+        dep_user = _make_user(
+            "deprecated-model", twitter_id="llm-dep-ancestor",
+        )
+        dep_llm = _make_node(
+            dep_user, parent_id=middle.id, content="dep",
+            node_type="llm", llm_model="deprecated-model",
+            human_owner=alice,
+        )
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.post(f"/api/nodes/{dep_llm.id}/llm", json={})
+        assert resp.status_code == 202
+        new_llm = Node.query.get(resp.get_json()["node_id"])
+        assert new_llm.llm_model == "claude-opus-4.7"
+
     def test_nodes_llm_inherits_from_ancestry(self, app):
         """POST /nodes/<id>/llm with no explicit model walks ancestry."""
         client = app.test_client()
@@ -711,6 +750,31 @@ class TestSuggestedModelEndpoint:
         body = resp.get_json()
         assert body["suggested_model"] == "gpt-5"
         assert body["source"] == "default"
+
+    def test_suggested_model_deprecated_ancestor_falls_through(self, app):
+        """Display endpoint must agree with pick_model_for_generation:
+        deprecated closest ancestor → fall through to user preference."""
+        client = app.test_client()
+        alice = _make_user("alice", preferred_model="claude-opus-4.7")
+        _db.session.commit()
+
+        root = _make_node(alice, content="root")
+        dep_user = _make_user(
+            "deprecated-model", twitter_id="llm-dep-suggested",
+        )
+        dep_llm = _make_node(
+            dep_user, parent_id=root.id, content="dep",
+            node_type="llm", llm_model="deprecated-model",
+            human_owner=alice,
+        )
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.get(f"/api/nodes/{dep_llm.id}/suggested-model")
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body["suggested_model"] == "claude-opus-4.7"
+        assert body["source"] == "user_preference"
 
     def test_suggested_model_falls_through_to_user_preference(self, app):
         """Node has no LLM ancestor — fall through to preference."""

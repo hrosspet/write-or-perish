@@ -20,6 +20,14 @@ def pick_model_for_generation(parent_node, user):
          non-deprecated).
       3. ``DEFAULT_LLM_MODEL`` from the Flask config / env.
 
+    If the closest LLM ancestor is recognized but no longer usable
+    (deprecated, or the historical ``gpt-4.5-preview`` legacy id), the
+    walk stops there and falls through to ``user.preferred_model``.
+    Walking past it to find an even older active model would silently
+    override the user's current account preference and diverge from the
+    ``/suggested-model`` display endpoint. Truly-unknown ancestors keep
+    walking — they're typically placeholder rows from data migrations.
+
     Cycle-safe walk up to ``_MAX_ANCESTRY_HOPS`` parents.
     """
     supported = current_app.config.get("SUPPORTED_MODELS", {})
@@ -35,12 +43,14 @@ def pick_model_for_generation(parent_node, user):
             if current is None or current.id in visited:
                 break
             visited.add(current.id)
-            if (
-                current.node_type == "llm"
-                and current.llm_model
-                and _is_active(current.llm_model)
-            ):
-                return current.llm_model
+            if current.node_type == "llm" and current.llm_model:
+                if _is_active(current.llm_model):
+                    return current.llm_model
+                # Recognized-but-unusable: stop and fall through to the
+                # user's account preference.
+                if (current.llm_model in supported
+                        or current.llm_model == "gpt-4.5-preview"):
+                    break
             current = (
                 Node.query.get(current.parent_id)
                 if current.parent_id else None
