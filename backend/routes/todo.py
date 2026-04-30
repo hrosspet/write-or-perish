@@ -227,7 +227,7 @@ def _start_todo_merge(draft, llm_node, user_id, confirm_node_id=None):
             with the final outcome.
     """
     merge_model = llm_node.llm_model or current_app.config.get(
-        "DEFAULT_LLM_MODEL", "claude-opus-4.5"
+        "DEFAULT_LLM_MODEL", "claude-opus-4.6"
     )
 
     # Delete ALL pending todo drafts for this user (not just the one found)

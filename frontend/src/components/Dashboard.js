@@ -57,7 +57,7 @@ function Dashboard() {
       })
       .catch((err) => {
         console.error("Error fetching default model:", err);
-        setSelectedModel("claude-opus-4.5"); // Fallback
+        setSelectedModel("claude-opus-4.6"); // Fallback
       });
   }, [endpoint]);
 

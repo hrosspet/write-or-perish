@@ -844,7 +844,7 @@ def get_default_model():
                 "suggested_model": pref,
                 "source": "user_preference",
             }), 200
-    default_model = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.5")
+    default_model = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.6")
     return jsonify({
         "suggested_model": default_model,
         "source": "default"
@@ -895,7 +895,7 @@ def get_suggested_model(node_id):
             }), 200
 
     # Fall back to server default
-    default_model = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.5")
+    default_model = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.6")
     return jsonify({
         "suggested_model": default_model,
         "source": "default"

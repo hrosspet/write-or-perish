@@ -50,7 +50,7 @@ services:
       - ANTHROPIC_API_KEY_CHAT=${ANTHROPIC_API_KEY_CHAT}
       - ANTHROPIC_API_KEY_TRAIN=${ANTHROPIC_API_KEY_TRAIN}
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
-      - LLM_NAME=${LLM_NAME:-claude-opus-4.5}
+      - LLM_NAME=${LLM_NAME:-claude-opus-4.6}
       - FLASK_ENV=${FLASK_ENV:-production}
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - GITHUB_REPO=${GITHUB_REPO}
@@ -86,7 +86,7 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - ANTHROPIC_API_KEY_CHAT=${ANTHROPIC_API_KEY_CHAT}
       - ANTHROPIC_API_KEY_TRAIN=${ANTHROPIC_API_KEY_TRAIN}
-      - LLM_NAME=${LLM_NAME:-claude-opus-4.5}
+      - LLM_NAME=${LLM_NAME:-claude-opus-4.6}
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - GITHUB_REPO=${GITHUB_REPO}
       - MAIL_SERVER=${MAIL_SERVER}
@@ -115,7 +115,7 @@ services:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-writeorperish}:${POSTGRES_PASSWORD:-writeorperish}@db:5432/${POSTGRES_DB:-writeorperish}
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
-      - LLM_NAME=${LLM_NAME:-claude-opus-4.5}
+      - LLM_NAME=${LLM_NAME:-claude-opus-4.6}
     depends_on:
       db:
         condition: service_healthy
