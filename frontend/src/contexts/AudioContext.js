@@ -44,9 +44,6 @@ export const AudioProvider = ({ children }) => {
   const queueMetadataRef = useRef(null);
   // Playback ID to prevent stale event handlers from updating state
   const playbackIdRef = useRef(0);
-  // For WebM files with continuous timestamps: track the starting timestamp offset of current chunk
-  // (MediaRecorder with timeslice produces chunks where timestamps continue across chunks)
-  const chunkTimestampOffsetRef = useRef(0);
 
   // Calculate cumulative time based on chunk index and current position
   const calculateCumulativeTime = useCallback((chunkIndex, timeInChunk) => {
@@ -73,10 +70,7 @@ export const AudioProvider = ({ children }) => {
         return;
       }
       if (audioRef.current && isFinite(audioRef.current.currentTime)) {
-        const rawTime = audioRef.current.currentTime;
-        // Subtract timestamp offset for WebM files with continuous timestamps
-        const timeInChunk = rawTime - chunkTimestampOffsetRef.current;
-        // Read chunk index from ref directly for most up-to-date value
+        const timeInChunk = audioRef.current.currentTime;
         const currentChunkIdx = currentChunkIndexRef.current;
         setCurrentTime(timeInChunk);
         setCumulativeTime(calculateCumulativeTime(currentChunkIdx, timeInChunk));
@@ -246,35 +240,19 @@ export const AudioProvider = ({ children }) => {
     audioRef.current = audio;
     audio.playbackRate = playbackRate;
 
-    // Detect if this is a WebM file with continuous timestamps
-    // WebM files from MediaRecorder with timeslice have timestamps that continue
-    // across chunks (chunk 0: 0-300s, chunk 1: 300-600s, etc.)
-    // MP3 and other formats start at timestamp 0 in each file
-    const isWebM = chunkUrl.toLowerCase().includes('.webm');
-
     // Track if we've already seeked (to avoid multiple seeks)
     let hasSeeked = false;
-    // Track if we've detected the timestamp offset for this chunk
-    let hasDetectedOffset = false;
 
     audio.onloadedmetadata = () => {
-      // Check if this handler is still valid
       if (playbackIdRef.current !== thisPlaybackId) return;
 
       const actualDuration = audio.duration;
-
-      if (isWebM) {
-        // WebM duration includes all prior chunks, so don't compare directly
-        // The ontimeupdate handler will detect the offset and correct durations
-      } else {
-        // For MP3 and other formats, update stored duration if significantly different
-        if (isFinite(actualDuration) && Math.abs(durations[chunkIndex] - actualDuration) > 1) {
-          const updatedDurations = [...chunkDurationsRef.current];
-          updatedDurations[chunkIndex] = actualDuration;
-          chunkDurationsRef.current = updatedDurations;
-          setChunkDurations(updatedDurations);
-          recalculateTotalDuration(updatedDurations);
-        }
+      if (isFinite(actualDuration) && Math.abs(durations[chunkIndex] - actualDuration) > 1) {
+        const updatedDurations = [...chunkDurationsRef.current];
+        updatedDurations[chunkIndex] = actualDuration;
+        chunkDurationsRef.current = updatedDurations;
+        setChunkDurations(updatedDurations);
+        recalculateTotalDuration(updatedDurations);
       }
       setDuration(actualDuration);
       setLoading(false);
@@ -283,74 +261,29 @@ export const AudioProvider = ({ children }) => {
     // Use canplay event for seeking - this fires when the browser can actually seek
     audio.oncanplay = () => {
       if (playbackIdRef.current !== thisPlaybackId) return;
-      if (hasSeeked) return; // Only seek once
+      if (hasSeeked) return;
       hasSeeked = true;
 
-      if (isWebM) {
-        // For WebM with continuous timestamps, add the expected offset
-        const expectedOffset = durations.slice(0, chunkIndex).reduce((a, b) => a + b, 0);
-        const rawSeekTime = safeTimeInChunk + expectedOffset;
-        const clampedTime = Math.max(expectedOffset, Math.min(rawSeekTime, (audio.duration || expectedOffset + 300)));
-        if (isFinite(clampedTime)) {
-          audio.currentTime = clampedTime;
-        }
-      } else {
-        // For MP3 and other formats, seek directly within the chunk
-        if (safeTimeInChunk > 0 && isFinite(safeTimeInChunk)) {
-          const clampedTime = Math.min(safeTimeInChunk, audio.duration || 300);
-          audio.currentTime = clampedTime;
-        }
+      if (safeTimeInChunk > 0 && isFinite(safeTimeInChunk)) {
+        const clampedTime = Math.min(safeTimeInChunk, audio.duration || 300);
+        audio.currentTime = clampedTime;
       }
     };
 
-    // Set the timestamp offset immediately based on format detection
-    // (don't wait for ontimeupdate which fires too late for initial seek)
-    if (isWebM) {
-      // Will be refined in ontimeupdate, but set a reasonable initial value
-      chunkTimestampOffsetRef.current = durations.slice(0, chunkIndex).reduce((a, b) => a + b, 0);
-    } else {
-      // MP3 and other formats always start at 0
-      chunkTimestampOffsetRef.current = 0;
-    }
-
     audio.ontimeupdate = () => {
-      // Check if this handler is still valid
       if (playbackIdRef.current !== thisPlaybackId) return;
 
-      const rawTime = audio.currentTime;
-
-      // Refine timestamp offset detection on first time update (WebM only)
-      if (!hasDetectedOffset) {
-        hasDetectedOffset = true;
-        if (isWebM) {
-          const expectedOffset = durations.slice(0, chunkIndex).reduce((a, b) => a + b, 0);
-          if (rawTime > expectedOffset - 5 && rawTime < expectedOffset + durations[chunkIndex] + 5) {
-            chunkTimestampOffsetRef.current = expectedOffset;
-          } else if (rawTime < 5) {
-            chunkTimestampOffsetRef.current = 0;
-          } else {
-            chunkTimestampOffsetRef.current = rawTime;
-          }
-        }
-        // For non-WebM, offset stays 0 (set above)
-      }
-
-      // Calculate time within chunk by subtracting the offset
-      const timeInCurrentChunk = rawTime - chunkTimestampOffsetRef.current;
+      const timeInCurrentChunk = audio.currentTime;
       setCurrentTime(timeInCurrentChunk);
       setCumulativeTime(calculateCumulativeTime(chunkIndex, timeInCurrentChunk));
     };
 
     audio.onended = () => {
-      // Check if this handler is still valid
       if (playbackIdRef.current !== thisPlaybackId) return;
 
-      // CRITICAL: Update this chunk's duration based on actual playback time
-      // This fixes the issue where preloaded metadata durations are incorrect
-      // (common with MediaRecorder-produced files that lack proper duration headers)
-      // Subtract the timestamp offset to get the actual duration within this chunk
-      const rawEndTime = audio.currentTime;
-      const actualDuration = rawEndTime - chunkTimestampOffsetRef.current;
+      // Correct stored duration with the actual playback length — preloaded
+      // metadata is unreliable for MediaRecorder-produced files.
+      const actualDuration = audio.currentTime;
       if (isFinite(actualDuration) && actualDuration > 0) {
         const currentDurations = chunkDurationsRef.current;
         const existingDuration = currentDurations[chunkIndex];
@@ -428,7 +361,6 @@ export const AudioProvider = ({ children }) => {
     setCumulativeTime(0);
     allChunkUrlsRef.current = [];
     audioQueueRef.current = [];
-    chunkTimestampOffsetRef.current = 0;
 
     setLoading(true);
     setCurrentAudio(audioData);
@@ -526,10 +458,9 @@ export const AudioProvider = ({ children }) => {
     setTotalChunks(urls.length);
     setCurrentChunkIndex(0);
     currentChunkIndexRef.current = 0;
-    chunkTimestampOffsetRef.current = 0;
 
     // Use server-provided durations if available (accurate via ffprobe)
-    // Otherwise fall back to browser metadata detection (unreliable for WebM with continuous timestamps)
+    // Otherwise fall back to browser metadata detection
     let durations;
     if (serverDurations && serverDurations.length === urls.length && serverDurations.every(d => d != null)) {
       durations = serverDurations;
@@ -628,7 +559,6 @@ export const AudioProvider = ({ children }) => {
       allChunkUrlsRef.current = [];
       audioQueueRef.current = [];
       queueMetadataRef.current = null;
-      chunkTimestampOffsetRef.current = 0;
       setCurrentAudio(null);
     }
   }, [stopTimeTracking]);
@@ -687,9 +617,7 @@ export const AudioProvider = ({ children }) => {
     // If same chunk, just seek within it
     if (chunkIndex === currentChunkIndexRef.current && audioRef.current) {
       const safeTime = isFinite(timeInChunk) ? timeInChunk : 0;
-      // Add timestamp offset for WebM with continuous timestamps
-      const rawSeekTime = safeTime + chunkTimestampOffsetRef.current;
-      audioRef.current.currentTime = rawSeekTime;
+      audioRef.current.currentTime = safeTime;
       setCurrentTime(safeTime);
       setCumulativeTime(clampedTime);
     } else {
@@ -716,10 +644,7 @@ export const AudioProvider = ({ children }) => {
       return;
     }
 
-    // Calculate current cumulative time and add 10 seconds
-    // Subtract the timestamp offset to get the actual position within the chunk
-    const rawTime = audioRef.current?.currentTime || 0;
-    const timeInChunk = rawTime - chunkTimestampOffsetRef.current;
+    const timeInChunk = audioRef.current?.currentTime || 0;
     const currentCumulative = calculateCumulativeTime(currentChunkIndexRef.current, timeInChunk);
     seekToCumulativeTime(currentCumulative + 10);
   }, [calculateCumulativeTime, seekToCumulativeTime]);
@@ -738,10 +663,7 @@ export const AudioProvider = ({ children }) => {
       return;
     }
 
-    // Calculate current cumulative time and subtract 10 seconds
-    // Subtract the timestamp offset to get the actual position within the chunk
-    const rawTime = audioRef.current?.currentTime || 0;
-    const timeInChunk = rawTime - chunkTimestampOffsetRef.current;
+    const timeInChunk = audioRef.current?.currentTime || 0;
     const currentCumulative = calculateCumulativeTime(currentChunkIndexRef.current, timeInChunk);
     seekToCumulativeTime(currentCumulative - 10);
   }, [calculateCumulativeTime, seekToCumulativeTime]);
