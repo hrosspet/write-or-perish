@@ -721,12 +721,12 @@ const NodeForm = forwardRef(
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '8px' }}>
             <button
               type="submit"
-              disabled={loading || !isOnline}
+              disabled={loading || !isOnline || isStreamingRecording}
               style={{
                 borderColor: 'var(--accent)',
                 color: 'var(--accent)',
-                opacity: !isOnline ? 0.35 : 1,
-                cursor: loading || !isOnline ? 'not-allowed' : 'pointer',
+                opacity: !isOnline || isStreamingRecording ? 0.35 : 1,
+                cursor: loading || !isOnline || isStreamingRecording ? 'not-allowed' : 'pointer',
               }}
             >
               {isUploading
