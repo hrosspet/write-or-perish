@@ -1,11 +1,15 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { FaChevronDown, FaChevronUp } from 'react-icons/fa';
 import NodeFooter from './NodeFooter';
+import MarkdownBody from './MarkdownBody';
 
 const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => {
   // Detect voice notes via backend-provided has_original_audio flag
   const isVoiceNote = !!node.has_original_audio;
   const isPinned = !!node.pinned_at;
   const promptKey = node.prompt_key || null;
+
+  const [expanded, setExpanded] = useState(false);
 
   // Use full content if available; otherwise use preview.
   const text = node.content || node.preview || "";
@@ -17,6 +21,15 @@ const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => 
   const firstNewline = displayText.indexOf('\n');
   const title = firstNewline > 0 ? displayText.substring(0, firstNewline) : displayText;
   const body = firstNewline > 0 ? displayText.substring(firstNewline + 1).trim() : '';
+
+  // Only offer expand when there's full content AND the collapsed preview
+  // actually hides something: title past 120 chars, body past 250 chars,
+  // or body with >2 newline-separated lines (which would be line-clamped).
+  const canExpand = !!node.content && (
+    title.length > 120 ||
+    body.length > 250 ||
+    body.split('\n').length > 2
+  );
 
   // Compute children count – use node.child_count if available, else fallback to node.children.length.
   const childrenCount = typeof node.child_count !== "undefined"
@@ -61,29 +74,44 @@ const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => 
         e.currentTarget.style.transform = 'translateY(0)';
       }}
     >
-      <div style={{
-        fontFamily: "var(--sans)",
-        fontSize: "1rem",
-        color: "var(--text-primary)",
-        marginBottom: body ? "0.6rem" : "0",
-        fontWeight: 400,
-      }}>
-        {title.length > 120 ? title.substring(0, 120) + "..." : title}
-      </div>
-      {body && (
+      {expanded ? (
         <div style={{
           fontFamily: "var(--sans)",
-          fontSize: "0.92rem",
+          fontSize: "0.95rem",
           fontWeight: 300,
           color: "var(--text-secondary)",
           lineHeight: 1.7,
-          overflow: "hidden",
-          display: "-webkit-box",
-          WebkitLineClamp: 2,
-          WebkitBoxOrient: "vertical",
+          marginBottom: "0.6rem",
         }}>
-          {body.length > 250 ? body.substring(0, 250) + "..." : body}
+          <MarkdownBody>{node.content}</MarkdownBody>
         </div>
+      ) : (
+        <>
+          <div style={{
+            fontFamily: "var(--sans)",
+            fontSize: "1rem",
+            color: "var(--text-primary)",
+            marginBottom: body ? "0.6rem" : "0",
+            fontWeight: 400,
+          }}>
+            {title.length > 120 ? title.substring(0, 120) + "..." : title}
+          </div>
+          {body && (
+            <div style={{
+              fontFamily: "var(--sans)",
+              fontSize: "0.92rem",
+              fontWeight: 300,
+              color: "var(--text-secondary)",
+              lineHeight: 1.7,
+              overflow: "hidden",
+              display: "-webkit-box",
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: "vertical",
+            }}>
+              {body.length > 250 ? body.substring(0, 250) + "..." : body}
+            </div>
+          )}
+        </>
       )}
       {/* Footer row with optional tags + node footer */}
       <div onClick={(e) => e.stopPropagation()} style={{
@@ -125,6 +153,30 @@ const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => 
               Voice Note
             </span>
           ) : null}
+          {canExpand && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setExpanded((prev) => !prev);
+              }}
+              aria-label={expanded ? "Collapse preview" : "Expand preview"}
+              style={{
+                marginLeft: "8px",
+                padding: "4px 8px",
+                background: "none",
+                border: "none",
+                color: "var(--text-muted)",
+                cursor: "pointer",
+                display: "inline-flex",
+                alignItems: "center",
+                fontSize: "0.85rem",
+                lineHeight: 1,
+              }}
+            >
+              {expanded ? <FaChevronUp /> : <FaChevronDown />}
+            </button>
+          )}
         </div>
       </div>
     </div>

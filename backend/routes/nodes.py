@@ -699,11 +699,13 @@ def get_node(node_id):
     while current:
         # Only include ancestor if user has access
         if can_user_access_node(current, current_user.id):
+            ancestor_content = current.get_content()
             ancestor_data = {
                 "id": current.id,
                 "username": current.user.username if current.user else "Unknown",
                 "llm_model": current.llm_model,
-                "preview": make_preview(current.get_content()),
+                "content": ancestor_content,
+                "preview": make_preview(ancestor_content),
                 "node_type": current.node_type,
                 "child_count": len(current.children),
                 "created_at": current.created_at.isoformat(),

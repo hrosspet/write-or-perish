@@ -66,47 +66,53 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', onCheckbox
     li: ({ node, children: liChildren, ...props }) => {
       const isTask = props.className === 'task-list-item';
 
-      if (isTask && onCheckboxToggle) {
-        const itemText = extractText(liChildren).trim();
+      if (isTask) {
+        const itemText = onCheckboxToggle ? extractText(liChildren).trim() : null;
         const { children: filteredChildren } = replaceCheckboxes(
           liChildren,
-          (isChecked) => (
-            <span
-              onClick={(e) => {
+          (isChecked) => {
+            const interactive = !!onCheckboxToggle;
+            const handlers = interactive ? {
+              onClick: (e) => {
                 e.preventDefault();
                 onCheckboxToggle(itemText, isChecked);
-              }}
-              role="checkbox"
-              aria-checked={isChecked}
-              tabIndex={0}
-              onKeyDown={(e) => {
+              },
+              role: 'checkbox',
+              'aria-checked': isChecked,
+              tabIndex: 0,
+              onKeyDown: (e) => {
                 if (e.key === 'Enter' || e.key === ' ') {
                   e.preventDefault();
                   onCheckboxToggle(itemText, isChecked);
                 }
-              }}
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                width: '18px',
-                height: '18px',
-                borderRadius: '50%',
-                border: `1.5px solid ${isChecked ? 'var(--accent-dim)' : 'var(--border-hover)'}`,
-                background: isChecked ? 'var(--accent-dim)' : 'none',
-                flexShrink: 0,
-                marginRight: '8px',
-                fontSize: '0.6rem',
-                color: 'var(--bg-deep)',
-                fontWeight: 600,
-                transition: 'all 0.3s',
-                cursor: 'pointer',
-                verticalAlign: 'middle',
-              }}
-            >
-              {isChecked && '✓'}
-            </span>
-          ),
+              },
+            } : {};
+            return (
+              <span
+                {...handlers}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  width: '18px',
+                  height: '18px',
+                  borderRadius: '50%',
+                  border: `1.5px solid ${isChecked ? 'var(--accent-dim)' : 'var(--border-hover)'}`,
+                  background: isChecked ? 'var(--accent-dim)' : 'none',
+                  flexShrink: 0,
+                  marginRight: '8px',
+                  fontSize: '0.6rem',
+                  color: 'var(--bg-deep)',
+                  fontWeight: 600,
+                  transition: 'all 0.3s',
+                  cursor: interactive ? 'pointer' : 'inherit',
+                  verticalAlign: 'middle',
+                }}
+              >
+                {isChecked && '✓'}
+              </span>
+            );
+          },
         );
 
         return (
@@ -131,8 +137,6 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', onCheckbox
             whiteSpace: 'normal',
             overflowWrap: 'break-word',
             marginBottom: '2px',
-            listStyleType: isTask ? 'none' : undefined,
-            marginLeft: isTask ? '-24px' : undefined,
           }}
           {...props}
         >
@@ -154,7 +158,13 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', onCheckbox
         </pre>
       ),
     a: ({ node, children, ...props }) => (
-      <a style={{ color: 'var(--accent)', textDecoration: 'underline' }} target="_blank" rel="noopener noreferrer" {...props}>{children}</a>
+      <a
+        style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+        target="_blank"
+        rel="noopener noreferrer"
+        onClick={(e) => e.stopPropagation()}
+        {...props}
+      >{children}</a>
     ),
     table: ({ node, ...props }) => (
       <div style={{ overflowX: 'auto', margin: '8px 0' }}>

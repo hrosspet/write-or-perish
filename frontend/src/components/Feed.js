@@ -58,10 +58,12 @@ function Feed() {
   }, [hasMore, loading, loadingMore, page, fetchPage]);
 
   const handleBubbleClick = (nodeId, e) => {
+    const card = feedNodes.find(n => n.id === nodeId);
+    const targetId = (card && card.newest_node_id) || nodeId;
     if (e && (e.metaKey || e.ctrlKey)) {
-      window.open(`/node/${nodeId}`, '_blank');
+      window.open(`/node/${targetId}`, '_blank');
     } else {
-      navigate(`/node/${nodeId}`);
+      navigate(`/node/${targetId}`);
     }
   };
 
