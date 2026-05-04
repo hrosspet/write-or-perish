@@ -154,7 +154,13 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', onCheckbox
         </pre>
       ),
     a: ({ node, children, ...props }) => (
-      <a style={{ color: 'var(--accent)', textDecoration: 'underline' }} target="_blank" rel="noopener noreferrer" {...props}>{children}</a>
+      <a
+        style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+        target="_blank"
+        rel="noopener noreferrer"
+        onClick={(e) => e.stopPropagation()}
+        {...props}
+      >{children}</a>
     ),
     table: ({ node, ...props }) => (
       <div style={{ overflowX: 'auto', margin: '8px 0' }}>
