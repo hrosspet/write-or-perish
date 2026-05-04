@@ -105,7 +105,7 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', onCheckbox
                   color: 'var(--bg-deep)',
                   fontWeight: 600,
                   transition: 'all 0.3s',
-                  cursor: interactive ? 'pointer' : 'default',
+                  cursor: interactive ? 'pointer' : 'inherit',
                   verticalAlign: 'middle',
                 }}
               >
