@@ -312,6 +312,7 @@ function NodeDetail() {
   const tryAutoGenerateFor = async (parentNodeId, chainNodes) => {
     if (!autoGenerateActive) return null;
     if (!contextAllowsAi(chainNodes)) {
+      setAutoGenerate(false);
       addToast(
         'Turning off auto-generate. AI usage on some nodes is turned off.',
         8000,
