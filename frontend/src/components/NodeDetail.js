@@ -302,6 +302,25 @@ function NodeDetail() {
       });
   };
 
+  // Gate + fire a child LLM generation under `parentNodeId`. Returns the
+  // new pending LLM node id, or null if auto-generate is off or the
+  // ancestry blocks AI. Re-checks context at submit time (not just on
+  // mount): if ANY node in `chainNodes` has `ai_usage` outside {chat,
+  // train}, auto-generate silently skips and toasts the user. Prevents
+  // firing an LLM call that would omit parts of the thread from context
+  // and produce partial / confusing replies.
+  const tryAutoGenerateFor = async (parentNodeId, chainNodes) => {
+    if (!autoGenerateActive) return null;
+    if (!contextAllowsAi(chainNodes)) {
+      addToast(
+        'Turning off auto-generate. AI usage on some nodes is turned off.',
+        8000,
+      );
+      return null;
+    }
+    return await requestLlmFor(parentNodeId);
+  };
+
   // Called by NodeForm after it successfully POSTs /nodes/.
   // `data` is the newly-created child node from the backend.
   const handleInlineSuccess = async (data) => {
@@ -309,30 +328,46 @@ function NodeDetail() {
     if (!newNodeId) return;
     setError("");
     try {
-      // Re-check context at submit time (not just on mount): if ANY node
-      // in the current thread ancestry has `ai_usage` outside
-      // {chat, train}, auto-generate silently skips and toasts the user.
-      // Prevents firing an LLM call that would omit parts of the thread
-      // from context and produce partial / confusing replies.
       const chain = [node, ...(node.ancestors || [])];
-      const aiAllowed = contextAllowsAi(chain);
-      if (autoGenerateActive && aiAllowed) {
-        const llmNodeId = await requestLlmFor(newNodeId);
+      const llmNodeId = await tryAutoGenerateFor(newNodeId, chain);
+      if (llmNodeId) {
         // Navigate directly to the pending LLM node so the inline input
         // stays anchored below it throughout generation.
         navigate(`/node/${llmNodeId}?awaitLlm=${llmNodeId}`);
       } else {
-        if (autoGenerateActive && !aiAllowed) {
-          addToast(
-            'Turning off auto-generate. AI usage on some nodes is turned off.',
-            8000,
-          );
-        }
         navigate(`/node/${newNodeId}`);
       }
     } catch (err) {
       console.error(err);
       setError(err.response?.data?.error || err.message || "Error sending message.");
+    }
+  };
+
+  // Called after NodeForm successfully PUTs /nodes/<id>. Updates local
+  // state, closes the overlay, and — if the edited node is user-authored
+  // — fires a fresh LLM child off it. Re-running on a node that already
+  // has an LLM child produces a new sibling, i.e. a new branch off the
+  // edit. Editing an LLM node never triggers generation: nothing for it
+  // to reply to.
+  const handleEditSuccess = async (data) => {
+    const updated = data.node ? data.node : { ...node, content: data.content };
+    setNode(updated);
+    setShowEditOverlay(false);
+    const editedIsLlm = updated.node_type === "llm" || !!updated.llm_model;
+    if (editedIsLlm) return;
+    try {
+      const chain = [updated, ...(updated.ancestors || [])];
+      const llmNodeId = await tryAutoGenerateFor(updated.id, chain);
+      if (llmNodeId) navigate(`/node/${llmNodeId}?awaitLlm=${llmNodeId}`);
+    } catch (err) {
+      console.error(err);
+      const status = err?.response?.status;
+      const apiErr = err?.response?.data?.error;
+      if (status === 400 && apiErr) {
+        addToast(apiErr, 8000);
+        return;
+      }
+      setError(apiErr || err.message || "Error requesting LLM response.");
     }
   };
 
@@ -892,10 +927,7 @@ function NodeDetail() {
             initialPrivacyLevel: node.privacy_level,
             initialAiUsage: node.ai_usage,
             detachPrompt: !!node.context_artifacts?.prompt,
-            onSuccess: (data) => {
-              setNode(data.node ? data.node : { ...node, content: data.content });
-              setShowEditOverlay(false);
-            },
+            onSuccess: handleEditSuccess,
           }}
         />
       )}
