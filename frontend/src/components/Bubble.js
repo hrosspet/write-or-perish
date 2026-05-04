@@ -10,7 +10,6 @@ const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => 
   const promptKey = node.prompt_key || null;
 
   const [expanded, setExpanded] = useState(false);
-  const canExpand = !!node.content;
 
   // Use full content if available; otherwise use preview.
   const text = node.content || node.preview || "";
@@ -22,6 +21,15 @@ const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => 
   const firstNewline = displayText.indexOf('\n');
   const title = firstNewline > 0 ? displayText.substring(0, firstNewline) : displayText;
   const body = firstNewline > 0 ? displayText.substring(firstNewline + 1).trim() : '';
+
+  // Only offer expand when there's full content AND the collapsed preview
+  // actually hides something: title past 120 chars, body past 250 chars,
+  // or body with >2 newline-separated lines (which would be line-clamped).
+  const canExpand = !!node.content && (
+    title.length > 120 ||
+    body.length > 250 ||
+    body.split('\n').length > 2
+  );
 
   // Compute children count – use node.child_count if available, else fallback to node.children.length.
   const childrenCount = typeof node.child_count !== "undefined"
