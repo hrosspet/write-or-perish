@@ -310,6 +310,61 @@ def test_feed_excludes_soft_deleted(app, alice):
     assert deleted.id not in ids
 
 
+# ── 23. Direct URL to soft-deleted node returns 404 ────────────────────
+
+def test_direct_url_to_soft_deleted_node_404s(app, alice):
+    n = _make_node(alice)
+    n.deleted_at = datetime.utcnow()
+    _db.session.commit()
+    client = app.test_client()
+    _login(client, alice)
+    resp = client.get(f"/nodes/{n.id}")
+    assert resp.status_code == 404
+
+
+# ── Tombstone appears in ancestors when traversing through it ──────────
+
+def test_tombstone_in_ancestor_breadcrumb(app, alice, bob):
+    # Public node so bob has pre-deletion access via the breadcrumb walk
+    # from his nested public reply.
+    a_root = _make_node(alice)
+    a_root.privacy_level = "public"
+    b_reply = _make_node(bob, parent=a_root)
+    b_reply.privacy_level = "public"
+    a_root.deleted_at = datetime.utcnow()
+    _db.session.commit()
+    client = app.test_client()
+    _login(client, bob)
+    resp = client.get(f"/nodes/{b_reply.id}")
+    assert resp.status_code == 200
+    ancestors = resp.json["ancestors"]
+    assert len(ancestors) == 1
+    assert ancestors[0]["deleted"] is True
+    assert ancestors[0]["id"] == a_root.id
+    assert "content" not in ancestors[0]  # tombstone shell only
+
+
+def test_tombstone_ancestor_hidden_without_pre_access(app, alice, bob):
+    # Alice's node is private. Bob has no pre-deletion access. After
+    # soft-delete, the ancestor must be omitted entirely from bob's
+    # breadcrumb (not surfaced as a tombstone) — username/timestamp
+    # would otherwise leak.
+    a_root = _make_node(alice)  # private by default
+    # Bob can post a reply only if alice's node is public OR shared. For
+    # this test we manufacture the tree directly bypassing the API.
+    b_reply = _make_node(bob, parent=a_root)
+    b_reply.privacy_level = "public"
+    a_root.deleted_at = datetime.utcnow()
+    _db.session.commit()
+    client = app.test_client()
+    _login(client, bob)
+    resp = client.get(f"/nodes/{b_reply.id}")
+    assert resp.status_code == 200
+    # Alice's tombstone must NOT appear: it was private pre-deletion, so
+    # bob has no pre-deletion access. The ancestors list is empty.
+    assert resp.json["ancestors"] == []
+
+
 # ── 16. Inline quote rendering distinguishes deleted vs inaccessible ────
 
 def test_quote_resolver_deleted_vs_inaccessible(app, alice, bob):

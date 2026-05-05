@@ -418,33 +418,68 @@ def _context_artifact_fields(n):
 def serialize_node_recursive(n, user_id=None):
     """Recursively serialize a node and its accessible children.
 
+    Soft-deleted nodes the viewer had pre-deletion access to render as
+    tombstones (placeholder content + minimal metadata) so threaded
+    discussion stays coherent. Soft-deleted nodes the viewer never had
+    access to render as inaccessible stubs.
+
     Args:
         n: Node to serialize
         user_id: User ID to check access for (defaults to current_user.id)
 
     Returns:
-        dict: Serialized node with only accessible children
+        dict: Serialized node — full content / tombstone / inaccessible —
+              including children that pass the same filter.
     """
+    from backend.utils.serialization import serialize_node_status
+
     if user_id is None:
         user_id = current_user.id if current_user.is_authenticated else None
 
-    # Filter children to only include those the user can access
-    accessible_children = [child for child in n.children if can_user_access_node(child, user_id)]
+    status = serialize_node_status(n, user_id)
+    if status is not None and status.get("inaccessible"):
+        # Privacy-blocked or no-pre-access fallback. Don't recurse — the
+        # viewer has no business seeing the subtree's structure either.
+        return status
 
-    # Sort the accessible children using the cached _descendant_count
-    sorted_children = sorted(accessible_children, key=lambda child: child._descendant_count, reverse=True)
+    # Tombstones still recurse: soft-deleted ancestors may have live
+    # other-user replies below them. Children list keeps the same filter.
+    def _child_visible(child):
+        if can_user_access_node(child, user_id):
+            return True
+        if child.deleted_at is None:
+            return False
+        s = serialize_node_status(child, user_id)
+        return s is not None and not s.get("inaccessible")
+
+    visible_children = [c for c in n.children if _child_visible(c)]
+    sorted_children = sorted(
+        visible_children, key=lambda c: c._descendant_count, reverse=True,
+    )
+    children_data = [
+        serialize_node_recursive(child, user_id) for child in sorted_children
+    ]
+
+    if status is not None:
+        # Tombstone — content already omitted by serialize_node_status.
+        return {
+            **status,
+            "child_count": len(visible_children),
+            "descendant_count": n._descendant_count,
+            "children": children_data,
+        }
 
     data = {
         "id": n.id,
         "content": n.get_content(),
         "node_type": n.node_type,
-        "child_count": len(accessible_children),  # Only count accessible children
+        "child_count": len(visible_children),
         "created_at": n.created_at.isoformat(),
         "updated_at": n.updated_at.isoformat(),
         "username": n.user.username if n.user else "Unknown",
         "llm_model": n.llm_model,
         "descendant_count": n._descendant_count,
-        "children": [serialize_node_recursive(child, user_id) for child in sorted_children]
+        "children": children_data,
     }
     data.update(_system_prompt_fields(n))
     return data
@@ -698,6 +733,13 @@ def get_node(node_id):
     if node is None:
         return jsonify({"error": "Node not found"}), 404
 
+    # Soft-deleted nodes 404 even for the owner (§10: direct URL never
+    # serves a tombstone, only ancestor breadcrumbs do). The structural
+    # tombstone lives in serialize_node_recursive / the ancestors loop —
+    # not here at the highlighted-node entry point.
+    if node.deleted_at is not None:
+        return jsonify({"error": "Node not found"}), 404
+
     # Check if user has permission to access this node
     if not can_user_access_node(node, current_user.id):
         return jsonify({"error": "Not authorized to access this node"}), 403
@@ -705,12 +747,17 @@ def get_node(node_id):
     # Compute descendant counts once for the entire subtree.
     compute_descendant_counts(node)
 
-    # Build ancestors, filtering by privacy
+    # Build ancestors. Soft-deleted ancestors the viewer had pre-deletion
+    # access to render as tombstones — without this the breadcrumb chain
+    # would silently skip them and hide the structural fact that something
+    # was once there. Privacy-blocked ancestors (and deletions the viewer
+    # never had access to) are omitted entirely.
+    from backend.utils.serialization import serialize_node_status
     ancestors = []
     current = node.parent
     while current:
-        # Only include ancestor if user has access
-        if can_user_access_node(current, current_user.id):
+        status = serialize_node_status(current, current_user.id)
+        if status is None:  # alive + accessible
             ancestor_content = current.get_content()
             ancestor_data = {
                 "id": current.id,
@@ -729,11 +776,33 @@ def get_node(node_id):
             }
             ancestor_data.update(_system_prompt_fields(current))
             ancestors.insert(0, ancestor_data)
+        elif status.get("deleted"):
+            ancestor_data = {
+                **status,
+                "child_count": len(current.children),
+                "ai_usage": current.ai_usage,
+            }
+            ancestor_data.update(_system_prompt_fields(current))
+            ancestors.insert(0, ancestor_data)
+        # else: status.get('inaccessible') — skip entirely (no leak of
+        # structural fact "something is here" to a viewer who never had
+        # access).
         current = current.parent
 
-    # Filter children by privacy and serialize
-    accessible_children = [child for child in node.children if can_user_access_node(child, current_user.id)]
-    sorted_children = sorted(accessible_children, key=lambda child: child._descendant_count, reverse=True)
+    # Filter children by privacy. Tombstones the viewer had pre-deletion
+    # access to are included; serialize_node_recursive renders them with
+    # the deletion shape and recurses into their (possibly alive) children.
+    def _child_visible(child):
+        if can_user_access_node(child, current_user.id):
+            return True
+        if child.deleted_at is None:
+            return False
+        s = serialize_node_status(child, current_user.id)
+        return s is not None and not s.get("inaccessible")
+
+    visible_children = [c for c in node.children if _child_visible(c)]
+    sorted_children = sorted(visible_children, key=lambda child: child._descendant_count, reverse=True)
+    accessible_children = visible_children  # for the child_count field below
 
     # Serialize the current node (its children are now sorted descending by descendant count).
     node_data = {
