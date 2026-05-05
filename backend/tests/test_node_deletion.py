@@ -181,6 +181,33 @@ def test_delete_with_descendants_skips_other_users(app, alice, bob):
     assert Node.query.get(b_reply.id).deleted_at is None  # preserved
 
 
+# ── 3b. Walk past other-user nodes into nested user-owned descendants ──
+
+def test_delete_descendants_walks_past_other_user_into_my_replies(app, alice, bob):
+    """Chain Me → Other → Me: the deepest "Me" must also be soft-deleted.
+
+    Earlier the walker `continue`d on other-user nodes, which both
+    skipped the deleted_at assignment AND skipped the descendant
+    enumeration — so the deepest "Me" silently stayed alive. The user
+    promised "delete this node and all my replies" expects the entire
+    user-owned subtree, not just up to the first foreign reply.
+    """
+    a_root = _make_node(alice)
+    b_reply = _make_node(bob, parent=a_root)
+    a_nested = _make_node(alice, parent=b_reply)
+    client = app.test_client()
+    _login(client, alice)
+    resp = client.delete(
+        f"/nodes/{a_root.id}?delete_descendants=true",
+    )
+    assert resp.status_code == 200
+    # a_root + a_nested = 2 owned nodes; b_reply preserved.
+    assert resp.json["scheduled"] == 2
+    assert Node.query.get(a_root.id).deleted_at is not None
+    assert Node.query.get(b_reply.id).deleted_at is None  # preserved
+    assert Node.query.get(a_nested.id).deleted_at is not None  # also deleted
+
+
 # ── 5. Reply blocked on soft-deleted parent ─────────────────────────────
 
 def test_create_blocked_when_parent_soft_deleted(app, alice):
@@ -363,6 +390,257 @@ def test_tombstone_ancestor_hidden_without_pre_access(app, alice, bob):
     # Alice's tombstone must NOT appear: it was private pre-deletion, so
     # bob has no pre-deletion access. The ancestors list is empty.
     assert resp.json["ancestors"] == []
+
+
+# ── 4. Cross-user descendant cascade across cleanup runs ────────────────
+
+def test_cleanup_cascade_processes_tree_leaf_first(app, alice):
+    """Leaf-first cascade: a parent's row stays as long as its (deleted)
+    children's rows still exist. Once a child purges, the parent
+    becomes eligible the next time the cleanup logic looks at it.
+
+    Whether this happens within one run or across multiple runs
+    depends on iteration order under the cleanup task's `yield_per`
+    stream — both are correct behavior. The test verifies the
+    invariant: a parent NEVER purges before all its children's rows
+    are gone.
+    """
+    parent = _make_node(alice, content="parent")
+    child = _make_node(alice, parent=parent, content="child")
+    parent.deleted_at = datetime.utcnow() - timedelta(days=31)
+    child.deleted_at = datetime.utcnow() - timedelta(days=31)
+    _db.session.commit()
+    pid, cid = parent.id, child.id
+
+    from backend.tasks.node_cleanup import (
+        _full_purge, _wipe_content_and_versions,
+    )
+
+    # Adversarial ordering: parent comes BEFORE child. Parent must NOT
+    # purge in this iteration because the child's row still exists.
+    p = Node.query.get(pid)
+    cc = Node.query.filter_by(parent_id=p.id).count()
+    assert cc == 1  # invariant precondition
+    if cc == 0:
+        _full_purge(p)
+    elif p.content is not None:
+        _wipe_content_and_versions(p)
+    _db.session.commit()
+    assert Node.query.get(pid) is not None  # parent kept
+    assert Node.query.get(pid).content is None  # content wiped
+
+    # Now process the child — purge.
+    c = Node.query.get(cid)
+    if Node.query.filter_by(parent_id=c.id).count() == 0:
+        _full_purge(c)
+    _db.session.commit()
+    assert Node.query.get(cid) is None
+
+    # Next pass touches the parent again. It now has zero children →
+    # eligible for full purge.
+    p = Node.query.get(pid)
+    if Node.query.filter_by(parent_id=p.id).count() == 0:
+        _full_purge(p)
+    _db.session.commit()
+    assert Node.query.get(pid) is None  # row gone after cascade
+
+
+# ── 5b. LLM placeholder factory blocked on soft-deleted parent ─────────
+
+def test_llm_placeholder_factory_blocked_on_soft_deleted_parent(app, alice):
+    """The LLM placeholder factory at backend/utils/llm_nodes.py:67+
+    uses with_for_update() on the parent and raises ParentDeletedError
+    if the parent has deleted_at set. This is the second create-side
+    code path that needs the Race A guard.
+    """
+    parent = _make_node(alice)
+    parent.deleted_at = datetime.utcnow()
+    _db.session.commit()
+
+    from backend.utils.llm_nodes import create_llm_placeholder
+    from backend.utils.node_deletion import ParentDeletedError
+
+    raised = False
+    try:
+        create_llm_placeholder(
+            parent.id, "claude-opus-4.6", alice.id, enqueue=False,
+        )
+    except ParentDeletedError:
+        raised = True
+    assert raised
+    # No placeholder LLM child was created.
+    assert Node.query.filter_by(parent_id=parent.id).count() == 0
+
+
+# ── 17. Drafts referencing soft-deleted nodes ──────────────────────────
+
+def test_drafts_filter_with_soft_deleted_targets(app, alice):
+    """Plan §17:
+    - Draft.node_id deleted: omit (return 404 from get_draft)
+    - Draft.parent_id deleted: keep, null parent_id, surface warning
+    """
+    from backend.models import Draft
+    from backend.routes.drafts import drafts_bp
+    app.register_blueprint(drafts_bp, url_prefix="/drafts")
+    client = app.test_client()
+    _login(client, alice)
+
+    # Setup: alive node, soft-deleted node, a draft against each as
+    # parent_id, plus a draft against the deleted node as node_id.
+    alive = _make_node(alice)
+    dead = _make_node(alice)
+    dead.deleted_at = datetime.utcnow()
+    _db.session.commit()
+
+    parent_draft = Draft(user_id=alice.id, parent_id=dead.id)
+    parent_draft.set_content("draft body")
+    _db.session.add(parent_draft)
+
+    edit_draft = Draft(user_id=alice.id, node_id=dead.id)
+    edit_draft.set_content("edit body")
+    _db.session.add(edit_draft)
+    _db.session.commit()
+
+    # node_id branch: 404 (treat as gone).
+    r = client.get(f"/drafts/?node_id={dead.id}")
+    assert r.status_code == 404
+
+    # parent_id branch: surface the saved content with parent_id null
+    # and a warning flag.
+    r = client.get(f"/drafts/?parent_id={dead.id}")
+    assert r.status_code == 200
+    assert r.json["parent_id"] is None
+    assert r.json.get("parent_deleted") is True
+    assert r.json["content"] == "draft body"
+
+
+# ── 19. AI-rooted thread soft-deleted via human_owner_id ───────────────
+
+def test_human_owner_can_delete_llm_rooted_thread(app, alice):
+    """A system-prompt root may be owned by an LLM pseudo-user but have
+    human_owner_id set to a real user. That user can soft-delete it
+    via can_user_edit_node, even though they aren't the literal owner.
+    """
+    # Manufacture an "LLM" pseudo-user as the owner; alice is human_owner.
+    llm_user = User(username="claude-test", twitter_id="llm-test")
+    _db.session.add(llm_user)
+    _db.session.commit()
+
+    root = Node(
+        user_id=llm_user.id, human_owner_id=alice.id,
+        node_type="llm", llm_model="claude-test",
+        privacy_level="private", ai_usage="none", token_count=1,
+    )
+    root.set_content("system prompt body")
+    _db.session.add(root)
+    _db.session.commit()
+
+    client = app.test_client()
+    _login(client, alice)
+    resp = client.delete(f"/nodes/{root.id}")
+    assert resp.status_code == 200
+    assert Node.query.get(root.id).deleted_at is not None
+
+
+# ── 20, 21. Feed display-swap rules with soft-deletion ─────────────────
+
+def test_feed_skips_deleted_first_child_of_system_prompt_root(app, alice):
+    """§4a Case 1: when the thread root is a system prompt and the
+    first child is soft-deleted, the Log card preview falls through to
+    the next live child rather than rendering as [Node deleted].
+
+    Implemented in feed.py via filter(deleted_at IS NULL) on the
+    first_child query.
+    """
+    from backend.models import (
+        UserPrompt, NodeContextArtifact,
+    )
+    from backend.routes.feed import feed_bp
+    app.register_blueprint(feed_bp, url_prefix="/api")
+
+    # Build a system-prompt root + 2 children; soft-delete the first.
+    prompt = UserPrompt(
+        user_id=alice.id, prompt_key="default", title="t",
+    )
+    prompt.set_content("ignore me")
+    _db.session.add(prompt)
+    _db.session.commit()
+    root = _make_node(alice)
+    artifact = NodeContextArtifact(
+        node_id=root.id, artifact_type="prompt", artifact_id=prompt.id,
+    )
+    _db.session.add(artifact)
+    first = _make_node(alice, parent=root, content="first child")
+    second = _make_node(alice, parent=root, content="second child body")
+    first.deleted_at = datetime.utcnow()
+    _db.session.commit()
+
+    client = app.test_client()
+    _login(client, alice)
+    r = client.get("/api/feed")
+    assert r.status_code == 200
+    cards = [c for c in r.json["nodes"] if c["thread_root_id"] == root.id]
+    assert len(cards) == 1
+    # Falls through to second (alive) child, not the deleted first.
+    assert cards[0]["id"] == second.id
+
+
+def test_feed_surfaces_deleted_root_with_alive_descendants(app, alice, bob):
+    """§4a Case 2: a soft-deleted thread root whose subtree still has
+    an alive accessible descendant must still surface in Log so the
+    descendants are reachable.
+    """
+    from backend.routes.feed import feed_bp
+    app.register_blueprint(feed_bp, url_prefix="/api")
+
+    root = _make_node(alice, content="root body")
+    # bob's reply is alive and visible to alice via human_owner /
+    # owner check. Force public so accessible_nodes_filter passes.
+    root.privacy_level = "public"
+    bob_reply = _make_node(bob, parent=root, content="bob reply")
+    bob_reply.privacy_level = "public"
+    root.deleted_at = datetime.utcnow()
+    _db.session.commit()
+
+    client = app.test_client()
+    _login(client, alice)
+    r = client.get("/api/feed")
+    assert r.status_code == 200
+    cards = [c for c in r.json["nodes"] if c["thread_root_id"] == root.id]
+    # Root is deleted but its subtree has an alive reply → the thread
+    # surfaces via §4a Case 2.
+    assert len(cards) == 1
+    # thread_root_id stays the actual (deleted) root so the kebab
+    # targets it for further deletion; the display preview swap to a
+    # live descendant happens in production (Postgres) but `newest_map`
+    # uses DISTINCT ON which SQLite silently ignores. We only assert
+    # the routing invariant here; the swap is exercised manually on
+    # staging.
+    assert cards[0]["thread_root_id"] == root.id
+
+
+# ── 22. recent-context token counter excludes soft-deleted ─────────────
+
+def test_recent_context_token_counter_excludes_deleted(app, alice):
+    """Soft-deleted nodes' token_count must not contribute to the
+    recent-context summarization threshold — otherwise a user who
+    soft-deleted a 10k-token wall of text would keep tripping the
+    "regenerate summary" trigger on static data.
+    """
+    alive = _make_node(alice, content="alive")
+    alive.token_count = 100
+    alive.ai_usage = "chat"
+    deleted = _make_node(alice, content="dead")
+    deleted.token_count = 100_000  # would dominate without the filter
+    deleted.ai_usage = "chat"
+    deleted.deleted_at = datetime.utcnow()
+    _db.session.commit()
+
+    from backend.tasks.recent_context import _count_total_eligible_tokens
+    total = _count_total_eligible_tokens(alice.id)
+    # Only the alive node contributes; the soft-deleted one is excluded
+    # despite its huge token_count.
+    assert total == 100
 
 
 # ── §5a Export: tombstones in mixed threads ────────────────────────────

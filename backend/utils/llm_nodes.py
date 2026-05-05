@@ -43,7 +43,11 @@ def pick_model_for_generation(parent_node, user):
             if current is None or current.id in visited:
                 break
             visited.add(current.id)
-            if current.node_type == "llm" and current.llm_model:
+            # Skip tombstones: a soft-deleted ancestor's `llm_model` is
+            # still set (only `content` gets wiped at +30d) but the
+            # node is meant to be invisible. Falling through to the
+            # user's preference is the right behavior here.
+            if current.deleted_at is None and current.node_type == "llm" and current.llm_model:
                 if _is_active(current.llm_model):
                     return current.llm_model
                 # Recognized-but-unusable: stop and fall through to the

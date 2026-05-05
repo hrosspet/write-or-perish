@@ -91,10 +91,8 @@ def cleanup_deleted_nodes():
         # "Has any child row in DB" subquery — true when the node still
         # has children referencing it (alive or soft-deleted, doesn't
         # matter for the FK constraint). When false, full-purge eligible.
-        has_any_child = exists().where(Node.parent_id == Node.id)
-        # Note: the above expression refers to Node.id twice — the outer
-        # one is what we filter on. SQLAlchemy resolves this correctly
-        # because of the EXISTS scoping; we rebuild explicitly below.
+        # Aliased so the inner Child.parent_id refers to a distinct row
+        # while the outer Node.id is the candidate row being filtered.
         from sqlalchemy.orm import aliased
         Child = aliased(Node)
         has_any_child = exists().where(Child.parent_id == Node.id)

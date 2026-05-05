@@ -3,7 +3,7 @@ from flask_login import login_required, current_user
 from backend.models import Node, User
 from backend.extensions import db
 from backend.utils.privacy import accessible_nodes_filter
-from sqlalchemy import or_, func
+from sqlalchemy import and_, or_, func
 
 feed_bp = Blueprint("feed_bp", __name__)
 
@@ -18,12 +18,62 @@ def get_feed():
     per_page = request.args.get("per_page", 20, type=int)
     per_page = min(per_page, 100)  # cap max page size
 
+    # §4a Case 2: a soft-deleted thread root whose subtree still has an
+    # alive accessible descendant must still surface in Log — otherwise
+    # the live descendants disappear (no other entry point exists for
+    # the owner). The recursive CTE below maps each accessible node to
+    # its root and yields the set of roots whose subtree has at least
+    # one alive accessible node.
+    anchor = db.session.query(
+        Node.id.label("id"),
+        Node.deleted_at.label("deleted_at"),
+        Node.id.label("root_id"),
+    ).filter(
+        Node.parent_id.is_(None),
+        or_(
+            Node.user_id == current_user.id,
+            Node.human_owner_id == current_user.id,
+        ),
+    ).cte(name="user_thread_subtree", recursive=True)
+
+    descendant = db.aliased(Node, flat=True)
+    recursive = db.session.query(
+        descendant.id,
+        descendant.deleted_at,
+        anchor.c.root_id,
+    ).join(anchor, descendant.parent_id == anchor.c.id).filter(
+        # accessible_nodes_filter excludes soft-deleted, so descendants
+        # that flow through the recursive arm are necessarily alive.
+        accessible_nodes_filter(descendant, current_user.id),
+    )
+    subtree_cte = anchor.union_all(recursive)
+
+    # Root IDs with at least one alive node in their subtree (the root
+    # itself counts if alive; otherwise an accessible alive descendant).
+    alive_roots_subq = (
+        db.session.query(subtree_cte.c.root_id)
+        .filter(subtree_cte.c.deleted_at.is_(None))
+        .distinct()
+        .subquery()
+    )
+
     query = Node.query.filter(
-        Node.deleted_at.is_(None),
         or_(Node.parent_id.is_(None), Node.pinned_at.isnot(None)),
         or_(
             Node.user_id == current_user.id,
             Node.human_owner_id == current_user.id,
+        ),
+        or_(
+            # Alive (any kind: alive root or alive pinned non-root).
+            Node.deleted_at.is_(None),
+            # §4a Case 2: soft-deleted thread root whose subtree still
+            # has an alive accessible descendant. Pinned non-roots that
+            # are soft-deleted stay hidden — this branch only relaxes
+            # the rule for thread roots.
+            and_(
+                Node.parent_id.is_(None),
+                Node.id.in_(db.session.query(alive_roots_subq)),
+            ),
         ),
     ).order_by(func.coalesce(Node.pinned_at, Node.created_at).desc())
     pagination = query.paginate(page=page, per_page=per_page, error_out=False)
@@ -63,10 +113,13 @@ def get_feed():
 
     nodes_list = []
     for node in pagination.items:
-        # If this is a system prompt root, skip to the first ALIVE child.
-        # Filtering deleted_at on the first_child query handles the §4a
-        # display-swap rule: the Log card preview falls through to the
-        # next live child rather than rendering as [Node deleted].
+        # Display-swap order:
+        #   1. System prompt root → first alive child for the preview.
+        #   2. Soft-deleted root with alive descendants (§4a Case 2) →
+        #      newest_map's accessible descendant for the preview, since
+        #      the root itself has no content to show.
+        # `thread_root_id` always points at the actual root so the
+        # frontend kebab targets the right node for delete.
         display_node = node
         prompt_key = None
         if node.is_system_prompt:
@@ -83,6 +136,14 @@ def get_feed():
             )
             if first_child:
                 display_node = first_child
+        elif node.deleted_at is not None:
+            # §4a Case 2: surface a live descendant as the card preview.
+            # newest_map is computed via `accessible_nodes_filter`, which
+            # only returns alive accessible descendants — exactly what
+            # we want here.
+            newest_id = newest_map.get(node.id)
+            if newest_id and newest_id != node.id:
+                display_node = Node.query.get(newest_id) or node
 
         # Determine human owner username for LLM nodes
         human_owner_username = None

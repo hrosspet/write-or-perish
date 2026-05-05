@@ -118,11 +118,15 @@ def soft_delete_node(node_id: int, user_id: int, *,
         if locked is None:
             # Already purged by cleanup, or never existed (e.g. race).
             continue
-        if not can_user_edit_node(locked, user_id):
-            # Other user's node; leave alive. Forces tombstone above.
-            continue
 
-        if locked.deleted_at is None:
+        # Other user's node: leave it alive (forces tombstone above), but
+        # KEEP WALKING into its descendants — the current user may have
+        # replies nested under it. The dialog promises "delete this node
+        # and all my replies", which means all my replies in this thread,
+        # not "all my replies until I hit someone else's". The lock on
+        # this node also prevents new INSERTs under it during our walk.
+        editable = can_user_edit_node(locked, user_id)
+        if editable and locked.deleted_at is None:
             locked.deleted_at = now
             flagged += 1
 
