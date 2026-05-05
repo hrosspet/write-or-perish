@@ -507,6 +507,12 @@ def create_node():
         if not validate_ai_usage(ai_usage):
             return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
 
+        # Race A guard: lock parent and reject if soft-deleted.
+        from backend.utils.node_deletion import assert_parent_alive
+        err = assert_parent_alive(parent_id)
+        if err is not None:
+            return err
+
         # Placeholder content until transcription is ready.
         placeholder_text = "[Voice note – transcription pending]"
         from backend.utils.tokens import approximate_token_count as _atc2
@@ -580,6 +586,12 @@ def create_node():
         return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
     if not validate_ai_usage(ai_usage):
         return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
+
+    # Race A guard: lock parent and reject if soft-deleted.
+    from backend.utils.node_deletion import assert_parent_alive
+    err = assert_parent_alive(parent_id)
+    if err is not None:
+        return err
 
     # Calculate token count before encryption
     from backend.utils.tokens import approximate_token_count as _atc
@@ -932,6 +944,7 @@ def request_llm_response(node_id):
 
     # Create placeholder LLM node and enqueue task
     # AI nodes inherit privacy settings from their parent node
+    from backend.utils.node_deletion import ParentDeletedError
     try:
         llm_node, task_id = create_llm_placeholder(
             parent_node.id, model_id, current_user.id,
@@ -939,6 +952,11 @@ def request_llm_response(node_id):
             ai_usage=parent_node.ai_usage,
             source_mode=source_mode,
         )
+    except ParentDeletedError as e:
+        # Race A: parent was soft-deleted between the route's auth check
+        # and the locking re-fetch inside create_llm_placeholder. Surface
+        # 410 so the frontend can show "this node was deleted" UX.
+        return jsonify({"error": str(e)}), 410
     except UserExportValidationError as e:
         # Misconfigured {user_export} placeholder — abort BEFORE creating
         # any LLM node so the user's feed isn't polluted with a stub
@@ -959,16 +977,25 @@ def request_llm_response(node_id):
 @nodes_bp.route("/<int:node_id>/link", methods=["POST"])
 @login_required
 def add_linked_node(node_id):
-    parent_node = Node.query.get_or_404(node_id)
     data = request.get_json()
     linked_node_id = data.get("linked_node_id")
     additional_text = data.get("content", "")  # Optional extra text.
     if not linked_node_id:
         return jsonify({"error": "linked_node_id is required"}), 400
-    # Validate that the node to be linked exists.
+    # Validate that the node to be linked exists and is alive (privacy filter
+    # also excludes soft-deleted, but we want a distinct 410 if specifically
+    # the target is deleted vs 404 if it never existed).
     linked_node = Node.query.get(linked_node_id)
     if not linked_node:
         return jsonify({"error": "Linked node not found"}), 404
+    if linked_node.deleted_at is not None:
+        return jsonify({"error": "Linked node has been deleted"}), 410
+    # Race A guard: lock parent and reject if soft-deleted.
+    from backend.utils.node_deletion import assert_parent_alive
+    err = assert_parent_alive(node_id)
+    if err is not None:
+        return err
+    parent_node = Node.query.get_or_404(node_id)
     from backend.utils.tokens import approximate_token_count as _atc5
     new_node = Node(
         user_id=current_user.id,
@@ -1543,6 +1570,12 @@ def init_chunked_upload():
     if not validate_ai_usage(ai_usage):
         return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
 
+    # Race A guard: lock parent and reject if soft-deleted.
+    from backend.utils.node_deletion import assert_parent_alive
+    err = assert_parent_alive(parent_id)
+    if err is not None:
+        return err
+
     # Create placeholder node
     placeholder_text = "[Voice note – upload in progress]"
     from backend.utils.tokens import approximate_token_count as _atc3
@@ -1863,6 +1896,12 @@ def init_streaming_transcription():
         return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
     if not validate_ai_usage(ai_usage):
         return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
+
+    # Race A guard: lock parent and reject if soft-deleted.
+    from backend.utils.node_deletion import assert_parent_alive
+    err = assert_parent_alive(parent_id)
+    if err is not None:
+        return err
 
     # Generate session ID
     import uuid
@@ -2185,39 +2224,40 @@ def unpin_node(node_id):
 @nodes_bp.route("/<int:node_id>", methods=["DELETE"])
 @login_required
 def delete_node(node_id):
-    from backend.models import (NodeVersion, NodeTranscriptChunk, TTSChunk,
-                                Draft, NodeContextArtifact)
+    """Soft-delete a node (and editable descendants if requested).
 
-    node = Node.query.get_or_404(node_id)
-    # Allow deletion if user is the owner or LLM requester (parent node owner)
-    if not can_user_edit_node(node):
+    Sets `deleted_at` rather than removing rows. The Celery cleanup task
+    finalizes purge after SOFT_DELETE_GRACE_DAYS (see
+    backend/tasks/node_cleanup.py).
+    """
+    from backend.constants import SOFT_DELETE_GRACE_DAYS
+    from backend.utils.node_deletion import soft_delete_node
+
+    raw = (request.args.get("delete_descendants")
+           or (request.get_json(silent=True) or {}).get("delete_descendants"))
+    with_descendants = str(raw).lower() in ("true", "1", "yes")
+
+    # Pre-lock 403 short-circuit — cheap and avoids holding a row lock to
+    # tell an unauthorized client they can't delete.
+    pre = Node.query.get_or_404(node_id)
+    if not can_user_edit_node(pre, current_user.id):
         return jsonify({"error": "Not authorized"}), 403
 
-    # Update all children: set their parent_id to None
-    # (This "orphans" the children so they become top‑level nodes.)
     try:
-        Node.query.filter_by(parent_id=node.id).update({"parent_id": None})
-
-        # Clean up related records that have foreign keys to this node
-        NodeVersion.query.filter_by(node_id=node.id).delete()
-        NodeTranscriptChunk.query.filter_by(node_id=node.id).delete()
-        TTSChunk.query.filter_by(node_id=node.id).delete()
-
-        # Update drafts that reference this node
-        Draft.query.filter_by(node_id=node.id).update({"node_id": None})
-        Draft.query.filter_by(parent_id=node.id).update({"parent_id": None})
-        Draft.query.filter_by(llm_node_id=node.id).delete()
-
-        # Clean up context artifact tracking
-        NodeContextArtifact.query.filter_by(node_id=node.id).delete()
-
-        # Update linked_node_id references in other nodes
-        Node.query.filter_by(linked_node_id=node.id).update({"linked_node_id": None})
-
-        db.session.delete(node)
+        flagged = soft_delete_node(
+            node_id, current_user.id, with_descendants=with_descendants,
+        )
+        if flagged is None:
+            # Concurrent purge or permission flip between the pre-check and
+            # the locking re-fetch.
+            db.session.rollback()
+            return jsonify({"error": "Not found or not authorized"}), 404
         db.session.commit()
-        return jsonify({"message": "Node deleted successfully"}), 200
+        return jsonify({
+            "scheduled": flagged,
+            "grace_days": SOFT_DELETE_GRACE_DAYS,
+        }), 200
     except Exception as e:
         db.session.rollback()
-        current_app.logger.error(f"Error deleting node {node_id}: {e}")
+        current_app.logger.error(f"Error soft-deleting node {node_id}: {e}")
         return jsonify({"error": "Error deleting node", "details": str(e)}), 500

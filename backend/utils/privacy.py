@@ -9,7 +9,7 @@ the two-column privacy system:
 from enum import Enum
 from typing import Optional
 from flask_login import current_user
-from sqlalchemy import or_
+from sqlalchemy import and_, or_
 
 
 class PrivacyLevel(str, Enum):
@@ -79,30 +79,20 @@ def find_human_owner(node) -> Optional[int]:
     return None
 
 
-def can_user_access_node(node, user_id: Optional[int] = None) -> bool:
-    """Check if a user can access a node based on privacy level.
+def _can_user_access_ignoring_deleted(node, user_id: int) -> bool:
+    """Same body as can_user_access_node, minus the deleted_at short-circuit.
 
-    Args:
-        node: The Node object to check access for
-        user_id: The user ID to check (defaults to current_user.id)
-
-    Returns:
-        True if user can access, False otherwise
+    Internal helper used by can_user_view_tombstone to check whether a viewer
+    *would have* had access to a node before it was soft-deleted. Routes
+    should never call this directly — they'd bypass the leak protection in
+    serialize_node.
     """
-    if user_id is None:
-        if not current_user.is_authenticated:
-            return False
-        user_id = current_user.id
-
-    # Owner can always access their own nodes
     if node.user_id == user_id:
         return True
 
-    # Check denormalized human_owner_id (covers LLM nodes and all others)
     if getattr(node, 'human_owner_id', None) and node.human_owner_id == user_id:
         return True
 
-    # Check privacy level
     privacy_level = getattr(node, 'privacy_level', PrivacyLevel.PRIVATE)
 
     if privacy_level == PrivacyLevel.PRIVATE:
@@ -116,21 +106,85 @@ def can_user_access_node(node, user_id: Optional[int] = None) -> bool:
     return False
 
 
+def can_user_access_node(node, user_id: Optional[int] = None) -> bool:
+    """Check if a user can currently access a node (alive + privacy passes).
+
+    Soft-deleted nodes are treated as inaccessible regardless of ownership;
+    if you need to know whether the viewer *would have* had access pre-deletion
+    (for tombstone rendering), use can_user_view_tombstone via serialize_node.
+
+    Args:
+        node: The Node object to check access for
+        user_id: The user ID to check (defaults to current_user.id)
+
+    Returns:
+        True if user can access, False otherwise
+    """
+    if user_id is None:
+        if not current_user.is_authenticated:
+            return False
+        user_id = current_user.id
+
+    # Soft-deleted: treat as inaccessible. Tombstone rendering goes through
+    # serialize_node, which uses can_user_view_tombstone.
+    if getattr(node, 'deleted_at', None) is not None:
+        return False
+
+    return _can_user_access_ignoring_deleted(node, user_id)
+
+
+def can_user_view_tombstone(node, user_id: Optional[int] = None) -> bool:
+    """Check if a viewer should see a tombstone placeholder for a soft-deleted node.
+
+    Returns True only when the viewer *would have* had access pre-deletion
+    (owner / human_owner / public / future circles). This prevents the
+    tombstone's metadata (username + timestamp + node_type) from leaking to
+    viewers who could not have seen the original node.
+
+    The "should this tombstone be included at all" decision (e.g. is there a
+    live descendant the viewer can reach) is the call site's responsibility,
+    not this helper's. Breadcrumb and inline-quote paths always include;
+    generic tree-walkers can apply additional filtering with their own
+    pre-computed live-descendant set.
+
+    Args:
+        node: The (soft-deleted) Node object
+        user_id: The user ID to check (defaults to current_user.id)
+
+    Returns:
+        True if a tombstone with metadata should be rendered for this viewer.
+    """
+    if getattr(node, 'deleted_at', None) is None:
+        # Not deleted — this helper isn't meant for live nodes.
+        return False
+
+    if user_id is None:
+        if not current_user.is_authenticated:
+            return False
+        user_id = current_user.id
+
+    return _can_user_access_ignoring_deleted(node, user_id)
+
+
 def accessible_nodes_filter(node_model, user_id: int):
     """Return a SQLAlchemy filter clause for nodes accessible by the given user.
 
     This is the query-level counterpart of can_user_access_node().
     Use it to filter list queries (feed, public dashboard) so that only
-    accessible nodes are returned from the database.
+    accessible nodes are returned from the database. Soft-deleted nodes are
+    excluded.
 
-    Currently allows: owner's own nodes + public nodes.
+    Currently allows: owner's own nodes + public nodes (alive only).
     When circles are implemented, update this alongside can_user_access_node().
     """
-    return or_(
-        node_model.user_id == user_id,
-        node_model.human_owner_id == user_id,
-        node_model.privacy_level == PrivacyLevel.PUBLIC,
-        # TODO: add circles membership subquery when circles feature is built
+    return and_(
+        node_model.deleted_at.is_(None),
+        or_(
+            node_model.user_id == user_id,
+            node_model.human_owner_id == user_id,
+            node_model.privacy_level == PrivacyLevel.PUBLIC,
+            # TODO: add circles membership subquery when circles feature is built
+        ),
     )
 
 

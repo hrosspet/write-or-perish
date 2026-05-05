@@ -16,6 +16,7 @@ import { contextAllowsAi } from "../utils/aiUsage";
 import NodeFormModal from "./NodeFormModal";
 import Bubble from "./Bubble";
 import QuotedContent from "./QuotedContent";
+import DeleteConfirmDialog from "./DeleteConfirmDialog";
 
 // Recursive component to render children nodes.
 function RenderChildTree({ nodes, onBubbleClick }) {
@@ -62,6 +63,7 @@ function NodeDetail() {
   const [voiceLoading, setVoiceLoading] = useState(false);
   const [toolActionsExpanded, setToolActionsExpanded] = useState(false);
   const [showPromptEditConfirm, setShowPromptEditConfirm] = useState(false);
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   // autoGenerate is shared across the whole text-mode experience — the
   // NodeDetailWrapper uses `key={id}` which remounts NodeDetail on every
   // node navigation, so local useState would reset the toggle. Persist to
@@ -250,25 +252,36 @@ function NodeDetail() {
     setPinLoading(false);
   };
 
-  // Define handleDelete: confirm deletion and delete via API.
-  const handleDelete = () => {
-    if (window.confirm("Are you sure you want to delete this node? This will orphan all children.")) {
-      api
-        .delete(`/nodes/${id}`)
-        .then(() => {
-          // Navigate to parent node if it exists, otherwise go to dashboard
-          if (node.ancestors && node.ancestors.length > 0) {
-            const parentNode = node.ancestors[node.ancestors.length - 1];
-            navigate(`/node/${parentNode.id}`);
-          } else {
-            navigate("/log");
-          }
-        })
-        .catch((err) => {
-          console.error(err);
-          setError("Error deleting node.");
-        });
-    }
+  // Open the soft-delete confirmation dialog. The dialog branches on
+  // hasChildren to offer "this only" vs. "this + my replies".
+  const handleDelete = () => setShowDeleteDialog(true);
+
+  const handleConfirmDelete = ({ withDescendants }) => {
+    setShowDeleteDialog(false);
+    api
+      .delete(`/nodes/${id}`, { params: { delete_descendants: withDescendants } })
+      .then((response) => {
+        const data = response.data || {};
+        const n = data.scheduled || 1;
+        const days = data.grace_days || 30;
+        addToast(
+          n === 1
+            ? `Node scheduled for deletion in ${days} days`
+            : `${n} nodes scheduled for deletion in ${days} days`,
+          3000,
+        );
+        // Navigate to parent node if it exists, otherwise go to dashboard
+        if (node.ancestors && node.ancestors.length > 0) {
+          const parentNode = node.ancestors[node.ancestors.length - 1];
+          navigate(`/node/${parentNode.id}`);
+        } else {
+          navigate("/log");
+        }
+      })
+      .catch((err) => {
+        console.error(err);
+        setError("Error deleting node.");
+      });
   };
 
   const requestLlmFor = async (parentNodeId) => {
@@ -932,6 +945,13 @@ function NodeDetail() {
           }}
         />
       )}
+      <DeleteConfirmDialog
+        open={showDeleteDialog}
+        mode="single"
+        hasChildren={!!(node && node.children && node.children.length > 0)}
+        onClose={() => setShowDeleteDialog(false)}
+        onConfirm={handleConfirmDelete}
+      />
     </div>
   );
 }

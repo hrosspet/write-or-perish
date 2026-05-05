@@ -118,7 +118,7 @@ class TestResolveQuotes:
         content = "See {quote:10}"
         result, resolved_ids = resolve_quotes(content, user_id=1, for_llm=True)
 
-        assert "not accessible" in result
+        assert "inaccessible" in result
         assert 10 not in resolved_ids
 
     @patch('backend.utils.quotes.get_quote_data')

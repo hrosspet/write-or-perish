@@ -51,16 +51,43 @@ def get_quote_data(node_ids: List[int], user_id: int) -> Dict[int, Optional[dict
         user_id: ID of the user requesting access (for permission checks)
 
     Returns:
-        Dict mapping node_id to node data dict (or None if not accessible)
+        Dict mapping node_id to node data dict (or None if not accessible).
+        Soft-deleted targets the viewer had pre-deletion access to are
+        returned with `"deleted": True` and no content; the resolver
+        renders these as `[Quoted node deleted]` rather than the privacy
+        "not accessible" string.
     """
     from backend.models import Node
-    from backend.utils.privacy import can_user_access_node
+    from backend.utils.privacy import (
+        can_user_access_node, can_user_view_tombstone,
+    )
 
     result = {}
 
     for node_id in node_ids:
         node = Node.query.get(node_id)
-        if node and can_user_access_node(node, user_id):
+        if node is None:
+            result[node_id] = None
+            continue
+        # Soft-deleted: emit a tombstone payload iff viewer had pre-deletion
+        # access; otherwise None (renders as "not accessible").
+        if node.deleted_at is not None:
+            if can_user_view_tombstone(node, user_id):
+                result[node_id] = {
+                    "id": node.id,
+                    "deleted": True,
+                    "content": None,
+                    "username": node.user.username if node.user else "Unknown",
+                    "user_id": node.user_id,
+                    "created_at": node.created_at.isoformat() if node.created_at else None,
+                    "node_type": node.node_type,
+                    "ai_usage": node.ai_usage,
+                }
+            else:
+                result[node_id] = None
+            continue
+        # Alive: standard access check.
+        if can_user_access_node(node, user_id):
             result[node_id] = {
                 "id": node.id,
                 "content": node.get_content(),
@@ -119,11 +146,22 @@ def resolve_quotes(
         data = quote_data.get(node_id)
 
         if data is None:
-            # Node not found or not accessible
+            # Node not found, privacy-blocked, or soft-deleted with no
+            # pre-deletion access — render as inaccessible (vocabulary
+            # aligned with the rest of the deletion plan).
             if for_llm:
-                return f"[Quote #{node_id}: not accessible]"
+                return f"[Quote #{node_id}: inaccessible]"
             else:
-                return f"[Quote not accessible: node {node_id}]"
+                return f"[Quoted node inaccessible: node {node_id}]"
+
+        # Soft-deleted target the viewer had pre-deletion access to:
+        # render a deletion-specific placeholder, distinct from
+        # privacy-blocked. Don't ingest deleted content into the LLM.
+        if data.get("deleted"):
+            if for_llm:
+                return f"[Quote #{node_id}: deleted by author]"
+            else:
+                return f"[Quoted node deleted: node {node_id}]"
 
         # AI usage check: block content from nodes that don't permit AI usage
         if for_llm and data.get("ai_usage") == "none":

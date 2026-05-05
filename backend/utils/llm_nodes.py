@@ -77,14 +77,23 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     Validation runs BEFORE any DB writes so a misconfigured placeholder
     never produces an orphan LLM node and never incurs LLM API spend.
     """
+    # Race A guard: lock the parent row and reject if soft-deleted. The
+    # locking is what closes the create-vs-soft-delete race under READ
+    # COMMITTED — a plain SELECT-then-INSERT can't see the concurrent
+    # deleted_at UPDATE in time. See backend/utils/node_deletion.py.
+    from backend.utils.node_deletion import ParentDeletedError
+    parent = Node.query.with_for_update().get(parent_node_id)
+    if parent is None:
+        raise ParentDeletedError("Parent node not found")
+    if parent.deleted_at is not None:
+        raise ParentDeletedError("Parent node has been deleted")
+
     # Pre-flight: validate any {user_export} placeholders in the parent's
     # content. Misconfigured placeholders previously fell back silently
     # to "no token cap" and cost real $$$ on a single request.
-    parent = Node.query.get(parent_node_id)
-    if parent is not None:
-        validate_user_export_placeholders(
-            parent.get_content(), user_id=human_owner_id,
-        )
+    validate_user_export_placeholders(
+        parent.get_content(), user_id=human_owner_id,
+    )
 
     llm_user = User.query.filter_by(username=model_id).first()
     if not llm_user:

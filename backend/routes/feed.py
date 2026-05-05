@@ -19,6 +19,7 @@ def get_feed():
     per_page = min(per_page, 100)  # cap max page size
 
     query = Node.query.filter(
+        Node.deleted_at.is_(None),
         or_(Node.parent_id.is_(None), Node.pinned_at.isnot(None)),
         or_(
             Node.user_id == current_user.id,
@@ -62,7 +63,10 @@ def get_feed():
 
     nodes_list = []
     for node in pagination.items:
-        # If this is a system prompt root, skip to the first child
+        # If this is a system prompt root, skip to the first ALIVE child.
+        # Filtering deleted_at on the first_child query handles the §4a
+        # display-swap rule: the Log card preview falls through to the
+        # next live child rather than rendering as [Node deleted].
         display_node = node
         prompt_key = None
         if node.is_system_prompt:
@@ -70,7 +74,13 @@ def get_feed():
             if prompt is None and node.user_prompt:
                 prompt = node.user_prompt  # legacy fallback
             prompt_key = prompt.prompt_key if prompt else None
-            first_child = Node.query.filter_by(parent_id=node.id).order_by(Node.created_at.asc()).first()
+            first_child = (
+                Node.query
+                .filter_by(parent_id=node.id)
+                .filter(Node.deleted_at.is_(None))
+                .order_by(Node.created_at.asc())
+                .first()
+            )
             if first_child:
                 display_node = first_child
 
@@ -81,12 +91,19 @@ def get_feed():
             if human_owner:
                 human_owner_username = human_owner.username
 
+        # Count only alive children — tombstones don't contribute to the
+        # visible reply count.
+        alive_child_count = sum(
+            1 for c in node.children if c.deleted_at is None
+        )
+
         nodes_list.append({
             "id": display_node.id,
+            "thread_root_id": node.id,
             "newest_node_id": newest_map.get(node.id, display_node.id),
             "preview": make_preview(display_node.get_content()),
             "node_type": display_node.node_type,
-            "child_count": len(node.children),
+            "child_count": alive_child_count,
             "created_at": display_node.created_at.isoformat(),
             "pinned_at": node.pinned_at.isoformat() if node.pinned_at else None,
             "username": node.user.username if node.user else "Unknown",

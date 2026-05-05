@@ -1,15 +1,48 @@
-import React, { useState } from 'react';
-import { FaChevronDown, FaChevronUp } from 'react-icons/fa';
+import React, { useState, useRef, useEffect } from 'react';
+import { FaChevronDown, FaChevronUp, FaEllipsisV } from 'react-icons/fa';
 import NodeFooter from './NodeFooter';
 import MarkdownBody from './MarkdownBody';
 
-const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => {
+const tombstoneStyle = {
+  fontFamily: 'var(--sans)',
+  fontSize: '0.95rem',
+  fontStyle: 'italic',
+  color: 'var(--text-muted)',
+  marginBottom: '0.6rem',
+};
+
+const Bubble = ({
+  node,
+  onClick,
+  isHighlighted = false,
+  leftAlign = false,
+  enableActions = false,
+  onDeleteThread = null,
+}) => {
   // Detect voice notes via backend-provided has_original_audio flag
   const isVoiceNote = !!node.has_original_audio;
   const isPinned = !!node.pinned_at;
   const promptKey = node.prompt_key || null;
+  const isTombstone = !!node.deleted;
+  const isInaccessible = !!node.inaccessible;
+  const isPlaceholder = isTombstone || isInaccessible;
 
   const [expanded, setExpanded] = useState(false);
+  const [showKebab, setShowKebab] = useState(false);
+  const [hovered, setHovered] = useState(false);
+  const kebabRef = useRef(null);
+
+  // Outside-click handler for the kebab dropdown.
+  useEffect(() => {
+    if (!showKebab) return undefined;
+    const handler = (e) => {
+      if (kebabRef.current && !kebabRef.current.contains(e.target)) {
+        setShowKebab(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [showKebab]);
 
   // Use full content if available; otherwise use preview.
   const text = node.content || node.preview || "";
@@ -25,7 +58,7 @@ const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => 
   // Only offer expand when there's full content AND the collapsed preview
   // actually hides something: title past 120 chars, body past 250 chars,
   // or body with >2 newline-separated lines (which would be line-clamped).
-  const canExpand = !!node.content && (
+  const canExpand = !isPlaceholder && !!node.content && (
     title.length > 120 ||
     body.length > 250 ||
     body.split('\n').length > 2
@@ -42,10 +75,11 @@ const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => 
     background: "var(--bg-card)",
     border: "1px solid var(--border)",
     borderRadius: "10px",
-    cursor: "pointer",
+    cursor: isPlaceholder ? "default" : "pointer",
     maxWidth: "1000px",
     width: "calc(100% - 20px)",
     transition: "border-color 0.3s ease, box-shadow 0.3s ease, transform 0.3s ease",
+    position: "relative",
   };
 
   const tagStyle = {
@@ -59,22 +93,114 @@ const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => 
     marginLeft: "8px",
   };
 
+  // Show kebab on hover (mouse), on focus (keyboard), or always on touch
+  // devices (no hover). Computed in inline style + the touch-device fallback.
+  const kebabAlwaysVisible = (
+    typeof window !== 'undefined' &&
+    window.matchMedia &&
+    window.matchMedia('(hover: none)').matches
+  );
+  const kebabVisible = (
+    enableActions && !isPlaceholder &&
+    (kebabAlwaysVisible || hovered || showKebab)
+  );
+
+  const handleCardClick = (e) => {
+    if (isPlaceholder) return; // Tombstones and inaccessible are non-navigable.
+    if (onClick) onClick(node.id, e);
+  };
+
   return (
     <div
       style={bubbleStyle}
-      onClick={(e) => onClick(node.id, e)}
+      onClick={handleCardClick}
       onMouseEnter={(e) => {
-        e.currentTarget.style.borderColor = 'var(--border-hover)';
-        e.currentTarget.style.boxShadow = '0 4px 24px rgba(0,0,0,0.3)';
-        e.currentTarget.style.transform = 'translateY(-1px)';
+        setHovered(true);
+        if (!isPlaceholder) {
+          e.currentTarget.style.borderColor = 'var(--border-hover)';
+          e.currentTarget.style.boxShadow = '0 4px 24px rgba(0,0,0,0.3)';
+          e.currentTarget.style.transform = 'translateY(-1px)';
+        }
       }}
       onMouseLeave={(e) => {
+        setHovered(false);
         e.currentTarget.style.borderColor = 'var(--border)';
         e.currentTarget.style.boxShadow = 'none';
         e.currentTarget.style.transform = 'translateY(0)';
       }}
     >
-      {expanded ? (
+      {enableActions && !isPlaceholder && (
+        <div
+          ref={kebabRef}
+          onClick={(e) => e.stopPropagation()}
+          style={{
+            position: 'absolute',
+            top: '10px',
+            right: '-12px',
+            opacity: kebabVisible ? 1 : 0,
+            transition: 'opacity 0.15s ease',
+            pointerEvents: kebabVisible ? 'auto' : 'none',
+          }}
+        >
+          <button
+            type="button"
+            onClick={() => setShowKebab((v) => !v)}
+            onFocus={() => setHovered(true)}
+            onBlur={() => setHovered(false)}
+            title="More actions"
+            aria-label="More actions"
+            style={{
+              background: 'var(--bg-card)',
+              border: '1px solid var(--border)',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              color: 'var(--text-muted)',
+              padding: '4px 6px',
+              display: 'inline-flex',
+              alignItems: 'center',
+            }}
+          >
+            <FaEllipsisV size={14} />
+          </button>
+          {showKebab && (
+            <div style={{
+              position: 'absolute',
+              top: '100%',
+              right: 0,
+              marginTop: '4px',
+              background: 'var(--bg-card)',
+              border: '1px solid var(--border)',
+              borderRadius: '6px',
+              boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
+              minWidth: '160px',
+              zIndex: 5,
+              overflow: 'hidden',
+            }}>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowKebab(false);
+                  if (onDeleteThread) onDeleteThread(node);
+                }}
+                style={{
+                  display: 'block', width: '100%', textAlign: 'left',
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  padding: '8px 12px',
+                  fontFamily: 'var(--sans)', fontSize: '0.85rem', fontWeight: 300,
+                  color: 'var(--accent)',
+                }}
+              >
+                Delete thread
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+      {isTombstone ? (
+        <div style={tombstoneStyle}>[Node deleted]</div>
+      ) : isInaccessible ? (
+        <div style={tombstoneStyle}>[Node inaccessible]</div>
+      ) : expanded ? (
         <div style={{
           fontFamily: "var(--sans)",
           fontSize: "0.95rem",
@@ -113,72 +239,78 @@ const Bubble = ({ node, onClick, isHighlighted = false, leftAlign = false }) => 
           )}
         </>
       )}
-      {/* Footer row with optional tags + node footer */}
-      <div onClick={(e) => e.stopPropagation()} style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-      }}>
-        <NodeFooter
-          username={node.username}
-          createdAt={node.created_at}
-          childrenCount={childrenCount}
-          humanOwnerUsername={node.human_owner_username}
-          llmModel={node.llm_model}
-        />
-        <div style={{ display: "flex", alignItems: "center" }}>
-          {isPinned && (
-            <span style={{
-              ...tagStyle,
-              color: "var(--accent-dim)",
-              backgroundColor: "var(--accent-subtle)",
-            }}>
-              Pinned
-            </span>
-          )}
-          {promptKey ? (
-            <span style={{
-              ...tagStyle,
-              color: "var(--accent-dim)",
-              backgroundColor: "var(--accent-subtle)",
-            }}>
-              {promptKey.charAt(0).toUpperCase() + promptKey.slice(1)}
-            </span>
-          ) : isVoiceNote ? (
-            <span style={{
-              ...tagStyle,
-              color: "var(--accent-dim)",
-              backgroundColor: "var(--accent-subtle)",
-            }}>
-              Voice Note
-            </span>
-          ) : null}
-          {canExpand && (
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                setExpanded((prev) => !prev);
-              }}
-              aria-label={expanded ? "Collapse preview" : "Expand preview"}
-              style={{
-                marginLeft: "8px",
-                padding: "4px 8px",
-                background: "none",
-                border: "none",
-                color: "var(--text-muted)",
-                cursor: "pointer",
-                display: "inline-flex",
-                alignItems: "center",
-                fontSize: "0.85rem",
-                lineHeight: 1,
-              }}
-            >
-              {expanded ? <FaChevronUp /> : <FaChevronDown />}
-            </button>
+      {/* Footer row with optional tags + node footer. Inaccessible nodes
+          omit the footer entirely — the whole point is to not leak
+          username/timestamp to viewers without pre-deletion access. */}
+      {!isInaccessible && (
+        <div onClick={(e) => e.stopPropagation()} style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+        }}>
+          <NodeFooter
+            username={node.username}
+            createdAt={node.created_at}
+            childrenCount={childrenCount}
+            humanOwnerUsername={node.human_owner_username}
+            llmModel={node.llm_model}
+          />
+          {!isPlaceholder && (
+            <div style={{ display: "flex", alignItems: "center" }}>
+              {isPinned && (
+                <span style={{
+                  ...tagStyle,
+                  color: "var(--accent-dim)",
+                  backgroundColor: "var(--accent-subtle)",
+                }}>
+                  Pinned
+                </span>
+              )}
+              {promptKey ? (
+                <span style={{
+                  ...tagStyle,
+                  color: "var(--accent-dim)",
+                  backgroundColor: "var(--accent-subtle)",
+                }}>
+                  {promptKey.charAt(0).toUpperCase() + promptKey.slice(1)}
+                </span>
+              ) : isVoiceNote ? (
+                <span style={{
+                  ...tagStyle,
+                  color: "var(--accent-dim)",
+                  backgroundColor: "var(--accent-subtle)",
+                }}>
+                  Voice Note
+                </span>
+              ) : null}
+              {canExpand && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setExpanded((prev) => !prev);
+                  }}
+                  aria-label={expanded ? "Collapse preview" : "Expand preview"}
+                  style={{
+                    marginLeft: "8px",
+                    padding: "4px 8px",
+                    background: "none",
+                    border: "none",
+                    color: "var(--text-muted)",
+                    cursor: "pointer",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    fontSize: "0.85rem",
+                    lineHeight: 1,
+                  }}
+                >
+                  {expanded ? <FaChevronUp /> : <FaChevronDown />}
+                </button>
+              )}
+            </div>
           )}
         </div>
-      </div>
+      )}
     </div>
   );
 };
