@@ -123,13 +123,23 @@ export function useStreamingMediaRecorder({
       mp4Aac: MediaRecorder.isTypeSupported('audio/mp4;codecs=mp4a.40.2'),
     };
 
+    // Permanent debug knob: ?force_mime=mp4 or ?force_mime=webm constrains
+    // the negotiation to a single family. Useful for asking any user to
+    // reproduce a specific codec path without code changes (e.g. exercising
+    // the MP4 path on a WebM-supporting browser to validate the server-side
+    // pipeline). No effect unless the param is present, so it can't be
+    // triggered by accident in production. Resume paths (forceMimeFamily
+    // branch below) ignore this since the session's family is already
+    // locked by chunk 0.
+    const forced = new URLSearchParams(window.location.search).get('force_mime');
+
     let chosenMime;
     if (forceMimeFamily) {
       // Resume path: the session's family is fixed by chunk 0. Refuse if
       // this browser can't record it — same behavior as a fresh start
       // hitting an unsupported environment.
       if (!MediaRecorder.isTypeSupported(forceMimeFamily)) {
-        console.log('[StreamingRecorder] Codec support:', codecSupport, 'forceMimeFamily:', forceMimeFamily, 'UA:', navigator.userAgent);
+        console.log('[StreamingRecorder] Codec support:', codecSupport, 'forceMimeFamily:', forceMimeFamily, 'forced:', forced, 'UA:', navigator.userAgent);
         const err = new Error(
           `Resumed session uses ${forceMimeFamily}, which this browser cannot record. (Detected codecs: ${JSON.stringify(codecSupport)})`
         );
@@ -144,11 +154,19 @@ export function useStreamingMediaRecorder({
           (m) => m.startsWith(forceMimeFamily + ';') && MediaRecorder.isTypeSupported(m),
         ) || forceMimeFamily;
     } else {
-      chosenMime = PREFERRED_MIMES.find((m) => MediaRecorder.isTypeSupported(m));
+      let preferred = PREFERRED_MIMES;
+      if (forced === 'mp4') {
+        preferred = PREFERRED_MIMES.filter((m) => m.startsWith('audio/mp4'));
+      } else if (forced === 'webm') {
+        preferred = PREFERRED_MIMES.filter((m) => m.startsWith('audio/webm'));
+      }
+      chosenMime = preferred.find((m) => MediaRecorder.isTypeSupported(m));
       if (!chosenMime) {
-        console.log('[StreamingRecorder] Codec support:', codecSupport, 'UA:', navigator.userAgent);
+        console.log('[StreamingRecorder] Codec support:', codecSupport, 'forced:', forced, 'UA:', navigator.userAgent);
         const err = new Error(
-          `This browser cannot record in any supported audio format. (Detected codecs: ${JSON.stringify(codecSupport)})`
+          forced
+            ? `Forced mime '${forced}' is not supported by this browser. (Detected codecs: ${JSON.stringify(codecSupport)})`
+            : `This browser cannot record in any supported audio format. (Detected codecs: ${JSON.stringify(codecSupport)})`
         );
         err.name = 'NotSupportedError';
         setError(err.message);
@@ -156,7 +174,7 @@ export function useStreamingMediaRecorder({
       }
     }
 
-    console.log('[StreamingRecorder] Codec support:', codecSupport, 'chosen:', chosenMime, 'UA:', navigator.userAgent);
+    console.log('[StreamingRecorder] Codec support:', codecSupport, 'chosen:', chosenMime, 'forced:', forced, 'UA:', navigator.userAgent);
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
