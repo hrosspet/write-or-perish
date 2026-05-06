@@ -415,7 +415,7 @@ def _context_artifact_fields(n):
     return artifacts if artifacts else None
 
 
-def serialize_node_recursive(n, user_id=None):
+def serialize_node_recursive(n, user_id=None, parent_user_id=None):
     """Recursively serialize a node and its accessible children.
 
     Soft-deleted nodes the viewer had pre-deletion access to render as
@@ -426,6 +426,10 @@ def serialize_node_recursive(n, user_id=None):
     Args:
         n: Node to serialize
         user_id: User ID to check access for (defaults to current_user.id)
+        parent_user_id: user_id of `n`'s parent — threaded down so the
+            frontend can compute "is this LLM node mine?" without an
+            N+1 lazy-load via `n.parent.user_id`. The caller at the
+            focal-node entry point passes the focal's effective owner.
 
     Returns:
         dict: Serialized node — full content / tombstone / inaccessible —
@@ -456,8 +460,17 @@ def serialize_node_recursive(n, user_id=None):
     sorted_children = sorted(
         visible_children, key=lambda c: c._descendant_count, reverse=True,
     )
+    # Mirror the focal serializer's parent_user_id derivation (nodes.py
+    # ~line 822) so the frontend's ownedByMe check works the same way
+    # at every depth.
+    n_as_parent_user_id = (
+        n.human_owner_id if n.node_type == "llm" else n.user_id
+    )
     children_data = [
-        serialize_node_recursive(child, user_id) for child in sorted_children
+        serialize_node_recursive(
+            child, user_id, parent_user_id=n_as_parent_user_id,
+        )
+        for child in sorted_children
     ]
 
     if status is not None:
@@ -479,6 +492,8 @@ def serialize_node_recursive(n, user_id=None):
         "username": n.user.username if n.user else "Unknown",
         "llm_model": n.llm_model,
         "descendant_count": n._descendant_count,
+        "user_id": n.user_id,
+        "parent_user_id": parent_user_id,
         "children": children_data,
     }
     data.update(_system_prompt_fields(n))
@@ -759,6 +774,14 @@ def get_node(node_id):
         status = serialize_node_status(current, current_user.id)
         if status is None:  # alive + accessible
             ancestor_content = current.get_content()
+            # Mirror the focal serializer's parent_user_id derivation
+            # (nodes.py:822) so the frontend's ownedByMe check works on
+            # ancestors. The walk already has current.parent in hand, no
+            # extra query.
+            ancestor_parent_user_id = (
+                current.human_owner_id if current.node_type == "llm"
+                else (current.parent.user_id if current.parent else None)
+            )
             ancestor_data = {
                 "id": current.id,
                 "username": current.user.username if current.user else "Unknown",
@@ -768,6 +791,8 @@ def get_node(node_id):
                 "node_type": current.node_type,
                 "child_count": len(current.children),
                 "created_at": current.created_at.isoformat(),
+                "user_id": current.user_id,
+                "parent_user_id": ancestor_parent_user_id,
                 # Needed by the frontend auto-generate guard, which
                 # checks ai_usage across [node, ...ancestors] before
                 # firing an LLM reply. Without it ancestors look like
@@ -804,6 +829,12 @@ def get_node(node_id):
     sorted_children = sorted(visible_children, key=lambda child: child._descendant_count, reverse=True)
     accessible_children = visible_children  # for the child_count field below
 
+    # Compute the focal node's effective owner so first-level children
+    # carry the right parent_user_id without an N+1.
+    focal_as_parent_user_id = (
+        node.human_owner_id if node.node_type == "llm" else node.user_id
+    )
+
     # Serialize the current node (its children are now sorted descending by descendant count).
     node_data = {
         "id": node.id,
@@ -811,7 +842,12 @@ def get_node(node_id):
         "node_type": node.node_type,
         "child_count": len(accessible_children),
         "ancestors": ancestors,
-        "children": [serialize_node_recursive(child, current_user.id) for child in sorted_children],
+        "children": [
+            serialize_node_recursive(
+                child, current_user.id, parent_user_id=focal_as_parent_user_id,
+            )
+            for child in sorted_children
+        ],
         "created_at": node.created_at.isoformat(),
         "updated_at": node.updated_at.isoformat(),
         "user": {

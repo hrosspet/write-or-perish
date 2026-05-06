@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
-import { FaThumbtack, FaMicrophone, FaEllipsisV } from "react-icons/fa";
+import { FaThumbtack, FaMicrophone } from "react-icons/fa";
 import NodeFooter from "./NodeFooter";
 import SpeakerIcon from "./SpeakerIcon";
 import DownloadAudioIcon from "./DownloadAudioIcon";
@@ -15,11 +15,12 @@ import { useCheckboxToggle } from "../utils/markdown";
 import { contextAllowsAi } from "../utils/aiUsage";
 import NodeFormModal from "./NodeFormModal";
 import Bubble from "./Bubble";
+import BubbleKebabMenu from "./BubbleKebabMenu";
 import QuotedContent from "./QuotedContent";
 import DeleteConfirmDialog from "./DeleteConfirmDialog";
 
 // Recursive component to render children nodes.
-function RenderChildTree({ nodes, onBubbleClick }) {
+function RenderChildTree({ nodes, onBubbleClick, buildActions }) {
   return (
     <div>
       {nodes.map((child, index) => {
@@ -30,9 +31,14 @@ function RenderChildTree({ nodes, onBubbleClick }) {
         return (
           <div key={child.id}>
             <div style={containerStyle}>
-              <Bubble node={child} onClick={onBubbleClick} leftAlign={true} />
+              <Bubble
+                node={child}
+                onClick={onBubbleClick}
+                leftAlign={true}
+                actions={buildActions ? buildActions(child) : null}
+              />
               {child.children && child.children.length > 0 &&
-                <RenderChildTree nodes={child.children} onBubbleClick={onBubbleClick} />
+                <RenderChildTree nodes={child.children} onBubbleClick={onBubbleClick} buildActions={buildActions} />
               }
             </div>
             {index < nodes.length - 1 && (
@@ -63,7 +69,16 @@ function NodeDetail() {
   const [voiceLoading, setVoiceLoading] = useState(false);
   const [toolActionsExpanded, setToolActionsExpanded] = useState(false);
   const [showPromptEditConfirm, setShowPromptEditConfirm] = useState(false);
-  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  // Per-bubble action targets. The kebab on any rendered Bubble (focal,
+  // ancestor, child) sets exactly one of these via setExclusiveTarget.
+  const [replyTarget, setReplyTarget] = useState(null);
+  const [editTarget, setEditTarget] = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const setExclusiveTarget = useCallback((slot, value) => {
+    setReplyTarget(slot === 'reply' ? value : null);
+    setEditTarget(slot === 'edit' ? value : null);
+    setDeleteTarget(slot === 'delete' ? value : null);
+  }, []);
   // autoGenerate is shared across the whole text-mode experience — the
   // NodeDetailWrapper uses `key={id}` which remounts NodeDetail on every
   // node navigation, so local useState would reset the toggle. Persist to
@@ -79,9 +94,7 @@ function NodeDetail() {
       return resolved;
     });
   }, []);
-  const [showKebabMenu, setShowKebabMenu] = useState(false);
   const highlightedNodeRef = useRef(null);
-  const kebabMenuRef = useRef(null);
 
   // `autoGenerate` is the single source of truth. Defaults to true on
   // a fresh install (see useState initializer) and persists across
@@ -168,17 +181,18 @@ function NodeDetail() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  // Close kebab menu on outside click
+  // editTarget drives Edit's two-path branch: prompt-rooted nodes show
+  // a confirmation first; everything else opens the edit overlay
+  // directly. Both paths route through editTarget.id, so focal and
+  // non-focal edits share one code path.
   useEffect(() => {
-    if (!showKebabMenu) return;
-    const handler = (e) => {
-      if (kebabMenuRef.current && !kebabMenuRef.current.contains(e.target)) {
-        setShowKebabMenu(false);
-      }
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [showKebabMenu]);
+    if (!editTarget) return;
+    if (editTarget.context_artifacts?.prompt) {
+      setShowPromptEditConfirm(true);
+    } else {
+      setShowEditOverlay(true);
+    }
+  }, [editTarget]);
 
   // Handle LLM completion
   useEffect(() => {
@@ -224,6 +238,39 @@ function NodeDetail() {
     }
   };
 
+  // Mirror the focal isOwner derivation (same as NodeDetail.js:216) for
+  // any ancestor or child node, using the user_id / parent_user_id
+  // fields added in the matching backend change.
+  const ownedByMe = (n) => !!currentUser && (
+    n.user_id === currentUser.id
+    || (n.node_type === "llm" && n.parent_user_id === currentUser.id)
+  );
+
+  const buildActions = (n) => {
+    // `kind` is the stable identifier — Bubble pulls the reply action
+    // out of this list to wire the comment-icon click. The label is
+    // free to change without breaking that coupling.
+    const actions = [{
+      kind: 'reply',
+      label: 'Reply',
+      action: () => setExclusiveTarget('reply', n),
+      color: 'var(--text-primary)',
+    }];
+    if (ownedByMe(n)) {
+      actions.push({
+        label: 'Edit',
+        action: () => setExclusiveTarget('edit', n),
+        color: 'var(--text-primary)',
+      });
+      actions.push({
+        label: 'Delete',
+        action: () => setExclusiveTarget('delete', n),
+        color: 'var(--accent)',
+      });
+    }
+    return actions;
+  };
+
   // For user-typed nodes: owner must match current user
   // For LLM nodes: parent node's owner must match current user (they requested the response)
   const isOwner = node.user && currentUser && (
@@ -252,31 +299,40 @@ function NodeDetail() {
     setPinLoading(false);
   };
 
-  // Open the soft-delete confirmation dialog. The dialog branches on
-  // hasChildren to offer "this only" vs. "this + my replies".
-  const handleDelete = () => setShowDeleteDialog(true);
-
   const handleConfirmDelete = ({ withDescendants }) => {
-    setShowDeleteDialog(false);
+    if (!deleteTarget) return;
+    const targetId = deleteTarget.id;
+    const wasFocal = targetId === node.id;
+    setDeleteTarget(null);
     api
-      .delete(`/nodes/${id}`, { params: { delete_descendants: withDescendants } })
+      .delete(`/nodes/${targetId}`, { params: { delete_descendants: withDescendants } })
       .then((response) => {
         const data = response.data || {};
         const n = data.scheduled || 1;
-        const days = data.grace_days || 30;
         addToast(
-          n === 1
-            ? `Node scheduled for deletion in ${days} days`
-            : `${n} nodes scheduled for deletion in ${days} days`,
+          `Deleted ${n} node${n === 1 ? "" : "s"}`,
           3000,
         );
-        // Navigate to parent node if it exists, otherwise go to dashboard
-        if (node.ancestors && node.ancestors.length > 0) {
-          const parentNode = node.ancestors[node.ancestors.length - 1];
-          navigate(`/node/${parentNode.id}`);
-        } else {
-          navigate("/log");
+        if (!wasFocal) {
+          // Non-focal target: refetch the focal node so the just-deleted
+          // ancestor/child surfaces as a tombstone preview in place.
+          return api.get(`/nodes/${id}`).then((r) => setNode(r.data));
         }
+        // Focal target: walk up to the closest alive ancestor. The
+        // immediate parent may itself be a tombstone (e.g., chained
+        // "this only"), and the ancestor's view shows the just-deleted
+        // node as a tombstoned child preview — so the tombstone stays
+        // visible without dropping the user on a 404.
+        if (node.ancestors && node.ancestors.length > 0) {
+          for (let i = node.ancestors.length - 1; i >= 0; i -= 1) {
+            if (!node.ancestors[i].deleted) {
+              navigate(`/node/${node.ancestors[i].id}`);
+              return;
+            }
+          }
+        }
+        navigate("/log");
+        return undefined;
       })
       .catch((err) => {
         console.error(err);
@@ -364,9 +420,25 @@ function NodeDetail() {
   // edit. Editing an LLM node never triggers generation: nothing for it
   // to reply to.
   const handleEditSuccess = async (data) => {
+    const wasFocal = editTarget?.id === node.id;
+    setShowEditOverlay(false);
+    setEditTarget(null);
+
+    if (!wasFocal) {
+      // Non-focal edit: refetch the focal node so the edited
+      // ancestor/child reflects new content. No auto-LLM trigger —
+      // the user is in a different conversation context.
+      try {
+        const refreshed = await api.get(`/nodes/${id}`).then((r) => r.data);
+        setNode(refreshed);
+      } catch (err) {
+        console.error(err);
+      }
+      return;
+    }
+
     const updated = data.node ? data.node : { ...node, content: data.content };
     setNode(updated);
-    setShowEditOverlay(false);
     const editedIsLlm = updated.node_type === "llm" || !!updated.llm_model;
     if (editedIsLlm) return;
     try {
@@ -412,7 +484,13 @@ function NodeDetail() {
   const ancestorsSection = node.ancestors && node.ancestors.length > 0 && (
     <div style={{ display: "flex", flexDirection: "column", marginBottom: "10px" }}>
       {node.ancestors.map((ancestor) => (
-        <Bubble key={ancestor.id} node={ancestor} onClick={handleBubbleClick} leftAlign={true} />
+        <Bubble
+          key={ancestor.id}
+          node={ancestor}
+          onClick={handleBubbleClick}
+          leftAlign={true}
+          actions={buildActions(ancestor)}
+        />
       ))}
     </div>
   );
@@ -426,7 +504,11 @@ function NodeDetail() {
     border: "1px solid var(--border)",
     borderLeft: "3px solid var(--accent)",
     borderRadius: "10px",
-    width: "95%",
+    // Reserve right-side space for the always-outside kebab so the
+    // visible gap to the right of the icon matches the gap between
+    // bubble and icon (~14px). Drops the 95% scaling — maxWidth still
+    // caps the bubble on wide viewports.
+    width: "calc(100% - 50px)",
     maxWidth: "1500px",
     marginLeft: "20px",
     position: "relative",
@@ -563,66 +645,21 @@ function NodeDetail() {
       <hr style={{ borderColor: "var(--border)", margin: 0 }} />
       <div style={highlightedTextStyle}>
         {isOwner && (
-          <div ref={kebabMenuRef} style={{
-            position: 'absolute',
-            top: '10px',
-            right: '10px',
-          }}>
-            <button
-              onClick={() => setShowKebabMenu((v) => !v)}
-              title="More actions"
-              style={{
-                background: 'none', border: 'none', cursor: 'pointer',
-                color: 'var(--text-muted)', padding: '4px 6px',
-                display: 'inline-flex', alignItems: 'center',
-              }}
-            >
-              <FaEllipsisV size={14} />
-            </button>
-            {showKebabMenu && (
-              <div style={{
-                position: 'absolute',
-                top: '100%',
-                right: 0,
-                marginTop: '4px',
-                background: 'var(--bg-card)',
-                border: '1px solid var(--border)',
-                borderRadius: '6px',
-                boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
-                minWidth: '120px',
-                zIndex: 5,
-                overflow: 'hidden',
-              }}>
-                <button
-                  onClick={() => {
-                    setShowKebabMenu(false);
-                    if (node.context_artifacts?.prompt) {
-                      setShowPromptEditConfirm(true);
-                    } else {
-                      setShowEditOverlay(true);
-                    }
-                  }}
-                  style={{
-                    display: 'block', width: '100%', textAlign: 'left',
-                    background: 'none', border: 'none', cursor: 'pointer',
-                    padding: '8px 12px',
-                    fontFamily: 'var(--sans)', fontSize: '0.85rem', fontWeight: 300,
-                    color: 'var(--text-primary)',
-                  }}
-                >Edit</button>
-                <button
-                  onClick={() => { setShowKebabMenu(false); handleDelete(); }}
-                  style={{
-                    display: 'block', width: '100%', textAlign: 'left',
-                    background: 'none', border: 'none', cursor: 'pointer',
-                    padding: '8px 12px',
-                    fontFamily: 'var(--sans)', fontSize: '0.85rem', fontWeight: 300,
-                    color: 'var(--accent)',
-                  }}
-                >Delete</button>
-              </div>
-            )}
-          </div>
+          <BubbleKebabMenu
+            visible={true}
+            items={[
+              {
+                label: 'Edit',
+                action: () => setExclusiveTarget('edit', node),
+                color: 'var(--text-primary)',
+              },
+              {
+                label: 'Delete',
+                action: () => setExclusiveTarget('delete', node),
+                color: 'var(--accent)',
+              },
+            ]}
+          />
         )}
         {node.is_system_prompt && node.prompt_title && (
           <div style={{
@@ -838,7 +875,11 @@ function NodeDetail() {
   const childrenSection = (
     <div>
       {node.children && node.children.length > 0 && (
-        <RenderChildTree nodes={node.children} onBubbleClick={handleBubbleClick} />
+        <RenderChildTree
+          nodes={node.children}
+          onBubbleClick={handleBubbleClick}
+          buildActions={buildActions}
+        />
       )}
     </div>
   );
@@ -867,7 +908,7 @@ function NodeDetail() {
 
       {showPromptEditConfirm && (
         <div
-          onClick={() => setShowPromptEditConfirm(false)}
+          onClick={() => { setShowPromptEditConfirm(false); setEditTarget(null); }}
           style={{
             position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
             backgroundColor: 'rgba(0,0,0,0.7)',
@@ -905,7 +946,7 @@ function NodeDetail() {
             </p>
             <div style={{ display: 'flex', gap: '12px', justifyContent: 'center' }}>
               <button
-                onClick={() => setShowPromptEditConfirm(false)}
+                onClick={() => { setShowPromptEditConfirm(false); setEditTarget(null); }}
                 style={{
                   padding: '8px 20px', background: 'none',
                   border: '1px solid var(--border)', borderRadius: '6px',
@@ -930,28 +971,45 @@ function NodeDetail() {
         </div>
       )}
 
-      {showEditOverlay && (
+      {showEditOverlay && editTarget && (
         <NodeFormModal
           title="Edit Text"
-          onClose={() => setShowEditOverlay(false)}
+          onClose={() => { setShowEditOverlay(false); setEditTarget(null); }}
           nodeFormProps={{
             editMode: true,
-            nodeId: node.id,
-            initialContent: node.content,
-            initialPrivacyLevel: node.privacy_level,
-            initialAiUsage: node.ai_usage,
-            detachPrompt: !!node.context_artifacts?.prompt,
+            nodeId: editTarget.id,
+            initialContent: editTarget.content,
+            initialPrivacyLevel: editTarget.privacy_level,
+            initialAiUsage: editTarget.ai_usage,
+            detachPrompt: !!editTarget.context_artifacts?.prompt,
             onSuccess: handleEditSuccess,
           }}
         />
       )}
       <DeleteConfirmDialog
-        open={showDeleteDialog}
+        open={!!deleteTarget}
         mode="single"
-        hasChildren={!!(node && node.children && node.children.length > 0)}
-        onClose={() => setShowDeleteDialog(false)}
+        hasChildren={!!(deleteTarget && (
+          deleteTarget.child_count > 0
+          || (deleteTarget.children && deleteTarget.children.length > 0)
+        ))}
+        onClose={() => setDeleteTarget(null)}
         onConfirm={handleConfirmDelete}
       />
+      {replyTarget && (
+        <NodeFormModal
+          title="Reply"
+          onClose={() => setReplyTarget(null)}
+          nodeFormProps={{
+            parentId: replyTarget.id,
+            hidePowerFeatures: !craftMode,
+            onSuccess: (data) => {
+              setReplyTarget(null);
+              navigate(`/node/${data.id}`);
+            },
+          }}
+        />
+      )}
     </div>
   );
 }
