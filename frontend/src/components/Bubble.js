@@ -31,6 +31,26 @@ const Bubble = ({
   const [showKebab, setShowKebab] = useState(false);
   const [hovered, setHovered] = useState(false);
   const kebabRef = useRef(null);
+  const hoverHideTimerRef = useRef(null);
+
+  const cancelHoverHide = () => {
+    if (hoverHideTimerRef.current) {
+      clearTimeout(hoverHideTimerRef.current);
+      hoverHideTimerRef.current = null;
+    }
+  };
+
+  // Keep the kebab on screen for a beat after the cursor leaves so a
+  // user can still reach it across the gap between bubble and icon.
+  const scheduleHoverHide = () => {
+    cancelHoverHide();
+    hoverHideTimerRef.current = setTimeout(() => {
+      setHovered(false);
+      hoverHideTimerRef.current = null;
+    }, 3000);
+  };
+
+  useEffect(() => cancelHoverHide, []);
 
   // Outside-click handler for the kebab dropdown.
   useEffect(() => {
@@ -115,6 +135,7 @@ const Bubble = ({
       style={bubbleStyle}
       onClick={handleCardClick}
       onMouseEnter={(e) => {
+        cancelHoverHide();
         setHovered(true);
         if (!isPlaceholder) {
           e.currentTarget.style.borderColor = 'var(--border-hover)';
@@ -123,7 +144,7 @@ const Bubble = ({
         }
       }}
       onMouseLeave={(e) => {
-        setHovered(false);
+        scheduleHoverHide();
         e.currentTarget.style.borderColor = 'var(--border)';
         e.currentTarget.style.boxShadow = 'none';
         e.currentTarget.style.transform = 'translateY(0)';
@@ -135,9 +156,10 @@ const Bubble = ({
           onClick={(e) => e.stopPropagation()}
           style={{
             position: 'absolute',
-            top: '10px',
+            top: '50%',
             left: '100%',
             marginLeft: '8px',
+            transform: 'translateY(-50%)',
             opacity: kebabVisible ? 1 : 0,
             transition: 'opacity 0.15s ease',
             pointerEvents: kebabVisible ? 'auto' : 'none',
@@ -146,8 +168,8 @@ const Bubble = ({
           <button
             type="button"
             onClick={() => setShowKebab((v) => !v)}
-            onFocus={() => setHovered(true)}
-            onBlur={() => setHovered(false)}
+            onFocus={() => { cancelHoverHide(); setHovered(true); }}
+            onBlur={() => scheduleHoverHide()}
             title="More actions"
             aria-label="More actions"
             style={{
