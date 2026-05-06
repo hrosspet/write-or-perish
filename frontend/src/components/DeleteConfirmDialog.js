@@ -102,8 +102,8 @@ function DeleteConfirmDialog({
     body = (
       <>
         All your nodes in this thread will be deleted. Other users' replies
-        are preserved (they own them) — they'll become top-level after the
-        {" "}{graceDays}-day grace period.
+        are preserved (they own them); your nodes stay as placeholders so
+        their replies remain reachable. Recoverable for {graceDays} days.
       </>
     );
     buttons = (
