@@ -267,18 +267,11 @@ function NodeDetail() {
           `Deleted ${n} node${n === 1 ? "" : "s"}`,
           3000,
         );
-        // "This only" leaves the node as a tombstone with alive children.
-        // Drop into a live child so the user sees the tombstone in its
-        // breadcrumb instead of landing on the deleted-node 404.
-        if (!withDescendants && node.children) {
-          const aliveChild = node.children.find((c) => !c.deleted);
-          if (aliveChild) {
-            navigate(`/node/${aliveChild.id}`);
-            return;
-          }
-        }
-        // Otherwise walk up to the closest alive ancestor — the immediate
-        // parent may itself be a tombstone (e.g., chained "this only").
+        // Walk up to the closest alive ancestor. The immediate parent
+        // may itself be a tombstone (e.g., chained "this only"), and the
+        // ancestor's view shows the just-deleted node as a tombstoned
+        // child preview — so the tombstone stays visible without
+        // dropping the user on a 404.
         if (node.ancestors && node.ancestors.length > 0) {
           for (let i = node.ancestors.length - 1; i >= 0; i -= 1) {
             if (!node.ancestors[i].deleted) {
