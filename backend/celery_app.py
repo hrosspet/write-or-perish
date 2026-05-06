@@ -37,6 +37,10 @@ celery.conf.update(
             'task': 'backend.tasks.recent_context.check_pending_recent_context_updates',
             'schedule': 600.0,  # every 10 minutes
         },
+        'cleanup-deleted-nodes': {
+            'task': 'backend.tasks.node_cleanup.cleanup_deleted_nodes',
+            'schedule': 86400.0,  # daily
+        },
     },
 )
 
@@ -49,3 +53,4 @@ from backend.tasks import exports  # noqa: F401
 from backend.tasks import streaming_transcription  # noqa: F401
 from backend.tasks import voice_todo_merge  # noqa: F401
 from backend.tasks import recent_context  # noqa: F401
+from backend.tasks import node_cleanup  # noqa: F401

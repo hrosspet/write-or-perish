@@ -418,33 +418,68 @@ def _context_artifact_fields(n):
 def serialize_node_recursive(n, user_id=None):
     """Recursively serialize a node and its accessible children.
 
+    Soft-deleted nodes the viewer had pre-deletion access to render as
+    tombstones (placeholder content + minimal metadata) so threaded
+    discussion stays coherent. Soft-deleted nodes the viewer never had
+    access to render as inaccessible stubs.
+
     Args:
         n: Node to serialize
         user_id: User ID to check access for (defaults to current_user.id)
 
     Returns:
-        dict: Serialized node with only accessible children
+        dict: Serialized node — full content / tombstone / inaccessible —
+              including children that pass the same filter.
     """
+    from backend.utils.serialization import serialize_node_status
+
     if user_id is None:
         user_id = current_user.id if current_user.is_authenticated else None
 
-    # Filter children to only include those the user can access
-    accessible_children = [child for child in n.children if can_user_access_node(child, user_id)]
+    status = serialize_node_status(n, user_id)
+    if status is not None and status.get("inaccessible"):
+        # Privacy-blocked or no-pre-access fallback. Don't recurse — the
+        # viewer has no business seeing the subtree's structure either.
+        return status
 
-    # Sort the accessible children using the cached _descendant_count
-    sorted_children = sorted(accessible_children, key=lambda child: child._descendant_count, reverse=True)
+    # Tombstones still recurse: soft-deleted ancestors may have live
+    # other-user replies below them. Children list keeps the same filter.
+    def _child_visible(child):
+        if can_user_access_node(child, user_id):
+            return True
+        if child.deleted_at is None:
+            return False
+        s = serialize_node_status(child, user_id)
+        return s is not None and not s.get("inaccessible")
+
+    visible_children = [c for c in n.children if _child_visible(c)]
+    sorted_children = sorted(
+        visible_children, key=lambda c: c._descendant_count, reverse=True,
+    )
+    children_data = [
+        serialize_node_recursive(child, user_id) for child in sorted_children
+    ]
+
+    if status is not None:
+        # Tombstone — content already omitted by serialize_node_status.
+        return {
+            **status,
+            "child_count": len(visible_children),
+            "descendant_count": n._descendant_count,
+            "children": children_data,
+        }
 
     data = {
         "id": n.id,
         "content": n.get_content(),
         "node_type": n.node_type,
-        "child_count": len(accessible_children),  # Only count accessible children
+        "child_count": len(visible_children),
         "created_at": n.created_at.isoformat(),
         "updated_at": n.updated_at.isoformat(),
         "username": n.user.username if n.user else "Unknown",
         "llm_model": n.llm_model,
         "descendant_count": n._descendant_count,
-        "children": [serialize_node_recursive(child, user_id) for child in sorted_children]
+        "children": children_data,
     }
     data.update(_system_prompt_fields(n))
     return data
@@ -506,6 +541,12 @@ def create_node():
             return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
         if not validate_ai_usage(ai_usage):
             return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
+
+        # Race A guard: lock parent and reject if soft-deleted.
+        from backend.utils.node_deletion import assert_parent_alive
+        err = assert_parent_alive(parent_id)
+        if err is not None:
+            return err
 
         # Placeholder content until transcription is ready.
         placeholder_text = "[Voice note – transcription pending]"
@@ -580,6 +621,12 @@ def create_node():
         return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
     if not validate_ai_usage(ai_usage):
         return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
+
+    # Race A guard: lock parent and reject if soft-deleted.
+    from backend.utils.node_deletion import assert_parent_alive
+    err = assert_parent_alive(parent_id)
+    if err is not None:
+        return err
 
     # Calculate token count before encryption
     from backend.utils.tokens import approximate_token_count as _atc
@@ -686,6 +733,13 @@ def get_node(node_id):
     if node is None:
         return jsonify({"error": "Node not found"}), 404
 
+    # Soft-deleted nodes 404 even for the owner (§10: direct URL never
+    # serves a tombstone, only ancestor breadcrumbs do). The structural
+    # tombstone lives in serialize_node_recursive / the ancestors loop —
+    # not here at the highlighted-node entry point.
+    if node.deleted_at is not None:
+        return jsonify({"error": "Node not found"}), 404
+
     # Check if user has permission to access this node
     if not can_user_access_node(node, current_user.id):
         return jsonify({"error": "Not authorized to access this node"}), 403
@@ -693,12 +747,17 @@ def get_node(node_id):
     # Compute descendant counts once for the entire subtree.
     compute_descendant_counts(node)
 
-    # Build ancestors, filtering by privacy
+    # Build ancestors. Soft-deleted ancestors the viewer had pre-deletion
+    # access to render as tombstones — without this the breadcrumb chain
+    # would silently skip them and hide the structural fact that something
+    # was once there. Privacy-blocked ancestors (and deletions the viewer
+    # never had access to) are omitted entirely.
+    from backend.utils.serialization import serialize_node_status
     ancestors = []
     current = node.parent
     while current:
-        # Only include ancestor if user has access
-        if can_user_access_node(current, current_user.id):
+        status = serialize_node_status(current, current_user.id)
+        if status is None:  # alive + accessible
             ancestor_content = current.get_content()
             ancestor_data = {
                 "id": current.id,
@@ -717,11 +776,33 @@ def get_node(node_id):
             }
             ancestor_data.update(_system_prompt_fields(current))
             ancestors.insert(0, ancestor_data)
+        elif status.get("deleted"):
+            ancestor_data = {
+                **status,
+                "child_count": len(current.children),
+                "ai_usage": current.ai_usage,
+            }
+            ancestor_data.update(_system_prompt_fields(current))
+            ancestors.insert(0, ancestor_data)
+        # else: status.get('inaccessible') — skip entirely (no leak of
+        # structural fact "something is here" to a viewer who never had
+        # access).
         current = current.parent
 
-    # Filter children by privacy and serialize
-    accessible_children = [child for child in node.children if can_user_access_node(child, current_user.id)]
-    sorted_children = sorted(accessible_children, key=lambda child: child._descendant_count, reverse=True)
+    # Filter children by privacy. Tombstones the viewer had pre-deletion
+    # access to are included; serialize_node_recursive renders them with
+    # the deletion shape and recurses into their (possibly alive) children.
+    def _child_visible(child):
+        if can_user_access_node(child, current_user.id):
+            return True
+        if child.deleted_at is None:
+            return False
+        s = serialize_node_status(child, current_user.id)
+        return s is not None and not s.get("inaccessible")
+
+    visible_children = [c for c in node.children if _child_visible(c)]
+    sorted_children = sorted(visible_children, key=lambda child: child._descendant_count, reverse=True)
+    accessible_children = visible_children  # for the child_count field below
 
     # Serialize the current node (its children are now sorted descending by descendant count).
     node_data = {
@@ -932,6 +1013,7 @@ def request_llm_response(node_id):
 
     # Create placeholder LLM node and enqueue task
     # AI nodes inherit privacy settings from their parent node
+    from backend.utils.node_deletion import ParentDeletedError
     try:
         llm_node, task_id = create_llm_placeholder(
             parent_node.id, model_id, current_user.id,
@@ -939,6 +1021,11 @@ def request_llm_response(node_id):
             ai_usage=parent_node.ai_usage,
             source_mode=source_mode,
         )
+    except ParentDeletedError as e:
+        # Race A: parent was soft-deleted between the route's auth check
+        # and the locking re-fetch inside create_llm_placeholder. Surface
+        # 410 so the frontend can show "this node was deleted" UX.
+        return jsonify({"error": str(e)}), 410
     except UserExportValidationError as e:
         # Misconfigured {user_export} placeholder — abort BEFORE creating
         # any LLM node so the user's feed isn't polluted with a stub
@@ -959,16 +1046,25 @@ def request_llm_response(node_id):
 @nodes_bp.route("/<int:node_id>/link", methods=["POST"])
 @login_required
 def add_linked_node(node_id):
-    parent_node = Node.query.get_or_404(node_id)
     data = request.get_json()
     linked_node_id = data.get("linked_node_id")
     additional_text = data.get("content", "")  # Optional extra text.
     if not linked_node_id:
         return jsonify({"error": "linked_node_id is required"}), 400
-    # Validate that the node to be linked exists.
+    # Validate that the node to be linked exists and is alive (privacy filter
+    # also excludes soft-deleted, but we want a distinct 410 if specifically
+    # the target is deleted vs 404 if it never existed).
     linked_node = Node.query.get(linked_node_id)
     if not linked_node:
         return jsonify({"error": "Linked node not found"}), 404
+    if linked_node.deleted_at is not None:
+        return jsonify({"error": "Linked node has been deleted"}), 410
+    # Race A guard: lock parent and reject if soft-deleted.
+    from backend.utils.node_deletion import assert_parent_alive
+    err = assert_parent_alive(node_id)
+    if err is not None:
+        return err
+    parent_node = Node.query.get_or_404(node_id)
     from backend.utils.tokens import approximate_token_count as _atc5
     new_node = Node(
         user_id=current_user.id,
@@ -1543,6 +1639,12 @@ def init_chunked_upload():
     if not validate_ai_usage(ai_usage):
         return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
 
+    # Race A guard: lock parent and reject if soft-deleted.
+    from backend.utils.node_deletion import assert_parent_alive
+    err = assert_parent_alive(parent_id)
+    if err is not None:
+        return err
+
     # Create placeholder node
     placeholder_text = "[Voice note – upload in progress]"
     from backend.utils.tokens import approximate_token_count as _atc3
@@ -1863,6 +1965,12 @@ def init_streaming_transcription():
         return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
     if not validate_ai_usage(ai_usage):
         return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
+
+    # Race A guard: lock parent and reject if soft-deleted.
+    from backend.utils.node_deletion import assert_parent_alive
+    err = assert_parent_alive(parent_id)
+    if err is not None:
+        return err
 
     # Generate session ID
     import uuid
@@ -2185,39 +2293,40 @@ def unpin_node(node_id):
 @nodes_bp.route("/<int:node_id>", methods=["DELETE"])
 @login_required
 def delete_node(node_id):
-    from backend.models import (NodeVersion, NodeTranscriptChunk, TTSChunk,
-                                Draft, NodeContextArtifact)
+    """Soft-delete a node (and editable descendants if requested).
 
-    node = Node.query.get_or_404(node_id)
-    # Allow deletion if user is the owner or LLM requester (parent node owner)
-    if not can_user_edit_node(node):
+    Sets `deleted_at` rather than removing rows. The Celery cleanup task
+    finalizes purge after SOFT_DELETE_GRACE_DAYS (see
+    backend/tasks/node_cleanup.py).
+    """
+    from backend.constants import SOFT_DELETE_GRACE_DAYS
+    from backend.utils.node_deletion import soft_delete_node
+
+    raw = (request.args.get("delete_descendants")
+           or (request.get_json(silent=True) or {}).get("delete_descendants"))
+    with_descendants = str(raw).lower() in ("true", "1", "yes")
+
+    # Pre-lock 403 short-circuit — cheap and avoids holding a row lock to
+    # tell an unauthorized client they can't delete.
+    pre = Node.query.get_or_404(node_id)
+    if not can_user_edit_node(pre, current_user.id):
         return jsonify({"error": "Not authorized"}), 403
 
-    # Update all children: set their parent_id to None
-    # (This "orphans" the children so they become top‑level nodes.)
     try:
-        Node.query.filter_by(parent_id=node.id).update({"parent_id": None})
-
-        # Clean up related records that have foreign keys to this node
-        NodeVersion.query.filter_by(node_id=node.id).delete()
-        NodeTranscriptChunk.query.filter_by(node_id=node.id).delete()
-        TTSChunk.query.filter_by(node_id=node.id).delete()
-
-        # Update drafts that reference this node
-        Draft.query.filter_by(node_id=node.id).update({"node_id": None})
-        Draft.query.filter_by(parent_id=node.id).update({"parent_id": None})
-        Draft.query.filter_by(llm_node_id=node.id).delete()
-
-        # Clean up context artifact tracking
-        NodeContextArtifact.query.filter_by(node_id=node.id).delete()
-
-        # Update linked_node_id references in other nodes
-        Node.query.filter_by(linked_node_id=node.id).update({"linked_node_id": None})
-
-        db.session.delete(node)
+        flagged = soft_delete_node(
+            node_id, current_user.id, with_descendants=with_descendants,
+        )
+        if flagged is None:
+            # Concurrent purge or permission flip between the pre-check and
+            # the locking re-fetch.
+            db.session.rollback()
+            return jsonify({"error": "Not found or not authorized"}), 404
         db.session.commit()
-        return jsonify({"message": "Node deleted successfully"}), 200
+        return jsonify({
+            "scheduled": flagged,
+            "grace_days": SOFT_DELETE_GRACE_DAYS,
+        }), 200
     except Exception as e:
         db.session.rollback()
-        current_app.logger.error(f"Error deleting node {node_id}: {e}")
+        current_app.logger.error(f"Error soft-deleting node {node_id}: {e}")
         return jsonify({"error": "Error deleting node", "details": str(e)}), 500

@@ -8,10 +8,22 @@ import NodeFooter from './NodeFooter';
  */
 const InlineQuoteBubble = ({ quote, onClick }) => {
   if (!quote) {
-    // Quote not accessible or not found
+    // Privacy-blocked or not found — vocabulary aligned with the rest of
+    // the soft-delete plan (see Bubble.js / DeleteConfirmDialog).
     return (
       <div style={notAccessibleStyle}>
-        [Quote not accessible]
+        [Quoted node inaccessible]
+      </div>
+    );
+  }
+
+  if (quote.deleted) {
+    // Soft-deleted target the viewer had pre-deletion access to. Distinct
+    // string from the privacy "inaccessible" case so the viewer can tell
+    // "this was deleted" vs "I can't see this".
+    return (
+      <div style={notAccessibleStyle}>
+        [Quoted node deleted]
       </div>
     );
   }

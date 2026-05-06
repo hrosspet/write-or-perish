@@ -2,6 +2,8 @@ import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import api from "../api";
 import Bubble from "./Bubble";
+import DeleteConfirmDialog from "./DeleteConfirmDialog";
+import { useToast } from "../contexts/ToastContext";
 
 function Feed() {
   const [feedNodes, setFeedNodes] = useState([]);
@@ -10,6 +12,8 @@ function Feed() {
   const [error, setError] = useState("");
   const [hasMore, setHasMore] = useState(false);
   const [page, setPage] = useState(1);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const { addToast } = useToast();
   const navigate = useNavigate();
 
   const fetchPage = useCallback((pageNum) => {
@@ -67,6 +71,39 @@ function Feed() {
     }
   };
 
+  const handleDeleteThread = (cardNode) => {
+    setDeleteTarget(cardNode);
+  };
+
+  const handleConfirmDeleteThread = ({ withDescendants }) => {
+    if (!deleteTarget) return;
+    // The backend's `thread_root_id` is the actual thread root (matters
+    // when the displayed card is the first child of a system-prompt root).
+    const targetId = deleteTarget.thread_root_id || deleteTarget.id;
+    api.delete(`/nodes/${targetId}`, {
+      params: { delete_descendants: withDescendants },
+    })
+      .then(response => {
+        const data = response.data || {};
+        const n = data.scheduled || 1;
+        const days = data.grace_days || 30;
+        addToast(
+          `Thread scheduled for deletion (${n} node${n === 1 ? "" : "s"}, ${days} days)`,
+          3000,
+        );
+        setFeedNodes(prev => prev.filter(card => card.id !== deleteTarget.id));
+      })
+      .catch(err => {
+        console.error(err);
+        const msg = (err.response && err.response.data && err.response.data.error)
+          || "Error deleting thread.";
+        addToast(msg, 4000);
+      })
+      .finally(() => {
+        setDeleteTarget(null);
+      });
+  };
+
   if (loading) return <div style={{ padding: "20px", color: "var(--text-muted)" }}>Loading feed...</div>;
   if (error) return <div style={{ padding: "20px", color: "var(--accent)" }}>{error}</div>;
 
@@ -101,7 +138,13 @@ function Feed() {
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: "1rem"}}>
           {feedNodes.map(node => (
-            <Bubble key={node.id} node={node} onClick={handleBubbleClick} />
+            <Bubble
+              key={node.id}
+              node={node}
+              onClick={handleBubbleClick}
+              enableActions={true}
+              onDeleteThread={handleDeleteThread}
+            />
           ))}
         </div>
       )}
@@ -114,6 +157,13 @@ function Feed() {
           Load more...
         </div>
       )}
+      <DeleteConfirmDialog
+        open={deleteTarget !== null}
+        mode="thread"
+        hasChildren={!!(deleteTarget && deleteTarget.child_count)}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={handleConfirmDeleteThread}
+      />
     </div>
   );
 }

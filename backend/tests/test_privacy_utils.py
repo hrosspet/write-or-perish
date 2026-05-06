@@ -84,7 +84,7 @@ class TestCanUserAccessNode:
 
     def test_owner_can_access_private_node(self):
         """Test that node owner can always access their private nodes."""
-        node = MagicMock()
+        node = MagicMock(deleted_at=None)
         node.user_id = 1
         node.privacy_level = PrivacyLevel.PRIVATE
 
@@ -92,7 +92,7 @@ class TestCanUserAccessNode:
 
     def test_owner_can_access_public_node(self):
         """Test that node owner can access their public nodes."""
-        node = MagicMock()
+        node = MagicMock(deleted_at=None)
         node.user_id = 1
         node.privacy_level = PrivacyLevel.PUBLIC
 
@@ -100,7 +100,7 @@ class TestCanUserAccessNode:
 
     def test_other_user_cannot_access_private_node(self):
         """Test that other users cannot access private nodes."""
-        node = MagicMock()
+        node = MagicMock(deleted_at=None)
         node.user_id = 1
         node.privacy_level = PrivacyLevel.PRIVATE
 
@@ -108,7 +108,7 @@ class TestCanUserAccessNode:
 
     def test_other_user_can_access_public_node(self):
         """Test that other users can access public nodes."""
-        node = MagicMock()
+        node = MagicMock(deleted_at=None)
         node.user_id = 1
         node.privacy_level = PrivacyLevel.PUBLIC
 
@@ -116,7 +116,7 @@ class TestCanUserAccessNode:
 
     def test_circles_not_yet_implemented(self):
         """Test that circles privacy level denies access (not yet implemented)."""
-        node = MagicMock()
+        node = MagicMock(deleted_at=None)
         node.user_id = 1
         node.privacy_level = PrivacyLevel.CIRCLES
 
@@ -131,7 +131,7 @@ class TestCanUserAccessNode:
         mock_current_user.is_authenticated = True
         mock_current_user.id = 1
 
-        node = MagicMock()
+        node = MagicMock(deleted_at=None)
         node.user_id = 1
         node.privacy_level = PrivacyLevel.PRIVATE
 
@@ -142,7 +142,7 @@ class TestCanUserAccessNode:
         """Test that unauthenticated users are denied access."""
         mock_current_user.is_authenticated = False
 
-        node = MagicMock()
+        node = MagicMock(deleted_at=None)
         node.user_id = 1
         node.privacy_level = PrivacyLevel.PUBLIC
 
@@ -150,7 +150,7 @@ class TestCanUserAccessNode:
 
     def test_handles_missing_privacy_level_attribute(self):
         """Test that function handles nodes without privacy_level gracefully."""
-        node = MagicMock()
+        node = MagicMock(deleted_at=None)
         node.user_id = 1
         del node.privacy_level  # Simulate missing attribute
 
@@ -164,49 +164,49 @@ class TestAIUsageChecks:
 
     def test_can_ai_use_for_chat_with_chat_permission(self):
         """Test that AI can use nodes with 'chat' permission."""
-        node = MagicMock()
+        node = MagicMock(deleted_at=None)
         node.ai_usage = AIUsage.CHAT
 
         assert can_ai_use_node_for_chat(node) is True
 
     def test_can_ai_use_for_chat_with_train_permission(self):
         """Test that AI can use nodes with 'train' permission for chat."""
-        node = MagicMock()
+        node = MagicMock(deleted_at=None)
         node.ai_usage = AIUsage.TRAIN
 
         assert can_ai_use_node_for_chat(node) is True
 
     def test_cannot_ai_use_for_chat_with_none_permission(self):
         """Test that AI cannot use nodes with 'none' permission."""
-        node = MagicMock()
+        node = MagicMock(deleted_at=None)
         node.ai_usage = AIUsage.NONE
 
         assert can_ai_use_node_for_chat(node) is False
 
     def test_can_ai_use_for_training_with_train_permission(self):
         """Test that AI can use nodes with 'train' permission for training."""
-        node = MagicMock()
+        node = MagicMock(deleted_at=None)
         node.ai_usage = AIUsage.TRAIN
 
         assert can_ai_use_node_for_training(node) is True
 
     def test_cannot_ai_use_for_training_with_chat_permission(self):
         """Test that AI cannot use nodes with 'chat' permission for training."""
-        node = MagicMock()
+        node = MagicMock(deleted_at=None)
         node.ai_usage = AIUsage.CHAT
 
         assert can_ai_use_node_for_training(node) is False
 
     def test_cannot_ai_use_for_training_with_none_permission(self):
         """Test that AI cannot use nodes with 'none' permission for training."""
-        node = MagicMock()
+        node = MagicMock(deleted_at=None)
         node.ai_usage = AIUsage.NONE
 
         assert can_ai_use_node_for_training(node) is False
 
     def test_handles_missing_ai_usage_attribute(self):
         """Test that functions handle nodes without ai_usage gracefully."""
-        node = MagicMock()
+        node = MagicMock(deleted_at=None)
         del node.ai_usage  # Simulate missing attribute
 
         # Should default to NONE behavior
@@ -223,7 +223,7 @@ class TestFindHumanOwner:
         human_node.node_type = "user"
         human_node.user_id = 1
 
-        llm_node = MagicMock()
+        llm_node = MagicMock(deleted_at=None)
         llm_node.node_type = "llm"
         llm_node.user_id = 100  # LLM account
         llm_node.parent = human_node
@@ -242,7 +242,7 @@ class TestFindHumanOwner:
         llm_node_1.user_id = 100  # LLM account
         llm_node_1.parent = human_node
 
-        llm_node_2 = MagicMock()
+        llm_node_2 = MagicMock(deleted_at=None)
         llm_node_2.node_type = "llm"
         llm_node_2.user_id = 101  # Another LLM account
         llm_node_2.parent = llm_node_1
@@ -261,7 +261,7 @@ class TestFindHumanOwner:
         llm_node_1.user_id = 100
         llm_node_1.parent = human_node
 
-        llm_node_2 = MagicMock()
+        llm_node_2 = MagicMock(deleted_at=None)
         llm_node_2.node_type = "llm"
         llm_node_2.user_id = 101
         llm_node_2.parent = llm_node_1
@@ -275,7 +275,7 @@ class TestFindHumanOwner:
 
     def test_llm_with_no_parent(self):
         """Test LLM node with no parent: should return None."""
-        llm_node = MagicMock()
+        llm_node = MagicMock(deleted_at=None)
         llm_node.node_type = "llm"
         llm_node.user_id = 100
         llm_node.parent = None
@@ -298,7 +298,7 @@ class TestCanUserAccessNodeLLMChains:
 
     def test_human_can_access_direct_llm_response(self):
         """Human can access LLM response directly under their node."""
-        llm_node = MagicMock()
+        llm_node = MagicMock(deleted_at=None)
         llm_node.node_type = "llm"
         llm_node.user_id = 100
         llm_node.human_owner_id = 1
@@ -308,7 +308,7 @@ class TestCanUserAccessNodeLLMChains:
 
     def test_human_can_access_nested_llm_response(self):
         """Human can access LLM response nested under another LLM response."""
-        llm_node_2 = MagicMock()
+        llm_node_2 = MagicMock(deleted_at=None)
         llm_node_2.node_type = "llm"
         llm_node_2.user_id = 101
         llm_node_2.human_owner_id = 1
@@ -318,7 +318,7 @@ class TestCanUserAccessNodeLLMChains:
 
     def test_other_user_cannot_access_private_llm_response(self):
         """Other users cannot access private LLM responses."""
-        llm_node = MagicMock()
+        llm_node = MagicMock(deleted_at=None)
         llm_node.node_type = "llm"
         llm_node.user_id = 100
         llm_node.human_owner_id = 1
@@ -333,7 +333,7 @@ class TestCanUserEditNodeLLMChains:
 
     def test_human_can_edit_direct_llm_response(self):
         """Human can edit LLM response directly under their node."""
-        llm_node = MagicMock()
+        llm_node = MagicMock(deleted_at=None)
         llm_node.node_type = "llm"
         llm_node.user_id = 100
         llm_node.human_owner_id = 1
@@ -342,7 +342,7 @@ class TestCanUserEditNodeLLMChains:
 
     def test_human_can_edit_nested_llm_response(self):
         """Human can edit LLM response nested under another LLM response."""
-        llm_node_2 = MagicMock()
+        llm_node_2 = MagicMock(deleted_at=None)
         llm_node_2.node_type = "llm"
         llm_node_2.user_id = 101
         llm_node_2.human_owner_id = 1
@@ -360,7 +360,7 @@ class TestCanUserEditNodeLLMChains:
 
     def test_other_user_cannot_edit_llm_response(self):
         """Other users cannot edit LLM responses they didn't request."""
-        llm_node = MagicMock()
+        llm_node = MagicMock(deleted_at=None)
         llm_node.node_type = "llm"
         llm_node.user_id = 100
         llm_node.human_owner_id = 1
@@ -370,7 +370,7 @@ class TestCanUserEditNodeLLMChains:
 
     def test_owner_can_still_edit_own_node(self):
         """User can still edit their own non-LLM node."""
-        node = MagicMock()
+        node = MagicMock(deleted_at=None)
         node.node_type = "user"
         node.user_id = 1
         node.human_owner_id = 1
@@ -379,7 +379,7 @@ class TestCanUserEditNodeLLMChains:
 
     def test_llm_account_cannot_edit_own_node(self):
         """LLM account being the owner doesn't grant edit to random users."""
-        llm_node = MagicMock()
+        llm_node = MagicMock(deleted_at=None)
         llm_node.node_type = "llm"
         llm_node.user_id = 100  # LLM account
         llm_node.human_owner_id = 1

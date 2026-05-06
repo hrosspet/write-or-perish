@@ -660,18 +660,26 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             llm_node.llm_task_progress = 30
             db.session.commit()
 
+            # All placeholder-detection passes below skip soft-deleted
+            # ancestors — those are scrubbed in the message-build loop
+            # below, so any placeholders inside their (still-in-DB during
+            # grace) content would be acting on content the user has
+            # asked to delete.
+            def _alive(n):
+                return n.deleted_at is None and n.get_content()
+
             # Check if any node contains the {user_export} placeholder
             # Find the first node containing it to use its timestamp as cutoff
             export_node = None
             export_placeholder_match = None
             for node in node_chain:
-                node_content = node.get_content()
-                if node_content:
-                    m = USER_EXPORT_PATTERN.search(node_content)
-                    if m:
-                        export_node = node
-                        export_placeholder_match = m.group(0)
-                        break
+                if not _alive(node):
+                    continue
+                m = USER_EXPORT_PATTERN.search(node.get_content())
+                if m:
+                    export_node = node
+                    export_placeholder_match = m.group(0)
+                    break
             needs_export = export_node is not None
             export_params = parse_placeholder_params(export_placeholder_match) if export_placeholder_match else {}
             user_export_content = None
@@ -679,28 +687,29 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # Check if any node contains the {user_profile} placeholder
             needs_profile = any(
                 USER_PROFILE_PLACEHOLDER in node.get_content()
-                for node in node_chain if node.get_content()
+                for node in node_chain if _alive(node)
             )
             user_profile_content = None
 
             # Check if any node contains the {user_todo} placeholder
             needs_todo = any(
                 USER_TODO_PLACEHOLDER in node.get_content()
-                for node in node_chain if node.get_content()
+                for node in node_chain if _alive(node)
             )
             user_todo_content = None
 
             # Check if any node contains {user_recent} or {user_recent_raw}
             needs_recent = any(
                 USER_RECENT_PLACEHOLDER in node.get_content()
-                for node in node_chain if node.get_content()
+                for node in node_chain if _alive(node)
             )
             # Find the node containing {user_recent_raw} to use its
             # created_at as an upper bound (avoid duplicating session context)
             recent_raw_node = None
             for node in node_chain:
-                nc = node.get_content()
-                if nc and USER_RECENT_RAW_PLACEHOLDER in nc:
+                if not _alive(node):
+                    continue
+                if USER_RECENT_RAW_PLACEHOLDER in node.get_content():
                     recent_raw_node = node
                     break
             needs_recent_raw = recent_raw_node is not None
@@ -710,14 +719,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # Check if any node contains {user_ai_preferences}
             needs_ai_prefs = any(
                 USER_AI_PREFERENCES_PLACEHOLDER in node.get_content()
-                for node in node_chain if node.get_content()
+                for node in node_chain if _alive(node)
             )
             user_ai_preferences_content = None
 
             # Check if any node contains {quote:ID} placeholders
             needs_quotes = any(
                 has_quotes(node.get_content())
-                for node in node_chain if node.get_content()
+                for node in node_chain if _alive(node)
             )
             if needs_quotes:
                 logger.info("Detected {quote:ID} placeholders in conversation chain")
@@ -870,6 +879,21 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 for node in node_chain:
                     author = node.user.username if node.user else "Unknown"
                     is_llm_node = node.node_type == "llm" or (node.llm_model is not None)
+
+                    # Soft-deleted ancestor: scrub content so the AI doesn't
+                    # ingest deleted user data. We still include the node so
+                    # the conversation structure is preserved (better than
+                    # an unexplained gap, which tends to make models try to
+                    # "fill in" what's missing).
+                    if node.deleted_at is not None:
+                        message_text = (
+                            "[Earlier message in this thread was deleted "
+                            "by the author]"
+                        )
+                        role = "assistant" if is_llm_node else "user"
+                        messages.append({"role": role, "content": message_text})
+                        continue
+
                     node_content = node.get_content()
 
                     if is_llm_node:
@@ -1054,6 +1078,27 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             # Step 5: Update the placeholder LLM node with the response
             self.update_state(state='PROGRESS', meta={'progress': 95, 'status': 'Finalizing'})
+
+            # Race B guard: re-fetch the target node and bail if it was
+            # soft-deleted while we were generating. Without this we'd
+            # write generated content into a tombstone-bound node and waste
+            # both the compute and the storage until the 30-day wipe.
+            db.session.refresh(llm_node)
+            if llm_node.deleted_at is not None:
+                logger.warning(
+                    "LLM target node %s was soft-deleted mid-generation; "
+                    "discarding response", llm_node.id,
+                )
+                llm_node.llm_task_status = 'cancelled'
+                llm_node.llm_task_progress = 100
+                db.session.commit()
+                return {
+                    'parent_node_id': parent_node_id,
+                    'llm_node_id': llm_node.id,
+                    'status': 'cancelled',
+                    'reason': 'target_soft_deleted',
+                }
+
             llm_node.set_content(llm_text)
             llm_node.token_count = output_tokens or approximate_token_count(llm_text)
 

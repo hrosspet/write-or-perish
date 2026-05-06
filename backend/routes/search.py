@@ -78,6 +78,7 @@ def search():
     ).filter(NodeContextArtifact.artifact_type == "prompt").subquery()
 
     query = Node.query.filter(
+        Node.deleted_at.is_(None),
         or_(
             Node.user_id == current_user.id,
             Node.human_owner_id == current_user.id,

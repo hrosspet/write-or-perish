@@ -1059,14 +1059,18 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     # LLM/TTS dispatch. The user_node already exists (the audio is
     # real and the user wants it kept); record a warning on it so the
     # voice frontend can surface a toast.
+    # ParentDeletedError handled the same way: if user_node got
+    # soft-deleted between voice-record finalization and now, abort
+    # cleanly without an orphan LLM placeholder.
     from backend.utils.placeholders import UserExportValidationError
+    from backend.utils.node_deletion import ParentDeletedError
     from backend.utils.task_warnings import record_task_warning
     try:
         llm_node, _ = create_llm_placeholder(
             user_node.id, model, user_id, enqueue=False,
             ai_usage=ai_usage,
         )
-    except UserExportValidationError as e:
+    except (UserExportValidationError, ParentDeletedError) as e:
         logger.warning(
             "Voice transcription aborted LLM dispatch: %s "
             "(session_id=%s user_id=%s)",

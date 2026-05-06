@@ -40,10 +40,27 @@ def get_draft():
         node = Node.query.get(node_id)
         if not node:
             return jsonify({"error": "Node not found"}), 404
+        # Soft-deleted target — treat as gone (per plan §17). The
+        # underlying Draft row is left alone so a future "rescue
+        # interrupted drafts" UI could surface it; at the GET-by-target
+        # entry point, behave as if no draft exists.
+        if node.deleted_at is not None:
+            return jsonify({"error": "Node not found"}), 404
 
         # Check authorization using shared utility function
         if not can_user_edit_node(node):
             return jsonify({"error": "Not authorized to access drafts for this node"}), 403
+
+    # Plan §17 parent_id branch: if the parent has been soft-deleted,
+    # we still want to surface the user's in-progress writing — but
+    # rebound to a top-level draft (parent_id=None) and flag a UI
+    # warning. We resolve this by reading parent.deleted_at first;
+    # the draft-fetch logic below decides the actual lookup key.
+    parent_deleted = False
+    if parent_id:
+        parent = Node.query.get(parent_id)
+        if parent is not None and parent.deleted_at is not None:
+            parent_deleted = True
 
     # Build query for the user's draft matching the context
     query = Draft.query.filter_by(user_id=current_user.id)
@@ -60,6 +77,10 @@ def get_draft():
         # Creating a new node (possibly under a parent)
         query = query.filter_by(node_id=None)
         if parent_id:
+            # Even if the parent is soft-deleted, look up the draft by
+            # the original parent_id so we can return the user's saved
+            # content (with a warning); the response below null-rebinds
+            # the parent_id field per plan §17.
             query = query.filter_by(parent_id=parent_id)
         else:
             query = query.filter_by(parent_id=None)
@@ -75,10 +96,15 @@ def get_draft():
         "id": draft.id,
         "content": draft.get_content(),
         "node_id": draft.node_id,
-        "parent_id": draft.parent_id,
+        "parent_id": None if parent_deleted else draft.parent_id,
         "created_at": draft.created_at.isoformat() + "Z",
         "updated_at": draft.updated_at.isoformat() + "Z"
     }
+    if parent_deleted:
+        response_data["parent_deleted"] = True
+        response_data["warning"] = (
+            "Original parent was deleted; this draft is now top-level."
+        )
 
     # Include streaming session info so frontend can trigger recovery
     if draft.session_id:
@@ -116,8 +142,38 @@ def get_interrupted_drafts():
 
     drafts = query.order_by(Draft.updated_at.desc()).all()
 
+    # Resolve all referenced parent_ids in one query so we can apply the
+    # plan §17 rules without N+1 lookups.
+    parent_ids = {d.parent_id for d in drafts if d.parent_id is not None}
+    deleted_parent_ids = set()
+    if parent_ids:
+        deleted_parent_ids = {
+            row.id for row in
+            Node.query.filter(
+                Node.id.in_(parent_ids),
+                Node.deleted_at.isnot(None),
+            ).with_entities(Node.id).all()
+        }
+
+    # Same lookup for node_id (editing target). Drafts whose edit target
+    # is gone get omitted entirely.
+    node_ids = {d.node_id for d in drafts if d.node_id is not None}
+    deleted_node_ids = set()
+    if node_ids:
+        deleted_node_ids = {
+            row.id for row in
+            Node.query.filter(
+                Node.id.in_(node_ids),
+                Node.deleted_at.isnot(None),
+            ).with_entities(Node.id).all()
+        }
+
     results = []
     for draft in drafts:
+        # Plan §17: omit drafts whose edit target is soft-deleted.
+        if draft.node_id and draft.node_id in deleted_node_ids:
+            continue
+
         chunk_count = NodeTranscriptChunk.query.filter_by(
             session_id=draft.session_id,
         ).count()
@@ -129,17 +185,30 @@ def get_interrupted_drafts():
             status='stored',
         ).count()
 
-        results.append({
+        # Plan §17: drafts with a soft-deleted parent_id surface with
+        # parent_id null + a warning, so the user's in-progress writing
+        # isn't lost.
+        parent_deleted = (
+            draft.parent_id is not None
+            and draft.parent_id in deleted_parent_ids
+        )
+        entry = {
             "id": draft.id,
             "session_id": draft.session_id,
-            "parent_id": draft.parent_id,
+            "parent_id": None if parent_deleted else draft.parent_id,
             "label": draft.label,
             "content": draft.get_content(),
             "chunk_count": chunk_count,
             "has_stored_chunks": stored_count > 0,
             "created_at": draft.created_at.isoformat() + "Z",
             "updated_at": draft.updated_at.isoformat() + "Z",
-        })
+        }
+        if parent_deleted:
+            entry["parent_deleted"] = True
+            entry["warning"] = (
+                "Original parent was deleted; this draft is now top-level."
+            )
+        results.append(entry)
 
     return jsonify(results), 200
 
@@ -167,6 +236,11 @@ def save_draft():
         node = Node.query.get(node_id)
         if not node:
             return jsonify({"error": "Node not found"}), 404
+        # Soft-deleted edit target — match the create endpoint's 410
+        # so the frontend can treat parent/edit-target deletions
+        # uniformly (clear local state, surface a warning).
+        if node.deleted_at is not None:
+            return jsonify({"error": "Node has been deleted"}), 410
 
         # Check authorization using shared utility function
         if not can_user_edit_node(node):
@@ -177,6 +251,8 @@ def save_draft():
         parent = Node.query.get(parent_id)
         if not parent:
             return jsonify({"error": "Parent node not found"}), 404
+        if parent.deleted_at is not None:
+            return jsonify({"error": "Parent node has been deleted"}), 410
 
     # Find existing draft for this context
     query = Draft.query.filter_by(user_id=current_user.id)

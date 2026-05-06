@@ -53,10 +53,15 @@ def _count_new_tokens(user_id, since):
     boundary node itself must be excluded — otherwise its own `token_count`
     keeps the threshold tripped on static data and the summary regenerates
     on every beat.
+
+    Soft-deleted nodes are also excluded — they're slated for purge and
+    shouldn't keep the summary threshold tripped on content the user is
+    actively trying to remove.
     """
     return db.session.query(
         func.coalesce(func.sum(Node.token_count), 0)
     ).filter(
+        Node.deleted_at.is_(None),
         or_(Node.user_id == user_id,
             Node.human_owner_id == user_id),
         Node.created_at > since,
@@ -65,10 +70,11 @@ def _count_new_tokens(user_id, since):
 
 
 def _count_total_eligible_tokens(user_id):
-    """Count all eligible tokens for a user (no cutoff)."""
+    """Count all eligible tokens for a user (no cutoff). Excludes soft-deleted."""
     return db.session.query(
         func.coalesce(func.sum(Node.token_count), 0)
     ).filter(
+        Node.deleted_at.is_(None),
         or_(Node.user_id == user_id,
             Node.human_owner_id == user_id),
         Node.ai_usage.in_(AI_ALLOWED),

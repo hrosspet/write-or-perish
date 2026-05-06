@@ -10,7 +10,7 @@ from backend.utils.privacy import AI_ALLOWED, accessible_nodes_filter, can_user_
 from backend.utils.quotes import (
     resolve_quotes, has_quotes, ExportQuoteResolver, resolve_quotes_for_export
 )
-from sqlalchemy import func, or_
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import subqueryload
 from datetime import datetime
 import os
@@ -61,6 +61,80 @@ def _node_author_label(node):
         return f"AI ({node.llm_model})" if node.llm_model else "AI (unknown)"
     author = node.user.username if node.user else "Unknown"
     return f"User ({author})"
+
+
+def _export_visible_filter(model, user_id):
+    """SQL filter for nodes visible to *user_id* in their export.
+
+    Same as ``accessible_nodes_filter`` for alive nodes (excludes
+    soft-deleted at the SQL level), plus soft-deleted nodes the user
+    *owned* — those render as tombstone placeholders so mixed threads
+    keep their structure (§5a). Soft-deleted nodes by other users are
+    NOT included even if public — including them would leak the
+    deleter's username/timestamp into someone else's export.
+    """
+    return or_(
+        accessible_nodes_filter(model, user_id),
+        and_(
+            model.deleted_at.isnot(None),
+            or_(
+                model.user_id == user_id,
+                model.human_owner_id == user_id,
+            ),
+        ),
+    )
+
+
+def _render_tombstoned_node(
+    node, index_path, processed_nodes, filter_ai_usage,
+    user_id, created_before, embedded_quotes, included_ids,
+    ai_blocked_ids,
+):
+    """Emit a deletion placeholder for a soft-deleted node and recurse
+    into its children. Children may be alive other-user replies that
+    should still surface in the export tree.
+
+    Caller is responsible for the pre-deletion-access check — this
+    helper assumes the viewer is allowed to see the tombstone shell.
+    """
+    depth = len(index_path.split('.'))
+    header = "#" * min(depth + 1, 6)
+    ts = node.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+    result = (
+        f"{header} [{index_path}] {_node_author_label(node)}"
+        f" - {ts}\n"
+        f"[Node deleted by author]\n\n"
+    )
+
+    processed_nodes.add(node.id)
+    children = node.children
+    if filter_ai_usage:
+        children = [c for c in children if c.ai_usage in AI_ALLOWED]
+    if created_before:
+        children = [c for c in children if c.created_at < created_before]
+    if included_ids is not None:
+        # Tombstones below us still need to surface even if they aren't
+        # in the SQL pre-selection set — see _export_visible_filter
+        # rationale.
+        children = [
+            c for c in children
+            if c.id in included_ids or c.deleted_at is not None
+        ]
+    children = sorted(children, key=lambda c: c.created_at)
+
+    for j, gc in enumerate(children):
+        gc_index = f"{index_path}.{j+1}"
+        result += format_node_tree(
+            gc, index_path=gc_index,
+            processed_nodes=processed_nodes,
+            filter_ai_usage=filter_ai_usage,
+            user_id=user_id,
+            created_before=created_before,
+            embedded_quotes=embedded_quotes,
+            included_ids=included_ids,
+            ai_blocked_ids=ai_blocked_ids,
+        )
+    return result
 
 
 def _render_inaccessible_node(
@@ -142,6 +216,18 @@ def format_node_tree(
     # Avoid infinite loops from circular references
     if node.id in processed_nodes:
         return ""
+
+    # Soft-deleted: render the tombstone shell (no content) and recurse.
+    # The caller is responsible for the pre-deletion-access check before
+    # routing here; format_node_tree's children loop below applies it
+    # via can_user_view_tombstone.
+    if node.deleted_at is not None:
+        return _render_tombstoned_node(
+            node, index_path, processed_nodes, filter_ai_usage,
+            user_id, created_before, embedded_quotes, included_ids,
+            ai_blocked_ids,
+        )
+
     processed_nodes.add(node.id)
 
     # Calculate depth from index_path (e.g., "1.2.3" -> depth 3)
@@ -201,13 +287,32 @@ def format_node_tree(
         if created_before:
             children = [c for c in children if c.created_at < created_before]
         if included_ids is not None:
-            children = [c for c in children if c.id in included_ids]
+            # Pass tombstones through even if they aren't in the SQL
+            # pre-selection set — they don't take real budget tokens
+            # and dropping them creates discontinuities.
+            children = [
+                c for c in children
+                if c.id in included_ids or c.deleted_at is not None
+            ]
         children = sorted(children, key=lambda c: c.created_at)
 
         for i, child in enumerate(children):
             child_index = f"{index_path}.{i+1}"
             if len(children) > 1 and i > 0:
                 result += "---\n**BRANCH**\n---\n\n"
+
+            if child.deleted_at is not None:
+                # Tombstone: render only if viewer had pre-deletion
+                # access. Otherwise skip silently — the structural fact
+                # "something is here" would itself leak username/timestamp.
+                from backend.utils.privacy import can_user_view_tombstone
+                if user_id is None or can_user_view_tombstone(child, user_id):
+                    result += _render_tombstoned_node(
+                        child, child_index, processed_nodes,
+                        filter_ai_usage, user_id, created_before,
+                        embedded_quotes, included_ids, ai_blocked_ids,
+                    )
+                continue
 
             if user_id and not can_user_access_node(child, user_id):
                 result += _render_inaccessible_node(
@@ -254,9 +359,15 @@ def format_node_tree(
     if created_before:
         children = [c for c in children if c.created_at < created_before]
 
-    # If we have included_ids, filter to only include nodes in the export
+    # If we have included_ids, filter to only include nodes in the
+    # export. Tombstones pass through even if not in included_ids —
+    # they don't take real budget tokens and dropping them creates
+    # discontinuities (per §5a).
     if included_ids is not None:
-        children = [c for c in children if c.id in included_ids]
+        children = [
+            c for c in children
+            if c.id in included_ids or c.deleted_at is not None
+        ]
 
     children = sorted(children, key=lambda c: c.created_at)
 
@@ -266,6 +377,18 @@ def format_node_tree(
         # Mark branches (when there are multiple children)
         if len(children) > 1 and i > 0:
             result += "---\n**BRANCH**\n---\n\n"
+
+        if child.deleted_at is not None:
+            # Tombstone: render only with pre-deletion access; otherwise
+            # skip (don't leak structural "something is here").
+            from backend.utils.privacy import can_user_view_tombstone
+            if user_id is None or can_user_view_tombstone(child, user_id):
+                result += _render_tombstoned_node(
+                    child, child_index, processed_nodes,
+                    filter_ai_usage, user_id, created_before,
+                    embedded_quotes, included_ids, ai_blocked_ids,
+                )
+            continue
 
         if user_id and not can_user_access_node(child, user_id):
             result += _render_inaccessible_node(
@@ -363,10 +486,15 @@ def _select_incremental_rows(user_id, filter_ai_usage=False,
     ever shows it matters; kept iterative for portability between
     PostgreSQL and the SQLite test database.
     """
-    cols = (Node.id, Node.parent_id, Node.created_at, Node.token_count)
+    cols = (Node.id, Node.parent_id, Node.created_at, Node.token_count,
+            Node.deleted_at)
 
     def _general_filter():
-        clauses = [accessible_nodes_filter(Node, user_id)]
+        # _export_visible_filter includes soft-deleted nodes the user
+        # owns so the export tree can render them as tombstones (§5a).
+        # Fully-deleted threads end up with no rows and are skipped at
+        # the entry-point selection step downstream.
+        clauses = [_export_visible_filter(Node, user_id)]
         if filter_ai_usage:
             clauses.append(Node.ai_usage.in_(AI_ALLOWED))
         if created_before is not None:
@@ -421,6 +549,33 @@ def _select_incremental_rows(user_id, filter_ai_usage=False,
     return list(rows_by_id.values())
 
 
+def _thread_has_alive_node(root_id):
+    """Per-thread skip rule (§5a): does the subtree rooted at *root_id*
+    contain any node with deleted_at IS NULL?
+
+    Returns True for a thread that should appear in the export (mixed or
+    fully alive); False for a fully-deleted thread that should be
+    omitted entirely so the AI doesn't see ghost-tombstone breadcrumbs
+    of content the user wanted gone.
+
+    Recursive CTE for portability across PostgreSQL and SQLite.
+    """
+    base = db.session.query(Node.id).filter(
+        Node.id == root_id
+    ).cte(name="thread_alive_check", recursive=True)
+    desc = db.aliased(Node, flat=True)
+    recursive = db.session.query(desc.id).join(
+        base, desc.parent_id == base.c.id
+    )
+    cte = base.union_all(recursive)
+    return db.session.query(
+        db.session.query(Node.id).filter(
+            Node.id.in_(db.session.query(cte.c.id)),
+            Node.deleted_at.is_(None),
+        ).exists()
+    ).scalar()
+
+
 def _preselect_node_ids(user_id, budget, filter_ai_usage=False,
                         created_before=None, created_after=None,
                         chronological_order=False):
@@ -453,7 +608,9 @@ def _preselect_node_ids(user_id, budget, filter_ai_usage=False,
 
     inner = db.session.query(Node.id, cumul).filter(
         Node.id.in_(db.session.query(thread_cte.c.id)),
-        accessible_nodes_filter(Node, user_id),
+        # Includes soft-deleted user-owned nodes so they can render as
+        # tombstones in the export tree (§5a).
+        _export_visible_filter(Node, user_id),
     )
     if filter_ai_usage:
         inner = inner.filter(Node.ai_usage.in_(AI_ALLOWED))
@@ -525,8 +682,14 @@ def _entry_point_top_level_started(node, user_id):
         cur = cur.parent
     if cur is None:
         return None
+    # Allow soft-deleted-with-pre-access roots through (the user's own
+    # tombstoned thread roots): the entry-point preamble's start-date
+    # is the user's own data and is fine to surface in their export.
     if not can_user_access_node(cur, user_id):
-        return None
+        from backend.utils.privacy import can_user_view_tombstone
+        if not (cur.deleted_at is not None
+                and can_user_view_tombstone(cur, user_id)):
+            return None
     return cur.created_at
 
 
@@ -662,6 +825,25 @@ def _build_user_export_incremental(
         )
         render_included_ids = included_ids
 
+    # Per-thread skip rule (§5a): exclude entry points whose entire
+    # subtree (within the user's accessible/owned set) is soft-deleted.
+    # Without this a fully-deleted thread would surface as just a chain
+    # of `[Node deleted by author]` placeholders — which leaks the
+    # structural fact "this thread existed" into the AI's recent
+    # context even though the user wanted it gone.
+    children_by_parent = {}
+    for r in cte_rows:
+        if r.parent_id is not None:
+            children_by_parent.setdefault(r.parent_id, []).append(r)
+
+    def _subtree_has_alive(row):
+        if row.deleted_at is None:
+            return True
+        for child in children_by_parent.get(row.id, []):
+            if _subtree_has_alive(child):
+                return True
+        return False
+
     # Entry points. Iterate CTE rows so quoted-pre-cutoff embeds added
     # by the resolver can never be entry candidates. Parent membership
     # is checked against `render_included_ids` so a budget-ejected
@@ -671,6 +853,7 @@ def _build_user_export_incremental(
         if r.id in render_included_ids
         and (r.parent_id is None
              or r.parent_id not in render_included_ids)
+        and _subtree_has_alive(r)
     ]
     entry_rows.sort(
         key=lambda r: r.created_at,
@@ -869,6 +1052,15 @@ def build_user_export_content(
         query = query.filter(Node.created_at < created_before)
 
     all_top_level_nodes = query.order_by(Node.created_at.desc()).all()
+
+    # §5a per-thread skip: drop fully-deleted threads so the export
+    # doesn't show a chain of `[Node deleted by author]` placeholders
+    # for content the user explicitly removed. Mixed threads (some
+    # alive, some deleted) still show through with tombstones rendered
+    # by `_render_tombstoned_node`.
+    all_top_level_nodes = [
+        n for n in all_top_level_nodes if _thread_has_alive_node(n.id)
+    ]
 
     if not all_top_level_nodes:
         return None
