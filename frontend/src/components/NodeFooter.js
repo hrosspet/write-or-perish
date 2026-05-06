@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { FaRegCommentDots } from 'react-icons/fa';
 import { useUser } from '../contexts/UserContext';
 
-const NodeFooter = ({ username, createdAt, childrenCount, humanOwnerUsername, llmModel, children }) => {
+const NodeFooter = ({ username, createdAt, childrenCount, humanOwnerUsername, llmModel, onReplyClick, children }) => {
   const { user } = useUser();
 
   // "via" display: show "humanOwner via model" for LLM nodes,
@@ -17,6 +17,13 @@ const NodeFooter = ({ username, createdAt, childrenCount, humanOwnerUsername, ll
   const linkUrl = user && user.username === linkUsername ? '/dashboard' : `/dashboard/${linkUsername}`;
   const formattedDateTime = createdAt ? new Date(createdAt).toLocaleString() : "";
 
+  const replyIcon = (
+    <>
+      <FaRegCommentDots />
+      {childrenCount > 0 && <span>{childrenCount}</span>}
+    </>
+  );
+
   return (
     <div style={footerStyle}>
       <Link to={linkUrl} style={{ color: "var(--text-muted)", textDecoration: "none", transition: "color 0.3s ease" }}>
@@ -24,12 +31,22 @@ const NodeFooter = ({ username, createdAt, childrenCount, humanOwnerUsername, ll
       </Link>
       <span style={{ color: "var(--border)" }}>&middot;</span>
       <span>{formattedDateTime}</span>
-      {childrenCount > 0 && (
-        <>
-          <span style={{ color: "var(--border)" }}>&middot;</span>
-          <FaRegCommentDots />
-          <span>{childrenCount}</span>
-        </>
+      <span style={{ color: "var(--border)" }}>&middot;</span>
+      {onReplyClick ? (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onReplyClick(); }}
+          title="Reply"
+          style={{
+            background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+            color: 'inherit', font: 'inherit',
+            display: 'flex', alignItems: 'center', gap: '4px',
+          }}
+        >
+          {replyIcon}
+        </button>
+      ) : (
+        replyIcon
       )}
       {children && (
         <>

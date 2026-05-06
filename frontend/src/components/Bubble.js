@@ -200,6 +200,11 @@ const Bubble = ({
             childrenCount={childrenCount}
             humanOwnerUsername={node.human_owner_username}
             llmModel={node.llm_model}
+            onReplyClick={
+              !isPlaceholder && Array.isArray(actions)
+                ? (actions.find((a) => a.label === 'Reply') || {}).action || null
+                : null
+            }
           />
           {!isPlaceholder && (
             <div style={{ display: "flex", alignItems: "center" }}>
