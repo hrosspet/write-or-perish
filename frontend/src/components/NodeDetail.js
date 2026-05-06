@@ -981,7 +981,10 @@ function NodeDetail() {
       <DeleteConfirmDialog
         open={!!deleteTarget}
         mode="single"
-        hasChildren={!!(deleteTarget && deleteTarget.children && deleteTarget.children.length > 0)}
+        hasChildren={!!(deleteTarget && (
+          deleteTarget.child_count > 0
+          || (deleteTarget.children && deleteTarget.children.length > 0)
+        ))}
         onClose={() => setDeleteTarget(null)}
         onConfirm={handleConfirmDelete}
       />
