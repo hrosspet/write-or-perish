@@ -991,6 +991,7 @@ function NodeDetail() {
           onClose={() => setReplyTarget(null)}
           nodeFormProps={{
             parentId: replyTarget.id,
+            hidePowerFeatures: !craftMode,
             onSuccess: (data) => {
               setReplyTarget(null);
               navigate(`/node/${data.id}`);
