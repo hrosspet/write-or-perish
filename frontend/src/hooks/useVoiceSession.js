@@ -138,15 +138,19 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       transcriptRef.current = text;
     },
     onError: (err) => {
-      // Only act on recording-startup failures (getUserMedia rejection,
-      // MediaRecorder construction error). Runtime errors like chunk-upload
-      // failures also flow through onError but should not interrupt an
-      // in-progress recording — preserve prior behavior for those.
-      if (!err?.startup) return;
+      // Surface (1) startup failures (getUserMedia/MediaRecorder ctor) and
+      // (2) fatal upload failures (server rejected chunk 0 with
+      // init_parse_failed — recorder was reset, session is dead).
+      // Non-fatal upload failures (transient network) preserve prior silent
+      // retry-queue behavior so they don't interrupt an in-progress recording.
+      if (!err?.startup && !err?.fatal) return;
 
       const name = err?.name || err?.error?.name;
       let message;
-      if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+      if (err?.fatal) {
+        // Use the fatal-error message verbatim — it's already user-facing.
+        message = err.message;
+      } else if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
         message = "Microphone access was denied. Allow microphone access for this site in your browser and OS settings, then try again.";
       } else if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
         message = "No microphone was found on this device.";

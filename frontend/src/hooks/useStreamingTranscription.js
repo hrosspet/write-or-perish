@@ -193,10 +193,18 @@ export function useStreamingTranscription(options = {}) {
         }
         playErrorSound();
         if (onError) {
-          onError(new Error(
+          const uploadErr = new Error(
             result.fatalError
             || `Failed to upload chunk ${chunkIndex} after retries`
-          ));
+          );
+          // Tag fatal errors so the parent can distinguish them from
+          // recoverable transient failures and surface a toast +
+          // reset phase. Non-fatal uploads (transient network) keep the
+          // existing behavior of just queueing for retry without UI.
+          if (result.fatalError) {
+            try { uploadErr.fatal = true; } catch (_) { /* sealed */ }
+          }
+          onError(uploadErr);
         }
       }
     })();
