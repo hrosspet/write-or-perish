@@ -7,13 +7,20 @@ function BubbleKebabMenu({ visible, items, onFocus, onBlur }) {
 
   useEffect(() => {
     if (!showMenu) return undefined;
-    const handler = (e) => {
+    const onMouseDown = (e) => {
       if (ref.current && !ref.current.contains(e.target)) {
         setShowMenu(false);
       }
     };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') setShowMenu(false);
+    };
+    document.addEventListener('mousedown', onMouseDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
   }, [showMenu]);
 
   if (!items || items.length === 0) return null;
