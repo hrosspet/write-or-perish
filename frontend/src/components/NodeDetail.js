@@ -500,7 +500,9 @@ function NodeDetail() {
     border: "1px solid var(--border)",
     borderLeft: "3px solid var(--accent)",
     borderRadius: "10px",
-    width: "95%",
+    // Reserve right-side space for the always-outside kebab so it
+    // stays on screen down to ~320px portrait viewports.
+    width: "calc(95% - 60px)",
     maxWidth: "1500px",
     marginLeft: "20px",
     position: "relative",
