@@ -83,12 +83,46 @@ export function useStreamingMediaRecorder({
       throw err;
     }
 
+    if (typeof MediaRecorder === 'undefined') {
+      const err = new Error('MediaRecorder API is not available in this browser. Please update your browser or operating system.');
+      err.name = 'NotSupportedError';
+      setError(err.message);
+      throw err;
+    }
+
+    // The server requires WebM (EBML init-segment parser, .webm-suffixed
+    // storage). If the browser doesn't support audio/webm at the MediaRecorder
+    // level (e.g. older iOS Safari, where MediaRecorder shipped MP4-only), we
+    // can't proceed — fail fast with an actionable message rather than letting
+    // `new MediaRecorder({mimeType:'audio/webm'})` throw a generic
+    // NotSupportedError. The console log captures the codec capability matrix
+    // and UA for any future diagnostic.
+    const codecSupport = {
+      webm: MediaRecorder.isTypeSupported('audio/webm'),
+      webmOpus: MediaRecorder.isTypeSupported('audio/webm;codecs=opus'),
+      mp4: MediaRecorder.isTypeSupported('audio/mp4'),
+      mp4Aac: MediaRecorder.isTypeSupported('audio/mp4;codecs=mp4a.40.2'),
+    };
+    console.log('[StreamingRecorder] Codec support:', codecSupport, 'UA:', navigator.userAgent);
+
+    if (!codecSupport.webm && !codecSupport.webmOpus) {
+      const err = new Error(
+        `This browser cannot record in WebM, which the server requires. ` +
+        `Please try a recent version of Chrome on this device, or update your ` +
+        `operating system. (Detected codecs: ${JSON.stringify(codecSupport)})`
+      );
+      err.name = 'NotSupportedError';
+      setError(err.message);
+      throw err;
+    }
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
 
       const options = { mimeType: 'audio/webm' };
       const mediaRecorder = new MediaRecorder(stream, options);
+      console.log('[StreamingRecorder] MediaRecorder constructed:', { requested: 'audio/webm', actual: mediaRecorder.mimeType });
       recorderRef.current = mediaRecorder;
       chunksRef.current = [];
       chunkIndexRef.current = startingChunkIndex;

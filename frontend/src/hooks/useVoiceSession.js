@@ -137,6 +137,36 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     onTranscriptUpdate: (text) => {
       transcriptRef.current = text;
     },
+    onError: (err) => {
+      // Only act on recording-startup failures (getUserMedia rejection,
+      // MediaRecorder construction error). Runtime errors like chunk-upload
+      // failures also flow through onError but should not interrupt an
+      // in-progress recording — preserve prior behavior for those.
+      if (!err?.startup) return;
+
+      const name = err?.name || err?.error?.name;
+      let message;
+      if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+        message = "Microphone access was denied. Allow microphone access for this site in your browser and OS settings, then try again.";
+      } else if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+        message = "No microphone was found on this device.";
+      } else if (name === 'NotReadableError' || name === 'TrackStartError') {
+        message = "The microphone is in use by another app. Close other apps using it (calls, voice memos, video meetings) and try again.";
+      } else if (name === 'SecurityError') {
+        message = "Microphone access was blocked by browser security settings.";
+      } else if (name === 'NotSupportedError') {
+        message = err?.message || "Your browser does not support the required audio format. Please try Chrome or update your operating system.";
+      } else if (err?.message) {
+        message = `Could not start recording: ${err.message}`;
+      } else {
+        message = "Could not start recording. Please try again.";
+      }
+      addToast(message, 8000);
+      stopSilentAudio();
+      setIsStopping(false);
+      setHasError(true);
+      setPhase('ready');
+    },
     onComplete: async (data) => {
       setIsStopping(false);
       setPhase('processing');

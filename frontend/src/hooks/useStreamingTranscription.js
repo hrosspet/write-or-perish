@@ -433,11 +433,10 @@ export function useStreamingTranscription(options = {}) {
   // Start streaming transcription
   // overrideParentId: optional parent ID to use instead of the hook's parentId
   const startStreaming = useCallback(async (overrideParentId) => {
+    let initSucceeded = false;
     try {
-      // Initialize session
       await initSession(overrideParentId);
-
-      // Start recording
+      initSucceeded = true;
       await startMediaRecorder();
       setSessionState('recording');
 
@@ -445,8 +444,19 @@ export function useStreamingTranscription(options = {}) {
       console.error('Failed to start streaming:', err);
       setSessionState('error');
       setErrorMessage(err.message);
+      // initSession's catch already invokes onError before re-throwing, so
+      // only fire it here for post-init failures (e.g. getUserMedia rejected
+      // because mic permission was denied or the mic is held by another app).
+      // Without this, the parent never learns recording failed and leaves
+      // the UI stuck in the "recording" phase. Tag with `startup: true` so
+      // the parent can distinguish from runtime chunk-upload errors and
+      // safely reset its UI without disrupting an in-progress recording.
+      if (initSucceeded && onError) {
+        try { err.startup = true; } catch (_) { /* DOMException may be sealed */ }
+        onError(err);
+      }
     }
-  }, [initSession, startMediaRecorder]);
+  }, [initSession, startMediaRecorder, onError]);
 
   // Resume an existing interrupted session (continue recording).
   // New chunks start after existingChunkCount, duration continues from estimated offset.
