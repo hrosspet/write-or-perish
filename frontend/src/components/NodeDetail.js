@@ -267,13 +267,27 @@ function NodeDetail() {
           `Deleted ${n} node${n === 1 ? "" : "s"}`,
           3000,
         );
-        // Navigate to parent node if it exists, otherwise go to dashboard
-        if (node.ancestors && node.ancestors.length > 0) {
-          const parentNode = node.ancestors[node.ancestors.length - 1];
-          navigate(`/node/${parentNode.id}`);
-        } else {
-          navigate("/log");
+        // "This only" leaves the node as a tombstone with alive children.
+        // Drop into a live child so the user sees the tombstone in its
+        // breadcrumb instead of landing on the deleted-node 404.
+        if (!withDescendants && node.children) {
+          const aliveChild = node.children.find((c) => !c.deleted);
+          if (aliveChild) {
+            navigate(`/node/${aliveChild.id}`);
+            return;
+          }
         }
+        // Otherwise walk up to the closest alive ancestor — the immediate
+        // parent may itself be a tombstone (e.g., chained "this only").
+        if (node.ancestors && node.ancestors.length > 0) {
+          for (let i = node.ancestors.length - 1; i >= 0; i -= 1) {
+            if (!node.ancestors[i].deleted) {
+              navigate(`/node/${node.ancestors[i].id}`);
+              return;
+            }
+          }
+        }
+        navigate("/log");
       })
       .catch((err) => {
         console.error(err);
