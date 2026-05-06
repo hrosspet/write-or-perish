@@ -1,7 +1,5 @@
 import React, { useEffect } from "react";
 
-const DEFAULT_GRACE_DAYS = 30;
-
 const overlayStyle = {
   position: "fixed",
   top: 0, left: 0, right: 0, bottom: 0,
@@ -78,7 +76,6 @@ function DeleteConfirmDialog({
   open,
   mode = "single",
   hasChildren = false,
-  graceDays = DEFAULT_GRACE_DAYS,
   onClose,
   onConfirm,
 }) {
@@ -101,9 +98,8 @@ function DeleteConfirmDialog({
     title = "Delete entire thread?";
     body = (
       <>
-        All your nodes in this thread will be deleted. Other users' replies
-        are preserved (they own them); your nodes stay as placeholders so
-        their replies remain reachable. Recoverable for {graceDays} days.
+        Your content in this thread will be removed. Your nodes remain as
+        placeholders so other users' replies stay reachable (they own them).
       </>
     );
     buttons = (
@@ -169,9 +165,7 @@ function DeleteConfirmDialog({
     title = "Delete node?";
     body = (
       <>
-        This will be permanently deleted in {graceDays} days. Support can
-        recover it during this window; after {graceDays} days, content and
-        edit history are wiped.
+        Content and edit history will be removed.
       </>
     );
     buttons = (
