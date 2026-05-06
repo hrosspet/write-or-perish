@@ -313,18 +313,29 @@ function NodeDetail() {
           `Deleted ${n} node${n === 1 ? "" : "s"}`,
           3000,
         );
-        if (!wasFocal) {
+        // If the cascade swept the focal node away (target is an
+        // ancestor of focal AND descendants were included), refetching
+        // focal would 404. Treat this like a focal-target delete and
+        // walk up to the closest alive ancestor of the deleted target.
+        const ancestorIdx = (!wasFocal && withDescendants && node.ancestors)
+          ? node.ancestors.findIndex((a) => a.id === targetId)
+          : -1;
+        const focalCascaded = ancestorIdx !== -1;
+        if (!wasFocal && !focalCascaded) {
           // Non-focal target: refetch the focal node so the just-deleted
           // ancestor/child surfaces as a tombstone preview in place.
           return api.get(`/nodes/${id}`).then((r) => setNode(r.data));
         }
-        // Focal target: walk up to the closest alive ancestor. The
-        // immediate parent may itself be a tombstone (e.g., chained
-        // "this only"), and the ancestor's view shows the just-deleted
-        // node as a tombstoned child preview — so the tombstone stays
-        // visible without dropping the user on a 404.
-        if (node.ancestors && node.ancestors.length > 0) {
-          for (let i = node.ancestors.length - 1; i >= 0; i -= 1) {
+        // Walk up to the closest alive ancestor. For the focal-target
+        // case, that's everything in node.ancestors; for the cascade
+        // case, it's everything strictly above the deleted target. The
+        // immediate parent may itself be a tombstone (chained "this
+        // only"), and the surviving ancestor's view shows the just-
+        // deleted node as a tombstoned child preview — so the tombstone
+        // stays visible without dropping the user on a 404.
+        const upperBound = focalCascaded ? ancestorIdx : (node.ancestors?.length ?? 0);
+        if (node.ancestors) {
+          for (let i = upperBound - 1; i >= 0; i -= 1) {
             if (!node.ancestors[i].deleted) {
               navigate(`/node/${node.ancestors[i].id}`);
               return;
