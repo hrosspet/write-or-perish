@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
-import { FaThumbtack, FaMicrophone, FaEllipsisV } from "react-icons/fa";
+import { FaThumbtack, FaMicrophone } from "react-icons/fa";
 import NodeFooter from "./NodeFooter";
 import SpeakerIcon from "./SpeakerIcon";
 import DownloadAudioIcon from "./DownloadAudioIcon";
@@ -15,6 +15,7 @@ import { useCheckboxToggle } from "../utils/markdown";
 import { contextAllowsAi } from "../utils/aiUsage";
 import NodeFormModal from "./NodeFormModal";
 import Bubble from "./Bubble";
+import BubbleKebabMenu from "./BubbleKebabMenu";
 import QuotedContent from "./QuotedContent";
 import DeleteConfirmDialog from "./DeleteConfirmDialog";
 
@@ -79,9 +80,7 @@ function NodeDetail() {
       return resolved;
     });
   }, []);
-  const [showKebabMenu, setShowKebabMenu] = useState(false);
   const highlightedNodeRef = useRef(null);
-  const kebabMenuRef = useRef(null);
 
   // `autoGenerate` is the single source of truth. Defaults to true on
   // a fresh install (see useState initializer) and persists across
@@ -167,18 +166,6 @@ function NodeDetail() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
-
-  // Close kebab menu on outside click
-  useEffect(() => {
-    if (!showKebabMenu) return;
-    const handler = (e) => {
-      if (kebabMenuRef.current && !kebabMenuRef.current.contains(e.target)) {
-        setShowKebabMenu(false);
-      }
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [showKebabMenu]);
 
   // Handle LLM completion
   useEffect(() => {
@@ -567,66 +554,27 @@ function NodeDetail() {
       <hr style={{ borderColor: "var(--border)", margin: 0 }} />
       <div style={highlightedTextStyle}>
         {isOwner && (
-          <div ref={kebabMenuRef} style={{
-            position: 'absolute',
-            top: '10px',
-            right: '10px',
-          }}>
-            <button
-              onClick={() => setShowKebabMenu((v) => !v)}
-              title="More actions"
-              style={{
-                background: 'none', border: 'none', cursor: 'pointer',
-                color: 'var(--text-muted)', padding: '4px 6px',
-                display: 'inline-flex', alignItems: 'center',
-              }}
-            >
-              <FaEllipsisV size={14} />
-            </button>
-            {showKebabMenu && (
-              <div style={{
-                position: 'absolute',
-                top: '100%',
-                right: 0,
-                marginTop: '4px',
-                background: 'var(--bg-card)',
-                border: '1px solid var(--border)',
-                borderRadius: '6px',
-                boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
-                minWidth: '120px',
-                zIndex: 5,
-                overflow: 'hidden',
-              }}>
-                <button
-                  onClick={() => {
-                    setShowKebabMenu(false);
-                    if (node.context_artifacts?.prompt) {
-                      setShowPromptEditConfirm(true);
-                    } else {
-                      setShowEditOverlay(true);
-                    }
-                  }}
-                  style={{
-                    display: 'block', width: '100%', textAlign: 'left',
-                    background: 'none', border: 'none', cursor: 'pointer',
-                    padding: '8px 12px',
-                    fontFamily: 'var(--sans)', fontSize: '0.85rem', fontWeight: 300,
-                    color: 'var(--text-primary)',
-                  }}
-                >Edit</button>
-                <button
-                  onClick={() => { setShowKebabMenu(false); handleDelete(); }}
-                  style={{
-                    display: 'block', width: '100%', textAlign: 'left',
-                    background: 'none', border: 'none', cursor: 'pointer',
-                    padding: '8px 12px',
-                    fontFamily: 'var(--sans)', fontSize: '0.85rem', fontWeight: 300,
-                    color: 'var(--accent)',
-                  }}
-                >Delete</button>
-              </div>
-            )}
-          </div>
+          <BubbleKebabMenu
+            visible={true}
+            items={[
+              {
+                label: 'Edit',
+                action: () => {
+                  if (node.context_artifacts?.prompt) {
+                    setShowPromptEditConfirm(true);
+                  } else {
+                    setShowEditOverlay(true);
+                  }
+                },
+                color: 'var(--text-primary)',
+              },
+              {
+                label: 'Delete',
+                action: () => handleDelete(),
+                color: 'var(--accent)',
+              },
+            ]}
+          />
         )}
         {node.is_system_prompt && node.prompt_title && (
           <div style={{
