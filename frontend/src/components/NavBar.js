@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useUser } from "../contexts/UserContext";
+import { useTheme } from "../contexts/ThemeContext";
 import GlobalAudioPlayer from "./GlobalAudioPlayer";
 import api from "../api";
 
@@ -10,6 +11,7 @@ const aboutPaths = ["/why-loore", "/vision", "/how-to"];
 
 function NavBar({ onNewEntryClick }) {
   const { user, setUser } = useUser();
+  const { theme, toggleTheme } = useTheme();
   const location = useLocation();
   const navigate = useNavigate();
   const [aboutOpen, setAboutOpen] = useState(false);
@@ -376,6 +378,46 @@ function NavBar({ onNewEntryClick }) {
                           position: "absolute",
                           top: "2px",
                           left: craftMode ? "16px" : "2px",
+                          transition: "left 0.2s ease",
+                        }} />
+                      </div>
+                    </button>
+
+                    {/* Theme toggle */}
+                    <button
+                      onClick={toggleTheme}
+                      style={{ ...dropdownItemStyle, display: "flex", justifyContent: "space-between", alignItems: "center" }}
+                      title={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
+                    >
+                      <span style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        {theme === "light" ? (
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <circle cx="12" cy="12" r="4" />
+                            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+                          </svg>
+                        ) : (
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+                          </svg>
+                        )}
+                        <span>Light mode</span>
+                      </span>
+                      <div style={{
+                        width: "32px",
+                        height: "18px",
+                        borderRadius: "9px",
+                        background: theme === "light" ? "var(--accent)" : "var(--border)",
+                        position: "relative",
+                        transition: "background 0.2s ease",
+                      }}>
+                        <div style={{
+                          width: "14px",
+                          height: "14px",
+                          borderRadius: "50%",
+                          background: "var(--text-primary)",
+                          position: "absolute",
+                          top: "2px",
+                          left: theme === "light" ? "16px" : "2px",
                           transition: "left 0.2s ease",
                         }} />
                       </div>
