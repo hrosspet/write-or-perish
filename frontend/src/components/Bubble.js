@@ -187,9 +187,10 @@ const Bubble = ({
           {showKebab && (
             <div style={{
               position: 'absolute',
-              top: 0,
+              top: '50%',
               left: '100%',
               marginLeft: '4px',
+              transform: 'translateY(-50%)',
               background: 'var(--bg-card)',
               border: '1px solid var(--border)',
               borderRadius: '6px',
