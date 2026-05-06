@@ -86,9 +86,8 @@ function Feed() {
       .then(response => {
         const data = response.data || {};
         const n = data.scheduled || 1;
-        const days = data.grace_days || 30;
         addToast(
-          `Thread scheduled for deletion (${n} node${n === 1 ? "" : "s"}, ${days} days)`,
+          `Deleted ${n} node${n === 1 ? "" : "s"}`,
           3000,
         );
         setFeedNodes(prev => prev.filter(card => card.id !== deleteTarget.id));

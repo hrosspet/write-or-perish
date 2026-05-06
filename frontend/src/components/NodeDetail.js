@@ -263,11 +263,8 @@ function NodeDetail() {
       .then((response) => {
         const data = response.data || {};
         const n = data.scheduled || 1;
-        const days = data.grace_days || 30;
         addToast(
-          n === 1
-            ? `Node scheduled for deletion in ${days} days`
-            : `${n} nodes scheduled for deletion in ${days} days`,
+          `Deleted ${n} node${n === 1 ? "" : "s"}`,
           3000,
         );
         // Navigate to parent node if it exists, otherwise go to dashboard
