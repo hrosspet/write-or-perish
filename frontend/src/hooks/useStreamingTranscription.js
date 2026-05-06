@@ -99,39 +99,49 @@ export function useStreamingTranscription(options = {}) {
    * Upload a single chunk with exponential backoff retry.
    * Returns { success: true } on success, or { success: false, fatalError?: string }
    * on failure. `fatalError` is set when the server returned a deterministic
-   * error (e.g. chunk 0's WebM header didn't parse) where retrying wouldn't
+   * error (e.g. chunk 0's init segment didn't parse) where retrying wouldn't
    * help — retries are skipped and the caller surfaces a distinct message.
    */
   const uploadChunkWithRetry = useCallback(async (blob, chunkIndex, sessionId) => {
     const maxRetries = 4;
     const baseDelay = 2000; // 2 seconds
 
+    // The blob's `type` is set from the MediaRecorder's mimeType (which
+    // may include codec params like ';codecs=opus'). Derive the on-disk
+    // extension from the family so the backend can store + look up
+    // chunks correctly. Default to webm for safety.
+    const blobType = blob.type || 'audio/webm';
+    const family = blobType.split(';')[0].trim().toLowerCase();
+    const ext = family === 'audio/mp4' ? '.mp4' : '.webm';
+
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         const formData = new FormData();
-        formData.append('chunk', blob, `chunk_${chunkIndex}.webm`);
+        formData.append('chunk', blob, `chunk_${chunkIndex}${ext}`);
         formData.append('chunk_index', chunkIndex.toString());
+        formData.append('mime_type', blobType);
 
         await api.post(`/drafts/streaming/${sessionId}/audio-chunk`, formData, {
           headers: { 'Content-Type': 'multipart/form-data' },
           timeout: 600000,
         });
 
-        console.log(`[StreamingTranscription] Upload complete: chunk=${chunkIndex}` + (attempt > 0 ? ` (after ${attempt} retries)` : ''));
+        console.log(`[StreamingTranscription] Upload complete: chunk=${chunkIndex} mime=${blobType}` + (attempt > 0 ? ` (after ${attempt} retries)` : ''));
         return { success: true };
       } catch (err) {
-        // Server rejected chunk 0 because it couldn't parse the WebM header
-        // (MediaRecorder on this browser produced bytes we don't recognize).
-        // Retrying will yield the exact same bytes, so short-circuit with a
-        // fatal-error message the caller can surface distinctly from
-        // ordinary network flakiness. Key only on the stable code field so
-        // the status code can change without regressing this check.
-        if (err.response?.data?.code === 'webm_header_parse_failed') {
+        // Server rejected chunk 0 because it couldn't parse the format's
+        // init segment. Retrying will yield the exact same bytes, so
+        // short-circuit with a fatal-error message the caller can surface
+        // distinctly from ordinary network flakiness. After the MP4
+        // fallback fix, this path means corruption in transit (or a
+        // browser producing genuinely malformed output across both
+        // formats), not a browser-incompatibility issue.
+        if (err.response?.data?.code === 'init_parse_failed') {
           const detail = err.response?.data?.detail || 'unknown parse error';
-          console.error(`[StreamingTranscription] Fatal: server could not parse chunk ${chunkIndex}'s WebM header (${detail}); not retrying`);
+          console.error(`[StreamingTranscription] Fatal: server could not parse chunk ${chunkIndex}'s init segment (${detail}); not retrying`);
           return {
             success: false,
-            fatalError: `Your browser produced an audio format we can't process. Please try a different browser or device. (${detail})`,
+            fatalError: `Your audio recording could not be processed. Please try recording again. (${detail})`,
           };
         }
 
@@ -460,7 +470,13 @@ export function useStreamingTranscription(options = {}) {
 
   // Resume an existing interrupted session (continue recording).
   // New chunks start after existingChunkCount, duration continues from estimated offset.
-  const resumeStreaming = useCallback(async (existingSessionId, existingDraftId, existingChunkCount) => {
+  // existingMimeType: family-only mime ('audio/webm' or 'audio/mp4') from the
+  //   /drafts/interrupted payload. The recorder must record in the same family
+  //   chunk 0 was uploaded with, otherwise the server rejects subsequent chunks
+  //   with mime_mismatch. If this browser can't record that family, the
+  //   recorder hook throws NotSupportedError and we surface that via onError.
+  const resumeStreaming = useCallback(async (existingSessionId, existingDraftId, existingChunkCount, existingMimeType) => {
+    let initSucceeded = false;
     try {
       setSessionState('initializing');
       setErrorMessage(null);
@@ -470,19 +486,27 @@ export function useStreamingTranscription(options = {}) {
       draftIdRef.current = existingDraftId;
       sessionIdRef.current = existingSessionId;
       totalChunksRef.current = existingChunkCount || 0;
+      initSucceeded = true;
 
       const durationOffset = (existingChunkCount || 0) * (chunkIntervalMs / 1000);
       await startMediaRecorder({
         startingChunkIndex: existingChunkCount || 0,
         durationOffset,
+        forceMimeFamily: existingMimeType || null,
       });
       setSessionState('recording');
     } catch (err) {
       console.error('Failed to resume streaming:', err);
       setSessionState('error');
       setErrorMessage(err.message);
+      // Mirror startStreaming's onError plumbing so the parent sees the
+      // resume-incompatible-browser case and can reset the UI.
+      if (initSucceeded && onError) {
+        try { err.startup = true; } catch (_) { /* DOMException may be sealed */ }
+        onError(err);
+      }
     }
-  }, [startMediaRecorder, chunkIntervalMs]);
+  }, [startMediaRecorder, chunkIntervalMs, onError]);
 
   // Stop streaming and finalize
   // extraParams: optional { parent_id, model } for server-side LLM chain

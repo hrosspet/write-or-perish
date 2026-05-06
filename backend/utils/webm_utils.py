@@ -1,25 +1,27 @@
 """
-Utility functions for WebM audio file handling.
+Utility functions for fragmented-media (Matroska/WebM and fMP4) audio
+file handling.
 
 Covers:
 - Probing duration via ffprobe (`get_webm_duration`).
-- Extracting a MediaRecorder session's init segment (EBML header +
-  Segment header + Info + Tracks, everything before the first Cluster)
-  via a proper EBML element walk (`extract_webm_init_segment`,
-  `find_first_cluster_offset`, `find_all_cluster_offsets`).
+- Extracting a MediaRecorder session's init segment via a proper EBML
+  element walk for WebM (`extract_webm_init_segment`,
+  `find_first_cluster_offset`, `find_all_cluster_offsets`) or a flat
+  ISOBMFF box walk for fMP4 (`extract_mp4_init_segment`).
 - Persisting that init segment alongside a streaming session so later
-  batches that don't include chunk 0 can still be remuxed into valid
-  WebM (`persist_init_segment`).
-- Concatenating MediaRecorder fragments into a single valid WebM via
-  binary append + a single ffmpeg remux (`concat_webm_fragments`), and
-  concatenating multiple standalone WebM files via the ffmpeg concat
-  demuxer (`concat_audio_files`).
+  batches that don't include chunk 0 can still be remuxed into a valid
+  file (`persist_init_segment` — format-aware, dispatches on file suffix).
+- Concatenating MediaRecorder fragments (Matroska or fMP4) into a single
+  valid file via binary append + a single ffmpeg remux
+  (`concat_fragmented_media`), and concatenating multiple standalone
+  audio files via the ffmpeg concat demuxer (`concat_audio_files`).
 """
 
 import logging
 import os
 import pathlib
 import shutil
+import struct
 import subprocess
 import tempfile
 from typing import Optional
@@ -115,32 +117,41 @@ def persist_init_segment(
     chunk_path: pathlib.Path, chunk_dir: pathlib.Path,
 ) -> None:
     """Extract the init segment from a chunk-0 file on disk and persist it
-    at `chunk_dir/init.webm.enc` (or `init.webm` if encryption is disabled).
+    at `chunk_dir/init{ext}.enc` (or `init{ext}` if encryption is disabled),
+    where `ext` matches the chunk's file extension (`.webm` or `.mp4`).
 
-    Raises ValueError if the chunk's WebM bytes can't be parsed or are
-    missing a Tracks element. The caller is responsible for deleting the
-    offending chunk and surfacing an error — retaining a chunk 0 we can't
-    extract the init from would let batch 1 succeed and batch 2 fail
+    Dispatches on the chunk's suffix: WebM goes through the EBML walker,
+    MP4 through the ISOBMFF box walker. Both raise ValueError on malformed
+    input, OSError on disk failure. The caller is responsible for deleting
+    the offending chunk and surfacing an error — retaining a chunk 0 we
+    can't extract the init from would let batch 1 succeed and batch 2 fail
     silently for want of an init segment.
     """
     # Local import avoids circular imports; encryption depends on this
     # module's sibling files.
     from backend.utils.encryption import encrypt_file
 
+    ext = chunk_path.suffix.lower()
     with open(chunk_path, 'rb') as f:
-        init_bytes = extract_webm_init_segment(f.read())
+        raw = f.read()
+    if ext == '.mp4':
+        init_bytes = extract_mp4_init_segment(raw)
+    elif ext == '.webm':
+        init_bytes = extract_webm_init_segment(raw)
+    else:
+        raise ValueError(f"Unsupported chunk extension: {ext}")
 
-    init_path = chunk_dir / "init.webm"
+    init_path = chunk_dir / ("init" + ext)
     with open(init_path, 'wb') as f:
         f.write(init_bytes)
     try:
         # encrypt_file is a no-op returning the original path when
         # encryption is disabled; no return value to track. On success it
-        # removes the plaintext init.webm and writes init.webm.enc.
+        # removes the plaintext init file and writes init{ext}.enc.
         encrypt_file(str(init_path))
     except Exception:
         # KMS outage or any other encrypt failure — don't leave a
-        # plaintext init.webm on disk for a subsequent batch to pick up
+        # plaintext init file on disk for a subsequent batch to pick up
         # and mistakenly treat as its own (unencrypted) init segment.
         try:
             init_path.unlink(missing_ok=True)
@@ -260,24 +271,87 @@ def extract_webm_init_segment(data: bytes) -> bytes:
     return data[:cluster_offset]
 
 
-def concat_webm_fragments(paths: list,
-                          init_segment_path: Optional[str] = None,
-                          output_suffix: str = '.webm') -> str:
-    """Concatenate MediaRecorder timeslice fragments into one valid WebM.
+def extract_mp4_init_segment(data: bytes) -> bytes:
+    """Return the init segment of a Safari/WebKit MediaRecorder fMP4 blob.
 
-    MediaRecorder with a timeslice emits Matroska *fragments* of a single
-    continuous stream — only the first blob carries the EBML/Segment/Tracks
-    header; subsequent blobs are header-less cluster data with timestamps
-    absolute to the original recording. Per the MSE byte-stream format, those
+    MediaRecorder on Safari with `audio/mp4` and a timeslice emits
+    fragmented MP4: the first blob carries `ftyp` + `moov` (the init
+    segment, ~652 bytes for typical AAC) followed by the first
+    `moof`+`mdat` fragment; later blobs are bare `moof`+`mdat` fragments
+    with timestamps absolute to the original recording. Like WebM, the
+    init bytes never change over the lifetime of a single MediaRecorder
+    recording, so we persist them once and prepend to future batches that
+    don't start at chunk 0.
+
+    Hardened to raise ValueError (never struct.error) on every parse
+    failure, so the route handler at drafts.py upload_streaming_chunk
+    catches and returns a clean 400 + `init_parse_failed`. Validates that
+    a `moov` box was seen before the first `moof`/`mdat` (parallel to the
+    WebM Tracks check) so a malformed chunk where the first box is `moof`
+    can't yield an empty init segment that would silently corrupt batch 2.
+    Rejects pathological box sizes (< 8, or < 16 for largesize) that would
+    otherwise misalign subsequent reads.
+    """
+    off = 0
+    saw_moov = False
+    while off + 8 <= len(data):
+        try:
+            size = struct.unpack('>I', data[off:off+4])[0]
+        except struct.error as e:
+            raise ValueError(f"Truncated MP4 box header at offset {off}") from e
+        box = data[off+4:off+8]
+        if box in (b'moof', b'mdat'):
+            if not saw_moov:
+                raise ValueError(
+                    "Init segment is missing a moov element — "
+                    "chunk 0 is structurally malformed"
+                )
+            return data[:off]
+        if box == b'moov':
+            saw_moov = True
+        if size == 1:  # 64-bit largesize
+            if off + 16 > len(data):
+                raise ValueError(f"Truncated 64-bit largesize at offset {off}")
+            try:
+                size = struct.unpack('>Q', data[off+8:off+16])[0]
+            except struct.error as e:
+                raise ValueError(f"Bad largesize at offset {off}") from e
+            if size < 16:
+                raise ValueError(f"Invalid largesize {size} at offset {off}")
+        elif size < 8:
+            raise ValueError(f"Invalid box size {size} at offset {off}")
+        if size == 0:
+            break
+        off += size
+    raise ValueError("No moof/mdat element found — chunk 0 is structurally malformed")
+
+
+def concat_fragmented_media(paths: list,
+                            init_segment_path: Optional[str] = None,
+                            output_suffix: str = '.webm') -> str:
+    """Concatenate MediaRecorder timeslice fragments into one valid file.
+
+    Handles both Matroska/WebM and fragmented MP4 (fMP4) — they share the
+    same architectural property: with a timeslice, MediaRecorder emits a
+    sequence of byte-concatenable fragments of a single continuous stream.
+    Only the first blob carries the init prefix (EBML/Segment/Tracks for
+    WebM; ftyp+moov for fMP4); subsequent blobs are header-less fragment
+    bodies (Matroska Clusters / MP4 moof+mdat) with timestamps absolute to
+    the original recording. Per the respective byte-stream formats, those
     fragments concatenated in order as raw bytes form exactly one valid
-    Matroska file. This function does that append, then runs a single ffmpeg
-    remux pass to rewrite the container's Duration/Cues so the output is
+    file. This function does that append, then runs a single ffmpeg remux
+    pass to rewrite the container's duration metadata so the output is
     seekable and reports the correct length.
 
     For batches that don't include the first fragment of the recording,
-    pass `init_segment_path` pointing at a previously-extracted init segment
-    (see `extract_webm_init_segment`). Its bytes are binary-prepended so the
-    resulting file has a valid EBML/Segment/Tracks prefix.
+    pass `init_segment_path` pointing at a previously-extracted init
+    segment (see `extract_webm_init_segment` / `extract_mp4_init_segment`).
+    Its bytes are binary-prepended.
+
+    `output_suffix` should be `.webm` for Matroska inputs and `.mp4` for
+    fMP4. The function body is format-agnostic — `+genpts` and `-c copy`
+    don't care about container — but the suffix tells ffmpeg which muxer
+    to use for the output.
 
     Returns the path to the merged output file. Caller is responsible for
     cleaning it up (parity with `concat_audio_files`).

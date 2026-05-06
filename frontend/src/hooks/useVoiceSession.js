@@ -426,8 +426,12 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     streaming.cancelStreaming();
   }, [audio, ttsSSE, streaming, stopSilentAudio]);
 
-  // Resume an interrupted session (continue recording from where it left off)
-  const handleResumeSession = useCallback(({ sessionId, draftId, chunkCount, parentId: draftParentId }) => {
+  // Resume an interrupted session (continue recording from where it left off).
+  // mimeType is the family-only mime ('audio/webm' or 'audio/mp4') from the
+  // /drafts/interrupted payload — required so the recorder records in the
+  // same family chunk 0 was uploaded with (otherwise the server rejects with
+  // mime_mismatch).
+  const handleResumeSession = useCallback(({ sessionId, draftId, chunkCount, parentId: draftParentId, mimeType }) => {
     // Restore thread context so finalization uses the correct parent
     if (draftParentId != null) {
       threadParentIdRef.current = draftParentId;
@@ -440,7 +444,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     setPhase('recording');
     setHasError(false);
     startSilentAudio();
-    streaming.resumeStreaming(sessionId, draftId, chunkCount);
+    streaming.resumeStreaming(sessionId, draftId, chunkCount, mimeType);
   }, [streaming, startSilentAudio]);
 
   const handlePauseRecording = useCallback(() => {

@@ -16,7 +16,7 @@ import subprocess
 import pytest
 
 from backend.utils.webm_utils import (
-    concat_webm_fragments,
+    concat_fragmented_media,
     extract_webm_init_segment,
     find_all_cluster_offsets,
     find_first_cluster_offset,
@@ -179,7 +179,7 @@ def test_raises_on_segment_with_no_cluster():
         find_first_cluster_offset(buf)
 
 
-# --- integration tests for concat_webm_fragments -----------------------------
+# --- integration tests for concat_fragmented_media -----------------------------
 # These exercise the full binary-append + ffmpeg remux pipeline and require
 # ffmpeg on PATH; skipped locally if absent. CI installs ffmpeg (see ci.yml).
 
@@ -233,7 +233,7 @@ def test_concat_single_fragment_including_init(tmp_path, webm_fixture):
     chunk_0 = tmp_path / "chunk_0000.webm"
     chunk_0.write_bytes(webm_fixture)
 
-    out = concat_webm_fragments([str(chunk_0)])
+    out = concat_fragmented_media([str(chunk_0)])
 
     assert _ffprobe_duration(out) == pytest.approx(5.0, abs=0.3)
 
@@ -261,7 +261,7 @@ def test_concat_multi_cluster_batch_with_init_segment(tmp_path, webm_fixture):
         fpath.write_bytes(webm_fixture[boundaries[i]:boundaries[i + 1]])
         fragment_paths.append(str(fpath))
 
-    out = concat_webm_fragments(
+    out = concat_fragmented_media(
         fragment_paths, init_segment_path=str(init_path),
     )
 
@@ -327,4 +327,4 @@ def test_concat_without_init_on_body_only_input_fails(
     body_path.write_bytes(webm_fixture[split:])
 
     with pytest.raises(RuntimeError, match="ffmpeg"):
-        concat_webm_fragments([str(body_path)])
+        concat_fragmented_media([str(body_path)])
