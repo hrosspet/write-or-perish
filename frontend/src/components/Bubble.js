@@ -136,7 +136,8 @@ const Bubble = ({
           style={{
             position: 'absolute',
             top: '10px',
-            right: '-12px',
+            left: '100%',
+            marginLeft: '8px',
             opacity: kebabVisible ? 1 : 0,
             transition: 'opacity 0.15s ease',
             pointerEvents: kebabVisible ? 'auto' : 'none',
@@ -150,9 +151,8 @@ const Bubble = ({
             title="More actions"
             aria-label="More actions"
             style={{
-              background: 'var(--bg-card)',
-              border: '1px solid var(--border)',
-              borderRadius: '4px',
+              background: 'none',
+              border: 'none',
               cursor: 'pointer',
               color: 'var(--text-muted)',
               padding: '4px 6px',
@@ -165,9 +165,9 @@ const Bubble = ({
           {showKebab && (
             <div style={{
               position: 'absolute',
-              top: '100%',
-              right: 0,
-              marginTop: '4px',
+              top: 0,
+              left: '100%',
+              marginLeft: '4px',
               background: 'var(--bg-card)',
               border: '1px solid var(--border)',
               borderRadius: '6px',
