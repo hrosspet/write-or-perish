@@ -85,9 +85,9 @@ const Bubble = ({
     maxWidth: "1000px",
     // Right-side reserve covers the always-outside kebab (8px margin +
     // ~26px icon + small buffer). On wide viewports maxWidth caps below
-    // 100%-60 so this doesn't change anything; on narrow viewports it's
+    // 100%-40 so this doesn't change anything; on narrow viewports it's
     // what keeps the kebab on screen down to ~320px portrait.
-    width: "calc(100% - 60px)",
+    width: "calc(100% - 40px)",
     transition: "border-color 0.3s ease, box-shadow 0.3s ease, transform 0.3s ease",
     position: "relative",
   };

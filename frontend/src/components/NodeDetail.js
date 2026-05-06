@@ -502,7 +502,7 @@ function NodeDetail() {
     borderRadius: "10px",
     // Reserve right-side space for the always-outside kebab so it
     // stays on screen down to ~320px portrait viewports.
-    width: "calc(95% - 60px)",
+    width: "calc(95% - 40px)",
     maxWidth: "1500px",
     marginLeft: "20px",
     position: "relative",
