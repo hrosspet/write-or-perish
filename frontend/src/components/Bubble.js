@@ -207,7 +207,7 @@ const Bubble = ({
             llmModel={node.llm_model}
             onReplyClick={
               !isPlaceholder && Array.isArray(actions)
-                ? (actions.find((a) => a.label === 'Reply') || {}).action || null
+                ? (actions.find((a) => a.kind === 'reply') || {}).action || null
                 : null
             }
           />

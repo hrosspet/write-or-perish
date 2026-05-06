@@ -247,7 +247,11 @@ function NodeDetail() {
   );
 
   const buildActions = (n) => {
+    // `kind` is the stable identifier — Bubble pulls the reply action
+    // out of this list to wire the comment-icon click. The label is
+    // free to change without breaking that coupling.
     const actions = [{
+      kind: 'reply',
       label: 'Reply',
       action: () => setExclusiveTarget('reply', n),
       color: 'var(--text-primary)',
