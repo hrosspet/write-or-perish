@@ -188,7 +188,7 @@ export default function ProfilePage() {
             >
               <span style={{
                 width: '6px', height: '6px', borderRadius: '50%',
-                background: '#4ade80', display: 'inline-block',
+                background: 'var(--success)', display: 'inline-block',
               }} />
               v{versionNumber} &middot; {formatDate(profile.created_at)}
             </button>

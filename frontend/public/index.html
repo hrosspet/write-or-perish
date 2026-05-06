@@ -6,17 +6,38 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400&family=Outfit:wght@200;300;400;500;600&display=swap" rel="stylesheet" />
+    <script>
+      // Theme bootstrap — runs synchronously before paint to set data-theme on <html>
+      // so the var-driven critical CSS below boots in the user's chosen theme.
+      // Honors localStorage 'loore_theme' (set by ThemeContext.setTheme), falling
+      // back to OS-level prefers-color-scheme. Wrapped in try/catch so localStorage
+      // failures (private browsing, etc.) don't break the page.
+      (function() {
+        try {
+          var t = localStorage.getItem('loore_theme');
+          if (t === 'light' || t === 'dark') {
+            document.documentElement.setAttribute('data-theme', t);
+          } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
+            document.documentElement.setAttribute('data-theme', 'light');
+          }
+        } catch (e) {}
+      })();
+    </script>
     <style>
-      /* Critical dark theme — prevents white flash before JS bundle loads */
+      /* Critical theme — prevents flash before JS bundle loads. Uses CSS vars
+         so the data-theme attribute set above resolves to the right colors. */
+      html { --boot-bg: #0e0d0b; --boot-fg: #ede8dd; }
+      html[data-theme="light"] { --boot-bg: #f5efe4; --boot-fg: #1f1c17; }
       html, body, #root {
         margin: 0; padding: 0; height: 100%; width: 100%;
-        background-color: #0e0d0b; color: #ede8dd;
+        background-color: var(--boot-bg); color: var(--boot-fg);
       }
     </style>
     <meta charset="utf-8" />
     <link rel="icon" href="%PUBLIC_URL%/favicon.ico" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#0e0d0b" />
+    <meta name="theme-color" content="#0e0d0b" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f5efe4" media="(prefers-color-scheme: light)" />
     <meta
       name="description"
       content="Uncover your lore. Unleash your hidden potential."

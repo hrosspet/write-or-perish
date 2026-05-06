@@ -127,7 +127,7 @@ export default function AiPreferencesPage() {
             >
               <span style={{
                 width: '6px', height: '6px', borderRadius: '50%',
-                background: '#4ade80', display: 'inline-block',
+                background: 'var(--success)', display: 'inline-block',
               }} />
               v{prefs.version_number} &middot; {formatDate(prefs.created_at)}
             </button>

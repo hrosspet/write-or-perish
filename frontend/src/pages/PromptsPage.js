@@ -97,7 +97,7 @@ export default function PromptsPage() {
                       width: '6px',
                       height: '6px',
                       borderRadius: '50%',
-                      background: 'var(--accent, #4ade80)',
+                      background: 'var(--accent)',
                       display: 'inline-block',
                       flexShrink: 0,
                     }}

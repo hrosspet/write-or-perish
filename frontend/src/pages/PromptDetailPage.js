@@ -201,7 +201,7 @@ export default function PromptDetailPage() {
           >
             <span style={{
               width: '6px', height: '6px', borderRadius: '50%',
-              background: '#4ade80', display: 'inline-block',
+              background: 'var(--success)', display: 'inline-block',
             }} />
             v{prompt.version_number} &middot; {formatDate(prompt.created_at)}
           </button>

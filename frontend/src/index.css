@@ -5,7 +5,7 @@
   box-sizing: border-box;
 }
 
-/* Design System Tokens */
+/* Design System Tokens — dark mode (default) */
 :root {
   /* Backgrounds */
   --bg-deep: #0e0d0b;
@@ -30,9 +30,49 @@
   --border: #302c27;
   --border-hover: #433e36;
 
+  /* Status */
+  --success: #4ade80;
+  --error: #e74c3c;
+  --warning: #ffc107;
+  --info: #61dafb;
+
+  /* Gradient overlays (LoginPage / LandingPage radial backgrounds) */
+  --gradient-overlay-1: #1a150f;
+  --gradient-overlay-2: #1a130d08;
+
   /* Fonts */
   --serif: 'Cormorant Garamond', Georgia, 'Times New Roman', serif;
   --sans: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+/* Light mode — warm parchment palette */
+[data-theme="light"] {
+  --bg-deep: #f5efe4;
+  --bg-surface: #ebe4d6;
+  --bg-card: #e0d8c7;
+  --bg-card-hover: #d6cdb9;
+  --bg-input: #fbf7ee;
+
+  --text-primary: #1f1c17;
+  --text-secondary: #5d564a;
+  --text-muted: #857c6c;
+
+  --accent: #a87547;
+  --accent-hover: #8a5d36;
+  --accent-dim: #bb8c66;
+  --accent-glow: #a8754740;
+  --accent-subtle: #a8754718;
+
+  --border: #cdc4b1;
+  --border-hover: #b3a98f;
+
+  --success: #1f8a4d;
+  --error: #c0392b;
+  --warning: #b88600;
+  --info: #0b6e9a;
+
+  --gradient-overlay-1: #e8dfca;
+  --gradient-overlay-2: #d4c8aa20;
 }
 
 html, body, #root {
@@ -45,6 +85,11 @@ html, body, #root {
   font-family: var(--sans);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* Theme-flip transition — narrowly scoped to chromatic properties */
+html, body, button, input, textarea, a {
+  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
 }
 
 /* Spinner animation for loading icons */
@@ -117,12 +162,12 @@ button {
 
 /* Change button appearance on hover/active */
 button:hover {
-  background-color: rgba(196, 149, 106, 0.08);
+  background-color: var(--accent-subtle);
   border-color: var(--border-hover);
   color: var(--text-primary);
 }
 button:active {
-  background-color: rgba(196, 149, 106, 0.12);
+  background-color: var(--accent-glow);
 }
 
 /* Search highlight */

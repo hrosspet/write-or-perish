@@ -107,7 +107,7 @@ function TodoItem({ item, onToggle, depth = 0 }) {
           alignItems: 'flex-start',
           gap: '12px',
           padding: '12px 0',
-          borderBottom: '1px solid #1e1d1a',
+          borderBottom: '1px solid var(--bg-surface)',
           paddingLeft: depth * 24,
         }}
       >
@@ -333,7 +333,7 @@ export default function TodoPage() {
             >
               <span style={{
                 width: '6px', height: '6px', borderRadius: '50%',
-                background: '#4ade80', display: 'inline-block',
+                background: 'var(--success)', display: 'inline-block',
               }} />
               v{todo.version_number} &middot; {formatDate(todo.created_at)}
             </button>

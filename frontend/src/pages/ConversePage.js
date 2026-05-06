@@ -198,7 +198,7 @@ export default function ConversePage() {
             width: '40px',
             height: '40px',
             borderRadius: '50%',
-            border: isVoiceRecording ? '2px solid #dc3545' : '1px solid var(--border)',
+            border: isVoiceRecording ? '2px solid var(--error)' : '1px solid var(--border)',
             background: isVoiceRecording ? 'rgba(220,53,69,0.1)' : 'transparent',
             cursor: 'pointer',
             display: 'flex',
@@ -208,7 +208,7 @@ export default function ConversePage() {
           }}
         >
           {isVoiceRecording ? (
-            <svg width="16" height="16" viewBox="0 0 20 20" fill="#dc3545">
+            <svg width="16" height="16" viewBox="0 0 20 20" style={{ fill: 'var(--error)' }}>
               <rect x="4" y="4" width="12" height="12" rx="2" />
             </svg>
           ) : (

@@ -92,7 +92,7 @@ function AdminPanel() {
       <h1>Admin Panel</h1>
 
       {/* Whitelist New User Section */}
-      <div style={{ marginBottom: "20px", padding: "10px", border: "1px solid #333" }}>
+      <div style={{ marginBottom: "20px", padding: "10px", border: "1px solid var(--border)" }}>
         <h2>Whitelist a New User</h2>
         <input
           type="text"
@@ -102,31 +102,31 @@ function AdminPanel() {
           style={{ padding: "8px", marginRight: "10px" }}
         />
         <button onClick={handleWhitelistUser}>Whitelist User</button>
-        {newHandleError && <div style={{ color: "red" }}>{newHandleError}</div>}
+        {newHandleError && <div style={{ color: "var(--error)" }}>{newHandleError}</div>}
       </div>
 
-      {error && <div style={{ color: "red" }}>{error}</div>}
-      <table style={{ width: "100%", borderCollapse: "collapse", color: "#e0e0e0" }}>
+      {error && <div style={{ color: "var(--error)" }}>{error}</div>}
+      <table style={{ width: "100%", borderCollapse: "collapse", color: "var(--text-primary)" }}>
         <thead>
           <tr>
-            <th style={{ border: "1px solid #333", padding: "8px" }}>ID</th>
-            <th style={{ border: "1px solid #333", padding: "8px" }}>Username</th>
-            <th style={{ border: "1px solid #333", padding: "8px" }}>Approved</th>
-            <th style={{ border: "1px solid #333", padding: "8px" }}>Plan</th>
-            <th style={{ border: "1px solid #333", padding: "8px" }}>Email</th>
-            <th style={{ border: "1px solid #333", padding: "8px" }}>Spent</th>
-            <th style={{ border: "1px solid #333", padding: "8px" }}>Actions</th>
+            <th style={{ border: "1px solid var(--border)", padding: "8px" }}>ID</th>
+            <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Username</th>
+            <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Approved</th>
+            <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Plan</th>
+            <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Email</th>
+            <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Spent</th>
+            <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Actions</th>
           </tr>
         </thead>
         <tbody>
           {users.map((u) => (
             <tr key={u.id}>
-              <td style={{ border: "1px solid #333", padding: "8px" }}>{u.id}</td>
-              <td style={{ border: "1px solid #333", padding: "8px" }}>{u.username}</td>
-              <td style={{ border: "1px solid #333", padding: "8px" }}>
+              <td style={{ border: "1px solid var(--border)", padding: "8px" }}>{u.id}</td>
+              <td style={{ border: "1px solid var(--border)", padding: "8px" }}>{u.username}</td>
+              <td style={{ border: "1px solid var(--border)", padding: "8px" }}>
                 {u.approved ? "Active" : "Inactive"}
               </td>
-              <td style={{ border: "1px solid #333", padding: "8px" }}>
+              <td style={{ border: "1px solid var(--border)", padding: "8px" }}>
                 <select
                   value={u.plan || "free"}
                   onChange={(e) => updatePlan(u.id, e.target.value)}
@@ -136,13 +136,13 @@ function AdminPanel() {
                   ))}
                 </select>
               </td>
-              <td style={{ border: "1px solid #333", padding: "8px" }}>
+              <td style={{ border: "1px solid var(--border)", padding: "8px" }}>
                 {u.email || "None"}
               </td>
-              <td style={{ border: "1px solid #333", padding: "8px" }}>
+              <td style={{ border: "1px solid var(--border)", padding: "8px" }}>
                 ${(u.total_spending_usd || 0).toFixed(2)}
               </td>
-              <td style={{ border: "1px solid #333", padding: "8px" }}>
+              <td style={{ border: "1px solid var(--border)", padding: "8px" }}>
                 {!u.approved && u.email ? (
                   <>
                     <button onClick={() => activateAndWelcome(u.id)}>

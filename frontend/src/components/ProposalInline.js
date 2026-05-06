@@ -200,7 +200,7 @@ function sizeStyles(size) {
       display: 'flex', alignItems: 'flex-start',
       gap: roomy ? '12px' : '10px',
       padding: roomy ? '12px 0' : '8px 0',
-      borderBottom: roomy ? '1px solid #1e1d1a' : '1px solid var(--border)',
+      borderBottom: roomy ? '1px solid var(--bg-surface)' : '1px solid var(--border)',
     },
     circleBase: {
       width: roomy ? '18px' : '16px',
@@ -548,7 +548,7 @@ export default function ProposalInline({
             </StatusTag>
           )}
           {applyStatus === 'completed' && (
-            <StatusTag style={{ ...styles.statusText, color: '#4ade80' }}>
+            <StatusTag style={{ ...styles.statusText, color: 'var(--success)' }}>
               Todo updated
             </StatusTag>
           )}
@@ -589,13 +589,13 @@ export default function ProposalInline({
               </StatusTag>
             )}
             {issueApplyStatus === 'completed' && (
-              <StatusTag style={{ ...styles.statusText, color: '#4ade80' }}>
+              <StatusTag style={{ ...styles.statusText, color: 'var(--success)' }}>
                 Issue created{issueResult?.issue_url && (
                   <> — <a
                     href={issueResult.issue_url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    style={{ color: '#4ade80', textDecoration: 'underline' }}
+                    style={{ color: 'var(--success)', textDecoration: 'underline' }}
                   >#{issueResult.issue_number}</a></>
                 )}
               </StatusTag>
@@ -612,7 +612,7 @@ export default function ProposalInline({
       {hasPrefsUpdate && (
         <p style={{
           fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
-          color: '#4ade80',
+          color: 'var(--success)',
           textAlign: styles.roomy ? 'center' : 'left',
           marginTop: '16px',
         }}>

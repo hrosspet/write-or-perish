@@ -294,7 +294,7 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage }) => {
     <button onClick={handleClick} title={noAiAccess ? 'TTS disabled — No AI access' : isActive ? 'Generating audio...' : 'Play audio'}
         disabled={noAiAccess}
         style={{ background: 'none', border: 'none', cursor: noAiAccess ? 'not-allowed' : 'pointer', padding: 0, marginLeft: '8px', opacity: noAiAccess ? 0.35 : 1 }}>
-      {isActive ? <FaSpinner className="spin" /> : <FaVolumeUp color={isCurrentlyPlaying ? '#61dafb' : 'inherit'} />}
+      {isActive ? <FaSpinner className="spin" /> : <FaVolumeUp color={isCurrentlyPlaying ? 'var(--accent)' : 'inherit'} />}
     </button>
   );
 };
