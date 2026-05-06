@@ -1,9 +1,15 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { FaEllipsisV } from 'react-icons/fa';
 
 function BubbleKebabMenu({ visible, items, onFocus, onBlur }) {
   const [showMenu, setShowMenu] = useState(false);
+  // When the dropdown would clip the viewport's right edge (narrow
+  // screens), flip it to open leftward of the kebab instead. Reset on
+  // each open so a viewport resize while the menu is closed is picked
+  // up next time.
+  const [flipLeft, setFlipLeft] = useState(false);
   const ref = useRef(null);
+  const menuRef = useRef(null);
 
   useEffect(() => {
     if (!showMenu) return undefined;
@@ -21,6 +27,15 @@ function BubbleKebabMenu({ visible, items, onFocus, onBlur }) {
       document.removeEventListener('mousedown', onMouseDown);
       document.removeEventListener('keydown', onKeyDown);
     };
+  }, [showMenu]);
+
+  useLayoutEffect(() => {
+    if (!showMenu || !menuRef.current) {
+      setFlipLeft(false);
+      return;
+    }
+    const rect = menuRef.current.getBoundingClientRect();
+    setFlipLeft(rect.right > window.innerWidth - 8);
   }, [showMenu]);
 
   if (!items || items.length === 0) return null;
@@ -62,11 +77,13 @@ function BubbleKebabMenu({ visible, items, onFocus, onBlur }) {
         <FaEllipsisV size={14} />
       </button>
       {showMenu && (
-        <div style={{
+        <div ref={menuRef} style={{
           position: 'absolute',
           top: '50%',
-          left: '100%',
-          marginLeft: '4px',
+          left: flipLeft ? 'auto' : '100%',
+          right: flipLeft ? '100%' : 'auto',
+          marginLeft: flipLeft ? 0 : '4px',
+          marginRight: flipLeft ? '4px' : 0,
           transform: 'translateY(-50%)',
           background: 'var(--bg-card)',
           border: '1px solid var(--border)',
