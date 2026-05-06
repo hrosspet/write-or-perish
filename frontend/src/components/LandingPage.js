@@ -45,18 +45,6 @@ const styles = {
     }
 
     .loore-landing {
-      --bg-deep: #0e0d0b;
-      --bg-surface: #151412;
-      --bg-card: #1a1917;
-      --text-primary: #e8e2d6;
-      --text-secondary: #9e9688;
-      --text-muted: #6b655b;
-      --accent: #c4956a;
-      --accent-glow: #c4956a33;
-      --accent-subtle: #c4956a18;
-      --serif: 'Cormorant Garamond', Georgia, serif;
-      --sans: 'Outfit', system-ui, sans-serif;
-
       background: var(--bg-deep);
       color: var(--text-primary);
       font-family: var(--sans);
@@ -70,8 +58,8 @@ const styles = {
       position: fixed;
       inset: 0;
       background:
-        radial-gradient(ellipse 80% 60% at 50% 0%, #1a150f 0%, transparent 70%),
-        radial-gradient(ellipse 50% 40% at 80% 20%, #1a130d08 0%, transparent 60%);
+        radial-gradient(ellipse 80% 60% at 50% 0%, var(--gradient-overlay-1) 0%, transparent 70%),
+        radial-gradient(ellipse 50% 40% at 80% 20%, var(--gradient-overlay-2) 0%, transparent 60%);
       pointer-events: none;
       z-index: 0;
     }
@@ -233,7 +221,7 @@ const styles = {
 
     .loore-mockup {
       background: var(--bg-card);
-      border: 1px solid #252320;
+      border: 1px solid var(--border);
       border-radius: 12px;
       overflow: hidden;
       box-shadow: 0 20px 80px rgba(0,0,0,0.4);
@@ -244,15 +232,15 @@ const styles = {
       align-items: center;
       gap: 6px;
       padding: 14px 18px;
-      background: #1e1d1a;
-      border-bottom: 1px solid #252320;
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border);
     }
 
     .loore-mockup-dot {
       width: 8px;
       height: 8px;
       border-radius: 50%;
-      background: #2a2825;
+      background: var(--bg-card-hover);
     }
 
     .loore-mockup-content {
@@ -272,12 +260,12 @@ const styles = {
       font-family: var(--serif);
       font-size: 1.25rem;
       line-height: 1.75;
-      color: #b5aea2;
+      color: var(--text-secondary);
       font-style: normal;
       font-weight: 400;
       margin-bottom: 1.8rem;
       padding-bottom: 1.8rem;
-      border-bottom: 1px solid #252320;
+      border-bottom: 1px solid var(--border);
     }
 
     .loore-mockup-reflection-label {
@@ -327,7 +315,7 @@ const styles = {
       font-family: var(--sans);
       font-size: 0.8rem;
       color: var(--text-muted);
-      border-top: 1px solid #1e1d1a;
+      border-top: 1px solid var(--border);
       position: relative;
       z-index: 1;
     }

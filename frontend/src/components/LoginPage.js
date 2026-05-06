@@ -27,8 +27,8 @@ const loginStyles = `
     position: fixed;
     inset: 0;
     background:
-      radial-gradient(ellipse 80% 60% at 50% 0%, #1a150f 0%, transparent 70%),
-      radial-gradient(ellipse 50% 40% at 80% 20%, #1a130d08 0%, transparent 60%);
+      radial-gradient(ellipse 80% 60% at 50% 0%, var(--gradient-overlay-1) 0%, transparent 70%),
+      radial-gradient(ellipse 50% 40% at 80% 20%, var(--gradient-overlay-2) 0%, transparent 60%);
     pointer-events: none;
     z-index: 0;
   }
@@ -114,7 +114,7 @@ const loginStyles = `
 
   .loore-login-btn-x:hover {
     border-color: var(--border-hover);
-    background: rgba(255,255,255,0.03);
+    background: var(--accent-subtle);
     transform: translateY(-1px);
     box-shadow: 0 4px 16px rgba(0,0,0,0.2);
   }
@@ -128,7 +128,7 @@ const loginStyles = `
 
   .loore-login-btn-email:hover {
     border-color: var(--border-hover);
-    background: rgba(255,255,255,0.03);
+    background: var(--accent-subtle);
     color: var(--text-primary);
     transform: translateY(-1px);
     box-shadow: 0 4px 16px rgba(0,0,0,0.2);
@@ -142,8 +142,8 @@ const loginStyles = `
   }
 
   .loore-login-btn-submit:hover {
-    background: rgba(196, 149, 106, 0.1);
-    box-shadow: 0 0 20px rgba(196, 149, 106, 0.15);
+    background: var(--accent-subtle);
+    box-shadow: 0 0 20px var(--accent-glow);
   }
 
   .loore-login-btn-submit:disabled {

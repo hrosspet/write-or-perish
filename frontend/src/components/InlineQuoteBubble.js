@@ -56,9 +56,9 @@ const bubbleStyle = {
   display: 'block',
   padding: '12px',
   margin: '10px 0',
-  background: '#252525',
-  border: '1px solid #444',
-  borderLeft: '3px solid #61dafb',
+  background: 'var(--bg-card)',
+  border: '1px solid var(--border)',
+  borderLeft: '3px solid var(--accent)',
   borderRadius: '6px',
   cursor: 'pointer',
   whiteSpace: 'pre-wrap',
@@ -68,7 +68,7 @@ const bubbleStyle = {
 
 const quoteHeaderStyle = {
   fontSize: '0.85em',
-  color: '#888',
+  color: 'var(--text-muted)',
   marginBottom: '6px',
   fontStyle: 'italic',
 };
@@ -83,10 +83,10 @@ const notAccessibleStyle = {
   display: 'inline-block',
   padding: '4px 8px',
   margin: '4px 0',
-  background: '#333',
-  border: '1px solid #555',
+  background: 'var(--bg-surface)',
+  border: '1px solid var(--border-hover)',
   borderRadius: '4px',
-  color: '#888',
+  color: 'var(--text-muted)',
   fontStyle: 'italic',
   fontSize: '0.9em',
 };

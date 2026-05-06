@@ -92,7 +92,7 @@ function EcgAnimation({ active = true, showScanline = true, dim = false }) {
       <svg width="100%" height="100%" viewBox="0 0 280 168" fill="none">
         <path
           d={ECG_PATH}
-          stroke="#c4956a"
+          stroke="var(--accent)"
           strokeWidth="8"
           strokeLinecap="round"
           strokeLinejoin="round"
@@ -109,7 +109,7 @@ function EcgAnimation({ active = true, showScanline = true, dim = false }) {
         />
         <path
           d={ECG_PATH}
-          stroke="#c4956a"
+          stroke="var(--accent)"
           strokeWidth="3"
           strokeLinecap="round"
           strokeLinejoin="round"
@@ -123,7 +123,7 @@ function EcgAnimation({ active = true, showScanline = true, dim = false }) {
         />
         <path
           d={ECG_PULSE_PATH}
-          stroke="#c4956a"
+          stroke="var(--accent)"
           strokeWidth="5"
           strokeLinecap="round"
           strokeLinejoin="round"
@@ -399,7 +399,7 @@ export default function VoicePage() {
 
         {hasError && phase === 'ready' && (
           <div style={{ marginBottom: '16px' }}>
-            <PulsingDot color="var(--error, #e74c3c)" />
+            <PulsingDot color="var(--error)" />
           </div>
         )}
 
