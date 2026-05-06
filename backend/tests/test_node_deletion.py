@@ -585,6 +585,45 @@ def test_feed_skips_deleted_first_child_of_system_prompt_root(app, alice):
     assert cards[0]["id"] == second.id
 
 
+def test_feed_surfaces_thread_with_multi_level_partial_deletes(app, alice):
+    """Successive partial deletes: R(deleted) → C(deleted) → G(alive).
+
+    Each level was soft-deleted in a separate transaction (e.g. user
+    deleted R "this only", then later deleted C "this only"). G is
+    alive and accessible. Without walking the recursive CTE through
+    tombstones, the alive_roots check would miss G (because C is
+    excluded by the recursive arm's filter, the join from G onto C
+    wouldn't fire, and G never enters the CTE result). The thread
+    would disappear from Log even though the user has live content.
+    """
+    from backend.routes.feed import feed_bp
+    app.register_blueprint(feed_bp, url_prefix="/api")
+
+    r = _make_node(alice, content="root body")
+    c = _make_node(alice, parent=r, content="child body")
+    g = _make_node(alice, parent=c, content="grandchild alive")
+    # First "this only" delete on R, then a separate one on C. Different
+    # transactions in real life — same effect here: two deleted_at
+    # timestamps, no descendants_walked propagation.
+    r.deleted_at = datetime.utcnow()
+    _db.session.commit()
+    c.deleted_at = datetime.utcnow()
+    _db.session.commit()
+
+    client = app.test_client()
+    _login(client, alice)
+    resp = client.get("/api/feed")
+    assert resp.status_code == 200
+    cards = [card for card in resp.json["nodes"] if card["thread_root_id"] == r.id]
+    # The thread MUST surface — G is alive and accessible. Without the
+    # ignoring-deleted recursive arm, this would return 0 cards.
+    assert len(cards) == 1, (
+        f"Expected G's thread to surface via §4a Case 2 even with "
+        f"two-level deletion; got {len(cards)} cards"
+    )
+    assert cards[0]["thread_root_id"] == r.id
+
+
 def test_feed_surfaces_deleted_root_with_alive_descendants(app, alice, bob):
     """§4a Case 2: a soft-deleted thread root whose subtree still has
     an alive accessible descendant must still surface in Log so the

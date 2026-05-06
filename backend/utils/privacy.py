@@ -179,12 +179,28 @@ def accessible_nodes_filter(node_model, user_id: int):
     """
     return and_(
         node_model.deleted_at.is_(None),
-        or_(
-            node_model.user_id == user_id,
-            node_model.human_owner_id == user_id,
-            node_model.privacy_level == PrivacyLevel.PUBLIC,
-            # TODO: add circles membership subquery when circles feature is built
-        ),
+        accessible_nodes_filter_ignoring_deleted(node_model, user_id),
+    )
+
+
+def accessible_nodes_filter_ignoring_deleted(node_model, user_id: int):
+    """Same access criteria as accessible_nodes_filter, minus the
+    deleted_at AND clause. Use in recursive CTE walks where the
+    traversal needs to step through tombstones to reach an alive node
+    further down — the outer query is responsible for re-filtering on
+    deleted_at to distinguish alive nodes from tombstones.
+
+    Without this, a chain like R(deleted) → C(deleted) → G(alive) would
+    have C excluded by the recursive arm's filter, the join from G
+    onto C would miss, and G would never appear in the CTE result —
+    making G unreachable from Log even though it's alive and
+    accessible. The §4a Case 2 feed swap depends on this traversal.
+    """
+    return or_(
+        node_model.user_id == user_id,
+        node_model.human_owner_id == user_id,
+        node_model.privacy_level == PrivacyLevel.PUBLIC,
+        # TODO: add circles membership subquery when circles feature is built
     )
 
 

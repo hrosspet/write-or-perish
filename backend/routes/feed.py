@@ -2,7 +2,9 @@ from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
 from backend.models import Node, User
 from backend.extensions import db
-from backend.utils.privacy import accessible_nodes_filter
+from backend.utils.privacy import (
+    accessible_nodes_filter, accessible_nodes_filter_ignoring_deleted,
+)
 from sqlalchemy import and_, or_, func
 
 feed_bp = Blueprint("feed_bp", __name__)
@@ -42,9 +44,12 @@ def get_feed():
         descendant.deleted_at,
         anchor.c.root_id,
     ).join(anchor, descendant.parent_id == anchor.c.id).filter(
-        # accessible_nodes_filter excludes soft-deleted, so descendants
-        # that flow through the recursive arm are necessarily alive.
-        accessible_nodes_filter(descendant, current_user.id),
+        # Walk through tombstones so the alive_roots check below can find
+        # alive descendants buried under one or more deleted ancestors.
+        # The outer alive_roots_subq filter on subtree.deleted_at IS NULL
+        # is what classifies which rows count as "alive descendant" —
+        # this filter just controls which descendants the walk reaches.
+        accessible_nodes_filter_ignoring_deleted(descendant, current_user.id),
     )
     subtree_cte = anchor.union_all(recursive)
 
@@ -83,13 +88,19 @@ def get_feed():
 
     # Map each row's root id to the most-recently-updated descendant the
     # current user can access. Drives the "click → newest node" jump on
-    # Log cards. One recursive CTE per page (no N+1).
+    # Log cards AND the §4a Case 2 preview swap (when the root is
+    # soft-deleted, the card surfaces a live descendant). The recursive
+    # arm walks through tombstones so a live grandchild buried under
+    # deleted ancestors is still reachable; the outer query then
+    # filters by deleted_at IS NULL so the navigation target itself is
+    # always alive.
     root_ids = [n.id for n in pagination.items]
     newest_map = {}
     if root_ids:
         anchor = db.session.query(
             Node.id.label("id"),
             Node.updated_at.label("updated_at"),
+            Node.deleted_at.label("deleted_at"),
             Node.id.label("root_id"),
         ).filter(Node.id.in_(root_ids)).cte(name="subtree", recursive=True)
 
@@ -97,14 +108,16 @@ def get_feed():
         recursive = db.session.query(
             child.id,
             child.updated_at,
+            child.deleted_at,
             anchor.c.root_id,
         ).join(anchor, child.parent_id == anchor.c.id).filter(
-            accessible_nodes_filter(child, current_user.id)
+            accessible_nodes_filter_ignoring_deleted(child, current_user.id),
         )
         subtree = anchor.union_all(recursive)
 
         rows = (
             db.session.query(subtree.c.root_id, subtree.c.id)
+            .filter(subtree.c.deleted_at.is_(None))
             .order_by(subtree.c.root_id, subtree.c.updated_at.desc())
             .distinct(subtree.c.root_id)
             .all()
