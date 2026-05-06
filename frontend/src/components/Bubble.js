@@ -1,7 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { FaChevronDown, FaChevronUp, FaEllipsisV } from 'react-icons/fa';
+import { FaChevronDown, FaChevronUp } from 'react-icons/fa';
 import NodeFooter from './NodeFooter';
 import MarkdownBody from './MarkdownBody';
+import BubbleKebabMenu from './BubbleKebabMenu';
 
 const tombstoneStyle = {
   fontFamily: 'var(--sans)',
@@ -16,8 +17,7 @@ const Bubble = ({
   onClick,
   isHighlighted = false,
   leftAlign = false,
-  enableActions = false,
-  onDeleteThread = null,
+  actions = null,
 }) => {
   // Detect voice notes via backend-provided has_original_audio flag
   const isVoiceNote = !!node.has_original_audio;
@@ -28,9 +28,7 @@ const Bubble = ({
   const isPlaceholder = isTombstone || isInaccessible;
 
   const [expanded, setExpanded] = useState(false);
-  const [showKebab, setShowKebab] = useState(false);
   const [hovered, setHovered] = useState(false);
-  const kebabRef = useRef(null);
   const hoverHideTimerRef = useRef(null);
 
   const cancelHoverHide = () => {
@@ -51,18 +49,6 @@ const Bubble = ({
   };
 
   useEffect(() => cancelHoverHide, []);
-
-  // Outside-click handler for the kebab dropdown.
-  useEffect(() => {
-    if (!showKebab) return undefined;
-    const handler = (e) => {
-      if (kebabRef.current && !kebabRef.current.contains(e.target)) {
-        setShowKebab(false);
-      }
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [showKebab]);
 
   // Use full content if available; otherwise use preview.
   const text = node.content || node.preview || "";
@@ -120,10 +106,8 @@ const Bubble = ({
     window.matchMedia &&
     window.matchMedia('(hover: none)').matches
   );
-  const kebabVisible = (
-    enableActions && !isPlaceholder &&
-    (kebabAlwaysVisible || hovered || showKebab)
-  );
+  const hasActions = !isPlaceholder && Array.isArray(actions) && actions.length > 0;
+  const kebabVisible = hasActions && (kebabAlwaysVisible || hovered);
 
   const handleCardClick = (e) => {
     if (isPlaceholder) return; // Tombstones and inaccessible are non-navigable.
@@ -150,74 +134,13 @@ const Bubble = ({
         e.currentTarget.style.transform = 'translateY(0)';
       }}
     >
-      {enableActions && !isPlaceholder && (
-        <div
-          ref={kebabRef}
-          onClick={(e) => e.stopPropagation()}
-          style={{
-            position: 'absolute',
-            top: '50%',
-            left: '100%',
-            marginLeft: '8px',
-            transform: 'translateY(-50%)',
-            opacity: kebabVisible ? 1 : 0,
-            transition: 'opacity 0.15s ease',
-            pointerEvents: kebabVisible ? 'auto' : 'none',
-          }}
-        >
-          <button
-            type="button"
-            onClick={() => setShowKebab((v) => !v)}
-            onFocus={() => { cancelHoverHide(); setHovered(true); }}
-            onBlur={() => scheduleHoverHide()}
-            title="More actions"
-            aria-label="More actions"
-            style={{
-              background: 'none',
-              border: 'none',
-              cursor: 'pointer',
-              color: 'var(--text-muted)',
-              padding: '4px 6px',
-              display: 'inline-flex',
-              alignItems: 'center',
-            }}
-          >
-            <FaEllipsisV size={14} />
-          </button>
-          {showKebab && (
-            <div style={{
-              position: 'absolute',
-              top: '50%',
-              left: '100%',
-              marginLeft: '4px',
-              transform: 'translateY(-50%)',
-              background: 'var(--bg-card)',
-              border: '1px solid var(--border)',
-              borderRadius: '6px',
-              boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
-              minWidth: '160px',
-              zIndex: 5,
-              overflow: 'hidden',
-            }}>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowKebab(false);
-                  if (onDeleteThread) onDeleteThread(node);
-                }}
-                style={{
-                  display: 'block', width: '100%', textAlign: 'left',
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  padding: '8px 12px',
-                  fontFamily: 'var(--sans)', fontSize: '0.85rem', fontWeight: 300,
-                  color: 'var(--accent)',
-                }}
-              >
-                Delete thread
-              </button>
-            </div>
-          )}
-        </div>
+      {hasActions && (
+        <BubbleKebabMenu
+          visible={kebabVisible}
+          items={actions}
+          onFocus={() => { cancelHoverHide(); setHovered(true); }}
+          onBlur={() => scheduleHoverHide()}
+        />
       )}
       {isTombstone ? (
         <div style={tombstoneStyle}>[Node deleted]</div>

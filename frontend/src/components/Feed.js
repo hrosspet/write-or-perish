@@ -141,8 +141,11 @@ function Feed() {
               key={node.id}
               node={node}
               onClick={handleBubbleClick}
-              enableActions={true}
-              onDeleteThread={handleDeleteThread}
+              actions={[{
+                label: 'Delete thread',
+                action: () => handleDeleteThread(node),
+                color: 'var(--accent)',
+              }]}
             />
           ))}
         </div>
