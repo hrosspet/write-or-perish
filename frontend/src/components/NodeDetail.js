@@ -500,9 +500,11 @@ function NodeDetail() {
     border: "1px solid var(--border)",
     borderLeft: "3px solid var(--accent)",
     borderRadius: "10px",
-    // Reserve right-side space for the always-outside kebab so it
-    // stays on screen down to ~320px portrait viewports.
-    width: "calc(95% - 40px)",
+    // Reserve right-side space for the always-outside kebab so the
+    // visible gap to the right of the icon matches the gap between
+    // bubble and icon (~14px). Drops the 95% scaling — maxWidth still
+    // caps the bubble on wide viewports.
+    width: "calc(100% - 50px)",
     maxWidth: "1500px",
     marginLeft: "20px",
     position: "relative",
