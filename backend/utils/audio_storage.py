@@ -25,11 +25,11 @@ def move_draft_audio_to_node_dir(
     """Move every audio file from a streaming-session draft dir into the
     node's permanent audio dir, then remove the emptied draft dir.
 
-    Skips `init.webm` (and `init.webm.enc`) — that file is the extracted
-    EBML/Segment/Tracks prefix cached on chunk-0 upload so later batches
-    can remux into valid WebM, and has no purpose in node storage.
-    Callers pass their own logger so the messages land with the right
-    request/task context.
+    Skips `init.{webm,mp4}` (and their `.enc` variants) — those files
+    are the format-specific init segments cached on chunk-0 upload so
+    later batches can remux into valid output, and have no purpose in
+    node storage. Callers pass their own logger so the messages land
+    with the right request/task context.
 
     Best-effort: exceptions are logged at warning level rather than
     raised, since by the time this is called the DB record has already
@@ -40,7 +40,10 @@ def move_draft_audio_to_node_dir(
     try:
         node_audio_dir.mkdir(parents=True, exist_ok=True)
         for fp in draft_audio_dir.iterdir():
-            if fp.name.startswith("init.webm"):
+            # Match init.webm, init.webm.enc, init.mp4, init.mp4.enc.
+            # The dir is server-controlled, never holds user-uploaded
+            # files, so a permissive prefix match is safe here.
+            if fp.name.startswith("init."):
                 fp.unlink()
                 continue
             shutil.move(str(fp), str(node_audio_dir / fp.name))

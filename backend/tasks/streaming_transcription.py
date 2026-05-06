@@ -18,7 +18,7 @@ from backend.models import Node, NodeTranscriptChunk, Draft, APICostLog
 from backend.extensions import db
 from backend.utils.audio_processing import compress_audio_if_needed, get_audio_duration
 from backend.utils.audio_storage import move_draft_audio_to_node_dir
-from backend.utils.webm_utils import concat_webm_fragments
+from backend.utils.webm_utils import concat_fragmented_media
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.encryption import decrypt_file_to_temp
 from backend.utils.cost import calculate_audio_cost_microdollars
@@ -530,12 +530,13 @@ class BatchTranscriptionTask(Task):
 @celery.task(base=BatchTranscriptionTask, bind=True)
 def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
     """
-    Transcribe a batch of audio chunks by merging them and sending to Whisper.
+    Transcribe a batch of audio chunks by merging them and sending to
+    OpenAI's gpt-4o-transcribe.
 
     Instead of transcribing each 15s chunk individually, this task:
     1. Decrypts all chunk files in the batch
-    2. Merges MediaRecorder fragments into one valid WebM
-    3. Sends merged audio to Whisper (gpt-4o-transcribe)
+    2. Merges MediaRecorder fragments into one valid file (WebM or fMP4)
+    3. Sends merged audio to gpt-4o-transcribe
     4. Stores transcript, marks all chunks as completed
     5. Reassembles draft.content from all completed chunks
     6. Encrypts the merged audio and deletes individual chunk files
@@ -554,6 +555,15 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
         if not draft:
             raise ValueError(f"Draft not found for session {session_id}")
 
+        # Family-only mime drives the on-disk extension. Defensive None
+        # handling in case a row was inserted before the default backfill;
+        # falling back to .webm preserves the pre-MP4 behavior.
+        ext = (
+            ".mp4"
+            if (draft.streaming_mime_type or "").startswith("audio/mp4")
+            else ".webm"
+        )
+
         chunk_dir = audio_storage_root / f"drafts/{draft.user_id}/{session_id}"
 
         # Collect and decrypt chunk files
@@ -562,7 +572,7 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
 
         try:
             for idx in sorted(chunk_indices):
-                chunk_filename = f"chunk_{idx:04d}.webm"
+                chunk_filename = f"chunk_{idx:04d}{ext}"
                 chunk_path = chunk_dir / chunk_filename
                 enc_path = chunk_dir / f"{chunk_filename}.enc"
 
@@ -585,15 +595,16 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                 )
 
             # If this batch doesn't include chunk 0, decrypt the cached
-            # init segment so concat_webm_fragments can prepend it — only
-            # chunk 0 carries the EBML/Segment/Tracks header, so later
-            # batches would otherwise be header-less cluster data that
-            # ffmpeg can't remux.
+            # init segment so concat_fragmented_media can prepend it —
+            # only chunk 0 carries the format-specific header (WebM:
+            # EBML/Segment/Tracks; fMP4: ftyp+moov), so later batches
+            # would otherwise be header-less fragment data that ffmpeg
+            # can't remux.
             first_chunk = min(chunk_indices) if chunk_indices else 0
             init_segment_path = None
             if first_chunk > 0:
-                init_enc = chunk_dir / "init.webm.enc"
-                init_plain = chunk_dir / "init.webm"
+                init_enc = chunk_dir / f"init{ext}.enc"
+                init_plain = chunk_dir / f"init{ext}"
                 if init_enc.exists():
                     init_segment_path = decrypt_file_to_temp(str(init_enc))
                     temp_files.append(init_segment_path)
@@ -606,15 +617,18 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                         "concat will likely fail"
                     )
 
-            # Merge MediaRecorder fragments into a single valid WebM.
+            # Merge MediaRecorder fragments into a single valid file.
             # Binary-append the fragments and remux — see
-            # concat_webm_fragments for the full rationale.
-            merged_path = concat_webm_fragments(
-                decrypted_paths, init_segment_path=init_segment_path,
+            # concat_fragmented_media for the full rationale. Same code
+            # path handles both Matroska/WebM and fMP4.
+            merged_path = concat_fragmented_media(
+                decrypted_paths,
+                init_segment_path=init_segment_path,
+                output_suffix=ext,
             )
             merge_input = merged_path
 
-            # Compress if needed (webm -> mp3)
+            # Compress if needed (no-op for already-compressed WebM/MP4)
             merge_input_path = pathlib.Path(merge_input)
             processed_path = compress_audio_if_needed(merge_input_path, logger)
 
@@ -622,7 +636,7 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
             batch_duration_sec = get_audio_duration(processed_path, logger)
 
             try:
-                # Transcribe via Whisper
+                # Transcribe via gpt-4o-transcribe
                 api_key = get_openai_chat_key(flask_app.config)
                 if not api_key:
                     raise ValueError(
@@ -631,9 +645,12 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
 
                 client = OpenAI(api_key=api_key)
                 with open(processed_path, "rb") as audio_file:
+                    # Pass an explicit (name, file) tuple so the API
+                    # infers the format from `ext` rather than from the
+                    # tempfile's auto-generated suffix.
                     resp = client.audio.transcriptions.create(
                         model="gpt-4o-transcribe",
-                        file=audio_file,
+                        file=(f"audio{ext}", audio_file),
                         response_format="text"
                     )
 
@@ -693,7 +710,7 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
             if merged_path and os.path.exists(merged_path):
                 batch_filename = (
                     f"batch_{min(chunk_indices):04d}-"
-                    f"{max(chunk_indices):04d}.webm"
+                    f"{max(chunk_indices):04d}{ext}"
                 )
                 batch_dest = chunk_dir / batch_filename
                 shutil.move(merged_path, str(batch_dest))
@@ -702,11 +719,11 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
 
                 # Delete individual encrypted chunk files in the batch
                 for idx in chunk_indices:
-                    for ext in [
-                        f"chunk_{idx:04d}.webm.enc",
-                        f"chunk_{idx:04d}.webm"
+                    for chunk_name in [
+                        f"chunk_{idx:04d}{ext}.enc",
+                        f"chunk_{idx:04d}{ext}",
                     ]:
-                        p = chunk_dir / ext
+                        p = chunk_dir / chunk_name
                         if p.exists():
                             try:
                                 p.unlink()

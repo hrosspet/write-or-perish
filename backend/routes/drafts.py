@@ -20,6 +20,17 @@ AUDIO_STORAGE_ROOT = pathlib.Path(
 ).resolve()
 
 
+def _mime_family(m: str) -> str:
+    """Return the MIME family prefix (substring before `;`) lowercased.
+
+    Browsers disagree on whether `mediaRecorder.mimeType` retains codec
+    params after construction (Safari may report 'audio/mp4', Chrome
+    'audio/mp4;codecs=mp4a.40.2'). We persist and compare on the family
+    only so chunk-N mime checks can't be defeated by codec-string drift.
+    """
+    return (m or '').split(';', 1)[0].strip().lower()
+
+
 @drafts_bp.route("/", methods=["GET"])
 @login_required
 def get_draft():
@@ -200,6 +211,7 @@ def get_interrupted_drafts():
             "content": draft.get_content(),
             "chunk_count": chunk_count,
             "has_stored_chunks": stored_count > 0,
+            "streaming_mime_type": draft.streaming_mime_type,
             "created_at": draft.created_at.isoformat() + "Z",
             "updated_at": draft.updated_at.isoformat() + "Z",
         }
@@ -493,6 +505,9 @@ def upload_streaming_chunk(session_id):
     Expects multipart/form-data with:
     - chunk: audio file blob
     - chunk_index: integer (0-based)
+    - mime_type: optional, family-only or codec-qualified MIME of the
+      chunk (e.g. 'audio/webm', 'audio/mp4;codecs=mp4a.40.2'). Defaults
+      to 'audio/webm' for backward compatibility with pre-MP4 frontends.
 
     Returns: { "chunk_index": 0, "task_id": "celery-task-id" }
     """
@@ -523,18 +538,45 @@ def upload_streaming_chunk(session_id):
     except ValueError:
         return jsonify({"error": "Invalid chunk_index"}), 400
 
+    # Normalize the chunk's mime to a family prefix; older frontends
+    # without the field send WebM by definition.
+    form_mime_family = _mime_family(
+        request.form.get("mime_type", "audio/webm")
+    )
+    if form_mime_family not in ("audio/webm", "audio/mp4"):
+        return jsonify({
+            "error": f"Unsupported audio mime: {form_mime_family}",
+        }), 400
+
+    # On chunks past 0, the session mime is locked in by chunk 0. Reject
+    # any chunk that disagrees — closes the resume-on-different-device
+    # class of bug where a user could try to append fMP4 fragments to a
+    # WebM session (or vice versa).
+    if (chunk_index > 0
+            and draft.streaming_mime_type
+            and form_mime_family != draft.streaming_mime_type):
+        return jsonify({
+            "error": (
+                f"Chunk mime {form_mime_family!r} does not match "
+                f"session mime {draft.streaming_mime_type!r}"
+            ),
+            "code": "mime_mismatch",
+        }), 400
+
+    ext = ".mp4" if form_mime_family == "audio/mp4" else ".webm"
+
     # Save chunk to disk
     chunk_dir = AUDIO_STORAGE_ROOT / f"drafts/{current_user.id}/{session_id}"
     if not chunk_dir.exists():
         return jsonify({"error": "Streaming session directory not found"}), 404
 
-    chunk_filename = f"chunk_{chunk_index:04d}.webm"
+    chunk_filename = f"chunk_{chunk_index:04d}{ext}"
     chunk_path = chunk_dir / chunk_filename
     chunk_file.save(chunk_path)
 
-    # Chunk 0 carries the EBML/Segment/Tracks init segment — the bytes that
-    # every later batch needs as a prefix to remain a valid WebM (chunks 1+
-    # are raw cluster fragments with no header). Extract and persist it now,
+    # Chunk 0 carries the format's init segment — the bytes that every
+    # later batch needs as a prefix to remain a valid file (WebM:
+    # EBML/Segment/Tracks; fMP4: ftyp+moov). Extract and persist it now,
     # before encrypt_file() deletes the plaintext chunk.
     #
     # Reject the upload if extraction fails: batch 1 (chunks 0..19) would
@@ -544,11 +586,12 @@ def upload_streaming_chunk(session_id):
     # later audio.
     if chunk_index == 0:
         # Narrow to the failure modes that actually signal "bad browser
-        # output": ValueError from the EBML walker and OSError from the
-        # file write. Anything else (e.g. KMS outage in encrypt_file) is
-        # not the client's fault and should propagate as a 500 by the
-        # usual Flask error path rather than getting misattributed to a
-        # parse failure the user can't do anything about.
+        # output": ValueError from the EBML/ISOBMFF walker and OSError
+        # from the file write. Anything else (e.g. KMS outage in
+        # encrypt_file) is not the client's fault and should propagate as
+        # a 500 by the usual Flask error path rather than getting
+        # misattributed to a parse failure the user can't do anything
+        # about.
         try:
             persist_init_segment(chunk_path, chunk_dir)
         except (ValueError, OSError) as exc:
@@ -564,10 +607,14 @@ def upload_streaming_chunk(session_id):
             # parse. Not a server failure, so it shouldn't count in the
             # 5xx alert dashboards.
             return jsonify({
-                "error": "Could not parse WebM header from first chunk",
+                "error": "Could not parse init segment from first chunk",
                 "detail": str(exc),
-                "code": "webm_header_parse_failed",
+                "code": "init_parse_failed",
             }), 400
+        # Only persist the family mime AFTER successful init extraction —
+        # if persist_init_segment raised, we don't want a half-committed
+        # mime that'd survive a future early-commit refactor.
+        draft.streaming_mime_type = form_mime_family
 
     # Encrypt the audio chunk at rest
     encrypted_path = encrypt_file(str(chunk_path))
@@ -836,6 +883,7 @@ def get_streaming_status(session_id):
         "session_id": session_id,
         "draft_id": draft.id,
         "streaming_status": draft.streaming_status,
+        "streaming_mime_type": draft.streaming_mime_type,
         "total_chunks": draft.streaming_total_chunks,
         "completed_chunks": completed_count,
         "failed_chunks": failed_count,

@@ -334,9 +334,15 @@ export default function VoicePage() {
         <RecoveryBanner
           draft={interruptedDraft}
           onContinue={() => {
-            const { session_id, id, chunk_count, parent_id } = interruptedDraft;
+            const { session_id, id, chunk_count, parent_id, streaming_mime_type } = interruptedDraft;
             clearInterrupted();
-            handleResumeSession({ sessionId: session_id, draftId: id, chunkCount: chunk_count, parentId: parent_id });
+            handleResumeSession({
+              sessionId: session_id,
+              draftId: id,
+              chunkCount: chunk_count,
+              parentId: parent_id,
+              mimeType: streaming_mime_type,
+            });
           }}
           onDiscard={() => {
             if (phase === 'playback') {

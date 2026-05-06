@@ -1,5 +1,20 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 
+// Preference-ordered MIME list. WebM/Opus first (existing browsers stay
+// on the optimized raw-byte-concat path), then MP4/AAC for iOS Safari
+// and other WebKit-based browsers that don't ship WebM in MediaRecorder.
+// Order matters: the first supported entry wins.
+const PREFERRED_MIMES = [
+  'audio/webm;codecs=opus',
+  'audio/webm',
+  'audio/mp4;codecs=mp4a.40.2',
+  'audio/mp4',
+];
+
+// Return 'audio/webm' or 'audio/mp4' (family prefix only) given any MIME
+// string — matches the backend's `_mime_family` so resume passes round-trip.
+const mimeFamily = (m) => (m || '').split(';', 1)[0].trim().toLowerCase();
+
 /**
  * useStreamingMediaRecorder hook for recording audio with real-time chunk emission.
  *
@@ -29,6 +44,7 @@ export function useStreamingMediaRecorder({
   const dataAvailableFiredRef = useRef(false); // Track if ondataavailable ran during stop
   const pausedAtRef = useRef(null); // Timestamp when paused
   const totalPausedMsRef = useRef(0); // Accumulated paused duration
+  const mimeTypeRef = useRef(null); // Active recorder's mimeType (so non-state callbacks like getPartialBlob can read it)
 
   // Clean up on unmount
   useEffect(() => {
@@ -64,6 +80,7 @@ export function useStreamingMediaRecorder({
     chunkIndexRef.current = 0;
     pausedAtRef.current = null;
     totalPausedMsRef.current = 0;
+    mimeTypeRef.current = null;
     setMediaBlob(null);
     setMediaUrl('');
     setDuration(0);
@@ -74,7 +91,14 @@ export function useStreamingMediaRecorder({
 
   // startingChunkIndex: offset for chunk numbering when resuming an interrupted session
   // durationOffset: seconds of audio already recorded before this session
-  const startRecording = useCallback(async ({ startingChunkIndex = 0, durationOffset = 0 } = {}) => {
+  // forceMimeFamily: 'audio/webm' or 'audio/mp4' — required for resume; the
+  //   recorder must match the family chunk 0 was uploaded with, otherwise
+  //   the server rejects subsequent chunks with mime_mismatch.
+  const startRecording = useCallback(async ({
+    startingChunkIndex = 0,
+    durationOffset = 0,
+    forceMimeFamily = null,
+  } = {}) => {
     resetRecording();
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -90,50 +114,89 @@ export function useStreamingMediaRecorder({
       throw err;
     }
 
-    // The server requires WebM (EBML init-segment parser, .webm-suffixed
-    // storage). If the browser doesn't support audio/webm at the MediaRecorder
-    // level (e.g. older iOS Safari, where MediaRecorder shipped MP4-only), we
-    // can't proceed — fail fast with an actionable message rather than letting
-    // `new MediaRecorder({mimeType:'audio/webm'})` throw a generic
-    // NotSupportedError. The console log captures the codec capability matrix
-    // and UA for any future diagnostic.
+    // Capture the codec capability matrix + UA for diagnostics — same log
+    // that confirmed user 50's iOS-18.0-Safari case in the field.
     const codecSupport = {
       webm: MediaRecorder.isTypeSupported('audio/webm'),
       webmOpus: MediaRecorder.isTypeSupported('audio/webm;codecs=opus'),
       mp4: MediaRecorder.isTypeSupported('audio/mp4'),
       mp4Aac: MediaRecorder.isTypeSupported('audio/mp4;codecs=mp4a.40.2'),
     };
-    console.log('[StreamingRecorder] Codec support:', codecSupport, 'UA:', navigator.userAgent);
 
-    if (!codecSupport.webm && !codecSupport.webmOpus) {
-      const err = new Error(
-        `This browser cannot record in WebM, which the server requires. ` +
-        `Please try a recent version of Chrome on this device, or update your ` +
-        `operating system. (Detected codecs: ${JSON.stringify(codecSupport)})`
-      );
-      err.name = 'NotSupportedError';
-      setError(err.message);
-      throw err;
+    // Permanent debug knob: ?force_mime=mp4 or ?force_mime=webm constrains
+    // the negotiation to a single family. Useful for asking any user to
+    // reproduce a specific codec path without code changes (e.g. exercising
+    // the MP4 path on a WebM-supporting browser to validate the server-side
+    // pipeline). No effect unless the param is present, so it can't be
+    // triggered by accident in production. Resume paths (forceMimeFamily
+    // branch below) ignore this since the session's family is already
+    // locked by chunk 0.
+    const forced = new URLSearchParams(window.location.search).get('force_mime');
+
+    let chosenMime;
+    if (forceMimeFamily) {
+      // Resume path: the session's family is fixed by chunk 0. Refuse if
+      // this browser can't record it — same behavior as a fresh start
+      // hitting an unsupported environment.
+      if (!MediaRecorder.isTypeSupported(forceMimeFamily)) {
+        console.log('[StreamingRecorder] Codec support:', codecSupport, 'forceMimeFamily:', forceMimeFamily, 'forced:', forced, 'UA:', navigator.userAgent);
+        const err = new Error(
+          `Resumed session uses ${forceMimeFamily}, which this browser cannot record. (Detected codecs: ${JSON.stringify(codecSupport)})`
+        );
+        err.name = 'NotSupportedError';
+        setError(err.message);
+        throw err;
+      }
+      // Prefer a codec-qualified entry that shares the family for explicit
+      // codec selection; fall back to family-only if none qualified.
+      chosenMime =
+        PREFERRED_MIMES.find(
+          (m) => m.startsWith(forceMimeFamily + ';') && MediaRecorder.isTypeSupported(m),
+        ) || forceMimeFamily;
+    } else {
+      let preferred = PREFERRED_MIMES;
+      if (forced === 'mp4') {
+        preferred = PREFERRED_MIMES.filter((m) => m.startsWith('audio/mp4'));
+      } else if (forced === 'webm') {
+        preferred = PREFERRED_MIMES.filter((m) => m.startsWith('audio/webm'));
+      }
+      chosenMime = preferred.find((m) => MediaRecorder.isTypeSupported(m));
+      if (!chosenMime) {
+        console.log('[StreamingRecorder] Codec support:', codecSupport, 'forced:', forced, 'UA:', navigator.userAgent);
+        const err = new Error(
+          forced
+            ? `Forced mime '${forced}' is not supported by this browser. (Detected codecs: ${JSON.stringify(codecSupport)})`
+            : `This browser cannot record in any supported audio format. (Detected codecs: ${JSON.stringify(codecSupport)})`
+        );
+        err.name = 'NotSupportedError';
+        setError(err.message);
+        throw err;
+      }
     }
+
+    console.log('[StreamingRecorder] Codec support:', codecSupport, 'chosen:', chosenMime, 'forced:', forced, 'UA:', navigator.userAgent);
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
 
-      const options = { mimeType: 'audio/webm' };
+      const options = { mimeType: chosenMime };
       const mediaRecorder = new MediaRecorder(stream, options);
-      console.log('[StreamingRecorder] MediaRecorder constructed:', { requested: 'audio/webm', actual: mediaRecorder.mimeType });
+      console.log('[StreamingRecorder] MediaRecorder constructed:', { requested: chosenMime, actual: mediaRecorder.mimeType, family: mimeFamily(mediaRecorder.mimeType) });
       recorderRef.current = mediaRecorder;
+      mimeTypeRef.current = mediaRecorder.mimeType;
       chunksRef.current = [];
       chunkIndexRef.current = startingChunkIndex;
 
-      // MediaRecorder with a timeslice emits Matroska *fragments* of one
-      // continuous stream — only chunk 0 has an EBML header; chunks 1+ are
-      // header-less cluster data whose timestamps are absolute to the
-      // original recording. These fragments, concatenated in order as raw
-      // bytes on the server, form exactly one valid WebM. So we upload each
-      // blob verbatim and let the backend do the binary concat + a single
-      // remux pass to rewrite duration metadata.
+      // MediaRecorder with a timeslice emits format-specific fragments
+      // of one continuous stream — only chunk 0 has the init prefix
+      // (Matroska EBML/Segment/Tracks for WebM, ftyp+moov for fMP4);
+      // chunks 1+ are header-less fragment bodies whose timestamps are
+      // absolute to the original recording. Per the respective byte-stream
+      // formats, those fragments concatenated in order as raw bytes form
+      // exactly one valid file. So we upload each blob verbatim and let
+      // the backend do the binary concat + a single remux pass to rewrite
+      // duration metadata.
       mediaRecorder.ondataavailable = (e) => {
         const recorderState = recorderRef.current?.state || 'unknown';
         console.log(`[StreamingRecorder] ondataavailable fired: size=${e.data?.size || 0}, recorderState=${recorderState}, timeSinceStart=${Date.now() - startTimeRef.current}ms`);
@@ -281,7 +344,7 @@ export function useStreamingMediaRecorder({
   // Get a partial blob from chunks recorded so far (for download during recording)
   const getPartialBlob = useCallback(() => {
     if (chunksRef.current.length === 0) return null;
-    return new Blob(chunksRef.current, { type: 'audio/webm' });
+    return new Blob(chunksRef.current, { type: mimeTypeRef.current || 'audio/webm' });
   }, []);
 
   return {

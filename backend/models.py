@@ -303,6 +303,12 @@ class Draft(db.Model):
     streaming_status = db.Column(db.String(20), nullable=True)  # recording, finalizing, completed, failed
     streaming_total_chunks = db.Column(db.Integer, nullable=True)  # Total chunks expected (set on finalize)
     streaming_completed_chunks = db.Column(db.Integer, default=0)  # Chunks transcribed so far
+    # Family-only audio MIME ('audio/webm' or 'audio/mp4') chosen by the
+    # frontend MediaRecorder negotiation. Set on chunk 0 after the init
+    # segment is successfully parsed; chunks 1+ are rejected if their mime
+    # family disagrees. Default 'audio/webm' keeps in-flight pre-deploy
+    # sessions on their existing path.
+    streaming_mime_type = db.Column(db.String(64), nullable=True, default='audio/webm')
     # Workflow label: 'Reflect', 'Orient', etc. Set on init for recovery UI.
     label = db.Column(db.String(20), nullable=True)
     # Privacy settings for when this draft becomes a node
