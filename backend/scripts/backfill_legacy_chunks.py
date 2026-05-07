@@ -57,7 +57,7 @@ from backend.models import Node  # noqa: E402
 from backend.utils.encryption import (  # noqa: E402
     decrypt_file, encrypt_file, is_encryption_enabled,
 )
-from backend.utils.webm_utils import concat_webm_fragments  # noqa: E402
+from backend.utils.webm_utils import concat_fragmented_media  # noqa: E402
 
 AUDIO_STORAGE_ROOT = pathlib.Path(
     os.environ.get("AUDIO_STORAGE_PATH", "data/audio")
@@ -156,7 +156,7 @@ def process_node(node, dry_run, verify_decode):
             chunks_total_size += os.path.getsize(p)
             plain_paths.append(p)
 
-        merged = concat_webm_fragments(plain_paths)
+        merged = concat_fragmented_media(plain_paths)
         merged_size = os.path.getsize(merged)
         merged_dur = ffprobe_duration(merged)
 
