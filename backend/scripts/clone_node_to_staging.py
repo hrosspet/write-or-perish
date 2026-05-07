@@ -79,10 +79,25 @@ def export_payload(app, node_ids):
         chunks = NodeTranscriptChunk.query.filter(
             NodeTranscriptChunk.node_id.in_(node_ids)
         ).all()
+
+        # Decrypt encrypted fields on the prod side and ship plaintext.
+        # Staging has a different KMS key, so the wire format must be
+        # plaintext; the import side re-encrypts via the model setters.
+        nodes_data = []
+        for n in nodes:
+            row = serialize_row(n)
+            row["content"] = n.get_content() if n.content else ""
+            nodes_data.append(row)
+        chunks_data = []
+        for c in chunks:
+            row = serialize_row(c)
+            row["text"] = c.get_text() if c.text else ""
+            chunks_data.append(row)
+
         return {
             "users": [serialize_row(u) for u in users],
-            "nodes": [serialize_row(n) for n in nodes],
-            "chunks": [serialize_row(c) for c in chunks],
+            "nodes": nodes_data,
+            "chunks": chunks_data,
         }
 
 
@@ -116,8 +131,8 @@ payload = json.loads(sys.stdin.read())
 app = create_app()
 with app.app_context():
     counts = {"users_inserted": 0, "users_updated": 0,
-              "nodes_inserted": 0, "nodes_skipped": 0,
-              "chunks_inserted": 0, "chunks_skipped": 0}
+              "nodes_inserted": 0, "nodes_replaced": 0,
+              "chunks_inserted": 0, "chunks_replaced": 0}
 
     # Users: insert or update so they have admin/voice access
     user_ids = []
@@ -142,28 +157,44 @@ with app.app_context():
         user_ids.append(u.id)
     db.session.commit()
 
-    # Nodes: skip if already exists; null out FK chain to keep clone shallow
+    # Replace-then-insert for nodes + chunks so re-running the script fixes
+    # any prior broken clone (e.g. ciphertext shipped before this script
+    # learned to decrypt-and-reencrypt). Scoped strictly to the requested
+    # node ids — never touches unrelated staging data.
+    cloned_node_ids = [deser_row(r)["id"] for r in payload["nodes"]]
+    if cloned_node_ids:
+        # Chunks first (FK to node has no CASCADE).
+        deleted_chunks = NodeTranscriptChunk.query.filter(
+            NodeTranscriptChunk.node_id.in_(cloned_node_ids)
+        ).delete(synchronize_session=False)
+        deleted_nodes = Node.query.filter(
+            Node.id.in_(cloned_node_ids)
+        ).delete(synchronize_session=False)
+        db.session.commit()
+        counts["nodes_replaced"] = deleted_nodes
+        counts["chunks_replaced"] = deleted_chunks
+
+    # Nodes: null out FK chain to keep clone shallow. Encrypted columns
+    # arrive as plaintext — re-encrypt with staging's key.
     for raw in payload["nodes"]:
         row = deser_row(raw)
-        n = Node.query.get(row["id"])
-        if n:
-            counts["nodes_skipped"] += 1
-            continue
         row["parent_id"] = None
         row["linked_node_id"] = None
+        plain_content = row.pop("content", None)
         n = Node(**row)
+        if plain_content is not None:
+            n.set_content(plain_content)
         db.session.add(n)
         counts["nodes_inserted"] += 1
     db.session.commit()
 
-    # Chunks
+    # Chunks: same plaintext-then-re-encrypt dance for `text`.
     for raw in payload["chunks"]:
         row = deser_row(raw)
-        c = NodeTranscriptChunk.query.get(row["id"])
-        if c:
-            counts["chunks_skipped"] += 1
-            continue
+        plain_text = row.pop("text", None)
         c = NodeTranscriptChunk(**row)
+        if plain_text is not None:
+            c.set_text(plain_text)
         db.session.add(c)
         counts["chunks_inserted"] += 1
     db.session.commit()
