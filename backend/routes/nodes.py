@@ -28,6 +28,7 @@ from backend.utils.quotes import find_quote_ids, get_quote_data, has_quotes
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.webm_utils import get_webm_duration
 from backend.utils.encryption import encrypt_file, decrypt_file_to_temp
+from backend.utils.audio_storage import list_streaming_audio_files
 from backend.utils.llm_nodes import (
     create_llm_placeholder, pick_model_for_generation,
 )
@@ -1168,14 +1169,7 @@ def get_audio_urls(node_id):
     has_audio_chunks = False
     if node.streaming_transcription:
         chunk_dir = AUDIO_STORAGE_ROOT / f"nodes/{node.user_id}/{node_id}"
-        if chunk_dir.exists():
-            has_chunks = (
-                list(chunk_dir.glob("chunk_*.webm")) or
-                list(chunk_dir.glob("chunk_*.webm.enc")) or
-                list(chunk_dir.glob("batch_*.webm")) or
-                list(chunk_dir.glob("batch_*.webm.enc"))
-            )
-            has_audio_chunks = bool(has_chunks)
+        has_audio_chunks = bool(list_streaming_audio_files(chunk_dir))
 
     if original_url or tts_url or has_audio_chunks:
         return jsonify({
@@ -1224,26 +1218,10 @@ def get_audio_chunks(node_id):
     if not node.streaming_transcription:
         return jsonify({"error": "Not a streaming transcription node"}), 404
 
-    # Find chunk files on disk
+    # Find chunk files on disk. Helper handles both .webm and .mp4
+    # recordings, chunk-vs-batch fallback, and plain-vs-encrypted preference.
     chunk_dir = AUDIO_STORAGE_ROOT / f"nodes/{node.user_id}/{node_id}"
-
-    if not chunk_dir.exists():
-        return jsonify({"error": "No audio chunks found"}), 404
-
-    # Get all audio files sorted by name (support both plain and encrypted).
-    # After batch transcription, individual chunk_*.webm files are replaced by
-    # batch_*.webm files — check for both patterns.
-    chunk_files = sorted(chunk_dir.glob("chunk_*.webm"))
-    chunk_files_enc = sorted(chunk_dir.glob("chunk_*.webm.enc"))
-    if not chunk_files and not chunk_files_enc:
-        chunk_files = sorted(chunk_dir.glob("batch_*.webm"))
-        chunk_files_enc = sorted(chunk_dir.glob("batch_*.webm.enc"))
-    # Prefer encrypted files if they exist, fall back to plain
-    if not chunk_files and chunk_files_enc:
-        chunk_files = chunk_files_enc
-    elif not chunk_files and not chunk_files_enc:
-        return jsonify({"error": "No audio chunks found"}), 404
-
+    chunk_files = list_streaming_audio_files(chunk_dir)
     if not chunk_files:
         return jsonify({"error": "No audio chunks found"}), 404
 
@@ -1309,17 +1287,7 @@ def download_audio(node_id):
         return jsonify({"error": "Not a streaming transcription node"}), 404
 
     chunk_dir = AUDIO_STORAGE_ROOT / f"nodes/{node.user_id}/{node_id}"
-    if not chunk_dir.exists():
-        return jsonify({"error": "No audio files found"}), 404
-
-    # Collect audio files — same fallback logic as get_audio_chunks
-    chunk_files = sorted(chunk_dir.glob("chunk_*.webm"))
-    chunk_files_enc = sorted(chunk_dir.glob("chunk_*.webm.enc"))
-    if not chunk_files and not chunk_files_enc:
-        chunk_files = sorted(chunk_dir.glob("batch_*.webm"))
-        chunk_files_enc = sorted(chunk_dir.glob("batch_*.webm.enc"))
-    if not chunk_files and chunk_files_enc:
-        chunk_files = chunk_files_enc
+    chunk_files = list_streaming_audio_files(chunk_dir)
     if not chunk_files:
         return jsonify({"error": "No audio files found"}), 404
 
@@ -1335,12 +1303,18 @@ def download_audio(node_id):
             else:
                 decrypted_paths.append(str(f))
 
-        merged_path = concat_audio_files(decrypted_paths)
+        # Detect source container so we ask ffmpeg for a matching output and
+        # report the right Content-Type to the browser.
+        first = chunk_files[0].name
+        if first.endswith('.mp4') or first.endswith('.mp4.enc'):
+            src_suffix, mimetype, ext = '.mp4', 'audio/mp4', 'mp4'
+        else:
+            src_suffix, mimetype, ext = '.webm', 'audio/webm', 'webm'
+
+        merged_path = concat_audio_files(decrypted_paths, output_suffix=src_suffix)
         temp_files.append(merged_path)
 
         output_path = merged_path
-        mimetype = 'audio/webm'
-        ext = 'webm'
 
         if fmt == 'mp3':
             import tempfile

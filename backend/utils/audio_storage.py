@@ -17,6 +17,32 @@ AUDIO_STORAGE_ROOT = pathlib.Path(
 ).resolve()
 
 
+def list_streaming_audio_files(chunk_dir: pathlib.Path) -> list:
+    """Return sorted list of streaming-recording chunk files for playback.
+
+    Searches `chunk_dir` for chunk_*.{webm,mp4}[.enc] first (recording
+    in-progress or pre-batch-transcription state), then falls back to
+    batch_*.{webm,mp4}[.enc] (the modern post-batch-transcription
+    format). Within each tier, prefers plain files over encrypted to
+    match prior endpoint behavior. Returns [] if nothing matches.
+
+    The `.legacy_backup` suffix used by `backfill_legacy_chunks.py` is
+    deliberately not matched — those files exist for rollback only and
+    must not be served to clients.
+    """
+    if not chunk_dir.exists():
+        return []
+    for prefix in ("chunk", "batch"):
+        for ext in (".webm", ".mp4"):
+            plain = sorted(chunk_dir.glob(f"{prefix}_*{ext}"))
+            if plain:
+                return plain
+            enc = sorted(chunk_dir.glob(f"{prefix}_*{ext}.enc"))
+            if enc:
+                return enc
+    return []
+
+
 def move_draft_audio_to_node_dir(
     draft_audio_dir: pathlib.Path,
     node_audio_dir: pathlib.Path,
