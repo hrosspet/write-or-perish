@@ -343,14 +343,17 @@ def main():
                 # alongside the new plaintext (the audio-chunks endpoint
                 # prefers plain over enc, but the backfill prefers the
                 # opposite — leaving both around would break backfill).
+                # Run cleanup + mkdir as root because earlier docker cp
+                # copied files in as root, and the container's default
+                # user can't unlink them (Permission denied).
                 dst_dir = f"/app/data/audio/nodes/{uid}/{nid}"
                 subprocess.run(
-                    ["docker", "exec", args.staging_backend,
+                    ["docker", "exec", "-u", "0", args.staging_backend,
                      "rm", "-rf", dst_dir], check=True,
                 )
                 dst_parent = f"/app/data/audio/nodes/{uid}"
                 subprocess.run(
-                    ["docker", "exec", args.staging_backend,
+                    ["docker", "exec", "-u", "0", args.staging_backend,
                      "mkdir", "-p", dst_parent], check=True,
                 )
                 subprocess.run(
