@@ -437,31 +437,64 @@ def concat_audio_files(paths: list, output_suffix: str = '.webm',
     import tempfile
 
     if reencode_codec:
-        # concat filter path — decode + sample-level join + re-encode
-        fd, out_path = tempfile.mkstemp(suffix=output_suffix, prefix='merged_')
-        os.close(fd)
-        ffmpeg_inputs = []
-        for p in paths:
-            ffmpeg_inputs.extend(['-i', p])
-        n = len(paths)
-        filter_streams = ''.join(f'[{i}:a:0]' for i in range(n))
-        filter_str = f'{filter_streams}concat=n={n}:v=0:a=1[out]'
-        result = subprocess.run(
-            ['ffmpeg', '-y', *ffmpeg_inputs,
-             '-filter_complex', filter_str,
-             '-map', '[out]', '-c:a', reencode_codec, '-b:a', '128k',
-             out_path],
-            capture_output=True, text=True, timeout=900,
-        )
-        if result.returncode != 0:
-            try:
-                os.unlink(out_path)
-            except OSError:
-                pass
-            raise RuntimeError(
-                f"ffmpeg concat-filter failed: {result.stderr[:500]}"
+        # WAV-intermediate path. Both the concat demuxer (-c copy) and
+        # the concat filter (-filter_complex) yielded mostly-silent
+        # output for fragmented-MP4 batches from MediaRecorder, even
+        # though each batch decodes correctly on its own. The
+        # symptomatic Qavg of 2231 from a direct concat-filter pass
+        # means the encoder was eating zero/near-zero samples — the
+        # batches' codec extradata or per-frame priming gets confused
+        # when fed sequentially through libavcodec.
+        #
+        # Decoding each batch to PCM WAV separately sidesteps the
+        # whole extradata / priming dance: each batch is decoded in
+        # its own libavcodec context, samples are written verbatim,
+        # then the WAV concat-demux + AAC encode is timestamp-trivial
+        # because PCM has no codec delay.
+        wav_dir = tempfile.mkdtemp(prefix='wav_concat_')
+        try:
+            wav_paths = []
+            for i, p in enumerate(paths):
+                wav_path = os.path.join(wav_dir, f'part_{i:04d}.wav')
+                r = subprocess.run(
+                    ['ffmpeg', '-y', '-i', p,
+                     '-c:a', 'pcm_s16le', '-ar', '48000', '-ac', '1',
+                     wav_path],
+                    capture_output=True, text=True, timeout=600,
+                )
+                if r.returncode != 0:
+                    raise RuntimeError(
+                        f"ffmpeg decode-to-wav failed for {p}: "
+                        f"{r.stderr[:500]}"
+                    )
+                wav_paths.append(wav_path)
+
+            list_path = os.path.join(wav_dir, 'list.txt')
+            with open(list_path, 'w') as f:
+                for w in wav_paths:
+                    escaped = w.replace("'", "'\\''")
+                    f.write(f"file '{escaped}'\n")
+
+            fd, out_path = tempfile.mkstemp(suffix=output_suffix,
+                                            prefix='merged_')
+            os.close(fd)
+            r = subprocess.run(
+                ['ffmpeg', '-y', '-f', 'concat', '-safe', '0',
+                 '-i', list_path,
+                 '-c:a', reencode_codec, '-b:a', '128k', out_path],
+                capture_output=True, text=True, timeout=600,
             )
-        return out_path
+            if r.returncode != 0:
+                try:
+                    os.unlink(out_path)
+                except OSError:
+                    pass
+                raise RuntimeError(
+                    f"ffmpeg WAV-concat encode failed: {r.stderr[:500]}"
+                )
+            return out_path
+        finally:
+            shutil.rmtree(wav_dir, ignore_errors=True)
 
     # concat demuxer path — fast stream-copy, used for WebM
     concat_fd, concat_path = tempfile.mkstemp(suffix='.txt', prefix='concat_')
