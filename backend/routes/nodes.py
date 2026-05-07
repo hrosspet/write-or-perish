@@ -1267,15 +1267,25 @@ def download_audio(node_id):
     """Download all audio chunks merged into a single file.
 
     Query params:
-        format: 'webm' (default) or 'mp3'
+        format: 'original' (default) returns the merged source container
+                as-is — .webm for desktop recordings, .mp4 for iOS
+                recordings. The Content-Disposition filename carries
+                the real extension.
+                'mp3' re-encodes the merged audio to MP3 for portability.
+                'webm' is accepted as a deprecated alias for 'original'
+                — it predates MP4 recording, when source was always WebM.
     """
     from flask import send_file
     import subprocess
     from backend.utils.webm_utils import concat_audio_files
 
-    fmt = request.args.get('format', 'webm').lower()
-    if fmt not in ('webm', 'mp3'):
-        return jsonify({"error": "Unsupported format, use 'webm' or 'mp3'"}), 400
+    fmt = request.args.get('format', 'original').lower()
+    if fmt == 'webm':
+        # Deprecated alias — the param's literal meaning got misleading
+        # once iOS recordings could be MP4. Treat as passthrough.
+        fmt = 'original'
+    if fmt not in ('original', 'mp3'):
+        return jsonify({"error": "Unsupported format, use 'original' or 'mp3'"}), 400
 
     node = Node.query.get_or_404(node_id)
 
