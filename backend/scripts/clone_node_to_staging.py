@@ -360,6 +360,15 @@ def main():
                     ["docker", "cp", str(dst),
                      f"{args.staging_backend}:{dst_parent}/"], check=True,
                 )
+                # docker cp creates files as root; the container's
+                # runtime user can't then write batch_*.webm during
+                # backfill. chmod a+rwX so the backfill (running as
+                # the container's default user) can write alongside.
+                subprocess.run(
+                    ["docker", "exec", "-u", "0", args.staging_backend,
+                     "chmod", "-R", "a+rwX",
+                     f"/app/data/audio/nodes/{uid}/{nid}"], check=True,
+                )
                 print(f"  node {nid}: {n_dec} decrypted + {n_plain} plain "
                       f"-> {round(total_bytes/1024/1024, 1)} MB")
             finally:
