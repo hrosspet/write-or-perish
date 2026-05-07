@@ -397,15 +397,26 @@ def concat_fragmented_media(paths: list,
             pass
 
 
-def concat_audio_files(paths: list, output_suffix: str = '.webm') -> str:
-    """Concatenate multiple audio files using ffmpeg concat demuxer.
+def concat_audio_files(paths: list, output_suffix: str = '.webm',
+                       reencode_codec: Optional[str] = None) -> str:
+    """Concatenate multiple audio files into a single output.
 
     Args:
         paths: List of file paths to concatenate (in order).
         output_suffix: Extension for the output temp file.
+        reencode_codec: When set (e.g. 'aac'), use the ffmpeg concat
+            FILTER to decode each input independently, concatenate
+            decoded sample buffers, and re-encode. Required for MP4
+            sources: the concat demuxer + `-c copy` path mangles
+            per-packet timestamps across fragmented-MP4 batch
+            boundaries (output reports correct duration but most of
+            the audio reads as silence). Operating on decoded samples
+            sidesteps any demuxer-level PTS quirks. When None, uses
+            the fast concat demuxer + `-c copy` (fine for WebM/Opus,
+            whose Matroska cluster timestamps are robust).
 
     Returns:
-        Path to the merged temp file.  Caller is responsible for cleanup.
+        Path to the merged temp file. Caller is responsible for cleanup.
 
     Raises:
         RuntimeError: If ffmpeg fails.
@@ -414,7 +425,7 @@ def concat_audio_files(paths: list, output_suffix: str = '.webm') -> str:
     if not paths:
         raise ValueError("No audio files to concatenate")
 
-    if len(paths) == 1:
+    if len(paths) == 1 and not reencode_codec:
         # Nothing to merge — return a copy so the caller can always unlink
         import tempfile
         fd, out_path = tempfile.mkstemp(suffix=output_suffix, prefix='merged_')
@@ -425,6 +436,67 @@ def concat_audio_files(paths: list, output_suffix: str = '.webm') -> str:
     import subprocess
     import tempfile
 
+    if reencode_codec:
+        # WAV-intermediate path. Both the concat demuxer (-c copy) and
+        # the concat filter (-filter_complex) yielded mostly-silent
+        # output for fragmented-MP4 batches from MediaRecorder, even
+        # though each batch decodes correctly on its own. The
+        # symptomatic Qavg of 2231 from a direct concat-filter pass
+        # means the encoder was eating zero/near-zero samples — the
+        # batches' codec extradata or per-frame priming gets confused
+        # when fed sequentially through libavcodec.
+        #
+        # Decoding each batch to PCM WAV separately sidesteps the
+        # whole extradata / priming dance: each batch is decoded in
+        # its own libavcodec context, samples are written verbatim,
+        # then the WAV concat-demux + AAC encode is timestamp-trivial
+        # because PCM has no codec delay.
+        wav_dir = tempfile.mkdtemp(prefix='wav_concat_')
+        try:
+            wav_paths = []
+            for i, p in enumerate(paths):
+                wav_path = os.path.join(wav_dir, f'part_{i:04d}.wav')
+                r = subprocess.run(
+                    ['ffmpeg', '-y', '-i', p,
+                     '-c:a', 'pcm_s16le', '-ar', '48000', '-ac', '1',
+                     wav_path],
+                    capture_output=True, text=True, timeout=600,
+                )
+                if r.returncode != 0:
+                    raise RuntimeError(
+                        f"ffmpeg decode-to-wav failed for {p}: "
+                        f"{r.stderr[:500]}"
+                    )
+                wav_paths.append(wav_path)
+
+            list_path = os.path.join(wav_dir, 'list.txt')
+            with open(list_path, 'w') as f:
+                for w in wav_paths:
+                    escaped = w.replace("'", "'\\''")
+                    f.write(f"file '{escaped}'\n")
+
+            fd, out_path = tempfile.mkstemp(suffix=output_suffix,
+                                            prefix='merged_')
+            os.close(fd)
+            r = subprocess.run(
+                ['ffmpeg', '-y', '-f', 'concat', '-safe', '0',
+                 '-i', list_path,
+                 '-c:a', reencode_codec, '-b:a', '128k', out_path],
+                capture_output=True, text=True, timeout=600,
+            )
+            if r.returncode != 0:
+                try:
+                    os.unlink(out_path)
+                except OSError:
+                    pass
+                raise RuntimeError(
+                    f"ffmpeg WAV-concat encode failed: {r.stderr[:500]}"
+                )
+            return out_path
+        finally:
+            shutil.rmtree(wav_dir, ignore_errors=True)
+
+    # concat demuxer path — fast stream-copy, used for WebM
     concat_fd, concat_path = tempfile.mkstemp(suffix='.txt', prefix='concat_')
     try:
         with os.fdopen(concat_fd, 'w') as f:
@@ -438,7 +510,7 @@ def concat_audio_files(paths: list, output_suffix: str = '.webm') -> str:
         result = subprocess.run(
             ['ffmpeg', '-y', '-f', 'concat', '-safe', '0',
              '-i', concat_path, '-c', 'copy', out_path],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=600,
         )
         if result.returncode != 0:
             try:
