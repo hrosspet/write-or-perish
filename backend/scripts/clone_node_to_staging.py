@@ -39,11 +39,15 @@ import sys
 from datetime import datetime, date, timedelta
 from decimal import Decimal
 
+import shutil
+import tempfile
+
 project_root = pathlib.Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from backend.app import create_app  # noqa: E402
 from backend.models import Node, NodeTranscriptChunk, User  # noqa: E402
+from backend.utils.encryption import decrypt_file  # noqa: E402
 
 AUDIO_STORAGE_ROOT = pathlib.Path(
     os.environ.get("AUDIO_STORAGE_PATH", "data/audio")
@@ -302,23 +306,61 @@ def main():
     if not args.skip_files:
         print(f"\n=== Phase 3: copy audio files into staging container ===")
         print(f"  prod audio root: {prod_audio_root}")
+        # Files in prod are encrypted with prod's KMS-wrapped DEK. Staging
+        # has its own (or no) KMS key and can't unwrap that DEK, so we
+        # decrypt on the prod side and ship plaintext. The /media route
+        # serves plaintext files transparently (decrypt_file is a no-op
+        # for paths without `.enc`), and the backfill script that runs
+        # next can read these plaintext chunks directly.
         for n in payload["nodes"]:
             uid, nid = n["user_id"], n["id"]
             src = prod_audio_root / f"nodes/{uid}/{nid}"
             if not src.exists():
                 print(f"  SKIP node {nid}: source dir {src} missing")
                 continue
-            dst_parent = f"/app/data/audio/nodes/{uid}"
-            subprocess.run(
-                ["docker", "exec", args.staging_backend,
-                 "mkdir", "-p", dst_parent], check=True,
-            )
-            subprocess.run(
-                ["docker", "cp", str(src),
-                 f"{args.staging_backend}:{dst_parent}/"], check=True,
-            )
-            size = sum(f.stat().st_size for f in src.rglob('*') if f.is_file())
-            print(f"  node {nid}: copied {round(size/1024/1024, 1)} MB")
+            stage = pathlib.Path(tempfile.mkdtemp(prefix=f'clone_{nid}_'))
+            try:
+                # Mirror src into stage/<nid>/, decrypting .enc files.
+                dst = stage / str(nid)
+                dst.mkdir()
+                n_dec, n_plain, total_bytes = 0, 0, 0
+                for f in src.iterdir():
+                    if not f.is_file():
+                        continue
+                    if f.name.endswith('.enc'):
+                        target = dst / f.name[:-4]
+                        plaintext = decrypt_file(str(f))
+                        target.write_bytes(plaintext)
+                        n_dec += 1
+                        total_bytes += len(plaintext)
+                    else:
+                        target = dst / f.name
+                        shutil.copy2(str(f), str(target))
+                        n_plain += 1
+                        total_bytes += target.stat().st_size
+                # Wipe any pre-existing staging data for this node so we
+                # don't end up with stale prod-encrypted .enc files
+                # alongside the new plaintext (the audio-chunks endpoint
+                # prefers plain over enc, but the backfill prefers the
+                # opposite — leaving both around would break backfill).
+                dst_dir = f"/app/data/audio/nodes/{uid}/{nid}"
+                subprocess.run(
+                    ["docker", "exec", args.staging_backend,
+                     "rm", "-rf", dst_dir], check=True,
+                )
+                dst_parent = f"/app/data/audio/nodes/{uid}"
+                subprocess.run(
+                    ["docker", "exec", args.staging_backend,
+                     "mkdir", "-p", dst_parent], check=True,
+                )
+                subprocess.run(
+                    ["docker", "cp", str(dst),
+                     f"{args.staging_backend}:{dst_parent}/"], check=True,
+                )
+                print(f"  node {nid}: {n_dec} decrypted + {n_plain} plain "
+                      f"-> {round(total_bytes/1024/1024, 1)} MB")
+            finally:
+                shutil.rmtree(str(stage), ignore_errors=True)
     else:
         print("\n=== Phase 3: skipped (--skip-files) ===")
 
