@@ -397,12 +397,19 @@ def concat_fragmented_media(paths: list,
             pass
 
 
-def concat_audio_files(paths: list, output_suffix: str = '.webm') -> str:
+def concat_audio_files(paths: list, output_suffix: str = '.webm',
+                       reencode_codec: Optional[str] = None) -> str:
     """Concatenate multiple audio files using ffmpeg concat demuxer.
 
     Args:
         paths: List of file paths to concatenate (in order).
         output_suffix: Extension for the output temp file.
+        reencode_codec: When set (e.g. 'aac'), decode + re-encode to
+            this codec instead of stream-copying. Required for MP4
+            sources because per-packet timestamps drift across
+            fragmented-MP4 batch boundaries under `-c copy`, leaving
+            most of the output muted; re-encoding rebuilds them from
+            decoded samples. WebM/Opus is robust under stream-copy.
 
     Returns:
         Path to the merged temp file.  Caller is responsible for cleanup.
@@ -414,7 +421,7 @@ def concat_audio_files(paths: list, output_suffix: str = '.webm') -> str:
     if not paths:
         raise ValueError("No audio files to concatenate")
 
-    if len(paths) == 1:
+    if len(paths) == 1 and not reencode_codec:
         # Nothing to merge — return a copy so the caller can always unlink
         import tempfile
         fd, out_path = tempfile.mkstemp(suffix=output_suffix, prefix='merged_')
@@ -435,10 +442,14 @@ def concat_audio_files(paths: list, output_suffix: str = '.webm') -> str:
         fd, out_path = tempfile.mkstemp(suffix=output_suffix, prefix='merged_')
         os.close(fd)
 
+        if reencode_codec:
+            codec_args = ['-c:a', reencode_codec, '-b:a', '128k']
+        else:
+            codec_args = ['-c', 'copy']
         result = subprocess.run(
             ['ffmpeg', '-y', '-f', 'concat', '-safe', '0',
-             '-i', concat_path, '-c', 'copy', out_path],
-            capture_output=True, text=True, timeout=120,
+             '-i', concat_path, *codec_args, out_path],
+            capture_output=True, text=True, timeout=600,
         )
         if result.returncode != 0:
             try:

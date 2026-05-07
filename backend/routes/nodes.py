@@ -1304,14 +1304,23 @@ def download_audio(node_id):
                 decrypted_paths.append(str(f))
 
         # Detect source container so we ask ffmpeg for a matching output and
-        # report the right Content-Type to the browser.
+        # report the right Content-Type to the browser. MP4 sources need
+        # re-encode during concat — stream-copy preserves duration but
+        # corrupts per-packet timestamps across fMP4 batch boundaries,
+        # producing a mostly-silent output.
         first = chunk_files[0].name
         if first.endswith('.mp4') or first.endswith('.mp4.enc'):
             src_suffix, mimetype, ext = '.mp4', 'audio/mp4', 'mp4'
+            concat_codec = 'aac'
         else:
             src_suffix, mimetype, ext = '.webm', 'audio/webm', 'webm'
+            concat_codec = None
 
-        merged_path = concat_audio_files(decrypted_paths, output_suffix=src_suffix)
+        merged_path = concat_audio_files(
+            decrypted_paths,
+            output_suffix=src_suffix,
+            reencode_codec=concat_codec,
+        )
         temp_files.append(merged_path)
 
         output_path = merged_path
