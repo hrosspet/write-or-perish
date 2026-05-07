@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useRef, useCallback } from 'react';
+import { useToast } from './ToastContext';
 
 const AudioContext = createContext();
 
@@ -10,7 +11,29 @@ export const useAudio = () => {
   return context;
 };
 
+// Map an HTMLMediaElement.error to a user-facing toast message. The
+// most common cause of code 4 (SRC_NOT_SUPPORTED) here is older iOS
+// Safari being asked to play a WebM/Opus recording made in
+// Chrome/Firefox; we surface that hypothesis since the browser doesn't
+// reveal which codec it choked on. Other codes are rare and stay
+// generic — network / decode errors mid-playback.
+const playbackErrorMessage = (audioEl) => {
+  const err = audioEl && audioEl.error;
+  if (!err) return 'Audio playback failed.';
+  if (err.code === 4) {
+    const src = (audioEl.currentSrc || '').toLowerCase();
+    if (src.includes('.webm')) {
+      return "This recording is in WebM/Opus, which this browser can't play. Try Chrome or update iOS to 17.4+.";
+    }
+    return "This audio format isn't supported by your browser.";
+  }
+  if (err.code === 2) return 'Network error loading audio. Try again.';
+  if (err.code === 3) return 'Audio decoding error. The recording may be corrupted.';
+  return 'Audio playback failed.';
+};
+
 export const AudioProvider = ({ children }) => {
+  const { addToast } = useToast();
   const [currentAudio, setCurrentAudio] = useState(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -333,7 +356,8 @@ export const AudioProvider = ({ children }) => {
 
     audio.onerror = (e) => {
       if (playbackIdRef.current !== thisPlaybackId) return;
-      console.error('Error loading audio chunk:', e);
+      console.error('Error loading audio chunk:', audio.error || e);
+      addToast(playbackErrorMessage(audio), 6000);
       setLoading(false);
       setIsPlaying(false);
       stopTimeTracking();
@@ -342,7 +366,7 @@ export const AudioProvider = ({ children }) => {
     if (shouldAutoPlay) {
       audio.play().catch(err => console.error('Error playing chunk:', err));
     }
-  }, [playbackRate, calculateCumulativeTime, startTimeTracking, stopTimeTracking, recalculateTotalDuration, cleanupAudio]);
+  }, [playbackRate, calculateCumulativeTime, startTimeTracking, stopTimeTracking, recalculateTotalDuration, cleanupAudio, addToast]);
 
   const loadAudio = useCallback(async (audioData) => {
     // If there's already audio playing, pause it first
@@ -409,7 +433,8 @@ export const AudioProvider = ({ children }) => {
     };
 
     audio.onerror = (e) => {
-      console.error('Error loading audio:', e);
+      console.error('Error loading audio:', audio.error || e);
+      addToast(playbackErrorMessage(audio), 6000);
       setLoading(false);
       setIsPlaying(false);
       stopTimeTracking();
@@ -422,7 +447,7 @@ export const AudioProvider = ({ children }) => {
       console.error('Error playing audio:', err);
       setLoading(false);
     }
-  }, [startTimeTracking, stopTimeTracking, playbackRate]);
+  }, [startTimeTracking, stopTimeTracking, playbackRate, addToast]);
 
   // Load and play a queue of audio URLs (for chunked playback)
   // serverDurations: optional array of durations from backend (accurate via ffprobe)
