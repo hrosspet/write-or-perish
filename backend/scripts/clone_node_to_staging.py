@@ -132,7 +132,7 @@ app = create_app()
 with app.app_context():
     counts = {"users_inserted": 0, "users_updated": 0,
               "nodes_inserted": 0, "nodes_replaced": 0,
-              "chunks_inserted": 0, "chunks_replaced": 0}
+              "chunks_inserted": 0}
 
     # Users: insert or update so they have admin/voice access
     user_ids = []
@@ -158,21 +158,42 @@ with app.app_context():
     db.session.commit()
 
     # Replace-then-insert for nodes + chunks so re-running the script fixes
-    # any prior broken clone (e.g. ciphertext shipped before this script
-    # learned to decrypt-and-reencrypt). Scoped strictly to the requested
-    # node ids — never touches unrelated staging data.
+    # any prior broken clone. Scoped strictly to the requested node ids —
+    # never touches unrelated staging data. We sweep referencing rows in
+    # dependency order before deleting the nodes themselves; staging may
+    # have created TTSChunk / NodeVersion / Draft rows pointing at these
+    # ids during prior speaker-icon clicks, and a plain Node delete fails
+    # the FK constraints.
     cloned_node_ids = [deser_row(r)["id"] for r in payload["nodes"]]
     if cloned_node_ids:
-        # Chunks first (FK to node has no CASCADE).
-        deleted_chunks = NodeTranscriptChunk.query.filter(
-            NodeTranscriptChunk.node_id.in_(cloned_node_ids)
-        ).delete(synchronize_session=False)
+        ids_csv = ",".join(str(i) for i in cloned_node_ids)
+        # Children with no CASCADE — delete outright.
+        for table, col in (
+            ("tts_chunk", "node_id"),
+            ("node_version", "node_id"),
+            ("node_transcript_chunk", "node_id"),
+        ):
+            db.session.execute(db.text(
+                f"DELETE FROM {table} WHERE {col} IN ({ids_csv})"
+            ))
+        # Tables that should survive — null the FK instead of deleting.
+        for table, col in (
+            ("draft", "node_id"),
+            ("draft", "parent_id"),
+            ("draft", "llm_node_id"),
+            ("node", "parent_id"),
+            ("node", "linked_node_id"),
+        ):
+            db.session.execute(db.text(
+                f"UPDATE \"{table}\" SET {col} = NULL "
+                f"WHERE {col} IN ({ids_csv})"
+            ))
+        # node_context_artifact has ON DELETE CASCADE — auto-cleaned.
         deleted_nodes = Node.query.filter(
             Node.id.in_(cloned_node_ids)
         ).delete(synchronize_session=False)
         db.session.commit()
         counts["nodes_replaced"] = deleted_nodes
-        counts["chunks_replaced"] = deleted_chunks
 
     # Nodes: null out FK chain to keep clone shallow. Encrypted columns
     # arrive as plaintext — re-encrypt with staging's key.
