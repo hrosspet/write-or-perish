@@ -237,7 +237,14 @@ def main():
     ap.add_argument("--staging-url", default="https://staging.loore.org")
     ap.add_argument("--skip-files", action="store_true",
                     help="Skip docker cp (audio files persist across deploys)")
+    ap.add_argument("--prod-audio-root",
+                    default=str(AUDIO_STORAGE_ROOT),
+                    help="Root path of prod audio storage. Defaults to "
+                         "AUDIO_STORAGE_PATH env var or 'data/audio' "
+                         "relative to cwd. Set this when running from a "
+                         "git worktree (e.g. /home/<user>/write-or-perish/data/audio)")
     args = ap.parse_args()
+    prod_audio_root = pathlib.Path(args.prod_audio_root).resolve()
 
     print("=== Phase 1: export from prod DB ===")
     app = create_app()
@@ -272,10 +279,11 @@ def main():
     print("  counts:", result["counts"])
 
     if not args.skip_files:
-        print("\n=== Phase 3: copy audio files into staging container ===")
+        print(f"\n=== Phase 3: copy audio files into staging container ===")
+        print(f"  prod audio root: {prod_audio_root}")
         for n in payload["nodes"]:
             uid, nid = n["user_id"], n["id"]
-            src = AUDIO_STORAGE_ROOT / f"nodes/{uid}/{nid}"
+            src = prod_audio_root / f"nodes/{uid}/{nid}"
             if not src.exists():
                 print(f"  SKIP node {nid}: source dir {src} missing")
                 continue
