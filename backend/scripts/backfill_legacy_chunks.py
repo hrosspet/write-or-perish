@@ -9,13 +9,13 @@ longer replay correctly: the player treats each chunk URL as an
 independent file starting at timestamp 0, but the chunks actually
 share absolute timestamps across files.
 
-This script remuxes each affected node's chunks into a single
-batch_0000-NNNN.webm[.enc] file (the modern format the post-fix
-player expects) and renames the originals to
-chunk_NNNN.webm[.enc].legacy_backup. The endpoint at
-backend/routes/nodes.py glob-matches chunk_*.webm[.enc] and
+This script remuxes each legacy chunk individually into a modern
+batch_NNNN-NNNN.webm[.enc] file with timestamps rebased to 0 — one
+batch per input chunk, preserving the original ~5-min granularity.
+Originals are renamed to chunk_NNNN.webm[.enc].legacy_backup. The
+audio-chunks endpoint glob-matches chunk_*.webm[.enc] and
 batch_*.webm[.enc] but not the .legacy_backup suffix, so after this
-script the endpoint falls through to the new batch_*.webm[.enc].
+script the endpoint serves the new batch_*.webm[.enc].
 
 Idempotent. Safe to rerun.
 
@@ -109,113 +109,132 @@ def process_node(node, dry_run, verify_decode):
     if not chunks and batches:
         return ("skip_already_modern", None, None)
 
-    # Partial-state recovery: prior run created the batch but didn't
-    # finish renaming the chunks. Verify the batch then complete the
-    # rename.
+    # Partial-state recovery: prior run created batches but didn't
+    # finish renaming the chunks. Verify the batches have a non-zero
+    # cumulative duration, then complete the rename. (We expect one
+    # batch per chunk after this script's per-chunk remux semantics.)
     if chunks and batches:
-        batch = batches[0]
-        batch_decrypted = None
-        try:
-            if batch.name.endswith('.enc'):
-                fd, batch_decrypted = tempfile.mkstemp(suffix='.webm')
-                os.close(fd)
-                with open(batch_decrypted, 'wb') as f:
-                    f.write(decrypt_file(str(batch)))
-                batch_for_probe = batch_decrypted
-            else:
-                batch_for_probe = str(batch)
-            dur = ffprobe_duration(batch_for_probe)
-            if not dur or dur <= 0:
-                return ("partial_bad_batch", None, "existing batch has no duration")
-        finally:
-            if batch_decrypted and os.path.exists(batch_decrypted):
-                os.unlink(batch_decrypted)
+        cumulative_dur = 0.0
+        for batch in batches:
+            decrypted = None
+            try:
+                if batch.name.endswith('.enc'):
+                    fd, decrypted = tempfile.mkstemp(suffix='.webm')
+                    os.close(fd)
+                    with open(decrypted, 'wb') as f:
+                        f.write(decrypt_file(str(batch)))
+                    probe_target = decrypted
+                else:
+                    probe_target = str(batch)
+                d_dur = ffprobe_duration(probe_target) or 0
+                if d_dur <= 0:
+                    return ("partial_bad_batch", None,
+                            f"{batch.name} has no duration")
+                cumulative_dur += d_dur
+            finally:
+                if decrypted and os.path.exists(decrypted):
+                    os.unlink(decrypted)
 
         if dry_run:
-            return ("partial_would_rename", dur, len(chunks))
+            return ("partial_would_rename", cumulative_dur,
+                    f"{len(batches)} batches, {len(chunks)} chunks to rename")
         for c in chunks:
             c.rename(c.with_name(c.name + '.legacy_backup'))
-        return ("partial_completed", dur, len(chunks))
+        return ("partial_completed", cumulative_dur, len(chunks))
 
-    # Standard case: chunks present, no batch yet
+    # Standard case: chunks present, no batch yet. Per-chunk remux —
+    # each legacy chunk becomes one modern batch with timestamps
+    # rebased to 0, preserving the original ~5-min granularity (vs.
+    # collapsing the whole recording into one file, which would lose
+    # the chunk model the post-fix player expects).
     encrypted = chunks[0].name.endswith('.enc')
     n_chunks = len(chunks)
     workdir = tempfile.mkdtemp(prefix=f'backfill_{node.id}_')
-    merged = None
+    remuxed_paths = []  # parallel to chunks: workdir paths of remuxed output
     try:
-        plain_paths = []
-        chunks_total_size = 0
-        for c in chunks:
+        durations_total = 0.0
+        size_total = 0
+        for i, c in enumerate(chunks):
+            # Decrypt or copy into workdir
             base = c.name[:-4] if encrypted else c.name
-            p = os.path.join(workdir, base)
+            in_path = os.path.join(workdir, f"in_{i:04d}_{base}")
             if encrypted:
-                with open(p, 'wb') as f:
+                with open(in_path, 'wb') as f:
                     f.write(decrypt_file(str(c)))
             else:
-                shutil.copy2(str(c), p)
-            chunks_total_size += os.path.getsize(p)
-            plain_paths.append(p)
+                shutil.copy2(str(c), in_path)
 
-        merged = concat_fragmented_media(plain_paths)
-        merged_size = os.path.getsize(merged)
-        merged_dur = ffprobe_duration(merged)
+            # Remux this chunk on its own. concat_fragmented_media with
+            # a single input is functionally `ffmpeg -c copy +genpts`,
+            # which the surrounding codebase already trusts to produce
+            # an output WebM whose first cluster lands at timestamp 0
+            # regardless of the input's absolute timestamps.
+            out_path = concat_fragmented_media([in_path])
+            durations_total += ffprobe_duration(out_path) or 0.0
+            size_total += os.path.getsize(out_path)
+            remuxed_paths.append(out_path)
 
-        if not merged_dur or merged_dur <= 0:
-            return ("fail_no_duration", merged_dur, merged_size)
-        if merged_size < chunks_total_size * 0.5:
-            return ("fail_size_anomaly",
-                    merged_dur,
-                    f"merged={merged_size} chunks_total={chunks_total_size}")
+        if durations_total <= 0:
+            return ("fail_no_duration", durations_total, size_total)
 
         if verify_decode:
-            ok, err_tail = ffmpeg_full_decode_ok(merged)
-            if not ok:
-                return ("fail_decode", merged_dur, err_tail)
+            for j, p in enumerate(remuxed_paths):
+                ok, err_tail = ffmpeg_full_decode_ok(p)
+                if not ok:
+                    return ("fail_decode",
+                            durations_total,
+                            f"chunk {j}: {err_tail}")
 
         if dry_run:
-            return ("ok_dry_run", merged_dur, merged_size)
+            return ("ok_dry_run", durations_total,
+                    f"{n_chunks} batches, {size_total} bytes total")
 
-        # Write the merged file as batch_0000-NNNN.webm[.enc] in the
-        # node's audio dir. Order: write batch first, verify, THEN
-        # rename originals — so a crash anywhere keeps the node's
-        # existing chunks intact (idempotent rerun completes the job).
-        batch_basename = f"batch_0000-{n_chunks - 1:04d}.webm"
-        batch_plain_path = d / batch_basename
-        shutil.move(merged, str(batch_plain_path))
-        merged = None  # consumed
+        # Write each remuxed output as batch_NNNN-NNNN.webm[.enc] in
+        # the node's audio dir. Order: write all batches + encrypt,
+        # verify, THEN rename originals — so a crash anywhere keeps
+        # the node's existing chunks intact (idempotent rerun
+        # completes the job).
+        batch_paths = []
+        for i, src in enumerate(remuxed_paths):
+            batch_plain = d / f"batch_{i:04d}-{i:04d}.webm"
+            shutil.move(src, str(batch_plain))
+            if encrypted and is_encryption_enabled():
+                final = encrypt_file(str(batch_plain))
+            else:
+                final = str(batch_plain)
+            batch_paths.append(final)
+        remuxed_paths = []  # consumed; clear so finally{} doesn't re-unlink
 
-        if encrypted and is_encryption_enabled():
-            final_path = encrypt_file(str(batch_plain_path))
-        else:
-            final_path = str(batch_plain_path)
-
-        # Sanity check: final file is on disk and ffprobe agrees.
-        if final_path.endswith('.enc'):
-            fd, tmp = tempfile.mkstemp(suffix='.webm')
-            os.close(fd)
-            try:
-                with open(tmp, 'wb') as f:
-                    f.write(decrypt_file(final_path))
-                final_dur = ffprobe_duration(tmp)
-            finally:
-                os.unlink(tmp)
-        else:
-            final_dur = ffprobe_duration(final_path)
-        if not final_dur or final_dur <= 0:
-            return ("fail_post_write_verify", final_dur,
-                    f"wrote {final_path} but ffprobe failed")
+        # Sanity check each batch
+        for fp in batch_paths:
+            if fp.endswith('.enc'):
+                fd, tmp = tempfile.mkstemp(suffix='.webm')
+                os.close(fd)
+                try:
+                    with open(tmp, 'wb') as f:
+                        f.write(decrypt_file(fp))
+                    final_dur = ffprobe_duration(tmp)
+                finally:
+                    os.unlink(tmp)
+            else:
+                final_dur = ffprobe_duration(fp)
+            if not final_dur or final_dur <= 0:
+                return ("fail_post_write_verify", final_dur,
+                        f"wrote {fp} but ffprobe failed")
 
         for c in chunks:
             c.rename(c.with_name(c.name + '.legacy_backup'))
 
-        return ("ok", merged_dur, merged_size)
+        return ("ok", durations_total,
+                f"{n_chunks} batches, {size_total} bytes total")
     except Exception as e:
         return ("fail_exception", None,
                 f"{type(e).__name__}: {str(e)[:300]}")
     finally:
-        if merged and os.path.exists(merged):
+        for p in remuxed_paths:
             try:
-                os.unlink(merged)
+                if os.path.exists(p):
+                    os.unlink(p)
             except OSError:
                 pass
         shutil.rmtree(workdir, ignore_errors=True)
