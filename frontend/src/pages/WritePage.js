@@ -28,8 +28,16 @@ export default function WritePage() {
       });
       return { id: res.data.id };
     }
+    // Respect the user's auto-generate preference from the very first
+    // turn (#134). Shares the `loore_auto_generate` key with NodeDetail's
+    // inline toggle and NodeForm's craft-mode toggle, so there's one
+    // "auto-generate after submit" preference across the app. Default
+    // true on a fresh install (matches the backend default). When off,
+    // /textmode/start creates the thread without firing an LLM reply.
+    const stored = localStorage.getItem('loore_auto_generate');
+    const autoGenerate = stored === null ? true : stored === 'true';
     const res = await api.post('/textmode/start', {
-      content, privacy_level, ai_usage,
+      content, privacy_level, ai_usage, auto_generate: autoGenerate,
     });
     return res.data;
   };
@@ -40,6 +48,10 @@ export default function WritePage() {
       // Land directly on the pending LLM node so NodeDetail anchors the
       // inline input below it and flips to the response in place.
       navigate(`/node/${llmNodeId}?awaitLlm=${llmNodeId}`);
+    } else if (data?.user_node_id) {
+      // Auto-generate off (#134): no LLM reply was created — land on the
+      // user's own entry. /textmode/start returns user_node_id (not id).
+      navigate(`/node/${data.user_node_id}`);
     } else if (data?.id) {
       // Fallback path (ai_usage not chat/train) — navigate to the plain
       // entry without the awaitLlm query param.
