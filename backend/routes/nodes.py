@@ -729,8 +729,17 @@ def update_node(node_id):
 
     # Save the current version before update.
     version = NodeVersion(node_id=node.id)
-    version.set_content(node.get_content())
+    old_content = node.get_content()
+    version.set_content(old_content)
     db.session.add(version)
+
+    # If the text actually changed, any generated TTS audio is now stale —
+    # drop it (and the per-chunk rows) so the user doesn't hear audio that
+    # no longer matches the text (#66). A privacy-only edit leaves it alone.
+    if new_content != old_content:
+        from backend.utils.audio_storage import clear_tts_artifacts
+        clear_tts_artifacts(node)
+
     node.set_content(new_content)
     try:
         db.session.commit()

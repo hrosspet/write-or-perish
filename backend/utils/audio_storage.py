@@ -17,6 +17,43 @@ AUDIO_STORAGE_ROOT = pathlib.Path(
 ).resolve()
 
 
+def clear_tts_artifacts(entity) -> bool:
+    """Invalidate any generated TTS audio for a Node or UserProfile.
+
+    Called when the entity's text content is edited so the user doesn't
+    keep hearing audio that no longer matches the text (#66). Clears the
+    scalar `audio_tts_url` AND the per-chunk `TTSChunk` rows used by the
+    streaming player (clearing only the URL would leave chunked replay
+    resurfacing the old audio), and resets the async-task tracking
+    columns so the UI shows TTS as not-yet-generated.
+
+    DB-only, mirroring the row cleanup in tasks/node_cleanup.py — on-disk
+    audio files are left as orphans (issue #66 "Option 1": require an
+    explicit regenerate; file GC is a separate follow-up).
+
+    Returns True if anything was cleared (caller still owns the commit).
+    """
+    from backend.models import Node, UserProfile, TTSChunk
+
+    if isinstance(entity, Node):
+        fk = {"node_id": entity.id}
+    elif isinstance(entity, UserProfile):
+        fk = {"profile_id": entity.id}
+    else:
+        raise TypeError(f"clear_tts_artifacts: unsupported entity {type(entity)!r}")
+
+    had_audio = bool(entity.audio_tts_url)
+    deleted = TTSChunk.query.filter_by(**fk).delete(synchronize_session=False)
+
+    entity.audio_tts_url = None
+    # These columns exist on both Node and UserProfile.
+    entity.tts_task_id = None
+    entity.tts_task_status = None
+    entity.tts_task_progress = 0
+
+    return had_audio or bool(deleted)
+
+
 def list_streaming_audio_files(chunk_dir: pathlib.Path) -> list:
     """Return sorted list of streaming-recording chunk files for playback.
 

@@ -244,6 +244,12 @@ def update_profile(profile_id):
     if not new_content.strip():
         return jsonify({"error": "Content cannot be empty"}), 400
 
+    # If the text actually changed, drop any generated TTS audio (and its
+    # per-chunk rows) so stale audio isn't replayed for edited profiles (#66).
+    if new_content != profile.get_content():
+        from backend.utils.audio_storage import clear_tts_artifacts
+        clear_tts_artifacts(profile)
+
     profile.set_content(new_content)
 
     # Handle privacy settings updates (optional)
