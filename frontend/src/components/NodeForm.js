@@ -443,6 +443,18 @@ const NodeForm = forwardRef(
       isDirty: () => content.trim().length > 0 || uploadedFile,
     }));
 
+    // Explain why the record/upload buttons are disabled (#62). The most
+    // common cause is "No AI Access" — audio needs transcription, which
+    // requires AI access. Surfaced as a tooltip on both buttons.
+    const audioDisabledReason =
+      aiUsage === 'none'
+        ? "Set AI Usage to Chat or Train to record or upload audio — transcription needs AI access."
+        : !isOnline
+        ? "You're offline — reconnect to record or upload audio."
+        : isStreamingRecording
+        ? "Finish the current recording first."
+        : "";
+
     // Format time ago for last saved indicator
     const formatTimeAgo = (date) => {
       if (!date) return '';
@@ -755,6 +767,7 @@ const NodeForm = forwardRef(
                   parentId={parentId}
                   privacyLevel={privacyLevel}
                   aiUsage={aiUsage}
+                  disabledReason={audioDisabledReason}
                   onRecordingStart={() => {
                     // Capture content before streaming starts so we can append to it
                     preStreamingContentRef.current = content;
@@ -801,6 +814,7 @@ const NodeForm = forwardRef(
                       type="button"
                       onClick={() => fileInputRef.current?.click()}
                       disabled={isStreamingRecording || aiUsage === 'none' || !isOnline}
+                      title={audioDisabledReason || undefined}
                       style={{ padding: '8px 16px', cursor: isStreamingRecording || aiUsage === 'none' || !isOnline ? 'not-allowed' : 'pointer', opacity: isStreamingRecording || aiUsage === 'none' || !isOnline ? 0.35 : 1 }}
                     >
                       Upload

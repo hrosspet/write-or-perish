@@ -27,6 +27,7 @@ export default function StreamingMicButton({
   onComplete = null,
   onError = null,
   disabled = false,
+  disabledReason = '',
 }) {
   const {
     sessionState,
@@ -194,6 +195,13 @@ export default function StreamingMicButton({
           type="button"
           onClick={handleClick}
           disabled={disabled || isIdleOffline || sessionState === 'initializing' || sessionState === 'finalizing'}
+          title={
+            disabled && disabledReason
+              ? disabledReason
+              : isIdleOffline
+              ? "You're offline — reconnect to record audio."
+              : undefined
+          }
           style={{
             display: 'flex',
             alignItems: 'center',
