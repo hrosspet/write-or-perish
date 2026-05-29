@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { FaPlay, FaPause, FaStop, FaUndo, FaRedo } from 'react-icons/fa';
 import { useAudio } from '../contexts/AudioContext';
+import { useIsMobile } from '../hooks/useIsMobile';
 
 const GlobalAudioPlayer = () => {
   const {
@@ -20,6 +21,50 @@ const GlobalAudioPlayer = () => {
     seekToCumulativeTime,
     changePlaybackRate,
   } = useAudio();
+
+  // Below 640px the player can't fit inline in the 56px NavBar row, so it
+  // pops out into a fixed bottom floating card (#28).
+  const isMobile = useIsMobile(640);
+  const cardRef = useRef(null);
+
+  // Publish the floating card's occupied height (from its top to the
+  // viewport bottom) as --floating-player-offset so the toast stack can
+  // sit ABOVE the player instead of covering it. ToastProvider is an
+  // ancestor of AudioProvider, so it can't read audio state directly — a
+  // CSS variable on :root is the decoupled hand-off. Cleared whenever the
+  // floating card isn't shown.
+  useEffect(() => {
+    const root = document.documentElement;
+    const clear = () => root.style.setProperty('--floating-player-offset', '0px');
+
+    if (!isMobile || !currentAudio) {
+      clear();
+      return undefined;
+    }
+    const el = cardRef.current;
+    if (!el) {
+      clear();
+      return undefined;
+    }
+    const update = () => {
+      const top = el.getBoundingClientRect().top;
+      // +8px breathing room between a toast and the player.
+      const offset = Math.max(0, window.innerHeight - top + 8);
+      root.style.setProperty('--floating-player-offset', `${offset}px`);
+    };
+    update();
+    let ro;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(update);
+      ro.observe(el);
+    }
+    window.addEventListener('resize', update);
+    return () => {
+      if (ro) ro.disconnect();
+      window.removeEventListener('resize', update);
+      clear();
+    };
+  }, [isMobile, currentAudio]);
 
   // Use cumulative time/duration for display with fallbacks
   const displayTime = cumulativeTime || 0;
@@ -48,19 +93,16 @@ const GlobalAudioPlayer = () => {
     }
   };
 
-  return (
-    <div style={{
-      display: 'flex',
-      alignItems: 'center',
-      gap: '12px',
-    }}>
+  const inner = (
+    <>
       {/* Title */}
       <div style={{
         color: 'var(--text-primary)',
         fontSize: '13px',
         fontWeight: '300',
         fontFamily: 'var(--sans)',
-        maxWidth: '200px',
+        maxWidth: isMobile ? 'none' : '200px',
+        flex: isMobile ? '1 1 auto' : '0 0 auto',
         overflow: 'hidden',
         textOverflow: 'ellipsis',
         whiteSpace: 'nowrap',
@@ -213,9 +255,11 @@ const GlobalAudioPlayer = () => {
       <div
         onClick={handleSeek}
         style={{
-          width: '150px',
+          width: isMobile ? 'auto' : '150px',
+          flex: isMobile ? '1 1 auto' : '0 0 auto',
+          minWidth: isMobile ? '60px' : undefined,
           height: '5px',
-          backgroundColor: 'var(--bg-card)',
+          backgroundColor: isMobile ? 'var(--bg-surface)' : 'var(--bg-card)',
           borderRadius: '3px',
           cursor: 'pointer',
           position: 'relative',
@@ -232,6 +276,68 @@ const GlobalAudioPlayer = () => {
           }}
         />
       </div>
+    </>
+  );
+
+  // Desktop: render inline inside the NavBar row (unchanged).
+  if (!isMobile) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+        {inner}
+      </div>
+    );
+  }
+
+  // Mobile: pop out of the NavBar into a persistent floating card pinned to
+  // the bottom, styled like the toasts (#28). Stays until the user closes
+  // it with ✕ or refreshes the tab. zIndex sits just below the toast stack
+  // (9999) so toasts render above it; the toast container offsets itself by
+  // --floating-player-offset (set in the effect above) to avoid overlap.
+  return (
+    <div
+      ref={cardRef}
+      style={{
+        position: 'fixed',
+        bottom: 'max(16px, env(safe-area-inset-bottom))',
+        left: '50%',
+        transform: 'translateX(-50%)',
+        width: 'calc(100vw - 24px)',
+        maxWidth: '480px',
+        boxSizing: 'border-box',
+        zIndex: 9998,
+        display: 'flex',
+        alignItems: 'center',
+        gap: '10px',
+        background: 'var(--bg-card)',
+        border: '1px solid var(--border)',
+        borderRadius: '8px',
+        padding: '10px 14px',
+        boxShadow: '0 4px 20px rgba(0,0,0,0.3)',
+      }}
+    >
+      {inner}
+      {/* Close — dismiss the floating player. Uses the existing stop()
+          (full teardown) for now; resetting-without-hiding is tracked
+          separately in #161. */}
+      <button
+        onClick={stop}
+        title="Close player"
+        aria-label="Close player"
+        style={{
+          background: 'none',
+          border: 'none',
+          color: 'var(--text-muted)',
+          cursor: 'pointer',
+          fontSize: '1.1rem',
+          lineHeight: 1,
+          flexShrink: 0,
+          padding: '4px',
+          display: 'flex',
+          alignItems: 'center',
+        }}
+      >
+        ✕
+      </button>
     </div>
   );
 };
