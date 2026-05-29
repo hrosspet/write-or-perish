@@ -5,6 +5,7 @@ from flask import Blueprint, request, jsonify, abort, current_app
 from flask_login import login_required, current_user
 from backend.models import User, APICostLog
 from backend.extensions import db
+from backend.utils.timefmt import iso_utc
 from sqlalchemy import func
 from backend.utils.magic_link import generate_magic_link_token, hash_token
 from backend.utils.email import send_welcome_email
@@ -43,12 +44,12 @@ def list_users():
             "twitter_id": user.twitter_id,
             "username": user.username,
             "description": user.description,
-            "created_at": user.created_at.isoformat(),
-            "accepted_terms_at": user.accepted_terms_at.isoformat() if user.accepted_terms_at else None,
+            "created_at": iso_utc(user.created_at),
+            "accepted_terms_at": iso_utc(user.accepted_terms_at),
             "approved": user.approved,
             "email": user.email,
             "plan": user.plan,
-            "deactivated_at": user.deactivated_at.isoformat() if user.deactivated_at else None,
+            "deactivated_at": iso_utc(user.deactivated_at),
             "total_spending_usd": total_microdollars / 1_000_000,
         })
     return jsonify({

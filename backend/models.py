@@ -35,6 +35,14 @@ class User(db.Model, UserMixin):
     # Preferred AI model for craft-mode operations
     preferred_model = db.Column(db.String(64), nullable=True)
 
+    # IANA timezone name (e.g. "Europe/Prague") captured from the browser via
+    # Intl.DateTimeFormat().resolvedOptions().timeZone. Used to render absolute
+    # local-time stamps in the LLM context (#130). Defaults to "UTC" when the
+    # client hasn't reported one.
+    timezone = db.Column(
+        db.String(64), nullable=True, default="UTC", server_default="UTC"
+    )
+
     # Subscription plan ("free", "alpha", "pro", etc.).
     plan = db.Column(db.String(16), nullable=False, default="alpha")
 

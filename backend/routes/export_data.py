@@ -10,6 +10,7 @@ from backend.utils.privacy import AI_ALLOWED, accessible_nodes_filter, can_user_
 from backend.utils.quotes import (
     resolve_quotes, has_quotes, ExportQuoteResolver, resolve_quotes_for_export
 )
+from backend.utils.timefmt import iso_utc
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import subqueryload
 from datetime import datetime
@@ -27,7 +28,7 @@ def export_data():
             "twitter_id": current_user.twitter_id,
             "username": current_user.username,
             "description": current_user.description,
-            "created_at": current_user.created_at.isoformat(),
+            "created_at": iso_utc(current_user.created_at),
         },
         "nodes": [],
         "versions": []
@@ -41,8 +42,8 @@ def export_data():
             "parent_id": node.parent_id,
             "linked_node_id": node.linked_node_id,
             "token_count": node.token_count,
-            "created_at": node.created_at.isoformat(),
-            "updated_at": node.updated_at.isoformat()
+            "created_at": iso_utc(node.created_at),
+            "updated_at": iso_utc(node.updated_at)
         })
     versions = NodeVersion.query.join(Node, Node.id == NodeVersion.node_id).filter(Node.user_id == current_user.id).all()
     for version in versions:
@@ -50,7 +51,7 @@ def export_data():
             "id": version.id,
             "node_id": version.node_id,
             "content": version.get_content(),
-            "timestamp": version.timestamp.isoformat()
+            "timestamp": iso_utc(version.timestamp)
         })
     return jsonify(user_data), 200
 
@@ -1730,7 +1731,7 @@ def get_profile_status(task_id):
                 "content": latest.get_content(),
                 "generated_by": latest.generated_by,
                 "tokens_used": latest.tokens_used,
-                "created_at": latest.created_at.isoformat()
+                "created_at": iso_utc(latest.created_at)
             }
         return jsonify({
             "task_id": task_id,
@@ -1768,7 +1769,7 @@ def get_profile_status(task_id):
                     "content": profile.get_content(),
                     "generated_by": profile.generated_by,
                     "tokens_used": profile.tokens_used,
-                    "created_at": profile.created_at.isoformat()
+                    "created_at": iso_utc(profile.created_at)
                 }
 
     # Map Celery states to frontend-expected statuses

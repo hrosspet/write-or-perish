@@ -16,6 +16,7 @@ from backend.utils.privacy import (
     can_user_access_node,
     can_user_view_tombstone,
 )
+from backend.utils.timefmt import iso_utc
 
 
 def serialize_node_status(node, viewer_id: int) -> Optional[dict]:
@@ -40,10 +41,10 @@ def serialize_node_status(node, viewer_id: int) -> Optional[dict]:
             return {
                 "id": node.id,
                 "deleted": True,
-                "deleted_at": node.deleted_at.isoformat(),
+                "deleted_at": iso_utc(node.deleted_at),
                 "username": node.user.username if node.user else None,
                 "node_type": node.node_type,
-                "created_at": node.created_at.isoformat(),
+                "created_at": iso_utc(node.created_at),
             }
         return {"id": node.id, "inaccessible": True}
 

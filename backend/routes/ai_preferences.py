@@ -2,6 +2,7 @@ from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
 from backend.models import UserAIPreferences
 from backend.extensions import db
+from backend.utils.timefmt import iso_utc
 
 ai_preferences_bp = Blueprint("ai_preferences", __name__)
 
@@ -27,7 +28,7 @@ def get_ai_preferences():
             "content": prefs.get_content(),
             "generated_by": prefs.generated_by,
             "tokens_used": prefs.tokens_used,
-            "created_at": prefs.created_at.isoformat(),
+            "created_at": iso_utc(prefs.created_at),
             "privacy_level": prefs.privacy_level,
             "ai_usage": prefs.ai_usage,
             "version_number": version_count,
@@ -67,7 +68,7 @@ def update_ai_preferences():
             "content": prefs.get_content(),
             "generated_by": prefs.generated_by,
             "tokens_used": prefs.tokens_used,
-            "created_at": prefs.created_at.isoformat(),
+            "created_at": iso_utc(prefs.created_at),
             "version_number": version_count,
         }
     }), 200
@@ -88,7 +89,7 @@ def get_ai_preferences_versions():
             "id": prefs.id,
             "generated_by": prefs.generated_by,
             "tokens_used": prefs.tokens_used,
-            "created_at": prefs.created_at.isoformat(),
+            "created_at": iso_utc(prefs.created_at),
             "version_number": total - i,
         })
 
@@ -110,6 +111,6 @@ def get_ai_preferences_version(version_id):
             "content": prefs.get_content(),
             "generated_by": prefs.generated_by,
             "tokens_used": prefs.tokens_used,
-            "created_at": prefs.created_at.isoformat(),
+            "created_at": iso_utc(prefs.created_at),
         }
     }), 200

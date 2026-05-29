@@ -3,6 +3,7 @@ from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
 from backend.extensions import db
 from backend.utils.email import send_admin_signup_notification
+from backend.utils.timefmt import iso_utc
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,6 @@ def accept_terms():
 
     return jsonify({
         "message": "Terms accepted",
-        "accepted_terms_at": current_user.accepted_terms_at.isoformat(),
+        "accepted_terms_at": iso_utc(current_user.accepted_terms_at),
         "accepted_terms_version": current_user.accepted_terms_version
     }), 200

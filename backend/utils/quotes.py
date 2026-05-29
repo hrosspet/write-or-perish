@@ -17,6 +17,8 @@ from datetime import datetime
 from typing import Tuple, List, Dict, Optional, Set
 from celery.utils.log import get_task_logger
 
+from backend.utils.timefmt import iso_utc
+
 logger = get_task_logger(__name__)
 
 # Pattern to match {quote:123} where 123 is a node ID
@@ -79,7 +81,7 @@ def get_quote_data(node_ids: List[int], user_id: int) -> Dict[int, Optional[dict
                     "content": None,
                     "username": node.user.username if node.user else "Unknown",
                     "user_id": node.user_id,
-                    "created_at": node.created_at.isoformat() if node.created_at else None,
+                    "created_at": iso_utc(node.created_at),
                     "node_type": node.node_type,
                     "ai_usage": node.ai_usage,
                 }
@@ -93,7 +95,7 @@ def get_quote_data(node_ids: List[int], user_id: int) -> Dict[int, Optional[dict
                 "content": node.get_content(),
                 "username": node.user.username if node.user else "Unknown",
                 "user_id": node.user_id,
-                "created_at": node.created_at.isoformat() if node.created_at else None,
+                "created_at": iso_utc(node.created_at),
                 "node_type": node.node_type,
                 "ai_usage": node.ai_usage,
             }

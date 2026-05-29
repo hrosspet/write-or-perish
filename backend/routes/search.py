@@ -6,6 +6,7 @@ from flask_login import login_required, current_user
 from sqlalchemy import or_
 from backend.models import Node, NodeContextArtifact, User
 from backend.extensions import db
+from backend.utils.timefmt import iso_utc
 
 search_bp = Blueprint("search_bp", __name__)
 
@@ -120,7 +121,7 @@ def search():
                 "preview": content[:200] + ("..." if len(content) > 200 else ""),
                 "snippet": None,
                 "node_type": node.node_type,
-                "created_at": node.created_at.isoformat(),
+                "created_at": iso_utc(node.created_at),
                 "username": node.user.username if node.user else "Unknown",
                 "child_count": len(node.children),
                 "parent_id": node.parent_id,
@@ -156,7 +157,7 @@ def search():
             "preview": content[:200] + ("..." if len(content) > 200 else ""),
             "snippet": _snippet(content, q),
             "node_type": node.node_type,
-            "created_at": node.created_at.isoformat(),
+            "created_at": iso_utc(node.created_at),
             "username": node.user.username if node.user else "Unknown",
             "child_count": len(node.children),
             "parent_id": node.parent_id,

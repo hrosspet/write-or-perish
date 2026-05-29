@@ -4,6 +4,7 @@ from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
 from backend.models import Node, User, UserProfile
 from backend.extensions import db
+from backend.utils.timefmt import iso_utc
 from backend.utils.privacy import (
     accessible_nodes_filter, VALID_PRIVACY_LEVELS, VALID_AI_USAGE,
 )
@@ -30,11 +31,10 @@ def get_latest_profile(user):
             "content": profile.get_content(),
             "generated_by": profile.generated_by,
             "tokens_used": profile.tokens_used,
-            "created_at": profile.created_at.isoformat(),
+            "created_at": iso_utc(profile.created_at),
             "source_tokens_used": profile.source_tokens_used,
             "source_data_cutoff": (
-                profile.source_data_cutoff.isoformat()
-                if profile.source_data_cutoff else None
+                iso_utc(profile.source_data_cutoff)
             ),
             "generation_type": profile.generation_type,
             # Whether this profile has generated TTS audio — drives the
@@ -73,8 +73,8 @@ def _serialize_node_for_list(node):
         "preview": preview,
         "node_type": display_node.node_type,
         "child_count": len(node.children),
-        "created_at": display_node.created_at.isoformat(),
-        "pinned_at": node.pinned_at.isoformat() if node.pinned_at else None,
+        "created_at": iso_utc(display_node.created_at),
+        "pinned_at": iso_utc(node.pinned_at),
         "username": node.user.username if node.user else "Unknown",
         "human_owner_username": human_owner_username,
         "llm_model": display_node.llm_model,
@@ -109,7 +109,7 @@ def get_dashboard():
             "id": current_user.id,
             "username": current_user.username,
             "description": current_user.description,
-            "accepted_terms_at": current_user.accepted_terms_at.isoformat() if current_user.accepted_terms_at else None,
+            "accepted_terms_at": iso_utc(current_user.accepted_terms_at),
             "terms_up_to_date": _terms_up_to_date(current_user),
             "approved": current_user.approved,
             "email": current_user.email,
@@ -242,7 +242,7 @@ def update_user():
                 "description": current_user.description,
                 "email": current_user.email,
                 "approved": current_user.approved,
-                "accepted_terms_at": current_user.accepted_terms_at.isoformat() if current_user.accepted_terms_at else None,
+                "accepted_terms_at": iso_utc(current_user.accepted_terms_at),
                 "terms_up_to_date": _terms_up_to_date(current_user),
                 "is_admin": current_user.is_admin,
                 "plan": current_user.plan,
