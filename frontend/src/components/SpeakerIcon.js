@@ -27,7 +27,7 @@ const extractMarkdownHeader = (content) => {
  * SpeakerIcon component fetches and plays audio for a node or profile.
  * Shows loading spinner, play/pause state.
  */
-const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage }) => {
+const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGenerated }) => {
   const { user } = useUser();
   const { loadAudio, loadAudioQueue, appendChunkToQueue, setGeneratingTTS, currentAudio, isPlaying, warmup } = useAudio();
   const [loading, setLoading] = useState(false);
@@ -136,6 +136,11 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage }) => {
         setTimeout(() => {
           loadAudio({ url: srcUrl, title: fullTitle, id, type: isNode ? 'node' : 'profile' });
         }, 500);
+        // Tell the parent this entry now has generated TTS, so its cached
+        // node/profile object updates without a page refresh — otherwise the
+        // edit flow's "regenerate audio?" prompt (#66) wouldn't fire until
+        // the page is reloaded.
+        if (onTtsGenerated) onTtsGenerated();
       }
       setTtsTaskActive(false);
       setLoading(false);
@@ -144,7 +149,7 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage }) => {
       setTtsTaskActive(false);
       setLoading(false);
     }
-  }, [ttsStatus, ttsData, ttsError, isNode, id, loadAudio, fullTitle]);
+  }, [ttsStatus, ttsData, ttsError, isNode, id, loadAudio, fullTitle, onTtsGenerated]);
 
   // Show for voice-mode users, or for any authenticated user on public posts
   if (!user || (!user.voice_mode_enabled && !isPublic)) {

@@ -188,6 +188,7 @@ export default function ProfilePage() {
             content={profile.content}
             isPublic={profile.privacy_level === 'public'}
             aiUsage={profile.ai_usage}
+            onTtsGenerated={() => setProfile(prev => prev ? { ...prev, has_tts: true } : prev)}
           />
         )}
 
