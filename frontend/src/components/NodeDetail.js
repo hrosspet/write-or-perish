@@ -993,6 +993,7 @@ function NodeDetail() {
             initialPrivacyLevel: editTarget.privacy_level,
             initialAiUsage: editTarget.ai_usage,
             detachPrompt: !!editTarget.context_artifacts?.prompt,
+            hasGeneratedTts: !!editTarget.has_tts,
             onSuccess: handleEditSuccess,
           }}
         />

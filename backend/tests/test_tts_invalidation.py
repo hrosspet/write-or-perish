@@ -1,10 +1,12 @@
 """Tests for stale-TTS invalidation on content edit (#66).
 
-When a node's (or profile's) text content is edited after TTS audio was
-generated, the generated audio is stale and must be dropped — both the
-scalar `audio_tts_url` AND the per-chunk `TTSChunk` rows used by the
-streaming player (clearing only the URL would leave chunked replay
-resurfacing the old audio). A privacy/ai_usage-only edit must NOT drop it.
+When a node's (or profile's) text is edited after TTS audio was generated,
+the audio is stale. The frontend prompts the user (keep vs. regenerate) and
+only sends `regenerate_tts=true` when they choose to regenerate; the backend
+then clears BOTH the scalar `audio_tts_url` AND the per-chunk `TTSChunk`
+rows (clearing only the URL would leave chunked replay resurfacing the old
+audio). Without the flag — or for a privacy/ai_usage-only edit — the audio
+is preserved.
 
 Patterned after test_node_deletion.py: sqlite in-memory, minimal Flask
 app, ENCRYPTION_DISABLED.
@@ -161,14 +163,17 @@ def _make_profile_with_tts(user, content="my profile"):
     return profile
 
 
-# ── Node content edit clears TTS ─────────────────────────────────────────
+# ── Node: regenerate flag clears TTS; absence preserves it ───────────────
 
-def test_node_content_edit_clears_tts_url_and_chunks(app, alice):
+def test_node_edit_with_regenerate_flag_clears_tts(app, alice):
     node = _make_node_with_tts(alice, content="original text")
     client = app.test_client()
     _login(client, alice)
 
-    resp = client.put(f"/nodes/{node.id}", json={"content": "edited text"})
+    resp = client.put(
+        f"/nodes/{node.id}",
+        json={"content": "edited text", "regenerate_tts": True},
+    )
     assert resp.status_code == 200
 
     refreshed = Node.query.get(node.id)
@@ -177,15 +182,31 @@ def test_node_content_edit_clears_tts_url_and_chunks(app, alice):
     assert TTSChunk.query.filter_by(node_id=node.id).count() == 0
 
 
+def test_node_content_edit_without_flag_preserves_tts(app, alice):
+    # User chose "keep existing audio": content changes but no flag sent.
+    node = _make_node_with_tts(alice, content="original text")
+    client = app.test_client()
+    _login(client, alice)
+
+    resp = client.put(f"/nodes/{node.id}", json={"content": "edited text"})
+    assert resp.status_code == 200
+
+    refreshed = Node.query.get(node.id)
+    assert refreshed.audio_tts_url == "data/audio/node_1/tts.mp3"
+    assert TTSChunk.query.filter_by(node_id=node.id).count() == 2
+
+
 def test_node_privacy_only_edit_preserves_tts(app, alice):
     node = _make_node_with_tts(alice, content="keep me")
     client = app.test_client()
     _login(client, alice)
 
-    # Same content, only privacy changes — audio is still valid.
+    # Even with the flag, an unchanged body must keep the audio (the flag
+    # only acts when the text actually changed).
     resp = client.put(
         f"/nodes/{node.id}",
-        json={"content": "keep me", "privacy_level": "public"},
+        json={"content": "keep me", "privacy_level": "public",
+              "regenerate_tts": True},
     )
     assert resp.status_code == 200
 
@@ -194,9 +215,26 @@ def test_node_privacy_only_edit_preserves_tts(app, alice):
     assert TTSChunk.query.filter_by(node_id=node.id).count() == 2
 
 
-# ── Profile content edit clears TTS ──────────────────────────────────────
+# ── Profile: regenerate flag clears TTS; absence preserves it ────────────
 
-def test_profile_content_edit_clears_tts_url_and_chunks(app, alice):
+def test_profile_edit_with_regenerate_flag_clears_tts(app, alice):
+    profile = _make_profile_with_tts(alice, content="original profile")
+    client = app.test_client()
+    _login(client, alice)
+
+    resp = client.put(
+        f"/profile/{profile.id}",
+        json={"content": "edited profile", "regenerate_tts": True},
+    )
+    assert resp.status_code == 200
+
+    refreshed = UserProfile.query.get(profile.id)
+    assert refreshed.audio_tts_url is None
+    assert TTSChunk.query.filter_by(profile_id=profile.id).count() == 0
+
+
+def test_profile_content_edit_without_flag_preserves_tts(app, alice):
+    # User chose "keep existing audio" on a profile edit.
     profile = _make_profile_with_tts(alice, content="original profile")
     client = app.test_client()
     _login(client, alice)
@@ -207,5 +245,5 @@ def test_profile_content_edit_clears_tts_url_and_chunks(app, alice):
     assert resp.status_code == 200
 
     refreshed = UserProfile.query.get(profile.id)
-    assert refreshed.audio_tts_url is None
-    assert TTSChunk.query.filter_by(profile_id=profile.id).count() == 0
+    assert refreshed.audio_tts_url == "data/audio/profile_1/tts.mp3"
+    assert TTSChunk.query.filter_by(profile_id=profile.id).count() == 1

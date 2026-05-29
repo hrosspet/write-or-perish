@@ -3,6 +3,7 @@ import MarkdownBody from '../components/MarkdownBody';
 import api from '../api';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
 import SpeakerIcon from '../components/SpeakerIcon';
+import RegenerateTtsDialog from '../components/RegenerateTtsDialog';
 import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
 import { useUser } from '../contexts/UserContext';
 
@@ -14,6 +15,9 @@ export default function ProfilePage() {
   const [editing, setEditing] = useState(false);
   const [editContent, setEditContent] = useState('');
   const [saving, setSaving] = useState(false);
+  // Ask whether to keep/regenerate stale TTS when editing a profile that
+  // has generated audio (#66).
+  const [showTtsDialog, setShowTtsDialog] = useState(false);
 
   // Version history drawer
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -99,12 +103,26 @@ export default function ProfilePage() {
     }
   }, [profile]);
 
-  const handleSave = async () => {
+  const handleSave = async (regenerateTts) => {
     if (!editContent.trim()) return;
+
+    // Editing a profile that has generated TTS and whose text changed:
+    // ask whether to keep or regenerate the now-stale audio first (#66).
+    if (
+      profile && profile.has_tts && regenerateTts === undefined
+      && editContent !== profile.content
+    ) {
+      setShowTtsDialog(true);
+      return;
+    }
+
     setSaving(true);
     try {
       if (profile) {
-        await api.put(`/profile/${profile.id}`, { content: editContent });
+        await api.put(`/profile/${profile.id}`, {
+          content: editContent,
+          ...(regenerateTts && { regenerate_tts: true }),
+        });
       } else {
         await api.post('/profile', { content: editContent });
       }
@@ -293,7 +311,7 @@ export default function ProfilePage() {
           />
           <div style={{ marginTop: '12px', display: 'flex', gap: '8px' }}>
             <button
-              onClick={handleSave}
+              onClick={() => handleSave()}
               disabled={saving}
               style={{
                 padding: '8px 20px',
@@ -350,6 +368,14 @@ export default function ProfilePage() {
         selectedVersionId={selectedVersionId}
         onSelectVersion={handleSelectVersion}
         versionContent={versionContent}
+      />
+      <RegenerateTtsDialog
+        open={showTtsDialog}
+        onClose={() => setShowTtsDialog(false)}
+        onChoice={(regenerate) => {
+          setShowTtsDialog(false);
+          handleSave(regenerate);
+        }}
       />
     </div>
   );

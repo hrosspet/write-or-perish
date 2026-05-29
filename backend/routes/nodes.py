@@ -733,10 +733,13 @@ def update_node(node_id):
     version.set_content(old_content)
     db.session.add(version)
 
-    # If the text actually changed, any generated TTS audio is now stale —
-    # drop it (and the per-chunk rows) so the user doesn't hear audio that
-    # no longer matches the text (#66). A privacy-only edit leaves it alone.
-    if new_content != old_content:
+    # Editing the text makes any generated TTS audio stale. Rather than
+    # silently dropping it, the frontend asks the user whether to keep or
+    # regenerate and only sends regenerate_tts=true when they choose to
+    # regenerate — at which point we clear audio_tts_url + the per-chunk
+    # rows so fresh audio is generated on the next request (#66). Original
+    # voice recordings (audio_original_url) are never touched.
+    if data.get("regenerate_tts") and new_content != old_content:
         from backend.utils.audio_storage import clear_tts_artifacts
         clear_tts_artifacts(node)
 
@@ -874,6 +877,10 @@ def get_node(node_id):
         "llm_model": node.llm_model,
         "llm_task_status": node.llm_task_status,
         "has_original_audio": bool(node.audio_original_url or node.streaming_transcription),
+        # Whether this node has GENERATED TTS audio (distinct from an
+        # original voice recording). Drives the "regenerate audio?" edit
+        # prompt (#66).
+        "has_tts": bool(node.audio_tts_url),
     }
     # Include tool call metadata for LLM nodes
     if node.tool_calls_meta:
