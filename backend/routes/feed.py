@@ -5,6 +5,7 @@ from backend.extensions import db
 from backend.utils.privacy import (
     accessible_nodes_filter, accessible_nodes_filter_ignoring_deleted,
 )
+from backend.utils.timefmt import iso_utc
 from sqlalchemy import and_, or_, func
 
 feed_bp = Blueprint("feed_bp", __name__)
@@ -178,8 +179,8 @@ def get_feed():
             "preview": make_preview(display_node.get_content()),
             "node_type": display_node.node_type,
             "child_count": alive_child_count,
-            "created_at": display_node.created_at.isoformat(),
-            "pinned_at": node.pinned_at.isoformat() if node.pinned_at else None,
+            "created_at": iso_utc(display_node.created_at),
+            "pinned_at": iso_utc(node.pinned_at),
             "username": node.user.username if node.user else "Unknown",
             "human_owner_username": human_owner_username,
             "llm_model": display_node.llm_model,

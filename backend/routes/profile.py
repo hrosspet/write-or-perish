@@ -2,6 +2,7 @@ from flask import jsonify, current_app
 from flask_login import login_required, current_user
 from backend.models import UserProfile
 from backend.extensions import db
+from backend.utils.timefmt import iso_utc
 from pathlib import Path
 
 from flask import Blueprint
@@ -35,12 +36,11 @@ def get_profile_versions():
             "id": profile.id,
             "generated_by": profile.generated_by,
             "tokens_used": profile.tokens_used,
-            "created_at": profile.created_at.isoformat(),
+            "created_at": iso_utc(profile.created_at),
             "version_number": total - i,
             "source_tokens_used": profile.source_tokens_used,
             "source_data_cutoff": (
-                profile.source_data_cutoff.isoformat()
-                if profile.source_data_cutoff else None
+                iso_utc(profile.source_data_cutoff)
             ),
             "generation_type": profile.generation_type,
         })
@@ -63,7 +63,7 @@ def get_profile_version(version_id):
             "content": profile.get_content(),
             "generated_by": profile.generated_by,
             "tokens_used": profile.tokens_used,
-            "created_at": profile.created_at.isoformat(),
+            "created_at": iso_utc(profile.created_at),
         }
     }), 200
 
@@ -214,7 +214,7 @@ def create_profile():
                 "content": profile.get_content(),
                 "generated_by": profile.generated_by,
                 "tokens_used": profile.tokens_used,
-                "created_at": profile.created_at.isoformat(),
+                "created_at": iso_utc(profile.created_at),
                 "privacy_level": profile.privacy_level,
                 "ai_usage": profile.ai_usage
             }
@@ -276,7 +276,7 @@ def update_profile(profile_id):
                 "content": profile.get_content(),
                 "generated_by": profile.generated_by,
                 "tokens_used": profile.tokens_used,
-                "created_at": profile.created_at.isoformat(),
+                "created_at": iso_utc(profile.created_at),
                 "privacy_level": profile.privacy_level,
                 "ai_usage": profile.ai_usage
             }

@@ -3,6 +3,7 @@ from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node, Draft, UserTodo
 from backend.extensions import db
+from backend.utils.timefmt import iso_utc
 from backend.utils.tool_meta import update_tool_meta
 
 todo_bp = Blueprint("todo", __name__)
@@ -30,7 +31,7 @@ def get_todo():
             "content": todo.get_content(),
             "generated_by": todo.generated_by,
             "tokens_used": todo.tokens_used,
-            "created_at": todo.created_at.isoformat(),
+            "created_at": iso_utc(todo.created_at),
             "privacy_level": todo.privacy_level,
             "ai_usage": todo.ai_usage,
             "version_number": version_count,
@@ -70,7 +71,7 @@ def patch_todo():
             "content": todo.get_content(),
             "generated_by": todo.generated_by,
             "tokens_used": todo.tokens_used,
-            "created_at": todo.created_at.isoformat(),
+            "created_at": iso_utc(todo.created_at),
             "version_number": version_count,
         }
     }), 200
@@ -108,7 +109,7 @@ def update_todo():
             "content": todo.get_content(),
             "generated_by": todo.generated_by,
             "tokens_used": todo.tokens_used,
-            "created_at": todo.created_at.isoformat(),
+            "created_at": iso_utc(todo.created_at),
             "version_number": version_count,
         }
     }), 200
@@ -129,7 +130,7 @@ def get_todo_versions():
             "id": todo.id,
             "generated_by": todo.generated_by,
             "tokens_used": todo.tokens_used,
-            "created_at": todo.created_at.isoformat(),
+            "created_at": iso_utc(todo.created_at),
             "version_number": total - i,
         })
 
@@ -151,7 +152,7 @@ def get_todo_version(version_id):
             "content": todo.get_content(),
             "generated_by": todo.generated_by,
             "tokens_used": todo.tokens_used,
-            "created_at": todo.created_at.isoformat(),
+            "created_at": iso_utc(todo.created_at),
         }
     }), 200
 
@@ -184,7 +185,7 @@ def revert_todo(version_id):
             "id": new_todo.id,
             "content": new_todo.get_content(),
             "generated_by": new_todo.generated_by,
-            "created_at": new_todo.created_at.isoformat(),
+            "created_at": iso_utc(new_todo.created_at),
             "version_number": version_count,
         }
     }), 200

@@ -5,6 +5,7 @@ from backend.models import (
     UserRecentContext, UserAIPreferences,
 )
 from backend.extensions import db
+from backend.utils.timefmt import iso_utc
 from datetime import datetime
 from openai import OpenAI
 import os
@@ -488,8 +489,8 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
         "content": n.get_content(),
         "node_type": n.node_type,
         "child_count": len(visible_children),
-        "created_at": n.created_at.isoformat(),
-        "updated_at": n.updated_at.isoformat(),
+        "created_at": iso_utc(n.created_at),
+        "updated_at": iso_utc(n.updated_at),
         "username": n.user.username if n.user else "Unknown",
         "llm_model": n.llm_model,
         "descendant_count": n._descendant_count,
@@ -616,7 +617,7 @@ def create_node():
             "audio_original_url": node.audio_original_url,
             "content": node.content,
             "node_type": node.node_type,
-            "created_at": node.created_at.isoformat(),
+            "created_at": iso_utc(node.created_at),
             "transcription_status": node.transcription_status,
             "transcription_task_id": node.transcription_task_id
         }), 201
@@ -682,7 +683,7 @@ def create_node():
         "node_type": node.node_type,
         "parent_id": node.parent_id,
         "linked_node_id": node.linked_node_id,
-        "created_at": node.created_at.isoformat(),
+        "created_at": iso_utc(node.created_at),
         "username": current_user.username,
         "privacy_level": node.privacy_level,
         "ai_usage": node.ai_usage
@@ -807,7 +808,7 @@ def get_node(node_id):
                 "preview": make_preview(ancestor_content),
                 "node_type": current.node_type,
                 "child_count": len(current.children),
-                "created_at": current.created_at.isoformat(),
+                "created_at": iso_utc(current.created_at),
                 "user_id": current.user_id,
                 "parent_user_id": ancestor_parent_user_id,
                 # Needed by the frontend auto-generate guard, which
@@ -865,8 +866,8 @@ def get_node(node_id):
             )
             for child in sorted_children
         ],
-        "created_at": node.created_at.isoformat(),
-        "updated_at": node.updated_at.isoformat(),
+        "created_at": iso_utc(node.created_at),
+        "updated_at": iso_utc(node.updated_at),
         "user": {
             "id": node.user.id,
             "username": node.user.username,
@@ -877,7 +878,7 @@ def get_node(node_id):
         "privacy_level": node.privacy_level,
         "ai_usage": node.ai_usage,
         # Pin-to-profile
-        "pinned_at": node.pinned_at.isoformat() if node.pinned_at else None,
+        "pinned_at": iso_utc(node.pinned_at),
         "llm_model": node.llm_model,
         "llm_task_status": node.llm_task_status,
         "has_original_audio": bool(node.audio_original_url or node.streaming_transcription),
@@ -1145,7 +1146,7 @@ def add_linked_node(node_id):
             "content": new_node.get_content(),
             "node_type": new_node.node_type,
             "linked_node_id": new_node.linked_node_id,
-            "created_at": new_node.created_at.isoformat(),
+            "created_at": iso_utc(new_node.created_at),
             "username": current_user.username
         }
     }), 201
@@ -1503,8 +1504,8 @@ def get_transcription_status(node_id):
         "status": node.transcription_status,
         "progress": node.transcription_progress or 0,
         "error": node.transcription_error,
-        "started_at": node.transcription_started_at.isoformat() if node.transcription_started_at else None,
-        "completed_at": node.transcription_completed_at.isoformat() if node.transcription_completed_at else None,
+        "started_at": iso_utc(node.transcription_started_at),
+        "completed_at": iso_utc(node.transcription_completed_at),
         "content": node.get_content() if node.transcription_status == 'completed' else None,
         "task_info": task_info  # Real-time progress from Celery
     })
@@ -1545,7 +1546,7 @@ def get_llm_status(node_id):
                             "content": llm_node.get_content(),
                             "node_type": llm_node.node_type,
                             "llm_model": llm_node.llm_model,
-                            "created_at": llm_node.created_at.isoformat()
+                            "created_at": iso_utc(llm_node.created_at)
                         }
         except Exception as e:
             # If Celery check fails, log and continue with DB status
@@ -1918,7 +1919,7 @@ def finalize_chunked_upload():
         "audio_original_url": node.audio_original_url,
         "content": node.content,
         "node_type": node.node_type,
-        "created_at": node.created_at.isoformat(),
+        "created_at": iso_utc(node.created_at),
         "transcription_status": node.transcription_status,
         "transcription_task_id": node.transcription_task_id
     }), 200
@@ -2320,7 +2321,7 @@ def pin_node(node_id):
 
     return jsonify({
         "message": "Node pinned",
-        "pinned_at": node.pinned_at.isoformat()
+        "pinned_at": iso_utc(node.pinned_at)
     }), 200
 
 

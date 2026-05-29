@@ -2,6 +2,7 @@ from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
 from backend.models import UserPrompt
 from backend.extensions import db
+from backend.utils.timefmt import iso_utc
 from backend.utils.prompts import (
     PROMPT_DEFAULTS, load_default_prompt, default_prompt_hash,
 )
@@ -47,7 +48,7 @@ def _serialize_prompt(prompt, version_number):
         "title": prompt.title,
         "content": _auto_upgraded_content(prompt),
         "generated_by": prompt.generated_by,
-        "created_at": prompt.created_at.isoformat(),
+        "created_at": iso_utc(prompt.created_at),
         "version_number": version_number,
         "default_updated": _is_default_updated(prompt),
     }
@@ -73,7 +74,7 @@ def list_prompts():
                 "preview": content[:150] if content else "",
                 "version_number": _edit_count(key),
                 "generated_by": latest.generated_by,
-                "created_at": latest.created_at.isoformat(),
+                "created_at": iso_utc(latest.created_at),
                 "default_updated": _is_default_updated(latest),
             })
         else:
@@ -170,7 +171,7 @@ def get_prompt_versions(prompt_key):
         versions.append({
             "id": p.id,
             "generated_by": p.generated_by,
-            "created_at": p.created_at.isoformat(),
+            "created_at": iso_utc(p.created_at),
             "version_number": total - i,
         })
 
@@ -219,7 +220,7 @@ def get_prompt_version(prompt_key, version_id):
             "id": prompt.id,
             "content": prompt.get_content(),
             "generated_by": prompt.generated_by,
-            "created_at": prompt.created_at.isoformat(),
+            "created_at": iso_utc(prompt.created_at),
         }
     }), 200
 

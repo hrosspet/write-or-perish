@@ -4,6 +4,7 @@ from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
 from backend.models import Node, User, UserProfile
 from backend.extensions import db
+from backend.utils.timefmt import iso_utc, is_valid_timezone
 from backend.utils.privacy import (
     accessible_nodes_filter, VALID_PRIVACY_LEVELS, VALID_AI_USAGE,
 )
@@ -30,11 +31,10 @@ def get_latest_profile(user):
             "content": profile.get_content(),
             "generated_by": profile.generated_by,
             "tokens_used": profile.tokens_used,
-            "created_at": profile.created_at.isoformat(),
+            "created_at": iso_utc(profile.created_at),
             "source_tokens_used": profile.source_tokens_used,
             "source_data_cutoff": (
-                profile.source_data_cutoff.isoformat()
-                if profile.source_data_cutoff else None
+                iso_utc(profile.source_data_cutoff)
             ),
             "generation_type": profile.generation_type,
             # Whether this profile has generated TTS audio — drives the
@@ -73,8 +73,8 @@ def _serialize_node_for_list(node):
         "preview": preview,
         "node_type": display_node.node_type,
         "child_count": len(node.children),
-        "created_at": display_node.created_at.isoformat(),
-        "pinned_at": node.pinned_at.isoformat() if node.pinned_at else None,
+        "created_at": iso_utc(display_node.created_at),
+        "pinned_at": iso_utc(node.pinned_at),
         "username": node.user.username if node.user else "Unknown",
         "human_owner_username": human_owner_username,
         "llm_model": display_node.llm_model,
@@ -109,7 +109,7 @@ def get_dashboard():
             "id": current_user.id,
             "username": current_user.username,
             "description": current_user.description,
-            "accepted_terms_at": current_user.accepted_terms_at.isoformat() if current_user.accepted_terms_at else None,
+            "accepted_terms_at": iso_utc(current_user.accepted_terms_at),
             "terms_up_to_date": _terms_up_to_date(current_user),
             "approved": current_user.approved,
             "email": current_user.email,
@@ -121,6 +121,7 @@ def get_dashboard():
             "profile_generation_task_id": current_user.profile_generation_task_id,
             "default_privacy_level": current_user.default_privacy_level,
             "default_ai_usage": current_user.default_ai_usage,
+            "timezone": current_user.timezone or "UTC",
         },
         "pinned_nodes": pinned_list,
         "nodes": nodes_list,
@@ -242,7 +243,7 @@ def update_user():
                 "description": current_user.description,
                 "email": current_user.email,
                 "approved": current_user.approved,
-                "accepted_terms_at": current_user.accepted_terms_at.isoformat() if current_user.accepted_terms_at else None,
+                "accepted_terms_at": iso_utc(current_user.accepted_terms_at),
                 "terms_up_to_date": _terms_up_to_date(current_user),
                 "is_admin": current_user.is_admin,
                 "plan": current_user.plan,
@@ -257,3 +258,25 @@ def update_user():
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": "Failed to update profile.", "details": str(e)}), 500
+
+
+# Persist the browser-reported IANA timezone (e.g. "Europe/Prague"), used to
+# render absolute local-time stamps in the LLM context (#130). Called by the
+# frontend on session start when the detected timezone differs from the stored
+# one. Fire-and-forget: invalid values are rejected rather than clobbering the
+# stored timezone.
+@dashboard_bp.route("/timezone", methods=["PATCH"])
+@login_required
+def update_timezone():
+    data = request.get_json(silent=True) or {}
+    tz_name = data.get("timezone")
+    if not is_valid_timezone(tz_name):
+        return jsonify({"error": "Invalid timezone."}), 400
+    current_user.timezone = tz_name
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Failed to update timezone.",
+                        "details": str(e)}), 500
+    return jsonify({"timezone": current_user.timezone}), 200

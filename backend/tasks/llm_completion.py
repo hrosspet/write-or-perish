@@ -5,7 +5,7 @@ import json
 import re
 from celery import Task
 from celery.utils.log import get_task_logger
-from datetime import datetime
+from datetime import datetime, timezone
 
 from backend.celery_app import celery, flask_app
 from backend.models import (
@@ -18,6 +18,7 @@ from backend.utils.tokens import (
     approximate_token_count, reduce_export_tokens, format_date_metadata,
 )
 from backend.utils.quotes import resolve_quotes, has_quotes
+from backend.utils.timefmt import local_stamp
 from backend.utils.api_keys import determine_api_key_type, get_api_keys_for_usage
 from backend.utils.cost import calculate_llm_cost_microdollars
 from backend.utils.tool_meta import update_tool_meta, parse_github_issue
@@ -875,10 +876,21 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 replaced_recent = False
                 replaced_recent_raw = False
 
+                # Temporal grounding (#130): every message is prefixed with an
+                # absolute local-time stamp derived from the node's updated_at
+                # (falling back to created_at), rendered in the conversation
+                # owner's timezone. The model infers "now" from the most recent
+                # message's stamp — no separate "Today is X" anchor, no
+                # relative phrasing.
+                _owner = User.query.get(user_id)
+                user_tz = (_owner.timezone if _owner and _owner.timezone
+                           else "UTC")
+
                 messages = []
                 for node in node_chain:
                     author = node.user.username if node.user else "Unknown"
                     is_llm_node = node.node_type == "llm" or (node.llm_model is not None)
+                    time_prefix = local_stamp(node.updated_at or node.created_at, user_tz)
 
                     # Soft-deleted ancestor: scrub content so the AI doesn't
                     # ingest deleted user data. We still include the node so
@@ -887,6 +899,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     # "fill in" what's missing).
                     if node.deleted_at is not None:
                         message_text = (
+                            f"{time_prefix} "
                             "[Earlier message in this thread was deleted "
                             "by the author]"
                         )
@@ -898,7 +911,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
                     if is_llm_node:
                         role = "assistant"
-                        message_text = node_content
+                        message_text = f"{time_prefix} {node_content}"
                         # Tag proposals with node ID for tracking
                         if is_agentic and node.tool_calls_meta:
                             try:
@@ -919,7 +932,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 pass
                     else:
                         role = "user"
-                        message_text = f"author {author}: {node_content}"
+                        message_text = (
+                            f"{time_prefix} author {author}: {node_content}"
+                        )
                         # Replace {user_export} placeholder if present
                         if user_export_content and export_placeholder_match:
                             message_text = message_text.replace(
@@ -1016,7 +1031,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         if mode_note:
                             agentic_notes.append(mode_note)
                 if is_agentic and agentic_notes:
-                    injected_text = "\n".join(agentic_notes)
+                    # Synthetic system-side note injected after the latest real
+                    # message; stamp it with "now" so the model's most-recent
+                    # time anchor stays consistent with the rest of the thread.
+                    now_prefix = local_stamp(
+                        datetime.now(timezone.utc), user_tz
+                    )
+                    injected_text = f"{now_prefix} " + "\n".join(agentic_notes)
                     logger.debug(f"Agentic context injection for node {llm_node_id}: {injected_text}")
                     messages.append({
                         "role": "user",

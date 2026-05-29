@@ -4,6 +4,7 @@ from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node
 from backend.extensions import db
+from backend.utils.timefmt import iso_utc
 from backend.utils.prompts import get_user_prompt_record
 from backend.utils.llm_nodes import (
     create_llm_placeholder, pick_model_for_generation,
@@ -23,7 +24,7 @@ def _serialize_message(node):
         "id": node.id,
         "role": "assistant" if is_llm else "user",
         "content": node.get_content(),
-        "created_at": node.created_at.isoformat(),
+        "created_at": iso_utc(node.created_at),
         "llm_model": node.llm_model,
         "llm_task_status": node.llm_task_status,
     }
