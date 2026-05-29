@@ -460,6 +460,31 @@ export function useStreamingTranscription(options = {}) {
 
     } catch (err) {
       console.error('Failed to start streaming:', err);
+      // Always land in a terminal state. The error path here means recording
+      // never started, so the session must not be left in 'recording' or
+      // 'initializing' (which would strand the parent UI). 'error' is set
+      // below; permission denials with an orphaned draft are cleaned up first.
+      const name = err?.name || err?.error?.name;
+      const isPermissionDenial =
+        name === 'NotAllowedError' || name === 'PermissionDeniedError';
+
+      // If initSession created a draft but recording could not start because
+      // the mic permission was denied, the draft is a dead streaming session
+      // (streaming_status='recording', zero chunks). Best-effort discard it so
+      // the "resume interrupted session" recovery banner — which lists drafts
+      // with streaming_status='recording' — doesn't later offer this empty,
+      // doomed session. The discard endpoint is keyed by session_id (not
+      // draft_id) and removes the draft, its chunk records, and audio dir.
+      // Failures here are non-fatal (network/permissions).
+      if (isPermissionDenial && initSucceeded && sessionIdRef.current) {
+        try {
+          await api.delete(`/drafts/streaming/${sessionIdRef.current}/discard`);
+          console.log('[StreamingTranscription] Discarded orphaned draft after permission denial (session):', sessionIdRef.current);
+        } catch (delErr) {
+          console.warn('[StreamingTranscription] Failed to discard orphaned draft after permission denial (non-fatal):', delErr?.message);
+        }
+      }
+
       setSessionState('error');
       setErrorMessage(err.message);
       // initSession's catch already invokes onError before re-throwing, so
