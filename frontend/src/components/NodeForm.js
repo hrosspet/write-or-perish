@@ -8,6 +8,7 @@ import RegenerateTtsDialog from "./RegenerateTtsDialog";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import api from "../api";
 import { uploadFileInChunks } from "../utils/chunkedUpload";
+import useSubmitShortcut, { submitShortcutHint } from "../hooks/useSubmitShortcut";
 
 const NodeForm = forwardRef(
   (
@@ -121,6 +122,7 @@ const NodeForm = forwardRef(
     const [isRecoveringAudio, setIsRecoveringAudio] = useState(false);
     // Track content that existed before streaming started (to append new transcript to it)
     const preStreamingContentRef = React.useRef("");
+    const textareaRef = React.useRef(null);
 
     // Track if streaming is in progress (set by StreamingMicButton callbacks)
     const [isStreamingRecording, setIsStreamingRecording] = useState(false);
@@ -520,11 +522,20 @@ const NodeForm = forwardRef(
       return `${hours}h ago`;
     };
 
+    // Cmd+Return / Ctrl+Enter submits (#129). Mirrors the submit button's
+    // enabled state: needs content (or an uploaded audio file) and must not
+    // be loading / offline / mid-recording. Plain Enter still inserts a newline.
+    const canSubmit =
+      (content.trim().length > 0 || (!editMode && !!uploadedFile)) &&
+      !loading && isOnline && !isStreamingRecording;
+    useSubmitShortcut(textareaRef, () => handleSubmit(), canSubmit);
+
     return (
       <>
       <form onSubmit={handleSubmit}>
         {/* Text entry */}
         <textarea
+          ref={textareaRef}
           value={content}
           onChange={(e) => {
             const newContent = e.target.value;
@@ -806,6 +817,14 @@ const NodeForm = forwardRef(
                 ? "Sending..."
                 : "Send"}
             </button>
+            {canSubmit && (
+              <span style={{
+                fontFamily: 'var(--sans)', fontSize: '0.7rem', fontWeight: 300,
+                color: 'var(--text-muted)', opacity: 0.6,
+              }}>
+                {submitShortcutHint()}
+              </span>
+            )}
             {hasDraft && (
               <button
                 type="button"

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import api from '../api';
 import { useCheckboxToggle, appendItemToSection } from '../utils/markdown';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
+import useSubmitShortcut from '../hooks/useSubmitShortcut';
 
 /**
  * Parse markdown checklist into sections with nested items.
@@ -188,6 +189,7 @@ export default function TodoPage() {
   const [quickAddText, setQuickAddText] = useState('');
   const [quickAddSaving, setQuickAddSaving] = useState(false);
   const quickAddInputRef = useRef(null);
+  const editTextareaRef = useRef(null);
 
   // Version history
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -306,6 +308,12 @@ export default function TodoPage() {
       console.error('Failed to revert:', err);
     }
   };
+
+  // Cmd+Return / Ctrl+Enter primary-submit (#129): save the edit textarea,
+  // or add the quick-add task. Plain Enter still inserts a newline in the
+  // textarea; the quick-add input handles plain Enter itself.
+  useSubmitShortcut(editTextareaRef, () => handleSave(), editing && !saving && !!editContent.trim());
+  useSubmitShortcut(quickAddInputRef, () => handleQuickAdd(), quickAddOpen && !quickAddSaving && !!quickAddText.trim());
 
   const formatDate = (iso) => {
     const d = new Date(iso);
@@ -509,6 +517,7 @@ export default function TodoPage() {
       {editing && (
         <div>
           <textarea
+            ref={editTextareaRef}
             value={editContent}
             onChange={(e) => setEditContent(e.target.value)}
             style={{

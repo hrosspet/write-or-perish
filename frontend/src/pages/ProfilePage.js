@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import MarkdownBody from '../components/MarkdownBody';
 import api from '../api';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
@@ -6,6 +6,7 @@ import SpeakerIcon from '../components/SpeakerIcon';
 import RegenerateTtsDialog from '../components/RegenerateTtsDialog';
 import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
 import { useUser } from '../contexts/UserContext';
+import useSubmitShortcut from '../hooks/useSubmitShortcut';
 
 export default function ProfilePage() {
   const { user } = useUser();
@@ -15,6 +16,7 @@ export default function ProfilePage() {
   const [editing, setEditing] = useState(false);
   const [editContent, setEditContent] = useState('');
   const [saving, setSaving] = useState(false);
+  const editTextareaRef = useRef(null);
   // Ask whether to keep/regenerate stale TTS when editing a profile that
   // has generated audio (#66).
   const [showTtsDialog, setShowTtsDialog] = useState(false);
@@ -155,6 +157,9 @@ export default function ProfilePage() {
     }
   };
 
+  // Cmd+Return / Ctrl+Enter saves the profile while editing (#129).
+  useSubmitShortcut(editTextareaRef, () => handleSave(), editing && !saving && !!editContent.trim());
+
   const formatDate = (iso) => {
     const d = new Date(iso);
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
@@ -293,6 +298,7 @@ export default function ProfilePage() {
       {editing && (
         <div>
           <textarea
+            ref={editTextareaRef}
             value={editContent}
             onChange={(e) => setEditContent(e.target.value)}
             style={{

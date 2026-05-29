@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { useUser } from "../contexts/UserContext";
+import useSubmitShortcut from "../hooks/useSubmitShortcut";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
@@ -221,6 +222,7 @@ function LoginPage() {
   const [emailLoading, setEmailLoading] = useState(false);
   const [emailSent, setEmailSent] = useState(false);
   const [emailError, setEmailError] = useState("");
+  const emailInputRef = useRef(null);
 
   // If already logged in, redirect to returnUrl
   useEffect(() => {
@@ -257,6 +259,14 @@ function LoginPage() {
       setEmailLoading(false);
     }
   };
+
+  // Cmd+Return / Ctrl+Enter sends the magic link (#129). Plain Enter already
+  // submits this single-line form natively; this keeps the shortcut uniform.
+  useSubmitShortcut(
+    emailInputRef,
+    (e) => { if (!emailLoading && emailInput.trim()) handleEmailSubmit(e); },
+    showEmailForm && !emailSent && !emailLoading,
+  );
 
   if (loading) {
     return (
@@ -342,6 +352,7 @@ function LoginPage() {
                 Email address
               </label>
               <input
+                ref={emailInputRef}
                 id="email"
                 type="email"
                 value={emailInput}
