@@ -40,6 +40,8 @@
 
 **Post-merge follow-ups (also shipped):** removed the `⌘↵` hint icon next to Send (kept the shortcut); extended #108 quick-add to the **Voice/Text todo-update proposals** (`ProposalInline`, shared by both modes) with Cmd/Ctrl+Enter; added the **pre-dialog** import progress (closing the "frozen until the dialog appears" gap). Plus model-config maintenance — **added Claude 4.8 Opus** (`claude-opus-4-8`, $5/$25, 1M ctx) to available models (4.5 Opus was already deprecated).
 
+**GitHub status (2026-05-29):** all 6 batch issues (#108/#128/#129/#130/#135/#137) now closed as completed. Todo-cluster siblings also resolved — **#94** (toggle ~1s delay) fixed & closed completed; **#93** (hit target too small) closed **won't-implement** (maintainer decision). So the whole todo cluster (Wave 2) is done. #172 (model attribution) stays open.
+
 **Caveats / open items:**
 - **#128** is read-time `Z` (no data backfill); existing users' `timezone` was backfilled to `UTC` by the migration's `server_default` and **self-heals to their real zone on the next full app load** (no logout/backfill needed).
 - **#130** model behavior isn't deterministically Chrome-testable — the prefix format is unit-tested; verify assembled prefixes in the celery-worker logs. **Open decision filed as #172** — whether to attribute the *specific model* on assistant turns (multi-model provenance); needs more thought.
@@ -50,8 +52,8 @@
 - In multi-agent **worktree** runs, a subagent's `cd <repo>` resolves to the **main checkout, not its worktree** — pin commits to the worktree branch and reset any stray local `main` back to `origin/main` before pushing.
 
 **▶ NEXT — remaining leftovers from the original Section-7 clusters** (the batch cherry-picked across them; see Section 7 for per-issue specs + updated status markers):
-- **Todo polish:** #94 (checkbox toggle ~1s delay) + #93 (hit target too small) — share the toggle path; re-confirm `PATCH /todo` + `TodoItem` against HEAD (Section 8).
-- **Import dedupe:** #136 (re-import / snapshot overlap) — now unblocked since #137/#135 shipped; model column + dedupe key, no manual migration.
+- ~~**Todo polish** (#94, #93)~~ — **RESOLVED 2026-05-29:** #94 fixed & closed completed; #93 closed won't-implement. Todo cluster fully closed out.
+- **Import dedupe:** #136 (re-import / snapshot overlap) — now unblocked since #137/#135 shipped; model column + dedupe key, no manual migration. *Best next pick.*
 - **Profile/UX:** #131 (app-wide toast on profile-generation completion), #101 (transparent favicon — needs brand sign-off).
 - **Security:** #91 (reserved usernames — security-critical, final single-item staging pass) + #160 (mic-denied path).
 - Then the keyword cluster (#139→#149, #105) and #138 (markdown rendering, isolated). Decision-gated items (Section 9) remain parked. Also still open from Wave 1: **#161** (Stop button resets playback to 0).
@@ -206,8 +208,8 @@ Principle: front-load XS/S high-confidence wins, sequence shared-plumbing, isola
 **Note on #66 scope:** touches `nodes.py` `update_node` AND profile.py `set_content`, plus TTSChunk row cleanup — verify chunk deletion doesn't balloon it past S.
 **Merge:** each green PR → `main`.
 
-### Wave 2 — Todo cluster (shared toggle path) — ◐ PARTIAL: #108 ✅ DONE (shipped in the 2026-05-29 batch, PR #169); #94, #93 still pending
-**Issues:** #94, #93, then #108. **(#108 done — see Section 0.)**
+### Wave 2 — Todo cluster (shared toggle path) — ✅ DONE / CLOSED OUT (2026-05-29)
+**Issues:** #94, #93, then #108. **(#108 shipped in PR #169; #94 fixed & closed completed; #93 closed won't-implement. Whole cluster resolved — see Section 0.)**
 **Why grouped:** #94 and #93 touch the same toggle path — landing them together avoids conflict and lets #93's full-row target sit on #94's stabilized save path. #108 reuses the same `PATCH /todo` path.
 **Pre-build (mandatory):** re-confirm root cause against HEAD — #93's fix is in `TodoPage.js` `TodoItem` (not MarkdownBody label); #94/#108 use `PATCH /todo` (not PUT). Identify which verb/handler creates a version row.
 **Parallel PRs:** **#94 and #93 developed together but as two PRs** (save-path vs. hit-target), reviewed as a pair. **#108 is a separate PR** sequenced after #94 merges. #129's quick-add wiring waits for #108.
