@@ -466,22 +466,36 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
 
         const importOptions = (
           <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
-            <label style={importLabelStyle}>
-              Import Claude
-              <input type="file" accept=".zip" onChange={handleClaudeImportFile} disabled={importing} style={{ display: "none" }} />
-            </label>
-            <label style={importLabelStyle}>
-              Import ChatGPT
-              <input type="file" accept=".zip" onChange={handleChatGPTImportFile} disabled={importing} style={{ display: "none" }} />
-            </label>
-            <label style={importLabelStyle}>
-              Import Markdown (e.g. Obsidian)
-              <input type="file" accept=".zip" onChange={handleImportFile} disabled={importing} style={{ display: "none" }} />
-            </label>
-            <label style={importLabelStyle}>
-              Import Tweets
-              <input type="file" accept=".zip" onChange={handleTwitterImportFile} disabled={importing} style={{ display: "none" }} />
-            </label>
+            {importing ? (
+              // Pre-dialog progress. While we extract the zip client-side and
+              // upload the conversations blob for analysis, the buttons are
+              // disabled and no dialog has appeared yet — without this the page
+              // looks frozen (esp. large Claude/ChatGPT zips, where extraction
+              // takes a few seconds). The .spin transform keeps animating on
+              // the compositor thread even while extraction is busy.
+              <div style={{ ...importLabelStyle, opacity: 1, cursor: "default", color: "var(--accent)" }}>
+                <ImportSpinner stage={importStage} fallback="Working…" />
+              </div>
+            ) : (
+              <>
+                <label style={importLabelStyle}>
+                  Import Claude
+                  <input type="file" accept=".zip" onChange={handleClaudeImportFile} style={{ display: "none" }} />
+                </label>
+                <label style={importLabelStyle}>
+                  Import ChatGPT
+                  <input type="file" accept=".zip" onChange={handleChatGPTImportFile} style={{ display: "none" }} />
+                </label>
+                <label style={importLabelStyle}>
+                  Import Markdown (e.g. Obsidian)
+                  <input type="file" accept=".zip" onChange={handleImportFile} style={{ display: "none" }} />
+                </label>
+                <label style={importLabelStyle}>
+                  Import Tweets
+                  <input type="file" accept=".zip" onChange={handleTwitterImportFile} style={{ display: "none" }} />
+                </label>
+              </>
+            )}
           </div>
         );
 
