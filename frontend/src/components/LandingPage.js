@@ -340,14 +340,25 @@ const styles = {
       .loore-mockup-content { padding: 1.5rem 1.2rem; }
 
       /* Mobile hero: tighten the top so the title sits higher (less dead
-         space above it) and leave clear room at the bottom for the scroll
-         hint to be visible above the fold. (#98) */
+         space above it). (#98) */
       .loore-hero {
         justify-content: flex-start;
-        padding-top: 18vh;
-        padding-bottom: 5rem;
+        padding-top: 14vh;
+        padding-bottom: 3rem;
       }
       .loore-logo-mark { margin-bottom: 1.5rem; }
+
+      /* Mobile scroll hint: take it OUT of absolute/viewport-bottom
+         anchoring (which kept landing below the fold whenever iOS resolved
+         the hero taller than the visible area, across vh/svh/dvh alike) and
+         let it flow right after the CTA. Tied to visible content, it can't
+         fall off-screen, and still signals "more below". (#98) */
+      .loore-scroll-hint {
+        position: static;
+        transform: none;
+        bottom: auto;
+        margin: 2.5rem auto 0;
+      }
     }
   `,
 };
