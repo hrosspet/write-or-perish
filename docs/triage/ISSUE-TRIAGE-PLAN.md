@@ -33,7 +33,28 @@
 - **`staging-batch-N` is deploy-only — never commit on it.** Verify `git rev-parse --abbrev-ref HEAD` is the `fix/<n>` branch before every commit (commits on the batch branch get destroyed when it's rebuilt; recover via `git reflog` + cherry-pick).
 - **Verify the deployed bundle actually contains the change** (`curl` the live `main.<hash>.js`, grep a unique marker) before testing — a successful deploy of the wrong commit looks identical to success; browser cache can also serve a stale bundle.
 
-**▶ NEXT: Wave 2** (todo cluster) — see Section 7. Before building #93/#94/#108, do the mandatory re-confirm-against-HEAD (Section 8): #93 fix is in `TodoPage.js` `TodoItem` (not MarkdownBody), toggles use `PATCH /todo` (not PUT), and #108 lands in the existing `## Today` section (NOT gated on #144).
+**✅ Wave 2 — COMPLETE & merged to `main`/prod (2026-05-29).** A user-reprioritized batch of **6 issues** (NOT the original wave order — it cherry-picked across Section-7 Waves 2/3/4/5): **#108, #128, #129, #130, #135, #137**. Built in **one parallel multi-agent workflow** (3 isolated git-worktree streams), integrated into one `staging-batch`, verified on staging, then shipped as **3 per-stream PRs**:
+- **PR #169 — fe-pages:** #108 quick-add (`+` on TodoPage → `PATCH /todo`, lands in `## Today`, no AI step); #129 Cmd+Return / Ctrl+Enter primary-submit via a shared `useSubmitShortcut` hook across NodeForm/Profile/PromptDetail/Todo-edit/Login/Account; #128-frontend (the 7 duplicated `formatDate` helpers consolidated into `utils/date.js`, defensive `Z` parsing + `today`/`yesterday`).
+- **PR #170 — import:** #137 Claude import extracts `conversations.json` client-side with JSZip and POSTs only the blob (sidesteps the 200 MB nginx limit); backend analyze reads `conversations_file` JSON (no zip). #135 import progress — spinner + `Extracting…/Analyzing…/Importing…` stage labels across all import paths.
+- **PR #171 — time-backend:** #128-backend `.isoformat()→Z` sweep + `User.timezone` column (`server_default='UTC'`); #130 LLM temporal grounding — every context message prefixed `[YYYY-MM-DD HH:MM TZ]` in the user's local zone, sourced from `node.updated_at` (fallback `created_at`); tz auto-captured by `UserContext` on any full app load + `X-Timezone` header.
+
+**Post-merge follow-ups (also shipped):** removed the `⌘↵` hint icon next to Send (kept the shortcut); extended #108 quick-add to the **Voice/Text todo-update proposals** (`ProposalInline`, shared by both modes) with Cmd/Ctrl+Enter; added the **pre-dialog** import progress (closing the "frozen until the dialog appears" gap). Plus model-config maintenance — **added Claude 4.8 Opus** (`claude-opus-4-8`, $5/$25, 1M ctx) to available models (4.5 Opus was already deprecated).
+
+**Caveats / open items:**
+- **#128** is read-time `Z` (no data backfill); existing users' `timezone` was backfilled to `UTC` by the migration's `server_default` and **self-heals to their real zone on the next full app load** (no logout/backfill needed).
+- **#130** model behavior isn't deterministically Chrome-testable — the prefix format is unit-tested; verify assembled prefixes in the celery-worker logs. **Open decision filed as #172** — whether to attribute the *specific model* on assistant turns (multi-model provenance); needs more thought.
+- **#137/#135** — the actual file-picker upload couldn't be driven (the Chrome extension blocks programmatic uploads); verified via a live analyze POST + unit tests + bundle markers, so the in-browser upload + visual spinner are the one unexercised path (a quick manual check is worthwhile). Real Claude export confirmed to carry a top-level `conversations.json`.
+
+**Key lessons added this wave:**
+- **The reused Chrome session serves a STALE bundle after a staging deploy** — verify the running `main.<hash>.js` matches the deployed hash and **cache-bust (`?cb=`)** before testing, or brand-new features look *falsely broken* (this burned a full pass on #108/#129/#130 before being caught).
+- In multi-agent **worktree** runs, a subagent's `cd <repo>` resolves to the **main checkout, not its worktree** — pin commits to the worktree branch and reset any stray local `main` back to `origin/main` before pushing.
+
+**▶ NEXT — remaining leftovers from the original Section-7 clusters** (the batch cherry-picked across them; see Section 7 for per-issue specs + updated status markers):
+- **Todo polish:** #94 (checkbox toggle ~1s delay) + #93 (hit target too small) — share the toggle path; re-confirm `PATCH /todo` + `TodoItem` against HEAD (Section 8).
+- **Import dedupe:** #136 (re-import / snapshot overlap) — now unblocked since #137/#135 shipped; model column + dedupe key, no manual migration.
+- **Profile/UX:** #131 (app-wide toast on profile-generation completion), #101 (transparent favicon — needs brand sign-off).
+- **Security:** #91 (reserved usernames — security-critical, final single-item staging pass) + #160 (mic-denied path).
+- Then the keyword cluster (#139→#149, #105) and #138 (markdown rendering, isolated). Decision-gated items (Section 9) remain parked. Also still open from Wave 1: **#161** (Stop button resets playback to 0).
 
 ---
 
@@ -185,8 +206,8 @@ Principle: front-load XS/S high-confidence wins, sequence shared-plumbing, isola
 **Note on #66 scope:** touches `nodes.py` `update_node` AND profile.py `set_content`, plus TTSChunk row cleanup — verify chunk deletion doesn't balloon it past S.
 **Merge:** each green PR → `main`.
 
-### Wave 2 — Todo cluster (shared toggle path)
-**Issues:** #94, #93, then #108.
+### Wave 2 — Todo cluster (shared toggle path) — ◐ PARTIAL: #108 ✅ DONE (shipped in the 2026-05-29 batch, PR #169); #94, #93 still pending
+**Issues:** #94, #93, then #108. **(#108 done — see Section 0.)**
 **Why grouped:** #94 and #93 touch the same toggle path — landing them together avoids conflict and lets #93's full-row target sit on #94's stabilized save path. #108 reuses the same `PATCH /todo` path.
 **Pre-build (mandatory):** re-confirm root cause against HEAD — #93's fix is in `TodoPage.js` `TodoItem` (not MarkdownBody label); #94/#108 use `PATCH /todo` (not PUT). Identify which verb/handler creates a version row.
 **Parallel PRs:** **#94 and #93 developed together but as two PRs** (save-path vs. hit-target), reviewed as a pair. **#108 is a separate PR** sequenced after #94 merges. #129's quick-add wiring waits for #108.
@@ -194,8 +215,8 @@ Principle: front-load XS/S high-confidence wins, sequence shared-plumbing, isola
 **Chrome test cycle:** Accept terms, seed a todo with several `- [ ] task` lines under `## Today`. (1) Click empty row area → toggles; full row is the target (#93). (2) Click checkbox → instant visual flip; Network shows **`PATCH /todo`** in background, not blocking (#94); toggle rapidly → each flips instantly. (3) Click "+", type "buy milk", Enter → new item appears under `## Today`, no AI step; reload → persisted; Network shows **`PATCH /todo`** (#108).
 **Merge:** green PRs → `main`.
 
-### Wave 3 — Import cluster (shared analyze/confirm plumbing)
-**Issues:** #136, #137, #135.
+### Wave 3 — Import cluster (shared analyze/confirm plumbing) — ◐ PARTIAL: #137, #135 ✅ DONE (PR #170, 2026-05-29); #136 still pending
+**Issues:** #136, #137, #135. **(#137 + #135 done — see Section 0; #136 dedupe is the remaining item and is now unblocked.)**
 **Why grouped:** all share the import analyze→confirm pipeline; dedupe key must exist before the Claude port so it inherits it; progress UI wraps both.
 **Parallel PRs:** **#136 first** (model column + dedupe — model change only, no manual migration). **#137** (Claude JSZip port) can be developed in parallel but merged after/with #136. **#135** (progress) is a separable frontend-led PR layered on top.
 **Staging batch:** `staging-batch-3` with all three. Note: the new column auto-migrates on deploy.
@@ -203,7 +224,7 @@ Principle: front-load XS/S high-confidence wins, sequence shared-plumbing, isola
 **Caveat to confirm:** exact JSON entry name inside a real Claude export (#137) — use a flexible entry-name match (likely `conversations.json`, as ChatGPT) and define the client-side-extraction-failure fallback; may need a human-supplied sample to confirm.
 **Merge:** green PRs → `main`.
 
-### Wave 4 — Timezone plumbing (sequenced, heavier than it looks)
+### Wave 4 — Timezone plumbing (sequenced, heavier than it looks) — ✅ DONE (#128 + #130; PR #171, 2026-05-29; see Section 0)
 **Issues:** #128, then #130.
 **Why grouped:** shared `User.timezone` column. Add the column once.
 **Effort reality:** #128 is **M spanning many files** (no `to_iso()` chokepoint — sweep every timestamp `.isoformat()`); #130 is L. This wave is heavier than "M + mostly-unit-test." Budget accordingly.
@@ -212,8 +233,8 @@ Principle: front-load XS/S high-confidence wins, sequence shared-plumbing, isola
 **Chrome test cycle:** Accept terms, seed a node. (1) DevTools Sensors → override tz to America/Los_Angeles → reload → NodeFooter/feed/version-history times match wall clock (#128); flip to a UTC+ zone → offset flips. (2) For #130: with tz override, trigger a text-mode chat → Network shows tz sent / column populated; assert message-prefix format via unit test (not Chrome).
 **Merge:** green PRs → `main`.
 
-### Wave 5 — Cross-app submit + profile notify + favicon
-**Issues:** #129, #131, #101.
+### Wave 5 — Cross-app submit + profile notify + favicon — ◐ PARTIAL: #129 ✅ DONE (PR #169, 2026-05-29); #131, #101 still pending
+**Issues:** #129, #131, #101. **(#129 done — see Section 0; it also now wires the #108 quick-add inputs on TodoPage and the Voice/Text proposals.)**
 **Why grouped:** independent, medium, each with a clean (or stub-driven) Chrome check. #129 now picks up #108's quick-add input (landed in Wave 2) in addition to its independently-shipped existing surfaces.
 **Parallel PRs:** all three **separate parallel PRs**.
 **Staging batch:** `staging-batch-5`.

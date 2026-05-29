@@ -1,5 +1,9 @@
 # Triage verdicts (sorted)
 
+> **Status (2026-05-29):** This file is the static triage analysis. For live progress see Section 0 of `ISSUE-TRIAGE-PLAN.md`.
+> **Shipped to prod so far:** Wave 1 — #142, #62, #63, #134, #98, #66, #28. Wave 2 (reprioritized batch) — #108, #128, #129, #130, #135, #137.
+> **Filed during the work:** #161 (Stop button reset), #172 (decide model attribution on assistant turns). Some inherited rationales below are now stale because the issue shipped — trust the PLAN's progress log over this file where they disagree.
+
 
 ## GOOD
 
