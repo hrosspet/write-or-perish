@@ -150,17 +150,11 @@ const styles = {
     }
 
     .loore-scroll-line {
-      width: 1px;
-      height: 36px;
-      /* Brighter top stop so the cue reads clearly (was fading from the
-         very dim --text-muted); still tapers to transparent. */
-      background: linear-gradient(to bottom, var(--text-secondary), transparent);
-      animation: loore-pulse 2s ease-in-out infinite;
-    }
-
-    .loore-scroll-chevron {
-      color: var(--text-secondary);
-      margin-top: -0.2rem;
+      width: 2px;
+      height: 40px;
+      /* Brighter, more opaque gradient so the cue reads clearly (was
+         fading from the very dim --text-muted); still tapers off. */
+      background: linear-gradient(to bottom, var(--text-secondary), rgba(255,255,255,0.05));
       animation: loore-pulse 2s ease-in-out infinite;
     }
 
@@ -375,17 +369,6 @@ function LandingPage() {
           </div>
           <div className="loore-scroll-hint" aria-hidden="true">
             <div className="loore-scroll-line" />
-            <svg
-              className="loore-scroll-chevron"
-              width="18"
-              height="18"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-            >
-              <path d="M6 9l6 6 6-6" />
-            </svg>
           </div>
         </section>
 
