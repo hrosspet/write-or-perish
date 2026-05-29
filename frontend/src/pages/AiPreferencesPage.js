@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import MarkdownBody from '../components/MarkdownBody';
 import api from '../api';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
+import { formatDate } from '../utils/date';
 
 export default function AiPreferencesPage() {
   const [prefs, setPrefs] = useState(null);
@@ -73,15 +74,6 @@ export default function AiPreferencesPage() {
     } catch (err) {
       console.error('Failed to load version:', err);
     }
-  };
-
-  const formatDate = (iso) => {
-    const d = new Date(iso);
-    const now = new Date();
-    if (d.toDateString() === now.toDateString()) return 'today';
-    const yesterday = new Date(now); yesterday.setDate(yesterday.getDate() - 1);
-    if (d.toDateString() === yesterday.toDateString()) return 'yesterday';
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   };
 
   const generatedByLabel = (g) => {

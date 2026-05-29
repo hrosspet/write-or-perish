@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import api from '../api';
 import { useCheckboxToggle, appendItemToSection } from '../utils/markdown';
+import { formatDate } from '../utils/date';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
 import useSubmitShortcut from '../hooks/useSubmitShortcut';
 
@@ -314,15 +315,6 @@ export default function TodoPage() {
   // textarea; the quick-add input handles plain Enter itself.
   useSubmitShortcut(editTextareaRef, () => handleSave(), editing && !saving && !!editContent.trim());
   useSubmitShortcut(quickAddInputRef, () => handleQuickAdd(), quickAddOpen && !quickAddSaving && !!quickAddText.trim());
-
-  const formatDate = (iso) => {
-    const d = new Date(iso);
-    const now = new Date();
-    if (d.toDateString() === now.toDateString()) return 'today';
-    const yesterday = new Date(now); yesterday.setDate(yesterday.getDate() - 1);
-    if (d.toDateString() === yesterday.toDateString()) return 'yesterday';
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-  };
 
   const generatedByLabel = (g) => {
     if (g === 'user' || g === 'manual') return 'edited manually';

@@ -7,6 +7,7 @@ import RegenerateTtsDialog from '../components/RegenerateTtsDialog';
 import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
 import { useUser } from '../contexts/UserContext';
 import useSubmitShortcut from '../hooks/useSubmitShortcut';
+import { formatDate } from '../utils/date';
 
 export default function ProfilePage() {
   const { user } = useUser();
@@ -160,11 +161,6 @@ export default function ProfilePage() {
   // Cmd+Return / Ctrl+Enter saves the profile while editing (#129).
   useSubmitShortcut(editTextareaRef, () => handleSave(), editing && !saving && !!editContent.trim());
 
-  const formatDate = (iso) => {
-    const d = new Date(iso);
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-  };
-
   if (loading) {
     return (
       <div style={{ padding: '60px 24px', maxWidth: '800px', margin: '0 auto' }}>
@@ -261,7 +257,7 @@ export default function ProfilePage() {
             : `Generated from ${profile.tokens_used?.toLocaleString() || 0} tokens`}
           {' '}&middot; {profile.generated_by}
           {profile.source_data_cutoff && (
-            <> &middot; Data through {new Date(profile.source_data_cutoff).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</>
+            <> &middot; Data through {formatDate(profile.source_data_cutoff, { relative: false })}</>
           )}
         </p>
       )}

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../api';
+import { formatDate } from '../utils/date';
 
 function SearchModal({ onClose }) {
   const [query, setQuery] = useState('');
@@ -120,11 +121,6 @@ function SearchModal({ onClose }) {
       onClose();
       navigate(`/node/${id}`);
     }
-  };
-
-  const formatDate = (iso) => {
-    const d = new Date(iso);
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   };
 
   return (
