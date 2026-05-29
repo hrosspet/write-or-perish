@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import api from '../api';
 import MarkdownBody from './MarkdownBody';
 import { appendItemToSection } from '../utils/markdown';
+import useSubmitShortcut from '../hooks/useSubmitShortcut';
 
 export function stripInlineMarkdown(text) {
   return text.replace(/\*\*(.+?)\*\*/g, '$1').replace(/__(.+?)__/g, '$1');
@@ -403,6 +404,16 @@ export default function ProposalInline({
       })
       .finally(() => setQuickAddSaving(false));
   }, [content, nodeId, onContentChange, onError, toggleable, quickAddText, quickAddSaving]);
+
+  // Cmd+Return (macOS) / Ctrl+Enter (Win/Linux) submits the quick-add input,
+  // matching the primary-submit shortcut used across the app (#129). Plain
+  // Enter is still handled by the input's onKeyDown below; this just adds the
+  // modifier chord. Enabled mirrors the Add button's disabled state.
+  useSubmitShortcut(
+    quickAddInputRef,
+    handleQuickAddTask,
+    quickAddOpen && !quickAddSaving && !!quickAddText.trim(),
+  );
 
   useEffect(() => {
     if (!toolCallsMeta) return;
