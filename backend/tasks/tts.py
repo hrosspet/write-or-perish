@@ -146,10 +146,21 @@ def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
 
     # Create TTSChunk records for streaming playback
     chunk_fk = {chunk_fk_attr: entity.id}
+    created_chunks = []
     for i in range(len(chunks)):
         tts_chunk = TTSChunk(chunk_index=i, status='pending', **chunk_fk)
         db.session.add(tts_chunk)
+        created_chunks.append(tts_chunk)
     db.session.commit()
+
+    # Cache-busting token for the emitted /media URLs. The media path is
+    # fixed per entity (…/node/<id>/tts.mp3) and nginx serves /media with a
+    # 24h Cache-Control, so after a regenerate the browser would replay the
+    # OLD cached file at the identical URL — i.e. the pre-edit text (#66).
+    # The freshly-inserted chunk-0 row id is unique to this run, so a
+    # `?v=<id>` suffix makes every regeneration a distinct URL.
+    cache_bust = created_chunks[0].id if created_chunks else None
+    _bust = (lambda url: f"{url}?v={cache_bust}") if cache_bust else (lambda url: url)
 
     if len(chunks) == 1:
         # Single chunk: direct streaming to MP3
@@ -174,7 +185,7 @@ def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
         ).first()
         if tts_chunk:
             rel_path = final_path.relative_to(AUDIO_ROOT)
-            tts_chunk.audio_url = f"/media/{rel_path.as_posix()}"
+            tts_chunk.audio_url = _bust(f"/media/{rel_path.as_posix()}")
             tts_chunk.duration = chunk_duration
             tts_chunk.status = 'completed'
             tts_chunk.completed_at = datetime.utcnow()
@@ -216,7 +227,7 @@ def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
 
             if tts_chunk:
                 rel_path = part_path.relative_to(AUDIO_ROOT)
-                tts_chunk.audio_url = f"/media/{rel_path.as_posix()}"
+                tts_chunk.audio_url = _bust(f"/media/{rel_path.as_posix()}")
                 tts_chunk.duration = chunk_duration
                 tts_chunk.status = 'completed'
                 tts_chunk.completed_at = datetime.utcnow()
@@ -262,7 +273,7 @@ def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
     db.session.commit()
 
     rel_path = final_path.relative_to(AUDIO_ROOT)
-    return f"/media/{rel_path.as_posix()}"
+    return _bust(f"/media/{rel_path.as_posix()}")
 
 
 @celery.task(base=TTSTask, bind=True)

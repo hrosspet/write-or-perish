@@ -1176,7 +1176,9 @@ def get_audio_urls(node_id):
         """Check if the file (or its .enc version) exists on disk."""
         if not url:
             return False
-        rel_path = url.replace("/media/", "", 1)
+        # Strip any cache-busting query string (e.g. tts.mp3?v=123, #66)
+        # before resolving the on-disk path.
+        rel_path = url.replace("/media/", "", 1).split("?", 1)[0]
         file_path = AUDIO_STORAGE_ROOT / rel_path
         enc_path = AUDIO_STORAGE_ROOT / (rel_path + '.enc')
         return file_path.is_file() or enc_path.is_file()
