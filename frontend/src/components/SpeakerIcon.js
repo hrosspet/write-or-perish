@@ -106,7 +106,12 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
     { enabled: ttsTaskActive }
   );
 
-  // Reset audio state when the node/profile changes
+  // Reset cached audio when the node/profile changes OR its content is
+  // edited. Without the `content` dependency, editing a node and choosing
+  // "regenerate" cleared the server-side audio but this component kept its
+  // cached audioSrc/chunks, so the next play replayed the stale clip
+  // instead of regenerating (#66). Content only changes on a real edit, so
+  // this correctly invalidates the cache exactly then.
   useEffect(() => {
     setAudioSrc(null);
     setAudioChunks(null);
@@ -115,7 +120,7 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
     setTtsTaskActive(false);
     setSseActive(false);
     sseChunkCountRef.current = 0;
-  }, [nodeId, profileId]);
+  }, [nodeId, profileId, content]);
 
   // Clean up SSE on unmount
   useEffect(() => {
