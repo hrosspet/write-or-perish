@@ -81,7 +81,7 @@ const styles = {
       align-items: center;
       justify-content: flex-start;
       position: relative;
-      padding: 16vh 2rem 3rem;
+      padding: 16vh 2rem 1.25rem;
       text-align: center;
     }
 
