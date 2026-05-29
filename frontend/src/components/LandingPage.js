@@ -65,10 +65,15 @@ const styles = {
     }
 
     .loore-hero {
-      /* svh tracks the *small* (mobile browser-chrome-collapsed) viewport
-         so the absolutely-positioned scroll hint isn't pushed off-screen
-         on phones, where 100vh overestimates the visible height (#98). */
+      /* Use dvh (dynamic viewport height) so the hero is exactly the
+         currently-visible area on mobile — with the browser toolbars
+         showing. 100vh (and even svh on some iOS builds) resolves taller
+         than what's visible, which pushed the centered content down (big
+         gap above the title) AND dropped the bottom-anchored scroll hint
+         below the fold. Fallback chain: vh -> svh -> dvh. (#98) */
+      min-height: 100vh;
       min-height: 100svh;
+      min-height: 100dvh;
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -76,10 +81,6 @@ const styles = {
       position: relative;
       padding: 2rem;
       text-align: center;
-    }
-
-    @supports not (height: 100svh) {
-      .loore-hero { min-height: 100vh; }
     }
 
     .loore-hero-grain {
@@ -337,6 +338,16 @@ const styles = {
       .loore-section { padding: 4rem 0; }
       .loore-preview { padding: 3rem 1rem 5rem; }
       .loore-mockup-content { padding: 1.5rem 1.2rem; }
+
+      /* Mobile hero: tighten the top so the title sits higher (less dead
+         space above it) and leave clear room at the bottom for the scroll
+         hint to be visible above the fold. (#98) */
+      .loore-hero {
+        justify-content: flex-start;
+        padding-top: 18vh;
+        padding-bottom: 5rem;
+      }
+      .loore-logo-mark { margin-bottom: 1.5rem; }
     }
   `,
 };
