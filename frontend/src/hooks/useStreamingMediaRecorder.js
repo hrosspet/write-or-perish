@@ -176,6 +176,34 @@ export function useStreamingMediaRecorder({
 
     console.log('[StreamingRecorder] Codec support:', codecSupport, 'chosen:', chosenMime, 'forced:', forced, 'UA:', navigator.userAgent);
 
+    // Pre-check the microphone permission where the Permissions API is
+    // available. On some platforms (notably Android Chrome) a previously
+    // denied permission makes getUserMedia reject silently/inconsistently or
+    // hang; querying first lets us fail fast with an unambiguous
+    // NotAllowedError so the caller surfaces a clear "permission denied"
+    // toast instead of a stuck "recording" state. Wrapped in try/catch so
+    // browsers that don't support permissions.query (or the 'microphone'
+    // name) simply fall through to getUserMedia as before.
+    try {
+      if (navigator.permissions?.query) {
+        const permStatus = await navigator.permissions.query({ name: 'microphone' });
+        if (permStatus?.state === 'denied') {
+          const permErr = new Error('Microphone permission is denied.');
+          permErr.name = 'NotAllowedError';
+          throw permErr;
+        }
+      }
+    } catch (permCheckErr) {
+      // Re-throw our own denial; swallow unsupported-query errors so we still
+      // attempt getUserMedia (the source of truth for the prompt/grant flow).
+      if (permCheckErr?.name === 'NotAllowedError') {
+        console.error('Microphone permission denied (permissions.query):', permCheckErr);
+        setError(permCheckErr.message);
+        throw permCheckErr;
+      }
+      console.log('[StreamingRecorder] permissions.query unavailable or failed; falling through to getUserMedia:', permCheckErr?.message);
+    }
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
@@ -284,6 +312,16 @@ export function useStreamingMediaRecorder({
     } catch (err) {
       console.error('Error accessing microphone:', err);
       setError(err.message);
+      // Preserve the permission-denial identity when rethrowing so the
+      // parent's onError handler maps it to the right toast. Some browsers
+      // use the legacy 'PermissionDeniedError' name; normalize both to a
+      // rethrown error whose .name survives (a plain `throw err` already
+      // preserves it, but guard against any environment that strips it).
+      if (err && (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError')) {
+        const permErr = new Error(err.message || 'Microphone permission is denied.');
+        permErr.name = err.name;
+        throw permErr;
+      }
       throw err;
     }
   }, [resetRecording, chunkIntervalMs, onChunkReady]);

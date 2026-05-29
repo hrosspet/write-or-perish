@@ -151,7 +151,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         // Use the fatal-error message verbatim — it's already user-facing.
         message = err.message;
       } else if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
-        message = "Microphone access was denied. Allow microphone access for this site in your browser and OS settings, then try again.";
+        message = "Microphone access is blocked. On Android, update this browser app's microphone permission in your phone's Settings. On iPhone or desktop, re-grant microphone access for this site via the browser's site-permissions menu (tap the address-bar icon). Then reload and try again.";
       } else if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
         message = "No microphone was found on this device.";
       } else if (name === 'NotReadableError' || name === 'TrackStartError') {
