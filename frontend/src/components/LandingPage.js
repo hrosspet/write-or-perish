@@ -1,30 +1,57 @@
 import React, { useState, useEffect, useRef } from "react";
 import CtaButton from "./CtaButton";
 
-function useOnScreen(ref, threshold = 0.15, rootMargin = "0px") {
+function useOnScreen(ref, threshold = 0.15) {
   const [visible, setVisible] = useState(false);
   useEffect(() => {
     const observer = new IntersectionObserver(
       ([entry]) => { if (entry.isIntersecting) setVisible(true); },
-      { threshold, rootMargin }
+      { threshold }
     );
     const el = ref.current;
     if (el) observer.observe(el);
     return () => { if (el) observer.unobserve(el); };
-  }, [ref, threshold, rootMargin]);
+  }, [ref, threshold]);
   return visible;
+}
+
+// True once the user has scrolled the page at all. On tall desktop
+// screens the whole first narrative section can fit within the initial
+// viewport, so an in-view check alone fades it in before any scroll. We
+// additionally gate on this so narrative sections only reveal after the
+// user initiates scrolling. Starts true if the page is already scrolled
+// (e.g. restored position / deep link). (#98)
+function useHasScrolled() {
+  const [scrolled, setScrolled] = useState(() =>
+    typeof window !== "undefined" && window.scrollY > 0
+  );
+  useEffect(() => {
+    if (scrolled) return undefined;
+    const onScroll = () => {
+      if (window.scrollY > 0) setScrolled(true);
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    // Sync in case a scroll happened between render and effect.
+    if (window.scrollY > 0) setScrolled(true);
+    return () => window.removeEventListener("scroll", onScroll);
+  }, [scrolled]);
+  return scrolled;
 }
 
 function FadeSection({ children, delay = 0, className = "", style = {} }) {
   const ref = useRef(null);
-  // Negative bottom rootMargin shrinks the observer viewport from the
-  // bottom, so a section only fades in once it's scrolled ~15% of the way
-  // up into view — not while it's merely peeking at the very bottom edge.
-  // On desktop the content-sized hero lets the first section peek in on
-  // load, which previously triggered the fade before any scroll; this
-  // gates it on actual scrolling. Mobile (section fully below the fold)
-  // is unaffected. (#98)
-  const visible = useOnScreen(ref, 0.1, "0px 0px -15% 0px");
+  const inView = useOnScreen(ref, 0.1);
+  const hasScrolled = useHasScrolled();
+  // Reveal only when the section is in view AND the user has scrolled, so
+  // a section that already fits in the initial viewport (tall desktop)
+  // doesn't appear until scrolling begins. The reveal latches on (stays
+  // visible thereafter). Mobile is unaffected — its sections sit below
+  // the fold and only enter view after scrolling anyway. (#98)
+  const [revealed, setRevealed] = useState(false);
+  useEffect(() => {
+    if (inView && hasScrolled) setRevealed(true);
+  }, [inView, hasScrolled]);
+  const visible = revealed;
   return (
     <div
       ref={ref}
