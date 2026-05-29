@@ -191,28 +191,42 @@ export default function StreamingMicButton({
         </div>
       )}
       <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-        <button
-          type="button"
-          onClick={handleClick}
-          disabled={disabled || isIdleOffline || sessionState === 'initializing' || sessionState === 'finalizing'}
+        {/* The tooltip lives on this wrapper span, NOT the button: browsers
+            suppress pointer events (and thus the native title tooltip) on
+            disabled elements, so a title on the disabled button never shows.
+            The span isn't disabled, so it receives hover and shows it (#62). */}
+        <span
           title={
-            disabled && disabledReason
+            (disabled && disabledReason)
               ? disabledReason
               : isIdleOffline
               ? "You're offline — reconnect to record audio."
               : undefined
           }
           style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '6px',
-            padding: '8px 16px',
-            cursor: disabled || isIdleOffline || sessionState === 'initializing' || sessionState === 'finalizing' ? 'not-allowed' : 'pointer',
-            opacity: disabled || isIdleOffline ? 0.35 : 1,
+            display: 'inline-flex',
+            cursor: disabled || isIdleOffline || sessionState === 'initializing' || sessionState === 'finalizing' ? 'not-allowed' : 'default',
           }}
         >
-          {getButtonContent()}
-        </button>
+          <button
+            type="button"
+            onClick={handleClick}
+            disabled={disabled || isIdleOffline || sessionState === 'initializing' || sessionState === 'finalizing'}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '8px 16px',
+              cursor: disabled || isIdleOffline || sessionState === 'initializing' || sessionState === 'finalizing' ? 'not-allowed' : 'pointer',
+              opacity: disabled || isIdleOffline ? 0.35 : 1,
+              // Let hover events reach the wrapper span when disabled so the
+              // tooltip can show.
+              pointerEvents: disabled || isIdleOffline ? 'none' : 'auto',
+            }}
+          >
+            {getButtonContent()}
+          </button>
+        </span>
         {showDownload && (
           <button
             type="button"

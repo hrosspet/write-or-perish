@@ -810,15 +810,22 @@ const NodeForm = forwardRef(
                       onChange={handleFileSelect}
                       style={{ display: 'none' }}
                     />
-                    <button
-                      type="button"
-                      onClick={() => fileInputRef.current?.click()}
-                      disabled={isStreamingRecording || aiUsage === 'none' || !isOnline}
-                      title={audioDisabledReason || undefined}
-                      style={{ padding: '8px 16px', cursor: isStreamingRecording || aiUsage === 'none' || !isOnline ? 'not-allowed' : 'pointer', opacity: isStreamingRecording || aiUsage === 'none' || !isOnline ? 0.35 : 1 }}
+                    {/* Tooltip on the wrapper span, not the disabled button —
+                        disabled elements don't fire hover, so a title on the
+                        button itself never shows (#62). */}
+                    <span
+                      title={(isStreamingRecording || aiUsage === 'none' || !isOnline) ? (audioDisabledReason || undefined) : undefined}
+                      style={{ display: 'inline-flex', cursor: isStreamingRecording || aiUsage === 'none' || !isOnline ? 'not-allowed' : 'default' }}
                     >
-                      Upload
-                    </button>
+                      <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={isStreamingRecording || aiUsage === 'none' || !isOnline}
+                        style={{ padding: '8px 16px', cursor: isStreamingRecording || aiUsage === 'none' || !isOnline ? 'not-allowed' : 'pointer', opacity: isStreamingRecording || aiUsage === 'none' || !isOnline ? 0.35 : 1, pointerEvents: isStreamingRecording || aiUsage === 'none' || !isOnline ? 'none' : 'auto' }}
+                      >
+                        Upload
+                      </button>
+                    </span>
                   </>
                 )}
               </>
