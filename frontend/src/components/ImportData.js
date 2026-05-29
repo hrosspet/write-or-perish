@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import ReactDOM from "react-dom";
 import JSZip from "jszip";
+import { FaSpinner } from "react-icons/fa";
 import api from "../api";
 import PrivacySelector from "./PrivacySelector";
 
@@ -26,6 +27,86 @@ const cancelBtnStyle = {
   ...ghostBtnStyle,
 };
 
+// Coarse stage labels shown while an import is in flight.
+const STAGE_LABELS = {
+  extracting: "Extracting…",
+  analyzing: "Analyzing…",
+  importing: "Importing…",
+};
+
+function importErr(userMessage) {
+  const e = new Error(userMessage);
+  e.userMessage = userMessage;
+  return e;
+}
+
+// A spinning icon + stage label, shown inside import buttons while an
+// import is in flight. `stage` is one of STAGE_LABELS' keys; falls back to
+// the provided label when the stage is unknown.
+function ImportSpinner({ stage, fallback }) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: "0.4em" }}>
+      <FaSpinner className="spin" aria-hidden="true" />
+      {STAGE_LABELS[stage] || fallback}
+    </span>
+  );
+}
+
+// Extract the conversations.json blob from a Claude/ChatGPT export zip in
+// the browser, so the full (potentially multi-GB) export with images/audio
+// never has to traverse the network.
+//
+// Entry matching is intentionally flexible:
+//   1. Prefer a file entry whose name ends with "conversations.json".
+//   2. Otherwise fall back to the largest .json entry whose parsed
+//      top-level value is an array (the export's conversation list).
+// Throws an Error with a `.userMessage` if no suitable entry is found or
+// the zip cannot be read.
+async function extractConversationsBlob(file) {
+  let zip;
+  try {
+    zip = await JSZip.loadAsync(file);
+  } catch {
+    throw importErr(
+      "Could not read the zip file. Please make sure it's a valid data export."
+    );
+  }
+
+  const entries = Object.values(zip.files).filter((f) => !f.dir);
+
+  const named = entries.find((f) => f.name.endsWith("conversations.json"));
+  if (named) {
+    return named.async("blob");
+  }
+
+  // Fallback: among .json entries, pick the largest whose top-level
+  // parsed value is an array. Sort by uncompressed size descending so we
+  // parse the most likely candidate first.
+  const jsonEntries = entries
+    .filter((f) => f.name.toLowerCase().endsWith(".json"))
+    .sort((a, b) => {
+      const sa = (a._data && a._data.uncompressedSize) || 0;
+      const sb = (b._data && b._data.uncompressedSize) || 0;
+      return sb - sa;
+    });
+
+  for (const entry of jsonEntries) {
+    try {
+      const text = await entry.async("string");
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) {
+        return new Blob([text], { type: "application/json" });
+      }
+    } catch {
+      // Not valid JSON or not an array — keep looking.
+    }
+  }
+
+  throw importErr(
+    "Could not find conversations.json in the zip archive. Please upload the original data export."
+  );
+}
+
 export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel, buttonHoverStyle, onProfileUpdateStarted, inline }) {
   const btnStyle = customButtonStyle || ghostBtnStyle;
   const [hovered, setHovered] = useState(false);
@@ -34,6 +115,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
   const [importType, setImportType] = useState("separate_nodes");
   const [dateOrdering, setDateOrdering] = useState("modified");
   const [importing, setImporting] = useState(false);
+  const [importStage, setImportStage] = useState(null);
   const [importPrivacy, setImportPrivacy] = useState("private");
   const [importAiUsage, setImportAiUsage] = useState("none");
   const [error, setError] = useState("");
@@ -68,6 +150,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     formData.append("zip_file", file);
 
     setImporting(true);
+    setImportStage("analyzing");
     setShowPicker(false);
     api.post("/import/analyze", formData, {
       headers: { "Content-Type": "multipart/form-data" }
@@ -76,11 +159,13 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         setImportFiles(response.data);
         setShowImportDialog(true);
         setImporting(false);
+        setImportStage(null);
       })
       .catch((err) => {
         console.error("Error analyzing import file:", err);
         setError(err.response?.data?.error || "Error analyzing import file. Please try again.");
         setImporting(false);
+        setImportStage(null);
       });
   };
 
@@ -88,6 +173,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     if (!importFiles) return;
 
     setImporting(true);
+    setImportStage("importing");
     api.post("/import/confirm", {
       files: importFiles.files,
       import_type: importType,
@@ -99,6 +185,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         setShowImportDialog(false);
         setImportFiles(null);
         setImporting(false);
+        setImportStage(null);
         setError("");
         if (response.data.profile_update_task_id && onProfileUpdateStarted) {
           onProfileUpdateStarted(response.data.profile_update_task_id);
@@ -109,6 +196,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         console.error("Error importing data:", err);
         setError(err.response?.data?.error || "Error importing data. Please try again.");
         setImporting(false);
+        setImportStage(null);
       });
   };
 
@@ -125,6 +213,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     formData.append("zip_file", file);
 
     setImporting(true);
+    setImportStage("analyzing");
     setShowPicker(false);
     api.post("/import/twitter/analyze", formData, {
       headers: { "Content-Type": "multipart/form-data" }
@@ -133,11 +222,13 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         setTwitterImportData(response.data);
         setShowTwitterImportDialog(true);
         setImporting(false);
+        setImportStage(null);
       })
       .catch((err) => {
         console.error("Error analyzing Twitter import:", err);
         setError(err.response?.data?.error || "Error analyzing Twitter export. Please try again.");
         setImporting(false);
+        setImportStage(null);
       });
 
     event.target.value = "";
@@ -147,6 +238,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     if (!twitterImportData) return;
 
     setImporting(true);
+    setImportStage("importing");
     api.post("/import/twitter/confirm", {
       tweets: twitterImportData.tweets,
       import_type: importType,
@@ -158,6 +250,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         setShowTwitterImportDialog(false);
         setTwitterImportData(null);
         setImporting(false);
+        setImportStage(null);
         setError("");
         if (response.data.profile_update_task_id && onProfileUpdateStarted) {
           onProfileUpdateStarted(response.data.profile_update_task_id);
@@ -168,6 +261,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         console.error("Error importing Twitter data:", err);
         setError(err.response?.data?.error || "Error importing Twitter data. Please try again.");
         setImporting(false);
+        setImportStage(null);
       });
   };
 
@@ -176,15 +270,34 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     setTwitterImportData(null);
   };
 
-  const handleClaudeImportFile = (event) => {
+  const handleClaudeImportFile = async (event) => {
     const file = event.target.files[0];
+    event.target.value = "";
     if (!file) return;
 
-    const formData = new FormData();
-    formData.append("zip_file", file);
-
     setImporting(true);
+    setImportStage("extracting");
     setShowPicker(false);
+
+    let conversationsBlob;
+    try {
+      conversationsBlob = await extractConversationsBlob(file);
+    } catch (err) {
+      console.error("Error reading Claude export zip:", err);
+      setError(
+        err && err.userMessage
+          ? err.userMessage
+          : "Could not read the zip file. Please make sure it's a valid Claude data export."
+      );
+      setImporting(false);
+      setImportStage(null);
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append("conversations_file", conversationsBlob, "conversations.json");
+
+    setImportStage("analyzing");
     api.post("/import/claude/analyze", formData, {
       headers: { "Content-Type": "multipart/form-data" }
     })
@@ -192,20 +305,21 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         setClaudeImportData(response.data);
         setShowClaudeImportDialog(true);
         setImporting(false);
+        setImportStage(null);
       })
       .catch((err) => {
         console.error("Error analyzing Claude import:", err);
         setError(err.response?.data?.error || "Error analyzing Claude export. Please try again.");
         setImporting(false);
+        setImportStage(null);
       });
-
-    event.target.value = "";
   };
 
   const handleConfirmClaudeImport = () => {
     if (!claudeImportData) return;
 
     setImporting(true);
+    setImportStage("importing");
     api.post("/import/claude/confirm", {
       conversations: claudeImportData.conversations,
       privacy_level: importPrivacy,
@@ -215,6 +329,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         setShowClaudeImportDialog(false);
         setClaudeImportData(null);
         setImporting(false);
+        setImportStage(null);
         setError("");
         if (response.data.profile_update_task_id && onProfileUpdateStarted) {
           onProfileUpdateStarted(response.data.profile_update_task_id);
@@ -225,6 +340,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         console.error("Error importing Claude data:", err);
         setError(err.response?.data?.error || "Error importing Claude data. Please try again.");
         setImporting(false);
+        setImportStage(null);
       });
   };
 
@@ -239,34 +355,28 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     if (!file) return;
 
     setImporting(true);
+    setImportStage("extracting");
     setShowPicker(false);
 
     let conversationsBlob;
     try {
-      const zip = await JSZip.loadAsync(file);
-      const entry = Object.values(zip.files).find(
-        (f) => !f.dir && f.name.endsWith("conversations.json")
-      );
-      if (!entry) {
-        setError(
-          "Could not find conversations.json in the zip archive. Please upload the original ChatGPT data export."
-        );
-        setImporting(false);
-        return;
-      }
-      conversationsBlob = await entry.async("blob");
+      conversationsBlob = await extractConversationsBlob(file);
     } catch (err) {
       console.error("Error reading ChatGPT export zip:", err);
       setError(
-        "Could not read the zip file. Please make sure it's a valid ChatGPT data export."
+        err && err.userMessage
+          ? err.userMessage
+          : "Could not read the zip file. Please make sure it's a valid ChatGPT data export."
       );
       setImporting(false);
+      setImportStage(null);
       return;
     }
 
     const formData = new FormData();
     formData.append("conversations_file", conversationsBlob, "conversations.json");
 
+    setImportStage("analyzing");
     api.post("/import/chatgpt/analyze", formData, {
       headers: { "Content-Type": "multipart/form-data" }
     })
@@ -274,6 +384,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         setChatGPTImportData(response.data);
         setShowChatGPTImportDialog(true);
         setImporting(false);
+        setImportStage(null);
       })
       .catch((err) => {
         console.error("Error analyzing ChatGPT import:", err);
@@ -294,6 +405,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         }
         setError(msg);
         setImporting(false);
+        setImportStage(null);
       });
   };
 
@@ -301,6 +413,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     if (!chatGPTImportData) return;
 
     setImporting(true);
+    setImportStage("importing");
     api.post("/import/chatgpt/confirm", {
       conversations: chatGPTImportData.conversations,
       privacy_level: importPrivacy,
@@ -310,6 +423,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         setShowChatGPTImportDialog(false);
         setChatGPTImportData(null);
         setImporting(false);
+        setImportStage(null);
         setError("");
         if (response.data.profile_update_task_id && onProfileUpdateStarted) {
           onProfileUpdateStarted(response.data.profile_update_task_id);
@@ -320,6 +434,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         console.error("Error importing ChatGPT data:", err);
         setError(err.response?.data?.error || "Error importing ChatGPT data. Please try again.");
         setImporting(false);
+        setImportStage(null);
       });
   };
 
@@ -351,22 +466,36 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
 
         const importOptions = (
           <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
-            <label style={importLabelStyle}>
-              Import Claude
-              <input type="file" accept=".zip" onChange={handleClaudeImportFile} disabled={importing} style={{ display: "none" }} />
-            </label>
-            <label style={importLabelStyle}>
-              Import ChatGPT
-              <input type="file" accept=".zip" onChange={handleChatGPTImportFile} disabled={importing} style={{ display: "none" }} />
-            </label>
-            <label style={importLabelStyle}>
-              Import Markdown (e.g. Obsidian)
-              <input type="file" accept=".zip" onChange={handleImportFile} disabled={importing} style={{ display: "none" }} />
-            </label>
-            <label style={importLabelStyle}>
-              Import Tweets
-              <input type="file" accept=".zip" onChange={handleTwitterImportFile} disabled={importing} style={{ display: "none" }} />
-            </label>
+            {importing ? (
+              // Pre-dialog progress. While we extract the zip client-side and
+              // upload the conversations blob for analysis, the buttons are
+              // disabled and no dialog has appeared yet — without this the page
+              // looks frozen (esp. large Claude/ChatGPT zips, where extraction
+              // takes a few seconds). The .spin transform keeps animating on
+              // the compositor thread even while extraction is busy.
+              <div style={{ ...importLabelStyle, opacity: 1, cursor: "default", color: "var(--accent)" }}>
+                <ImportSpinner stage={importStage} fallback="Working…" />
+              </div>
+            ) : (
+              <>
+                <label style={importLabelStyle}>
+                  Import Claude
+                  <input type="file" accept=".zip" onChange={handleClaudeImportFile} style={{ display: "none" }} />
+                </label>
+                <label style={importLabelStyle}>
+                  Import ChatGPT
+                  <input type="file" accept=".zip" onChange={handleChatGPTImportFile} style={{ display: "none" }} />
+                </label>
+                <label style={importLabelStyle}>
+                  Import Markdown (e.g. Obsidian)
+                  <input type="file" accept=".zip" onChange={handleImportFile} style={{ display: "none" }} />
+                </label>
+                <label style={importLabelStyle}>
+                  Import Tweets
+                  <input type="file" accept=".zip" onChange={handleTwitterImportFile} style={{ display: "none" }} />
+                </label>
+              </>
+            )}
           </div>
         );
 
@@ -391,7 +520,9 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                   opacity: importing ? 0.6 : 1,
                 }}
               >
-                {importing ? "Analyzing..." : (buttonLabel || "Import Data")}
+                {importing
+                  ? <ImportSpinner stage={importStage} fallback="Analyzing…" />
+                  : (buttonLabel || "Import Data")}
               </button>
             )}
 
@@ -545,7 +676,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                 opacity: importing ? 0.6 : 1
               }}
             >
-              {importing ? "Importing..." : "Confirm Import"}
+              {importing ? <ImportSpinner stage={importStage} fallback="Importing…" /> : "Confirm Import"}
             </button>
             <button
               onClick={handleCancelImport}
@@ -600,7 +731,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                 opacity: importing ? 0.6 : 1
               }}
             >
-              {importing ? "Importing..." : "Confirm Import"}
+              {importing ? <ImportSpinner stage={importStage} fallback="Importing…" /> : "Confirm Import"}
             </button>
             <button
               onClick={handleCancelClaudeImport}
@@ -655,7 +786,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                 opacity: importing ? 0.6 : 1
               }}
             >
-              {importing ? "Importing..." : "Confirm Import"}
+              {importing ? <ImportSpinner stage={importStage} fallback="Importing…" /> : "Confirm Import"}
             </button>
             <button
               onClick={handleCancelChatGPTImport}
@@ -768,7 +899,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                 opacity: importing ? 0.6 : 1
               }}
             >
-              {importing ? "Importing..." : "Confirm Import"}
+              {importing ? <ImportSpinner stage={importStage} fallback="Importing…" /> : "Confirm Import"}
             </button>
             <button
               onClick={handleCancelTwitterImport}
