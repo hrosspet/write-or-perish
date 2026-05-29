@@ -65,21 +65,23 @@ const styles = {
     }
 
     .loore-hero {
-      /* Use dvh (dynamic viewport height) so the hero is exactly the
-         currently-visible area on mobile — with the browser toolbars
-         showing. 100vh (and even svh on some iOS builds) resolves taller
-         than what's visible, which pushed the centered content down (big
-         gap above the title) AND dropped the bottom-anchored scroll hint
-         below the fold. Fallback chain: vh -> svh -> dvh. (#98) */
+      /* Full-height for a clean, undisturbed first view. vh -> svh -> dvh
+         cascade so mobile uses the actually-visible (toolbar-collapsed)
+         height. Content sits in the upper area (flex-start + padding-top)
+         and the scroll line is pinned to the bottom via margin-top:auto
+         on .loore-scroll-hint — in-flow (no iOS absolute-positioning bug)
+         yet at the hero bottom, so the first narrative section follows the
+         hero directly and "pops up" right away on scroll instead of after
+         a large empty band. (#98) */
       min-height: 100vh;
       min-height: 100svh;
       min-height: 100dvh;
       display: flex;
       flex-direction: column;
       align-items: center;
-      justify-content: center;
+      justify-content: flex-start;
       position: relative;
-      padding: 2rem;
+      padding: 16vh 2rem 3rem;
       text-align: center;
     }
 
@@ -134,12 +136,14 @@ const styles = {
     }
 
     .loore-scroll-hint {
-      /* In normal flow, just below the CTA (it follows the CTA in the
-         JSX). Earlier absolute/viewport-bottom anchoring kept landing the
-         line at the screen edge — cut off on desktop and below the fold on
-         mobile (across vh/svh/dvh). In-flow, it's tied to visible content
-         and is reliably visible on every viewport. (#98) */
-      margin: 2.5rem auto 0;
+      /* In normal flow (NOT absolute — that kept landing the line at the
+         screen edge / below the fold across vh/svh/dvh). margin-top:auto
+         pushes it to the bottom of the full-height hero, so it's reliably
+         visible near the fold and the next section follows the hero
+         directly. min 2.5rem keeps clearance from the CTA on short
+         viewports where auto collapses. (#98) */
+      margin-top: auto;
+      padding-top: 2.5rem;
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -338,21 +342,14 @@ const styles = {
       .loore-preview { padding: 3rem 1rem 5rem; }
       .loore-mockup-content { padding: 1.5rem 1.2rem; }
 
-      /* Mobile hero: size to its content instead of forcing a full
-         viewport. With the content packed at the top and the scroll line
-         right after the CTA, a 100dvh hero left ~25% dead space between
-         the line and the first narrative section. Dropping the min-height
-         removes that gap so the narrative follows the line with the same
-         spacing as the other sections; padding-top keeps the title in the
-         upper third. (#98) */
+      /* Mobile hero: a touch tighter top than the base rule; line stays
+         bottom-pinned (margin-top:auto, base rule). Logo margin trimmed
+         so the title sits in the upper third. (#98) */
       .loore-hero {
-        min-height: auto;
-        justify-content: flex-start;
-        padding-top: 14vh;
-        padding-bottom: 1rem;
+        padding-top: 12vh;
+        padding-bottom: 2rem;
       }
       .loore-logo-mark { margin-bottom: 1.5rem; }
-      /* Scroll hint is in normal flow (base rule); no mobile override needed. */
     }
   `,
 };
