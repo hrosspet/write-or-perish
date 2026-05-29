@@ -1,23 +1,30 @@
 import React, { useState, useEffect, useRef } from "react";
 import CtaButton from "./CtaButton";
 
-function useOnScreen(ref, threshold = 0.15) {
+function useOnScreen(ref, threshold = 0.15, rootMargin = "0px") {
   const [visible, setVisible] = useState(false);
   useEffect(() => {
     const observer = new IntersectionObserver(
       ([entry]) => { if (entry.isIntersecting) setVisible(true); },
-      { threshold }
+      { threshold, rootMargin }
     );
     const el = ref.current;
     if (el) observer.observe(el);
     return () => { if (el) observer.unobserve(el); };
-  }, [ref, threshold]);
+  }, [ref, threshold, rootMargin]);
   return visible;
 }
 
 function FadeSection({ children, delay = 0, className = "", style = {} }) {
   const ref = useRef(null);
-  const visible = useOnScreen(ref, 0.1);
+  // Negative bottom rootMargin shrinks the observer viewport from the
+  // bottom, so a section only fades in once it's scrolled ~15% of the way
+  // up into view — not while it's merely peeking at the very bottom edge.
+  // On desktop the content-sized hero lets the first section peek in on
+  // load, which previously triggered the fade before any scroll; this
+  // gates it on actual scrolling. Mobile (section fully below the fold)
+  // is unaffected. (#98)
+  const visible = useOnScreen(ref, 0.1, "0px 0px -15% 0px");
   return (
     <div
       ref={ref}
