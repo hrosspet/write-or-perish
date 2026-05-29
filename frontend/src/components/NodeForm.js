@@ -23,11 +23,47 @@ const NodeForm = forwardRef(
     const [isUploading, setIsUploading] = useState(false);
     const [hasDraft, setHasDraft] = useState(false);
 
+    // Remember the user's last privacy / AI-usage choices for fresh
+    // top-level entries (#63), so they don't have to re-pick every time.
+    // Only consulted when there's no more-specific source: edit-mode
+    // (initialPrivacyLevel/initialAiUsage), parent inheritance (parentId),
+    // and explicit props all take precedence over these remembered
+    // values. Mirrors the localStorage pattern used by loore_auto_generate.
+    const remembersChoices = !editMode && !parentId
+      && !initialPrivacyLevel && !initialAiUsage;
+    const readRemembered = (key, fallback) => {
+      if (!remembersChoices) return fallback;
+      const stored = localStorage.getItem(key);
+      return stored === null ? fallback : stored;
+    };
+
     // Privacy settings state - use initial values if provided (edit mode),
-    // then user defaults from context, then hardcoded fallback.
+    // then remembered choice (fresh top-level entry), then user defaults
+    // from context, then hardcoded fallback.
     // For new nodes with a parent, we'll update these after fetching the parent.
-    const [privacyLevel, setPrivacyLevel] = useState(initialPrivacyLevel || user?.default_privacy_level || "private");
-    const [aiUsage, setAiUsage] = useState(initialAiUsage || user?.default_ai_usage || "none");
+    const [privacyLevel, setPrivacyLevel] = useState(
+      initialPrivacyLevel
+      || readRemembered('loore_last_privacy_level', user?.default_privacy_level)
+      || "private"
+    );
+    const [aiUsage, setAiUsage] = useState(
+      initialAiUsage
+      || readRemembered('loore_last_ai_usage', user?.default_ai_usage)
+      || "none"
+    );
+
+    // Persist choices whenever the user changes them on a fresh top-level
+    // entry, so the next Write dialog opens with the same selections.
+    useEffect(() => {
+      if (remembersChoices) {
+        localStorage.setItem('loore_last_privacy_level', privacyLevel);
+      }
+    }, [privacyLevel, remembersChoices]);
+    useEffect(() => {
+      if (remembersChoices) {
+        localStorage.setItem('loore_last_ai_usage', aiUsage);
+      }
+    }, [aiUsage, remembersChoices]);
     // "Agentic Reply" — opt-in to attaching the textmode system prompt
     // (profile + recent + todo + prefs as context). Local state, OFF by
     // default — deliberate and distinct from "auto-generate".
