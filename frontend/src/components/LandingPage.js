@@ -81,7 +81,11 @@ const styles = {
       align-items: center;
       justify-content: flex-start;
       position: relative;
-      padding: 16vh 2rem 1.25rem;
+      /* Top padding clears the fixed 56px navbar and places the title in
+         the upper area, but stays small enough that title + CTA + the
+         bottom-pinned line all fit within one viewport (so the line is
+         inside the fold). padding-top was overshooting at 16vh. */
+      padding: clamp(4.5rem, 11vh, 10rem) 2rem 1.25rem;
       text-align: center;
     }
 
