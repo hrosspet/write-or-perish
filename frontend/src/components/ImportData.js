@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import ReactDOM from "react-dom";
 import JSZip from "jszip";
+import { FaSpinner } from "react-icons/fa";
 import api from "../api";
 import PrivacySelector from "./PrivacySelector";
 
@@ -37,6 +38,18 @@ function importErr(userMessage) {
   const e = new Error(userMessage);
   e.userMessage = userMessage;
   return e;
+}
+
+// A spinning icon + stage label, shown inside import buttons while an
+// import is in flight. `stage` is one of STAGE_LABELS' keys; falls back to
+// the provided label when the stage is unknown.
+function ImportSpinner({ stage, fallback }) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: "0.4em" }}>
+      <FaSpinner className="spin" aria-hidden="true" />
+      {STAGE_LABELS[stage] || fallback}
+    </span>
+  );
 }
 
 // Extract the conversations.json blob from a Claude/ChatGPT export zip in
@@ -137,6 +150,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     formData.append("zip_file", file);
 
     setImporting(true);
+    setImportStage("analyzing");
     setShowPicker(false);
     api.post("/import/analyze", formData, {
       headers: { "Content-Type": "multipart/form-data" }
@@ -145,11 +159,13 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         setImportFiles(response.data);
         setShowImportDialog(true);
         setImporting(false);
+        setImportStage(null);
       })
       .catch((err) => {
         console.error("Error analyzing import file:", err);
         setError(err.response?.data?.error || "Error analyzing import file. Please try again.");
         setImporting(false);
+        setImportStage(null);
       });
   };
 
@@ -157,6 +173,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     if (!importFiles) return;
 
     setImporting(true);
+    setImportStage("importing");
     api.post("/import/confirm", {
       files: importFiles.files,
       import_type: importType,
@@ -168,6 +185,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         setShowImportDialog(false);
         setImportFiles(null);
         setImporting(false);
+        setImportStage(null);
         setError("");
         if (response.data.profile_update_task_id && onProfileUpdateStarted) {
           onProfileUpdateStarted(response.data.profile_update_task_id);
@@ -178,6 +196,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         console.error("Error importing data:", err);
         setError(err.response?.data?.error || "Error importing data. Please try again.");
         setImporting(false);
+        setImportStage(null);
       });
   };
 
@@ -194,6 +213,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     formData.append("zip_file", file);
 
     setImporting(true);
+    setImportStage("analyzing");
     setShowPicker(false);
     api.post("/import/twitter/analyze", formData, {
       headers: { "Content-Type": "multipart/form-data" }
@@ -202,11 +222,13 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         setTwitterImportData(response.data);
         setShowTwitterImportDialog(true);
         setImporting(false);
+        setImportStage(null);
       })
       .catch((err) => {
         console.error("Error analyzing Twitter import:", err);
         setError(err.response?.data?.error || "Error analyzing Twitter export. Please try again.");
         setImporting(false);
+        setImportStage(null);
       });
 
     event.target.value = "";
@@ -216,6 +238,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     if (!twitterImportData) return;
 
     setImporting(true);
+    setImportStage("importing");
     api.post("/import/twitter/confirm", {
       tweets: twitterImportData.tweets,
       import_type: importType,
@@ -227,6 +250,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         setShowTwitterImportDialog(false);
         setTwitterImportData(null);
         setImporting(false);
+        setImportStage(null);
         setError("");
         if (response.data.profile_update_task_id && onProfileUpdateStarted) {
           onProfileUpdateStarted(response.data.profile_update_task_id);
@@ -237,6 +261,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         console.error("Error importing Twitter data:", err);
         setError(err.response?.data?.error || "Error importing Twitter data. Please try again.");
         setImporting(false);
+        setImportStage(null);
       });
   };
 
@@ -294,6 +319,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     if (!claudeImportData) return;
 
     setImporting(true);
+    setImportStage("importing");
     api.post("/import/claude/confirm", {
       conversations: claudeImportData.conversations,
       privacy_level: importPrivacy,
@@ -303,6 +329,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         setShowClaudeImportDialog(false);
         setClaudeImportData(null);
         setImporting(false);
+        setImportStage(null);
         setError("");
         if (response.data.profile_update_task_id && onProfileUpdateStarted) {
           onProfileUpdateStarted(response.data.profile_update_task_id);
@@ -313,6 +340,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         console.error("Error importing Claude data:", err);
         setError(err.response?.data?.error || "Error importing Claude data. Please try again.");
         setImporting(false);
+        setImportStage(null);
       });
   };
 
@@ -327,34 +355,28 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     if (!file) return;
 
     setImporting(true);
+    setImportStage("extracting");
     setShowPicker(false);
 
     let conversationsBlob;
     try {
-      const zip = await JSZip.loadAsync(file);
-      const entry = Object.values(zip.files).find(
-        (f) => !f.dir && f.name.endsWith("conversations.json")
-      );
-      if (!entry) {
-        setError(
-          "Could not find conversations.json in the zip archive. Please upload the original ChatGPT data export."
-        );
-        setImporting(false);
-        return;
-      }
-      conversationsBlob = await entry.async("blob");
+      conversationsBlob = await extractConversationsBlob(file);
     } catch (err) {
       console.error("Error reading ChatGPT export zip:", err);
       setError(
-        "Could not read the zip file. Please make sure it's a valid ChatGPT data export."
+        err && err.userMessage
+          ? err.userMessage
+          : "Could not read the zip file. Please make sure it's a valid ChatGPT data export."
       );
       setImporting(false);
+      setImportStage(null);
       return;
     }
 
     const formData = new FormData();
     formData.append("conversations_file", conversationsBlob, "conversations.json");
 
+    setImportStage("analyzing");
     api.post("/import/chatgpt/analyze", formData, {
       headers: { "Content-Type": "multipart/form-data" }
     })
@@ -362,6 +384,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         setChatGPTImportData(response.data);
         setShowChatGPTImportDialog(true);
         setImporting(false);
+        setImportStage(null);
       })
       .catch((err) => {
         console.error("Error analyzing ChatGPT import:", err);
@@ -382,6 +405,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         }
         setError(msg);
         setImporting(false);
+        setImportStage(null);
       });
   };
 
@@ -389,6 +413,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     if (!chatGPTImportData) return;
 
     setImporting(true);
+    setImportStage("importing");
     api.post("/import/chatgpt/confirm", {
       conversations: chatGPTImportData.conversations,
       privacy_level: importPrivacy,
@@ -398,6 +423,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         setShowChatGPTImportDialog(false);
         setChatGPTImportData(null);
         setImporting(false);
+        setImportStage(null);
         setError("");
         if (response.data.profile_update_task_id && onProfileUpdateStarted) {
           onProfileUpdateStarted(response.data.profile_update_task_id);
@@ -408,6 +434,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         console.error("Error importing ChatGPT data:", err);
         setError(err.response?.data?.error || "Error importing ChatGPT data. Please try again.");
         setImporting(false);
+        setImportStage(null);
       });
   };
 
@@ -480,7 +507,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                 }}
               >
                 {importing
-                  ? (STAGE_LABELS[importStage] || "Analyzing…")
+                  ? <ImportSpinner stage={importStage} fallback="Analyzing…" />
                   : (buttonLabel || "Import Data")}
               </button>
             )}
@@ -635,7 +662,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                 opacity: importing ? 0.6 : 1
               }}
             >
-              {importing ? "Importing..." : "Confirm Import"}
+              {importing ? <ImportSpinner stage={importStage} fallback="Importing…" /> : "Confirm Import"}
             </button>
             <button
               onClick={handleCancelImport}
@@ -690,7 +717,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                 opacity: importing ? 0.6 : 1
               }}
             >
-              {importing ? "Importing..." : "Confirm Import"}
+              {importing ? <ImportSpinner stage={importStage} fallback="Importing…" /> : "Confirm Import"}
             </button>
             <button
               onClick={handleCancelClaudeImport}
@@ -745,7 +772,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                 opacity: importing ? 0.6 : 1
               }}
             >
-              {importing ? "Importing..." : "Confirm Import"}
+              {importing ? <ImportSpinner stage={importStage} fallback="Importing…" /> : "Confirm Import"}
             </button>
             <button
               onClick={handleCancelChatGPTImport}
@@ -858,7 +885,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                 opacity: importing ? 0.6 : 1
               }}
             >
-              {importing ? "Importing..." : "Confirm Import"}
+              {importing ? <ImportSpinner stage={importStage} fallback="Importing…" /> : "Confirm Import"}
             </button>
             <button
               onClick={handleCancelTwitterImport}
