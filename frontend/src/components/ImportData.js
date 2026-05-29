@@ -26,6 +26,74 @@ const cancelBtnStyle = {
   ...ghostBtnStyle,
 };
 
+// Coarse stage labels shown while an import is in flight.
+const STAGE_LABELS = {
+  extracting: "Extracting…",
+  analyzing: "Analyzing…",
+  importing: "Importing…",
+};
+
+function importErr(userMessage) {
+  const e = new Error(userMessage);
+  e.userMessage = userMessage;
+  return e;
+}
+
+// Extract the conversations.json blob from a Claude/ChatGPT export zip in
+// the browser, so the full (potentially multi-GB) export with images/audio
+// never has to traverse the network.
+//
+// Entry matching is intentionally flexible:
+//   1. Prefer a file entry whose name ends with "conversations.json".
+//   2. Otherwise fall back to the largest .json entry whose parsed
+//      top-level value is an array (the export's conversation list).
+// Throws an Error with a `.userMessage` if no suitable entry is found or
+// the zip cannot be read.
+async function extractConversationsBlob(file) {
+  let zip;
+  try {
+    zip = await JSZip.loadAsync(file);
+  } catch {
+    throw importErr(
+      "Could not read the zip file. Please make sure it's a valid data export."
+    );
+  }
+
+  const entries = Object.values(zip.files).filter((f) => !f.dir);
+
+  const named = entries.find((f) => f.name.endsWith("conversations.json"));
+  if (named) {
+    return named.async("blob");
+  }
+
+  // Fallback: among .json entries, pick the largest whose top-level
+  // parsed value is an array. Sort by uncompressed size descending so we
+  // parse the most likely candidate first.
+  const jsonEntries = entries
+    .filter((f) => f.name.toLowerCase().endsWith(".json"))
+    .sort((a, b) => {
+      const sa = (a._data && a._data.uncompressedSize) || 0;
+      const sb = (b._data && b._data.uncompressedSize) || 0;
+      return sb - sa;
+    });
+
+  for (const entry of jsonEntries) {
+    try {
+      const text = await entry.async("string");
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) {
+        return new Blob([text], { type: "application/json" });
+      }
+    } catch {
+      // Not valid JSON or not an array — keep looking.
+    }
+  }
+
+  throw importErr(
+    "Could not find conversations.json in the zip archive. Please upload the original data export."
+  );
+}
+
 export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel, buttonHoverStyle, onProfileUpdateStarted, inline }) {
   const btnStyle = customButtonStyle || ghostBtnStyle;
   const [hovered, setHovered] = useState(false);
@@ -34,6 +102,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
   const [importType, setImportType] = useState("separate_nodes");
   const [dateOrdering, setDateOrdering] = useState("modified");
   const [importing, setImporting] = useState(false);
+  const [importStage, setImportStage] = useState(null);
   const [importPrivacy, setImportPrivacy] = useState("private");
   const [importAiUsage, setImportAiUsage] = useState("none");
   const [error, setError] = useState("");
@@ -176,15 +245,34 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     setTwitterImportData(null);
   };
 
-  const handleClaudeImportFile = (event) => {
+  const handleClaudeImportFile = async (event) => {
     const file = event.target.files[0];
+    event.target.value = "";
     if (!file) return;
 
-    const formData = new FormData();
-    formData.append("zip_file", file);
-
     setImporting(true);
+    setImportStage("extracting");
     setShowPicker(false);
+
+    let conversationsBlob;
+    try {
+      conversationsBlob = await extractConversationsBlob(file);
+    } catch (err) {
+      console.error("Error reading Claude export zip:", err);
+      setError(
+        err && err.userMessage
+          ? err.userMessage
+          : "Could not read the zip file. Please make sure it's a valid Claude data export."
+      );
+      setImporting(false);
+      setImportStage(null);
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append("conversations_file", conversationsBlob, "conversations.json");
+
+    setImportStage("analyzing");
     api.post("/import/claude/analyze", formData, {
       headers: { "Content-Type": "multipart/form-data" }
     })
@@ -192,14 +280,14 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         setClaudeImportData(response.data);
         setShowClaudeImportDialog(true);
         setImporting(false);
+        setImportStage(null);
       })
       .catch((err) => {
         console.error("Error analyzing Claude import:", err);
         setError(err.response?.data?.error || "Error analyzing Claude export. Please try again.");
         setImporting(false);
+        setImportStage(null);
       });
-
-    event.target.value = "";
   };
 
   const handleConfirmClaudeImport = () => {
@@ -391,7 +479,9 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                   opacity: importing ? 0.6 : 1,
                 }}
               >
-                {importing ? "Analyzing..." : (buttonLabel || "Import Data")}
+                {importing
+                  ? (STAGE_LABELS[importStage] || "Analyzing…")
+                  : (buttonLabel || "Import Data")}
               </button>
             )}
 
