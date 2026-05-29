@@ -82,7 +82,12 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
         : `${process.env.REACT_APP_BACKEND_URL}${data.tts_url}`;
       setAudioSrc(finalUrl);
     }
-  }, [setGeneratingTTS]);
+    // Fresh generation completes via this SSE path (the tts-status poll is
+    // only a fallback), so tell the parent the entry now has TTS — this is
+    // what makes the edit "regenerate audio?" prompt (#66) fire without a
+    // page refresh.
+    if (onTtsGenerated) onTtsGenerated();
+  }, [setGeneratingTTS, onTtsGenerated]);
 
   const { disconnect: disconnectSSE } = useTTSStreamSSE(id, {
     enabled: sseActive,
