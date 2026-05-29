@@ -1,5 +1,3 @@
-import re
-
 from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
 from backend.models import Node, User, UserProfile
@@ -9,6 +7,7 @@ from backend.utils.privacy import (
     accessible_nodes_filter, VALID_PRIVACY_LEVELS, VALID_AI_USAGE,
 )
 from backend.routes.terms import CURRENT_TERMS_VERSION
+from backend.utils.reserved_usernames import validate_username
 
 dashboard_bp = Blueprint("dashboard_bp", __name__)
 
@@ -191,21 +190,11 @@ def update_user():
 
     if new_username:
         new_username = new_username.strip()
-        if not new_username:
-            return jsonify({"error": "Username cannot be empty."}), 400
-        if len(new_username) > 64:
-            return jsonify({"error": "Username must be 64 characters or fewer."}), 400
-        if not re.fullmatch(r'[a-zA-Z0-9_]+', new_username):
-            return jsonify({
-                "error": "Username may only contain letters, numbers, and underscores."
-            }), 400
-        # Case-insensitive uniqueness check (exclude current user)
-        existing = User.query.filter(
-            db.func.lower(User.username) == new_username.lower(),
-            User.id != current_user.id
-        ).first()
-        if existing:
-            return jsonify({"error": "That username is already taken."}), 400
+        # Validates non-empty, length, allowed chars, reserved names, and
+        # case-insensitive uniqueness (excluding the current user's own row).
+        error = validate_username(new_username, exclude_user_id=current_user.id)
+        if error:
+            return jsonify({"error": error}), 400
         current_user.username = new_username
 
     if new_description is not None:
