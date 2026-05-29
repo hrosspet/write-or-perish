@@ -244,6 +244,10 @@ class Node(db.Model):
     # Soft-delete: non-NULL means scheduled for cleanup after SOFT_DELETE_GRACE_DAYS.
     deleted_at = db.Column(db.DateTime, nullable=True, index=True)
 
+    # Stable per-message identity used to deduplicate imported data.
+    # Scoped per user (see import_data.py). NULL for natively-created nodes.
+    source_key = db.Column(db.String(255), nullable=True, index=True)
+
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
