@@ -16,6 +16,7 @@ const GlobalAudioPlayer = () => {
     play,
     pause,
     stop,
+    closePlayer,
     skipBackward,
     skipForward,
     seekToCumulativeTime,
@@ -279,11 +280,33 @@ const GlobalAudioPlayer = () => {
     </>
   );
 
-  // Desktop: render inline inside the NavBar row (unchanged).
+  // Desktop: render inline inside the NavBar row. Stop (the square button in
+  // `inner`) resets to 0 and keeps the player visible (#161); the X below
+  // fully dismisses it.
   if (!isMobile) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
         {inner}
+        {/* Close — full teardown + hide the player (#161 closePlayer). */}
+        <button
+          onClick={closePlayer}
+          title="Close player"
+          aria-label="Close player"
+          style={{
+            background: 'none',
+            border: 'none',
+            color: 'var(--text-muted)',
+            cursor: 'pointer',
+            fontSize: '1rem',
+            lineHeight: 1,
+            flexShrink: 0,
+            padding: '4px',
+            display: 'flex',
+            alignItems: 'center',
+          }}
+        >
+          ✕
+        </button>
       </div>
     );
   }
@@ -316,11 +339,12 @@ const GlobalAudioPlayer = () => {
       }}
     >
       {inner}
-      {/* Close — dismiss the floating player. Uses the existing stop()
-          (full teardown) for now; resetting-without-hiding is tracked
-          separately in #161. */}
+      {/* Close — full teardown + hide the floating player (#161
+          closePlayer). The Stop button inside `inner` resets playback to 0
+          and keeps the player visible; only this X (or a refresh) dismisses
+          it. */}
       <button
-        onClick={stop}
+        onClick={closePlayer}
         title="Close player"
         aria-label="Close player"
         style={{
