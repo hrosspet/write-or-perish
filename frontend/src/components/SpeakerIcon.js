@@ -27,7 +27,7 @@ const extractMarkdownHeader = (content) => {
  * SpeakerIcon component fetches and plays audio for a node or profile.
  * Shows loading spinner, play/pause state.
  */
-const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage }) => {
+const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGenerated }) => {
   const { user } = useUser();
   const { loadAudio, loadAudioQueue, appendChunkToQueue, setGeneratingTTS, currentAudio, isPlaying, warmup } = useAudio();
   const [loading, setLoading] = useState(false);
@@ -82,7 +82,12 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage }) => {
         : `${process.env.REACT_APP_BACKEND_URL}${data.tts_url}`;
       setAudioSrc(finalUrl);
     }
-  }, [setGeneratingTTS]);
+    // Fresh generation completes via this SSE path (the tts-status poll is
+    // only a fallback), so tell the parent the entry now has TTS — this is
+    // what makes the edit "regenerate audio?" prompt (#66) fire without a
+    // page refresh.
+    if (onTtsGenerated) onTtsGenerated();
+  }, [setGeneratingTTS, onTtsGenerated]);
 
   const { disconnect: disconnectSSE } = useTTSStreamSSE(id, {
     enabled: sseActive,
@@ -101,7 +106,12 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage }) => {
     { enabled: ttsTaskActive }
   );
 
-  // Reset audio state when the node/profile changes
+  // Reset cached audio when the node/profile changes OR its content is
+  // edited. Without the `content` dependency, editing a node and choosing
+  // "regenerate" cleared the server-side audio but this component kept its
+  // cached audioSrc/chunks, so the next play replayed the stale clip
+  // instead of regenerating (#66). Content only changes on a real edit, so
+  // this correctly invalidates the cache exactly then.
   useEffect(() => {
     setAudioSrc(null);
     setAudioChunks(null);
@@ -110,7 +120,7 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage }) => {
     setTtsTaskActive(false);
     setSseActive(false);
     sseChunkCountRef.current = 0;
-  }, [nodeId, profileId]);
+  }, [nodeId, profileId, content]);
 
   // Clean up SSE on unmount
   useEffect(() => {
@@ -136,6 +146,11 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage }) => {
         setTimeout(() => {
           loadAudio({ url: srcUrl, title: fullTitle, id, type: isNode ? 'node' : 'profile' });
         }, 500);
+        // Tell the parent this entry now has generated TTS, so its cached
+        // node/profile object updates without a page refresh — otherwise the
+        // edit flow's "regenerate audio?" prompt (#66) wouldn't fire until
+        // the page is reloaded.
+        if (onTtsGenerated) onTtsGenerated();
       }
       setTtsTaskActive(false);
       setLoading(false);
@@ -144,7 +159,7 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage }) => {
       setTtsTaskActive(false);
       setLoading(false);
     }
-  }, [ttsStatus, ttsData, ttsError, isNode, id, loadAudio, fullTitle]);
+  }, [ttsStatus, ttsData, ttsError, isNode, id, loadAudio, fullTitle, onTtsGenerated]);
 
   // Show for voice-mode users, or for any authenticated user on public posts
   if (!user || (!user.voice_mode_enabled && !isPublic)) {

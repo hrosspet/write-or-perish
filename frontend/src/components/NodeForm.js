@@ -4,13 +4,14 @@ import { useDraft } from "../hooks/useDraft";
 import { useUser } from "../contexts/UserContext";
 import StreamingMicButton from "./StreamingMicButton";
 import PrivacySelector from "./PrivacySelector";
+import RegenerateTtsDialog from "./RegenerateTtsDialog";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import api from "../api";
 import { uploadFileInChunks } from "../utils/chunkedUpload";
 
 const NodeForm = forwardRef(
   (
-    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, compact = false, hideAudioUpload = false, allowAgenticPrompt = false },
+    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false },
     ref
   ) => {
     const { user } = useUser();
@@ -22,6 +23,9 @@ const NodeForm = forwardRef(
     const [uploadProgress, setUploadProgress] = useState(0);
     const [isUploading, setIsUploading] = useState(false);
     const [hasDraft, setHasDraft] = useState(false);
+    // When editing an entry that has generated TTS, ask whether to keep or
+    // regenerate the now-stale audio before saving (#66).
+    const [showTtsDialog, setShowTtsDialog] = useState(false);
 
     // Remember the user's last privacy / AI-usage choices for fresh
     // top-level entries (#63), so they don't have to re-pick every time.
@@ -273,7 +277,7 @@ const NodeForm = forwardRef(
       setContent("");
     };
 
-    const handleSubmit = async (event) => {
+    const handleSubmit = async (event, regenerateTts) => {
       event && event.preventDefault();
       // Validate: require content or audio
       if (!editMode && uploadedFile) {
@@ -282,6 +286,19 @@ const NodeForm = forwardRef(
         setError("Content is required.");
         return;
       }
+
+      // Editing an entry that has generated TTS and whose text actually
+      // changed: ask whether to keep or regenerate the now-stale audio
+      // before saving (#66). `regenerateTts` is undefined on the initial
+      // submit (→ open the dialog) and a boolean once the user has chosen.
+      if (
+        editMode && nodeId && hasGeneratedTts && regenerateTts === undefined
+        && content !== initialContent
+      ) {
+        setShowTtsDialog(true);
+        return;
+      }
+
       setLoading(true);
       setError("");
       try {
@@ -357,6 +374,7 @@ const NodeForm = forwardRef(
             privacy_level: privacyLevel,
             ai_usage: aiUsage,
             ...(detachPrompt && { detach_prompt: true }),
+            ...(regenerateTts && { regenerate_tts: true }),
           });
         } else if (uploadedFile) {
           // Upload audio file
@@ -503,6 +521,7 @@ const NodeForm = forwardRef(
     };
 
     return (
+      <>
       <form onSubmit={handleSubmit}>
         {/* Text entry */}
         <textarea
@@ -869,6 +888,16 @@ const NodeForm = forwardRef(
           </div>
         )}
       </form>
+      <RegenerateTtsDialog
+        open={showTtsDialog}
+        onClose={() => setShowTtsDialog(false)}
+        onChoice={(regenerate) => {
+          setShowTtsDialog(false);
+          // Resume the save with the user's choice (no event object).
+          handleSubmit(null, regenerate);
+        }}
+      />
+      </>
     );
   }
 );

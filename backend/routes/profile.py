@@ -244,6 +244,14 @@ def update_profile(profile_id):
     if not new_content.strip():
         return jsonify({"error": "Content cannot be empty"}), 400
 
+    # Editing the text makes generated TTS audio stale. The frontend asks
+    # the user whether to keep or regenerate and only sends
+    # regenerate_tts=true when they choose to regenerate; we then clear the
+    # audio so fresh TTS is generated on the next request (#66).
+    if data.get("regenerate_tts") and new_content != profile.get_content():
+        from backend.utils.audio_storage import clear_tts_artifacts
+        clear_tts_artifacts(profile)
+
     profile.set_content(new_content)
 
     # Handle privacy settings updates (optional)

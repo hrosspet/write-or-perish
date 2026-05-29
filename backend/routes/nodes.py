@@ -496,6 +496,10 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
         "user_id": n.user_id,
         "parent_user_id": parent_user_id,
         "children": children_data,
+        # Generated-TTS flag — drives the "regenerate audio?" edit prompt
+        # (#66). Needed here too because Edit can be launched from a
+        # child/list node, not just the focal one.
+        "has_tts": bool(n.audio_tts_url),
     }
     data.update(_system_prompt_fields(n))
     return data
@@ -729,8 +733,20 @@ def update_node(node_id):
 
     # Save the current version before update.
     version = NodeVersion(node_id=node.id)
-    version.set_content(node.get_content())
+    old_content = node.get_content()
+    version.set_content(old_content)
     db.session.add(version)
+
+    # Editing the text makes any generated TTS audio stale. Rather than
+    # silently dropping it, the frontend asks the user whether to keep or
+    # regenerate and only sends regenerate_tts=true when they choose to
+    # regenerate — at which point we clear audio_tts_url + the per-chunk
+    # rows so fresh audio is generated on the next request (#66). Original
+    # voice recordings (audio_original_url) are never touched.
+    if data.get("regenerate_tts") and new_content != old_content:
+        from backend.utils.audio_storage import clear_tts_artifacts
+        clear_tts_artifacts(node)
+
     node.set_content(new_content)
     try:
         db.session.commit()
@@ -865,6 +881,10 @@ def get_node(node_id):
         "llm_model": node.llm_model,
         "llm_task_status": node.llm_task_status,
         "has_original_audio": bool(node.audio_original_url or node.streaming_transcription),
+        # Whether this node has GENERATED TTS audio (distinct from an
+        # original voice recording). Drives the "regenerate audio?" edit
+        # prompt (#66).
+        "has_tts": bool(node.audio_tts_url),
     }
     # Include tool call metadata for LLM nodes
     if node.tool_calls_meta:
@@ -1156,7 +1176,9 @@ def get_audio_urls(node_id):
         """Check if the file (or its .enc version) exists on disk."""
         if not url:
             return False
-        rel_path = url.replace("/media/", "", 1)
+        # Strip any cache-busting query string (e.g. tts.mp3?v=123, #66)
+        # before resolving the on-disk path.
+        rel_path = url.replace("/media/", "", 1).split("?", 1)[0]
         file_path = AUDIO_STORAGE_ROOT / rel_path
         enc_path = AUDIO_STORAGE_ROOT / (rel_path + '.enc')
         return file_path.is_file() or enc_path.is_file()

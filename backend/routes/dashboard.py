@@ -37,6 +37,9 @@ def get_latest_profile(user):
                 if profile.source_data_cutoff else None
             ),
             "generation_type": profile.generation_type,
+            # Whether this profile has generated TTS audio — drives the
+            # "regenerate audio?" edit prompt (#66).
+            "has_tts": bool(profile.audio_tts_url),
         }
     return None
 
