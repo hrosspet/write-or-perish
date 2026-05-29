@@ -1,6 +1,8 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import api from '../api';
 import MarkdownBody from './MarkdownBody';
+import { appendItemToSection } from '../utils/markdown';
+import useSubmitShortcut from '../hooks/useSubmitShortcut';
 
 export function stripInlineMarkdown(text) {
   return text.replace(/\*\*(.+?)\*\*/g, '$1').replace(/__(.+?)__/g, '$1');
@@ -343,6 +345,10 @@ export default function ProposalInline({
   const [issueApplyError, setIssueApplyError] = useState(null);
   const [issueResult, setIssueResult] = useState(null);
   const mergePollingRef = useRef(null);
+  const [quickAddOpen, setQuickAddOpen] = useState(false);
+  const [quickAddText, setQuickAddText] = useState('');
+  const [quickAddSaving, setQuickAddSaving] = useState(false);
+  const quickAddInputRef = useRef(null);
   const styles = sizeStyles(size);
   const toggleable = typeof onContentChange === 'function'
     && applyStatus !== 'completed'
@@ -363,6 +369,51 @@ export default function ProposalInline({
       }
     });
   }, [content, nodeId, onContentChange, onError, toggleable]);
+
+  // Quick-add a task to the proposal's "New Tasks" section (#108), mirroring
+  // the Todo-page quick-add. Reuses appendItemToSection + the same optimistic
+  // PUT /nodes/:id persist+revert path as the toggle above, so the added task
+  // is included when the user clicks "Apply changes to my Todo".
+  const handleQuickAddTask = useCallback(() => {
+    const task = quickAddText.trim();
+    if (!toggleable || !nodeId || !task || quickAddSaving) return;
+    const newContent = appendItemToSection(content, 'new task', task, {
+      headingLevel: 3,
+      match: 'includes',
+      itemPrefix: '- ',
+      createTitle: 'New Tasks',
+    });
+    if (newContent === content) return;
+    const prevContent = content;
+    setQuickAddSaving(true);
+    setQuickAddText('');
+    onContentChange(newContent);
+    api.put(`/nodes/${nodeId}`, { content: newContent })
+      .then(() => {
+        // Keep the input open + focused for rapid entry of multiple tasks.
+        if (quickAddInputRef.current) quickAddInputRef.current.focus();
+      })
+      .catch((err) => {
+        console.error('Failed to add proposal task:', err);
+        onContentChange(prevContent);
+        setQuickAddText(task);
+        if (onError) {
+          const reason = err.response?.data?.error || err.response?.statusText || err.message || 'Unknown error';
+          onError(`Couldn't add task — reverted (${reason})`);
+        }
+      })
+      .finally(() => setQuickAddSaving(false));
+  }, [content, nodeId, onContentChange, onError, toggleable, quickAddText, quickAddSaving]);
+
+  // Cmd+Return (macOS) / Ctrl+Enter (Win/Linux) submits the quick-add input,
+  // matching the primary-submit shortcut used across the app (#129). Plain
+  // Enter is still handled by the input's onKeyDown below; this just adds the
+  // modifier chord. Enabled mirrors the Add button's disabled state.
+  useSubmitShortcut(
+    quickAddInputRef,
+    handleQuickAddTask,
+    quickAddOpen && !quickAddSaving && !!quickAddText.trim(),
+  );
 
   useEffect(() => {
     if (!toolCallsMeta) return;
@@ -502,6 +553,86 @@ export default function ProposalInline({
                   <div style={styles.itemText}>{item}</div>
                 </div>
               ))}
+              {toggleable && (
+                quickAddOpen ? (
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: '8px',
+                    padding: styles.roomy ? '12px 0' : '8px 0',
+                  }}>
+                    <input
+                      ref={quickAddInputRef}
+                      value={quickAddText}
+                      onChange={(e) => setQuickAddText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) {
+                          e.preventDefault();
+                          handleQuickAddTask();
+                        } else if (e.key === 'Escape') {
+                          setQuickAddOpen(false);
+                          setQuickAddText('');
+                        }
+                      }}
+                      placeholder="Add a task and press Enter"
+                      disabled={quickAddSaving}
+                      style={{
+                        flex: 1,
+                        background: 'var(--bg-input)',
+                        border: '1px solid var(--border)',
+                        borderRadius: '6px',
+                        color: 'var(--text-primary)',
+                        fontFamily: 'var(--sans)',
+                        fontSize: styles.roomy ? '0.92rem' : '0.85rem',
+                        fontWeight: 300,
+                        padding: '8px 12px',
+                      }}
+                    />
+                    <button
+                      onClick={handleQuickAddTask}
+                      disabled={quickAddSaving || !quickAddText.trim()}
+                      style={{
+                        padding: '8px 16px',
+                        background: 'var(--accent)',
+                        border: 'none',
+                        borderRadius: '6px',
+                        color: 'var(--bg-deep)',
+                        fontFamily: 'var(--sans)',
+                        fontSize: styles.roomy ? '0.85rem' : '0.8rem',
+                        fontWeight: 400,
+                        cursor: (quickAddSaving || !quickAddText.trim()) ? 'not-allowed' : 'pointer',
+                        opacity: (quickAddSaving || !quickAddText.trim()) ? 0.5 : 1,
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {quickAddSaving ? 'Adding…' : 'Add'}
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => {
+                      setQuickAddOpen(true);
+                      setTimeout(() => {
+                        if (quickAddInputRef.current) quickAddInputRef.current.focus();
+                      }, 0);
+                    }}
+                    aria-label="Add a task"
+                    title="Add a task"
+                    style={{
+                      width: styles.roomy ? '24px' : '22px',
+                      height: styles.roomy ? '24px' : '22px',
+                      borderRadius: '50%',
+                      border: '1px dashed var(--border-hover)',
+                      background: 'none',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      cursor: 'pointer', padding: 0,
+                      color: 'var(--text-muted)',
+                      fontFamily: 'var(--sans)', fontWeight: 300,
+                      fontSize: styles.roomy ? '1.1rem' : '1rem', lineHeight: 1,
+                      marginTop: styles.roomy ? '12px' : '8px',
+                      transition: 'all 0.2s ease',
+                    }}
+                  >+</button>
+                )
+              )}
             </div>
           )}
 

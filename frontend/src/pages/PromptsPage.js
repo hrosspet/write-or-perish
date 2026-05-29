@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../api';
+import { formatDate as formatDateShared } from '../utils/date';
 
 export default function PromptsPage() {
   const [prompts, setPrompts] = useState([]);
@@ -18,11 +19,7 @@ export default function PromptsPage() {
       });
   }, []);
 
-  const formatDate = (iso) => {
-    if (!iso) return 'default';
-    const d = new Date(iso);
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-  };
+  const formatDate = (iso) => formatDateShared(iso, { fallback: 'default' });
 
   const generatedByLabel = (g) => {
     if (g === 'default') return 'default';

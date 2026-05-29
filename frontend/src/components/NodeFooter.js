@@ -2,6 +2,7 @@ import React from 'react';
 import { Link } from 'react-router-dom';
 import { FaRegCommentDots } from 'react-icons/fa';
 import { useUser } from '../contexts/UserContext';
+import { formatDateTime } from '../utils/date';
 
 const NodeFooter = ({ username, createdAt, childrenCount, humanOwnerUsername, llmModel, onReplyClick, children }) => {
   const { user } = useUser();
@@ -15,7 +16,7 @@ const NodeFooter = ({ username, createdAt, childrenCount, humanOwnerUsername, ll
   // Link goes to human owner's dashboard for LLM nodes
   const linkUsername = humanOwnerUsername || username;
   const linkUrl = user && user.username === linkUsername ? '/dashboard' : `/dashboard/${linkUsername}`;
-  const formattedDateTime = createdAt ? new Date(createdAt).toLocaleString() : "";
+  const formattedDateTime = formatDateTime(createdAt);
 
   const replyIcon = (
     <>

@@ -1,8 +1,10 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import MarkdownBody from '../components/MarkdownBody';
 import api from '../api';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
+import useSubmitShortcut from '../hooks/useSubmitShortcut';
+import { formatDate as formatDateShared } from '../utils/date';
 
 export default function PromptDetailPage() {
   const { promptKey } = useParams();
@@ -11,6 +13,7 @@ export default function PromptDetailPage() {
   const [editing, setEditing] = useState(false);
   const [editContent, setEditContent] = useState('');
   const [saving, setSaving] = useState(false);
+  const editTextareaRef = useRef(null);
 
   // Version history
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -130,11 +133,10 @@ export default function PromptDetailPage() {
     setDismissing(false);
   };
 
-  const formatDate = (iso) => {
-    if (!iso) return 'default';
-    const d = new Date(iso);
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-  };
+  // Cmd+Return / Ctrl+Enter saves the prompt while editing (#129).
+  useSubmitShortcut(editTextareaRef, () => handleSave(), editing && !saving && !!editContent.trim());
+
+  const formatDate = (iso) => formatDateShared(iso, { fallback: 'default' });
 
   const generatedByLabel = (g) => {
     if (g === 'default') return 'default';
@@ -313,6 +315,7 @@ export default function PromptDetailPage() {
       {editing && (
         <div>
           <textarea
+            ref={editTextareaRef}
             value={editContent}
             onChange={(e) => setEditContent(e.target.value)}
             style={{

@@ -1,8 +1,9 @@
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { useUser } from "../contexts/UserContext";
 import ModelSelector from "../components/ModelSelector";
 import api from "../api";
+import useSubmitShortcut from "../hooks/useSubmitShortcut";
 
 export default function AccountPage() {
   const { user, setUser } = useUser();
@@ -12,6 +13,7 @@ export default function AccountPage() {
   const [username, setUsername] = useState(user?.username || "");
   const [usernameSaving, setUsernameSaving] = useState(false);
   const [usernameMsg, setUsernameMsg] = useState(null); // { type, text }
+  const usernameInputRef = useRef(null);
 
   const [selectedModel, setSelectedModel] = useState(user?.preferred_model || null);
 
@@ -49,6 +51,14 @@ export default function AccountPage() {
       setUsernameSaving(false);
     }
   };
+
+  // Cmd+Return / Ctrl+Enter saves the username (#129). Plain Enter already
+  // saves via the input's onKeyDown; this keeps the shortcut uniform.
+  useSubmitShortcut(
+    usernameInputRef,
+    () => { if (!usernameSaving && username.trim() !== user?.username) saveUsername(); },
+    !usernameSaving && username.trim() !== user?.username,
+  );
 
   const handleModelChange = useCallback(
     async (model) => {
@@ -141,6 +151,7 @@ export default function AccountPage() {
         <div style={labelStyle}>Username</div>
         <div style={{ display: "flex", gap: "8px" }}>
           <input
+            ref={usernameInputRef}
             value={username}
             onChange={(e) => {
               setUsername(e.target.value);
