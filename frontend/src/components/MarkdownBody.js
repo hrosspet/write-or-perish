@@ -54,8 +54,51 @@ function replaceCheckboxes(children, renderToggle) {
  */
 const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', onCheckboxToggle }) => {
   const components = {
+    h1: ({ node, ...props }) => (
+      <h1 style={{ fontFamily: 'var(--serif)', fontSize: '2.2em', fontWeight: 700, lineHeight: 1.2, margin: '1.2em 0 0.4em', color: 'var(--text-primary)' }} {...props} />
+    ),
+    h2: ({ node, ...props }) => (
+      <h2 style={{ fontFamily: 'var(--serif)', fontSize: '1.8em', fontWeight: 700, lineHeight: 1.25, margin: '1.1em 0 0.4em', color: 'var(--text-primary)' }} {...props} />
+    ),
+    h3: ({ node, ...props }) => (
+      <h3 style={{ fontFamily: 'var(--serif)', fontSize: '1.5em', fontWeight: 600, lineHeight: 1.3, margin: '1em 0 0.35em', color: 'var(--text-primary)' }} {...props} />
+    ),
+    h4: ({ node, ...props }) => (
+      <h4 style={{ fontFamily: 'var(--serif)', fontSize: '1.25em', fontWeight: 600, lineHeight: 1.3, margin: '1em 0 0.35em', color: 'var(--text-primary)' }} {...props} />
+    ),
+    h5: ({ node, ...props }) => (
+      <h5 style={{ fontFamily: 'var(--serif)', fontSize: '1.1em', fontWeight: 600, lineHeight: 1.35, margin: '0.9em 0 0.3em', color: 'var(--text-primary)' }} {...props} />
+    ),
+    h6: ({ node, ...props }) => (
+      <h6 style={{ fontFamily: 'var(--serif)', fontSize: '0.95em', fontWeight: 600, lineHeight: 1.35, margin: '0.9em 0 0.3em', color: 'var(--text-primary)' }} {...props} />
+    ),
     p: ({ node, ...props }) => (
       <p style={{ whiteSpace: 'pre-wrap', overflowWrap: 'break-word', margin: paragraphMargin }} {...props} />
+    ),
+    blockquote: ({ node, ...props }) => (
+      <blockquote
+        style={{
+          borderLeft: '3px solid var(--accent-dim)',
+          background: 'var(--bg-card)',
+          padding: '0.5em 1em',
+          margin: '0.75em 0',
+          color: 'var(--text-secondary)',
+          fontStyle: 'italic',
+        }}
+        {...props}
+      />
+    ),
+    strong: ({ node, ...props }) => (
+      <strong style={{ fontWeight: 700 }} {...props} />
+    ),
+    em: ({ node, ...props }) => (
+      <em style={{ fontStyle: 'italic' }} {...props} />
+    ),
+    del: ({ node, ...props }) => (
+      <del style={{ textDecoration: 'line-through', color: 'var(--text-muted)' }} {...props} />
+    ),
+    img: ({ node, ...props }) => (
+      <img style={{ maxWidth: '100%', height: 'auto' }} {...props} />
     ),
     ul: ({ node, ...props }) => (
       <ul style={{ margin: '4px 0', paddingLeft: '24px' }} {...props} />
@@ -147,15 +190,27 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', onCheckbox
     hr: ({ node, ...props }) => (
       <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '20px 0' }} {...props} />
     ),
+    pre: ({ node, ...props }) => (
+      <pre
+        style={{
+          background: 'var(--bg-card)',
+          border: '1px solid var(--border)',
+          borderRadius: '6px',
+          padding: '0.75em 1em',
+          margin: '0.75em 0',
+          overflowX: 'auto',
+          fontSize: '0.9em',
+        }}
+        {...props}
+      />
+    ),
     code: ({ node, inline, className, children, ...props }) =>
       inline ? (
         <code style={{ whiteSpace: 'pre-wrap', overflowWrap: 'break-word', fontSize: '0.9em' }} {...props}>
           {children}
         </code>
       ) : (
-        <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'break-word', fontSize: '0.9em' }} {...props}>
-          <code>{children}</code>
-        </pre>
+        <code className={className} {...props}>{children}</code>
       ),
     a: ({ node, children, ...props }) => (
       <a
