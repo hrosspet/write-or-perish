@@ -15,9 +15,43 @@ function useOnScreen(ref, threshold = 0.15) {
   return visible;
 }
 
+// True once the user has scrolled the page at all. On tall desktop
+// screens the whole first narrative section can fit within the initial
+// viewport, so an in-view check alone fades it in before any scroll. We
+// additionally gate on this so narrative sections only reveal after the
+// user initiates scrolling. Starts true if the page is already scrolled
+// (e.g. restored position / deep link). (#98)
+function useHasScrolled() {
+  const [scrolled, setScrolled] = useState(() =>
+    typeof window !== "undefined" && window.scrollY > 0
+  );
+  useEffect(() => {
+    if (scrolled) return undefined;
+    const onScroll = () => {
+      if (window.scrollY > 0) setScrolled(true);
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    // Sync in case a scroll happened between render and effect.
+    if (window.scrollY > 0) setScrolled(true);
+    return () => window.removeEventListener("scroll", onScroll);
+  }, [scrolled]);
+  return scrolled;
+}
+
 function FadeSection({ children, delay = 0, className = "", style = {} }) {
   const ref = useRef(null);
-  const visible = useOnScreen(ref, 0.1);
+  const inView = useOnScreen(ref, 0.1);
+  const hasScrolled = useHasScrolled();
+  // Reveal only when the section is in view AND the user has scrolled, so
+  // a section that already fits in the initial viewport (tall desktop)
+  // doesn't appear until scrolling begins. The reveal latches on (stays
+  // visible thereafter). Mobile is unaffected — its sections sit below
+  // the fold and only enter view after scrolling anyway. (#98)
+  const [revealed, setRevealed] = useState(false);
+  useEffect(() => {
+    if (inView && hasScrolled) setRevealed(true);
+  }, [inView, hasScrolled]);
+  const visible = revealed;
   return (
     <div
       ref={ref}
@@ -65,13 +99,21 @@ const styles = {
     }
 
     .loore-hero {
-      min-height: 100vh;
+      /* Content-sized hero (NOT forced to full viewport). The scroll line
+         sits a fixed ~40px below the CTA as part of this block — always
+         visible and close to the content on every screen — and the first
+         narrative section follows directly, so there's no dead band and
+         it "pops up" right away on scroll. Earlier full-height + either
+         absolute-bottom or margin-top:auto pinning put the line at the
+         screen edge (detached / below the fold across vh/svh/dvh). The
+         clamped top padding clears the fixed 56px navbar and keeps the
+         title in the upper area. (#98) */
       display: flex;
       flex-direction: column;
       align-items: center;
-      justify-content: center;
+      justify-content: flex-start;
       position: relative;
-      padding: 2rem;
+      padding: clamp(5rem, 18vh, 14rem) 2rem clamp(3rem, 8vh, 6rem);
       text-align: center;
     }
 
@@ -126,22 +168,26 @@ const styles = {
     }
 
     .loore-scroll-hint {
-      position: absolute;
-      bottom: 2.5rem;
-      left: 50%;
-      transform: translateX(-50%);
+      /* In normal flow, a fixed ~40px below the CTA (it follows the CTA in
+         the JSX). Not absolute and not margin-top:auto — both put the line
+         at the screen edge on tall viewports. Tied to the content, it's
+         reliably visible and close to the CTA on every screen. (#98) */
+      margin: 2.5rem auto 0;
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 0.5rem;
+      gap: 0.35rem;
       opacity: 0;
       animation: loore-fade-down 1s ease 1.5s forwards;
+      cursor: default;
     }
 
     .loore-scroll-line {
-      width: 1px;
+      width: 2px;
       height: 40px;
-      background: linear-gradient(to bottom, var(--text-muted), transparent);
+      /* Brighter, more opaque gradient so the cue reads clearly (was
+         fading from the very dim --text-muted); still tapers off. */
+      background: linear-gradient(to bottom, var(--text-secondary), rgba(255,255,255,0.05));
       animation: loore-pulse 2s ease-in-out infinite;
     }
 
@@ -151,8 +197,8 @@ const styles = {
     }
 
     @keyframes loore-pulse {
-      0%, 100% { opacity: 0.3; }
-      50% { opacity: 0.8; }
+      0%, 100% { opacity: 0.5; }
+      50% { opacity: 1; }
     }
 
     /* Narrative sections */
@@ -324,6 +370,15 @@ const styles = {
       .loore-section { padding: 4rem 0; }
       .loore-preview { padding: 3rem 1rem 5rem; }
       .loore-mockup-content { padding: 1.5rem 1.2rem; }
+
+      /* Mobile hero: a touch tighter top than the base rule. Logo margin
+         trimmed so the title sits in the upper third. The line stays
+         ~40px below the CTA (base rule). (#98) */
+      .loore-hero {
+        padding-top: 12vh;
+        padding-bottom: 2rem;
+      }
+      .loore-logo-mark { margin-bottom: 1.5rem; }
     }
   `,
 };
@@ -354,7 +409,7 @@ function LandingPage() {
           }}>
             <CtaButton href="/login?returnUrl=%2F">Join the Alpha</CtaButton>
           </div>
-          <div className="loore-scroll-hint">
+          <div className="loore-scroll-hint" aria-hidden="true">
             <div className="loore-scroll-line" />
           </div>
         </section>
