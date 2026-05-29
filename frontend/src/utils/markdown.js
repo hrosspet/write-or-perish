@@ -38,31 +38,54 @@ export function toggleCheckbox(content, itemText, currentChecked) {
 }
 
 /**
- * Append a new unchecked checkbox item (`- [ ] <task>`) to the END of a
- * named markdown section (a `## <sectionTitle>` heading) in `content`.
+ * Append a new list item to the END of a named markdown section in `content`.
  *
- * The item is inserted right after the last non-blank line that belongs to
- * the section (its heading and any list items / text), and before the blank
- * line(s) that separate it from the next `##` heading. This keeps existing
- * spacing between sections intact.
+ * Shared by the Todo page quick-add (`## Today`, issue #108) and the
+ * Voice/Text proposal quick-add (`### New Tasks` in ProposalInline). The
+ * item is inserted right after the last non-blank line that belongs to the
+ * section, and before the blank line(s) before the next heading — so existing
+ * spacing between sections is preserved. If the section isn't found, a fresh
+ * section (with `createTitle`) is appended so the task is never silently
+ * dropped.
  *
- * If the section is not found, the item (with the heading) is appended to the
- * end of the document so the task is never silently dropped.
+ * Options:
+ *   headingLevel — heading depth of the target section (2 = `##`, 3 = `###`).
+ *   match        — 'exact' matches the whole heading text; 'includes' matches
+ *                  a substring (e.g. 'new task' matches a `### New Tasks`).
+ *   itemPrefix   — prefix for the inserted line (`- [ ] ` for checklists,
+ *                  `- ` for plain bullet lists like the proposal sections).
+ *   createTitle  — heading text used when the section must be created
+ *                  (defaults to `sectionTitle`; useful when `match` is a
+ *                  lowercase search term but the heading should be cased).
  */
-export function appendItemToSection(content, sectionTitle, task) {
+export function appendItemToSection(content, sectionTitle, task, options = {}) {
+  const {
+    headingLevel = 2,
+    match = 'exact',
+    itemPrefix = '- [ ] ',
+    createTitle = sectionTitle,
+  } = options;
+
   const cleanTask = (task || '').trim();
   if (!cleanTask) return content;
-  const newItem = `- [ ] ${cleanTask}`;
+  const newItem = `${itemPrefix}${cleanTask}`;
 
   const base = content || '';
   const lines = base.split('\n');
+  const hashes = '#'.repeat(headingLevel);
+  // Heading line at exactly this level; section boundary is any heading at
+  // the same-or-higher level (`#{1,headingLevel}`), so a deeper subheading
+  // doesn't prematurely end the section.
+  const headingRe = new RegExp(`^#{${headingLevel}}\\s+(.+)`);
+  const boundaryRe = new RegExp(`^#{1,${headingLevel}}\\s+`);
+  const wanted = sectionTitle.trim().toLowerCase();
+  const headingMatches = (h) => (match === 'includes' ? h.includes(wanted) : h === wanted);
 
-  // Locate the heading line for the target section (case-insensitive match
-  // on the trimmed title).
+  // Locate the heading line for the target section (case-insensitive).
   let headingIdx = -1;
   for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^##\s+(.+)/);
-    if (m && m[1].trim().toLowerCase() === sectionTitle.trim().toLowerCase()) {
+    const m = lines[i].match(headingRe);
+    if (m && headingMatches(m[1].trim().toLowerCase())) {
       headingIdx = i;
       break;
     }
@@ -71,13 +94,13 @@ export function appendItemToSection(content, sectionTitle, task) {
   // Section not present — append a fresh section at the end.
   if (headingIdx === -1) {
     const sep = base.length && !base.endsWith('\n') ? '\n\n' : (base.endsWith('\n\n') ? '' : '\n');
-    return `${base}${sep}## ${sectionTitle}\n\n${newItem}\n`;
+    return `${base}${sep}${hashes} ${createTitle}\n\n${newItem}\n`;
   }
 
-  // Find where this section ends: the next `##` heading, or end of document.
+  // Find where this section ends: the next same-or-higher heading, or EOF.
   let sectionEnd = lines.length;
   for (let i = headingIdx + 1; i < lines.length; i++) {
-    if (/^##\s+/.test(lines[i])) {
+    if (boundaryRe.test(lines[i])) {
       sectionEnd = i;
       break;
     }
