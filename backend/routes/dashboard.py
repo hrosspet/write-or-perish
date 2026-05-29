@@ -4,7 +4,7 @@ from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
 from backend.models import Node, User, UserProfile
 from backend.extensions import db
-from backend.utils.timefmt import iso_utc
+from backend.utils.timefmt import iso_utc, is_valid_timezone
 from backend.utils.privacy import (
     accessible_nodes_filter, VALID_PRIVACY_LEVELS, VALID_AI_USAGE,
 )
@@ -121,6 +121,7 @@ def get_dashboard():
             "profile_generation_task_id": current_user.profile_generation_task_id,
             "default_privacy_level": current_user.default_privacy_level,
             "default_ai_usage": current_user.default_ai_usage,
+            "timezone": current_user.timezone or "UTC",
         },
         "pinned_nodes": pinned_list,
         "nodes": nodes_list,
@@ -257,3 +258,25 @@ def update_user():
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": "Failed to update profile.", "details": str(e)}), 500
+
+
+# Persist the browser-reported IANA timezone (e.g. "Europe/Prague"), used to
+# render absolute local-time stamps in the LLM context (#130). Called by the
+# frontend on session start when the detected timezone differs from the stored
+# one. Fire-and-forget: invalid values are rejected rather than clobbering the
+# stored timezone.
+@dashboard_bp.route("/timezone", methods=["PATCH"])
+@login_required
+def update_timezone():
+    data = request.get_json(silent=True) or {}
+    tz_name = data.get("timezone")
+    if not is_valid_timezone(tz_name):
+        return jsonify({"error": "Invalid timezone."}), 400
+    current_user.timezone = tz_name
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Failed to update timezone.",
+                        "details": str(e)}), 500
+    return jsonify({"timezone": current_user.timezone}), 200

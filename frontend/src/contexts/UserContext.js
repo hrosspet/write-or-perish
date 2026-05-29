@@ -15,8 +15,30 @@ export const UserProvider = ({ children }) => {
     api.get("/dashboard")  // Or another endpoint you use to get current user info.
       .then((response) => {
         // Assume the endpoint returns a { user: { id: ..., username: ... } } object.
-        setUser(response.data.user);
+        const fetchedUser = response.data.user;
+        setUser(fetchedUser);
         setLoading(false);
+
+        // Persist the browser timezone so the LLM context can render absolute
+        // local-time stamps (#130). Only PATCH when it differs from what the
+        // backend has stored, to avoid a redundant write on every load.
+        try {
+          const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+          if (browserTz && fetchedUser && browserTz !== fetchedUser.timezone) {
+            api.patch("/dashboard/timezone", { timezone: browserTz })
+              .then(() => {
+                setUser((prev) =>
+                  prev ? { ...prev, timezone: browserTz } : prev
+                );
+              })
+              .catch((tzErr) => {
+                // Non-fatal: stamps just fall back to the stored/UTC timezone.
+                console.warn("Failed to persist timezone:", tzErr);
+              });
+          }
+        } catch (tzDetectErr) {
+          console.warn("Timezone detection unavailable:", tzDetectErr);
+        }
       })
       .catch((err) => {
         console.error("Error fetching user:", err);
