@@ -65,7 +65,10 @@ const styles = {
     }
 
     .loore-hero {
-      min-height: 100vh;
+      /* svh tracks the *small* (mobile browser-chrome-collapsed) viewport
+         so the absolutely-positioned scroll hint isn't pushed off-screen
+         on phones, where 100vh overestimates the visible height (#98). */
+      min-height: 100svh;
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -73,6 +76,10 @@ const styles = {
       position: relative;
       padding: 2rem;
       text-align: center;
+    }
+
+    @supports not (height: 100svh) {
+      .loore-hero { min-height: 100vh; }
     }
 
     .loore-hero-grain {
@@ -127,21 +134,33 @@ const styles = {
 
     .loore-scroll-hint {
       position: absolute;
-      bottom: 2.5rem;
+      /* Clamp to the bottom but never closer than the device safe-area
+         inset (home indicator), and keep it on-screen on short viewports
+         (#98). */
+      bottom: max(1.25rem, env(safe-area-inset-bottom));
       left: 50%;
       transform: translateX(-50%);
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 0.5rem;
+      gap: 0.35rem;
       opacity: 0;
       animation: loore-fade-down 1s ease 1.5s forwards;
+      cursor: default;
     }
 
     .loore-scroll-line {
       width: 1px;
-      height: 40px;
-      background: linear-gradient(to bottom, var(--text-muted), transparent);
+      height: 36px;
+      /* Brighter top stop so the cue reads clearly (was fading from the
+         very dim --text-muted); still tapers to transparent. */
+      background: linear-gradient(to bottom, var(--text-secondary), transparent);
+      animation: loore-pulse 2s ease-in-out infinite;
+    }
+
+    .loore-scroll-chevron {
+      color: var(--text-secondary);
+      margin-top: -0.2rem;
       animation: loore-pulse 2s ease-in-out infinite;
     }
 
@@ -151,8 +170,8 @@ const styles = {
     }
 
     @keyframes loore-pulse {
-      0%, 100% { opacity: 0.3; }
-      50% { opacity: 0.8; }
+      0%, 100% { opacity: 0.5; }
+      50% { opacity: 1; }
     }
 
     /* Narrative sections */
@@ -354,8 +373,19 @@ function LandingPage() {
           }}>
             <CtaButton href="/login?returnUrl=%2F">Join the Alpha</CtaButton>
           </div>
-          <div className="loore-scroll-hint">
+          <div className="loore-scroll-hint" aria-hidden="true">
             <div className="loore-scroll-line" />
+            <svg
+              className="loore-scroll-chevron"
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+            >
+              <path d="M6 9l6 6 6-6" />
+            </svg>
           </div>
         </section>
 
