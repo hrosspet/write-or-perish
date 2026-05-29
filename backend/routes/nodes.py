@@ -496,6 +496,10 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
         "user_id": n.user_id,
         "parent_user_id": parent_user_id,
         "children": children_data,
+        # Generated-TTS flag — drives the "regenerate audio?" edit prompt
+        # (#66). Needed here too because Edit can be launched from a
+        # child/list node, not just the focal one.
+        "has_tts": bool(n.audio_tts_url),
     }
     data.update(_system_prompt_fields(n))
     return data
