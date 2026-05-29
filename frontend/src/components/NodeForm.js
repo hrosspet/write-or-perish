@@ -8,7 +8,7 @@ import RegenerateTtsDialog from "./RegenerateTtsDialog";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import api from "../api";
 import { uploadFileInChunks } from "../utils/chunkedUpload";
-import useSubmitShortcut, { submitShortcutHint } from "../hooks/useSubmitShortcut";
+import useSubmitShortcut from "../hooks/useSubmitShortcut";
 
 const NodeForm = forwardRef(
   (
@@ -817,14 +817,6 @@ const NodeForm = forwardRef(
                 ? "Sending..."
                 : "Send"}
             </button>
-            {canSubmit && (
-              <span style={{
-                fontFamily: 'var(--sans)', fontSize: '0.7rem', fontWeight: 300,
-                color: 'var(--text-muted)', opacity: 0.6,
-              }}>
-                {submitShortcutHint()}
-              </span>
-            )}
             {hasDraft && (
               <button
                 type="button"
