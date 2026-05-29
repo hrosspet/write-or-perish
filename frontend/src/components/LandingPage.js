@@ -134,13 +134,12 @@ const styles = {
     }
 
     .loore-scroll-hint {
-      position: absolute;
-      /* Clamp to the bottom but never closer than the device safe-area
-         inset (home indicator), and keep it on-screen on short viewports
-         (#98). */
-      bottom: max(1.25rem, env(safe-area-inset-bottom));
-      left: 50%;
-      transform: translateX(-50%);
+      /* In normal flow, just below the CTA (it follows the CTA in the
+         JSX). Earlier absolute/viewport-bottom anchoring kept landing the
+         line at the screen edge — cut off on desktop and below the fold on
+         mobile (across vh/svh/dvh). In-flow, it's tied to visible content
+         and is reliably visible on every viewport. (#98) */
+      margin: 2.5rem auto 0;
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -339,26 +338,21 @@ const styles = {
       .loore-preview { padding: 3rem 1rem 5rem; }
       .loore-mockup-content { padding: 1.5rem 1.2rem; }
 
-      /* Mobile hero: tighten the top so the title sits higher (less dead
-         space above it). (#98) */
+      /* Mobile hero: size to its content instead of forcing a full
+         viewport. With the content packed at the top and the scroll line
+         right after the CTA, a 100dvh hero left ~25% dead space between
+         the line and the first narrative section. Dropping the min-height
+         removes that gap so the narrative follows the line with the same
+         spacing as the other sections; padding-top keeps the title in the
+         upper third. (#98) */
       .loore-hero {
+        min-height: auto;
         justify-content: flex-start;
         padding-top: 14vh;
-        padding-bottom: 3rem;
+        padding-bottom: 1rem;
       }
       .loore-logo-mark { margin-bottom: 1.5rem; }
-
-      /* Mobile scroll hint: take it OUT of absolute/viewport-bottom
-         anchoring (which kept landing below the fold whenever iOS resolved
-         the hero taller than the visible area, across vh/svh/dvh alike) and
-         let it flow right after the CTA. Tied to visible content, it can't
-         fall off-screen, and still signals "more below". (#98) */
-      .loore-scroll-hint {
-        position: static;
-        transform: none;
-        bottom: auto;
-        margin: 2.5rem auto 0;
-      }
+      /* Scroll hint is in normal flow (base rule); no mobile override needed. */
     }
   `,
 };
