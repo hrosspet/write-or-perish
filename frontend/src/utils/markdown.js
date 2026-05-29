@@ -38,6 +38,66 @@ export function toggleCheckbox(content, itemText, currentChecked) {
 }
 
 /**
+ * Append a new unchecked checkbox item (`- [ ] <task>`) to the END of a
+ * named markdown section (a `## <sectionTitle>` heading) in `content`.
+ *
+ * The item is inserted right after the last non-blank line that belongs to
+ * the section (its heading and any list items / text), and before the blank
+ * line(s) that separate it from the next `##` heading. This keeps existing
+ * spacing between sections intact.
+ *
+ * If the section is not found, the item (with the heading) is appended to the
+ * end of the document so the task is never silently dropped.
+ */
+export function appendItemToSection(content, sectionTitle, task) {
+  const cleanTask = (task || '').trim();
+  if (!cleanTask) return content;
+  const newItem = `- [ ] ${cleanTask}`;
+
+  const base = content || '';
+  const lines = base.split('\n');
+
+  // Locate the heading line for the target section (case-insensitive match
+  // on the trimmed title).
+  let headingIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^##\s+(.+)/);
+    if (m && m[1].trim().toLowerCase() === sectionTitle.trim().toLowerCase()) {
+      headingIdx = i;
+      break;
+    }
+  }
+
+  // Section not present — append a fresh section at the end.
+  if (headingIdx === -1) {
+    const sep = base.length && !base.endsWith('\n') ? '\n\n' : (base.endsWith('\n\n') ? '' : '\n');
+    return `${base}${sep}## ${sectionTitle}\n\n${newItem}\n`;
+  }
+
+  // Find where this section ends: the next `##` heading, or end of document.
+  let sectionEnd = lines.length;
+  for (let i = headingIdx + 1; i < lines.length; i++) {
+    if (/^##\s+/.test(lines[i])) {
+      sectionEnd = i;
+      break;
+    }
+  }
+
+  // Within [headingIdx+1, sectionEnd), find the index AFTER the last
+  // non-blank line, so we insert below existing items but above the trailing
+  // blank lines that precede the next heading.
+  let insertAt = headingIdx + 1;
+  for (let i = headingIdx + 1; i < sectionEnd; i++) {
+    if (lines[i].trim() !== '') {
+      insertAt = i + 1;
+    }
+  }
+
+  lines.splice(insertAt, 0, newItem);
+  return lines.join('\n');
+}
+
+/**
  * Hook for optimistic checkbox toggling.
  *
  * Parameters:

@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import api from '../api';
-import { useCheckboxToggle } from '../utils/markdown';
+import { useCheckboxToggle, appendItemToSection } from '../utils/markdown';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
 
 /**
@@ -183,6 +183,12 @@ export default function TodoPage() {
   const [editContent, setEditContent] = useState('');
   const [saving, setSaving] = useState(false);
 
+  // Quick-add task (#108): reveal a small input that appends to "## Today".
+  const [quickAddOpen, setQuickAddOpen] = useState(false);
+  const [quickAddText, setQuickAddText] = useState('');
+  const [quickAddSaving, setQuickAddSaving] = useState(false);
+  const quickAddInputRef = useRef(null);
+
   // Version history
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [versions, setVersions] = useState([]);
@@ -234,6 +240,31 @@ export default function TodoPage() {
       console.error('Failed to save todo:', err);
     }
     setSaving(false);
+  };
+
+  const handleQuickAdd = async () => {
+    const task = quickAddText.trim();
+    if (!task || quickAddSaving || !todo) return;
+    const prevContent = todo.content;
+    const newContent = appendItemToSection(prevContent, 'Today', task);
+    setQuickAddSaving(true);
+    // Optimistic update so the new task appears immediately.
+    setTodo(prev => prev ? { ...prev, content: newContent } : prev);
+    setEditContent(newContent);
+    setQuickAddText('');
+    try {
+      const res = await api.patch('/todo', { content: newContent });
+      if (res.data?.todo) setTodo(res.data.todo);
+      // Keep the input open and focused for rapid entry of multiple tasks.
+      if (quickAddInputRef.current) quickAddInputRef.current.focus();
+    } catch (err) {
+      console.error('Failed to add task:', err);
+      // Revert optimistic update on failure.
+      setTodo(prev => prev ? { ...prev, content: prevContent } : prev);
+      setEditContent(prevContent);
+      setQuickAddText(task);
+    }
+    setQuickAddSaving(false);
   };
 
   const handleCreate = async () => {
@@ -348,9 +379,89 @@ export default function TodoPage() {
             >
               history
             </button>
+            {/* Quick-add task (#108) */}
+            {!editing && (
+              <button
+                onClick={() => {
+                  setQuickAddOpen(v => !v);
+                  // Focus the input on the next tick once it's mounted.
+                  setTimeout(() => {
+                    if (quickAddInputRef.current) quickAddInputRef.current.focus();
+                  }, 0);
+                }}
+                aria-label="Quick-add task"
+                title="Quick-add task to Today"
+                style={{
+                  background: 'none',
+                  border: '1px solid var(--border)',
+                  borderRadius: '50%',
+                  width: '24px', height: '24px',
+                  cursor: 'pointer', padding: 0,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontFamily: 'var(--sans)', fontSize: '1rem', fontWeight: 300,
+                  lineHeight: 1,
+                  color: quickAddOpen ? 'var(--accent)' : 'var(--text-muted)',
+                  borderColor: quickAddOpen ? 'var(--accent)' : 'var(--border)',
+                  transition: 'all 0.2s ease',
+                }}
+              >
+                {quickAddOpen ? '×' : '+'}
+              </button>
+            )}
           </div>
         )}
       </div>
+
+      {/* Quick-add input row (#108) */}
+      {todo && quickAddOpen && !editing && (
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '8px' }}>
+          <input
+            ref={quickAddInputRef}
+            value={quickAddText}
+            onChange={(e) => setQuickAddText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) {
+                e.preventDefault();
+                handleQuickAdd();
+              } else if (e.key === 'Escape') {
+                setQuickAddOpen(false);
+                setQuickAddText('');
+              }
+            }}
+            placeholder="Add a task to Today and press Enter"
+            disabled={quickAddSaving}
+            style={{
+              flex: 1,
+              background: 'var(--bg-input)',
+              border: '1px solid var(--border)',
+              borderRadius: '6px',
+              color: 'var(--text-primary)',
+              fontFamily: 'var(--sans)',
+              fontSize: '0.85rem',
+              fontWeight: 300,
+              padding: '8px 12px',
+            }}
+          />
+          <button
+            onClick={handleQuickAdd}
+            disabled={quickAddSaving || !quickAddText.trim()}
+            style={{
+              padding: '8px 16px',
+              background: 'var(--accent)',
+              border: 'none',
+              borderRadius: '6px',
+              color: 'var(--bg-deep)',
+              fontFamily: 'var(--sans)',
+              fontSize: '0.85rem',
+              fontWeight: 400,
+              cursor: (quickAddSaving || !quickAddText.trim()) ? 'not-allowed' : 'pointer',
+              opacity: (quickAddSaving || !quickAddText.trim()) ? 0.5 : 1,
+            }}
+          >
+            {quickAddSaving ? 'Adding...' : 'Add'}
+          </button>
+        </div>
+      )}
 
       {/* Meta line */}
       {todo && (
