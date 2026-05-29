@@ -877,10 +877,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 replaced_recent_raw = False
 
                 # Temporal grounding (#130): every message is prefixed with an
-                # absolute local-time stamp derived from the node's created_at,
-                # rendered in the conversation owner's timezone. The model
-                # infers "now" from the most recent message's stamp — no
-                # separate "Today is X" anchor, no relative phrasing.
+                # absolute local-time stamp derived from the node's updated_at
+                # (falling back to created_at), rendered in the conversation
+                # owner's timezone. The model infers "now" from the most recent
+                # message's stamp — no separate "Today is X" anchor, no
+                # relative phrasing.
                 _owner = User.query.get(user_id)
                 user_tz = (_owner.timezone if _owner and _owner.timezone
                            else "UTC")
@@ -889,7 +890,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 for node in node_chain:
                     author = node.user.username if node.user else "Unknown"
                     is_llm_node = node.node_type == "llm" or (node.llm_model is not None)
-                    time_prefix = local_stamp(node.created_at, user_tz)
+                    time_prefix = local_stamp(node.updated_at or node.created_at, user_tz)
 
                     # Soft-deleted ancestor: scrub content so the AI doesn't
                     # ingest deleted user data. We still include the node so
