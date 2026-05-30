@@ -54,23 +54,23 @@ function replaceCheckboxes(children, renderToggle) {
  */
 const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', onCheckboxToggle }) => {
   const components = {
-    h1: ({ node, ...props }) => (
-      <h1 style={{ fontFamily: 'var(--serif)', fontSize: '2.2em', fontWeight: 700, lineHeight: 1.2, margin: '1.2em 0 0.4em', color: 'var(--text-primary)' }} {...props} />
+    h1: ({ node, children, ...props }) => (
+      <h1 style={{ fontFamily: 'var(--serif)', fontSize: '2.2em', fontWeight: 700, lineHeight: 1.2, margin: '1.2em 0 0.4em', color: 'var(--text-primary)' }} {...props}>{children}</h1>
     ),
-    h2: ({ node, ...props }) => (
-      <h2 style={{ fontFamily: 'var(--serif)', fontSize: '1.8em', fontWeight: 700, lineHeight: 1.25, margin: '1.1em 0 0.4em', color: 'var(--text-primary)' }} {...props} />
+    h2: ({ node, children, ...props }) => (
+      <h2 style={{ fontFamily: 'var(--serif)', fontSize: '1.8em', fontWeight: 700, lineHeight: 1.25, margin: '1.1em 0 0.4em', color: 'var(--text-primary)' }} {...props}>{children}</h2>
     ),
-    h3: ({ node, ...props }) => (
-      <h3 style={{ fontFamily: 'var(--serif)', fontSize: '1.5em', fontWeight: 600, lineHeight: 1.3, margin: '1em 0 0.35em', color: 'var(--text-primary)' }} {...props} />
+    h3: ({ node, children, ...props }) => (
+      <h3 style={{ fontFamily: 'var(--serif)', fontSize: '1.5em', fontWeight: 600, lineHeight: 1.3, margin: '1em 0 0.35em', color: 'var(--text-primary)' }} {...props}>{children}</h3>
     ),
-    h4: ({ node, ...props }) => (
-      <h4 style={{ fontFamily: 'var(--serif)', fontSize: '1.25em', fontWeight: 600, lineHeight: 1.3, margin: '1em 0 0.35em', color: 'var(--text-primary)' }} {...props} />
+    h4: ({ node, children, ...props }) => (
+      <h4 style={{ fontFamily: 'var(--serif)', fontSize: '1.25em', fontWeight: 600, lineHeight: 1.3, margin: '1em 0 0.35em', color: 'var(--text-primary)' }} {...props}>{children}</h4>
     ),
-    h5: ({ node, ...props }) => (
-      <h5 style={{ fontFamily: 'var(--serif)', fontSize: '1.1em', fontWeight: 600, lineHeight: 1.35, margin: '0.9em 0 0.3em', color: 'var(--text-primary)' }} {...props} />
+    h5: ({ node, children, ...props }) => (
+      <h5 style={{ fontFamily: 'var(--serif)', fontSize: '1.1em', fontWeight: 600, lineHeight: 1.35, margin: '0.9em 0 0.3em', color: 'var(--text-primary)' }} {...props}>{children}</h5>
     ),
-    h6: ({ node, ...props }) => (
-      <h6 style={{ fontFamily: 'var(--serif)', fontSize: '0.95em', fontWeight: 600, lineHeight: 1.35, margin: '0.9em 0 0.3em', color: 'var(--text-primary)' }} {...props} />
+    h6: ({ node, children, ...props }) => (
+      <h6 style={{ fontFamily: 'var(--serif)', fontSize: '0.95em', fontWeight: 600, lineHeight: 1.35, margin: '0.9em 0 0.3em', color: 'var(--text-primary)' }} {...props}>{children}</h6>
     ),
     p: ({ node, ...props }) => (
       <p style={{ whiteSpace: 'pre-wrap', overflowWrap: 'break-word', margin: paragraphMargin }} {...props} />
@@ -97,8 +97,8 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', onCheckbox
     del: ({ node, ...props }) => (
       <del style={{ textDecoration: 'line-through', color: 'var(--text-muted)' }} {...props} />
     ),
-    img: ({ node, ...props }) => (
-      <img style={{ maxWidth: '100%', height: 'auto' }} {...props} />
+    img: ({ node, alt, ...props }) => (
+      <img alt={alt || ''} style={{ maxWidth: '100%', height: 'auto' }} {...props} />
     ),
     ul: ({ node, ...props }) => (
       <ul style={{ margin: '4px 0', paddingLeft: '24px' }} {...props} />
