@@ -3,14 +3,28 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 /**
- * Extract plain text from React children recursively.
+ * True when a rendered child is a nested list element (<ul>/<ol>). Detected via
+ * the hast `node` react-markdown passes to every component, because when these
+ * helpers run the element's `type` is our custom `ul`/`ol` component (a
+ * function), not the string 'ul'.
+ */
+function isListElement(child) {
+  const tag = child && child.props && child.props.node && child.props.node.tagName;
+  return tag === 'ul' || tag === 'ol';
+}
+
+/**
+ * Extract plain text from React children recursively, WITHOUT descending into
+ * nested lists — so a task item's label is just its own text, not its
+ * sub-items' text concatenated (which would never match its source line when
+ * toggling).
  */
 function extractText(children) {
   let text = '';
   React.Children.forEach(children, child => {
     if (typeof child === 'string') {
       text += child;
-    } else if (child && child.props && child.props.children) {
+    } else if (child && child.props && child.props.children && !isListElement(child)) {
       text += extractText(child.props.children);
     }
   });
@@ -30,8 +44,12 @@ function replaceCheckboxes(children, renderToggle) {
       found = true;
       return renderToggle(!!child.props.checked);
     }
-    // Recurse into wrapper elements like <p>
-    if (child && child.props && child.props.children) {
+    // Recurse into wrapper elements like <p>, but NOT into nested lists. A
+    // nested <li>'s checkbox is still a raw <input> when the parent <li>
+    // renders, so descending here would let the parent steal it (binding the
+    // toggle to the parent's label). Leaving nested lists untouched lets each
+    // nested <li> wire its own checkbox when it renders.
+    if (child && child.props && child.props.children && !isListElement(child)) {
       const inner = replaceCheckboxes(child.props.children, renderToggle);
       if (inner.found) {
         found = true;
@@ -100,9 +118,15 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', onCheckbox
     img: ({ node, alt, ...props }) => (
       <img alt={alt || ''} style={{ maxWidth: '100%', height: 'auto' }} {...props} />
     ),
-    ul: ({ node, ...props }) => (
-      <ul style={{ margin: '4px 0', paddingLeft: '24px' }} {...props} />
-    ),
+    ul: ({ node, ...props }) => {
+      const isTaskList = (props.className || '').split(/\s+/).includes('contains-task-list');
+      // Task lists are styled via the `.loore-md ul.contains-task-list` rules in
+      // index.css so nested levels indent correctly. Inline padding here would
+      // override that CSS and flatten the tree (#138). Plain lists stay inline.
+      return isTaskList
+        ? <ul {...props} />
+        : <ul style={{ margin: '4px 0', paddingLeft: '24px' }} {...props} />;
+    },
     ol: ({ node, ...props }) => (
       <ol style={{ margin: '4px 0', paddingLeft: '24px' }} {...props} />
     ),
@@ -165,7 +189,6 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', onCheckbox
               overflowWrap: 'break-word',
               marginBottom: '2px',
               listStyleType: 'none',
-              marginLeft: '-24px',
             }}
             {...props}
           >
@@ -238,7 +261,7 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', onCheckbox
   };
 
   return (
-    <div style={style}>
+    <div className="loore-md" style={style}>
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
         {children}
       </ReactMarkdown>

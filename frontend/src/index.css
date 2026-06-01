@@ -198,3 +198,16 @@ code {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--border-hover);
 }
+
+/* Nested task lists rendered by MarkdownBody (#138).
+   Keep the top-level checkbox circles flush-left, but indent each nested
+   level. Controlled in CSS (not inline) because inline padding on the <ul>
+   would override these rules and flatten the tree. */
+.loore-md ul.contains-task-list {
+  list-style: none;
+  padding-left: 0;
+  margin: 4px 0;
+}
+.loore-md ul.contains-task-list ul.contains-task-list {
+  padding-left: 1.5em;
+}
