@@ -942,3 +942,62 @@ class TestEngagedThreadsStrategy:
         assert "bob april public reply marker" in content
         assert "alice april reply marker" in content
         assert {bob_post.id, alice_post.id}.issubset(result["node_ids"])
+
+
+# ── 16. _collect_all_nodes_in_tree: deep chain (recursion regression) ────
+
+class TestCollectAllNodesDeepChain:
+    def test_deep_chain_does_not_overflow(self, app):
+        """A reply chain far deeper than Python's recursion limit must be
+        collected without RecursionError — the bug that crashed full
+        profile regen for the deepest-thread user before any LLM call."""
+        from backend.routes.export_data import _collect_all_nodes_in_tree
+
+        alice = _make_user("alice")
+        _db.session.commit()
+
+        depth = 1500  # comfortably past the default recursion limit (1000)
+        parent_id = None
+        for i in range(depth):
+            n = _make_node(
+                alice, parent_id=parent_id, content=f"link {i}",
+                ai_usage="chat", token_count=1,
+                created_at=DEC_15 + timedelta(seconds=i),
+            )
+            parent_id = n.id
+        _db.session.commit()
+
+        root = Node.query.filter_by(
+            user_id=alice.id, parent_id=None
+        ).first()
+        collected = _collect_all_nodes_in_tree(root, filter_ai_usage=True)
+        assert len(collected) == depth
+
+    def test_preorder_parent_before_descendants(self, app):
+        """Pre-order preserved: a parent precedes all its descendants, and
+        a child's whole subtree precedes the next sibling — same ordering
+        the recursive implementation produced."""
+        from backend.routes.export_data import _collect_all_nodes_in_tree
+
+        alice = _make_user("alice")
+        _db.session.commit()
+
+        root = _make_node(alice, content="root", ai_usage="chat",
+                          token_count=1, created_at=DEC_15)
+        a = _make_node(alice, parent_id=root.id, content="A",
+                       ai_usage="chat", token_count=1,
+                       created_at=DEC_15 + timedelta(hours=1))
+        b = _make_node(alice, parent_id=root.id, content="B",
+                       ai_usage="chat", token_count=1,
+                       created_at=DEC_15 + timedelta(hours=2))
+        a1 = _make_node(alice, parent_id=a.id, content="A1",
+                        ai_usage="chat", token_count=1,
+                        created_at=DEC_15 + timedelta(hours=3))
+        _db.session.commit()
+
+        order = [n.id for n in
+                 _collect_all_nodes_in_tree(root, filter_ai_usage=True)]
+        assert set(order) == {root.id, a.id, b.id, a1.id}
+        # root before A before A1; A's subtree (incl. A1) before sibling B
+        assert order.index(root.id) < order.index(a.id) < order.index(a1.id)
+        assert order.index(a1.id) < order.index(b.id)
