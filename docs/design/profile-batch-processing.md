@@ -1,6 +1,8 @@
 # Design: Batch API for profile generation (poll-driven)
 
-**Status:** RFC / design — implementation follows once the approach is agreed.
+**Status:** Implemented in this PR, behind `PROFILE_USE_BATCH` /
+`PROFILE_BATCH_USER_IDS` (both default off — ships dark). See the commits on
+this branch.
 **Issue:** part of #173 (Part A only). **Does not** address Part B (prompt
 caching for agentic Voice/Text) — #173 stays open.
 **Builds on:** the profile-pipeline fixes in PR #181 (eligibility, iterative

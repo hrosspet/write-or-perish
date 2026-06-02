@@ -41,6 +41,16 @@ celery.conf.update(
             'task': 'backend.tasks.node_cleanup.cleanup_deleted_nodes',
             'schedule': 86400.0,  # daily
         },
+        # Profile batch pipeline (issue #173). No-ops unless a user is
+        # selected via PROFILE_USE_BATCH / PROFILE_BATCH_USER_IDS.
+        'seed-profile-batches': {
+            'task': 'backend.tasks.profile_batch.seed_profile_batches',
+            'schedule': 3600.0,  # hourly, alongside the sync check
+        },
+        'poll-profile-batches': {
+            'task': 'backend.tasks.profile_batch.poll_profile_batches',
+            'schedule': 60.0,  # ~1 min — batches typically finish in 1-5 min
+        },
     },
 )
 
@@ -54,3 +64,4 @@ from backend.tasks import streaming_transcription  # noqa: F401
 from backend.tasks import voice_todo_merge  # noqa: F401
 from backend.tasks import recent_context  # noqa: F401
 from backend.tasks import node_cleanup  # noqa: F401
+from backend.tasks import profile_batch  # noqa: F401
