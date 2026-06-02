@@ -551,8 +551,21 @@ export const AudioProvider = ({ children }) => {
       } catch (err) {
         console.error('Error playing audio:', err);
       }
+      return;
     }
-  }, [isPlaying]);
+    // After stop() (#161) the element is released but currentAudio + (for
+    // chunked playback) chunk URLs are retained. Re-init from the beginning.
+    if (!audioRef.current) {
+      if (allChunkUrlsRef.current.length > 0) {
+        // Chunked playback: playChunkAtTime creates a fresh Audio() when
+        // audioRef.current is null, using the retained chunk URLs.
+        playChunkAtTime(0, 0, true);
+      } else if (currentAudio && currentAudio.url) {
+        // Single-clip playback: rebuild the element and replay from 0.
+        loadAudio(currentAudio);
+      }
+    }
+  }, [isPlaying, playChunkAtTime, currentAudio, loadAudio]);
 
   const pause = useCallback(() => {
     if (audioRef.current && isPlaying) {
@@ -560,8 +573,20 @@ export const AudioProvider = ({ children }) => {
     }
   }, [isPlaying]);
 
+  // Stop (#161): reset playback to the beginning but KEEP the player mounted
+  // and replayable. We invalidate any in-flight handlers, reset position to 0,
+  // and — for Bluetooth safety — still fully release the HTMLAudioElement
+  // (removeAttribute('src') + load() + null the ref) so the browser drops the
+  // audio session and can cleanly switch A2DP->HFP when the mic is next
+  // requested. We deliberately RETAIN currentAudio plus all chunk/queue
+  // metadata (allChunkUrlsRef, chunkDurationsRef, queueMetadataRef,
+  // totalChunks, chunkDurations, totalDuration) so the player stays visible;
+  // play() re-inits a fresh element from chunk 0 using the retained URLs.
   const stop = useCallback(() => {
     if (audioRef.current) {
+      // Invalidate any pending event handlers / interval callbacks bound to
+      // the element we're about to release.
+      playbackIdRef.current += 1;
       audioRef.current.pause();
       // Fully release the audio element so the browser drops the audio session.
       // A paused element with loaded media can hold the Bluetooth A2DP profile,
@@ -569,23 +594,54 @@ export const AudioProvider = ({ children }) => {
       audioRef.current.removeAttribute('src');
       audioRef.current.load();
       audioRef.current = null;
-      setCurrentTime(0);
-      setCumulativeTime(0);
-      setIsPlaying(false);
-      stopTimeTracking();
-
-      // Reset chunk state
-      setCurrentChunkIndex(0);
-      currentChunkIndexRef.current = 0;
-      setTotalChunks(0);
-      setChunkDurations([]);
-      chunkDurationsRef.current = [];
-      setTotalDuration(0);
-      allChunkUrlsRef.current = [];
-      audioQueueRef.current = [];
-      queueMetadataRef.current = null;
-      setCurrentAudio(null);
     }
+    stopTimeTracking();
+    setIsPlaying(false);
+    // Reset playback position to the start (UI + tracking refs).
+    setCurrentTime(0);
+    setCumulativeTime(0);
+    setCurrentChunkIndex(0);
+    currentChunkIndexRef.current = 0;
+    // Rebuild the queue so a subsequent play() restarts from chunk 0.
+    audioQueueRef.current = allChunkUrlsRef.current.slice(1);
+    waitingForChunksRef.current = false;
+    // NOTE: intentionally NOT clearing currentAudio / allChunkUrlsRef /
+    // chunkDurationsRef / queueMetadataRef / totalChunks / chunkDurations /
+    // totalDuration — the player stays mounted and replayable. Use
+    // closePlayer() for full teardown + hide.
+  }, [stopTimeTracking]);
+
+  // Close the player (#161): full teardown + hide. Releases the element AND
+  // clears currentAudio plus all chunk/queue metadata so the player unmounts.
+  // Wired to the X (close) affordance and used on refresh-equivalent dismissal.
+  const closePlayer = useCallback(() => {
+    if (audioRef.current) {
+      playbackIdRef.current += 1;
+      audioRef.current.pause();
+      // Fully release the audio element so the browser drops the audio session.
+      // A paused element with loaded media can hold the Bluetooth A2DP profile,
+      // preventing a clean switch to HFP when the mic is requested next.
+      audioRef.current.removeAttribute('src');
+      audioRef.current.load();
+      audioRef.current = null;
+    }
+    stopTimeTracking();
+    setCurrentTime(0);
+    setCumulativeTime(0);
+    setIsPlaying(false);
+
+    // Reset chunk state
+    setCurrentChunkIndex(0);
+    currentChunkIndexRef.current = 0;
+    setTotalChunks(0);
+    setChunkDurations([]);
+    chunkDurationsRef.current = [];
+    setTotalDuration(0);
+    allChunkUrlsRef.current = [];
+    audioQueueRef.current = [];
+    queueMetadataRef.current = null;
+    waitingForChunksRef.current = false;
+    setCurrentAudio(null);
   }, [stopTimeTracking]);
 
   // Seek to a cumulative time position (works across chunks)
@@ -770,6 +826,7 @@ export const AudioProvider = ({ children }) => {
     play,
     pause,
     stop,
+    closePlayer,
     skipForward,
     skipBackward,
     seek,
