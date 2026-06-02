@@ -131,10 +131,11 @@ record, not the user. The boolean guard is enough on the user side.)
      `_build_chunk_request(user, prev_profile, ...)` returning messages +
      metadata, without calling the LLM).
    - `submit_pending_profile_batches()` — the hourly seeder: for each eligible
-     user (via `User.profile_eligible_query()`, the threshold check, and **no**
-     `profile_batch_pending`), build their *current* step request, accumulate
-     across the cohort, `batch_submit(...)`, persist `ProfileBatchJob` rows,
-     set guards.
+     user (via `User.profile_eligible_query()`, the threshold check, **no**
+     `profile_batch_pending`, and `use_batch(user)` true), build their
+     *current* step request, accumulate across the cohort, `batch_submit(...)`,
+     persist `ProfileBatchJob` rows, set guards. Users for whom `use_batch` is
+     false fall through to the existing synchronous dispatch.
    - `poll_profile_batches()` — the ~2-min poller (below).
 4. **`backend/celery_app.py`** — beat entries for the submitter (reuse the
    hourly `check_pending_profile_updates` cadence) and the poller (~60s).
@@ -143,8 +144,14 @@ record, not the user. The boolean guard is enough on the user side.)
    never executed).
 5. **`backend/utils/cost.py`** — apply the batch discount so `APICostLog`
    reflects true spend (see Accounting).
-6. **Config** — `PROFILE_USE_BATCH` (default **False**) and optional
-   `OPENAI_API_KEY_BATCH`.
+6. **Config** — a gating resolver
+   `use_batch(user) = PROFILE_USE_BATCH or user.id in PROFILE_BATCH_USER_IDS`:
+   - `PROFILE_BATCH_USER_IDS` (comma-separated ids, default empty) — the
+     **canary** list, to validate on one real user first.
+   - `PROFILE_USE_BATCH` (bool, default **False**) — the **global** switch to
+     flip once the canary looks good.
+
+   Both default off ⇒ ships dark. Plus optional `OPENAI_API_KEY_BATCH`.
 
 ## The poller (`poll_profile_batches`, ~every 60s)
 
@@ -217,7 +224,7 @@ updates. That leaves **essentially all failures transient**:
 | **Whole batch `expired`** (OpenAI 24h window) / `failed` / `cancelled` | provider capacity | mark job failed; re-seed next cycle. |
 | **Stuck `pending`** (no terminal status) | provider | staleness check (mirror `_is_task_stale`): `submitted_at` older than N h → mark failed, clear guard, re-seed. |
 | **Double-collect** (poller crash mid-tick) | infra | idempotent: a chunk whose `source_data_cutoff` already has a child profile is skipped; job flips to `collected` atomically. |
-| `PROFILE_USE_BATCH=False` | — | none of this runs; the synchronous path (PR #181) is the permanent fallback. |
+| **Not selected for batch** (`use_batch(user)` false) | — | the synchronous path (PR #181) runs unchanged — the permanent fallback. |
 
 **Retry policy:** since failures are transient, the primary mechanism is simply
 **re-seed via batch next cycle**, bounded by `profile_batch_attempts` (≈3) plus
@@ -228,11 +235,12 @@ path should be rare-to-never, not a routine fallback.
 
 ## Rollout
 
-1. Land behind `PROFILE_USE_BATCH=False` — zero behavior change.
-2. Unit tests green (mocked SDK clients); extraction verified against the RCT.
-3. Canary: flip the flag for a single user (or a low-traffic window), watch
+1. Land with both flags off — ships dark, zero behavior change.
+2. Unit tests green (mocked SDK clients); RCT verified against the shared module.
+3. **Canary:** add one real user id to `PROFILE_BATCH_USER_IDS`; watch
    `ProfileBatchJob` transitions + `APICostLog` halving + a coherent profile.
-4. Enable broadly. Synchronous path stays as the fallback.
+4. **Global:** once the canary looks good, set `PROFILE_USE_BATCH=true` for
+   everyone. Synchronous path stays as the permanent fallback.
 
 ## Testing strategy
 
