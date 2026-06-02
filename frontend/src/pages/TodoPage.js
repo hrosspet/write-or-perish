@@ -303,7 +303,7 @@ export default function TodoPage() {
     const task = quickAddText.trim();
     if (!task || quickAddSaving || !todo) return;
     const prevContent = todo.content;
-    const newContent = appendItemToSection(prevContent, 'Today', task);
+    const newContent = appendItemToSection(prevContent, 'Today', task, { createAtStart: true });
     setQuickAddSaving(true);
     // Optimistic update so the new task appears immediately.
     setTodo(prev => prev ? { ...prev, content: newContent } : prev);

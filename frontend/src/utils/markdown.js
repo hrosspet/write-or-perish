@@ -103,6 +103,9 @@ export function insertItemAfter(content, afterItemText, newText) {
  *   createTitle  — heading text used when the section must be created
  *                  (defaults to `sectionTitle`; useful when `match` is a
  *                  lowercase search term but the heading should be cased).
+ *   createAtStart — when the section doesn't exist, create it at the TOP of
+ *                  the content instead of appending at the end (e.g. `## Today`
+ *                  should be the first todo section).
  */
 export function appendItemToSection(content, sectionTitle, task, options = {}) {
   const {
@@ -110,6 +113,7 @@ export function appendItemToSection(content, sectionTitle, task, options = {}) {
     match = 'exact',
     itemPrefix = '- [ ] ',
     createTitle = sectionTitle,
+    createAtStart = false,
   } = options;
 
   const cleanTask = (task || '').trim();
@@ -137,10 +141,15 @@ export function appendItemToSection(content, sectionTitle, task, options = {}) {
     }
   }
 
-  // Section not present — append a fresh section at the end.
+  // Section not present — create a fresh one.
   if (headingIdx === -1) {
+    const newSection = `${hashes} ${createTitle}\n\n${newItem}\n`;
+    if (createAtStart) {
+      const body = base.trim();
+      return body ? `${newSection}\n${body}\n` : newSection;
+    }
     const sep = base.length && !base.endsWith('\n') ? '\n\n' : (base.endsWith('\n\n') ? '' : '\n');
-    return `${base}${sep}${hashes} ${createTitle}\n\n${newItem}\n`;
+    return `${base}${sep}${newSection}`;
   }
 
   // Find where this section ends: the next same-or-higher heading, or EOF.
