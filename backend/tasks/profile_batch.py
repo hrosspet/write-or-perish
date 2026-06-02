@@ -104,9 +104,11 @@ def _should_seed(user):
     if latest:
         if (datetime.utcnow() - latest.created_at) < MIN_INTERVAL:
             return False
+        # Null cutoff (e.g. a user-written profile): nothing has been folded in
+        # yet, so all eligible data counts as new — measure it instead of
+        # force-seeding (mirrors maybe_trigger_incremental_profile_update).
         cutoff = latest.source_data_cutoff
-        new_tokens = (_new_token_count(user, cutoff) if cutoff
-                      else THRESHOLD_TOKENS)
+        new_tokens = _new_token_count(user, cutoff)
     else:
         new_tokens = _new_token_count(user, None)
     return new_tokens >= THRESHOLD_TOKENS

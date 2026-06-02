@@ -33,7 +33,7 @@ for _mod in ["backend.models", "backend.extensions"]:
 
 from backend.extensions import db  # noqa: E402
 from backend.models import (  # noqa: E402
-    User, UserProfile, ProfileBatchJob, APICostLog)
+    User, UserProfile, ProfileBatchJob, APICostLog, Node)
 
 # backend.tasks.profile_batch is imported lazily in the `app` fixture: an
 # eager import at collection time trips over cross-file celery-mock ordering
@@ -140,6 +140,44 @@ def test_build_next_request_none_when_no_data(app, monkeypatch):
     monkeypatch.setattr(pb, "build_user_export_content",
                         MagicMock(return_value=None))
     assert pb._build_next_profile_request(u) is None
+
+
+# ── seed gate: null-cutoff (user-written) profiles ────────────────────────
+
+def _age(obj, days):
+    """Backdate a row so the inactivity/interval gates pass, isolating the
+    token-threshold decision."""
+    obj.created_at = datetime.utcnow() - timedelta(days=days)
+
+
+def _seed_node(user, tokens):
+    n = Node(user_id=user.id, node_type="user", ai_usage="chat",
+             token_count=tokens)
+    n.set_content("writing")
+    db.session.add(n)
+    db.session.flush()
+    _age(n, 25)
+    return n
+
+
+def test_should_seed_null_cutoff_low_data_false(app):
+    """A null-cutoff (user-written) profile with <80k tokens must NOT seed —
+    the sentinel that used to force-seed it is gone."""
+    u = _user()
+    _age(_prev_profile(u, None, gen_type="initial"), 30)
+    _seed_node(u, 2884)
+    db.session.commit()
+    assert pb._should_seed(u) is False
+
+
+def test_should_seed_null_cutoff_high_data_true(app):
+    """A null-cutoff profile WITH >=80k tokens still seeds, so the base gets
+    folded into a data-grounded profile."""
+    u = _user()
+    _age(_prev_profile(u, None, gen_type="initial"), 30)
+    _seed_node(u, 90000)
+    db.session.commit()
+    assert pb._should_seed(u) is True
 
 
 # ── poll cycle ────────────────────────────────────────────────────────────
