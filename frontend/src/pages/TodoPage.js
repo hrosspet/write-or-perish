@@ -182,7 +182,7 @@ function TodoItem({ item, onToggle, onInsertAfter, addingKey, setAddingKey, dept
         {addable && (
           <button
             type="button"
-            onMouseDown={(e) => e.preventDefault()}
+            onMouseDown={(e) => { e.preventDefault(); setAddText(''); setAddingKey(item.text); }}
             onClick={() => { setAddText(''); setAddingKey(item.text); }}
             title="Add an item below"
             aria-label="Add an item below"

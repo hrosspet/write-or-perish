@@ -232,7 +232,7 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', onCheckbox
                   className="loore-add-task"
                   title="Add an item below"
                   aria-label="Add an item below"
-                  onMouseDown={(e) => e.preventDefault()}
+                  onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); setAddingAfter(itemText); }}
                   onClick={(e) => { e.preventDefault(); e.stopPropagation(); setAddingAfter(itemText); }}
                   style={{
                     background: 'none',

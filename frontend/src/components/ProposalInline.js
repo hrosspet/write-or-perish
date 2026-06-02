@@ -365,7 +365,7 @@ function ProposalTaskRow({ item, styles, toggleable, variant, addingKey, setAddi
         {toggleable && (
           <button
             type="button"
-            onMouseDown={(e) => e.preventDefault()}
+            onMouseDown={(e) => { e.preventDefault(); setAddText(''); setAddingKey(rowKey); }}
             onClick={() => { setAddText(''); setAddingKey(rowKey); }}
             title="Add an item below"
             aria-label="Add an item below"
