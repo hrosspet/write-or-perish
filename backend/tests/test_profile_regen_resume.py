@@ -101,3 +101,34 @@ def test_full_regen_clears_flag_after_first_chunk(app, monkeypatch):
     saved = UserProfile.query.get(profile_id)
     assert saved is not None
     assert saved.generation_type == "iterative"
+
+
+def test_incremental_update_null_cutoff_falls_back_to_full_regen(app, monkeypatch):
+    """A previous profile with no source_data_cutoff (user-written/legacy)
+    must NOT crash _do_incremental_update on `Node.created_at > None` — it
+    falls back to full generation instead."""
+    import backend.tasks.exports as exports
+
+    user = User(username="nullcut", plan="alpha", twitter_id=None,
+                approved=True)
+    _db.session.add(user)
+    _db.session.flush()
+    prev = UserProfile(
+        user_id=user.id, generated_by="user", tokens_used=0,
+        generation_type="initial", source_tokens_used=0,
+        source_data_cutoff=None,
+    )
+    prev.set_content("USER-WRITTEN PROFILE")
+    _db.session.add(prev)
+    _db.session.commit()
+
+    sentinel = {"status": "full-regen"}
+    full = MagicMock(return_value=sentinel)
+    monkeypatch.setattr(exports, "_do_initial_generation", full)
+
+    result = exports._do_incremental_update(
+        MagicMock(), user, "gpt-5.5", prev.id,
+        context_window=200000, max_output_tokens=10000, api_keys={})
+
+    full.assert_called_once()      # fell back to full regen, no crash
+    assert result is sentinel

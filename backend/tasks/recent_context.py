@@ -224,10 +224,15 @@ def generate_recent_context(user_id, profile_id=None, data_cutoff_iso=None):
             )
             return
 
-        # Determine the model to use (same as profile generation)
-        model_id = user.preferred_model or "claude-opus-4-6"
+        # Determine the model to use (same as profile generation). The
+        # fallback must be a valid SUPPORTED_MODELS key — the old hardcoded
+        # "claude-opus-4-6" (hyphen) is the *api_model*, not the internal id
+        # ("claude-opus-4.6"), so it failed get_completion's lookup.
+        default_model = flask_app.config.get(
+            "DEFAULT_LLM_MODEL", "claude-opus-4.6")
+        model_id = user.preferred_model or default_model
         if model_id not in flask_app.config.get("SUPPORTED_MODELS", {}):
-            model_id = "claude-opus-4-6"
+            model_id = default_model
 
         # Build data: ALL nodes since profile cutoff
         from backend.routes.export_data import (

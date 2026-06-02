@@ -452,6 +452,17 @@ def _do_incremental_update(self, user, model_id, previous_profile_id,
         raise ValueError(f"Previous profile {previous_profile_id} not found")
 
     cutoff = prev_profile.source_data_cutoff
+    if cutoff is None:
+        # A profile with no data cutoff (user-written or legacy) has no
+        # baseline for an incremental diff — `Node.created_at > None` raises
+        # ArgumentError. Rebuild from scratch instead of crashing.
+        logger.info(
+            f"User {user.id}: previous profile {prev_profile.id} has no "
+            f"source_data_cutoff — falling back to full generation"
+        )
+        return _do_initial_generation(
+            self, user, model_id, context_window, max_output_tokens, api_keys
+        )
 
     # Build update template
     update_template = build_update_template(user.id)
