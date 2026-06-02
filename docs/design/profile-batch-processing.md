@@ -276,3 +276,52 @@ All resolved in review:
    rare last-resort safety net (prompt-too-long doesn't apply to chunked
    updates, so transient retry suffices in practice).
 4. **Poller cadence: 60s.**
+
+## Canary runbook (staging)
+
+Validate on one real user before flipping the global switch. The compose
+services pass env via explicit `environment:` lists, so the gating vars are
+declared there (`docker-compose.yml`, backend + celery + celery-beat) and
+interpolated from `.env.staging`.
+
+1. **List the canary** in `.env.staging` on the VM (the "opt in" step):
+   ```
+   PROFILE_BATCH_USER_IDS=1     # the user id to canary
+   PROFILE_USE_BATCH=false      # keep it to just that user
+   ```
+   `OPENAI_API_KEY_BATCH` is optional (batches fall back to the chat key).
+2. **Deploy** the branch to staging (carries the code + compose wiring):
+   ```
+   git push origin <branch>:staging --force
+   ```
+   The deploy reads `.env.staging` at `docker compose up`, so set step 1
+   *first*. If you change `.env.staging` after a deploy, restart so the
+   processes re-read config (it's read at process start):
+   ```
+   docker compose -p wop-staging ... restart backend celery celery-beat
+   ```
+3. **Confirm the id.** Staging wipes its DB each deploy, so ids are assigned
+   fresh on signup — be the first to log in to get id 1, or confirm via the
+   admin dashboard / `flask shell` and adjust the allowlist (+ restart celery)
+   if it differs.
+4. **Verify the var reached the worker:**
+   ```
+   docker compose -p wop-staging ... exec celery printenv PROFILE_BATCH_USER_IDS
+   ```
+5. **Generate ≥80k eligible tokens** (e.g. import a ChatGPT/Claude archive),
+   then wait for the hourly `seed_profile_batches` or kick it now from a
+   `flask shell` in the backend/celery container:
+   ```python
+   from backend.tasks.profile_batch import seed_profile_batches
+   seed_profile_batches.delay()
+   ```
+   The 60s poller advances it from there.
+6. **What "healthy" looks like:**
+   - celery logs: `Profile batch <id> (...) submitted` → `saved batch chunk
+     profile <id>` → (if a chain forms) `saved batch integration profile`.
+   - `ProfileBatchJob` rows go `pending` → `collected`; `source_data_cutoff`
+     advances across the resulting `UserProfile` rows.
+   - `APICostLog` rows for the run have `request_type='profile_batch'` and ~half
+     the cost of the equivalent synchronous run.
+   - `User.profile_batch_pending` returns to `false` when the user's pipeline
+     finishes; `profile_batch_attempts` stays 0 on success.
