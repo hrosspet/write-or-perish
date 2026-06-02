@@ -1,5 +1,6 @@
 from datetime import datetime
 from flask_login import UserMixin
+from sqlalchemy import or_
 from backend.extensions import db
 from backend.utils.encryption import encrypt_content, decrypt_content
 
@@ -79,6 +80,24 @@ class User(db.Model, UserMixin):
 
     def get_id(self):
         return str(self.id)
+
+    @classmethod
+    def profile_eligible_query(cls):
+        """Users eligible for automatic profile / recent-context updates:
+        anyone on a Voice-Mode plan, minus the synthetic ``llm-<model>``
+        placeholder accounts.
+
+        The placeholder exclusion MUST keep users whose ``twitter_id`` is
+        NULL (email / magic-link signups). A bare ``~twitter_id.like('llm-%')``
+        silently drops them: in SQL ``NULL NOT LIKE x`` evaluates to NULL —
+        not TRUE — so the row fails the WHERE clause. That bug starved every
+        non-Twitter signup of automatic profile updates, which is why this
+        is a single shared helper rather than an inline filter.
+        """
+        return cls.query.filter(
+            cls.plan.in_(list(cls.VOICE_MODE_PLANS)),
+            or_(cls.twitter_id.is_(None), ~cls.twitter_id.like("llm-%")),
+        )
 
 class Node(db.Model):
     id = db.Column(db.Integer, primary_key=True)

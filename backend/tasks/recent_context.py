@@ -165,12 +165,11 @@ def _should_generate_recent_context(user):
 def check_pending_recent_context_updates():
     """Periodic task: check all eligible users for pending recent context updates."""
     with flask_app.app_context():
-        # Exclude LLM bot accounts (created by create_llm_placeholder
-        # with twitter_id="llm-{model_id}") — no need for profiles/summaries.
-        users = User.query.filter(
-            User.plan.in_(list(User.VOICE_MODE_PLANS)),
-            ~User.twitter_id.like("llm-%"),
-        ).all()
+        # Voice-Mode users minus the llm-<model> placeholder accounts.
+        # Shared helper keeps NULL-twitter_id (email signup) users in —
+        # a bare NOT LIKE drops them (NULL NOT LIKE = NULL). See
+        # User.profile_eligible_query.
+        users = User.profile_eligible_query().all()
         triggered = 0
         for user in users:
             try:
