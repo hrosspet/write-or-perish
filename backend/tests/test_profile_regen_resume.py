@@ -42,6 +42,12 @@ from backend.models import User, UserProfile      # noqa: E402
 
 @pytest.fixture
 def app():
+    # Warm celery_app first (lazily, at run time) so it resolves
+    # backend.tasks.exports then backend.tasks.profile_batch in the safe order.
+    # Importing exports directly as the first module trips the
+    # exports <-> profile_batch import cycle; doing this at module top instead
+    # breaks full-suite collection. So warm it here, in the fixture.
+    import backend.celery_app  # noqa: F401
     app = Flask(__name__)
     app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///:memory:"
     app.config["SECRET_KEY"] = "test-secret"
