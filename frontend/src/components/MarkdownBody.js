@@ -62,6 +62,31 @@ function replaceCheckboxes(children, renderToggle) {
 }
 
 /**
+ * Inline "add a task here" input row, shown below a checklist item when its
+ * hover "+" is clicked. Type + Enter inserts; Esc / blur-when-empty cancels.
+ */
+function AddTaskInput({ onSubmit, onCancel }) {
+  const [val, setVal] = React.useState('');
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: '4px 0' }}>
+      <span style={{ width: '18px', height: '18px', borderRadius: '50%', border: '1.5px dashed var(--border-hover)', flexShrink: 0, opacity: 0.5 }} />
+      <input
+        autoFocus
+        value={val}
+        onChange={(e) => setVal(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') { e.preventDefault(); const t = val.trim(); if (t) onSubmit(t); }
+          else if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+        }}
+        onBlur={() => { if (!val.trim()) onCancel(); }}
+        placeholder="New task…"
+        style={{ flex: 1, minWidth: 0, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--text-primary)', fontFamily: 'var(--sans)', fontSize: '0.92em', padding: '4px 8px' }}
+      />
+    </div>
+  );
+}
+
+/**
  * MarkdownBody — shared ReactMarkdown wrapper with consistent styling.
  *
  * Props:
@@ -69,8 +94,10 @@ function replaceCheckboxes(children, renderToggle) {
  *   style: optional style object applied to the outer <div>
  *   paragraphMargin: optional margin for <p> elements (default: "0.5em 0")
  *   onCheckboxToggle: optional callback(lineText, currentChecked) for clickable checkboxes
+ *   onAddTask: optional callback(afterItemText, newText) — enables the per-row hover "+"
  */
-const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', onCheckboxToggle }) => {
+const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', onCheckboxToggle, onAddTask }) => {
+  const [addingAfter, setAddingAfter] = React.useState(null);
   const components = {
     h1: ({ node, children, ...props }) => (
       <h1 style={{ fontFamily: 'var(--serif)', fontSize: '2.2em', fontWeight: 700, lineHeight: 1.2, margin: '1.2em 0 0.4em', color: 'var(--text-primary)' }} {...props}>{children}</h1>
@@ -134,7 +161,7 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', onCheckbox
       const isTask = props.className === 'task-list-item';
 
       if (isTask) {
-        const itemText = onCheckboxToggle ? extractText(liChildren).trim() : null;
+        const itemText = (onCheckboxToggle || onAddTask) ? extractText(liChildren).trim() : null;
         const { children: filteredChildren } = replaceCheckboxes(
           liChildren,
           (isChecked) => {
@@ -182,6 +209,11 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', onCheckbox
           },
         );
 
+        const childArr = React.Children.toArray(filteredChildren);
+        const ownContent = childArr.filter((c) => !isListElement(c));
+        const nestedLists = childArr.filter((c) => isListElement(c));
+        const addable = !!onAddTask;
+
         return (
           <li
             style={{
@@ -192,7 +224,37 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', onCheckbox
             }}
             {...props}
           >
-            {filteredChildren}
+            <span className="loore-task-row" style={{ display: 'block', position: 'relative' }}>
+              {ownContent}
+              {addable && (
+                <button
+                  type="button"
+                  className="loore-add-task"
+                  title="Add a task below"
+                  aria-label="Add a task below"
+                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); setAddingAfter(itemText); }}
+                  style={{
+                    position: 'absolute',
+                    right: 0,
+                    top: 0,
+                    background: 'none',
+                    border: 'none',
+                    color: 'var(--accent)',
+                    cursor: 'pointer',
+                    fontSize: '1.1em',
+                    lineHeight: 1,
+                    padding: '0 2px',
+                  }}
+                >+</button>
+              )}
+            </span>
+            {nestedLists}
+            {addable && addingAfter === itemText && (
+              <AddTaskInput
+                onSubmit={(t) => { onAddTask(itemText, t); setAddingAfter(null); }}
+                onCancel={() => setAddingAfter(null)}
+              />
+            )}
           </li>
         );
       }

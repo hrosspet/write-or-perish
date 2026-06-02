@@ -11,7 +11,7 @@ import { useUser } from "../contexts/UserContext";
 import { useToast } from "../contexts/ToastContext";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 import api from "../api";
-import { useCheckboxToggle } from "../utils/markdown";
+import { useCheckboxToggle, useTaskInsert } from "../utils/markdown";
 import { contextAllowsAi } from "../utils/aiUsage";
 import NodeFormModal from "./NodeFormModal";
 import Bubble from "./Bubble";
@@ -220,11 +220,11 @@ function NodeDetail() {
     }
   }, [llmStatus, llmData, llmError, navigate, id, llmTaskNodeId]);
 
-  const handleCheckboxToggle = useCheckboxToggle(
-    useCallback(() => node?.content, [node]),
-    useCallback((newContent) => setNode(prev => ({ ...prev, content: newContent })), []),
-    useCallback((newContent) => api.put(`/nodes/${id}`, { content: newContent }), [id]),
-  );
+  const getNodeContent = useCallback(() => node?.content, [node]);
+  const setNodeContent = useCallback((newContent) => setNode(prev => ({ ...prev, content: newContent })), []);
+  const saveNodeContent = useCallback((newContent) => api.put(`/nodes/${id}`, { content: newContent }), [id]);
+  const handleCheckboxToggle = useCheckboxToggle(getNodeContent, setNodeContent, saveNodeContent);
+  const handleTaskInsert = useTaskInsert(getNodeContent, setNodeContent, saveNodeContent);
 
   if (loading) return <div style={{ color: "var(--text-muted)", padding: "20px" }}>Loading node...</div>;
   if (error) return <div style={{ color: "var(--accent)", padding: "20px" }}>{error}</div>;
@@ -728,6 +728,7 @@ function NodeDetail() {
             contextArtifacts={node.context_artifacts || null}
             onQuoteClick={handleBubbleClick}
             onCheckboxToggle={isOwner ? handleCheckboxToggle : undefined}
+            onAddTask={isOwner ? handleTaskInsert : undefined}
           />
         )}
         {showProposal && (

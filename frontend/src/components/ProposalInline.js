@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import api from '../api';
 import MarkdownBody from './MarkdownBody';
-import { appendItemToSection } from '../utils/markdown';
+import { appendItemToSection, insertItemAfter } from '../utils/markdown';
 import useSubmitShortcut from '../hooks/useSubmitShortcut';
 
 export function stripInlineMarkdown(text) {
@@ -328,6 +328,74 @@ function sizeStyles(size) {
   };
 }
 
+// A single "New Tasks" proposal row with a hover "+" that opens an inline
+// input to insert a sibling task right below it (Voice + Text modes share
+// this — both render through the same row path).
+function NewTaskRow({ item, styles, toggleable, onToggle, onInsert }) {
+  const [hovered, setHovered] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [addText, setAddText] = useState('');
+  const submit = () => {
+    const t = addText.trim();
+    if (t) onInsert(item, t);
+    setAdding(false);
+    setAddText('');
+  };
+  return (
+    <>
+      <div
+        style={{ ...styles.row, position: 'relative' }}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+      >
+        <div
+          onClick={toggleable ? () => onToggle(item, 'new task', 'completed') : undefined}
+          title={toggleable ? 'Mark as done' : undefined}
+          style={{ ...styles.circleBase, ...styles.circleNewExtra, cursor: toggleable ? 'pointer' : 'default' }}
+        />
+        <div style={styles.itemText}>{item}</div>
+        {toggleable && (
+          <button
+            type="button"
+            onClick={() => { setAdding(true); setAddText(''); }}
+            title="Add a task below"
+            aria-label="Add a task below"
+            style={{
+              marginLeft: 'auto', opacity: hovered ? 1 : 0,
+              transition: 'opacity 0.12s ease', background: 'none', border: 'none',
+              color: 'var(--accent)', cursor: 'pointer', fontSize: '1.2rem',
+              lineHeight: 1, padding: '0 4px',
+            }}
+          >+</button>
+        )}
+      </div>
+      {adding && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: styles.roomy ? '12px' : '10px', padding: styles.roomy ? '12px 0' : '8px 0' }}>
+          <span style={{ width: styles.roomy ? '18px' : '16px', height: styles.roomy ? '18px' : '16px', borderRadius: '50%', border: '1.5px dashed var(--border-hover)', flexShrink: 0, opacity: 0.5 }} />
+          <input
+            autoFocus
+            value={addText}
+            onChange={(e) => setAddText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); submit(); }
+              else if (e.key === 'Escape') { e.preventDefault(); setAdding(false); setAddText(''); }
+            }}
+            onBlur={() => { if (!addText.trim()) setAdding(false); }}
+            placeholder="New task…"
+            style={{
+              flex: 1, minWidth: 0, background: 'var(--bg-input)',
+              border: '1px solid var(--border)', borderRadius: '6px',
+              color: 'var(--text-primary)', fontFamily: 'var(--sans)',
+              fontSize: styles.roomy ? '0.92rem' : '0.85rem', fontWeight: 300,
+              padding: '8px 12px',
+            }}
+          />
+        </div>
+      )}
+    </>
+  );
+}
+
 export default function ProposalInline({
   content,
   nodeId,
@@ -404,6 +472,24 @@ export default function ProposalInline({
       })
       .finally(() => setQuickAddSaving(false));
   }, [content, nodeId, onContentChange, onError, toggleable, quickAddText, quickAddSaving]);
+
+  // Insert a new task immediately below a given "New Tasks" row (the hover "+"),
+  // preserving the section's plain-bullet style. Same optimistic+revert path.
+  const handleInsertAfter = useCallback((afterItem, newTask) => {
+    const task = (newTask || '').trim();
+    if (!toggleable || !nodeId || !task) return;
+    const newContent = insertItemAfter(content, afterItem, task);
+    if (newContent === content) return;
+    const prevContent = content;
+    onContentChange(newContent);
+    api.put(`/nodes/${nodeId}`, { content: newContent }).catch((err) => {
+      onContentChange(prevContent);
+      if (onError) {
+        const reason = err?.response?.data?.error || err?.message || 'Unknown error';
+        onError(`Couldn't add task — reverted (${reason})`);
+      }
+    });
+  }, [content, nodeId, onContentChange, onError, toggleable]);
 
   // Cmd+Return (macOS) / Ctrl+Enter (Win/Linux) submits the quick-add input,
   // matching the primary-submit shortcut used across the app (#129). Plain
@@ -538,20 +624,14 @@ export default function ProposalInline({
                 </div>
               ))}
               {parsed.newTasks && parseTodoItems(parsed.newTasks).map((item, i) => (
-                <div key={`new-${i}`} style={styles.row}>
-                  <div
-                    onClick={toggleable
-                      ? () => handleToggleItem(item, 'new task', 'completed')
-                      : undefined}
-                    title={toggleable ? 'Mark as done' : undefined}
-                    style={{
-                      ...styles.circleBase,
-                      ...styles.circleNewExtra,
-                      cursor: toggleable ? 'pointer' : 'default',
-                    }}
-                  />
-                  <div style={styles.itemText}>{item}</div>
-                </div>
+                <NewTaskRow
+                  key={`new-${i}`}
+                  item={item}
+                  styles={styles}
+                  toggleable={toggleable}
+                  onToggle={handleToggleItem}
+                  onInsert={handleInsertAfter}
+                />
               ))}
               {toggleable && (
                 quickAddOpen ? (

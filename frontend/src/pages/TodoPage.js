@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import api from '../api';
-import { useCheckboxToggle, appendItemToSection } from '../utils/markdown';
+import { useCheckboxToggle, useTaskInsert, appendItemToSection } from '../utils/markdown';
 import { formatDate } from '../utils/date';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
 import useSubmitShortcut from '../hooks/useSubmitShortcut';
@@ -96,14 +96,27 @@ function countAllItems(items) {
   return count;
 }
 
-function TodoItem({ item, onToggle, depth = 0 }) {
+function TodoItem({ item, onToggle, onInsertAfter, depth = 0 }) {
   const [collapsed, setCollapsed] = useState(true);
+  const [hovered, setHovered] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [addText, setAddText] = useState('');
   const hasChildren = item.children && item.children.length > 0;
   const childCount = hasChildren ? countAllItems(item.children) : 0;
+  const addable = item.checked !== null && typeof onInsertAfter === 'function';
+
+  const submitAdd = () => {
+    const t = addText.trim();
+    if (t) onInsertAfter(item, t);
+    setAdding(false);
+    setAddText('');
+  };
 
   return (
     <div>
       <div
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
         style={{
           display: 'flex',
           alignItems: 'flex-start',
@@ -166,11 +179,45 @@ function TodoItem({ item, onToggle, depth = 0 }) {
             </span>
           </div>
         )}
+        {addable && (
+          <button
+            type="button"
+            onClick={() => { setAdding(true); setAddText(''); }}
+            title="Add a task below"
+            aria-label="Add a task below"
+            style={{
+              marginLeft: 'auto',
+              opacity: hovered ? 1 : 0,
+              transition: 'opacity 0.12s ease',
+              background: 'none', border: 'none',
+              color: 'var(--accent)', cursor: 'pointer',
+              fontSize: '1.2rem', lineHeight: 1, padding: '0 4px',
+              marginTop: '-1px',
+            }}
+          >+</button>
+        )}
       </div>
+      {adding && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '8px 0', paddingLeft: depth * 24 }}>
+          <span style={{ width: '18px', height: '18px', borderRadius: '50%', border: '1.5px dashed var(--border-hover)', flexShrink: 0, opacity: 0.5 }} />
+          <input
+            autoFocus
+            value={addText}
+            onChange={(e) => setAddText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') { e.preventDefault(); submitAdd(); }
+              else if (e.key === 'Escape') { e.preventDefault(); setAdding(false); setAddText(''); }
+            }}
+            onBlur={() => { if (!addText.trim()) setAdding(false); }}
+            placeholder="New task…"
+            style={{ flex: 1, minWidth: 0, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--text-primary)', fontFamily: 'var(--sans)', fontSize: '0.92rem', padding: '6px 10px' }}
+          />
+        </div>
+      )}
       {hasChildren && !collapsed && (
         <div>
           {item.children.map((child, k) => (
-            <TodoItem key={k} item={child} onToggle={onToggle} depth={depth + 1} />
+            <TodoItem key={k} item={child} onToggle={onToggle} onInsertAfter={onInsertAfter} depth={depth + 1} />
           ))}
         </div>
       )}
@@ -216,17 +263,20 @@ export default function TodoPage() {
     fetchTodo();
   }, [fetchTodo]);
 
-  const checkboxToggle = useCheckboxToggle(
-    useCallback(() => todo?.content, [todo]),
-    useCallback((newContent) => {
-      setTodo(prev => prev ? { ...prev, content: newContent } : prev);
-      setEditContent(newContent);
-    }, []),
-    useCallback((newContent) => api.patch('/todo', { content: newContent }), []),
-  );
+  const getTodoContent = useCallback(() => todo?.content, [todo]);
+  const setTodoContent = useCallback((newContent) => {
+    setTodo(prev => prev ? { ...prev, content: newContent } : prev);
+    setEditContent(newContent);
+  }, []);
+  const saveTodoContent = useCallback((newContent) => api.patch('/todo', { content: newContent }), []);
+  const checkboxToggle = useCheckboxToggle(getTodoContent, setTodoContent, saveTodoContent);
+  const taskInsert = useTaskInsert(getTodoContent, setTodoContent, saveTodoContent);
 
   const handleToggle = (item) => {
     checkboxToggle(item.text, item.checked);
+  };
+  const handleInsertAfter = (item, text) => {
+    taskInsert(item.text, text);
   };
 
   const handleSave = async () => {
@@ -586,7 +636,7 @@ export default function TodoPage() {
                 </span>
               </div>
               {section.items.map((item, j) => (
-                <TodoItem key={j} item={item} onToggle={handleToggle} />
+                <TodoItem key={j} item={item} onToggle={handleToggle} onInsertAfter={handleInsertAfter} />
               ))}
               {section.items.length === 0 && (
                 <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', fontStyle: 'italic', padding: '4px 0' }}>
