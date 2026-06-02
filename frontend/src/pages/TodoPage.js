@@ -183,10 +183,9 @@ function TodoItem({ item, onToggle, onInsertAfter, depth = 0 }) {
           <button
             type="button"
             onClick={() => { setAdding(true); setAddText(''); }}
-            title="Add a task below"
-            aria-label="Add a task below"
+            title="Add an item below"
+            aria-label="Add an item below"
             style={{
-              marginLeft: 'auto',
               opacity: hovered ? 1 : 0,
               transition: 'opacity 0.12s ease',
               background: 'none', border: 'none',
@@ -209,7 +208,7 @@ function TodoItem({ item, onToggle, onInsertAfter, depth = 0 }) {
               else if (e.key === 'Escape') { e.preventDefault(); setAdding(false); setAddText(''); }
             }}
             onBlur={() => { if (!addText.trim()) setAdding(false); }}
-            placeholder="New task…"
+            placeholder="New item…"
             style={{ flex: 1, minWidth: 0, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--text-primary)', fontFamily: 'var(--sans)', fontSize: '0.92rem', padding: '6px 10px' }}
           />
         </div>

@@ -79,7 +79,7 @@ function AddTaskInput({ onSubmit, onCancel }) {
           else if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
         }}
         onBlur={() => { if (!val.trim()) onCancel(); }}
-        placeholder="New task…"
+        placeholder="New item…"
         style={{ flex: 1, minWidth: 0, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--text-primary)', fontFamily: 'var(--sans)', fontSize: '0.92em', padding: '4px 8px' }}
       />
     </div>
@@ -224,19 +224,16 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', onCheckbox
             }}
             {...props}
           >
-            <span className="loore-task-row" style={{ display: 'block', position: 'relative' }}>
+            <span className="loore-task-row" style={{ display: 'block' }}>
               {ownContent}
               {addable && (
                 <button
                   type="button"
                   className="loore-add-task"
-                  title="Add a task below"
-                  aria-label="Add a task below"
+                  title="Add an item below"
+                  aria-label="Add an item below"
                   onClick={(e) => { e.preventDefault(); e.stopPropagation(); setAddingAfter(itemText); }}
                   style={{
-                    position: 'absolute',
-                    right: 0,
-                    top: 0,
                     background: 'none',
                     border: 'none',
                     color: 'var(--accent)',
@@ -244,6 +241,8 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', onCheckbox
                     fontSize: '1.1em',
                     lineHeight: 1,
                     padding: '0 2px',
+                    marginLeft: '4px',
+                    verticalAlign: 'middle',
                   }}
                 >+</button>
               )}
