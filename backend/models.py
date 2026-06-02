@@ -65,6 +65,15 @@ class User(db.Model, UserMixin):
     # Flag: next profile generation should be a full regen (not incremental)
     profile_needs_full_regen = db.Column(db.Boolean, nullable=False, default=False)
 
+    # --- Profile-generation batch pipeline (issue #173, Part A) ---
+    # True while a batch request for this user's profile is in flight
+    # (one step at a time — chunks are sequential).
+    profile_batch_pending = db.Column(
+        db.Boolean, nullable=False, default=False, server_default="false")
+    # Consecutive batch failures for the current step (bounds retries).
+    profile_batch_attempts = db.Column(
+        db.Integer, nullable=False, default=0, server_default="0")
+
     # All valid subscription plans (single source of truth).
     ALLOWED_PLANS = {"free", "alpha", "pro"}
 
@@ -108,6 +117,34 @@ class User(db.Model, UserMixin):
             cls.plan.in_(list(cls.VOICE_MODE_PLANS)),
             or_(cls.twitter_id.is_(None), ~cls.twitter_id.like("llm-%")),
         )
+
+
+class ProfileBatchJob(db.Model):
+    """A submitted provider batch covering one profile-generation step for one
+    or more users (issue #173, Part A).
+
+    A single batch is heterogeneous — it can carry "chunk" items for users
+    mid-rebuild and "integration" items for users who just finished — so the
+    per-item metadata the poller needs to save each result lives in `items`
+    (keyed by custom_id), not on the job. The poller retrieves `batch_id`,
+    collects results, and routes each one back to its user via `items`.
+    """
+    __tablename__ = "profile_batch_job"
+
+    id = db.Column(db.Integer, primary_key=True)
+    # "anthropic" | "openai:<api_model>"
+    provider_key = db.Column(db.String(64), nullable=False)
+    batch_id = db.Column(db.String(255), nullable=False, index=True)
+    # "pending" | "collected" | "failed"
+    status = db.Column(db.String(16), nullable=False, default="pending")
+    # List of per-item dicts, each:
+    #   {custom_id, user_id, prev_profile_id, chunk_num, kind,
+    #    source_data_cutoff (iso str|None), cumulative_source_tokens, model_id}
+    items = db.Column(db.JSON, nullable=False, default=list)
+    submitted_at = db.Column(
+        db.DateTime, nullable=False, default=datetime.utcnow)
+    collected_at = db.Column(db.DateTime, nullable=True)
+
 
 class Node(db.Model):
     id = db.Column(db.Integer, primary_key=True)

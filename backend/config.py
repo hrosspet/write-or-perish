@@ -24,6 +24,17 @@ class Config:
     # Default model (for backward compatibility and fallback)
     DEFAULT_LLM_MODEL = os.environ.get("LLM_NAME", "claude-opus-4.6")
 
+    # --- Profile-generation batch processing (issue #173, Part A) ---
+    # A user takes the Batch API path if the global switch is on OR their id
+    # is in the canary allowlist. Both default off → batch ships dark.
+    PROFILE_USE_BATCH = os.environ.get(
+        "PROFILE_USE_BATCH", "false").lower() in ("1", "true", "yes")
+    PROFILE_BATCH_USER_IDS = {
+        int(x) for x in
+        os.environ.get("PROFILE_BATCH_USER_IDS", "").replace(" ", "").split(",")
+        if x
+    }
+
     # Safety factor for prompt-too-long retries (0.99 = aim for 99% of the limit)
     RETRY_SAFETY_FACTOR = 0.99
 
