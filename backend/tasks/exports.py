@@ -1138,18 +1138,23 @@ def maybe_trigger_incremental_profile_update(user):
             return None
 
         cutoff = latest_profile.source_data_cutoff
+        from sqlalchemy import func, or_
+        q = db.session.query(
+            func.coalesce(func.sum(Node.token_count), 0)
+        ).filter(
+            or_(Node.user_id == user.id,
+                Node.human_owner_id == user.id),
+            Node.ai_usage.in_(['chat', 'train']),
+        )
         if cutoff:
-            from sqlalchemy import func, or_
-            new_tokens = db.session.query(
-                func.coalesce(func.sum(Node.token_count), 0)
-            ).filter(
-                or_(Node.user_id == user.id,
-                    Node.human_owner_id == user.id),
-                Node.updated_at >= cutoff,
-                Node.ai_usage.in_(['chat', 'train']),
-            ).scalar()
+            new_tokens = q.filter(Node.updated_at >= cutoff).scalar()
         else:
-            new_tokens = THRESHOLD_TOKENS  # No cutoff = trigger
+            # No cutoff (e.g. a user-written profile): nothing has been folded
+            # into it yet, so all the user's data counts as new. Measure it and
+            # apply the same threshold rather than force-triggering on volume we
+            # never checked — otherwise a hand-written profile with almost no
+            # data gets needlessly overwritten by an LLM generation.
+            new_tokens = q.scalar()
     else:
         # No profile exists: check total eligible tokens
         from sqlalchemy import func, or_

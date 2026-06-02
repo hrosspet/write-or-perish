@@ -180,3 +180,64 @@ def test_integration_annotates_user_written_chain_root(app):
     gen_msg = next(t for t in texts if "GENERATED UPDATE PROFILE" in t)
     assert "written by the user" in user_msg        # root flagged
     assert "written by the user" not in gen_msg      # generated not flagged
+
+
+def _seed_null_cutoff_user(username, node_tokens):
+    """A user whose only profile is hand-written (null cutoff), plus one old
+    node carrying ``node_tokens``. Old timestamps so the inactivity (30m) and
+    interval (1h) gates both pass, isolating the token-threshold decision."""
+    from backend.models import Node
+    user = User(username=username, plan="alpha", twitter_id=None, approved=True)
+    _db.session.add(user)
+    _db.session.flush()
+    prof = UserProfile(
+        user_id=user.id, generated_by="user", tokens_used=0,
+        generation_type="initial", source_tokens_used=0,
+        source_data_cutoff=None, created_at=datetime(2025, 1, 1),
+    )
+    prof.set_content("USER-WRITTEN")
+    _db.session.add(prof)
+    node = Node(user_id=user.id, node_type="user", ai_usage="chat",
+                token_count=node_tokens, created_at=datetime(2025, 1, 2),
+                updated_at=datetime(2025, 1, 2))
+    node.set_content("writing")
+    _db.session.add(node)
+    _db.session.commit()
+    return user
+
+
+def test_null_cutoff_low_data_does_not_trigger(app, monkeypatch):
+    """A hand-written (null-cutoff) profile with <80k tokens of data must NOT
+    force-trigger an update — the heartbeat now measures the real data instead
+    of sentinelling a null cutoff straight to the threshold."""
+    import backend.tasks.exports as exports
+    import backend.tasks.profile_batch as pb
+    monkeypatch.setattr(pb, "use_batch_for_user", lambda *a, **k: False)
+
+    user = _seed_null_cutoff_user("nulllow", node_tokens=2884)
+
+    called = {}
+    monkeypatch.setattr(exports, "maybe_trigger_profile_update",
+                        lambda *a, **k: called.setdefault("yes", (a, k)))
+
+    result = exports.maybe_trigger_incremental_profile_update(user)
+    assert result is None
+    assert "yes" not in called          # did NOT trigger despite the null cutoff
+
+
+def test_null_cutoff_high_data_still_triggers(app, monkeypatch):
+    """A hand-written (null-cutoff) profile WITH >=80k tokens still triggers, so
+    the base eventually gets folded into a data-grounded profile."""
+    import backend.tasks.exports as exports
+    import backend.tasks.profile_batch as pb
+    monkeypatch.setattr(pb, "use_batch_for_user", lambda *a, **k: False)
+
+    user = _seed_null_cutoff_user("nullhigh", node_tokens=90000)
+
+    called = {}
+    monkeypatch.setattr(exports, "maybe_trigger_profile_update",
+                        lambda *a, **k: called.setdefault("yes", (a, k)))
+
+    exports.maybe_trigger_incremental_profile_update(user)
+    assert "yes" in called              # crossed threshold -> triggered
+    assert called["yes"][0][0] == user.id
