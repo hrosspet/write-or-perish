@@ -34,6 +34,14 @@ class Config:
         os.environ.get("PROFILE_BATCH_USER_IDS", "").replace(" ", "").split(",")
         if x
     }
+    # Kill-switch: pause ALL background profile/recent-context generation — the
+    # sync check (check_pending_profile_updates), the batch seeder
+    # (seed_profile_batches), and the recent-context check — while leaving the
+    # batch poller (poll_profile_batches) running. So an in-flight batch can
+    # finish on its own, but no NEW generation starts for anyone. Lets you
+    # hand-seed one user and canary them in isolation (issue #173).
+    PROFILE_UPDATES_PAUSED = os.environ.get(
+        "PROFILE_UPDATES_PAUSED", "false").lower() in ("1", "true", "yes")
 
     # Safety factor for prompt-too-long retries (0.99 = aim for 99% of the limit)
     RETRY_SAFETY_FACTOR = 0.99

@@ -327,6 +327,9 @@ def seed_profile_batches():
 def _seed_profile_batches():
     """Impl — runs inside an active app context (testable directly)."""
     config = current_app.config
+    if config.get("PROFILE_UPDATES_PAUSED"):
+        logger.info("PROFILE_UPDATES_PAUSED — skipping batch seeder")
+        return
     keys = apply_batch_key_override(
         get_api_keys_for_usage(config, 'chat'), config)
     built = []

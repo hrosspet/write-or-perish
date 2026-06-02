@@ -165,6 +165,10 @@ def _should_generate_recent_context(user):
 def check_pending_recent_context_updates():
     """Periodic task: check all eligible users for pending recent context updates."""
     with flask_app.app_context():
+        if flask_app.config.get("PROFILE_UPDATES_PAUSED"):
+            logger.info(
+                "PROFILE_UPDATES_PAUSED — skipping recent-context check")
+            return
         # Voice-Mode users minus the llm-<model> placeholder accounts.
         # Shared helper keeps NULL-twitter_id (email signup) users in —
         # a bare NOT LIKE drops them (NULL NOT LIKE = NULL). See

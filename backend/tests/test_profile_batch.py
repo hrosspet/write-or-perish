@@ -238,6 +238,38 @@ def test_poll_leaves_pending_job_untouched(app, monkeypatch):
     submit.assert_not_called()
 
 
+def test_seed_paused_is_noop(app, monkeypatch):
+    app.config["PROFILE_UPDATES_PAUSED"] = True
+    submit = MagicMock()
+    monkeypatch.setattr(pb, "batch_submit", submit)
+    pb._seed_profile_batches()
+    submit.assert_not_called()
+    assert ProfileBatchJob.query.count() == 0
+
+
+def test_poll_is_not_paused(app, monkeypatch):
+    # The pause kill-switch must NOT stop the poller — an in-flight batch
+    # still gets collected so it can finish on its own.
+    app.config["PROFILE_UPDATES_PAUSED"] = True
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        {item["custom_id"]: {"content": "P", "input_tokens": 100,
+                             "output_tokens": 50}}, {}, {}))
+    monkeypatch.setattr(pb, "build_user_export_content",
+                        MagicMock(return_value=None))
+    monkeypatch.setattr(pb, "build_integration_messages",
+                        lambda uid, pid: (None, None))
+    monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
+
+    pb._poll_profile_batches()
+
+    assert ProfileBatchJob.query.get(job.id).status == "collected"
+    assert UserProfile.query.filter_by(
+        user_id=u.id, parent_profile_id=prev.id).first() is not None
+
+
 def test_poll_fails_stale_job(app, monkeypatch):
     u = _user()
     prev = _prev_profile(u, datetime(2026, 5, 1))
