@@ -860,6 +860,20 @@ def _chunked_profile_loop(self, user, model_id, update_template,
         current_profile_id = profile.id
         current_cutoff = latest_ts
 
+        # After the first committed chunk, a from-scratch full regen is no
+        # longer needed: chunk 1 is the oldest data, so the chronological
+        # rebuild is anchored, and a later timeout can resume incrementally
+        # from this chunk instead of restarting from zero next heartbeat.
+        # (No-op for incremental updates, where the flag is already False.)
+        if chunk_num == 1 and user.profile_needs_full_regen:
+            user.profile_needs_full_regen = False
+            db.session.commit()
+            logger.info(
+                f"User {user.id}: cleared profile_needs_full_regen after "
+                f"first chunk (profile {profile.id}) — any later timeout "
+                f"resumes incrementally"
+            )
+
         logger.info(
             f"User {user.id}: chunk {chunk_num} done — "
             f"profile {profile.id}, {chunk_tokens_est} formatted tokens, "
