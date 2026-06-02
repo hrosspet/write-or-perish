@@ -96,20 +96,20 @@ function countAllItems(items) {
   return count;
 }
 
-function TodoItem({ item, onToggle, onInsertAfter, depth = 0 }) {
+function TodoItem({ item, onToggle, onInsertAfter, addingKey, setAddingKey, depth = 0 }) {
   const [collapsed, setCollapsed] = useState(true);
   const [hovered, setHovered] = useState(false);
-  const [adding, setAdding] = useState(false);
   const [addText, setAddText] = useState('');
   const hasChildren = item.children && item.children.length > 0;
   const childCount = hasChildren ? countAllItems(item.children) : 0;
   const addable = item.checked !== null && typeof onInsertAfter === 'function';
+  const adding = addingKey === item.text;
+  const closeAdd = () => { setAddingKey(null); setAddText(''); };
 
   const submitAdd = () => {
     const t = addText.trim();
     if (t) onInsertAfter(item, t);
-    setAdding(false);
-    setAddText('');
+    closeAdd();
   };
 
   return (
@@ -182,7 +182,8 @@ function TodoItem({ item, onToggle, onInsertAfter, depth = 0 }) {
         {addable && (
           <button
             type="button"
-            onClick={() => { setAdding(true); setAddText(''); }}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => { setAddText(''); setAddingKey(item.text); }}
             title="Add an item below"
             aria-label="Add an item below"
             style={{
@@ -191,7 +192,7 @@ function TodoItem({ item, onToggle, onInsertAfter, depth = 0 }) {
               background: 'none', border: 'none',
               color: 'var(--accent)', cursor: 'pointer',
               fontSize: '1.2rem', lineHeight: 1, padding: '0 4px',
-              marginTop: '-1px',
+              alignSelf: 'center',
             }}
           >+</button>
         )}
@@ -205,9 +206,9 @@ function TodoItem({ item, onToggle, onInsertAfter, depth = 0 }) {
             onChange={(e) => setAddText(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter') { e.preventDefault(); submitAdd(); }
-              else if (e.key === 'Escape') { e.preventDefault(); setAdding(false); setAddText(''); }
+              else if (e.key === 'Escape') { e.preventDefault(); closeAdd(); }
             }}
-            onBlur={() => { if (!addText.trim()) setAdding(false); }}
+            onBlur={() => { if (!addText.trim()) closeAdd(); }}
             placeholder="New item…"
             style={{ flex: 1, minWidth: 0, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--text-primary)', fontFamily: 'var(--sans)', fontSize: '0.92rem', padding: '6px 10px' }}
           />
@@ -216,7 +217,7 @@ function TodoItem({ item, onToggle, onInsertAfter, depth = 0 }) {
       {hasChildren && !collapsed && (
         <div>
           {item.children.map((child, k) => (
-            <TodoItem key={k} item={child} onToggle={onToggle} onInsertAfter={onInsertAfter} depth={depth + 1} />
+            <TodoItem key={k} item={child} onToggle={onToggle} onInsertAfter={onInsertAfter} addingKey={addingKey} setAddingKey={setAddingKey} depth={depth + 1} />
           ))}
         </div>
       )}
@@ -230,6 +231,10 @@ export default function TodoPage() {
   const [editing, setEditing] = useState(false);
   const [editContent, setEditContent] = useState('');
   const [saving, setSaving] = useState(false);
+
+  // Which per-row "+" inline add-input is open (keyed by item text). Lifted so
+  // opening one closes any other, and clicking a second "+" switches to it.
+  const [addingKey, setAddingKey] = useState(null);
 
   // Quick-add task (#108): reveal a small input that appends to "## Today".
   const [quickAddOpen, setQuickAddOpen] = useState(false);
@@ -491,24 +496,6 @@ export default function TodoPage() {
               padding: '8px 12px',
             }}
           />
-          <button
-            onClick={handleQuickAdd}
-            disabled={quickAddSaving || !quickAddText.trim()}
-            style={{
-              padding: '8px 16px',
-              background: 'var(--accent)',
-              border: 'none',
-              borderRadius: '6px',
-              color: 'var(--bg-deep)',
-              fontFamily: 'var(--sans)',
-              fontSize: '0.85rem',
-              fontWeight: 400,
-              cursor: (quickAddSaving || !quickAddText.trim()) ? 'not-allowed' : 'pointer',
-              opacity: (quickAddSaving || !quickAddText.trim()) ? 0.5 : 1,
-            }}
-          >
-            {quickAddSaving ? 'Adding...' : 'Add'}
-          </button>
         </div>
       )}
 
@@ -635,7 +622,7 @@ export default function TodoPage() {
                 </span>
               </div>
               {section.items.map((item, j) => (
-                <TodoItem key={j} item={item} onToggle={handleToggle} onInsertAfter={handleInsertAfter} />
+                <TodoItem key={j} item={item} onToggle={handleToggle} onInsertAfter={handleInsertAfter} addingKey={addingKey} setAddingKey={setAddingKey} />
               ))}
               {section.items.length === 0 && (
                 <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', fontStyle: 'italic', padding: '4px 0' }}>

@@ -333,16 +333,17 @@ function sizeStyles(size) {
 // A single proposal row (Completed or New Tasks) with a hover "+" right after
 // the text that opens an inline input to insert a sibling item below it.
 // Voice + Text modes share this (only `styles` differ via `size`).
-function ProposalTaskRow({ item, styles, toggleable, variant, onToggle, onInsert }) {
+function ProposalTaskRow({ item, styles, toggleable, variant, addingKey, setAddingKey, onToggle, onInsert }) {
   const [hovered, setHovered] = useState(false);
-  const [adding, setAdding] = useState(false);
   const [addText, setAddText] = useState('');
   const completed = variant === 'completed';
+  const rowKey = `${variant}:${item}`;
+  const adding = addingKey === rowKey;
+  const close = () => { setAddingKey(null); setAddText(''); };
   const submit = () => {
     const t = addText.trim();
     if (t) onInsert(item, t);
-    setAdding(false);
-    setAddText('');
+    close();
   };
   return (
     <>
@@ -364,7 +365,8 @@ function ProposalTaskRow({ item, styles, toggleable, variant, onToggle, onInsert
         {toggleable && (
           <button
             type="button"
-            onClick={() => { setAdding(true); setAddText(''); }}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => { setAddText(''); setAddingKey(rowKey); }}
             title="Add an item below"
             aria-label="Add an item below"
             style={{
@@ -385,9 +387,9 @@ function ProposalTaskRow({ item, styles, toggleable, variant, onToggle, onInsert
             onChange={(e) => setAddText(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); submit(); }
-              else if (e.key === 'Escape') { e.preventDefault(); setAdding(false); setAddText(''); }
+              else if (e.key === 'Escape') { e.preventDefault(); close(); }
             }}
-            onBlur={() => { if (!addText.trim()) setAdding(false); }}
+            onBlur={() => { if (!addText.trim()) close(); }}
             placeholder="New item…"
             style={{
               flex: 1, minWidth: 0, background: 'var(--bg-input)',
@@ -415,6 +417,10 @@ export default function ProposalInline({
   const hasTodo = parsed.completed || parsed.newTasks || parsed.priority || parsed.note;
   const hasIssue = parsed.issueTitle && parsed.issueDescription;
   const [applyStatus, setApplyStatus] = useState(null);
+  // Which row (if any) currently has its inline add-input open. Lifted here so
+  // opening one row's "+" closes any other — and clicking a second "+" switches
+  // to it instead of just cancelling the first.
+  const [addingKey, setAddingKey] = useState(null);
   const [applyError, setApplyError] = useState(null);
   const [issueApplyStatus, setIssueApplyStatus] = useState(null);
   const [issueApplyError, setIssueApplyError] = useState(null);
@@ -569,6 +575,8 @@ export default function ProposalInline({
                   styles={styles}
                   toggleable={toggleable}
                   variant="completed"
+                  addingKey={addingKey}
+                  setAddingKey={setAddingKey}
                   onToggle={handleToggleItem}
                   onInsert={handleInsertAfter}
                 />
@@ -580,6 +588,8 @@ export default function ProposalInline({
                   styles={styles}
                   toggleable={toggleable}
                   variant="new"
+                  addingKey={addingKey}
+                  setAddingKey={setAddingKey}
                   onToggle={handleToggleItem}
                   onInsert={handleInsertAfter}
                 />
