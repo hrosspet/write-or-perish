@@ -417,43 +417,54 @@ def format_node_tree(
 def _collect_all_nodes_in_tree(node, filter_ai_usage=False, created_before=None,
                                collected=None, user_id=None):
     """
-    Recursively collect all accessible nodes in a tree.
+    Collect all accessible nodes in a tree, in pre-order.
+
+    Iterative (explicit stack) rather than recursive: a recursive walk
+    overflowed Python's call-stack limit on users with very deep reply
+    chains — each level also lazy-loads ``node.children``, multiplying the
+    frames per level — which crashed full profile regeneration before any
+    LLM call. An explicit stack bounds depth by the heap instead.
 
     Args:
         node: Root node of the tree
         filter_ai_usage: If True, only include nodes where ai_usage is 'chat' or 'train'
         created_before: Optional datetime filter
-        collected: Set of already collected node IDs (to avoid duplicates)
-        user_id: If provided, skip inaccessible nodes but still recurse
+        collected: Set of already collected node IDs (dedupe + cycle guard)
+        user_id: If provided, skip inaccessible nodes but still descend
                 into their children (which may be accessible).
 
     Returns:
-        List of Node objects in the tree
+        List of Node objects in the tree, pre-order (parent before children,
+        children left-to-right) — identical ordering to the previous
+        recursive implementation.
     """
     if collected is None:
         collected = set()
 
-    if node.id in collected:
-        return []
+    result = []
+    # LIFO stack; push children reversed so they pop left-to-right, giving
+    # the same pre-order the recursive version produced.
+    stack = [node]
+    while stack:
+        current = stack.pop()
 
-    collected.add(node.id)
+        if current.id in collected:
+            continue
+        collected.add(current.id)
 
-    # Only include the node itself if it's accessible (or no user_id check)
-    if user_id and not can_user_access_node(node, user_id):
-        result = []
-    else:
-        result = [node]
+        # Include the node only if it's accessible (or no user_id check);
+        # descend into children regardless — they may be accessible.
+        if not (user_id and not can_user_access_node(current, user_id)):
+            result.append(current)
 
-    children = node.children
-    if filter_ai_usage:
-        children = [c for c in children if c.ai_usage in AI_ALLOWED]
-    if created_before:
-        children = [c for c in children if c.created_at < created_before]
+        children = current.children
+        if filter_ai_usage:
+            children = [c for c in children if c.ai_usage in AI_ALLOWED]
+        if created_before:
+            children = [c for c in children if c.created_at < created_before]
 
-    for child in children:
-        result.extend(_collect_all_nodes_in_tree(
-            child, filter_ai_usage, created_before, collected, user_id
-        ))
+        for child in reversed(children):
+            stack.append(child)
 
     return result
 

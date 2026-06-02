@@ -860,6 +860,20 @@ def _chunked_profile_loop(self, user, model_id, update_template,
         current_profile_id = profile.id
         current_cutoff = latest_ts
 
+        # After the first committed chunk, a from-scratch full regen is no
+        # longer needed: chunk 1 is the oldest data, so the chronological
+        # rebuild is anchored, and a later timeout can resume incrementally
+        # from this chunk instead of restarting from zero next heartbeat.
+        # (No-op for incremental updates, where the flag is already False.)
+        if chunk_num == 1 and user.profile_needs_full_regen:
+            user.profile_needs_full_regen = False
+            db.session.commit()
+            logger.info(
+                f"User {user.id}: cleared profile_needs_full_regen after "
+                f"first chunk (profile {profile.id}) — any later timeout "
+                f"resumes incrementally"
+            )
+
         logger.info(
             f"User {user.id}: chunk {chunk_num} done — "
             f"profile {profile.id}, {chunk_tokens_est} formatted tokens, "
@@ -1110,12 +1124,11 @@ def maybe_trigger_incremental_profile_update(user):
 def check_pending_profile_updates():
     """Periodic task: check all eligible users for pending profile updates."""
     with flask_app.app_context():
-        # Exclude LLM bot accounts (created by create_llm_placeholder
-        # with twitter_id="llm-{model_id}") — no need for profiles.
-        users = User.query.filter(
-            User.plan.in_(list(User.VOICE_MODE_PLANS)),
-            ~User.twitter_id.like("llm-%"),
-        ).all()
+        # Voice-Mode users minus the llm-<model> placeholder accounts.
+        # Shared helper keeps NULL-twitter_id (email signup) users in —
+        # a bare NOT LIKE drops them (NULL NOT LIKE = NULL). See
+        # User.profile_eligible_query.
+        users = User.profile_eligible_query().all()
         for user in users:
             try:
                 maybe_trigger_incremental_profile_update(user)
