@@ -52,9 +52,10 @@ def app():
         db.drop_all()
 
 
-def _make_user(username, plan, twitter_id):
+def _make_user(username, plan, twitter_id, approved=True,
+               deactivated_at=None):
     u = User(username=username, plan=plan, twitter_id=twitter_id,
-             approved=True)
+             approved=approved, deactivated_at=deactivated_at)
     db.session.add(u)
     db.session.flush()
     return u
@@ -85,3 +86,26 @@ def test_filter_includes_and_excludes_the_right_cohorts(app):
     assert twitter_alpha.id in eligible
     assert llm_bot.id not in eligible      # placeholder bots stay excluded
     assert free_email.id not in eligible   # free plan is not Voice-Mode
+
+
+def test_deactivated_and_unapproved_users_are_excluded(app):
+    """Deactivated (approved=False, deactivated_at set) and never-approved
+    users must NOT receive background profile generation — otherwise
+    deactivating a user wouldn't stop LLM spend on their profile."""
+    from datetime import datetime
+
+    active = _make_user("active_alpha", "alpha", None, approved=True)
+    deactivated = _make_user(
+        "deactivated_alpha", "alpha", None,
+        approved=False, deactivated_at=datetime(2026, 6, 1, 0, 0, 0),
+    )
+    never_approved = _make_user(
+        "pending_alpha", "alpha", None, approved=False,
+    )
+    db.session.commit()
+
+    eligible = {u.id for u in User.profile_eligible_query().all()}
+
+    assert active.id in eligible
+    assert deactivated.id not in eligible     # the user-44 hold-off case
+    assert never_approved.id not in eligible

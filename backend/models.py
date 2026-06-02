@@ -84,17 +84,27 @@ class User(db.Model, UserMixin):
     @classmethod
     def profile_eligible_query(cls):
         """Users eligible for automatic profile / recent-context updates:
-        anyone on a Voice-Mode plan, minus the synthetic ``llm-<model>``
-        placeholder accounts.
+        approved, active accounts on a Voice-Mode plan, minus the synthetic
+        ``llm-<model>`` placeholder accounts.
 
-        The placeholder exclusion MUST keep users whose ``twitter_id`` is
-        NULL (email / magic-link signups). A bare ``~twitter_id.like('llm-%')``
-        silently drops them: in SQL ``NULL NOT LIKE x`` evaluates to NULL —
-        not TRUE — so the row fails the WHERE clause. That bug starved every
-        non-Twitter signup of automatic profile updates, which is why this
-        is a single shared helper rather than an inline filter.
+        Two non-obvious guards:
+
+        * ``approved`` gates all access (login + terms) and is flipped to
+          ``False`` by admin deactivation. Excluding non-approved users
+          stops us spending LLM budget building profiles nobody can open —
+          and makes deactivation an effective "pause this user" switch.
+
+        * The placeholder exclusion MUST keep users whose ``twitter_id`` is
+          NULL (email / magic-link signups). A bare ``~twitter_id.like('llm-%')``
+          silently drops them: in SQL ``NULL NOT LIKE x`` evaluates to NULL —
+          not TRUE — so the row fails the WHERE clause. That bug starved
+          every non-Twitter signup of automatic profile updates.
+
+        Shared helper (not an inline filter) so the profile and
+        recent-context tasks can't drift apart again.
         """
         return cls.query.filter(
+            cls.approved.is_(True),
             cls.plan.in_(list(cls.VOICE_MODE_PLANS)),
             or_(cls.twitter_id.is_(None), ~cls.twitter_id.like("llm-%")),
         )
