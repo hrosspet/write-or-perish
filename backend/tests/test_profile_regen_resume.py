@@ -109,11 +109,12 @@ def test_full_regen_clears_flag_after_first_chunk(app, monkeypatch):
     assert saved.generation_type == "iterative"
 
 
-def test_incremental_update_null_cutoff_falls_back_to_full_regen(app, monkeypatch):
-    """A previous profile with no source_data_cutoff (user-written/legacy)
-    must NOT crash _do_incremental_update on `Node.created_at > None` — it
-    falls back to full generation instead."""
+def test_incremental_update_null_cutoff_uses_existing_base_with_note(app, monkeypatch):
+    """A user-written (null-cutoff) profile must NOT crash and must NOT be
+    discarded by full regen — it's used as the incremental base, annotated so
+    the LLM knows it's the user's own words."""
     import backend.tasks.exports as exports
+    from backend.models import Node
 
     user = User(username="nullcut", plan="alpha", twitter_id=None,
                 approved=True)
@@ -126,15 +127,56 @@ def test_incremental_update_null_cutoff_falls_back_to_full_regen(app, monkeypatc
     )
     prev.set_content("USER-WRITTEN PROFILE")
     _db.session.add(prev)
+    node = Node(user_id=user.id, node_type="user", ai_usage="chat")
+    node.set_content("some recent writing")
+    _db.session.add(node)
     _db.session.commit()
 
-    sentinel = {"status": "full-regen"}
-    full = MagicMock(return_value=sentinel)
+    captured = {}
+
+    def fake_loop(*a, **kw):
+        captured["base"] = kw.get("initial_profile_content")
+        return (prev.id, 1, 0)
+    monkeypatch.setattr(exports, "_chunked_profile_loop", fake_loop)
+    full = MagicMock()
     monkeypatch.setattr(exports, "_do_initial_generation", full)
 
-    result = exports._do_incremental_update(
+    exports._do_incremental_update(
         MagicMock(), user, "gpt-5.5", prev.id,
         context_window=200000, max_output_tokens=10000, api_keys={})
 
-    full.assert_called_once()      # fell back to full regen, no crash
-    assert result is sentinel
+    full.assert_not_called()                            # NOT full regen
+    assert "USER-WRITTEN PROFILE" in captured["base"]   # existing kept as base
+    assert "written by the user" in captured["base"]    # annotated as user-written
+
+
+def test_integration_annotates_user_written_chain_root(app):
+    """The integration chain root can be the user's hand-written profile — it
+    must be flagged as user-written; generated versions must not be."""
+    import backend.tasks.exports as exports
+    from datetime import datetime
+
+    user = User(username="iu", plan="alpha", twitter_id=None, approved=True)
+    _db.session.add(user)
+    _db.session.flush()
+    p1 = UserProfile(user_id=user.id, generated_by="user", tokens_used=0,
+                     generation_type="initial", source_tokens_used=0,
+                     source_data_cutoff=None)
+    p1.set_content("USER BASE PROFILE")
+    _db.session.add(p1)
+    _db.session.flush()
+    p2 = UserProfile(user_id=user.id, generated_by="gpt-5.5", tokens_used=0,
+                     generation_type="update", source_tokens_used=1000,
+                     source_data_cutoff=datetime(2026, 6, 1),
+                     parent_profile_id=p1.id)
+    p2.set_content("GENERATED UPDATE PROFILE")
+    _db.session.add(p2)
+    _db.session.commit()
+
+    messages, chain = exports.build_integration_messages(user.id, p2.id)
+    assert messages is not None and len(chain) == 2
+    texts = [m["content"][0]["text"] for m in messages]
+    user_msg = next(t for t in texts if "USER BASE PROFILE" in t)
+    gen_msg = next(t for t in texts if "GENERATED UPDATE PROFILE" in t)
+    assert "written by the user" in user_msg        # root flagged
+    assert "written by the user" not in gen_msg      # generated not flagged

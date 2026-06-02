@@ -26,6 +26,16 @@ logger = get_task_logger(__name__)
 CHUNK_BUDGET = 90000
 MIN_CHUNK_TOKENS = 80000
 
+# Prepended to a user-written profile (generated_by == "user") whenever it's
+# fed to the LLM — as the base for an incremental update or as the root of an
+# integration chain — so the model treats it as the user's own words rather
+# than a prior generated profile.
+USER_WRITTEN_PROFILE_NOTE = (
+    "[NOTE: The profile below was written by the user themselves, not "
+    "AI-generated. Treat it as their own self-description - important, but "
+    "also just another data point. Don't overindex on it.]"
+)
+
 
 def _is_task_stale(user):
     """Check if the user's profile generation task is stale (lost or timed out).
@@ -452,28 +462,23 @@ def _do_incremental_update(self, user, model_id, previous_profile_id,
         raise ValueError(f"Previous profile {previous_profile_id} not found")
 
     cutoff = prev_profile.source_data_cutoff
-    if cutoff is None:
-        # A profile with no data cutoff (user-written or legacy) has no
-        # baseline for an incremental diff — `Node.created_at > None` raises
-        # ArgumentError. Rebuild from scratch instead of crashing.
-        logger.info(
-            f"User {user.id}: previous profile {prev_profile.id} has no "
-            f"source_data_cutoff — falling back to full generation"
-        )
-        return _do_initial_generation(
-            self, user, model_id, context_window, max_output_tokens, api_keys
-        )
 
     # Build update template
     update_template = build_update_template(user.id)
 
-    # Check if there's any new data at all
+    # Check if there's any new data at all. A null cutoff (user-written or
+    # legacy profile) has no baseline, so treat ALL eligible data as new and
+    # let the chunk loop fold it into the existing profile — rather than
+    # crashing on `Node.created_at > None` or discarding the profile via a
+    # full regen.
     from backend.models import Node
-    has_new_data = Node.query.filter(
+    q = Node.query.filter(
         Node.user_id == user.id,
-        Node.created_at > cutoff,
         Node.ai_usage.in_(['chat', 'train'])
-    ).first() is not None
+    )
+    if cutoff is not None:
+        q = q.filter(Node.created_at > cutoff)
+    has_new_data = q.first() is not None
 
     if not has_new_data:
         logger.info(f"No new data for user {user.id} since cutoff {cutoff}")
@@ -499,10 +504,17 @@ def _do_iterative_incremental_update(self, user, model_id, prev_profile,
         f"budget={CHUNK_BUDGET} tokens per chunk, cutoff={cutoff}"
     )
 
+    # When the base is the user's own hand-written profile, tell the LLM so
+    # (it's chunk 1's {existing_profile}; later chunks build on generated
+    # output and need no note).
+    base_content = prev_profile.get_content()
+    if prev_profile.generated_by == "user":
+        base_content = f"{USER_WRITTEN_PROFILE_NOTE}\n\n{base_content}"
+
     current_profile_id, chunk_num, cumulative_source_tokens = \
         _chunked_profile_loop(
             self, user, model_id, update_template, api_keys,
-            initial_profile_content=prev_profile.get_content(),
+            initial_profile_content=base_content,
             initial_profile_id=prev_profile.id,
             initial_source_tokens=prev_profile.source_tokens_used or 0,
             initial_cutoff=cutoff,
@@ -726,6 +738,10 @@ def build_integration_messages(user_id, last_iterative_profile_id):
     messages = []
     for i, profile in enumerate(chain, 1):
         content = profile.get_content()
+        # The chain root can be the user's hand-written profile — flag it so
+        # the integration treats it as the user's own words.
+        if profile.generated_by == "user":
+            content = f"{USER_WRITTEN_PROFILE_NOTE}\n\n{content}"
         cutoff = profile.source_data_cutoff
         date_str = cutoff.strftime("%Y-%m-%d") if cutoff else "unknown"
         if i == 1:
