@@ -54,6 +54,14 @@ celery.conf.update(
     },
 )
 
+# Keep third-party HTTP/SDK loggers off DEBUG so request bodies (which can
+# contain user content, e.g. profile prompts) never get logged — even when the
+# worker runs at --loglevel=debug (staging). These set their own level, so it
+# holds regardless of the root level Celery configures.
+import logging  # noqa: E402
+for _noisy_logger in ("anthropic", "openai", "httpx", "httpcore"):
+    logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
+
 # Import tasks to register them with Celery
 # This must be done after celery app is created
 from backend.tasks import transcription  # noqa: F401

@@ -149,7 +149,10 @@ def _build_next_profile_request(user):
                 cumulative, chunk)
             generation_type = "update"
         latest_ts = chunk["latest_node_created_at"]
-        cid = f"profile:{user.id}:{prev_id or 0}:chunk"
+        # NB: Anthropic requires custom_id to match ^[a-zA-Z0-9_-]{1,64}$ —
+        # no colons. Underscore-delimited, parsed nowhere (routing is by exact
+        # match against the stored items), so the format is free to change.
+        cid = f"profile_{user.id}_{prev_id or 0}_chunk"
         return {
             "provider": provider,
             "request": {
@@ -180,7 +183,7 @@ def _build_next_profile_request(user):
         if len(chain) >= 2 and not already:
             messages, _chain = build_integration_messages(user.id, prev.id)
             if messages is not None:
-                cid = f"profile:{user.id}:{prev.id}:integration"
+                cid = f"profile_{user.id}_{prev.id}_integration"
                 return {
                     "provider": provider,
                     "request": {

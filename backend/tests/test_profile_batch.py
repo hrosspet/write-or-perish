@@ -6,9 +6,13 @@ chain actually advances. The @celery.task wrappers aren't called directly
 (they're mocks under the celery stub) — we exercise the _impl functions.
 """
 import os
+import re
 import sys
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock
+
+# Anthropic requires batch custom_id to match this; OpenAI is no stricter.
+CUSTOM_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 os.environ["ENCRYPTION_DISABLED"] = "true"
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
@@ -125,6 +129,8 @@ def test_build_next_request_chunk(app, monkeypatch):
     assert req["meta"]["source_data_cutoff"] == "2026-06-01T00:00:00"
     text = req["request"]["messages"][0]["content"][0]["text"]
     assert "NEW DATA" in text and "PREVIOUS PROFILE" in text
+    # Regression: Anthropic rejects custom_id with colons (must match pattern)
+    assert CUSTOM_ID_RE.match(req["request"]["custom_id"])
 
 
 def test_build_next_request_none_when_no_data(app, monkeypatch):
@@ -189,6 +195,7 @@ def test_poll_saves_chunk_then_enqueues_integration(app, monkeypatch):
     assert ProfileBatchJob.query.get(job.id).status == "collected"
     integ = ProfileBatchJob.query.filter_by(batch_id="b2").first()
     assert integ is not None and integ.items[0]["kind"] == "integration"
+    assert CUSTOM_ID_RE.match(integ.items[0]["custom_id"])   # no colons
     assert User.query.get(u.id).profile_batch_pending is True
 
 
