@@ -24,6 +24,25 @@ class Config:
     # Default model (for backward compatibility and fallback)
     DEFAULT_LLM_MODEL = os.environ.get("LLM_NAME", "claude-opus-4.6")
 
+    # --- Profile-generation batch processing (issue #173, Part A) ---
+    # A user takes the Batch API path if the global switch is on OR their id
+    # is in the canary allowlist. Both default off → batch ships dark.
+    PROFILE_USE_BATCH = os.environ.get(
+        "PROFILE_USE_BATCH", "false").lower() in ("1", "true", "yes")
+    PROFILE_BATCH_USER_IDS = {
+        int(x) for x in
+        os.environ.get("PROFILE_BATCH_USER_IDS", "").replace(" ", "").split(",")
+        if x
+    }
+    # Kill-switch: pause ALL background profile/recent-context generation — the
+    # sync check (check_pending_profile_updates), the batch seeder
+    # (seed_profile_batches), and the recent-context check — while leaving the
+    # batch poller (poll_profile_batches) running. So an in-flight batch can
+    # finish on its own, but no NEW generation starts for anyone. Lets you
+    # hand-seed one user and canary them in isolation (issue #173).
+    PROFILE_UPDATES_PAUSED = os.environ.get(
+        "PROFILE_UPDATES_PAUSED", "false").lower() in ("1", "true", "yes")
+
     # Safety factor for prompt-too-long retries (0.99 = aim for 99% of the limit)
     RETRY_SAFETY_FACTOR = 0.99
 

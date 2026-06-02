@@ -7,12 +7,17 @@ floating-point precision issues while supporting sub-cent costs.
 from flask import current_app
 
 
-def calculate_llm_cost_microdollars(model_id, input_tokens, output_tokens):
+def calculate_llm_cost_microdollars(model_id, input_tokens, output_tokens,
+                                    batch=False):
     """
     Calculate LLM API cost in microdollars.
 
     Formula: input_tokens * input_price_per_mtok + output_tokens * output_price_per_mtok
     (the million factors in microdollars and per-million-token pricing cancel out)
+
+    batch=True applies the Batch API discount (~50% of synchronous pricing,
+    issue #173). Long-context multipliers still apply to the per-call input
+    before the discount.
     """
     config = current_app.config["SUPPORTED_MODELS"].get(model_id)
     if not config:
@@ -23,7 +28,10 @@ def calculate_llm_cost_microdollars(model_id, input_tokens, output_tokens):
     if threshold and input_tokens > threshold:
         input_price *= config.get("long_context_input_multiplier", 1)
         output_price *= config.get("long_context_output_multiplier", 1)
-    return round(input_tokens * input_price + output_tokens * output_price)
+    cost = input_tokens * input_price + output_tokens * output_price
+    if batch:
+        cost *= 0.5
+    return round(cost)
 
 
 def calculate_audio_cost_microdollars(model_id, duration_seconds):

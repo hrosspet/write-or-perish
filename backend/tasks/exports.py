@@ -270,8 +270,10 @@ def _call_llm_with_retries(self, model_id, prompt_text, user_id,
 
 def _save_profile(user, model_id, profile_text, response,
                    source_tokens_used, source_data_cutoff,
-                   generation_type, parent_profile_id=None):
-    """Save a new UserProfile and log API cost. Returns the profile."""
+                   generation_type, parent_profile_id=None, batch=False):
+    """Save a new UserProfile and log API cost. Returns the profile.
+
+    batch=True records the Batch API discount in the cost log (issue #173)."""
     from backend.utils.privacy import PrivacyLevel, AIUsage
 
     input_tokens = response.get("input_tokens", 0)
@@ -279,9 +281,10 @@ def _save_profile(user, model_id, profile_text, response,
     total_tokens = response["total_tokens"]
 
     cost = calculate_llm_cost_microdollars(model_id, input_tokens,
-                                           output_tokens)
+                                           output_tokens, batch=batch)
     cost_log = APICostLog(
-        user_id=user.id, model_id=model_id, request_type="profile",
+        user_id=user.id, model_id=model_id,
+        request_type="profile_batch" if batch else "profile",
         input_tokens=input_tokens, output_tokens=output_tokens,
         cost_microdollars=cost,
     )
@@ -451,12 +454,7 @@ def _do_incremental_update(self, user, model_id, previous_profile_id,
     cutoff = prev_profile.source_data_cutoff
 
     # Build update template
-    update_template = _load_prompt("profile_update.txt", user_id=user.id)
-    gen_template = _load_prompt("profile_generation.txt", user_id=user.id)
-    gen_template_no_output = gen_template.split("## OUTPUT")[0]
-    update_template = update_template.replace(
-        "{profile_generation_prompt}", gen_template_no_output
-    )
+    update_template = build_update_template(user.id)
 
     # Check if there's any new data at all
     from backend.models import Node
@@ -656,29 +654,57 @@ def _calculate_months_span(first_profile, last_profile):
     return max(1, round(delta.days / 30.44))
 
 
-def _do_integration(self, user, model_id, last_iterative_profile_id,
-                    api_keys):
-    """Integrate all iterative profile versions into a single unified profile.
+# --- Shared prompt/message builders -------------------------------------
+# Extracted so the synchronous chunk loop AND the batch request builder
+# (backend/tasks/profile_batch.py) produce byte-identical prompts — single
+# source of truth (issue #173, Part A).
 
-    Collects the full iterative chain, sends each version as a separate
-    user message, and asks the LLM to produce a unified profile.
+def build_update_template(user_id):
+    """Assemble the incremental-update template: profile_update.txt with the
+    generation prompt (minus its OUTPUT section) embedded."""
+    update_template = _load_prompt("profile_update.txt", user_id=user_id)
+    gen_template = _load_prompt("profile_generation.txt", user_id=user_id)
+    gen_template_no_output = gen_template.split("## OUTPUT")[0]
+    return update_template.replace(
+        "{profile_generation_prompt}", gen_template_no_output
+    )
 
-    Returns a result dict like other generation functions, or None if
-    integration is not needed (< 2 versions in chain).
-    """
+
+def build_chunk_prompt(update_template, current_profile_content,
+                       cumulative_source_tokens, chunk):
+    """Build the per-chunk incremental-update prompt (the non-first-chunk
+    branch of _chunked_profile_loop)."""
+    chunk_tokens_est = chunk["token_count"]
+    ratio_pct = round(
+        chunk_tokens_est / max(
+            cumulative_source_tokens + chunk_tokens_est, 1
+        ) * 100, 1
+    )
+    prompt = update_template.replace(
+        "{existing_profile}", current_profile_content
+    )
+    prompt = prompt.replace("{new_data}", chunk["content"])
+    prompt = prompt.replace(
+        "{source_tokens_past}", str(cumulative_source_tokens)
+    )
+    prompt = prompt.replace("{source_tokens_new}", str(chunk_tokens_est))
+    prompt = prompt.replace("{ratio_percent}", str(ratio_pct))
+    return prompt
+
+
+def build_integration_messages(user_id, last_iterative_profile_id):
+    """Build the integration message list — one user message per profile
+    version in the chain, then the integration prompt. Returns
+    (messages, chain), or (None, None) if there are < 2 versions to merge."""
     chain = _collect_iterative_chain(last_iterative_profile_id)
     if len(chain) < 2:
-        return None
+        return None, None
 
     n_months = _calculate_months_span(chain[0], chain[-1])
-
-    # Load integration prompt template and fill placeholders
     integration_template = _load_prompt(
-        "profile_integration.txt", user_id=user.id
+        "profile_integration.txt", user_id=user_id
     )
-    gen_template = _load_prompt(
-        "profile_generation.txt", user_id=user.id
-    )
+    gen_template = _load_prompt("profile_generation.txt", user_id=user_id)
     integration_prompt = integration_template.replace(
         "{N_MONTHS}", str(n_months)
     )
@@ -686,14 +712,11 @@ def _do_integration(self, user, model_id, last_iterative_profile_id,
         "{profile_generation_prompt}", gen_template
     )
 
-    # Build messages — each profile as a separate user message
     messages = []
     for i, profile in enumerate(chain, 1):
         content = profile.get_content()
         cutoff = profile.source_data_cutoff
         date_str = cutoff.strftime("%Y-%m-%d") if cutoff else "unknown"
-
-        # For first profile, date_from is approximate
         if i == 1:
             date_from = "start"
         else:
@@ -701,7 +724,6 @@ def _do_integration(self, user, model_id, last_iterative_profile_id,
             date_from = prev_cutoff.strftime(
                 "%Y-%m-%d"
             ) if prev_cutoff else "unknown"
-
         messages.append({
             "role": "user",
             "content": [{
@@ -713,12 +735,28 @@ def _do_integration(self, user, model_id, last_iterative_profile_id,
                 )
             }]
         })
-
-    # Append integration prompt as final user message
     messages.append({
         "role": "user",
         "content": [{"type": "text", "text": integration_prompt}]
     })
+    return messages, chain
+
+
+def _do_integration(self, user, model_id, last_iterative_profile_id,
+                    api_keys):
+    """Integrate all iterative profile versions into a single unified profile.
+
+    Collects the full iterative chain, sends each version as a separate
+    user message, and asks the LLM to produce a unified profile.
+
+    Returns a result dict like other generation functions, or None if
+    integration is not needed (< 2 versions in chain).
+    """
+    messages, chain = build_integration_messages(
+        user.id, last_iterative_profile_id
+    )
+    if messages is None:
+        return None
 
     self.update_state(state='PROGRESS', meta={
         'progress': 90, 'status': 'Integrating profile versions'
@@ -819,23 +857,10 @@ def _chunked_profile_loop(self, user, model_id, update_template,
         if is_first_with_gen:
             prompt = first_chunk_prompt_fn(chunk)
         else:
-            ratio_pct = round(
-                chunk_tokens_est / max(
-                    cumulative_source_tokens + chunk_tokens_est, 1
-                ) * 100, 1
+            prompt = build_chunk_prompt(
+                update_template, current_profile_content,
+                cumulative_source_tokens, chunk
             )
-            prompt = update_template.replace(
-                "{existing_profile}", current_profile_content
-            )
-            prompt = prompt.replace("{new_data}", chunk["content"])
-            prompt = prompt.replace(
-                "{source_tokens_past}",
-                str(cumulative_source_tokens)
-            )
-            prompt = prompt.replace(
-                "{source_tokens_new}", str(chunk_tokens_est)
-            )
-            prompt = prompt.replace("{ratio_percent}", str(ratio_pct))
 
         response = _call_llm_with_retries(
             self, model_id, prompt, user.id, api_keys,
@@ -903,11 +928,7 @@ def _iterative_generation(self, user, model_id, gen_template, budget,
         f"budget={budget} tokens per chunk"
     )
 
-    update_template = _load_prompt("profile_update.txt", user_id=user.id)
-    gen_template_no_output = gen_template.split("## OUTPUT")[0]
-    update_template = update_template.replace(
-        "{profile_generation_prompt}", gen_template_no_output
-    )
+    update_template = build_update_template(user.id)
 
     current_profile_id, chunk_num, cumulative_source_tokens = \
         _chunked_profile_loop(
@@ -1058,6 +1079,16 @@ def maybe_trigger_incremental_profile_update(user):
     if (user.plan or "free") not in User.VOICE_MODE_PLANS:
         return None
 
+    # Batch-selected users are driven by the batch pipeline
+    # (backend/tasks/profile_batch.py), not the synchronous path — unless they
+    # exhausted their batch retries, in which case sync is the last resort.
+    # Local import avoids a circular import (profile_batch imports exports).
+    from backend.tasks.profile_batch import (
+        use_batch_for_user, MAX_BATCH_ATTEMPTS)
+    if (use_batch_for_user(user, flask_app.config)
+            and (user.profile_batch_attempts or 0) < MAX_BATCH_ATTEMPTS):
+        return None
+
     # User must have been inactive for at least 30 minutes
     last_node = Node.query.filter_by(user_id=user.id) \
         .order_by(Node.created_at.desc()).first()
@@ -1124,6 +1155,10 @@ def maybe_trigger_incremental_profile_update(user):
 def check_pending_profile_updates():
     """Periodic task: check all eligible users for pending profile updates."""
     with flask_app.app_context():
+        if flask_app.config.get("PROFILE_UPDATES_PAUSED"):
+            logger.info(
+                "PROFILE_UPDATES_PAUSED — skipping sync profile-update check")
+            return
         # Voice-Mode users minus the llm-<model> placeholder accounts.
         # Shared helper keeps NULL-twitter_id (email signup) users in —
         # a bare NOT LIKE drops them (NULL NOT LIKE = NULL). See
