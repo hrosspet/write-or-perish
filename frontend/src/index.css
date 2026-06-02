@@ -212,6 +212,17 @@ code {
   padding-left: 1.5em;
 }
 
+/* Trim the outer margins of MarkdownBody content so the first/last block sits
+   flush within its container (the bubble/card already provides the padding).
+   Without this a leading "# Heading" pushes down by its large top margin. The
+   !important overrides the inline element margins MarkdownBody sets. */
+.loore-md > *:first-child {
+  margin-top: 0 !important;
+}
+.loore-md > *:last-child {
+  margin-bottom: 0 !important;
+}
+
 /* Per-row hover "+" to add a task below a checklist item. The button is
    scoped to each item's own row (.loore-task-row wraps only the row, not its
    nested children), so hovering a row reveals only that row's "+". */
