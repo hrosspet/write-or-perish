@@ -34,8 +34,8 @@ one OpenAI batch per model).
 Naively advancing one chunk per *hourly* beat would stretch a 47-chunk user
 across 47 cycles. Instead we drive the chain with a **frequent poller** — in
 practice batches finish in ~1–5 min (only *guaranteed* within 24h), so a
-~2-min poller advances each user roughly minutes-per-chunk, all at half price,
-with nobody blocked. If a batch is slow, the chain just waits — it's a
+**~60s poller** advances each user roughly minutes-per-chunk, all at half
+price, with nobody blocked. If a batch is slow, the chain just waits — it's a
 background job.
 
 ## Reuse: the batch implementation already exists
@@ -53,8 +53,11 @@ Part A is largely **extraction + reuse**:
 | `get_batch_api_keys(cfg)` (honors `OPENAI_API_KEY_BATCH`) | `backend/utils/llm_batch.py` |
 
 Each batch result is `{content, input_tokens, output_tokens}` per `custom_id`
-— the same fields `_save_profile` already consumes. The RCT keeps importing
-from the new module (thin shim) so we don't duplicate.
+— the same fields `_save_profile` already consumes. **The prompt-RCT harness
+is refactored to import these from `llm_batch.py` and its local copies are
+deleted**, so there is exactly one implementation (and prod-critical batch
+code no longer lives under `experiments/`). The RCT must keep working
+unchanged against the shared module — that's an acceptance criterion.
 
 Request shape (unchanged from RCT):
 `{"custom_id", "model_id", "api_model", "messages", "max_tokens"}`.
@@ -91,6 +94,7 @@ ProfileBatchJob
   batch_id        str        # provider batch id
   status          str        # "pending" | "collected" | "failed"
   kind            str        # "chunk" | "integration"
+  custom_ids      json       # ids submitted → failed = submitted − succeeded
   submitted_at    datetime
   collected_at    datetime?
 ```
@@ -102,10 +106,11 @@ table needed:
 custom_id = f"profile:{user_id}:{prev_profile_id or 0}:{chunk_num}:{kind}"
 ```
 
-Plus one guard column on `User` to prevent double-submission:
+Plus guard columns on `User` to prevent double-submission and bound retries:
 
 ```
-profile_batch_pending  bool   # set on submit, cleared on collect/fail
+profile_batch_pending   bool   # set on submit, cleared on collect/fail
+profile_batch_attempts  int    # consecutive batch failures for current step
 ```
 
 (Alternative considered: store `batch_id` directly on `User`. Rejected —
@@ -116,6 +121,8 @@ record, not the user. The boolean guard is enough on the user side.)
 
 1. **`backend/utils/llm_batch.py`** (new) — extracted submit/poll/collect +
    key/message helpers. Pure-ish, unit-testable with mocked SDK clients.
+   `experiments/prompt_rct/run_rct.py` is refactored to import from here and
+   its duplicate definitions removed (single source of truth).
 2. **`backend/models.py`** — `ProfileBatchJob` model + `User.profile_batch_pending`.
    (Migration auto-generated on deploy per the Flask-Migrate workflow.)
 3. **`backend/tasks/exports.py`**:
@@ -130,7 +137,7 @@ record, not the user. The boolean guard is enough on the user side.)
      set guards.
    - `poll_profile_batches()` — the ~2-min poller (below).
 4. **`backend/celery_app.py`** — beat entries for the submitter (reuse the
-   hourly `check_pending_profile_updates` cadence) and the poller (~120s).
+   hourly `check_pending_profile_updates` cadence) and the poller (~60s).
    **Must add `from backend.tasks import <module>`** if the poller lives in a
    new module (per CLAUDE.md — unregistered task files are dispatched but
    never executed).
@@ -139,7 +146,7 @@ record, not the user. The boolean guard is enough on the user side.)
 6. **Config** — `PROFILE_USE_BATCH` (default **False**) and optional
    `OPENAI_API_KEY_BATCH`.
 
-## The poller (`poll_profile_batches`, ~every 2 min)
+## The poller (`poll_profile_batches`, ~every 60s)
 
 ```
 for job in ProfileBatchJob where status == "pending":
@@ -191,15 +198,33 @@ halved** to reflect batch pricing. Add a discount to
 dashboards can distinguish. (Long-context multipliers still apply to the
 per-call input, but each chunk stays well under the threshold.)
 
-## Failure modes
+## Failure modes & retry policy
 
-| Case | Handling |
-| --- | --- |
-| Batch item `failed`/`errored` | log; clear `profile_batch_pending`; user retries next hourly seed (or fall back to sync for that user under the flag) |
-| OpenAI batch `expired`/`cancelled` | mark job failed; re-seed next cycle |
-| Batch stuck `pending` too long | staleness check (mirror `_is_task_stale`): if `submitted_at` > N h, mark failed + clear guard |
-| Poller collects same batch twice | idempotent: a chunk whose `source_data_cutoff` already has a child profile is skipped; job flips to `collected` atomically |
-| `PROFILE_USE_BATCH=False` | none of this runs; the synchronous path (PR #181) is unchanged and is the permanent fallback |
+Detection: each `ProfileBatchJob` stores the `custom_id`s it submitted, so on
+collect, **failed items = submitted − succeeded** (`batch_check_and_collect`
+silently drops non-`succeeded` Anthropic items / non-200 OpenAI lines).
+
+Crucially, **prompt-too-long is a non-issue here**: chunks are capped at
+`CHUNK_BUDGET` (~90K), far below model context windows, so the one
+*deterministic* failure the synchronous path needs its shrink-and-retry for
+(`_call_llm_with_retries`, `exports.py:232`) simply won't fire on chunk
+updates. That leaves **essentially all failures transient**:
+
+| Failure | Cause | Handling |
+| --- | --- | --- |
+| **Submission** (`batch_submit` returns no id) | network / auth / rate-limit at create | don't set `profile_batch_pending` unless an id came back → user re-seeded next cycle. Self-healing. |
+| **Per-item transient** (one request errors in a good batch) | provider hiccup / overload | re-seed that user via batch next cycle. |
+| **Whole batch `expired`** (OpenAI 24h window) / `failed` / `cancelled` | provider capacity | mark job failed; re-seed next cycle. |
+| **Stuck `pending`** (no terminal status) | provider | staleness check (mirror `_is_task_stale`): `submitted_at` older than N h → mark failed, clear guard, re-seed. |
+| **Double-collect** (poller crash mid-tick) | infra | idempotent: a chunk whose `source_data_cutoff` already has a child profile is skipped; job flips to `collected` atomically. |
+| `PROFILE_USE_BATCH=False` | — | none of this runs; the synchronous path (PR #181) is the permanent fallback. |
+
+**Retry policy:** since failures are transient, the primary mechanism is simply
+**re-seed via batch next cycle**, bounded by `profile_batch_attempts` (≈3) plus
+the staleness timeout so nothing loops forever. A synchronous run of a single
+step is kept only as a **last-resort safety net** after the attempt budget is
+exhausted (guaranteed progress) — but with prompt-too-long off the table, that
+path should be rare-to-never, not a routine fallback.
 
 ## Rollout
 
@@ -229,13 +254,15 @@ The synchronous path (`update_user_profile` → `_chunked_profile_loop` →
 (`profile_eligible_query`), and the integration logic. Batch mode is an
 alternate *transport* gated by a flag, not a rewrite of the profile logic.
 
-## Open questions for review
+## Decisions
 
-1. **`ProfileBatchJob` table vs. columns-on-User** — proposed the table since a
-   batch spans many users. OK?
-2. **Integration step** — batch it too (proposed), or keep integration
-   synchronous since it's a single call per user at the end? Batching it keeps
-   everything one transport but adds one more state hop.
-3. **Per-user fallback** — on a failed batch item, retry via batch next cycle,
-   or fall straight to a synchronous call for that user?
-4. **Poller cadence** — 120s default; tune against observed batch turnaround.
+All resolved in review:
+
+1. **`ProfileBatchJob` table** (not columns-on-User) — a batch spans many users.
+2. **Integration step is batched too** — one transport end-to-end (one extra
+   state hop).
+3. **Retry policy:** transient-only failures → **batch re-seed** bounded by
+   `profile_batch_attempts` + staleness timeout; synchronous run kept only as a
+   rare last-resort safety net (prompt-too-long doesn't apply to chunked
+   updates, so transient retry suffices in practice).
+4. **Poller cadence: 60s.**
