@@ -1,8 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import api from '../api';
 import MarkdownBody from './MarkdownBody';
-import { appendItemToSection } from '../utils/markdown';
-import useSubmitShortcut from '../hooks/useSubmitShortcut';
+import { insertItemAfter } from '../utils/markdown';
 
 export function stripInlineMarkdown(text) {
   return text.replace(/\*\*(.+?)\*\*/g, '$1').replace(/__(.+?)__/g, '$1');
@@ -328,6 +327,84 @@ function sizeStyles(size) {
   };
 }
 
+// A single "New Tasks" proposal row with a hover "+" that opens an inline
+// input to insert a sibling task right below it (Voice + Text modes share
+// this — both render through the same row path).
+// A single proposal row (Completed or New Tasks) with a hover "+" right after
+// the text that opens an inline input to insert a sibling item below it.
+// Voice + Text modes share this (only `styles` differ via `size`).
+function ProposalTaskRow({ item, styles, toggleable, variant, addingKey, setAddingKey, onToggle, onInsert }) {
+  const [hovered, setHovered] = useState(false);
+  const [addText, setAddText] = useState('');
+  const completed = variant === 'completed';
+  const rowKey = `${variant}:${item}`;
+  const adding = addingKey === rowKey;
+  const close = () => { setAddingKey(null); setAddText(''); };
+  const submit = () => {
+    const t = addText.trim();
+    if (t) onInsert(item, t);
+    close();
+  };
+  return (
+    <>
+      <div
+        style={styles.row}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+      >
+        <div
+          onClick={toggleable
+            ? () => (completed
+                ? onToggle(item, 'completed', 'new task', { prepend: true })
+                : onToggle(item, 'new task', 'completed'))
+            : undefined}
+          title={toggleable ? (completed ? 'Unmark as done' : 'Mark as done') : undefined}
+          style={{ ...styles.circleBase, ...(completed ? styles.circleCompletedExtra : styles.circleNewExtra), cursor: toggleable ? 'pointer' : 'default' }}
+        >{completed ? '✓' : null}</div>
+        <div style={{ ...styles.itemText, ...(completed ? { textDecoration: 'line-through', opacity: 0.4 } : null) }}>{item}</div>
+        {toggleable && (
+          <button
+            type="button"
+            onMouseDown={(e) => { e.preventDefault(); setAddText(''); setAddingKey(rowKey); }}
+            onClick={() => { setAddText(''); setAddingKey(rowKey); }}
+            title="Add an item below"
+            aria-label="Add an item below"
+            style={{
+              opacity: hovered ? 1 : 0,
+              transition: 'opacity 0.12s ease', background: 'none', border: 'none',
+              color: 'var(--accent)', cursor: 'pointer', fontSize: '1.2rem',
+              lineHeight: 1, padding: '0 4px',
+            }}
+          >+</button>
+        )}
+      </div>
+      {adding && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: styles.roomy ? '12px' : '10px', padding: styles.roomy ? '12px 0' : '8px 0' }}>
+          <span style={{ width: styles.roomy ? '18px' : '16px', height: styles.roomy ? '18px' : '16px', borderRadius: '50%', border: '1.5px dashed var(--border-hover)', flexShrink: 0, opacity: 0.5 }} />
+          <input
+            autoFocus
+            value={addText}
+            onChange={(e) => setAddText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); submit(); }
+              else if (e.key === 'Escape') { e.preventDefault(); close(); }
+            }}
+            onBlur={() => { if (!addText.trim()) close(); }}
+            placeholder="New item…"
+            style={{
+              flex: 1, minWidth: 0, background: 'var(--bg-input)',
+              border: '1px solid var(--border)', borderRadius: '6px',
+              color: 'var(--text-primary)', fontFamily: 'var(--sans)',
+              fontSize: styles.roomy ? '0.92rem' : '0.85rem', fontWeight: 300,
+              padding: '8px 12px',
+            }}
+          />
+        </div>
+      )}
+    </>
+  );
+}
+
 export default function ProposalInline({
   content,
   nodeId,
@@ -340,15 +417,15 @@ export default function ProposalInline({
   const hasTodo = parsed.completed || parsed.newTasks || parsed.priority || parsed.note;
   const hasIssue = parsed.issueTitle && parsed.issueDescription;
   const [applyStatus, setApplyStatus] = useState(null);
+  // Which row (if any) currently has its inline add-input open. Lifted here so
+  // opening one row's "+" closes any other — and clicking a second "+" switches
+  // to it instead of just cancelling the first.
+  const [addingKey, setAddingKey] = useState(null);
   const [applyError, setApplyError] = useState(null);
   const [issueApplyStatus, setIssueApplyStatus] = useState(null);
   const [issueApplyError, setIssueApplyError] = useState(null);
   const [issueResult, setIssueResult] = useState(null);
   const mergePollingRef = useRef(null);
-  const [quickAddOpen, setQuickAddOpen] = useState(false);
-  const [quickAddText, setQuickAddText] = useState('');
-  const [quickAddSaving, setQuickAddSaving] = useState(false);
-  const quickAddInputRef = useRef(null);
   const styles = sizeStyles(size);
   const toggleable = typeof onContentChange === 'function'
     && applyStatus !== 'completed'
@@ -370,50 +447,23 @@ export default function ProposalInline({
     });
   }, [content, nodeId, onContentChange, onError, toggleable]);
 
-  // Quick-add a task to the proposal's "New Tasks" section (#108), mirroring
-  // the Todo-page quick-add. Reuses appendItemToSection + the same optimistic
-  // PUT /nodes/:id persist+revert path as the toggle above, so the added task
-  // is included when the user clicks "Apply changes to my Todo".
-  const handleQuickAddTask = useCallback(() => {
-    const task = quickAddText.trim();
-    if (!toggleable || !nodeId || !task || quickAddSaving) return;
-    const newContent = appendItemToSection(content, 'new task', task, {
-      headingLevel: 3,
-      match: 'includes',
-      itemPrefix: '- ',
-      createTitle: 'New Tasks',
-    });
+  // Insert a new task immediately below a given "New Tasks" row (the hover "+"),
+  // preserving the section's plain-bullet style. Same optimistic+revert path.
+  const handleInsertAfter = useCallback((afterItem, newTask) => {
+    const task = (newTask || '').trim();
+    if (!toggleable || !nodeId || !task) return;
+    const newContent = insertItemAfter(content, afterItem, task);
     if (newContent === content) return;
     const prevContent = content;
-    setQuickAddSaving(true);
-    setQuickAddText('');
     onContentChange(newContent);
-    api.put(`/nodes/${nodeId}`, { content: newContent })
-      .then(() => {
-        // Keep the input open + focused for rapid entry of multiple tasks.
-        if (quickAddInputRef.current) quickAddInputRef.current.focus();
-      })
-      .catch((err) => {
-        console.error('Failed to add proposal task:', err);
-        onContentChange(prevContent);
-        setQuickAddText(task);
-        if (onError) {
-          const reason = err.response?.data?.error || err.response?.statusText || err.message || 'Unknown error';
-          onError(`Couldn't add task — reverted (${reason})`);
-        }
-      })
-      .finally(() => setQuickAddSaving(false));
-  }, [content, nodeId, onContentChange, onError, toggleable, quickAddText, quickAddSaving]);
-
-  // Cmd+Return (macOS) / Ctrl+Enter (Win/Linux) submits the quick-add input,
-  // matching the primary-submit shortcut used across the app (#129). Plain
-  // Enter is still handled by the input's onKeyDown below; this just adds the
-  // modifier chord. Enabled mirrors the Add button's disabled state.
-  useSubmitShortcut(
-    quickAddInputRef,
-    handleQuickAddTask,
-    quickAddOpen && !quickAddSaving && !!quickAddText.trim(),
-  );
+    api.put(`/nodes/${nodeId}`, { content: newContent }).catch((err) => {
+      onContentChange(prevContent);
+      if (onError) {
+        const reason = err?.response?.data?.error || err?.message || 'Unknown error';
+        onError(`Couldn't add task — reverted (${reason})`);
+      }
+    });
+  }, [content, nodeId, onContentChange, onError, toggleable]);
 
   useEffect(() => {
     if (!toolCallsMeta) return;
@@ -519,120 +569,31 @@ export default function ProposalInline({
             <div style={styles.sectionWrapper}>
               {sectionLabel('Updated from your sharing')}
               {parsed.completed && parseTodoItems(parsed.completed).map((item, i) => (
-                <div key={`done-${i}`} style={styles.row}>
-                  <div
-                    onClick={toggleable
-                      ? () => handleToggleItem(item, 'completed', 'new task', { prepend: true })
-                      : undefined}
-                    title={toggleable ? 'Unmark as done' : undefined}
-                    style={{
-                      ...styles.circleBase,
-                      ...styles.circleCompletedExtra,
-                      cursor: toggleable ? 'pointer' : 'default',
-                    }}
-                  >✓</div>
-                  <div style={{
-                    ...styles.itemText,
-                    textDecoration: 'line-through', opacity: 0.4,
-                  }}>{item}</div>
-                </div>
+                <ProposalTaskRow
+                  key={`done-${i}`}
+                  item={item}
+                  styles={styles}
+                  toggleable={toggleable}
+                  variant="completed"
+                  addingKey={addingKey}
+                  setAddingKey={setAddingKey}
+                  onToggle={handleToggleItem}
+                  onInsert={handleInsertAfter}
+                />
               ))}
               {parsed.newTasks && parseTodoItems(parsed.newTasks).map((item, i) => (
-                <div key={`new-${i}`} style={styles.row}>
-                  <div
-                    onClick={toggleable
-                      ? () => handleToggleItem(item, 'new task', 'completed')
-                      : undefined}
-                    title={toggleable ? 'Mark as done' : undefined}
-                    style={{
-                      ...styles.circleBase,
-                      ...styles.circleNewExtra,
-                      cursor: toggleable ? 'pointer' : 'default',
-                    }}
-                  />
-                  <div style={styles.itemText}>{item}</div>
-                </div>
+                <ProposalTaskRow
+                  key={`new-${i}`}
+                  item={item}
+                  styles={styles}
+                  toggleable={toggleable}
+                  variant="new"
+                  addingKey={addingKey}
+                  setAddingKey={setAddingKey}
+                  onToggle={handleToggleItem}
+                  onInsert={handleInsertAfter}
+                />
               ))}
-              {toggleable && (
-                quickAddOpen ? (
-                  <div style={{
-                    display: 'flex', alignItems: 'center', gap: '8px',
-                    padding: styles.roomy ? '12px 0' : '8px 0',
-                  }}>
-                    <input
-                      ref={quickAddInputRef}
-                      value={quickAddText}
-                      onChange={(e) => setQuickAddText(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) {
-                          e.preventDefault();
-                          handleQuickAddTask();
-                        } else if (e.key === 'Escape') {
-                          setQuickAddOpen(false);
-                          setQuickAddText('');
-                        }
-                      }}
-                      placeholder="Add a task and press Enter"
-                      disabled={quickAddSaving}
-                      style={{
-                        flex: 1,
-                        background: 'var(--bg-input)',
-                        border: '1px solid var(--border)',
-                        borderRadius: '6px',
-                        color: 'var(--text-primary)',
-                        fontFamily: 'var(--sans)',
-                        fontSize: styles.roomy ? '0.92rem' : '0.85rem',
-                        fontWeight: 300,
-                        padding: '8px 12px',
-                      }}
-                    />
-                    <button
-                      onClick={handleQuickAddTask}
-                      disabled={quickAddSaving || !quickAddText.trim()}
-                      style={{
-                        padding: '8px 16px',
-                        background: 'var(--accent)',
-                        border: 'none',
-                        borderRadius: '6px',
-                        color: 'var(--bg-deep)',
-                        fontFamily: 'var(--sans)',
-                        fontSize: styles.roomy ? '0.85rem' : '0.8rem',
-                        fontWeight: 400,
-                        cursor: (quickAddSaving || !quickAddText.trim()) ? 'not-allowed' : 'pointer',
-                        opacity: (quickAddSaving || !quickAddText.trim()) ? 0.5 : 1,
-                        whiteSpace: 'nowrap',
-                      }}
-                    >
-                      {quickAddSaving ? 'Adding…' : 'Add'}
-                    </button>
-                  </div>
-                ) : (
-                  <button
-                    onClick={() => {
-                      setQuickAddOpen(true);
-                      setTimeout(() => {
-                        if (quickAddInputRef.current) quickAddInputRef.current.focus();
-                      }, 0);
-                    }}
-                    aria-label="Add a task"
-                    title="Add a task"
-                    style={{
-                      width: styles.roomy ? '24px' : '22px',
-                      height: styles.roomy ? '24px' : '22px',
-                      borderRadius: '50%',
-                      border: '1px dashed var(--border-hover)',
-                      background: 'none',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      cursor: 'pointer', padding: 0,
-                      color: 'var(--text-muted)',
-                      fontFamily: 'var(--sans)', fontWeight: 300,
-                      fontSize: styles.roomy ? '1.1rem' : '1rem', lineHeight: 1,
-                      marginTop: styles.roomy ? '12px' : '8px',
-                      transition: 'all 0.2s ease',
-                    }}
-                  >+</button>
-                )
-              )}
             </div>
           )}
 

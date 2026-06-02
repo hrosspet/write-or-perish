@@ -90,7 +90,7 @@ function BubbleKebabMenu({ visible, items, onFocus, onBlur }) {
           borderRadius: '6px',
           boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
           minWidth: '160px',
-          zIndex: 5,
+          zIndex: 1000,
           overflow: 'hidden',
         }}>
           {items.map((item) => (

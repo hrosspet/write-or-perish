@@ -38,6 +38,52 @@ export function toggleCheckbox(content, itemText, currentChecked) {
 }
 
 /**
+ * Insert a new list item immediately after the item whose text matches
+ * `afterItemText` (and after that item's nested subtree), preserving the
+ * matched item's bullet style ("- " plain vs "- [ ] " checkbox) and
+ * indentation. Powers the per-row "+" quick-add across Todo, proposals, and
+ * MarkdownBody checklists. Returns the content unchanged if no line matches.
+ */
+export function insertItemAfter(content, afterItemText, newText) {
+  const text = (newText || '').trim();
+  if (!text) return content;
+  const lines = (content || '').split('\n');
+  // indent | bullet | optional checkbox | label
+  const lineRe = /^(\s*)([-*])\s+(\[[ xX]\]\s+)?(.*)$/;
+
+  let idx = -1;
+  let indent = '';
+  let bullet = '-';
+  let checkbox = '';
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(lineRe);
+    if (m && stripInlineMarkdown(m[4]).trim() === afterItemText) {
+      idx = i;
+      indent = m[1];
+      bullet = m[2];
+      checkbox = m[3] ? '[ ] ' : '';
+      break;
+    }
+  }
+  if (idx === -1) return content;
+
+  // Skip past the item's nested subtree (deeper-indented lines) so the new
+  // sibling lands after the item's children, not in the middle of them.
+  let insertAt = idx + 1;
+  for (let i = idx + 1; i < lines.length; i++) {
+    const lead = (lines[i].match(/^(\s*)/)[1] || '');
+    if (lines[i].trim() !== '' && lead.length > indent.length) {
+      insertAt = i + 1;
+    } else {
+      break;
+    }
+  }
+
+  lines.splice(insertAt, 0, `${indent}${bullet} ${checkbox}${text}`);
+  return lines.join('\n');
+}
+
+/**
  * Append a new list item to the END of a named markdown section in `content`.
  *
  * Shared by the Todo page quick-add (`## Today`, issue #108) and the
@@ -57,6 +103,9 @@ export function toggleCheckbox(content, itemText, currentChecked) {
  *   createTitle  — heading text used when the section must be created
  *                  (defaults to `sectionTitle`; useful when `match` is a
  *                  lowercase search term but the heading should be cased).
+ *   createAtStart — when the section doesn't exist, create it at the TOP of
+ *                  the content instead of appending at the end (e.g. `## Today`
+ *                  should be the first todo section).
  */
 export function appendItemToSection(content, sectionTitle, task, options = {}) {
   const {
@@ -64,6 +113,7 @@ export function appendItemToSection(content, sectionTitle, task, options = {}) {
     match = 'exact',
     itemPrefix = '- [ ] ',
     createTitle = sectionTitle,
+    createAtStart = false,
   } = options;
 
   const cleanTask = (task || '').trim();
@@ -91,10 +141,15 @@ export function appendItemToSection(content, sectionTitle, task, options = {}) {
     }
   }
 
-  // Section not present — append a fresh section at the end.
+  // Section not present — create a fresh one.
   if (headingIdx === -1) {
+    const newSection = `${hashes} ${createTitle}\n\n${newItem}\n`;
+    if (createAtStart) {
+      const body = base.trim();
+      return body ? `${newSection}\n${body}\n` : newSection;
+    }
     const sep = base.length && !base.endsWith('\n') ? '\n\n' : (base.endsWith('\n\n') ? '' : '\n');
-    return `${base}${sep}${hashes} ${createTitle}\n\n${newItem}\n`;
+    return `${base}${sep}${newSection}`;
   }
 
   // Find where this section ends: the next same-or-higher heading, or EOF.
@@ -150,6 +205,39 @@ export function useCheckboxToggle(getContent, setContent, save) {
         || err.message
         || 'Unknown error';
       addToast(`Couldn't save change — reverted (${reason})`);
+    });
+  }, [getContent, setContent, save, addToast]);
+}
+
+/**
+ * Hook for optimistic per-row task insertion (the hover "+" quick-add).
+ * Same getContent/setContent/save contract as useCheckboxToggle.
+ *
+ * Returns: (afterItemText: string, newText: string) => void — inserts a new
+ * item right after the matched row (and its subtree), optimistically, then
+ * persists; reverts and toasts on failure.
+ */
+export function useTaskInsert(getContent, setContent, save) {
+  const prevContentRef = useRef(null);
+  const { addToast } = useToast();
+
+  return useCallback((afterItemText, newText) => {
+    const content = getContent();
+    if (content == null) return;
+    const newContent = insertItemAfter(content, afterItemText, newText);
+    if (newContent === content) return;
+    prevContentRef.current = content;
+    setContent(newContent);
+    save(newContent).catch((err) => {
+      console.error('Failed to insert task:', err);
+      if (prevContentRef.current !== null) {
+        setContent(prevContentRef.current);
+      }
+      const reason = err.response?.data?.error
+        || err.response?.statusText
+        || err.message
+        || 'Unknown error';
+      addToast(`Couldn't add task — reverted (${reason})`);
     });
   }, [getContent, setContent, save, addToast]);
 }
