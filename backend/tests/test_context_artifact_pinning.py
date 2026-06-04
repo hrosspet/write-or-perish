@@ -217,7 +217,7 @@ class TestProfilePinning:
         db.session.commit()
 
         assert get_user_profile_content(u.id, pinned_node=node) is not None
-        p.ai_usage = "off"
+        p.ai_usage = "none"
         db.session.commit()
         assert get_user_profile_content(u.id, pinned_node=node) is None
 
@@ -313,7 +313,7 @@ class TestRecentContextPinning:
         db.session.commit()
 
         assert get_user_recent_content(u.id, pinned_node=node) is not None
-        rc.ai_usage = "off"
+        rc.ai_usage = "none"
         db.session.commit()
         assert get_user_recent_content(u.id, pinned_node=node) is None
 
