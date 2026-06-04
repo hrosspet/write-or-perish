@@ -123,14 +123,16 @@ def get_user_ai_preferences_content(user_id, pinned_node=None):
     export references, so the session sees one coherent point-in-time
     snapshot instead of re-fetching "latest now" each turn. Falls back to the
     latest when the node has no binding (e.g. legacy nodes). ai_usage is
-    re-checked on the resolved row so a mid-session opt-out is honored.
+    re-checked on the resolved row (AI_ALLOWED — 'chat' or 'train', matching
+    attach_context_artifacts and the other artifacts) so a mid-session
+    opt-out is honored.
     """
     prefs = pinned_node.get_artifact("ai_preferences") if pinned_node else None
     if prefs is None:
         prefs = UserAIPreferences.query.filter_by(user_id=user_id).order_by(
             UserAIPreferences.created_at.desc()
         ).first()
-    if prefs and prefs.ai_usage == "chat":
+    if prefs and prefs.ai_usage in AI_ALLOWED:
         return prefs.get_content()
     return None
 
@@ -470,10 +472,14 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
                             result["issue_number"] = gh_result["number"]
 
             elif name == "update_ai_preferences":
+                pref_user = User.query.get(user_id)
                 prefs = UserAIPreferences(
                     user_id=user_id,
                     generated_by=llm_node.llm_model or "voice_session",
                     tokens_used=0,
+                    # ai_usage follows the user's global default (#191).
+                    ai_usage=(pref_user.default_ai_usage
+                              if pref_user else "chat"),
                 )
                 prefs.set_content(inp["updated_preferences"])
                 db.session.add(prefs)

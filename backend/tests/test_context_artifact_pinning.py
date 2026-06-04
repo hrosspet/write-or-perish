@@ -245,6 +245,18 @@ class TestTodoPinning:
         assert get_user_todo_content(u.id, pinned_node=node) == "NEW todo"
         assert get_user_todo_content(u.id) == "NEW todo"
 
+    def test_mid_session_opt_out_honored(self, app):
+        u = _user()
+        t = _todo(u.id, T_OLD, "OLD todo")
+        node = _node(u.id)
+        _bind(node, "todo", t.id)
+        db.session.commit()
+
+        assert get_user_todo_content(u.id, pinned_node=node) == "OLD todo"
+        t.ai_usage = "none"
+        db.session.commit()
+        assert get_user_todo_content(u.id, pinned_node=node) is None
+
 
 # ── ai preferences ─────────────────────────────────────────────────────────
 
@@ -270,6 +282,33 @@ class TestAIPreferencesPinning:
         assert get_user_ai_preferences_content(
             u.id, pinned_node=node) == "be verbose"
         assert get_user_ai_preferences_content(u.id) == "be verbose"
+
+    def test_train_preferences_are_allowed(self, app):
+        """A 'train' prefs row must be returned: the resolver gates on
+        AI_ALLOWED ('chat'/'train'), matching attach_context_artifacts — not
+        'chat' only. Otherwise a 'train'-default user's prefs (now inherited,
+        #191) would be silently dropped from the prompt."""
+        u = _user()
+        p = _prefs(u.id, T_OLD, "train me", ai_usage="train")
+        node = _node(u.id)
+        _bind(node, "ai_preferences", p.id)
+        db.session.commit()
+
+        assert get_user_ai_preferences_content(
+            u.id, pinned_node=node) == "train me"
+
+    def test_mid_session_opt_out_honored(self, app):
+        u = _user()
+        p = _prefs(u.id, T_OLD, "be terse")
+        node = _node(u.id)
+        _bind(node, "ai_preferences", p.id)
+        db.session.commit()
+
+        assert get_user_ai_preferences_content(
+            u.id, pinned_node=node) is not None
+        p.ai_usage = "none"
+        db.session.commit()
+        assert get_user_ai_preferences_content(u.id, pinned_node=node) is None
 
 
 # ── recent context ─────────────────────────────────────────────────────────
