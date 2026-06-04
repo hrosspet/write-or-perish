@@ -12,7 +12,7 @@ import useSubmitShortcut from "../hooks/useSubmitShortcut";
 
 const NodeForm = forwardRef(
   (
-    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false },
+    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false, aiUsageFromGlobalDefault = false },
     ref
   ) => {
     const { user } = useUser();
@@ -51,9 +51,15 @@ const NodeForm = forwardRef(
       || readRemembered('loore_last_privacy_level', user?.default_privacy_level)
       || "private"
     );
+    // Fresh agentic sessions (Voice/Text) take ai_usage from the user's
+    // global default rather than the last-used value — the global setting
+    // is the user's standing AI-interaction consent. Plain journaling
+    // entries still remember the last choice.
     const [aiUsage, setAiUsage] = useState(
       initialAiUsage
-      || readRemembered('loore_last_ai_usage', user?.default_ai_usage)
+      || (aiUsageFromGlobalDefault
+            ? user?.default_ai_usage
+            : readRemembered('loore_last_ai_usage', user?.default_ai_usage))
       || "none"
     );
 
@@ -65,10 +71,10 @@ const NodeForm = forwardRef(
       }
     }, [privacyLevel, remembersChoices]);
     useEffect(() => {
-      if (remembersChoices) {
+      if (remembersChoices && !aiUsageFromGlobalDefault) {
         localStorage.setItem('loore_last_ai_usage', aiUsage);
       }
-    }, [aiUsage, remembersChoices]);
+    }, [aiUsage, remembersChoices, aiUsageFromGlobalDefault]);
     // "Agentic Reply" — opt-in to attaching the textmode system prompt
     // (profile + recent + todo + prefs as context). Local state, OFF by
     // default — deliberate and distinct from "auto-generate".

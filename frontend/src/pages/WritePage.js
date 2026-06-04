@@ -85,6 +85,7 @@ export default function WritePage() {
           parentId={null}
           hidePowerFeatures={!craftMode}
           hideAudioUpload={!craftMode}
+          aiUsageFromGlobalDefault
           placeholder="Type what's on your mind…"
           onSubmitOverride={handleSubmit}
           onSuccess={handleSuccess}
