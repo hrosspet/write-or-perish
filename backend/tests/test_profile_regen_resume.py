@@ -182,6 +182,27 @@ def test_integration_annotates_user_written_chain_root(app):
     assert "written by the user" not in gen_msg      # generated not flagged
 
 
+def test_save_profile_inherits_user_default_ai_usage(app):
+    """Generated profiles take ai_usage from the user's global default, not a
+    hardcoded 'chat' (#191). Combined with the profile_eligible_query gate, a
+    'train' user gets a 'train' profile (and opted-out users never generate)."""
+    import backend.tasks.exports as exports
+
+    user = User(username="trainer", plan="alpha", twitter_id=None,
+                approved=True, default_ai_usage="train")
+    _db.session.add(user)
+    _db.session.commit()
+
+    response = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+    profile = exports._save_profile(
+        user, "gpt-5.5", "GENERATED PROFILE", response,
+        source_tokens_used=0, source_data_cutoff=None,
+        generation_type="initial",
+    )
+
+    assert profile.ai_usage == "train"
+
+
 def _seed_null_cutoff_user(username, node_tokens):
     """A user whose only profile is hand-written (null cutoff), plus one old
     node carrying ``node_tokens``. Old timestamps so the inactivity (30m) and

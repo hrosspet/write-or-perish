@@ -96,12 +96,19 @@ class User(db.Model, UserMixin):
         approved, active accounts on a Voice-Mode plan, minus the synthetic
         ``llm-<model>`` placeholder accounts.
 
-        Two non-obvious guards:
+        Three non-obvious guards:
 
         * ``approved`` gates all access (login + terms) and is flipped to
           ``False`` by admin deactivation. Excluding non-approved users
           stops us spending LLM budget building profiles nobody can open —
           and makes deactivation an effective "pause this user" switch.
+
+        * ``default_ai_usage`` must be AI-readable ('chat'/'train'). A user
+          who set their global AI-usage to 'none' has opted out, so we must
+          not auto-generate (or refresh) an AI-readable profile / recent
+          context from their writing. Node-level ``filter_ai_usage`` already
+          keeps opted-out *content* out of the input, but this stops the
+          generation from running at all for opted-out accounts.
 
         * The placeholder exclusion MUST keep users whose ``twitter_id`` is
           NULL (email / magic-link signups). A bare ``~twitter_id.like('llm-%')``
@@ -112,9 +119,11 @@ class User(db.Model, UserMixin):
         Shared helper (not an inline filter) so the profile and
         recent-context tasks can't drift apart again.
         """
+        from backend.utils.privacy import AI_ALLOWED
         return cls.query.filter(
             cls.approved.is_(True),
             cls.plan.in_(list(cls.VOICE_MODE_PLANS)),
+            cls.default_ai_usage.in_(list(AI_ALLOWED)),
             or_(cls.twitter_id.is_(None), ~cls.twitter_id.like("llm-%")),
         )
 

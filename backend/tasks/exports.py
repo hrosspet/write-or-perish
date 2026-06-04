@@ -193,14 +193,17 @@ def generate_user_profile(self, user_id: int, model_id: str):
             # Step 5: Save to database (95% progress)
             self.update_state(state='PROGRESS', meta={'progress': 95, 'status': 'Saving profile'})
 
-            # Default privacy for AI-generated profiles: private + chat
-            from backend.utils.privacy import PrivacyLevel, AIUsage
+            # AI-generated profiles are private; ai_usage follows the user's
+            # global default (gated to 'chat'/'train' in
+            # profile_eligible_query, so an opted-out user never reaches
+            # here — see #191).
+            from backend.utils.privacy import PrivacyLevel
             new_profile = UserProfile(
                 user_id=user.id,
                 generated_by=model_id,
                 tokens_used=total_tokens,
                 privacy_level=PrivacyLevel.PRIVATE,
-                ai_usage=AIUsage.CHAT
+                ai_usage=user.default_ai_usage,
             )
             new_profile.set_content(
                 format_date_metadata(
@@ -284,7 +287,7 @@ def _save_profile(user, model_id, profile_text, response,
     """Save a new UserProfile and log API cost. Returns the profile.
 
     batch=True records the Batch API discount in the cost log (issue #173)."""
-    from backend.utils.privacy import PrivacyLevel, AIUsage
+    from backend.utils.privacy import PrivacyLevel
 
     input_tokens = response.get("input_tokens", 0)
     output_tokens = response.get("output_tokens", 0)
@@ -304,7 +307,9 @@ def _save_profile(user, model_id, profile_text, response,
         user_id=user.id, generated_by=model_id,
         tokens_used=total_tokens,
         privacy_level=PrivacyLevel.PRIVATE,
-        ai_usage=AIUsage.CHAT,
+        # ai_usage follows the user's global default; profile generation is
+        # gated to 'chat'/'train' users in profile_eligible_query (#191).
+        ai_usage=user.default_ai_usage,
         source_tokens_used=source_tokens_used,
         source_data_cutoff=source_data_cutoff,
         generation_type=generation_type,
