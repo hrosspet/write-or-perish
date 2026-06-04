@@ -13,7 +13,7 @@ import redis
 from celery.utils.log import get_task_logger
 
 from backend.celery_app import celery, flask_app
-from backend.models import Node, UserTodo
+from backend.models import Node, UserTodo, User
 from backend.extensions import db
 from backend.llm_providers import LLMProvider
 from backend.utils.api_keys import get_api_keys_for_usage
@@ -163,10 +163,13 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
     ))
 
     # Save new UserTodo
+    merge_user = User.query.get(user_id)
     new_todo = UserTodo(
         user_id=user_id,
         generated_by="voice_session",
         tokens_used=output_tokens,
+        # ai_usage follows the user's global default (#191).
+        ai_usage=merge_user.default_ai_usage if merge_user else "chat",
     )
     new_todo.set_content(merged_todo)
     db.session.add(new_todo)

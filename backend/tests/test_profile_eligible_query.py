@@ -109,3 +109,21 @@ def test_deactivated_and_unapproved_users_are_excluded(app):
     assert active.id in eligible
     assert deactivated.id not in eligible     # the user-44 hold-off case
     assert never_approved.id not in eligible
+
+
+def test_global_ai_usage_gates_generation(app):
+    """A user who set their global default_ai_usage to 'none' has opted out
+    of AI, so automatic profile / recent-context generation must skip them
+    (#191). 'chat' and 'train' users stay eligible."""
+    chat_user = _make_user("chat_user", "alpha", None)        # default 'chat'
+    train_user = _make_user("train_user", "alpha", None)
+    train_user.default_ai_usage = "train"
+    opted_out = _make_user("opted_out", "alpha", None)
+    opted_out.default_ai_usage = "none"
+    db.session.commit()
+
+    eligible = {u.id for u in User.profile_eligible_query().all()}
+
+    assert chat_user.id in eligible
+    assert train_user.id in eligible          # train is still AI-readable
+    assert opted_out.id not in eligible       # global opt-out excludes

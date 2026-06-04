@@ -94,6 +94,9 @@ def update_todo():
         user_id=current_user.id,
         generated_by=generated_by,
         tokens_used=data.get("tokens_used", 0),
+        # ai_usage follows the user's global default, not a hardcoded
+        # 'chat' (#191); live-gated out of prompts if the user opts out.
+        ai_usage=current_user.default_ai_usage,
     )
     todo.set_content(content)
     db.session.add(todo)
@@ -170,6 +173,8 @@ def revert_todo(version_id):
         user_id=current_user.id,
         generated_by="revert",
         tokens_used=0,
+        # A revert reproduces a prior version, so copy its ai_usage (#191).
+        ai_usage=old_todo.ai_usage,
     )
     # Copy the encrypted content directly
     new_todo.content = old_todo.content

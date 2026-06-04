@@ -182,6 +182,66 @@ def test_integration_annotates_user_written_chain_root(app):
     assert "written by the user" not in gen_msg      # generated not flagged
 
 
+def test_save_profile_inherits_user_default_ai_usage(app):
+    """Generated profiles take ai_usage from the user's global default, not a
+    hardcoded 'chat' (#191). Combined with the profile_eligible_query gate, a
+    'train' user gets a 'train' profile (and opted-out users never generate)."""
+    import backend.tasks.exports as exports
+
+    user = User(username="trainer", plan="alpha", twitter_id=None,
+                approved=True, default_ai_usage="train")
+    _db.session.add(user)
+    _db.session.commit()
+
+    response = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+    profile = exports._save_profile(
+        user, "gpt-5.5", "GENERATED PROFILE", response,
+        source_tokens_used=0, source_data_cutoff=None,
+        generation_type="initial",
+    )
+
+    assert profile.ai_usage == "train"
+
+
+def test_revert_profile_copies_reverted_to_ai_usage(app):
+    """A revert reproduces a prior profile version, so it carries that
+    version's ai_usage rather than a fresh default (#191)."""
+    import backend.tasks.exports as exports
+
+    user = User(username="reverter", plan="alpha", twitter_id=None,
+                approved=True)
+    _db.session.add(user)
+    _db.session.flush()
+    # Older valid profile (train), cutoff before the import boundary.
+    valid = UserProfile(
+        user_id=user.id, generated_by="gpt-5.5", tokens_used=0,
+        generation_type="update", source_tokens_used=100,
+        source_data_cutoff=datetime(2026, 1, 1), ai_usage="train",
+    )
+    valid.set_content("VALID TRAIN PROFILE")
+    _db.session.add(valid)
+    _db.session.flush()
+    # Newer profile (chat) that included since-removed imported data.
+    newer = UserProfile(
+        user_id=user.id, generated_by="gpt-5.5", tokens_used=0,
+        generation_type="update", source_tokens_used=200,
+        source_data_cutoff=datetime(2026, 3, 1), ai_usage="chat",
+        parent_profile_id=valid.id,
+    )
+    newer.set_content("NEWER PROFILE")
+    _db.session.add(newer)
+    _db.session.commit()
+
+    # Import boundary between the two cutoffs -> revert target is `valid`.
+    exports.revert_profile_for_import(user.id, datetime(2026, 2, 1))
+    _db.session.commit()
+
+    revert = UserProfile.query.filter_by(
+        user_id=user.id, generation_type="revert").first()
+    assert revert is not None
+    assert revert.ai_usage == "train"   # copied from the reverted-to version
+
+
 def _seed_null_cutoff_user(username, node_tokens):
     """A user whose only profile is hand-written (null cutoff), plus one old
     node carrying ``node_tokens``. Old timestamps so the inactivity (30m) and

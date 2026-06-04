@@ -53,6 +53,9 @@ def update_ai_preferences():
         user_id=current_user.id,
         generated_by=generated_by,
         tokens_used=data.get("tokens_used", 0),
+        # ai_usage follows the user's global default, not a hardcoded
+        # 'chat' (#191).
+        ai_usage=current_user.default_ai_usage,
     )
     prefs.set_content(content)
     db.session.add(prefs)
