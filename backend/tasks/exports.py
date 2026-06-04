@@ -333,7 +333,7 @@ def revert_profile_for_import(user_id, earliest_imported_created_at):
     <= earliest_imported_created_at and creates a "revert" copy.
     If no valid profile exists, falls back to profile_needs_full_regen.
     """
-    from backend.utils.privacy import PrivacyLevel, AIUsage
+    from backend.utils.privacy import PrivacyLevel
 
     profiles = UserProfile.query.filter(
         UserProfile.user_id == user_id,
@@ -366,13 +366,15 @@ def revert_profile_for_import(user_id, earliest_imported_created_at):
     if valid_profile.id == profiles[0].id:
         return
 
-    # Create a revert profile copying the valid version's content
+    # Create a revert profile copying the valid version's content. A revert
+    # reproduces that prior version, so it carries the same ai_usage rather
+    # than a fresh default (#191).
     new_profile = UserProfile(
         user_id=user_id,
         generated_by=valid_profile.generated_by,
         tokens_used=0,
         privacy_level=PrivacyLevel.PRIVATE,
-        ai_usage=AIUsage.CHAT,
+        ai_usage=valid_profile.ai_usage,
         source_tokens_used=valid_profile.source_tokens_used,
         source_data_cutoff=valid_profile.source_data_cutoff,
         generation_type="revert",

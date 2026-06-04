@@ -368,7 +368,9 @@ def generate_recent_context(user_id, profile_id=None, data_cutoff_iso=None):
             source_data_cutoff=latest_ts,
             source_tokens_covered=source_tokens,
             profile_id=pid,
-            ai_usage="chat",
+            # ai_usage mirrors the user's global default; generation is gated
+            # to 'chat'/'train' users in profile_eligible_query (#191).
+            ai_usage=user.default_ai_usage,
         )
         rc.set_content(
             format_date_metadata(

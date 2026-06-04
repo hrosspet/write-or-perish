@@ -12,7 +12,6 @@ from backend.utils.privacy import (
     validate_privacy_level,
     validate_ai_usage,
     PrivacyLevel,
-    AIUsage
 )
 from backend.utils.api_keys import get_openai_chat_key
 
@@ -187,7 +186,9 @@ def create_profile():
         return jsonify({"error": "Content cannot be empty"}), 400
 
     privacy_level = data.get("privacy_level", PrivacyLevel.PRIVATE)
-    ai_usage = data.get("ai_usage", AIUsage.CHAT)
+    # Default a user-authored profile's ai_usage to their global setting,
+    # not a hardcoded 'chat' (#191); an explicit value still wins.
+    ai_usage = data.get("ai_usage", current_user.default_ai_usage)
 
     if not validate_privacy_level(privacy_level):
         return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
