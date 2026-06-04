@@ -114,20 +114,22 @@ VOICE_TOOLS = [
 ]
 
 
-def get_user_ai_preferences_content(user_id, as_of=None):
-    """Get the AI preferences as of *as_of* (or latest) if AI usage permitted.
+def get_user_ai_preferences_content(user_id, pinned_node=None):
+    """Resolve the AI preferences for an LLM prompt.
 
-    *as_of* pins the result to a per-session snapshot — the latest row with
-    ``created_at <= as_of``. Passing None returns the latest row. See #191:
-    all agentic context artifacts are anchored to the conversation's
-    system-node timestamp so the system prefix is logically consistent
-    within a session (and byte-identical across turns, a pre-condition
-    for prompt caching, #187).
+    If *pinned_node* carries a recorded version (NodeContextArtifact, written
+    by ``attach_context_artifacts`` when the session's system node was
+    created — see #191), that exact version is used: the same one the data
+    export references, so the session sees one coherent point-in-time
+    snapshot instead of re-fetching "latest now" each turn. Falls back to the
+    latest when the node has no binding (e.g. legacy nodes). ai_usage is
+    re-checked on the resolved row so a mid-session opt-out is honored.
     """
-    q = UserAIPreferences.query.filter_by(user_id=user_id)
-    if as_of is not None:
-        q = q.filter(UserAIPreferences.created_at <= as_of)
-    prefs = q.order_by(UserAIPreferences.created_at.desc()).first()
+    prefs = pinned_node.get_artifact("ai_preferences") if pinned_node else None
+    if prefs is None:
+        prefs = UserAIPreferences.query.filter_by(user_id=user_id).order_by(
+            UserAIPreferences.created_at.desc()
+        ).first()
     if prefs and prefs.ai_usage == "chat":
         return prefs.get_content()
     return None
@@ -508,70 +510,74 @@ def build_user_export_content(user, max_tokens=None, filter_ai_usage=False,
                   include_strategy=include_strategy)
 
 
-def get_user_profile_content(user_id, as_of=None):
+def get_user_profile_content(user_id, pinned_node=None):
     """
-    Get the user profile as of *as_of* (or the latest) if AI usage permitted.
+    Resolve the user profile for an LLM prompt.
 
     Returns the UserProfile object if ai_usage is 'chat' or 'train',
-    otherwise returns None. *as_of* pins the result to a per-session
-    snapshot (latest row with ``created_at <= as_of``); None returns the
-    latest. See #191.
+    otherwise None. If *pinned_node* carries a recorded version
+    (NodeContextArtifact, written by ``attach_context_artifacts`` at session
+    start — see #191), that exact version is used: the same one the data
+    export references, so the session sees one coherent point-in-time
+    snapshot instead of re-fetching "latest now" each turn. Falls back to
+    the latest when the node has no binding (e.g. legacy nodes). ai_usage is
+    re-checked on the resolved row so a mid-session opt-out is honored.
     """
-    q = UserProfile.query.filter_by(user_id=user_id)
-    if as_of is not None:
-        q = q.filter(UserProfile.created_at <= as_of)
-    profile = q.order_by(UserProfile.created_at.desc()).first()
+    profile = pinned_node.get_artifact("profile") if pinned_node else None
+    if profile is None:
+        profile = UserProfile.query.filter_by(user_id=user_id).order_by(
+            UserProfile.created_at.desc()
+        ).first()
 
     if profile and profile.ai_usage in AI_ALLOWED:
         return profile
     return None
 
 
-def get_user_todo_content(user_id, as_of=None):
+def get_user_todo_content(user_id, pinned_node=None):
     """
-    Get the user todo content as of *as_of* (or latest) if AI usage permitted.
+    Resolve the user todo content for an LLM prompt.
 
     Returns the todo content if ai_usage permits AI access, otherwise None.
-    *as_of* pins the result to a per-session snapshot (latest row with
-    ``created_at <= as_of``); None returns the latest. See #191.
+    Prefers the version recorded on *pinned_node* (see #191), falling back to
+    the latest when the node has no binding. ai_usage is re-checked on the
+    resolved row so a mid-session opt-out is honored.
     """
-    q = UserTodo.query.filter_by(user_id=user_id)
-    if as_of is not None:
-        q = q.filter(UserTodo.created_at <= as_of)
-    todo = q.order_by(UserTodo.created_at.desc()).first()
+    todo = pinned_node.get_artifact("todo") if pinned_node else None
+    if todo is None:
+        todo = UserTodo.query.filter_by(user_id=user_id).order_by(
+            UserTodo.created_at.desc()
+        ).first()
 
     if todo and todo.ai_usage in AI_ALLOWED:
         return todo.get_content()
     return None
 
 
-def get_user_recent_content(user_id, as_of=None):
-    """Get the recent context summary as of *as_of* (or latest) for a user.
+def get_user_recent_content(user_id, pinned_node=None):
+    """Resolve the recent context summary for an LLM prompt.
 
-    Filters by profile_id matching the profile current as of *as_of* so
-    old summaries (from before a profile update) are not returned. *as_of*
-    pins both the profile resolution and the summary to a per-session
-    snapshot (latest row with ``created_at <= as_of``); None returns the
-    latest. See #191.
+    Prefers the version recorded on *pinned_node* (see #191) — the same one
+    the data export references — so the session sees a coherent snapshot.
+    Falls back (legacy nodes) to the latest summary for the *current*
+    profile, so summaries from before a profile update are not returned.
+    ai_usage is re-checked on the resolved row so a mid-session opt-out is
+    honored.
     """
-    pq = UserProfile.query.filter_by(user_id=user_id).filter(
-        UserProfile.ai_usage.in_(AI_ALLOWED)
-    )
-    if as_of is not None:
-        pq = pq.filter(UserProfile.created_at <= as_of)
-    profile = pq.order_by(UserProfile.created_at.desc()).first()
+    rc = pinned_node.get_artifact("recent_context") if pinned_node else None
+    if rc is None:
+        profile = UserProfile.query.filter_by(user_id=user_id).filter(
+            UserProfile.ai_usage.in_(AI_ALLOWED)
+        ).order_by(UserProfile.created_at.desc()).first()
+        profile_id = profile.id if profile else None
 
-    profile_id = profile.id if profile else None
+        q = UserRecentContext.query.filter_by(user_id=user_id)
+        if profile_id is not None:
+            q = q.filter_by(profile_id=profile_id)
+        else:
+            q = q.filter(UserRecentContext.profile_id.is_(None))
+        rc = q.order_by(UserRecentContext.created_at.desc()).first()
 
-    q = UserRecentContext.query.filter_by(user_id=user_id)
-    if profile_id is not None:
-        q = q.filter_by(profile_id=profile_id)
-    else:
-        q = q.filter(UserRecentContext.profile_id.is_(None))
-    if as_of is not None:
-        q = q.filter(UserRecentContext.created_at <= as_of)
-
-    rc = q.order_by(UserRecentContext.created_at.desc()).first()
     if rc and rc.ai_usage in AI_ALLOWED:
         return rc
     return None
@@ -707,19 +713,22 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             export_params = parse_placeholder_params(export_placeholder_match) if export_placeholder_match else {}
             user_export_content = None
 
-            # Every context artifact is pinned to a per-session snapshot:
-            # the created_at of the first non-deleted node whose content
-            # holds its placeholder. In an agentic/voice session all
-            # placeholders live in the single system-prompt node at the
-            # root of the chain, so they share one anchor — the
-            # thread-start timestamp. This makes the whole system prefix a
-            # deterministic function of (thread, anchor): logically
-            # consistent within a session and byte-identical across turns
-            # (a pre-condition for prompt caching, #187). The 10k-raw
-            # window has always been pinned this way; #191 extends the
-            # same anchor to profile, recent-context, todo, and AI-prefs,
-            # which previously re-fetched "latest now" and drifted
-            # mid-thread.
+            # Every context artifact is pinned to a per-session snapshot.
+            # The node carrying a placeholder also carries a
+            # NodeContextArtifact row recording the exact artifact version
+            # that was current when it was created (written by
+            # attach_context_artifacts for agentic system nodes, and by
+            # sync_context_artifacts for ad-hoc placeholders in user
+            # messages). We resolve each artifact from that recorded version
+            # — the same source of truth the data export reads — so the
+            # whole system prefix presents one coherent point-in-time view
+            # for the life of the session: logically consistent within a
+            # session and byte-identical across turns (a pre-condition for
+            # prompt caching, #187). Before #191, profile / recent-context /
+            # todo / AI-prefs were re-fetched "latest now" each turn and
+            # drifted mid-thread; only the 10k-raw window was pinned (and it
+            # still is, via recent_raw_node.created_at — it's a rolling
+            # token window, not a single versioned row).
             def _placeholder_node(placeholder):
                 for n in node_chain:
                     if _alive(n) and placeholder in n.get_content():
@@ -755,7 +764,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             if needs_profile:
                 profile_obj = get_user_profile_content(
-                    user_id, as_of=profile_node.created_at
+                    user_id, pinned_node=profile_node
                 )
                 if profile_obj:
                     # Metadata already baked into stored content
@@ -763,12 +772,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             if needs_todo:
                 user_todo_content = get_user_todo_content(
-                    user_id, as_of=todo_node.created_at
+                    user_id, pinned_node=todo_node
                 )
 
             if needs_recent:
                 rc = get_user_recent_content(
-                    user_id, as_of=recent_node.created_at
+                    user_id, pinned_node=recent_node
                 )
                 if rc:
                     # Metadata already baked into stored content
@@ -789,7 +798,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             if needs_ai_prefs:
                 user_ai_preferences_content = get_user_ai_preferences_content(
-                    user_id, as_of=ai_prefs_node.created_at
+                    user_id, pinned_node=ai_prefs_node
                 )
 
             # Detect if this is an agentic session (enables tools)
@@ -901,8 +910,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # so subsequent occurrences get emptied (dedup).
                 # user_todo and user_ai_preferences are NOT deduped — a
                 # re-injected placeholder repeats the same pinned snapshot
-                # (since #191 all artifacts are pinned to the system-node
-                # anchor, not re-fetched "latest").
+                # (since #191 all artifacts resolve to the version recorded
+                # on the node, not a re-fetched "latest").
                 replaced_profile = False
                 replaced_recent = False
                 replaced_recent_raw = False

@@ -2,28 +2,33 @@
 
 The agentic/voice system prompt embeds {user_profile}, {user_recent},
 {user_recent_raw}, {user_todo}, and {user_ai_preferences}. Before #191 only
-the 10k-raw window was pinned to the conversation's system-node timestamp;
-the rest were re-fetched "latest now" and drifted mid-thread. These tests
-pin the corrected behavior:
+the 10k-raw window was pinned; profile, recent-context, todo, and AI-prefs
+were re-fetched "latest now" and drifted mid-thread.
 
-  - Each fetcher, given an ``as_of`` anchor, returns the artifact
-    version/state as of that timestamp (the latest row with
-    ``created_at <= as_of``).
-  - recent-context resolves its ``profile_id`` as-of the anchor too, so a
-    summary written against a *newer* profile is not leaked into a session
-    pinned to the older one.
-  - ``as_of=None`` preserves the legacy "latest" behavior.
-  - ai_usage gating is unchanged.
+The fix resolves each artifact from the version recorded on the node that
+carries its placeholder — the NodeContextArtifact row written by
+``attach_context_artifacts`` (agentic system nodes) / ``sync_context_artifacts``
+(ad-hoc placeholders), the same source of truth the data export reads. These
+tests pin that behavior:
 
-A lightweight AST check guards the call-site wiring in llm_completion.py
-(each fetcher must be invoked with an ``as_of`` kwarg) without importing
-the heavy Celery task.
+  - With a recorded version, the fetcher returns *that* version, not the
+    latest.
+  - With no binding (legacy nodes / pinned_node=None), it falls back to the
+    latest.
+  - ai_usage is re-checked on the resolved row, so a mid-session opt-out is
+    honored even though the version is pinned.
+  - recent-context resolves the recorded summary; the legacy fallback uses
+    the latest summary for the current profile.
+
+A lightweight AST check guards the call-site wiring (each fetcher must be
+invoked with a ``pinned_node`` kwarg) without importing the heavy Celery
+task body.
 """
 
 import ast
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 from unittest.mock import MagicMock
 
 # ── Environment (mirror the lightweight setup used by other model tests) ─
@@ -66,6 +71,7 @@ from flask import Flask  # noqa: E402
 from backend.extensions import db  # noqa: E402
 from backend.models import (  # noqa: E402
     User, UserProfile, UserRecentContext, UserTodo, UserAIPreferences,
+    Node, NodeContextArtifact,
 )
 from backend.tasks.llm_completion import (  # noqa: E402
     get_user_profile_content,
@@ -83,10 +89,10 @@ for _k, _v in _saved_glue.items():
     else:
         sys.modules[_k] = _v
 
-# Timeline: two artifact versions straddling the session anchor.
+# Two artifact versions: the OLD one is what the node was pinned to at
+# session start; the NEW one is written mid-session (later created_at).
 T_OLD = datetime(2026, 6, 1, 12, 0, 0)
-ANCHOR = datetime(2026, 6, 1, 13, 0, 0)   # session/system-node created_at
-T_NEW = datetime(2026, 6, 1, 14, 0, 0)    # written mid-session, after anchor
+T_NEW = datetime(2026, 6, 1, 14, 0, 0)
 
 
 @pytest.fixture
@@ -108,6 +114,26 @@ def _user():
     db.session.add(u)
     db.session.flush()
     return u
+
+
+def _node(user_id):
+    """A node carrying every artifact placeholder (stands in for the
+    agentic system node)."""
+    n = Node(user_id=user_id, node_type="user")
+    n.set_content(
+        "{user_profile} {user_recent} {user_todo} {user_ai_preferences}"
+    )
+    db.session.add(n)
+    db.session.flush()
+    return n
+
+
+def _bind(node, artifact_type, artifact_id):
+    """Record an artifact version on a node (what attach/sync write)."""
+    db.session.add(NodeContextArtifact(
+        node=node, artifact_type=artifact_type, artifact_id=artifact_id,
+    ))
+    db.session.flush()
 
 
 def _profile(user_id, created_at, content, ai_usage="chat"):
@@ -157,128 +183,147 @@ def _recent(user_id, created_at, content, profile_id, ai_usage="chat"):
 # ── profile ──────────────────────────────────────────────────────────────
 
 class TestProfilePinning:
-    def test_as_of_returns_version_at_anchor(self, app):
+    def test_returns_recorded_version_not_latest(self, app):
+        u = _user()
+        old = _profile(u.id, T_OLD, "OLD profile")
+        _profile(u.id, T_NEW, "NEW profile")
+        node = _node(u.id)
+        _bind(node, "profile", old.id)
+        db.session.commit()
+
+        resolved = get_user_profile_content(u.id, pinned_node=node)
+        assert resolved is not None
+        assert resolved.get_content() == "OLD profile"
+
+    def test_no_binding_falls_back_to_latest(self, app):
         u = _user()
         _profile(u.id, T_OLD, "OLD profile")
         _profile(u.id, T_NEW, "NEW profile")
+        node = _node(u.id)  # no binding recorded
         db.session.commit()
 
-        pinned = get_user_profile_content(u.id, as_of=ANCHOR)
-        assert pinned is not None
-        assert pinned.get_content() == "OLD profile"
-
-    def test_as_of_none_returns_latest(self, app):
-        u = _user()
-        _profile(u.id, T_OLD, "OLD profile")
-        _profile(u.id, T_NEW, "NEW profile")
-        db.session.commit()
-
+        assert get_user_profile_content(
+            u.id, pinned_node=node).get_content() == "NEW profile"
+        # pinned_node=None behaves the same (legacy callers).
         assert get_user_profile_content(u.id).get_content() == "NEW profile"
 
-    def test_ai_usage_gating_still_applies(self, app):
-        """The latest-as-of row is selected first, then gated — an opted-out
-        latest profile yields None (it does not fall back to an older
-        allowed one). This matches the pre-#191 behavior."""
+    def test_mid_session_opt_out_honored(self, app):
+        """The version is pinned, but if the user flips that exact version's
+        ai_usage to 'off' mid-session the prompt must withhold it."""
         u = _user()
-        _profile(u.id, T_OLD, "OLD profile")
-        _profile(u.id, ANCHOR - timedelta(minutes=1), "PRIVATE", ai_usage="off")
+        p = _profile(u.id, T_OLD, "OLD profile")
+        node = _node(u.id)
+        _bind(node, "profile", p.id)
         db.session.commit()
 
-        assert get_user_profile_content(u.id, as_of=ANCHOR) is None
+        assert get_user_profile_content(u.id, pinned_node=node) is not None
+        p.ai_usage = "off"
+        db.session.commit()
+        assert get_user_profile_content(u.id, pinned_node=node) is None
 
 
 # ── todo ───────────────────────────────────────────────────────────────────
 
 class TestTodoPinning:
-    def test_as_of_returns_version_at_anchor(self, app):
+    def test_returns_recorded_version_not_latest(self, app):
+        u = _user()
+        old = _todo(u.id, T_OLD, "OLD todo")
+        _todo(u.id, T_NEW, "NEW todo")
+        node = _node(u.id)
+        _bind(node, "todo", old.id)
+        db.session.commit()
+
+        assert get_user_todo_content(u.id, pinned_node=node) == "OLD todo"
+
+    def test_no_binding_falls_back_to_latest(self, app):
         u = _user()
         _todo(u.id, T_OLD, "OLD todo")
         _todo(u.id, T_NEW, "NEW todo")
+        node = _node(u.id)
         db.session.commit()
 
-        assert get_user_todo_content(u.id, as_of=ANCHOR) == "OLD todo"
-
-    def test_as_of_none_returns_latest(self, app):
-        u = _user()
-        _todo(u.id, T_OLD, "OLD todo")
-        _todo(u.id, T_NEW, "NEW todo")
-        db.session.commit()
-
+        assert get_user_todo_content(u.id, pinned_node=node) == "NEW todo"
         assert get_user_todo_content(u.id) == "NEW todo"
 
 
 # ── ai preferences ─────────────────────────────────────────────────────────
 
 class TestAIPreferencesPinning:
-    def test_as_of_returns_version_at_anchor(self, app):
+    def test_returns_recorded_version_not_latest(self, app):
+        u = _user()
+        old = _prefs(u.id, T_OLD, "be terse")
+        _prefs(u.id, T_NEW, "be verbose")
+        node = _node(u.id)
+        _bind(node, "ai_preferences", old.id)
+        db.session.commit()
+
+        assert get_user_ai_preferences_content(
+            u.id, pinned_node=node) == "be terse"
+
+    def test_no_binding_falls_back_to_latest(self, app):
         u = _user()
         _prefs(u.id, T_OLD, "be terse")
         _prefs(u.id, T_NEW, "be verbose")
+        node = _node(u.id)
         db.session.commit()
 
-        assert get_user_ai_preferences_content(u.id, as_of=ANCHOR) == "be terse"
-
-    def test_as_of_none_returns_latest(self, app):
-        u = _user()
-        _prefs(u.id, T_OLD, "be terse")
-        _prefs(u.id, T_NEW, "be verbose")
-        db.session.commit()
-
+        assert get_user_ai_preferences_content(
+            u.id, pinned_node=node) == "be verbose"
         assert get_user_ai_preferences_content(u.id) == "be verbose"
 
 
-# ── recent context (profile_id resolved as-of the anchor) ───────────────────
+# ── recent context ─────────────────────────────────────────────────────────
 
 class TestRecentContextPinning:
-    def test_resolves_profile_and_summary_at_anchor(self, app):
-        """A session pinned before the profile update must see the summary
-        tied to the *old* profile, not the one written against the new
-        profile after the anchor."""
+    def test_returns_recorded_summary_not_latest(self, app):
+        """A session pinned to the old summary must not see the one written
+        against the newer profile after the session started."""
         u = _user()
         p_old = _profile(u.id, T_OLD, "OLD profile")
         p_new = _profile(u.id, T_NEW, "NEW profile")
-        _recent(u.id, T_OLD + timedelta(minutes=10),
-                "summary for OLD profile", profile_id=p_old.id)
-        _recent(u.id, T_NEW + timedelta(minutes=10),
-                "summary for NEW profile", profile_id=p_new.id)
+        rc_old = _recent(u.id, T_OLD, "summary for OLD profile",
+                         profile_id=p_old.id)
+        _recent(u.id, T_NEW, "summary for NEW profile", profile_id=p_new.id)
+        node = _node(u.id)
+        _bind(node, "recent_context", rc_old.id)
         db.session.commit()
 
-        rc = get_user_recent_content(u.id, as_of=ANCHOR)
+        rc = get_user_recent_content(u.id, pinned_node=node)
         assert rc is not None
         assert rc.get_content() == "summary for OLD profile"
 
-    def test_as_of_none_returns_latest_for_current_profile(self, app):
+    def test_no_binding_falls_back_to_latest_for_current_profile(self, app):
         u = _user()
         p_old = _profile(u.id, T_OLD, "OLD profile")
         p_new = _profile(u.id, T_NEW, "NEW profile")
-        _recent(u.id, T_OLD + timedelta(minutes=10),
-                "summary for OLD profile", profile_id=p_old.id)
-        _recent(u.id, T_NEW + timedelta(minutes=10),
-                "summary for NEW profile", profile_id=p_new.id)
+        _recent(u.id, T_OLD, "summary for OLD profile", profile_id=p_old.id)
+        _recent(u.id, T_NEW, "summary for NEW profile", profile_id=p_new.id)
+        node = _node(u.id)
         db.session.commit()
 
-        rc = get_user_recent_content(u.id)
+        rc = get_user_recent_content(u.id, pinned_node=node)
         assert rc.get_content() == "summary for NEW profile"
 
-    def test_summary_after_anchor_excluded_even_for_pinned_profile(self, app):
-        """If the only summary for the as-of profile was written after the
-        anchor, the pinned fetch returns nothing (no time-travel)."""
+    def test_mid_session_opt_out_honored(self, app):
         u = _user()
-        p_old = _profile(u.id, T_OLD, "OLD profile")
-        _recent(u.id, T_NEW, "late summary", profile_id=p_old.id)
+        p = _profile(u.id, T_OLD, "OLD profile")
+        rc = _recent(u.id, T_OLD, "summary", profile_id=p.id)
+        node = _node(u.id)
+        _bind(node, "recent_context", rc.id)
         db.session.commit()
 
-        assert get_user_recent_content(u.id, as_of=ANCHOR) is None
-        # Without the anchor it's the latest and is returned.
-        assert get_user_recent_content(u.id).get_content() == "late summary"
+        assert get_user_recent_content(u.id, pinned_node=node) is not None
+        rc.ai_usage = "off"
+        db.session.commit()
+        assert get_user_recent_content(u.id, pinned_node=node) is None
 
 
 # ── call-site wiring (AST guard) ───────────────────────────────────────────
 
 class TestCallSiteWiring:
-    """Guard that generate_llm_response pins every artifact fetch to the
-    per-session anchor by passing an ``as_of`` kwarg. Parsed via ``ast`` to
-    avoid importing the heavy Celery task body."""
+    """Guard that generate_llm_response resolves every artifact from the
+    node's recorded version by passing a ``pinned_node`` kwarg. Parsed via
+    ``ast`` to avoid importing the heavy Celery task body."""
 
     @pytest.fixture(scope="class")
     def llm_completion_ast(self):
@@ -308,10 +353,10 @@ class TestCallSiteWiring:
         "get_user_recent_content",
         "get_user_ai_preferences_content",
     ])
-    def test_fetcher_called_with_as_of(self, llm_completion_ast, fn):
+    def test_fetcher_called_with_pinned_node(self, llm_completion_ast, fn):
         calls = list(self._calls_named(llm_completion_ast, fn))
         assert calls, f"Expected a call to {fn} in llm_completion.py"
         assert any(
-            any(kw.arg == "as_of" for kw in call.keywords)
+            any(kw.arg == "pinned_node" for kw in call.keywords)
             for call in calls
-        ), f"{fn} must be called with an as_of= anchor (per #191)"
+        ), f"{fn} must be called with a pinned_node= (per #191)"
