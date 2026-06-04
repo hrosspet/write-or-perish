@@ -195,6 +195,38 @@ Order these so shared code lands once and downstream items inherit it.
 
 ---
 
+## 6b. Prompt-caching & context-pinning cluster (filed 2026-06-04, post-triage)
+
+A tightly-interdependent family filed during a voice latency/cost design session — **not part of the original 65-issue triage**. Governing insight: **#191 (pin artifacts) is the linchpin** — independently valuable (logical consistency + reproducibility, for both live sessions *and* data exports) **and** a hard pre-condition for the provider-cache and backend-cache work. When picked up, these slot in as their own wave.
+
+### Priority-relevance map
+
+| # | Issue | Relevance | Depends on | Notes |
+|---|-------|-----------|------------|-------|
+| **#191** | Pin all context artifacts to a per-session snapshot | **Logical consistency + reproducibility** (sessions + exports) | — (standalone) | **Linchpin — do first.** Blocks #187 + #192. Today only the 10k-raw is pinned; profile / recent-context / todos / AI-prefs drift. |
+| **#187** | Voice provider prompt caching (Anthropic `cache_control` + finalize pre-warm/3b) | **Both cost + latency** | #191 (hard); de-risked by #192 | Headline win. Gated on #191. |
+| **#192** | `backend-cache`: assembled system prompt per session | **Reproducibility (byte-identity) + perf** | #191 (hard) | Guarantees the byte-identity #187 needs (assemble-once-reuse) + removes per-turn re-assembly. |
+| **#188** | Stream Claude → progressive-TTS chunker | **Latency only** | — (independent) | No cost change. Composes with #187, blocks nothing. |
+| **#189** | OpenAI provider caching (`prompt_cache_key` + cost-accounting fix) | **Cost only** | — (independent) | Also fixes a *current* over-count: we already get OpenAI's cache discount but log full price (`utils/cost.py:10`). |
+| **#190** | Text-mode prompt caching | **TBD — placeholder, needs scoping** | would reuse #191 | No recording/finalize window → 3b doesn't map. Decide whether/when it's worth it. |
+| #173 *(pre-triage)* | Batch API + prompt caching | **Cost only** | — | Part B (caching) is subsumed by #187/#189 for the agentic path — coordinate. Part A (Batch profile-gen) is separate cost work. |
+| #143 *(triaged)* | Reconcile AI-prefs (profile vs artifact) | consistency (AI-prefs) | — | **Related to #191, NOT a blocker.** When it settles canonical storage, align which source #191 pins. |
+
+### Implementation order
+
+1. **#191 — first, independent of the caching work.** Standalone consistency/reproducibility win (sessions + exports) *and* the hard pre-condition for the rest. Decided: all artifacts frozen per-session, uniformly (no per-artifact tiers); the live `propose_todo` drafts still surface via the trailing-notes channel, so freezing the persistent list is acceptable.
+2. **#192 — with or just before #187.** Assemble-once-reuse guarantees #187's byte-identity and kills per-turn re-assembly. Its within-turn (warm↔gen) sharing may fold into #187; the cross-turn cache is the separable part.
+3. **#187 — the headline both-cost-and-latency win.** Gated on #191, de-risked by #192.
+4. **#188 (latency) + #189 (cost) — independent, opportunistic.** Neither is blocked; pick up by whichever axis is the current priority. #189 has standalone value *today* (the over-count fix).
+5. **#190 — deferred.** Revisit after #191/#187; reuses #191's pinning. Needs a whether/when decision first.
+
+### How to prioritize by goal
+- **Latency:** #191 → #187 (+ #192), with #188 in parallel.
+- **Cost:** #189 now (standalone + fixes over-count); #173 Part A (Batch) separately; #187 also cuts multi-turn cost.
+- **Correctness / consistency:** #191 stands alone as the highest-value single item — independent of any caching.
+
+---
+
 ## 7. Implementation & testing plan — waves
 
 Principle: front-load XS/S high-confidence wins, sequence shared-plumbing, isolate risky/regression-prone items into their own staging cycle. Each wave = one staging integration branch + one Chrome test cycle.
