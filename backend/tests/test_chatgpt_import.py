@@ -35,7 +35,7 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
 
 import flask_login as _real_flask_login          # noqa: E402
 from backend.extensions import db as _db         # noqa: E402
-from backend.models import User                  # noqa: E402
+from backend.models import User, Node            # noqa: E402
 import backend.models as _real_backend_models    # noqa: E402
 
 
@@ -95,6 +95,19 @@ def _login(client, user_id):
         sess["_fresh"] = True
 
 
+def _reset_login_cache():
+    """Clear Flask-Login's per-context user cache.
+
+    The ``app`` fixture wraps the whole test in a single application
+    context, so ``flask.g._login_user`` (set by Flask-Login on the first
+    authenticated request) leaks into subsequent requests and pins
+    ``current_user`` to the first user. Pop it so the next request
+    re-loads the identity from its own session cookie.
+    """
+    from flask import g
+    g.pop("_login_user", None)
+
+
 def _make_user(username, **kwargs):
     u = User(username=username, approved=True, plan="alpha", **kwargs)
     _db.session.add(u)
@@ -111,6 +124,17 @@ def _post_conversations(client, raw_conversations):
         "/api/import/chatgpt/analyze",
         data=data,
         content_type="multipart/form-data",
+    )
+
+
+def _confirm_conversations(client, conversations, **extra):
+    """POST analyzed conversations to the ChatGPT confirm endpoint."""
+    body = {"conversations": conversations}
+    body.update(extra)
+    return client.post(
+        "/api/import/chatgpt/confirm",
+        data=json.dumps(body),
+        content_type="application/json",
     )
 
 
@@ -453,3 +477,161 @@ class TestAnalyzeChatgptImport:
         resp = _post_conversations(client, [])
         # flask_login redirects unauthenticated requests (302/401).
         assert resp.status_code in (302, 401)
+
+
+# ── POST /api/import/chatgpt/confirm (dedup) ─────────────────────────────
+
+def _analyzed_conv(name="First chat", created_at="2023-11-14T22:13:20",
+                   messages=None):
+    """Build a confirm-shaped conversation (mirrors analyze output)."""
+    if messages is None:
+        messages = [
+            {
+                "text": "hello world",
+                "role": "user",
+                "created_at": "2023-11-14T22:13:20",
+                "model": "",
+                "mapping_id": "u1",
+            },
+            {
+                "text": "hi there, friend",
+                "role": "assistant",
+                "created_at": "2023-11-14T22:13:21",
+                "model": "gpt-4o",
+                "mapping_id": "a1",
+            },
+        ]
+    return {
+        "name": name,
+        "created_at": created_at,
+        "default_model": "gpt-4o",
+        "messages": messages,
+        "message_count": len(messages),
+        "token_count": sum(len(m["text"]) // 4 for m in messages),
+    }
+
+
+class TestConfirmChatgptImportDedup:
+    def _count_nodes(self, user_id):
+        return Node.query.filter_by(human_owner_id=user_id).count()
+
+    def test_reimport_same_archive_creates_zero_new_nodes(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        convs = [_analyzed_conv()]
+
+        # First import: both messages become nodes.
+        r1 = _confirm_conversations(client, convs)
+        assert r1.status_code == 201
+        b1 = r1.get_json()
+        assert b1["created"] == 2
+        assert b1["skipped"] == 0
+        assert b1["nodes_created"] == 2
+        assert self._count_nodes(alice.id) == 2
+
+        # Re-import the identical archive: zero new nodes.
+        r2 = _confirm_conversations(client, convs)
+        assert r2.status_code == 201
+        b2 = r2.get_json()
+        assert b2["created"] == 0
+        assert b2["skipped"] == 2
+        assert self._count_nodes(alice.id) == 2
+
+    def test_overlapping_snapshot_adds_only_new_messages(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        first = [_analyzed_conv()]
+        r1 = _confirm_conversations(client, first)
+        assert r1.status_code == 201
+        assert r1.get_json()["created"] == 2
+        assert self._count_nodes(alice.id) == 2
+
+        # A later snapshot of the same conversation: the original two
+        # messages plus one genuinely-new follow-up.
+        extended_messages = [
+            {
+                "text": "hello world",
+                "role": "user",
+                "created_at": "2023-11-14T22:13:20",
+                "model": "",
+                "mapping_id": "u1",
+            },
+            {
+                "text": "hi there, friend",
+                "role": "assistant",
+                "created_at": "2023-11-14T22:13:21",
+                "model": "gpt-4o",
+                "mapping_id": "a1",
+            },
+            {
+                "text": "one more question",
+                "role": "user",
+                "created_at": "2023-11-14T22:14:00",
+                "model": "",
+                "mapping_id": "u2",
+            },
+        ]
+        second = [_analyzed_conv(messages=extended_messages)]
+        r2 = _confirm_conversations(client, second)
+        assert r2.status_code == 201
+        b2 = r2.get_json()
+        assert b2["created"] == 1
+        assert b2["skipped"] == 2
+        assert self._count_nodes(alice.id) == 3
+
+    def test_dedup_is_scoped_per_user(self, app):
+        alice = _make_user("alice")
+        bob = _make_user("bob")
+        _db.session.commit()
+
+        convs = [_analyzed_conv()]
+
+        alice_client = app.test_client()
+        _login(alice_client, alice.id)
+        ra = _confirm_conversations(alice_client, convs)
+        assert ra.get_json()["created"] == 2
+
+        # Bob importing the same archive gets his own copy. Clear the
+        # leaked Flask-Login cache so current_user re-loads as Bob.
+        _reset_login_cache()
+        bob_client = app.test_client()
+        _login(bob_client, bob.id)
+        rb = _confirm_conversations(bob_client, convs)
+        assert rb.get_json()["created"] == 2
+        assert rb.get_json()["skipped"] == 0
+        assert self._count_nodes(alice.id) == 2
+        assert self._count_nodes(bob.id) == 2
+
+    def test_intra_request_duplicates_are_deduped(self, app):
+        # Same conversation appears twice within one payload.
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        convs = [_analyzed_conv(), _analyzed_conv()]
+        r = _confirm_conversations(client, convs)
+        assert r.status_code == 201
+        b = r.get_json()
+        assert b["created"] == 2
+        assert b["skipped"] == 2
+        assert self._count_nodes(alice.id) == 2
+
+    def test_source_key_persisted_on_created_nodes(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        _confirm_conversations(client, [_analyzed_conv()])
+        keys = [
+            n.source_key
+            for n in Node.query.filter_by(human_owner_id=alice.id).all()
+        ]
+        assert all(k and k.startswith("chatgpt:") for k in keys)

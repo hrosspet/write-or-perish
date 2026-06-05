@@ -4,6 +4,7 @@ from backend.models import Node, User, UserProfile
 from backend.extensions import db
 from backend.utils.privacy import AI_ALLOWED
 from datetime import datetime
+import hashlib
 import zipfile
 import io
 import json
@@ -18,6 +19,34 @@ def approximate_token_count(text):
     Uses a simple heuristic: ~4 characters per token.
     """
     return len(text) // 4
+
+
+def _generic_source_key(author, timestamp, content):
+    """Stable fallback dedup key when no source-native id is available."""
+    raw = f"{author}:{timestamp}:{content}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _source_key_exists(user_id, key):
+    """
+    True if a node owned by this user with this source_key already exists.
+
+    Scoping is on ``human_owner_id`` (the importing human), NOT ``user_id``:
+    imported assistant/LLM messages are stored under a synthetic LLM user
+    (e.g. ``chatgpt`` / ``claude-web``) via ``user_id`` while the real
+    importer is recorded in ``human_owner_id``. Scoping on the human owner
+    therefore dedups both human and assistant turns per importing user, so
+    two different users importing the same archive each keep their own copy.
+
+    Pending (flushed-but-uncommitted) nodes within the same request are
+    covered because db.session.flush() is called after each insert, so the
+    query sees them too.
+    """
+    if not key:
+        return False
+    return db.session.query(Node.id).filter_by(
+        human_owner_id=user_id, source_key=key
+    ).first() is not None
 
 
 @import_bp.route("/import/analyze", methods=["POST"])
@@ -188,7 +217,14 @@ def confirm_import():
         files_sorted = sorted(files, key=lambda f: f.get('modified_at', ''))
 
         nodes_created = 0
+        nodes_skipped = 0
         thread_count = 0
+        seen_keys = set()
+
+        def _file_source_key(filename, content):
+            """sha256 of (filename + content) for markdown-zip dedup."""
+            raw = f"{filename}{content}"
+            return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
         if import_type == 'single_thread':
             # Create a single thread with all files as sequential nodes
@@ -197,6 +233,14 @@ def confirm_import():
             for file_data in files_sorted:
                 filename = file_data.get('filename_without_ext', 'Untitled')
                 content = file_data.get('content', '')
+
+                source_key = _file_source_key(filename, content)
+                if source_key in seen_keys or _source_key_exists(
+                    current_user.id, source_key
+                ):
+                    nodes_skipped += 1
+                    continue
+                seen_keys.add(source_key)
 
                 # Add filename as markdown headline only if content doesn't have H1
                 stripped_content = content.lstrip()
@@ -223,7 +267,8 @@ def confirm_import():
                     content=node_content,
                     token_count=approximate_token_count(node_content),
                     privacy_level=privacy_level,
-                    ai_usage=ai_usage
+                    ai_usage=ai_usage,
+                    source_key=source_key,
                 )
 
                 if node_created_at:
@@ -242,6 +287,14 @@ def confirm_import():
             for file_data in files_sorted:
                 filename = file_data.get('filename_without_ext', 'Untitled')
                 content = file_data.get('content', '')
+
+                source_key = _file_source_key(filename, content)
+                if source_key in seen_keys or _source_key_exists(
+                    current_user.id, source_key
+                ):
+                    nodes_skipped += 1
+                    continue
+                seen_keys.add(source_key)
 
                 # Add filename as markdown headline only if content doesn't have H1
                 stripped_content = content.lstrip()
@@ -268,16 +321,18 @@ def confirm_import():
                     content=node_content,
                     token_count=approximate_token_count(node_content),
                     privacy_level=privacy_level,
-                    ai_usage=ai_usage
+                    ai_usage=ai_usage,
+                    source_key=source_key,
                 )
 
                 if node_created_at:
                     node.created_at = node_created_at
 
                 db.session.add(node)
+                db.session.flush()
                 nodes_created += 1
 
-            thread_count = len(files_sorted)
+            thread_count = nodes_created
 
         # Commit all nodes
         db.session.commit()
@@ -344,6 +399,8 @@ def confirm_import():
             "nodes_created": nodes_created,
             "thread_count": thread_count,
             "profile_update_task_id": profile_update_task_id,
+            "created": nodes_created,
+            "skipped": nodes_skipped,
         }), 201
 
     except Exception as e:
@@ -665,7 +722,9 @@ def confirm_claude_import():
             db.session.flush()
 
         nodes_created = 0
+        nodes_skipped = 0
         thread_count = 0
+        seen_keys = set()
 
         # Sort conversations by created_at ascending
         conversations_sorted = sorted(
@@ -676,6 +735,7 @@ def confirm_claude_import():
         for conv in conversations_sorted:
             messages = conv.get('messages', [])
             conv_name = conv.get('name', '')
+            conv_created = conv.get('created_at', '')
 
             if not messages:
                 continue
@@ -696,6 +756,15 @@ def confirm_claude_import():
                     node_content = text
 
                 is_assistant = sender == 'assistant'
+
+                # Stable dedup key keyed on conversation + message index.
+                source_key = f"claude:{conv_name}:{conv_created}:{i}"
+                if source_key in seen_keys or _source_key_exists(
+                    current_user.id, source_key
+                ):
+                    nodes_skipped += 1
+                    continue
+                seen_keys.add(source_key)
 
                 # Parse original timestamp from Claude export
                 msg_created_at = None
@@ -718,7 +787,8 @@ def confirm_claude_import():
                     content=node_content,
                     token_count=approximate_token_count(node_content),
                     privacy_level=privacy_level,
-                    ai_usage=ai_usage
+                    ai_usage=ai_usage,
+                    source_key=source_key,
                 )
 
                 if msg_created_at:
@@ -804,6 +874,8 @@ def confirm_claude_import():
             "nodes_created": nodes_created,
             "thread_count": thread_count,
             "profile_update_task_id": profile_update_task_id,
+            "created": nodes_created,
+            "skipped": nodes_skipped,
         }), 201
 
     except Exception as e:
@@ -870,7 +942,20 @@ def confirm_twitter_import():
         )
 
         nodes_created = 0
+        nodes_skipped = 0
         thread_count = 0
+        seen_keys = set()
+
+        def _tweet_source_key(tweet_data):
+            """twitter:<id_str>; content hash when id_str is absent."""
+            id_str = tweet_data.get('id_str', '')
+            if id_str:
+                return f"twitter:{id_str}"
+            return _generic_source_key(
+                "twitter",
+                tweet_data.get('created_at', ''),
+                tweet_data.get('full_text', ''),
+            )
 
         if import_type == 'single_thread':
             parent_node = None
@@ -880,6 +965,14 @@ def confirm_twitter_import():
                 token_count = tweet_data.get(
                     'token_count', approximate_token_count(content)
                 )
+
+                source_key = _tweet_source_key(tweet_data)
+                if source_key in seen_keys or _source_key_exists(
+                    current_user.id, source_key
+                ):
+                    nodes_skipped += 1
+                    continue
+                seen_keys.add(source_key)
 
                 # Parse original Twitter timestamp
                 tweet_created_at = None
@@ -900,7 +993,8 @@ def confirm_twitter_import():
                     content=content,
                     token_count=token_count,
                     privacy_level=privacy_level,
-                    ai_usage=ai_usage
+                    ai_usage=ai_usage,
+                    source_key=source_key,
                 )
 
                 if tweet_created_at:
@@ -921,6 +1015,14 @@ def confirm_twitter_import():
                     'token_count', approximate_token_count(content)
                 )
 
+                source_key = _tweet_source_key(tweet_data)
+                if source_key in seen_keys or _source_key_exists(
+                    current_user.id, source_key
+                ):
+                    nodes_skipped += 1
+                    continue
+                seen_keys.add(source_key)
+
                 # Parse original Twitter timestamp
                 tweet_created_at = None
                 raw_ts = tweet_data.get('created_at', '')
@@ -940,16 +1042,18 @@ def confirm_twitter_import():
                     content=content,
                     token_count=token_count,
                     privacy_level=privacy_level,
-                    ai_usage=ai_usage
+                    ai_usage=ai_usage,
+                    source_key=source_key,
                 )
 
                 if tweet_created_at:
                     node.created_at = tweet_created_at
 
                 db.session.add(node)
+                db.session.flush()
                 nodes_created += 1
 
-            thread_count = len(tweets_sorted)
+            thread_count = nodes_created
 
         db.session.commit()
 
@@ -1020,6 +1124,8 @@ def confirm_twitter_import():
             "nodes_created": nodes_created,
             "thread_count": thread_count,
             "profile_update_task_id": profile_update_task_id,
+            "created": nodes_created,
+            "skipped": nodes_skipped,
         }), 201
 
     except Exception as e:
@@ -1089,6 +1195,10 @@ def _linearize_chatgpt_messages(mapping):
                         "role": role,
                         "created_at": msg_created_at or '',
                         "model": model,
+                        # Stable per-message id from the export graph.
+                        # Survives analyze->confirm so re-imports dedup
+                        # on the original ChatGPT message identity.
+                        "mapping_id": current,
                     })
 
         children = entry.get('children', [])
@@ -1264,7 +1374,9 @@ def confirm_chatgpt_import():
             db.session.flush()
 
         nodes_created = 0
+        nodes_skipped = 0
         thread_count = 0
+        seen_keys = set()
 
         # Sort conversations by created_at ascending
         conversations_sorted = sorted(
@@ -1275,6 +1387,7 @@ def confirm_chatgpt_import():
         for conv in conversations_sorted:
             messages = conv.get('messages', [])
             conv_name = conv.get('name', '')
+            conv_created = conv.get('created_at', '')
 
             if not messages:
                 continue
@@ -1295,6 +1408,26 @@ def confirm_chatgpt_import():
                     node_content = text
 
                 is_assistant = role == 'assistant'
+
+                # Compute a stable dedup key. Prefer the ChatGPT mapping
+                # id (survives analyze->confirm); fall back to a content
+                # hash when it is missing.
+                mapping_id = msg.get('mapping_id')
+                if mapping_id:
+                    source_key = (
+                        f"chatgpt:{conv_name}:{conv_created}:{mapping_id}"
+                    )
+                else:
+                    source_key = _generic_source_key(
+                        role, msg.get('created_at', ''), node_content
+                    )
+
+                if source_key in seen_keys or _source_key_exists(
+                    current_user.id, source_key
+                ):
+                    nodes_skipped += 1
+                    continue
+                seen_keys.add(source_key)
 
                 # Parse original timestamp
                 msg_created_at = None
@@ -1323,7 +1456,8 @@ def confirm_chatgpt_import():
                     content=node_content,
                     token_count=approximate_token_count(node_content),
                     privacy_level=privacy_level,
-                    ai_usage=ai_usage
+                    ai_usage=ai_usage,
+                    source_key=source_key,
                 )
 
                 if msg_created_at:
@@ -1406,6 +1540,8 @@ def confirm_chatgpt_import():
             "nodes_created": nodes_created,
             "thread_count": thread_count,
             "profile_update_task_id": profile_update_task_id,
+            "created": nodes_created,
+            "skipped": nodes_skipped,
         }), 201
 
     except Exception as e:
