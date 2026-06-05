@@ -137,9 +137,11 @@ class TestGenerateUniqueUsername:
             assert result == "johndoetag"
 
     def test_empty_prefix_fallback(self, app):
-        mock_user = self._make_mock_user([None])
+        # The bare 'user' fallback is itself a reserved name (issue #91), so
+        # generate_unique_username must skip it and append a suffix.
+        mock_user = self._make_mock_user([None, None])
         with app.app_context(), \
                 patch.dict("sys.modules", {"backend.models": MagicMock(User=mock_user)}):
             import backend.utils.magic_link as ml
             result = ml.generate_unique_username("@example.com")
-            assert result == "user"
+            assert result == "user2"

@@ -9,6 +9,7 @@ from backend.utils.timefmt import iso_utc
 from sqlalchemy import func
 from backend.utils.magic_link import generate_magic_link_token, hash_token
 from backend.utils.email import send_welcome_email
+from backend.utils.reserved_usernames import is_username_reserved
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,10 @@ def whitelist_user():
     handle = data.get("handle", "").strip()
     if not handle:
         return jsonify({"error": "Handle is required."}), 400
+
+    # Reject reserved/protected handles (brand/founder/system names).
+    if is_username_reserved(handle):
+        return jsonify({"error": "That username is reserved."}), 400
 
     # Check if a user with that handle already exists.
     if User.query.filter_by(username=handle).first():
