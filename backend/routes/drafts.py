@@ -735,9 +735,12 @@ def finalize_streaming(session_id):
     label = data.get("label")  # e.g. "Reflect", "Orient"
     parent_id = data.get("parent_id")  # thread parent for LLM chain
     model = data.get("model")  # LLM model for server-side generation
-    if not model and label in ("Reflect", "Orient"):
-        # Walks ancestry from parent_id (if any) → user.preferred_model
-        # → DEFAULT.
+    if not model and label in ("Reflect", "Orient", "Voice"):
+        # Resolve a model when the client didn't send one (e.g. user has no
+        # preferred_model). Without this, should_chain is False for Voice and
+        # node creation falls back to the frontend POST /voice path, which
+        # re-posts the draft's titled content. Walks ancestry from parent_id
+        # (if any) → user.preferred_model → DEFAULT.
         parent_node = Node.query.get(parent_id) if parent_id else None
         model = pick_model_for_generation(parent_node, current_user)
 

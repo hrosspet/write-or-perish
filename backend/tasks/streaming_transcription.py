@@ -921,9 +921,12 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
 
         full_transcript = "\n\n".join(transcripts)
 
-        # Format final content - only add title for top-level drafts
+        # Title only standalone top-level voice notes. Voice-workflow turns
+        # (label='Voice') are conversation messages, not journal notes — never
+        # title them (also stops the title leaking onto the node via the
+        # frontend POST /voice fallback when the server-side chain is skipped).
         title_label = label or "Voice note"
-        if draft.parent_id is None:
+        if draft.parent_id is None and label != 'Voice':
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             if failed_chunks:
                 failed_indices = [c.chunk_index for c in failed_chunks]
