@@ -647,6 +647,27 @@ class APICostLog(db.Model):
     user = db.relationship("User", backref="api_cost_logs")
 
 
+class SpendAlert(db.Model):
+    """Dedupe record for API spend-limit alerts (issue #85).
+
+    One row per (provider, month, threshold) that has already been
+    alerted, so the hourly check never re-sends the same alert within
+    a calendar month.
+    """
+    __tablename__ = "spend_alert"
+    id = db.Column(db.Integer, primary_key=True)
+    provider = db.Column(db.String(32), nullable=False)
+    month = db.Column(db.String(7), nullable=False)  # "YYYY-MM" (UTC)
+    threshold = db.Column(db.Float, nullable=False)  # fraction of limit, e.g. 0.8
+    spend_usd = db.Column(db.Float, nullable=False)  # spend at alert time
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        db.UniqueConstraint("provider", "month", "threshold",
+                            name="uq_spend_alert_provider_month_threshold"),
+    )
+
+
 class TTSChunk(db.Model):
     """
     Stores individual TTS audio chunk URLs for streaming TTS playback.
