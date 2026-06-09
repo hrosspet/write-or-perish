@@ -50,8 +50,8 @@ class Config:
     # Sources:
     #   Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
     #   OpenAI:    https://developers.openai.com/api/docs/pricing
-    PRICING_VERSION = "1"
-    PRICING_UPDATED_AT = "2026-02-13"
+    PRICING_VERSION = "2"
+    PRICING_UPDATED_AT = "2026-06-09"
 
     # Supported models configuration (single source of truth for all model metadata)
     SUPPORTED_MODELS = {
@@ -153,6 +153,14 @@ class Config:
             "context_window": 1000000,
             "input_price_per_mtok": 5.00,
             "output_price_per_mtok": 25.00,
+        },
+        "claude-fable-5": {
+            "provider": "anthropic",
+            "api_model": "claude-fable-5",
+            "display_name": "Claude Fable 5",
+            "context_window": 1000000,
+            "input_price_per_mtok": 10.00,
+            "output_price_per_mtok": 50.00,
         },
         "claude-opus-3": {
             "provider": "anthropic",
