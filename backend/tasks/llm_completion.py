@@ -47,6 +47,7 @@ USER_AI_PREFERENCES_PLACEHOLDER = "{user_ai_preferences}"
 # Placeholders for user artifacts — LLM memory/scratchpad + index (#158)
 USER_MEMORY_PLACEHOLDER = "{user_memory}"
 USER_SCRATCHPAD_PLACEHOLDER = "{user_scratchpad}"
+USER_INTENTIONS_PLACEHOLDER = "{user_intentions}"
 USER_ARTIFACTS_INDEX_PLACEHOLDER = "{user_artifacts_index}"
 
 # ── Voice tool definitions ──────────────────────────────────────────────
@@ -122,8 +123,11 @@ VOICE_TOOLS = [
             "documents that survive across sessions. Built-in kinds: "
             "'memory' (durable facts and observations about the user "
             "worth remembering long-term — write here whenever you learn "
-            "something that future sessions should know) and 'scratchpad' "
-            "(your working notes for ongoing threads of work). You can "
+            "something that future sessions should know), 'scratchpad' "
+            "(your working notes for ongoing threads of work), and "
+            "'intentions' (the user's long-running aspirations you help "
+            "them clarify and track — see the Intentions section of your "
+            "instructions). You can "
             "also create new kinds for the user on request (e.g. "
             "'reading-list'). The updated_content must be the FULL new "
             "text of the artifact (not a diff) — it replaces the previous "
@@ -239,17 +243,19 @@ def get_user_artifacts_context(user_id, pinned_node=None):
 
     memory = artifacts.get("memory")
     scratchpad = artifacts.get("scratchpad")
+    intentions = artifacts.get("intentions")
     memory_content = memory.get_content() if memory else ""
     scratchpad_content = scratchpad.get_content() if scratchpad else ""
+    intentions_content = intentions.get_content() if intentions else ""
 
     index_lines = []
     for kind, artifact in sorted(artifacts.items()):
-        if kind in ("memory", "scratchpad"):
-            continue
+        if kind in ("memory", "scratchpad", "intentions"):
+            continue  # ambient via their own placeholders, not the index
         tokens = approximate_token_count(artifact.get_content() or "")
         index_lines.append(f"- {kind} — \"{artifact.title}\" (~{tokens} tokens)")
     index_text = "\n".join(index_lines) if index_lines else "(none)"
-    return memory_content, scratchpad_content, index_text
+    return memory_content, scratchpad_content, intentions_content, index_text
 
 
 def get_user_ai_preferences_content(user_id, pinned_node=None):
@@ -927,11 +933,13 @@ def render_system_message(system_node, user_id):
                 user_id, pinned_node=system_node) or "")
     if (USER_MEMORY_PLACEHOLDER in text
             or USER_SCRATCHPAD_PLACEHOLDER in text
+            or USER_INTENTIONS_PLACEHOLDER in text
             or USER_ARTIFACTS_INDEX_PLACEHOLDER in text):
-        memory, scratchpad, index = get_user_artifacts_context(
+        memory, scratchpad, intentions, index = get_user_artifacts_context(
             user_id, pinned_node=system_node)
         text = text.replace(USER_MEMORY_PLACEHOLDER, memory or "")
         text = text.replace(USER_SCRATCHPAD_PLACEHOLDER, scratchpad or "")
+        text = text.replace(USER_INTENTIONS_PLACEHOLDER, intentions or "")
         text = text.replace(
             USER_ARTIFACTS_INDEX_PLACEHOLDER, index or "(none)")
     return text
@@ -1175,11 +1183,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             artifacts_node = (
                 _placeholder_node(USER_MEMORY_PLACEHOLDER)
                 or _placeholder_node(USER_SCRATCHPAD_PLACEHOLDER)
+                or _placeholder_node(USER_INTENTIONS_PLACEHOLDER)
                 or _placeholder_node(USER_ARTIFACTS_INDEX_PLACEHOLDER)
             )
             needs_artifacts = artifacts_node is not None
             user_memory_content = None
             user_scratchpad_content = None
+            user_intentions_content = None
             user_artifacts_index = None
 
             # Check if any node contains {quote:ID} placeholders
@@ -1231,6 +1241,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             if needs_artifacts:
                 (user_memory_content, user_scratchpad_content,
+                 user_intentions_content,
                  user_artifacts_index) = get_user_artifacts_context(
                     user_id, pinned_node=artifacts_node
                 )
@@ -1502,6 +1513,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             message_text = message_text.replace(
                                 USER_SCRATCHPAD_PLACEHOLDER,
                                 user_scratchpad_content or ""
+                            )
+                        if USER_INTENTIONS_PLACEHOLDER in message_text:
+                            message_text = message_text.replace(
+                                USER_INTENTIONS_PLACEHOLDER,
+                                user_intentions_content or ""
                             )
                         if USER_ARTIFACTS_INDEX_PLACEHOLDER in message_text:
                             message_text = message_text.replace(

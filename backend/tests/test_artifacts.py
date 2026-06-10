@@ -140,7 +140,7 @@ def test_list_includes_empty_defaults(app, client):
     resp = client.get("/api/artifacts/")
     assert resp.status_code == 200
     kinds = {a["kind"] for a in resp.get_json()["artifacts"]}
-    assert {"memory", "scratchpad"} <= kinds
+    assert {"memory", "scratchpad", "intentions"} <= kinds
 
 
 def test_put_creates_versions_and_get_returns_latest(app, client):
@@ -331,13 +331,41 @@ def test_artifacts_context_resolution_pinned_vs_latest(app):
         _db.session.commit()
 
         # Pinned: only memory v1 (the node binding wins)
-        memory, scratchpad, index = get_user_artifacts_context(
+        memory, scratchpad, intentions, index = get_user_artifacts_context(
             uid, pinned_node=node)
         assert memory == "mem-v1"
         assert scratchpad == ""
+        assert intentions == ""
 
         # Fallback (no pinned node): latest of everything
-        memory, scratchpad, index = get_user_artifacts_context(uid)
+        memory, scratchpad, intentions, index = get_user_artifacts_context(uid)
         assert memory == "mem-v1"
         assert scratchpad == "pad-v1"
         assert "reading-list" in index
+
+
+def test_intentions_ambient_not_in_index(app):
+    """Intentions (#150) resolve via their own placeholder and stay out
+    of the read_artifact index, like memory/scratchpad."""
+    with app.app_context():
+        uid = User.query.first().id
+        _mk_artifact(uid, "intentions",
+                     "## Write daily\n*held since 2026-06-10 — active*")
+        memory, scratchpad, intentions, index = \
+            get_user_artifacts_context(uid)
+        assert "Write daily" in intentions
+        assert "intentions" not in index
+
+
+def test_update_artifact_tool_handles_intentions(app):
+    with app.app_context():
+        uid = User.query.first().id
+        r = _run_tool(app, "update_artifact", {
+            "kind": "intentions",
+            "updated_content": "## Morning pages\n*held since "
+                               "2026-06-10 — active*\nWrite 3 pages.",
+        }, uid)
+        assert r["status"] == "success"
+        latest = UserArtifact.latest_for(uid, "intentions")
+        assert latest.title == "Intentions"
+        assert "Morning pages" in latest.get_content()

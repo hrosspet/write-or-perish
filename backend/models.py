@@ -593,6 +593,8 @@ class UserArtifact(db.Model):
     DEFAULT_KINDS = {
         "memory": "Memory",
         "scratchpad": "Scratchpad",
+        # Long-running aspirations the AI helps clarify and track (#150)
+        "intentions": "Intentions",
     }
 
     def set_content(self, plaintext):
