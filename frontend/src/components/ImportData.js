@@ -97,6 +97,8 @@ function ModalShell({ onDismiss, children, maxWidth = "440px" }) {
           maxWidth,
           width: "90vw",
           boxShadow: "0 24px 80px rgba(0,0,0,0.5)",
+          maxHeight: "85vh",
+          overflowY: "auto",
           animation: "loore-modal-rise 0.35s cubic-bezier(0.22, 1, 0.36, 1)",
         }}
       >
@@ -218,6 +220,14 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
   // as a summary after the import finishes; dismissing it reloads the
   // page so the new nodes appear.
   const [importResult, setImportResult] = useState(null);
+
+  // Backdrop/Escape dismiss for the confirm-dialog modals: ignored while
+  // a request is in flight or while a prompt modal is stacked on top
+  // (Escape would otherwise close both layers at once).
+  const dismissGuard = (cancel) => () => {
+    if (importing || deletedPrompt || importResult) return;
+    cancel();
+  };
 
   // Returns true when the error is the backend's 409 "this import
   // matches soft-deleted nodes" conflict, in which case the prompt is
@@ -784,14 +794,8 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
 
       {/* Markdown import confirmation dialog */}
       {showImportDialog && importFiles && (
-        <div style={{
-          marginTop: "20px",
-          padding: "2rem",
-          backgroundColor: "var(--bg-card)",
-          borderRadius: "10px",
-          border: "1px solid var(--border)"
-        }}>
-          <h3 style={{ fontFamily: "var(--serif)", fontWeight: 300, color: "var(--text-primary)", margin: "0 0 12px 0" }}>Confirm Import</h3>
+        <ModalShell onDismiss={dismissGuard(handleCancelImport)} maxWidth="520px">
+          <ModalTitle>Confirm Import</ModalTitle>
           <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
             Found <strong style={{ color: "var(--text-primary)" }}>{importFiles.total_files}</strong> .md file{importFiles.total_files !== 1 ? 's' : ''}
             ({importFiles.total_size.toLocaleString()} bytes)
@@ -901,19 +905,13 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
               Cancel
             </button>
           </div>
-        </div>
+        </ModalShell>
       )}
 
       {/* Claude import confirmation dialog */}
       {showClaudeImportDialog && claudeImportData && (
-        <div style={{
-          marginTop: "20px",
-          padding: "2rem",
-          backgroundColor: "var(--bg-card)",
-          borderRadius: "10px",
-          border: "1px solid var(--border)"
-        }}>
-          <h3 style={{ fontFamily: "var(--serif)", fontWeight: 300, color: "var(--text-primary)", margin: "0 0 12px 0" }}>Confirm Claude Import</h3>
+        <ModalShell onDismiss={dismissGuard(handleCancelClaudeImport)} maxWidth="520px">
+          <ModalTitle>Confirm Claude Import</ModalTitle>
           <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
             Found <strong style={{ color: "var(--text-primary)" }}>{claudeImportData.total_conversations}</strong> conversation{claudeImportData.total_conversations !== 1 ? 's' : ''} with{" "}
             <strong style={{ color: "var(--text-primary)" }}>{claudeImportData.total_messages}</strong> messages
@@ -956,19 +954,13 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
               Cancel
             </button>
           </div>
-        </div>
+        </ModalShell>
       )}
 
       {/* ChatGPT import confirmation dialog */}
       {showChatGPTImportDialog && chatGPTImportData && (
-        <div style={{
-          marginTop: "20px",
-          padding: "2rem",
-          backgroundColor: "var(--bg-card)",
-          borderRadius: "10px",
-          border: "1px solid var(--border)"
-        }}>
-          <h3 style={{ fontFamily: "var(--serif)", fontWeight: 300, color: "var(--text-primary)", margin: "0 0 12px 0" }}>Confirm ChatGPT Import</h3>
+        <ModalShell onDismiss={dismissGuard(handleCancelChatGPTImport)} maxWidth="520px">
+          <ModalTitle>Confirm ChatGPT Import</ModalTitle>
           <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
             Found <strong style={{ color: "var(--text-primary)" }}>{chatGPTImportData.total_conversations}</strong> conversation{chatGPTImportData.total_conversations !== 1 ? 's' : ''} with{" "}
             <strong style={{ color: "var(--text-primary)" }}>{chatGPTImportData.total_messages}</strong> messages
@@ -1011,19 +1003,13 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
               Cancel
             </button>
           </div>
-        </div>
+        </ModalShell>
       )}
 
       {/* Twitter import confirmation dialog */}
       {showTwitterImportDialog && twitterImportData && (
-        <div style={{
-          marginTop: "20px",
-          padding: "2rem",
-          backgroundColor: "var(--bg-card)",
-          borderRadius: "10px",
-          border: "1px solid var(--border)"
-        }}>
-          <h3 style={{ fontFamily: "var(--serif)", fontWeight: 300, color: "var(--text-primary)", margin: "0 0 12px 0" }}>Confirm Twitter Import</h3>
+        <ModalShell onDismiss={dismissGuard(handleCancelTwitterImport)} maxWidth="520px">
+          <ModalTitle>Confirm Twitter Import</ModalTitle>
           <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
             Found <strong style={{ color: "var(--text-primary)" }}>{twitterImportData.total_tweets}</strong> tweets
             ({twitterImportData.original_count} original, {twitterImportData.reply_count} replies)
@@ -1124,7 +1110,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
               Cancel
             </button>
           </div>
-        </div>
+        </ModalShell>
       )}
     </div>
   );
