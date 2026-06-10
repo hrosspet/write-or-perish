@@ -98,6 +98,47 @@ def test_140_tiny_first_sentence_falls_back_to_word_split():
     assert not first.endswith("wor")  # never mid-word
 
 
+def test_140_v2_short_first_chunk_bounds_second_chunk():
+    # Regression: user-reported stall — a ~9s first chunk (short opening
+    # section) followed by a ~117s second chunk from the old STATIC
+    # budget (computed off the theoretical 318-char first chunk). The
+    # second chunk must be sized from the ACTUAL emitted first chunk's
+    # playback window: ~145 chars → ~(9s − 2s) × 106 ≈ 740-char cap
+    # (≈46s of audio), so it finishes generating before playback
+    # reaches it.
+    intro = ("This opening sentence is deliberately sized to roughly one "
+             "hundred and forty characters so the first chunk plays back "
+             "for about nine seconds.")
+    text = f"# Todo\n{intro}\n# Details\n{LONG * 3}"
+    chunks = section_aware_chunk_text(text)
+    first, second = chunks[0][0], chunks[1][0]
+    assert len(first) < 200  # short, section-bounded first chunk
+    window_secs = len(first) * 0.062 - 2.0
+    assert len(second) <= int(window_secs * 106.0)
+    assert len(second) > 300  # but still a real chunk, not degenerate
+
+
+def test_140_v2_gapless_pipeline_invariant():
+    # For ANY mix of short and long sections, generation of chunks 2..N
+    # must fit inside the playback time of the already-emitted chunks,
+    # so audio never stalls. A 2s scheduling floor exists for very short
+    # openers (a tiny chunk grants ~212 chars + 2s overhead ≈ 4s of gen
+    # against <2s of playback), so allow a 6s transient overshoot — it
+    # self-corrects because each floor grant adds ~13s of playback.
+    text = (f"# A\nTiny.\n# B\n{LONG}\n# C\nShort again here.\n"
+            f"# D\n{LONG * 4}")
+    chunks = section_aware_chunk_text(text)
+    gen, play, overhead = 106.0, 0.062, 2.0
+    playback = len(chunks[0][0]) * play
+    committed = 0.0
+    for c, _t, _i in chunks[1:]:
+        committed += len(c) / gen + overhead
+        assert committed <= playback + 6.0, (
+            f"chunk of {len(c)} chars overruns playback window: "
+            f"gen {committed:.1f}s vs playback {playback:.1f}s")
+        playback += len(c) * play
+
+
 # ── chapters endpoint ────────────────────────────────────────────────────
 
 def test_chapters_endpoint(tmp_path):
