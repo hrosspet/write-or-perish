@@ -315,8 +315,14 @@ function SearchModal({ onClose }) {
 
           {!loading && results.map((r) => (
             <div
-              key={r.id}
-              onClick={(e) => handleResultClick(r.id, e)}
+              key={`${r.kind || 'node'}-${r.id}`}
+              onClick={(e) => {
+                if (r.kind === 'external') {
+                  if (r.external_url) window.open(r.external_url, '_blank', 'noopener');
+                  return;
+                }
+                handleResultClick(r.id, e);
+              }}
               style={{
                 padding: '12px 20px',
                 cursor: 'pointer',
@@ -341,8 +347,15 @@ function SearchModal({ onClose }) {
                   textTransform: 'uppercase',
                   letterSpacing: '0.5px',
                 }}>
-                  {r.node_type}
+                  {r.kind === 'external'
+                    ? (r.source === 'twitter_bookmark' ? 'bookmark' : 'archive')
+                    : r.node_type}
                 </span>
+                {r.kind === 'external' && r.author_handle && (
+                  <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                    @{r.author_handle}
+                  </span>
+                )}
                 <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
                   {formatDate(r.created_at)}
                 </span>

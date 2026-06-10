@@ -194,6 +194,15 @@ class Config:
         "gpt-4o-transcribe": {"price_per_minute_usd": 0.006},
     }
 
+    # --- X (Twitter) API for bookmark sync (#155 / Download) ---
+    # Pay-per-use tier; OAuth2 PKCE app. Unset = feature env-gated off.
+    X_CLIENT_ID = os.environ.get("X_CLIENT_ID")
+    X_CLIENT_SECRET = os.environ.get("X_CLIENT_SECRET")
+    X_REDIRECT_URI = os.environ.get(
+        "X_REDIRECT_URI",
+        "https://loore.org/api/external/twitter/callback",
+    )
+
     # Magic link email authentication (SMTP)
     MAIL_SERVER = os.environ.get("MAIL_SERVER", "localhost")
     MAIL_PORT = int(os.environ.get("MAIL_PORT", "587"))

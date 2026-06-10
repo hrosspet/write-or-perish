@@ -14,7 +14,9 @@ from sqlalchemy import or_
 
 from backend.celery_app import celery, flask_app
 from backend.extensions import db
-from backend.models import Node, NodeEmbedding
+from backend.models import (
+    ExternalItem, ExternalItemEmbedding, Node, NodeEmbedding,
+)
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.embeddings import (
     EMBEDDING_MODEL, content_hash, embed_texts, pack_vector,
@@ -103,7 +105,44 @@ def sweep_embeddings(limit=SWEEP_BATCH_SIZE):
                 embedded += 1
             db.session.commit()
 
-        logger.info("Embedding sweep: %d embedded, %d stale removed",
-                    embedded, len(stale))
+        # External references (#155 component 2): embed imported items
+        # the same way. They're user-curated content (bookmarks, CA
+        # tweets) — embedding makes them semantically searchable.
+        ext_rows = (
+            db.session.query(ExternalItem, ExternalItemEmbedding)
+            .outerjoin(ExternalItemEmbedding,
+                       ExternalItemEmbedding.item_id == ExternalItem.id)
+            .filter(ExternalItemEmbedding.id.is_(None))
+            .order_by(ExternalItem.id.desc())
+            .limit(limit)
+            .all()
+        )
+        ext_candidates = []
+        for item, _ in ext_rows:
+            text = item.get_content()
+            if text and text.strip():
+                ext_candidates.append((item, text))
+        ext_embedded = 0
+        for start in range(0, len(ext_candidates), EMBED_API_BATCH):
+            batch = ext_candidates[start:start + EMBED_API_BATCH]
+            vectors = embed_texts(
+                [text for _, text in batch], api_key,
+                user_id=batch[0][0].user_id)
+            for (item, text), vector in zip(batch, vectors):
+                db.session.add(ExternalItemEmbedding(
+                    item_id=item.id,
+                    user_id=item.user_id,
+                    model=EMBEDDING_MODEL,
+                    content_hash=content_hash(text),
+                    vector=pack_vector(vector),
+                ))
+                ext_embedded += 1
+            db.session.commit()
+
+        logger.info(
+            "Embedding sweep: %d nodes embedded, %d external items "
+            "embedded, %d stale removed", embedded, ext_embedded,
+            len(stale))
         return {"status": "ok", "embedded": embedded,
+                "external_embedded": ext_embedded,
                 "removed": len(stale)}
