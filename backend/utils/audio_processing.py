@@ -307,6 +307,16 @@ def adaptive_chunk_text(text: str, first_chunk_gen_secs: float = 3.0) -> list:
     return chunks
 
 
+# Streaming TTS pipeline model (#140). Generation rate is the OpenAI API
+# streaming rate; overhead is the per-chunk fixed cost AROUND the API call:
+# pydub decode of the returned MP3, section-end silence re-export, DB
+# status commits, encryption, and the SSE poll interval. Calibrated from
+# live staging timings 2026-06-10 (solved from chunk-ready wall times:
+# rate ≈ 104 chars/s, fixed ≈ 7.3s — the old 2.0s only modeled the API).
+TTS_GEN_CHARS_PER_SEC = 106.0
+TTS_AUDIO_SECS_PER_CHAR = 0.062
+TTS_CHUNK_OVERHEAD_SECS = 7.0
+
 # Minimum sensible first chunk (#140): a tiny first sentence ("Okay.")
 # produces a sub-second clip — an audible stitch artifact and a wasted
 # API round-trip. Below this size we split word-aware at the target
@@ -358,9 +368,9 @@ def section_aware_chunk_text(text, first_chunk_gen_secs: float = 3.0):
     Sections whose body is empty (e.g. a heading directly followed by
     another heading) are skipped — they'd produce zero-length audio.
     """
-    gen_chars_per_sec = 106.0
-    audio_secs_per_char = 0.062
-    overhead_secs = 2.0
+    gen_chars_per_sec = TTS_GEN_CHARS_PER_SEC
+    audio_secs_per_char = TTS_AUDIO_SECS_PER_CHAR
+    overhead_secs = TTS_CHUNK_OVERHEAD_SECS
 
     first_chunk_chars = min(
         int(first_chunk_gen_secs * gen_chars_per_sec), TTS_MAX_CHARS)

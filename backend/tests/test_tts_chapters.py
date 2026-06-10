@@ -22,7 +22,8 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
         del sys.modules[_mod]
 
 from backend.utils.audio_processing import (  # noqa: E402
-    MIN_FIRST_CHUNK_CHARS, section_aware_chunk_text, split_sections,
+    MIN_FIRST_CHUNK_CHARS, TTS_AUDIO_SECS_PER_CHAR, TTS_CHUNK_OVERHEAD_SECS,
+    TTS_GEN_CHARS_PER_SEC, section_aware_chunk_text, split_sections,
 )
 
 LONG = ("This is a reasonably long sentence used to pad sections so the "
@@ -103,9 +104,8 @@ def test_140_v2_short_first_chunk_bounds_second_chunk():
     # section) followed by a ~117s second chunk from the old STATIC
     # budget (computed off the theoretical 318-char first chunk). The
     # second chunk must be sized from the ACTUAL emitted first chunk's
-    # playback window: ~145 chars → ~(9s − 2s) × 106 ≈ 740-char cap
-    # (≈46s of audio), so it finishes generating before playback
-    # reaches it.
+    # playback window so it finishes generating before playback reaches
+    # it (a 2s generation floor applies when the window is very tight).
     intro = ("This opening sentence is deliberately sized to roughly one "
              "hundred and forty characters so the first chunk plays back "
              "for about nine seconds.")
@@ -113,27 +113,32 @@ def test_140_v2_short_first_chunk_bounds_second_chunk():
     chunks = section_aware_chunk_text(text)
     first, second = chunks[0][0], chunks[1][0]
     assert len(first) < 200  # short, section-bounded first chunk
-    window_secs = len(first) * 0.062 - 2.0
-    assert len(second) <= int(window_secs * 106.0)
-    assert len(second) > 300  # but still a real chunk, not degenerate
+    window = max(len(first) * TTS_AUDIO_SECS_PER_CHAR
+                 - TTS_CHUNK_OVERHEAD_SECS, 2.0)
+    assert len(second) <= int(window * TTS_GEN_CHARS_PER_SEC)
+    # And nowhere near the old static ~1900-char budget
+    assert len(second) < 1000
 
 
 def test_140_v2_gapless_pipeline_invariant():
     # For ANY mix of short and long sections, generation of chunks 2..N
     # must fit inside the playback time of the already-emitted chunks,
-    # so audio never stalls. A 2s scheduling floor exists for very short
-    # openers (a tiny chunk grants ~212 chars + 2s overhead ≈ 4s of gen
-    # against <2s of playback), so allow a 6s transient overshoot — it
-    # self-corrects because each floor grant adds ~13s of playback.
+    # so audio never stalls. The 2s generation floor for very short
+    # openers may transiently overshoot the window (by at most the
+    # floor grant: 2s of gen + the per-chunk overhead); it self-corrects
+    # because every floor-granted chunk adds far more playback than gen.
     text = (f"# A\nTiny.\n# B\n{LONG}\n# C\nShort again here.\n"
             f"# D\n{LONG * 4}")
     chunks = section_aware_chunk_text(text)
-    gen, play, overhead = 106.0, 0.062, 2.0
+    gen = TTS_GEN_CHARS_PER_SEC
+    play = TTS_AUDIO_SECS_PER_CHAR
+    overhead = TTS_CHUNK_OVERHEAD_SECS
+    tolerance = 2.0 + overhead
     playback = len(chunks[0][0]) * play
     committed = 0.0
     for c, _t, _i in chunks[1:]:
         committed += len(c) / gen + overhead
-        assert committed <= playback + 6.0, (
+        assert committed <= playback + tolerance, (
             f"chunk of {len(c)} chars overruns playback window: "
             f"gen {committed:.1f}s vs playback {playback:.1f}s")
         playback += len(c) * play
