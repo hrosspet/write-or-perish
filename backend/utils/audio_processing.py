@@ -364,17 +364,30 @@ def section_aware_chunk_text(text, first_chunk_gen_secs: float = 3.0):
 
     first_chunk_chars = min(
         int(first_chunk_gen_secs * gen_chars_per_sec), TTS_MAX_CHARS)
-    first_play_secs = first_chunk_chars * audio_secs_per_char
-    next_budget_secs = max(first_play_secs - overhead_secs, 2.0)
-    second_chunk_chars = min(
-        int(next_budget_secs * gen_chars_per_sec), TTS_MAX_CHARS)
 
-    def _budget(global_idx):
-        if global_idx == 0:
+    # Gapless-pipeline budgets (#140 v2): chunk N must finish generating
+    # before playback reaches it. With playback starting when chunk 1 is
+    # ready, that means gen-time of chunks 2..N must fit inside the
+    # playback time of chunks 1..N-1. Budgets therefore derive from the
+    # ACTUAL emitted chunks — a short first chunk (sentence or section
+    # boundary) gets a proportionally smaller second chunk (~40-50s of
+    # audio instead of the old static ~2min, which stalled playback).
+    emitted_playback_secs = [0.0]   # cumulative playback of chunks 1..N
+    committed_gen_secs = [0.0]      # cumulative gen time of chunks 2..N
+
+    def _budget():
+        if not out:
             return first_chunk_chars
-        if global_idx == 1:
-            return second_chunk_chars
-        return TTS_MAX_CHARS
+        window = (emitted_playback_secs[0] - committed_gen_secs[0]
+                  - overhead_secs)
+        return max(min(int(max(window, 2.0) * gen_chars_per_sec),
+                       TTS_MAX_CHARS), 1)
+
+    def _account(chunk_len):
+        if out:  # chunks 2..N consume the generation window
+            committed_gen_secs[0] += (chunk_len / gen_chars_per_sec
+                                      + overhead_secs)
+        emitted_playback_secs[0] += chunk_len * audio_secs_per_char
 
     out = []
     for section_index, (title, body) in enumerate(split_sections(text)):
@@ -384,8 +397,9 @@ def section_aware_chunk_text(text, first_chunk_gen_secs: float = 3.0):
         else:
             remaining = body
         while remaining:
-            budget = _budget(len(out))
+            budget = _budget()
             if len(remaining) <= budget:
+                _account(len(remaining))
                 out.append((remaining, title, section_index))
                 break
             split_point = _split_at_sentence(remaining, budget)
@@ -395,6 +409,7 @@ def section_aware_chunk_text(text, first_chunk_gen_secs: float = 3.0):
                 split_point = _split_at_word(remaining, budget)
             chunk = remaining[:split_point].strip()
             if chunk:
+                _account(len(chunk))
                 out.append((chunk, title, section_index))
             remaining = remaining[split_point:].strip()
     return out
