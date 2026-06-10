@@ -1076,6 +1076,54 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         mode_note = mode_labels.get(source_mode)
                         if mode_note:
                             agentic_notes.append(mode_note)
+                # Semantic retrieval (#155): surface relevant archive
+                # snippets for the latest user message via the notes
+                # channel (after the stable prefix — cache-friendly).
+                # Failures never break a completion.
+                if is_agentic and flask_app.config.get(
+                        "RAG_AGENTIC_INJECTION", True):
+                    try:
+                        from backend.utils.api_keys import (
+                            get_openai_chat_key,
+                        )
+                        from backend.utils.embeddings import (
+                            retrieve_relevant_snippets,
+                        )
+                        latest_user_node = next(
+                            (n for n in reversed(node_chain)
+                             if n.node_type != "llm"
+                             and n.llm_model is None
+                             and n.deleted_at is None), None)
+                        rag_key = get_openai_chat_key(flask_app.config)
+                        query_text = (latest_user_node.get_content() or ""
+                                      ).strip() if latest_user_node else ""
+                        if rag_key and len(query_text) >= 20:
+                            chain_ids = [n.id for n in node_chain]
+                            snippets = retrieve_relevant_snippets(
+                                user_id, query_text[-4000:], chain_ids,
+                                rag_key,
+                                k=flask_app.config.get("RAG_TOP_K", 4),
+                                min_score=flask_app.config.get(
+                                    "RAG_MIN_SCORE", 0.35),
+                            )
+                            if snippets:
+                                lines = [
+                                    "[Possibly relevant entries from the "
+                                    "user's archive (retrieved by semantic "
+                                    "similarity to their latest message — "
+                                    "use only if actually relevant):"
+                                ]
+                                for nid, created, snip, score in snippets:
+                                    stamp = local_stamp(created, user_tz)
+                                    lines.append(
+                                        f"- {stamp} (node {nid}): {snip}")
+                                lines.append("]")
+                                agentic_notes.append("\n".join(lines))
+                    except Exception:
+                        logger.warning(
+                            "Semantic retrieval failed; continuing "
+                            "without it", exc_info=True)
+
                 if is_agentic and agentic_notes:
                     # Synthetic system-side note injected after the latest real
                     # message; stamp it with "now" so the model's most-recent
