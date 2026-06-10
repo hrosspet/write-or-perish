@@ -15,16 +15,22 @@ CACHE_WRITE_MULTIPLIER = 1.25
 
 def calculate_llm_cost_microdollars(model_id, input_tokens, output_tokens,
                                     batch=False, cache_read_tokens=0,
-                                    cache_write_tokens=0):
+                                    cache_write_tokens=0,
+                                    cached_input_tokens=0):
     """
     Calculate LLM API cost in microdollars.
 
     Formula: input_tokens * input_price_per_mtok + output_tokens * output_price_per_mtok
     (the million factors in microdollars and per-million-token pricing cancel out)
 
-    input_tokens must be the UNCACHED portion (what the provider reports in
-    usage.input_tokens); cache reads/writes are passed separately and billed
-    at their multipliers (#187).
+    Anthropic (#187): input_tokens must be the UNCACHED portion (what the
+    provider reports in usage.input_tokens); cache reads/writes are passed
+    separately and billed at their multipliers.
+
+    OpenAI (#189): cached_input_tokens is the cached SUBSET of
+    input_tokens (usage.prompt_tokens_details.cached_tokens), billed at
+    the model's cached_input_multiplier (default 0.5). Fixes the prior
+    over-count where the auto-cache discount was ignored.
 
     batch=True applies the Batch API discount (~50% of synchronous pricing,
     issue #173). Long-context multipliers still apply to the per-call input
@@ -40,7 +46,10 @@ def calculate_llm_cost_microdollars(model_id, input_tokens, output_tokens,
     if threshold and total_prompt > threshold:
         input_price *= config.get("long_context_input_multiplier", 1)
         output_price *= config.get("long_context_output_multiplier", 1)
-    cost = (input_tokens * input_price
+    cached_subset = min(cached_input_tokens or 0, input_tokens)
+    cached_multiplier = config.get("cached_input_multiplier", 0.5)
+    cost = ((input_tokens - cached_subset) * input_price
+            + cached_subset * input_price * cached_multiplier
             + cache_read_tokens * input_price * CACHE_READ_MULTIPLIER
             + cache_write_tokens * input_price * CACHE_WRITE_MULTIPLIER
             + output_tokens * output_price)

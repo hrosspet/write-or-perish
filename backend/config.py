@@ -92,6 +92,8 @@ class Config:
             "context_window": 1050000,
             "input_price_per_mtok": 5.00,
             "output_price_per_mtok": 30.00,
+            # OpenAI auto-cache discount (#189): GPT-5.5 caches at 75% off
+            "cached_input_multiplier": 0.25,
             "long_context_threshold": 272000,
             "long_context_input_multiplier": 2.0,
             "long_context_output_multiplier": 1.5,
