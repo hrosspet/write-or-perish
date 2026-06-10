@@ -42,6 +42,7 @@ export function useStreamingMediaRecorder({
   const durationIntervalRef = useRef(null);
   const stopResolveRef = useRef(null); // Resolve fn for the stop promise
   const dataAvailableFiredRef = useRef(false); // Track if ondataavailable ran during stop
+  const lifecycleCleanupRef = useRef(null); // #88 visibility/pagehide listeners
   const pausedAtRef = useRef(null); // Timestamp when paused
   const totalPausedMsRef = useRef(0); // Accumulated paused duration
   const mimeTypeRef = useRef(null); // Active recorder's mimeType (so non-state callbacks like getPartialBlob can read it)
@@ -60,6 +61,10 @@ export function useStreamingMediaRecorder({
 
   const resetRecording = useCallback(() => {
     // Clean up previous recording
+    if (lifecycleCleanupRef.current) {
+      lifecycleCleanupRef.current();
+      lifecycleCleanupRef.current = null;
+    }
     if (mediaUrl) {
       URL.revokeObjectURL(mediaUrl);
     }
@@ -253,6 +258,10 @@ export function useStreamingMediaRecorder({
       };
 
       mediaRecorder.onstop = () => {
+        if (lifecycleCleanupRef.current) {
+          lifecycleCleanupRef.current();
+          lifecycleCleanupRef.current = null;
+        }
         console.log(`[StreamingRecorder] onstop fired: totalChunks=${chunksRef.current.length}, chunkIndex=${chunkIndexRef.current}`);
         // Combine all chunks into final blob
         const blob = new Blob(chunksRef.current, { type: mediaRecorder.mimeType });
@@ -296,6 +305,28 @@ export function useStreamingMediaRecorder({
       const durationOffsetMs = durationOffset * 1000;
 
       // Start recording with timeslice for chunked output
+      // #88: flush the in-flight timeslice when the page is about to be
+      // hidden or unloaded (phone call, lock screen, tab switch, kill).
+      // requestData() emits the buffered audio through the normal
+      // ondataavailable → upload path while the page can still run JS;
+      // the upload layer adds a sendBeacon fallback for dying pages.
+      const lifecycleFlush = () => {
+        if (recorderRef.current
+            && recorderRef.current.state === 'recording') {
+          console.log('[StreamingRecorder] Lifecycle flush (visibility/pagehide)');
+          try { recorderRef.current.requestData(); } catch (e) { /* no-op */ }
+        }
+      };
+      const onVisibility = () => {
+        if (document.visibilityState === 'hidden') lifecycleFlush();
+      };
+      window.addEventListener('pagehide', lifecycleFlush);
+      document.addEventListener('visibilitychange', onVisibility);
+      lifecycleCleanupRef.current = () => {
+        window.removeEventListener('pagehide', lifecycleFlush);
+        document.removeEventListener('visibilitychange', onVisibility);
+      };
+
       // The timeslice parameter makes ondataavailable fire at the specified interval
       mediaRecorder.start(chunkIntervalMs);
       setStatus('recording');
