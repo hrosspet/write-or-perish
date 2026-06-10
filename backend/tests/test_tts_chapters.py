@@ -57,6 +57,13 @@ def test_chunks_never_cross_sections():
     chunks = section_aware_chunk_text(text)
     for _text, title, idx in chunks:
         assert title in ("One", "Two")
+    # Spoken titles (v2): each section's first chunk opens with the
+    # bare title, sentence-terminated, blank-line-separated.
+    firsts = {}
+    for c, _t, i in chunks:
+        firsts.setdefault(i, c)
+    assert firsts[0].startswith("One.\n\n")
+    assert firsts[1].startswith("Two.\n\n")
     # Contiguous non-decreasing section indices
     indices = [idx for _, _, idx in chunks]
     assert indices == sorted(indices)
@@ -166,3 +173,10 @@ def test_chapters_endpoint(tmp_path):
 
         _db.session.rollback()
         _db.drop_all()
+
+
+def test_spoken_title_keeps_existing_punctuation():
+    chunks = section_aware_chunk_text("# Ready?\nBody text here.")
+    assert chunks[0][0].startswith("Ready?\n\n")
+    # No markdown markers in the spoken text
+    assert "#" not in chunks[0][0]

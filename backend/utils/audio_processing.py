@@ -348,6 +348,13 @@ def section_aware_chunk_text(text, first_chunk_gen_secs: float = 3.0):
     every chunk belongs to exactly one section — the prerequisite for
     chapter-accurate jumping in the player (#145).
 
+    Section titles ARE spoken (maintainer decision, v2 of #145): each
+    section's text starts with the bare title (no markdown markers,
+    sentence-terminated) separated from the body by a blank line, which
+    gives the TTS voice an audible chapter pause. Chapter start_times
+    stay exact — the title audio belongs to its own section's first
+    chunk.
+
     Sections whose body is empty (e.g. a heading directly followed by
     another heading) are skipped — they'd produce zero-length audio.
     """
@@ -371,7 +378,11 @@ def section_aware_chunk_text(text, first_chunk_gen_secs: float = 3.0):
 
     out = []
     for section_index, (title, body) in enumerate(split_sections(text)):
-        remaining = body
+        if title and body:
+            spoken = title if title[-1] in '.!?' else f"{title}."
+            remaining = f"{spoken}\n\n{body}"
+        else:
+            remaining = body
         while remaining:
             budget = _budget(len(out))
             if len(remaining) <= budget:
