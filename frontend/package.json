@@ -4,6 +4,7 @@
   "private": true,
   "proxy": "http://localhost:5010",
   "dependencies": {
+    "@sentry/react": "^10.57.0",
     "@testing-library/dom": "^10.4.0",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.2.0",

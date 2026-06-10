@@ -35,7 +35,8 @@ class LLMProvider:
 
     @staticmethod
     def get_completion(model_id: str, messages: list, api_keys: dict,
-                       max_tokens: int = None, tools: list = None) -> dict:
+                       max_tokens: int = None, tools: list = None,
+                       prompt_cache_key: str = None) -> dict:
         """
         Generate a completion using the specified model.
 
@@ -71,7 +72,7 @@ class LLMProvider:
         if provider == "openai":
             return LLMProvider._call_openai(
                 api_model, messages, api_keys["openai"], max_tokens,
-                tools=tools)
+                tools=tools, prompt_cache_key=prompt_cache_key)
         elif provider == "anthropic":
             return LLMProvider._call_anthropic(
                 api_model, messages, api_keys["anthropic"], max_tokens,
@@ -81,7 +82,8 @@ class LLMProvider:
 
     @staticmethod
     def _call_openai(model: str, messages: list, api_key: str,
-                     max_tokens: int = None, tools: list = None) -> dict:
+                     max_tokens: int = None, tools: list = None,
+                     prompt_cache_key: str = None) -> dict:
         """
         Call OpenAI API with the given model and messages.
 
@@ -102,6 +104,10 @@ class LLMProvider:
             temperature=1,
             max_completion_tokens=max_tokens or DEFAULT_MAX_OUTPUT_TOKENS,
         )
+        # #189: a stable per-conversation key improves OpenAI's automatic
+        # prefix-cache routing (best-effort; no behavior change otherwise).
+        if prompt_cache_key:
+            kwargs["prompt_cache_key"] = prompt_cache_key
 
         # Convert Anthropic-format tools to OpenAI format
         if tools:
@@ -148,11 +154,22 @@ class LLMProvider:
         if truncated:
             logger.warning(f"OpenAI response truncated (max_tokens reached): model={model}, output_tokens={response.usage.completion_tokens}")
 
+        # #189: OpenAI auto-caches >=1024-token prefixes; cached_tokens is
+        # the cached SUBSET of prompt_tokens (unlike Anthropic's disjoint
+        # counters) and is billed at a discount we must account for.
+        details = getattr(response.usage, "prompt_tokens_details", None)
+        cached_tokens = getattr(details, "cached_tokens", 0) or 0
+        if cached_tokens:
+            logger.info(
+                f"OpenAI prompt cache: cached={cached_tokens} of "
+                f"{response.usage.prompt_tokens} prompt tokens")
+
         return {
             "content": message.content or "",
             "total_tokens": response.usage.total_tokens,
             "input_tokens": response.usage.prompt_tokens,
             "output_tokens": response.usage.completion_tokens,
+            "cached_tokens": cached_tokens,
             "tool_calls": tool_calls,
             "truncated": truncated,
         }
@@ -186,15 +203,18 @@ class LLMProvider:
             if m.get("content")
         ])
 
-        # Convert remaining messages to Anthropic format
+        # Convert remaining messages to Anthropic format. Content blocks
+        # are passed through as-is (#187): block boundaries and any
+        # cache_control markers placed upstream must survive — flattening
+        # to a string would erase the cache breakpoints.
         anthropic_messages = []
         for msg in messages:
             if msg["role"] in ["user", "assistant"]:
                 content = msg["content"]
-                # Convert content format if needed
                 if isinstance(content, list) and len(content) > 0:
-                    if isinstance(content[0], dict) and "text" in content[0]:
-                        content = content[0]["text"]
+                    if not (isinstance(content[0], dict)
+                            and "text" in content[0]):
+                        content = str(content)
                 anthropic_messages.append({
                     "role": msg["role"],
                     "content": content
@@ -208,7 +228,11 @@ class LLMProvider:
             max_tokens = DEFAULT_MAX_OUTPUT_TOKENS
 
         # Log the actual API call details
-        total_input_chars = sum(len(m.get("content", "")) for m in anthropic_messages)
+        total_input_chars = sum(
+            (len(m["content"]) if isinstance(m["content"], str)
+             else sum(len(b.get("text", "")) for b in m["content"]))
+            for m in anthropic_messages
+        )
         logger.info(f"Anthropic API call: model={model}, num_messages={len(anthropic_messages)}, total_input_chars={total_input_chars}, max_tokens={max_tokens}")
 
         kwargs = dict(
@@ -255,11 +279,21 @@ class LLMProvider:
         if truncated:
             logger.warning(f"Anthropic response truncated (max_tokens reached): model={model}, output_tokens={response.usage.output_tokens}")
 
+        cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
+        cache_write = getattr(
+            response.usage, "cache_creation_input_tokens", 0) or 0
+        if cache_read or cache_write:
+            logger.info(
+                f"Anthropic prompt cache: read={cache_read} "
+                f"write={cache_write} uncached={response.usage.input_tokens}")
+
         return {
             "content": content,
             "total_tokens": total_tokens,
             "input_tokens": response.usage.input_tokens,
             "output_tokens": response.usage.output_tokens,
+            "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": cache_write,
             "tool_calls": tool_calls,
             "truncated": truncated,
         }

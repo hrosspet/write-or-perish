@@ -176,3 +176,89 @@ def activate_and_welcome(user_id):
         "approved": True,
         "email_sent": True,
     }), 200
+
+
+@admin_bp.route("/spend", methods=["GET"])
+@login_required
+@admin_required
+def spend_status():
+    """Month-to-date API spend + limit status (issue #85)."""
+    from backend.models import SpendAlert
+    from backend.utils.spend import (
+        get_month_spend_microdollars, parse_thresholds,
+    )
+
+    config = current_app.config
+    now = datetime.utcnow()
+    month = now.strftime("%Y-%m")
+
+    total = get_month_spend_microdollars(config, now=now)
+    anthropic = get_month_spend_microdollars(config, provider="anthropic", now=now)
+    openai = get_month_spend_microdollars(config, provider="openai", now=now)
+
+    limit_usd = config.get("ANTHROPIC_SPEND_LIMIT_USD") or 0
+    alerts = SpendAlert.query.filter_by(month=month).order_by(
+        SpendAlert.threshold).all()
+
+    return jsonify({
+        "month": month,
+        "total_usd": total / 1_000_000,
+        "anthropic_usd": anthropic / 1_000_000,
+        "openai_usd": openai / 1_000_000,
+        "limit_usd": limit_usd,
+        "limit_fraction_used": (
+            (anthropic / 1_000_000) / limit_usd if limit_usd > 0 else None
+        ),
+        "thresholds": parse_thresholds(config.get("SPEND_ALERT_THRESHOLDS")),
+        "alerts_fired": [
+            {
+                "threshold": a.threshold,
+                "spend_usd": a.spend_usd,
+                "at": iso_utc(a.created_at),
+            }
+            for a in alerts
+        ],
+    }), 200
+
+
+@admin_bp.route("/feedback", methods=["GET"])
+@login_required
+@admin_required
+def list_feedback():
+    """List user feedback submitted via the LLM tool (issue #158)."""
+    from backend.models import UserFeedback
+
+    status = request.args.get("status")
+    query = UserFeedback.query
+    if status:
+        query = query.filter_by(status=status)
+    items = query.order_by(UserFeedback.created_at.desc()).limit(500).all()
+
+    return jsonify({"feedback": [
+        {
+            "id": f.id,
+            "user_id": f.user_id,
+            "username": f.user.username if f.user else None,
+            "content": f.get_content(),
+            "category": f.category,
+            "source": f.source,
+            "status": f.status,
+            "created_at": iso_utc(f.created_at),
+        }
+        for f in items
+    ]}), 200
+
+
+@admin_bp.route("/feedback/<int:feedback_id>", methods=["PUT"])
+@login_required
+@admin_required
+def update_feedback_status(feedback_id):
+    from backend.models import UserFeedback
+
+    feedback = UserFeedback.query.get_or_404(feedback_id)
+    status = (request.get_json() or {}).get("status")
+    if status not in ("new", "reviewed", "done"):
+        return jsonify({"error": "Invalid status"}), 400
+    feedback.status = status
+    db.session.commit()
+    return jsonify({"id": feedback.id, "status": feedback.status}), 200
