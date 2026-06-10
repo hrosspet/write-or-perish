@@ -12,6 +12,10 @@ class User(db.Model, UserMixin):
     description = db.Column(db.String(128), nullable=True, default="")
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     accepted_terms_at = db.Column(db.DateTime, nullable=True)
+    # First-login onboarding walkthrough completion (#147). NULL for
+    # pre-feature users too — at alpha scale they see the flow once
+    # (doubles as a what's-new tour) rather than being grandfathered.
+    onboarding_completed_at = db.Column(db.DateTime, nullable=True)
     accepted_terms_version = db.Column(db.String(16), nullable=True)
     # NEW: Approval status for our alpha (whitelisting) and optional email.
     approved = db.Column(db.Boolean, default=False, nullable=False)
