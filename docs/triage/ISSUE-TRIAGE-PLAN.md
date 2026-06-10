@@ -26,7 +26,7 @@
 - #98 landing scroll line (PR #167) — final design: content-sized hero, line ~40px below CTA on all viewports; narrative fade gated on `useHasScrolled()` (tall desktop fits the first section in-viewport, so a geometry threshold alone fired it pre-scroll).
 - #66 stale TTS on edit (PR #166) — confirm dialog (Keep / Regenerate). Took several layers: `regenerate_tts` flag-gating; `has_tts` on BOTH node serializers (focal + `serialize_node_recursive`); `onTtsGenerated` callback fired from the SSE completion path so same-session edits see fresh `has_tts`; `SpeakerIcon` cache reset on `content` change; and **cache-busting the media URL** (`?v=<chunk id>`) because nginx serves `/media` with a 24h `Cache-Control` and the path is reused every regen.
 - #28 mobile audio player (PR #168) — pops out of the NavBar into a bottom floating card < 640px; toasts offset above it via `--floating-player-offset`.
-- Also filed during Wave 1: **#161** (Stop button should reset playback to 0, not hide the player) — not yet done.
+- Also filed during Wave 1: **#161** (Stop button should reset playback to 0, not hide the player) — ~~not yet done~~ **RESOLVED (confirmed fixed, 2026-06-10)**.
 
 **Key lessons that bit us in Wave 1 (see memory + Section 8):**
 - **Test like a human, end-to-end, in the real state.** Screenshots are primary evidence for layout; reproduce the user's *exact* repro (e.g. "generate TTS then edit in the *same session*", logged-out for the landing page). "200 OK"/"string is in the bundle"/passing unit tests are NOT proof a UI feature works.
@@ -56,7 +56,7 @@
 - **Import dedupe:** #136 (re-import / snapshot overlap) — now unblocked since #137/#135 shipped; model column + dedupe key, no manual migration. *Best next pick.*
 - **Profile/UX:** #131 (app-wide toast on profile-generation completion), #101 (transparent favicon — needs brand sign-off).
 - **Security:** #91 (reserved usernames — security-critical, final single-item staging pass) + #160 (mic-denied path).
-- Then the keyword cluster (#139→#149, #105) and #138 (markdown rendering, isolated). Decision-gated items (Section 9) remain parked. Also still open from Wave 1: **#161** (Stop button resets playback to 0).
+- Then the keyword cluster (#139→#149, #105) and #138 (markdown rendering, isolated). Decision-gated items (Section 9) remain parked. ~~Also still open from Wave 1: **#161**~~ — #161 confirmed fixed (2026-06-10). **Update 2026-06-10:** #139/#110/#104 implemented (PR in flight, stacked on the caching batch); #105 dropped — likely no longer reproduces per maintainer; #149 dropped from the current plan per maintainer.
 
 ---
 
