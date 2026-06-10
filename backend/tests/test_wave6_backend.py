@@ -126,3 +126,17 @@ def test_call_llm_with_retries_forwards_max_tokens(app):
         finally:
             exports_module.LLMProvider = original
         assert captured["max_tokens"] == 1234
+
+
+def test_generation_helpers_accept_max_output_tokens():
+    """Regression for the staging-caught TypeError: every #104 call site
+    passes max_output_tokens — the defs must accept it."""
+    import inspect
+    assert "max_output_tokens" in inspect.signature(
+        exports_module._single_pass_generation).parameters
+    assert "max_output_tokens" in inspect.signature(
+        exports_module._chunked_profile_loop).parameters
+    assert "max_output_tokens" in inspect.signature(
+        exports_module._do_iterative_incremental_update).parameters
+    assert "max_tokens" in inspect.signature(
+        exports_module._call_llm_with_retries).parameters
