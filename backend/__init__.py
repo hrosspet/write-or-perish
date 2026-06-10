@@ -26,6 +26,17 @@ from flask_cors import CORS
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 def create_app():
+    # Error monitoring (roadmap Phase 0). No-op unless SENTRY_DSN is set.
+    sentry_dsn = os.environ.get("SENTRY_DSN")
+    if sentry_dsn:
+        import sentry_sdk
+        sentry_sdk.init(
+            dsn=sentry_dsn,
+            environment=os.environ.get("SENTRY_ENVIRONMENT", "production"),
+            send_default_pii=False,   # never attach user content/PII
+            traces_sample_rate=0.0,   # errors only, no perf tracing
+        )
+
     app = Flask(__name__)
     app.config.from_object(Config)
 
@@ -142,6 +153,12 @@ def create_app():
     from backend.routes.ai_preferences import ai_preferences_bp
     app.register_blueprint(ai_preferences_bp, url_prefix="/api/ai-preferences")
 
+    from backend.routes.artifacts import artifacts_bp
+    app.register_blueprint(artifacts_bp, url_prefix="/api/artifacts")
+
+    from backend.routes.external import external_bp
+    app.register_blueprint(external_bp, url_prefix="/api/external")
+
     from backend.routes.prompts import prompts_bp
     app.register_blueprint(prompts_bp, url_prefix="/api/prompts")
 
@@ -156,6 +173,15 @@ def create_app():
     # --------------------------------------------------------------------
     from backend.routes.sse import sse_bp
     app.register_blueprint(sse_bp, url_prefix="/api/sse")
+
+    # --------------------------------------------------------------------
+    # Health checks – liveness/readiness for monitoring (no auth).
+    # --------------------------------------------------------------------
+    from backend.routes.health import health_bp
+    app.register_blueprint(health_bp)
+    # Also under /api so the checks are reachable through the public
+    # nginx proxy (which only forwards /api, /auth, /media to Flask).
+    app.register_blueprint(health_bp, url_prefix="/api", name="health_api_bp")
 
     # Register CLI commands
     from backend.init_db import (
