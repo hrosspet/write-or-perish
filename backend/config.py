@@ -24,6 +24,18 @@ class Config:
     # Default model (for backward compatibility and fallback)
     DEFAULT_LLM_MODEL = os.environ.get("LLM_NAME", "claude-opus-4.6")
 
+    # --- API spend monitoring (issue #85) ---
+    # Monthly Anthropic spend cap in USD. 0 (default) disables the check.
+    ANTHROPIC_SPEND_LIMIT_USD = float(
+        os.environ.get("ANTHROPIC_SPEND_LIMIT_USD", "0") or "0"
+    )
+    # Comma-separated fractions of the limit at which to alert.
+    SPEND_ALERT_THRESHOLDS = os.environ.get(
+        "SPEND_ALERT_THRESHOLDS", "0.5,0.8,0.95"
+    )
+    # Recipient for spend alerts (admin inbox also used for signup notices).
+    SPEND_ALERT_EMAIL = os.environ.get("SPEND_ALERT_EMAIL", "signup@loore.org")
+
     # --- Profile-generation batch processing (issue #173, Part A) ---
     # A user takes the Batch API path if the global switch is on OR their id
     # is in the canary allowlist. Both default off → batch ships dark.
@@ -62,6 +74,8 @@ class Config:
             "context_window": 1050000,
             "input_price_per_mtok": 5.00,
             "output_price_per_mtok": 30.00,
+            # OpenAI auto-cache discount (#189): GPT-5.5 caches at 75% off
+            "cached_input_multiplier": 0.25,
             "long_context_threshold": 272000,
             "long_context_input_multiplier": 2.0,
             "long_context_output_multiplier": 1.5,
@@ -179,6 +193,15 @@ class Config:
         "gpt-4o-mini-tts": {"price_per_minute_usd": 0.015},
         "gpt-4o-transcribe": {"price_per_minute_usd": 0.006},
     }
+
+    # --- X (Twitter) API for bookmark sync (#155 / Download) ---
+    # Pay-per-use tier; OAuth2 PKCE app. Unset = feature env-gated off.
+    X_CLIENT_ID = os.environ.get("X_CLIENT_ID")
+    X_CLIENT_SECRET = os.environ.get("X_CLIENT_SECRET")
+    X_REDIRECT_URI = os.environ.get(
+        "X_REDIRECT_URI",
+        "https://loore.org/api/external/twitter/callback",
+    )
 
     # Magic link email authentication (SMTP)
     MAIL_SERVER = os.environ.get("MAIL_SERVER", "localhost")
