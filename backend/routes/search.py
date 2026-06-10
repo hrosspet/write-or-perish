@@ -172,3 +172,81 @@ def search():
         "has_more": (start + per_page) < total,
         "search_type": "keyword",
     })
+
+
+@search_bp.route("/search/semantic", methods=["GET"])
+@login_required
+def semantic_search():
+    """Semantic search over the user's own archive (#155).
+
+    Embeds the query and ranks the user's NodeEmbedding rows by cosine
+    similarity (brute-force scan — fine at alpha scale). Only AI-readable
+    nodes are embedded, so ai_usage='none' content never appears here
+    (keyword search still covers it).
+    """
+    from flask import current_app
+    from backend.models import NodeEmbedding
+    from backend.utils.api_keys import get_openai_chat_key
+    from backend.utils.embeddings import embed_texts, top_k_similar
+
+    q = request.args.get("q", "").strip()
+    limit = min(request.args.get("limit", 20, type=int), 50)
+    min_score = request.args.get("min_score", 0.2, type=float)
+
+    if not q:
+        return jsonify({"error": "Provide a query (q)."}), 400
+
+    api_key = get_openai_chat_key(current_app.config)
+    if not api_key:
+        return jsonify({"error": "Semantic search is not configured."}), 503
+
+    try:
+        query_vector = embed_texts(
+            [q], api_key, user_id=current_user.id,
+            request_type="embedding_query",
+        )[0]
+        db.session.commit()  # persist the query cost log
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "Embedding the query failed."}), 502
+
+    rows = db.session.query(
+        NodeEmbedding.node_id, NodeEmbedding.vector
+    ).filter(NodeEmbedding.user_id == current_user.id).all()
+
+    ranked = top_k_similar(query_vector, rows, k=limit, min_score=min_score)
+    nodes_by_id = {
+        n.id: n for n in Node.query.filter(
+            Node.id.in_([node_id for node_id, _ in ranked]),
+            Node.deleted_at.is_(None),
+        ).all()
+    } if ranked else {}
+
+    results = []
+    for node_id, score in ranked:
+        node = nodes_by_id.get(node_id)
+        if node is None:
+            continue
+        # Defense in depth: embeddings are already scoped by user_id,
+        # but re-check ownership on the node itself.
+        if (node.user_id != current_user.id
+                and node.human_owner_id != current_user.id):
+            continue
+        content = node.get_content() or ""
+        results.append({
+            "id": node.id,
+            "preview": content[:200] + ("..." if len(content) > 200 else ""),
+            "snippet": None,
+            "node_type": node.node_type,
+            "created_at": iso_utc(node.created_at),
+            "username": node.user.username if node.user else "Unknown",
+            "child_count": len(node.children),
+            "parent_id": node.parent_id,
+            "score": round(score, 4),
+        })
+
+    return jsonify({
+        "results": results,
+        "total": len(results),
+        "mode": "semantic",
+    }), 200
