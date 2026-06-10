@@ -1349,6 +1349,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 replaced_profile = False
                 replaced_recent = False
                 replaced_recent_raw = False
+                replaced_export = False  # #139: first occurrence only
 
                 # Temporal grounding (#130): every message is prefixed with an
                 # absolute local-time stamp derived from the node's updated_at
@@ -1423,12 +1424,22 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         message_text = (
                             f"{time_prefix} author {author}: {node_content}"
                         )
-                        # Replace {user_export} placeholder if present
+                        # Replace {user_export} — first occurrence gets
+                        # the archive, repeats get a stub (#139): the
+                        # export is the heaviest placeholder and
+                        # duplicating it doubles prompt cost.
                         if user_export_content and export_placeholder_match:
-                            message_text = message_text.replace(
-                                export_placeholder_match,
-                                user_export_content
-                            )
+                            if export_placeholder_match in message_text:
+                                if not replaced_export:
+                                    message_text = message_text.replace(
+                                        export_placeholder_match,
+                                        user_export_content, 1
+                                    )
+                                    replaced_export = True
+                                message_text = message_text.replace(
+                                    export_placeholder_match,
+                                    "(see archive above)"
+                                )
                         # Replace {user_profile} — first occurrence
                         # gets content, subsequent get emptied (dedup)
                         if USER_PROFILE_PLACEHOLDER in message_text:
