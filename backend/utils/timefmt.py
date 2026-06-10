@@ -12,6 +12,8 @@ an explicit ``"Z"`` (Zulu / UTC) suffix when the value is naive, and otherwise
 relies on the offset already produced by ``.isoformat()`` for aware datetimes.
 """
 
+import re
+
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -93,3 +95,31 @@ def is_valid_timezone(tz_name: Optional[str]) -> bool:
         return True
     except (ZoneInfoNotFoundError, ValueError, KeyError):
         return False
+
+
+# Matches the local_stamp format (and the [unknown time] fallback) at a
+# message edge, e.g. "[2026-06-10 08:27 UTC]" / "[2026-06-01 20:39 CEST]".
+_EDGE_STAMP_RE = (
+    r'\[(?:\d{4}-\d{2}-\d{2} \d{2}:\d{2} [A-Za-z+\-0-9:]{1,6}'
+    r'|unknown time)\]'
+)
+_LEADING_STAMPS_RE = re.compile(r'^(?:\s*' + _EDGE_STAMP_RE + r')+\s*')
+_TRAILING_STAMPS_RE = re.compile(r'\s*(?:' + _EDGE_STAMP_RE + r'\s*)+$')
+
+
+def strip_edge_timestamps(text):
+    """Remove hallucinated context timestamps from a response's edges
+    (#179 + trailing variant).
+
+    Every context message carries a local_stamp prefix for temporal
+    grounding (#130); some models mimic it — leading stamps (#179, all
+    models occasionally; confirmed on Fable 5) or trailing ones (Opus
+    4.8). The stamp is system metadata and must never reach the user or
+    TTS. Only edge stamps are removed — in-content mentions of dates or
+    bracketed text are left alone.
+    """
+    if not text:
+        return text
+    text = _LEADING_STAMPS_RE.sub('', text)
+    text = _TRAILING_STAMPS_RE.sub('', text)
+    return text

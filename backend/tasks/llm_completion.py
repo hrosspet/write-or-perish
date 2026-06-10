@@ -18,7 +18,7 @@ from backend.utils.tokens import (
     approximate_token_count, reduce_export_tokens, format_date_metadata,
 )
 from backend.utils.quotes import resolve_quotes, has_quotes
-from backend.utils.timefmt import local_stamp
+from backend.utils.timefmt import local_stamp, strip_edge_timestamps
 from backend.utils.api_keys import determine_api_key_type, get_api_keys_for_usage
 from backend.utils.cost import calculate_llm_cost_microdollars
 from backend.utils.tool_meta import update_tool_meta, parse_github_issue
@@ -1691,6 +1691,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         f"(attempt {attempt + 2}/{MAX_RETRIES + 1})"
                     )
             llm_text = response["content"]
+            # #179: strip hallucinated context-timestamp echoes from the
+            # response edges before anything stores or speaks the text.
+            scrubbed = strip_edge_timestamps(llm_text)
+            if scrubbed != llm_text:
+                logger.info(
+                    "Stripped edge timestamp(s) from LLM response "
+                    "(model=%s, node=%s)", model_id, llm_node_id)
+                llm_text = scrubbed
             total_tokens = response["total_tokens"]
             input_tokens = response.get("input_tokens", 0)
             output_tokens = response.get("output_tokens", 0)
