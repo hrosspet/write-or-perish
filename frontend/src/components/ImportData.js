@@ -132,6 +132,25 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
 
   const [showPicker, setShowPicker] = useState(false);
 
+  // Restore-or-skip prompt shown when a confirm collides with content
+  // the user previously deleted: { count, retry }. `retry` re-runs the
+  // confirm with on_deleted set to the user's choice.
+  const [deletedPrompt, setDeletedPrompt] = useState(null);
+
+  // Returns true when the error is the backend's 409 "this import
+  // matches soft-deleted nodes" conflict, in which case the prompt is
+  // shown instead of an error message.
+  const handleDeletedConflict = (err, retry) => {
+    const data = err.response?.data;
+    if (err.response?.status === 409 && data?.error === "deleted_content_matches") {
+      setDeletedPrompt({ count: data.deleted_matches, retry });
+      setImporting(false);
+      setImportStage(null);
+      return true;
+    }
+    return false;
+  };
+
   // Close picker dialog on Escape
   useEffect(() => {
     if (!showPicker) return;
@@ -169,7 +188,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
       });
   };
 
-  const handleConfirmImport = () => {
+  const handleConfirmImport = (onDeleted) => {
     if (!importFiles) return;
 
     setImporting(true);
@@ -179,7 +198,8 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
       import_type: importType,
       date_ordering: dateOrdering,
       privacy_level: importPrivacy,
-      ai_usage: importAiUsage
+      ai_usage: importAiUsage,
+      ...(onDeleted ? { on_deleted: onDeleted } : {})
     })
       .then((response) => {
         setShowImportDialog(false);
@@ -193,6 +213,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         window.location.reload();
       })
       .catch((err) => {
+        if (handleDeletedConflict(err, handleConfirmImport)) return;
         console.error("Error importing data:", err);
         setError(err.response?.data?.error || "Error importing data. Please try again.");
         setImporting(false);
@@ -234,7 +255,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     event.target.value = "";
   };
 
-  const handleConfirmTwitterImport = () => {
+  const handleConfirmTwitterImport = (onDeleted) => {
     if (!twitterImportData) return;
 
     setImporting(true);
@@ -244,7 +265,8 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
       import_type: importType,
       include_replies: includeReplies,
       privacy_level: importPrivacy,
-      ai_usage: importAiUsage
+      ai_usage: importAiUsage,
+      ...(onDeleted ? { on_deleted: onDeleted } : {})
     })
       .then((response) => {
         setShowTwitterImportDialog(false);
@@ -258,6 +280,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         window.location.reload();
       })
       .catch((err) => {
+        if (handleDeletedConflict(err, handleConfirmTwitterImport)) return;
         console.error("Error importing Twitter data:", err);
         setError(err.response?.data?.error || "Error importing Twitter data. Please try again.");
         setImporting(false);
@@ -315,7 +338,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
       });
   };
 
-  const handleConfirmClaudeImport = () => {
+  const handleConfirmClaudeImport = (onDeleted) => {
     if (!claudeImportData) return;
 
     setImporting(true);
@@ -323,7 +346,8 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     api.post("/import/claude/confirm", {
       conversations: claudeImportData.conversations,
       privacy_level: importPrivacy,
-      ai_usage: importAiUsage
+      ai_usage: importAiUsage,
+      ...(onDeleted ? { on_deleted: onDeleted } : {})
     })
       .then((response) => {
         setShowClaudeImportDialog(false);
@@ -337,6 +361,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         window.location.reload();
       })
       .catch((err) => {
+        if (handleDeletedConflict(err, handleConfirmClaudeImport)) return;
         console.error("Error importing Claude data:", err);
         setError(err.response?.data?.error || "Error importing Claude data. Please try again.");
         setImporting(false);
@@ -409,7 +434,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
       });
   };
 
-  const handleConfirmChatGPTImport = () => {
+  const handleConfirmChatGPTImport = (onDeleted) => {
     if (!chatGPTImportData) return;
 
     setImporting(true);
@@ -417,7 +442,8 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     api.post("/import/chatgpt/confirm", {
       conversations: chatGPTImportData.conversations,
       privacy_level: importPrivacy,
-      ai_usage: importAiUsage
+      ai_usage: importAiUsage,
+      ...(onDeleted ? { on_deleted: onDeleted } : {})
     })
       .then((response) => {
         setShowChatGPTImportDialog(false);
@@ -431,6 +457,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         window.location.reload();
       })
       .catch((err) => {
+        if (handleDeletedConflict(err, handleConfirmChatGPTImport)) return;
         console.error("Error importing ChatGPT data:", err);
         setError(err.response?.data?.error || "Error importing ChatGPT data. Please try again.");
         setImporting(false);
@@ -446,6 +473,56 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
   return (
     <div>
       {error && <div style={{ color: "var(--accent)", marginBottom: "0.8rem", fontSize: "0.88rem" }}>{error}</div>}
+
+      {/* Restore-or-skip prompt for imports matching deleted content */}
+      {deletedPrompt && (
+        <div style={{
+          marginTop: "20px",
+          padding: "2rem",
+          backgroundColor: "var(--bg-card)",
+          borderRadius: "10px",
+          border: "1px solid var(--border)"
+        }}>
+          <h3 style={{ fontFamily: "var(--serif)", fontWeight: 300, color: "var(--text-primary)", margin: "0 0 12px 0" }}>
+            Previously Deleted Content Found
+          </h3>
+          <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
+            <strong style={{ color: "var(--text-primary)" }}>{deletedPrompt.count}</strong>{" "}
+            message{deletedPrompt.count !== 1 ? "s" : ""} in this import match
+            content you previously deleted. Do you want to restore{" "}
+            {deletedPrompt.count !== 1 ? "them" : "it"}, or keep{" "}
+            {deletedPrompt.count !== 1 ? "them" : "it"} deleted?
+          </p>
+          <div style={{ display: "flex", gap: "10px", marginTop: "15px", flexWrap: "wrap" }}>
+            <button
+              onClick={() => {
+                const retry = deletedPrompt.retry;
+                setDeletedPrompt(null);
+                retry("restore");
+              }}
+              style={primaryBtnStyle}
+            >
+              Restore deleted content
+            </button>
+            <button
+              onClick={() => {
+                const retry = deletedPrompt.retry;
+                setDeletedPrompt(null);
+                retry("skip");
+              }}
+              style={cancelBtnStyle}
+            >
+              Keep it deleted
+            </button>
+            <button
+              onClick={() => setDeletedPrompt(null)}
+              style={cancelBtnStyle}
+            >
+              Cancel import
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Shared import option labels */}
       {(() => {
@@ -668,7 +745,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
 
           <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
             <button
-              onClick={handleConfirmImport}
+              onClick={() => handleConfirmImport()}
               disabled={importing}
               style={{
                 ...primaryBtnStyle,
@@ -723,7 +800,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
 
           <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
             <button
-              onClick={handleConfirmClaudeImport}
+              onClick={() => handleConfirmClaudeImport()}
               disabled={importing}
               style={{
                 ...primaryBtnStyle,
@@ -778,7 +855,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
 
           <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
             <button
-              onClick={handleConfirmChatGPTImport}
+              onClick={() => handleConfirmChatGPTImport()}
               disabled={importing}
               style={{
                 ...primaryBtnStyle,
@@ -891,7 +968,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
 
           <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
             <button
-              onClick={handleConfirmTwitterImport}
+              onClick={() => handleConfirmTwitterImport()}
               disabled={importing}
               style={{
                 ...primaryBtnStyle,

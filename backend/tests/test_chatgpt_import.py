@@ -750,3 +750,174 @@ class TestConfirmMarkdownImportDedup:
             Node.content.contains("file c content"),
         ).one()
         assert node_c.parent_id == node_b.id
+
+
+# ── POST confirm endpoints: soft-deleted content (restore-or-skip) ───────
+
+class TestConfirmImportDeletedContent:
+    """Imports colliding with soft-deleted nodes prompt restore-or-skip."""
+
+    def _count_nodes(self, user_id):
+        return Node.query.filter_by(human_owner_id=user_id).count()
+
+    def _soft_delete_all(self, user_id, wipe_content=False):
+        """Soft-delete all of the user's nodes (optionally as wiped
+        tombstones, mirroring the cleanup task's content wipe)."""
+        from datetime import datetime
+        for node in Node.query.filter_by(human_owner_id=user_id).all():
+            node.deleted_at = datetime.utcnow()
+            if wipe_content:
+                node.content = None
+        _db.session.commit()
+
+    def test_reimport_of_deleted_content_returns_409(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        convs = [_analyzed_conv()]
+        assert _confirm_conversations(client, convs).status_code == 201
+        self._soft_delete_all(alice.id)
+
+        r = _confirm_conversations(client, convs)
+        assert r.status_code == 409
+        body = r.get_json()
+        assert body["error"] == "deleted_content_matches"
+        assert body["deleted_matches"] == 2
+        # Nothing changed: no new nodes, originals still deleted.
+        assert self._count_nodes(alice.id) == 2
+        assert all(
+            n.deleted_at is not None
+            for n in Node.query.filter_by(human_owner_id=alice.id)
+        )
+
+    def test_on_deleted_skip_keeps_nodes_deleted(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        convs = [_analyzed_conv()]
+        _confirm_conversations(client, convs)
+        self._soft_delete_all(alice.id)
+
+        r = _confirm_conversations(client, convs, on_deleted="skip")
+        assert r.status_code == 201
+        body = r.get_json()
+        assert body["created"] == 0
+        assert body["skipped"] == 2
+        assert body["restored"] == 0
+        assert self._count_nodes(alice.id) == 2
+        assert all(
+            n.deleted_at is not None
+            for n in Node.query.filter_by(human_owner_id=alice.id)
+        )
+
+    def test_on_deleted_restore_undeletes_wiped_tombstones(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        convs = [_analyzed_conv()]
+        _confirm_conversations(client, convs)
+        original_ids = sorted(
+            n.id for n in Node.query.filter_by(human_owner_id=alice.id)
+        )
+        # Wiped tombstones: content already cleared by the cleanup task.
+        self._soft_delete_all(alice.id, wipe_content=True)
+
+        r = _confirm_conversations(client, convs, on_deleted="restore")
+        assert r.status_code == 201
+        body = r.get_json()
+        assert body["created"] == 0
+        assert body["skipped"] == 0
+        assert body["restored"] == 2
+        # Same rows, un-deleted, content refilled from the archive.
+        nodes = Node.query.filter_by(human_owner_id=alice.id).all()
+        assert sorted(n.id for n in nodes) == original_ids
+        assert all(n.deleted_at is None for n in nodes)
+        assert all(n.content for n in nodes)
+
+    def test_overlap_snapshot_chains_onto_restored_node(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        _confirm_conversations(client, [_analyzed_conv()])
+        self._soft_delete_all(alice.id)
+
+        extended = _analyzed_conv(messages=[
+            {
+                "text": "hello world",
+                "role": "user",
+                "created_at": "2023-11-14T22:13:20",
+                "model": "",
+                "mapping_id": "u1",
+            },
+            {
+                "text": "hi there, friend",
+                "role": "assistant",
+                "created_at": "2023-11-14T22:13:21",
+                "model": "gpt-4o",
+                "mapping_id": "a1",
+            },
+            {
+                "text": "one more question",
+                "role": "user",
+                "created_at": "2023-11-14T22:14:00",
+                "model": "",
+                "mapping_id": "u2",
+            },
+        ])
+        r = _confirm_conversations(client, [extended], on_deleted="restore")
+        assert r.status_code == 201
+        body = r.get_json()
+        assert body["created"] == 1
+        assert body["restored"] == 2
+        assert body["skipped"] == 0
+
+        new_node = Node.query.filter_by(
+            human_owner_id=alice.id, source_key="chatgpt:u2"
+        ).one()
+        prev_node = Node.query.filter_by(
+            human_owner_id=alice.id, source_key="chatgpt:a1"
+        ).one()
+        assert prev_node.deleted_at is None
+        assert new_node.parent_id == prev_node.id
+
+    def test_markdown_reimport_restore_only_deleted_file(self, app):
+        # One deleted file out of two: 409 reports 1 match; restore
+        # un-deletes it while the alive duplicate is just skipped.
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        from datetime import datetime
+        files = [
+            _md_file("a", "file a content", "2024-01-01T12:00:00"),
+            _md_file("b", "file b content", "2024-01-02T12:00:00"),
+        ]
+        _confirm_files(client, files, import_type="separate_nodes")
+        node_a = Node.query.filter(
+            Node.human_owner_id == alice.id,
+            Node.content.contains("file a content"),
+        ).one()
+        node_a.deleted_at = datetime.utcnow()
+        _db.session.commit()
+
+        r1 = _confirm_files(client, files, import_type="separate_nodes")
+        assert r1.status_code == 409
+        assert r1.get_json()["deleted_matches"] == 1
+
+        r2 = _confirm_files(client, files, import_type="separate_nodes",
+                            on_deleted="restore")
+        assert r2.status_code == 201
+        body = r2.get_json()
+        assert body["created"] == 0
+        assert body["restored"] == 1
+        assert body["skipped"] == 1
+        assert Node.query.get(node_a.id).deleted_at is None
