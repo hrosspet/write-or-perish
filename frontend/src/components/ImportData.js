@@ -52,6 +52,85 @@ function ImportSpinner({ stage, fallback }) {
   );
 }
 
+// Centered modal overlay matching the import-picker pattern: portal to
+// document.body, dimmed blurred backdrop, card with a quiet rise-in.
+// Backdrop click and Escape both call onDismiss.
+function ModalShell({ onDismiss, children, maxWidth = "440px" }) {
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape") onDismiss();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onDismiss]);
+
+  return ReactDOM.createPortal(
+    <div
+      onClick={onDismiss}
+      style={{
+        position: "fixed",
+        top: 0, left: 0, right: 0, bottom: 0,
+        backgroundColor: "rgba(5, 4, 3, 0.75)",
+        backdropFilter: "blur(10px)",
+        WebkitBackdropFilter: "blur(10px)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 2000,
+        animation: "loore-modal-fade 0.25s ease-out",
+      }}
+    >
+      <style>{`
+        @keyframes loore-modal-fade { from { opacity: 0; } }
+        @keyframes loore-modal-rise {
+          from { opacity: 0; transform: translateY(14px) scale(0.98); }
+        }
+      `}</style>
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: "var(--bg-card)",
+          border: "1px solid var(--border)",
+          borderRadius: "12px",
+          padding: "2.5rem",
+          minWidth: "300px",
+          maxWidth,
+          width: "90vw",
+          boxShadow: "0 24px 80px rgba(0,0,0,0.5)",
+          maxHeight: "85vh",
+          overflowY: "auto",
+          animation: "loore-modal-rise 0.35s cubic-bezier(0.22, 1, 0.36, 1)",
+        }}
+      >
+        {children}
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+// Serif modal heading with a short amber hairline underneath.
+function ModalTitle({ children }) {
+  return (
+    <>
+      <h3 style={{
+        fontFamily: "var(--serif)",
+        fontWeight: 300,
+        fontSize: "1.35rem",
+        color: "var(--text-primary)",
+        margin: 0,
+      }}>{children}</h3>
+      <div style={{
+        width: "2rem",
+        height: "1px",
+        backgroundColor: "var(--accent)",
+        opacity: 0.6,
+        margin: "0.9rem 0 1.4rem",
+      }} />
+    </>
+  );
+}
+
 // Extract the conversations.json blob from a Claude/ChatGPT export zip in
 // the browser, so the full (potentially multi-GB) export with images/audio
 // never has to traverse the network.
@@ -132,6 +211,38 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
 
   const [showPicker, setShowPicker] = useState(false);
 
+  // Restore-or-skip prompt shown when a confirm collides with content
+  // the user previously deleted: { count, retry }. `retry` re-runs the
+  // confirm with on_deleted set to the user's choice.
+  const [deletedPrompt, setDeletedPrompt] = useState(null);
+
+  // Confirm-response stats ({ created, skipped, restored, ... }) shown
+  // as a summary after the import finishes; dismissing it reloads the
+  // page so the new nodes appear.
+  const [importResult, setImportResult] = useState(null);
+
+  // Backdrop/Escape dismiss for the confirm-dialog modals: ignored while
+  // a request is in flight or while a prompt modal is stacked on top
+  // (Escape would otherwise close both layers at once).
+  const dismissGuard = (cancel) => () => {
+    if (importing || deletedPrompt || importResult) return;
+    cancel();
+  };
+
+  // Returns true when the error is the backend's 409 "this import
+  // matches soft-deleted nodes" conflict, in which case the prompt is
+  // shown instead of an error message.
+  const handleDeletedConflict = (err, retry) => {
+    const data = err.response?.data;
+    if (err.response?.status === 409 && data?.error === "deleted_content_matches") {
+      setDeletedPrompt({ count: data.deleted_matches, retry });
+      setImporting(false);
+      setImportStage(null);
+      return true;
+    }
+    return false;
+  };
+
   // Close picker dialog on Escape
   useEffect(() => {
     if (!showPicker) return;
@@ -169,7 +280,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
       });
   };
 
-  const handleConfirmImport = () => {
+  const handleConfirmImport = (onDeleted) => {
     if (!importFiles) return;
 
     setImporting(true);
@@ -179,7 +290,8 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
       import_type: importType,
       date_ordering: dateOrdering,
       privacy_level: importPrivacy,
-      ai_usage: importAiUsage
+      ai_usage: importAiUsage,
+      ...(onDeleted ? { on_deleted: onDeleted } : {})
     })
       .then((response) => {
         setShowImportDialog(false);
@@ -190,9 +302,10 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         if (response.data.profile_update_task_id && onProfileUpdateStarted) {
           onProfileUpdateStarted(response.data.profile_update_task_id);
         }
-        window.location.reload();
+        setImportResult(response.data);
       })
       .catch((err) => {
+        if (handleDeletedConflict(err, handleConfirmImport)) return;
         console.error("Error importing data:", err);
         setError(err.response?.data?.error || "Error importing data. Please try again.");
         setImporting(false);
@@ -234,7 +347,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     event.target.value = "";
   };
 
-  const handleConfirmTwitterImport = () => {
+  const handleConfirmTwitterImport = (onDeleted) => {
     if (!twitterImportData) return;
 
     setImporting(true);
@@ -244,7 +357,8 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
       import_type: importType,
       include_replies: includeReplies,
       privacy_level: importPrivacy,
-      ai_usage: importAiUsage
+      ai_usage: importAiUsage,
+      ...(onDeleted ? { on_deleted: onDeleted } : {})
     })
       .then((response) => {
         setShowTwitterImportDialog(false);
@@ -255,9 +369,10 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         if (response.data.profile_update_task_id && onProfileUpdateStarted) {
           onProfileUpdateStarted(response.data.profile_update_task_id);
         }
-        window.location.reload();
+        setImportResult(response.data);
       })
       .catch((err) => {
+        if (handleDeletedConflict(err, handleConfirmTwitterImport)) return;
         console.error("Error importing Twitter data:", err);
         setError(err.response?.data?.error || "Error importing Twitter data. Please try again.");
         setImporting(false);
@@ -315,7 +430,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
       });
   };
 
-  const handleConfirmClaudeImport = () => {
+  const handleConfirmClaudeImport = (onDeleted) => {
     if (!claudeImportData) return;
 
     setImporting(true);
@@ -323,7 +438,8 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     api.post("/import/claude/confirm", {
       conversations: claudeImportData.conversations,
       privacy_level: importPrivacy,
-      ai_usage: importAiUsage
+      ai_usage: importAiUsage,
+      ...(onDeleted ? { on_deleted: onDeleted } : {})
     })
       .then((response) => {
         setShowClaudeImportDialog(false);
@@ -334,9 +450,10 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         if (response.data.profile_update_task_id && onProfileUpdateStarted) {
           onProfileUpdateStarted(response.data.profile_update_task_id);
         }
-        window.location.reload();
+        setImportResult(response.data);
       })
       .catch((err) => {
+        if (handleDeletedConflict(err, handleConfirmClaudeImport)) return;
         console.error("Error importing Claude data:", err);
         setError(err.response?.data?.error || "Error importing Claude data. Please try again.");
         setImporting(false);
@@ -409,7 +526,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
       });
   };
 
-  const handleConfirmChatGPTImport = () => {
+  const handleConfirmChatGPTImport = (onDeleted) => {
     if (!chatGPTImportData) return;
 
     setImporting(true);
@@ -417,7 +534,8 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     api.post("/import/chatgpt/confirm", {
       conversations: chatGPTImportData.conversations,
       privacy_level: importPrivacy,
-      ai_usage: importAiUsage
+      ai_usage: importAiUsage,
+      ...(onDeleted ? { on_deleted: onDeleted } : {})
     })
       .then((response) => {
         setShowChatGPTImportDialog(false);
@@ -428,9 +546,10 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         if (response.data.profile_update_task_id && onProfileUpdateStarted) {
           onProfileUpdateStarted(response.data.profile_update_task_id);
         }
-        window.location.reload();
+        setImportResult(response.data);
       })
       .catch((err) => {
+        if (handleDeletedConflict(err, handleConfirmChatGPTImport)) return;
         console.error("Error importing ChatGPT data:", err);
         setError(err.response?.data?.error || "Error importing ChatGPT data. Please try again.");
         setImporting(false);
@@ -446,6 +565,108 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
   return (
     <div>
       {error && <div style={{ color: "var(--accent)", marginBottom: "0.8rem", fontSize: "0.88rem" }}>{error}</div>}
+
+      {/* Post-import summary: what was actually imported vs skipped */}
+      {importResult && (
+        <ModalShell onDismiss={() => window.location.reload()}>
+          <ModalTitle>Import Finished</ModalTitle>
+          <div style={{ display: "flex", gap: "2.4rem", marginBottom: "1.3rem" }}>
+            {[
+              { label: "Imported", value: importResult.created, highlight: importResult.created > 0 },
+              { label: "Restored", value: importResult.restored || 0, highlight: importResult.restored > 0 },
+              { label: "Updated", value: importResult.updated || 0, highlight: importResult.updated > 0 },
+              { label: "Skipped", value: importResult.skipped || 0, highlight: false },
+            ].filter((s) => s.label === "Imported" || s.value > 0).map((s) => (
+              <div key={s.label}>
+                <div style={{
+                  fontFamily: "var(--serif)",
+                  fontWeight: 300,
+                  fontSize: "2.2rem",
+                  lineHeight: 1.1,
+                  color: s.highlight ? "var(--accent)" : "var(--text-primary)",
+                }}>{s.value}</div>
+                <div style={{
+                  fontFamily: "var(--sans)",
+                  fontWeight: 400,
+                  fontSize: "0.7rem",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.14em",
+                  color: "var(--text-muted)",
+                  marginTop: "0.3rem",
+                }}>{s.label}</div>
+              </div>
+            ))}
+          </div>
+          {importResult.created === 0 && !importResult.restored && !importResult.updated ? (
+            <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.92rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
+              Everything in this archive was already imported — nothing new was added.
+            </p>
+          ) : (
+            <>
+              {importResult.updated > 0 && (
+                <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.88rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
+                  Updated items were already imported; their privacy and
+                  AI-usage settings now match this import.
+                </p>
+              )}
+              {importResult.skipped > 0 && (
+                <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.88rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
+                  Skipped items were already imported and left untouched.
+                </p>
+              )}
+            </>
+          )}
+          <button
+            onClick={() => window.location.reload()}
+            style={primaryBtnStyle}
+          >
+            OK
+          </button>
+        </ModalShell>
+      )}
+
+      {/* Restore-or-skip prompt for imports matching deleted content */}
+      {deletedPrompt && (
+        <ModalShell onDismiss={() => setDeletedPrompt(null)}>
+          <ModalTitle>Previously Deleted Content</ModalTitle>
+          <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300, margin: "0 0 1.4rem" }}>
+            <strong style={{ color: "var(--text-primary)" }}>{deletedPrompt.count}</strong>{" "}
+            message{deletedPrompt.count !== 1 ? "s" : ""} in this import{" "}
+            {deletedPrompt.count !== 1 ? "match" : "matches"} content you
+            previously deleted. Restore{" "}
+            {deletedPrompt.count !== 1 ? "them" : "it"}, or keep{" "}
+            {deletedPrompt.count !== 1 ? "them" : "it"} deleted?
+          </p>
+          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", alignItems: "center" }}>
+            <button
+              onClick={() => {
+                const retry = deletedPrompt.retry;
+                setDeletedPrompt(null);
+                retry("restore");
+              }}
+              style={primaryBtnStyle}
+            >
+              Restore deleted content
+            </button>
+            <button
+              onClick={() => {
+                const retry = deletedPrompt.retry;
+                setDeletedPrompt(null);
+                retry("skip");
+              }}
+              style={cancelBtnStyle}
+            >
+              Keep it deleted
+            </button>
+            <button
+              onClick={() => setDeletedPrompt(null)}
+              style={{ ...ghostBtnStyle, border: "none", color: "var(--text-muted)" }}
+            >
+              Cancel import
+            </button>
+          </div>
+        </ModalShell>
+      )}
 
       {/* Shared import option labels */}
       {(() => {
@@ -573,14 +794,8 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
 
       {/* Markdown import confirmation dialog */}
       {showImportDialog && importFiles && (
-        <div style={{
-          marginTop: "20px",
-          padding: "2rem",
-          backgroundColor: "var(--bg-card)",
-          borderRadius: "10px",
-          border: "1px solid var(--border)"
-        }}>
-          <h3 style={{ fontFamily: "var(--serif)", fontWeight: 300, color: "var(--text-primary)", margin: "0 0 12px 0" }}>Confirm Import</h3>
+        <ModalShell onDismiss={dismissGuard(handleCancelImport)} maxWidth="520px">
+          <ModalTitle>Confirm Import</ModalTitle>
           <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
             Found <strong style={{ color: "var(--text-primary)" }}>{importFiles.total_files}</strong> .md file{importFiles.total_files !== 1 ? 's' : ''}
             ({importFiles.total_size.toLocaleString()} bytes)
@@ -668,7 +883,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
 
           <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
             <button
-              onClick={handleConfirmImport}
+              onClick={() => handleConfirmImport()}
               disabled={importing}
               style={{
                 ...primaryBtnStyle,
@@ -690,19 +905,13 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
               Cancel
             </button>
           </div>
-        </div>
+        </ModalShell>
       )}
 
       {/* Claude import confirmation dialog */}
       {showClaudeImportDialog && claudeImportData && (
-        <div style={{
-          marginTop: "20px",
-          padding: "2rem",
-          backgroundColor: "var(--bg-card)",
-          borderRadius: "10px",
-          border: "1px solid var(--border)"
-        }}>
-          <h3 style={{ fontFamily: "var(--serif)", fontWeight: 300, color: "var(--text-primary)", margin: "0 0 12px 0" }}>Confirm Claude Import</h3>
+        <ModalShell onDismiss={dismissGuard(handleCancelClaudeImport)} maxWidth="520px">
+          <ModalTitle>Confirm Claude Import</ModalTitle>
           <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
             Found <strong style={{ color: "var(--text-primary)" }}>{claudeImportData.total_conversations}</strong> conversation{claudeImportData.total_conversations !== 1 ? 's' : ''} with{" "}
             <strong style={{ color: "var(--text-primary)" }}>{claudeImportData.total_messages}</strong> messages
@@ -723,7 +932,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
 
           <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
             <button
-              onClick={handleConfirmClaudeImport}
+              onClick={() => handleConfirmClaudeImport()}
               disabled={importing}
               style={{
                 ...primaryBtnStyle,
@@ -745,19 +954,13 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
               Cancel
             </button>
           </div>
-        </div>
+        </ModalShell>
       )}
 
       {/* ChatGPT import confirmation dialog */}
       {showChatGPTImportDialog && chatGPTImportData && (
-        <div style={{
-          marginTop: "20px",
-          padding: "2rem",
-          backgroundColor: "var(--bg-card)",
-          borderRadius: "10px",
-          border: "1px solid var(--border)"
-        }}>
-          <h3 style={{ fontFamily: "var(--serif)", fontWeight: 300, color: "var(--text-primary)", margin: "0 0 12px 0" }}>Confirm ChatGPT Import</h3>
+        <ModalShell onDismiss={dismissGuard(handleCancelChatGPTImport)} maxWidth="520px">
+          <ModalTitle>Confirm ChatGPT Import</ModalTitle>
           <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
             Found <strong style={{ color: "var(--text-primary)" }}>{chatGPTImportData.total_conversations}</strong> conversation{chatGPTImportData.total_conversations !== 1 ? 's' : ''} with{" "}
             <strong style={{ color: "var(--text-primary)" }}>{chatGPTImportData.total_messages}</strong> messages
@@ -778,7 +981,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
 
           <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
             <button
-              onClick={handleConfirmChatGPTImport}
+              onClick={() => handleConfirmChatGPTImport()}
               disabled={importing}
               style={{
                 ...primaryBtnStyle,
@@ -800,19 +1003,13 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
               Cancel
             </button>
           </div>
-        </div>
+        </ModalShell>
       )}
 
       {/* Twitter import confirmation dialog */}
       {showTwitterImportDialog && twitterImportData && (
-        <div style={{
-          marginTop: "20px",
-          padding: "2rem",
-          backgroundColor: "var(--bg-card)",
-          borderRadius: "10px",
-          border: "1px solid var(--border)"
-        }}>
-          <h3 style={{ fontFamily: "var(--serif)", fontWeight: 300, color: "var(--text-primary)", margin: "0 0 12px 0" }}>Confirm Twitter Import</h3>
+        <ModalShell onDismiss={dismissGuard(handleCancelTwitterImport)} maxWidth="520px">
+          <ModalTitle>Confirm Twitter Import</ModalTitle>
           <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
             Found <strong style={{ color: "var(--text-primary)" }}>{twitterImportData.total_tweets}</strong> tweets
             ({twitterImportData.original_count} original, {twitterImportData.reply_count} replies)
@@ -891,7 +1088,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
 
           <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
             <button
-              onClick={handleConfirmTwitterImport}
+              onClick={() => handleConfirmTwitterImport()}
               disabled={importing}
               style={{
                 ...primaryBtnStyle,
@@ -913,7 +1110,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
               Cancel
             </button>
           </div>
-        </div>
+        </ModalShell>
       )}
     </div>
   );

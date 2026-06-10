@@ -4,6 +4,7 @@ from backend.models import Node, User, UserProfile
 from backend.extensions import db
 from backend.utils.privacy import AI_ALLOWED
 from datetime import datetime
+import hashlib
 import zipfile
 import io
 import json
@@ -18,6 +19,149 @@ def approximate_token_count(text):
     Uses a simple heuristic: ~4 characters per token.
     """
     return len(text) // 4
+
+
+def _generic_source_key(author, timestamp, content):
+    """Stable fallback dedup key when no source-native id is available.
+
+    NUL separators prevent boundary ambiguity between the fields.
+    """
+    raw = f"{author}\x00{timestamp}\x00{content}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _load_source_key_index(user_id):
+    """
+    Map source_key -> node id for this user's previously imported nodes,
+    plus the set of keys whose node is currently soft-deleted.
+
+    Loaded once per confirm request so dedup checks are dict lookups
+    instead of one query per message. The node ids let partially-skipped
+    threads chain new messages onto the existing copy of the previous
+    message rather than orphaning them as new roots.
+
+    Scoping is on ``human_owner_id`` (the importing human), NOT ``user_id``:
+    imported assistant/LLM messages are stored under a synthetic LLM user
+    (e.g. ``chatgpt`` / ``claude-web``) via ``user_id`` while the real
+    importer is recorded in ``human_owner_id``. Scoping on the human owner
+    therefore dedups both human and assistant turns per importing user, so
+    two different users importing the same archive each keep their own copy.
+
+    Returns:
+        (key_index, deleted_keys) where key_index maps source_key ->
+        node id and deleted_keys contains the keys of soft-deleted nodes.
+    """
+    rows = db.session.query(
+        Node.source_key, Node.id, Node.deleted_at
+    ).filter(
+        Node.human_owner_id == user_id,
+        Node.source_key.isnot(None),
+    )
+    key_index = {}
+    deleted_keys = set()
+    for source_key, node_id, deleted_at in rows:
+        key_index[source_key] = node_id
+        if deleted_at is not None:
+            deleted_keys.add(source_key)
+    return key_index, deleted_keys
+
+
+def _claude_msg_key(msg):
+    """Dedup key for one Claude confirm-payload message.
+
+    Prefers the export's per-message uuid (rename-proof, bounded
+    length); falls back to a content hash when it is missing.
+    """
+    msg_uuid = msg.get('uuid')
+    if msg_uuid:
+        return f"claude:{msg_uuid}"
+    return _generic_source_key(
+        msg.get('sender', 'human'), msg.get('created_at', ''),
+        msg.get('text', ''),
+    )
+
+
+def _chatgpt_msg_key(msg):
+    """Dedup key for one ChatGPT confirm-payload message.
+
+    The mapping id alone identifies the message globally (rename-proof,
+    bounded length); falls back to a content hash when it is missing.
+    """
+    mapping_id = msg.get('mapping_id')
+    if mapping_id:
+        return f"chatgpt:{mapping_id}"
+    return _generic_source_key(
+        msg.get('role', 'user'), msg.get('created_at', ''),
+        msg.get('text', ''),
+    )
+
+
+def _deleted_match_response(keys, deleted_keys, on_deleted):
+    """409 response when the import collides with soft-deleted nodes and
+    the client hasn't said what to do about them.
+
+    The frontend surfaces this as a restore-or-skip dialog and retries
+    the confirm with ``on_deleted`` set: ``"skip"`` leaves the deleted
+    nodes alone (they stay deleted and are not re-imported), ``"restore"``
+    un-deletes them in place. Returns None when no dialog is needed.
+    """
+    if on_deleted in ('restore', 'skip'):
+        return None
+    matches = sum(1 for k in keys if k in deleted_keys)
+    if not matches:
+        return None
+    return jsonify({
+        "error": "deleted_content_matches",
+        "deleted_matches": matches,
+    }), 409
+
+
+def _restore_node(node_id, content, privacy_level, ai_usage,
+                  token_count=None):
+    """Un-delete a soft-deleted imported node in place.
+
+    Refills content from the archive — this also recovers tombstones
+    whose content was already wiped by the cleanup task — and keeps the
+    node id, so existing child links stay intact. Privacy/AI-usage are
+    set to this import's choices, like any other (re)imported node.
+    """
+    node = Node.query.get(node_id)
+    node.content = content
+    node.token_count = (
+        token_count if token_count is not None
+        else approximate_token_count(content)
+    )
+    node.privacy_level = privacy_level
+    node.ai_usage = ai_usage
+    node.deleted_at = None
+
+
+def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage):
+    """Apply this import's privacy/ai_usage to already-imported nodes.
+
+    Re-importing an archive is also how users change their mind about
+    import settings, so dedup-skipped (alive) nodes adopt the values
+    chosen for this import instead of being a pure no-op. Returns the
+    number of nodes whose settings actually changed; callers report it
+    as ``updated`` and keep it disjoint from ``skipped``.
+    """
+    from sqlalchemy import or_
+    ids = [i for i in node_ids if i is not None]
+    updated = 0
+    # Chunked so a huge archive doesn't produce an unbounded IN clause.
+    for start in range(0, len(ids), 1000):
+        chunk = ids[start:start + 1000]
+        updated += Node.query.filter(
+            Node.id.in_(chunk),
+            or_(
+                Node.privacy_level != privacy_level,
+                Node.ai_usage != ai_usage,
+            ),
+        ).update(
+            {"privacy_level": privacy_level, "ai_usage": ai_usage},
+            synchronize_session=False,
+        )
+    return updated
 
 
 @import_bp.route("/import/analyze", methods=["POST"])
@@ -172,6 +316,7 @@ def confirm_import():
     date_ordering = data.get('date_ordering', 'modified')
     privacy_level = data.get('privacy_level', 'private')
     ai_usage = data.get('ai_usage', 'none')
+    on_deleted = data.get('on_deleted')
 
     if not files:
         return jsonify({"error": "No files provided"}), 400
@@ -188,11 +333,29 @@ def confirm_import():
         files_sorted = sorted(files, key=lambda f: f.get('modified_at', ''))
 
         nodes_created = 0
+        nodes_skipped = 0
+        nodes_restored = 0
         thread_count = 0
+        skipped_alive_ids = []
+        key_index, deleted_keys = _load_source_key_index(current_user.id)
+
+        def _file_source_key(filename, content):
+            """sha256 of (filename, content) for markdown-zip dedup."""
+            raw = f"{filename}\x00{content}"
+            return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+        conflict = _deleted_match_response(
+            (_file_source_key(f.get('filename_without_ext', 'Untitled'),
+                              f.get('content', ''))
+             for f in files_sorted),
+            deleted_keys, on_deleted,
+        )
+        if conflict:
+            return conflict
 
         if import_type == 'single_thread':
             # Create a single thread with all files as sequential nodes
-            parent_node = None
+            parent_id = None
 
             for file_data in files_sorted:
                 filename = file_data.get('filename_without_ext', 'Untitled')
@@ -204,6 +367,22 @@ def confirm_import():
                     node_content = f"# {filename}\n\n{content}"
                 else:
                     node_content = content
+
+                source_key = _file_source_key(filename, content)
+                if source_key in key_index:
+                    # Chain the next new file onto the existing copy so
+                    # partially-skipped imports don't orphan new nodes.
+                    if source_key in deleted_keys and on_deleted == 'restore':
+                        _restore_node(key_index[source_key], node_content,
+                                      privacy_level, ai_usage)
+                        deleted_keys.discard(source_key)
+                        nodes_restored += 1
+                    else:
+                        nodes_skipped += 1
+                        if source_key not in deleted_keys:
+                            skipped_alive_ids.append(key_index[source_key])
+                    parent_id = key_index[source_key]
+                    continue
 
                 # Parse original timestamp from zip metadata
                 node_created_at = None
@@ -218,12 +397,13 @@ def confirm_import():
                 node = Node(
                     user_id=current_user.id,
                     human_owner_id=current_user.id,
-                    parent_id=parent_node.id if parent_node else None,
+                    parent_id=parent_id,
                     node_type="user",
                     content=node_content,
                     token_count=approximate_token_count(node_content),
                     privacy_level=privacy_level,
-                    ai_usage=ai_usage
+                    ai_usage=ai_usage,
+                    source_key=source_key,
                 )
 
                 if node_created_at:
@@ -232,7 +412,8 @@ def confirm_import():
                 db.session.add(node)
                 db.session.flush()  # Get the node ID
 
-                parent_node = node
+                key_index[source_key] = node.id
+                parent_id = node.id
                 nodes_created += 1
 
             thread_count = 1
@@ -249,6 +430,20 @@ def confirm_import():
                     node_content = f"# {filename}\n\n{content}"
                 else:
                     node_content = content
+
+                source_key = _file_source_key(filename, content)
+                if source_key in key_index:
+                    if source_key in deleted_keys and on_deleted == 'restore':
+                        _restore_node(key_index[source_key], node_content,
+                                      privacy_level, ai_usage)
+                        deleted_keys.discard(source_key)
+                        nodes_restored += 1
+                    else:
+                        nodes_skipped += 1
+                        if source_key not in deleted_keys:
+                            skipped_alive_ids.append(key_index[source_key])
+                    continue
+                key_index[source_key] = None  # id not needed: no chaining
 
                 # Parse original timestamp from zip metadata
                 node_created_at = None
@@ -268,7 +463,8 @@ def confirm_import():
                     content=node_content,
                     token_count=approximate_token_count(node_content),
                     privacy_level=privacy_level,
-                    ai_usage=ai_usage
+                    ai_usage=ai_usage,
+                    source_key=source_key,
                 )
 
                 if node_created_at:
@@ -277,7 +473,12 @@ def confirm_import():
                 db.session.add(node)
                 nodes_created += 1
 
-            thread_count = len(files_sorted)
+            thread_count = nodes_created
+
+        nodes_updated = _apply_settings_to_skipped(
+            skipped_alive_ids, privacy_level, ai_usage
+        )
+        nodes_skipped -= nodes_updated
 
         # Commit all nodes
         db.session.commit()
@@ -344,6 +545,10 @@ def confirm_import():
             "nodes_created": nodes_created,
             "thread_count": thread_count,
             "profile_update_task_id": profile_update_task_id,
+            "created": nodes_created,
+            "skipped": nodes_skipped,
+            "restored": nodes_restored,
+            "updated": nodes_updated,
         }), 201
 
     except Exception as e:
@@ -511,7 +716,8 @@ def analyze_claude_import():
                         {
                             "text": "...",
                             "sender": "human" | "assistant",
-                            "created_at": "..."
+                            "created_at": "...",
+                            "uuid": "..."
                         }
                     ],
                     "message_count": N,
@@ -565,7 +771,11 @@ def analyze_claude_import():
                     "text": text,
                     "sender": sender,
                     "created_at": created_at,
-                    "token_count": token_count
+                    "token_count": token_count,
+                    # Stable per-message id from the Claude export.
+                    # Survives analyze->confirm so re-imports dedup on
+                    # the original message identity (rename-proof).
+                    "uuid": msg.get('uuid', ''),
                 })
 
                 total_tokens += token_count
@@ -654,7 +864,20 @@ def confirm_claude_import():
     if not conversations:
         return jsonify({"error": "No conversations provided"}), 400
 
+    on_deleted = data.get('on_deleted')
+
     try:
+        key_index, deleted_keys = _load_source_key_index(current_user.id)
+        conflict = _deleted_match_response(
+            (_claude_msg_key(m)
+             for conv in conversations
+             for m in conv.get('messages', [])
+             if m.get('text')),
+            deleted_keys, on_deleted,
+        )
+        if conflict:
+            return conflict
+
         # Get or create the synthetic user for claude-web nodes
         llm_user = User.query.filter_by(username="claude-web").first()
         if not llm_user:
@@ -665,7 +888,10 @@ def confirm_claude_import():
             db.session.flush()
 
         nodes_created = 0
+        nodes_skipped = 0
+        nodes_restored = 0
         thread_count = 0
+        skipped_alive_ids = []
 
         # Sort conversations by created_at ascending
         conversations_sorted = sorted(
@@ -680,7 +906,8 @@ def confirm_claude_import():
             if not messages:
                 continue
 
-            parent_node = None
+            parent_id = None
+            conv_started_new_thread = False
 
             for i, msg in enumerate(messages):
                 text = msg.get('text', '')
@@ -697,6 +924,23 @@ def confirm_claude_import():
 
                 is_assistant = sender == 'assistant'
 
+                source_key = _claude_msg_key(msg)
+                if source_key in key_index:
+                    # Chain the next new message onto the existing copy
+                    # so overlap re-imports extend the original thread.
+                    if (source_key in deleted_keys
+                            and on_deleted == 'restore'):
+                        _restore_node(key_index[source_key], node_content,
+                                      privacy_level, ai_usage)
+                        deleted_keys.discard(source_key)
+                        nodes_restored += 1
+                    else:
+                        nodes_skipped += 1
+                        if source_key not in deleted_keys:
+                            skipped_alive_ids.append(key_index[source_key])
+                    parent_id = key_index[source_key]
+                    continue
+
                 # Parse original timestamp from Claude export
                 msg_created_at = None
                 raw_ts = msg.get('created_at', '')
@@ -712,25 +956,38 @@ def confirm_claude_import():
                 node = Node(
                     user_id=llm_user.id if is_assistant else current_user.id,
                     human_owner_id=current_user.id,
-                    parent_id=parent_node.id if parent_node else None,
+                    parent_id=parent_id,
                     node_type="llm" if is_assistant else "user",
                     llm_model="claude-web" if is_assistant else None,
                     content=node_content,
                     token_count=approximate_token_count(node_content),
                     privacy_level=privacy_level,
-                    ai_usage=ai_usage
+                    ai_usage=ai_usage,
+                    source_key=source_key,
                 )
 
                 if msg_created_at:
                     node.created_at = msg_created_at
 
+                # A node created without a parent starts a new thread;
+                # nodes chained onto an existing copy extend an old one.
+                if parent_id is None:
+                    conv_started_new_thread = True
+
                 db.session.add(node)
                 db.session.flush()
 
-                parent_node = node
+                key_index[source_key] = node.id
+                parent_id = node.id
                 nodes_created += 1
 
-            thread_count += 1
+            if conv_started_new_thread:
+                thread_count += 1
+
+        nodes_updated = _apply_settings_to_skipped(
+            skipped_alive_ids, privacy_level, ai_usage
+        )
+        nodes_skipped -= nodes_updated
 
         db.session.commit()
 
@@ -804,6 +1061,10 @@ def confirm_claude_import():
             "nodes_created": nodes_created,
             "thread_count": thread_count,
             "profile_update_task_id": profile_update_task_id,
+            "created": nodes_created,
+            "skipped": nodes_skipped,
+            "restored": nodes_restored,
+            "updated": nodes_updated,
         }), 201
 
     except Exception as e:
@@ -849,6 +1110,7 @@ def confirm_twitter_import():
     include_replies = data.get('include_replies', False)
     privacy_level = data.get('privacy_level', 'private')
     ai_usage = data.get('ai_usage', 'none')
+    on_deleted = data.get('on_deleted')
 
     if not tweets:
         return jsonify({"error": "No tweets provided"}), 400
@@ -870,16 +1132,56 @@ def confirm_twitter_import():
         )
 
         nodes_created = 0
+        nodes_skipped = 0
+        nodes_restored = 0
         thread_count = 0
+        skipped_alive_ids = []
+        key_index, deleted_keys = _load_source_key_index(current_user.id)
+
+        def _tweet_source_key(tweet_data):
+            """twitter:<id_str>; content hash when id_str is absent."""
+            id_str = tweet_data.get('id_str', '')
+            if id_str:
+                return f"twitter:{id_str}"
+            return _generic_source_key(
+                "twitter",
+                tweet_data.get('created_at', ''),
+                tweet_data.get('full_text', ''),
+            )
+
+        conflict = _deleted_match_response(
+            (_tweet_source_key(t) for t in tweets_sorted),
+            deleted_keys, on_deleted,
+        )
+        if conflict:
+            return conflict
 
         if import_type == 'single_thread':
-            parent_node = None
+            parent_id = None
 
             for tweet_data in tweets_sorted:
                 content = tweet_data.get('full_text', '')
                 token_count = tweet_data.get(
                     'token_count', approximate_token_count(content)
                 )
+
+                source_key = _tweet_source_key(tweet_data)
+                if source_key in key_index:
+                    # Chain the next new tweet onto the existing copy so
+                    # partially-skipped imports don't orphan new nodes.
+                    if source_key in deleted_keys and on_deleted == 'restore':
+                        _restore_node(
+                            key_index[source_key], content,
+                            privacy_level, ai_usage, token_count
+                        )
+                        deleted_keys.discard(source_key)
+                        nodes_restored += 1
+                    else:
+                        nodes_skipped += 1
+                        if source_key not in deleted_keys:
+                            skipped_alive_ids.append(key_index[source_key])
+                    parent_id = key_index[source_key]
+                    continue
 
                 # Parse original Twitter timestamp
                 tweet_created_at = None
@@ -895,12 +1197,13 @@ def confirm_twitter_import():
                 node = Node(
                     user_id=current_user.id,
                     human_owner_id=current_user.id,
-                    parent_id=parent_node.id if parent_node else None,
+                    parent_id=parent_id,
                     node_type="user",
                     content=content,
                     token_count=token_count,
                     privacy_level=privacy_level,
-                    ai_usage=ai_usage
+                    ai_usage=ai_usage,
+                    source_key=source_key,
                 )
 
                 if tweet_created_at:
@@ -909,7 +1212,8 @@ def confirm_twitter_import():
                 db.session.add(node)
                 db.session.flush()
 
-                parent_node = node
+                key_index[source_key] = node.id
+                parent_id = node.id
                 nodes_created += 1
 
             thread_count = 1
@@ -920,6 +1224,22 @@ def confirm_twitter_import():
                 token_count = tweet_data.get(
                     'token_count', approximate_token_count(content)
                 )
+
+                source_key = _tweet_source_key(tweet_data)
+                if source_key in key_index:
+                    if source_key in deleted_keys and on_deleted == 'restore':
+                        _restore_node(
+                            key_index[source_key], content,
+                            privacy_level, ai_usage, token_count
+                        )
+                        deleted_keys.discard(source_key)
+                        nodes_restored += 1
+                    else:
+                        nodes_skipped += 1
+                        if source_key not in deleted_keys:
+                            skipped_alive_ids.append(key_index[source_key])
+                    continue
+                key_index[source_key] = None  # id not needed: no chaining
 
                 # Parse original Twitter timestamp
                 tweet_created_at = None
@@ -940,7 +1260,8 @@ def confirm_twitter_import():
                     content=content,
                     token_count=token_count,
                     privacy_level=privacy_level,
-                    ai_usage=ai_usage
+                    ai_usage=ai_usage,
+                    source_key=source_key,
                 )
 
                 if tweet_created_at:
@@ -949,7 +1270,12 @@ def confirm_twitter_import():
                 db.session.add(node)
                 nodes_created += 1
 
-            thread_count = len(tweets_sorted)
+            thread_count = nodes_created
+
+        nodes_updated = _apply_settings_to_skipped(
+            skipped_alive_ids, privacy_level, ai_usage
+        )
+        nodes_skipped -= nodes_updated
 
         db.session.commit()
 
@@ -1020,6 +1346,10 @@ def confirm_twitter_import():
             "nodes_created": nodes_created,
             "thread_count": thread_count,
             "profile_update_task_id": profile_update_task_id,
+            "created": nodes_created,
+            "skipped": nodes_skipped,
+            "restored": nodes_restored,
+            "updated": nodes_updated,
         }), 201
 
     except Exception as e:
@@ -1089,6 +1419,10 @@ def _linearize_chatgpt_messages(mapping):
                         "role": role,
                         "created_at": msg_created_at or '',
                         "model": model,
+                        # Stable per-message id from the export graph.
+                        # Survives analyze->confirm so re-imports dedup
+                        # on the original ChatGPT message identity.
+                        "mapping_id": current,
                     })
 
         children = entry.get('children', [])
@@ -1253,7 +1587,20 @@ def confirm_chatgpt_import():
     if not conversations:
         return jsonify({"error": "No conversations provided"}), 400
 
+    on_deleted = data.get('on_deleted')
+
     try:
+        key_index, deleted_keys = _load_source_key_index(current_user.id)
+        conflict = _deleted_match_response(
+            (_chatgpt_msg_key(m)
+             for conv in conversations
+             for m in conv.get('messages', [])
+             if m.get('text')),
+            deleted_keys, on_deleted,
+        )
+        if conflict:
+            return conflict
+
         # Get or create the synthetic user for chatgpt nodes
         llm_user = User.query.filter_by(username="chatgpt").first()
         if not llm_user:
@@ -1264,7 +1611,10 @@ def confirm_chatgpt_import():
             db.session.flush()
 
         nodes_created = 0
+        nodes_skipped = 0
+        nodes_restored = 0
         thread_count = 0
+        skipped_alive_ids = []
 
         # Sort conversations by created_at ascending
         conversations_sorted = sorted(
@@ -1279,7 +1629,8 @@ def confirm_chatgpt_import():
             if not messages:
                 continue
 
-            parent_node = None
+            parent_id = None
+            conv_started_new_thread = False
 
             for i, msg in enumerate(messages):
                 text = msg.get('text', '')
@@ -1295,6 +1646,23 @@ def confirm_chatgpt_import():
                     node_content = text
 
                 is_assistant = role == 'assistant'
+
+                source_key = _chatgpt_msg_key(msg)
+                if source_key in key_index:
+                    # Chain the next new message onto the existing copy
+                    # so overlap re-imports extend the original thread.
+                    if (source_key in deleted_keys
+                            and on_deleted == 'restore'):
+                        _restore_node(key_index[source_key], node_content,
+                                      privacy_level, ai_usage)
+                        deleted_keys.discard(source_key)
+                        nodes_restored += 1
+                    else:
+                        nodes_skipped += 1
+                        if source_key not in deleted_keys:
+                            skipped_alive_ids.append(key_index[source_key])
+                    parent_id = key_index[source_key]
+                    continue
 
                 # Parse original timestamp
                 msg_created_at = None
@@ -1315,7 +1683,7 @@ def confirm_chatgpt_import():
                         llm_user.id if is_assistant else current_user.id
                     ),
                     human_owner_id=current_user.id,
-                    parent_id=parent_node.id if parent_node else None,
+                    parent_id=parent_id,
                     node_type="llm" if is_assistant else "user",
                     llm_model=model_slug or (
                         "chatgpt" if is_assistant else None
@@ -1323,19 +1691,32 @@ def confirm_chatgpt_import():
                     content=node_content,
                     token_count=approximate_token_count(node_content),
                     privacy_level=privacy_level,
-                    ai_usage=ai_usage
+                    ai_usage=ai_usage,
+                    source_key=source_key,
                 )
 
                 if msg_created_at:
                     node.created_at = msg_created_at
 
+                # A node created without a parent starts a new thread;
+                # nodes chained onto an existing copy extend an old one.
+                if parent_id is None:
+                    conv_started_new_thread = True
+
                 db.session.add(node)
                 db.session.flush()
 
-                parent_node = node
+                key_index[source_key] = node.id
+                parent_id = node.id
                 nodes_created += 1
 
-            thread_count += 1
+            if conv_started_new_thread:
+                thread_count += 1
+
+        nodes_updated = _apply_settings_to_skipped(
+            skipped_alive_ids, privacy_level, ai_usage
+        )
+        nodes_skipped -= nodes_updated
 
         db.session.commit()
 
@@ -1406,6 +1787,10 @@ def confirm_chatgpt_import():
             "nodes_created": nodes_created,
             "thread_count": thread_count,
             "profile_update_task_id": profile_update_task_id,
+            "created": nodes_created,
+            "skipped": nodes_skipped,
+            "restored": nodes_restored,
+            "updated": nodes_updated,
         }), 201
 
     except Exception as e:

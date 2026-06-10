@@ -244,6 +244,22 @@ class Node(db.Model):
     # Soft-delete: non-NULL means scheduled for cleanup after SOFT_DELETE_GRACE_DAYS.
     deleted_at = db.Column(db.DateTime, nullable=True, index=True)
 
+    # Stable per-message identity used to deduplicate imported data.
+    # Scoped per importing human (see import_data.py). NULL for
+    # natively-created nodes. Keys are short ("chatgpt:<uuid>") or a
+    # sha256 hex digest, so they always fit String(255).
+    source_key = db.Column(db.String(255), nullable=True, index=True)
+
+    # DB-level backstop against concurrent imports racing past the
+    # application dedup check. NULL source_key rows are exempt (both
+    # PostgreSQL and SQLite treat NULLs as distinct in unique indexes).
+    __table_args__ = (
+        db.UniqueConstraint(
+            "human_owner_id", "source_key",
+            name="uq_node_human_owner_source_key",
+        ),
+    )
+
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
