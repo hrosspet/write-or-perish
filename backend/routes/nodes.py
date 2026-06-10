@@ -1612,6 +1612,10 @@ def get_tts_status(node_id):
             elif task.state == 'SUCCESS':
                 node.tts_task_status = 'completed'
                 db.session.commit()
+            elif task.state == 'FAILURE':
+                # Surface the worker exception so failures are
+                # diagnosable without SSH access to worker logs.
+                task_info = {"error": str(task.info)[:500]}
         except Exception as e:
             # If Celery check fails, log and continue with DB status
             current_app.logger.warning(f"Failed to check Celery task status: {e}")
