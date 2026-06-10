@@ -22,14 +22,22 @@ def approximate_token_count(text):
 
 
 def _generic_source_key(author, timestamp, content):
-    """Stable fallback dedup key when no source-native id is available."""
-    raw = f"{author}:{timestamp}:{content}"
+    """Stable fallback dedup key when no source-native id is available.
+
+    NUL separators prevent boundary ambiguity between the fields.
+    """
+    raw = f"{author}\x00{timestamp}\x00{content}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _source_key_exists(user_id, key):
+def _load_source_key_index(user_id):
     """
-    True if a node owned by this user with this source_key already exists.
+    Map source_key -> node id for this user's previously imported nodes.
+
+    Loaded once per confirm request so dedup checks are dict lookups
+    instead of one query per message. The node ids let partially-skipped
+    threads chain new messages onto the existing copy of the previous
+    message rather than orphaning them as new roots.
 
     Scoping is on ``human_owner_id`` (the importing human), NOT ``user_id``:
     imported assistant/LLM messages are stored under a synthetic LLM user
@@ -37,16 +45,13 @@ def _source_key_exists(user_id, key):
     importer is recorded in ``human_owner_id``. Scoping on the human owner
     therefore dedups both human and assistant turns per importing user, so
     two different users importing the same archive each keep their own copy.
-
-    Pending (flushed-but-uncommitted) nodes within the same request are
-    covered because db.session.flush() is called after each insert, so the
-    query sees them too.
     """
-    if not key:
-        return False
-    return db.session.query(Node.id).filter_by(
-        human_owner_id=user_id, source_key=key
-    ).first() is not None
+    return dict(
+        db.session.query(Node.source_key, Node.id).filter(
+            Node.human_owner_id == user_id,
+            Node.source_key.isnot(None),
+        )
+    )
 
 
 @import_bp.route("/import/analyze", methods=["POST"])
@@ -219,28 +224,28 @@ def confirm_import():
         nodes_created = 0
         nodes_skipped = 0
         thread_count = 0
-        seen_keys = set()
+        key_index = _load_source_key_index(current_user.id)
 
         def _file_source_key(filename, content):
-            """sha256 of (filename + content) for markdown-zip dedup."""
-            raw = f"{filename}{content}"
+            """sha256 of (filename, content) for markdown-zip dedup."""
+            raw = f"{filename}\x00{content}"
             return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
         if import_type == 'single_thread':
             # Create a single thread with all files as sequential nodes
-            parent_node = None
+            parent_id = None
 
             for file_data in files_sorted:
                 filename = file_data.get('filename_without_ext', 'Untitled')
                 content = file_data.get('content', '')
 
                 source_key = _file_source_key(filename, content)
-                if source_key in seen_keys or _source_key_exists(
-                    current_user.id, source_key
-                ):
+                if source_key in key_index:
+                    # Chain the next new file onto the existing copy so
+                    # partially-skipped imports don't orphan new nodes.
                     nodes_skipped += 1
+                    parent_id = key_index[source_key]
                     continue
-                seen_keys.add(source_key)
 
                 # Add filename as markdown headline only if content doesn't have H1
                 stripped_content = content.lstrip()
@@ -262,7 +267,7 @@ def confirm_import():
                 node = Node(
                     user_id=current_user.id,
                     human_owner_id=current_user.id,
-                    parent_id=parent_node.id if parent_node else None,
+                    parent_id=parent_id,
                     node_type="user",
                     content=node_content,
                     token_count=approximate_token_count(node_content),
@@ -277,7 +282,8 @@ def confirm_import():
                 db.session.add(node)
                 db.session.flush()  # Get the node ID
 
-                parent_node = node
+                key_index[source_key] = node.id
+                parent_id = node.id
                 nodes_created += 1
 
             thread_count = 1
@@ -289,12 +295,10 @@ def confirm_import():
                 content = file_data.get('content', '')
 
                 source_key = _file_source_key(filename, content)
-                if source_key in seen_keys or _source_key_exists(
-                    current_user.id, source_key
-                ):
+                if source_key in key_index:
                     nodes_skipped += 1
                     continue
-                seen_keys.add(source_key)
+                key_index[source_key] = None  # id not needed: no chaining
 
                 # Add filename as markdown headline only if content doesn't have H1
                 stripped_content = content.lstrip()
@@ -329,7 +333,6 @@ def confirm_import():
                     node.created_at = node_created_at
 
                 db.session.add(node)
-                db.session.flush()
                 nodes_created += 1
 
             thread_count = nodes_created
@@ -568,7 +571,8 @@ def analyze_claude_import():
                         {
                             "text": "...",
                             "sender": "human" | "assistant",
-                            "created_at": "..."
+                            "created_at": "...",
+                            "uuid": "..."
                         }
                     ],
                     "message_count": N,
@@ -622,7 +626,11 @@ def analyze_claude_import():
                     "text": text,
                     "sender": sender,
                     "created_at": created_at,
-                    "token_count": token_count
+                    "token_count": token_count,
+                    # Stable per-message id from the Claude export.
+                    # Survives analyze->confirm so re-imports dedup on
+                    # the original message identity (rename-proof).
+                    "uuid": msg.get('uuid', ''),
                 })
 
                 total_tokens += token_count
@@ -724,7 +732,7 @@ def confirm_claude_import():
         nodes_created = 0
         nodes_skipped = 0
         thread_count = 0
-        seen_keys = set()
+        key_index = _load_source_key_index(current_user.id)
 
         # Sort conversations by created_at ascending
         conversations_sorted = sorted(
@@ -735,12 +743,12 @@ def confirm_claude_import():
         for conv in conversations_sorted:
             messages = conv.get('messages', [])
             conv_name = conv.get('name', '')
-            conv_created = conv.get('created_at', '')
 
             if not messages:
                 continue
 
-            parent_node = None
+            parent_id = None
+            conv_started_new_thread = False
 
             for i, msg in enumerate(messages):
                 text = msg.get('text', '')
@@ -757,14 +765,23 @@ def confirm_claude_import():
 
                 is_assistant = sender == 'assistant'
 
-                # Stable dedup key keyed on conversation + message index.
-                source_key = f"claude:{conv_name}:{conv_created}:{i}"
-                if source_key in seen_keys or _source_key_exists(
-                    current_user.id, source_key
-                ):
+                # Stable dedup key. Prefer the export's per-message uuid
+                # (rename-proof, bounded length); fall back to a content
+                # hash when it is missing.
+                msg_uuid = msg.get('uuid')
+                if msg_uuid:
+                    source_key = f"claude:{msg_uuid}"
+                else:
+                    source_key = _generic_source_key(
+                        sender, msg.get('created_at', ''), text
+                    )
+
+                if source_key in key_index:
+                    # Chain the next new message onto the existing copy
+                    # so overlap re-imports extend the original thread.
                     nodes_skipped += 1
+                    parent_id = key_index[source_key]
                     continue
-                seen_keys.add(source_key)
 
                 # Parse original timestamp from Claude export
                 msg_created_at = None
@@ -781,7 +798,7 @@ def confirm_claude_import():
                 node = Node(
                     user_id=llm_user.id if is_assistant else current_user.id,
                     human_owner_id=current_user.id,
-                    parent_id=parent_node.id if parent_node else None,
+                    parent_id=parent_id,
                     node_type="llm" if is_assistant else "user",
                     llm_model="claude-web" if is_assistant else None,
                     content=node_content,
@@ -794,13 +811,20 @@ def confirm_claude_import():
                 if msg_created_at:
                     node.created_at = msg_created_at
 
+                # A node created without a parent starts a new thread;
+                # nodes chained onto an existing copy extend an old one.
+                if parent_id is None:
+                    conv_started_new_thread = True
+
                 db.session.add(node)
                 db.session.flush()
 
-                parent_node = node
+                key_index[source_key] = node.id
+                parent_id = node.id
                 nodes_created += 1
 
-            thread_count += 1
+            if conv_started_new_thread:
+                thread_count += 1
 
         db.session.commit()
 
@@ -944,7 +968,7 @@ def confirm_twitter_import():
         nodes_created = 0
         nodes_skipped = 0
         thread_count = 0
-        seen_keys = set()
+        key_index = _load_source_key_index(current_user.id)
 
         def _tweet_source_key(tweet_data):
             """twitter:<id_str>; content hash when id_str is absent."""
@@ -958,7 +982,7 @@ def confirm_twitter_import():
             )
 
         if import_type == 'single_thread':
-            parent_node = None
+            parent_id = None
 
             for tweet_data in tweets_sorted:
                 content = tweet_data.get('full_text', '')
@@ -967,12 +991,12 @@ def confirm_twitter_import():
                 )
 
                 source_key = _tweet_source_key(tweet_data)
-                if source_key in seen_keys or _source_key_exists(
-                    current_user.id, source_key
-                ):
+                if source_key in key_index:
+                    # Chain the next new tweet onto the existing copy so
+                    # partially-skipped imports don't orphan new nodes.
                     nodes_skipped += 1
+                    parent_id = key_index[source_key]
                     continue
-                seen_keys.add(source_key)
 
                 # Parse original Twitter timestamp
                 tweet_created_at = None
@@ -988,7 +1012,7 @@ def confirm_twitter_import():
                 node = Node(
                     user_id=current_user.id,
                     human_owner_id=current_user.id,
-                    parent_id=parent_node.id if parent_node else None,
+                    parent_id=parent_id,
                     node_type="user",
                     content=content,
                     token_count=token_count,
@@ -1003,7 +1027,8 @@ def confirm_twitter_import():
                 db.session.add(node)
                 db.session.flush()
 
-                parent_node = node
+                key_index[source_key] = node.id
+                parent_id = node.id
                 nodes_created += 1
 
             thread_count = 1
@@ -1016,12 +1041,10 @@ def confirm_twitter_import():
                 )
 
                 source_key = _tweet_source_key(tweet_data)
-                if source_key in seen_keys or _source_key_exists(
-                    current_user.id, source_key
-                ):
+                if source_key in key_index:
                     nodes_skipped += 1
                     continue
-                seen_keys.add(source_key)
+                key_index[source_key] = None  # id not needed: no chaining
 
                 # Parse original Twitter timestamp
                 tweet_created_at = None
@@ -1050,7 +1073,6 @@ def confirm_twitter_import():
                     node.created_at = tweet_created_at
 
                 db.session.add(node)
-                db.session.flush()
                 nodes_created += 1
 
             thread_count = nodes_created
@@ -1376,7 +1398,7 @@ def confirm_chatgpt_import():
         nodes_created = 0
         nodes_skipped = 0
         thread_count = 0
-        seen_keys = set()
+        key_index = _load_source_key_index(current_user.id)
 
         # Sort conversations by created_at ascending
         conversations_sorted = sorted(
@@ -1387,12 +1409,12 @@ def confirm_chatgpt_import():
         for conv in conversations_sorted:
             messages = conv.get('messages', [])
             conv_name = conv.get('name', '')
-            conv_created = conv.get('created_at', '')
 
             if not messages:
                 continue
 
-            parent_node = None
+            parent_id = None
+            conv_started_new_thread = False
 
             for i, msg in enumerate(messages):
                 text = msg.get('text', '')
@@ -1409,25 +1431,23 @@ def confirm_chatgpt_import():
 
                 is_assistant = role == 'assistant'
 
-                # Compute a stable dedup key. Prefer the ChatGPT mapping
-                # id (survives analyze->confirm); fall back to a content
-                # hash when it is missing.
+                # Stable dedup key. The mapping id alone identifies the
+                # message globally (rename-proof, bounded length); fall
+                # back to a content hash when it is missing.
                 mapping_id = msg.get('mapping_id')
                 if mapping_id:
-                    source_key = (
-                        f"chatgpt:{conv_name}:{conv_created}:{mapping_id}"
-                    )
+                    source_key = f"chatgpt:{mapping_id}"
                 else:
                     source_key = _generic_source_key(
-                        role, msg.get('created_at', ''), node_content
+                        role, msg.get('created_at', ''), text
                     )
 
-                if source_key in seen_keys or _source_key_exists(
-                    current_user.id, source_key
-                ):
+                if source_key in key_index:
+                    # Chain the next new message onto the existing copy
+                    # so overlap re-imports extend the original thread.
                     nodes_skipped += 1
+                    parent_id = key_index[source_key]
                     continue
-                seen_keys.add(source_key)
 
                 # Parse original timestamp
                 msg_created_at = None
@@ -1448,7 +1468,7 @@ def confirm_chatgpt_import():
                         llm_user.id if is_assistant else current_user.id
                     ),
                     human_owner_id=current_user.id,
-                    parent_id=parent_node.id if parent_node else None,
+                    parent_id=parent_id,
                     node_type="llm" if is_assistant else "user",
                     llm_model=model_slug or (
                         "chatgpt" if is_assistant else None
@@ -1463,13 +1483,20 @@ def confirm_chatgpt_import():
                 if msg_created_at:
                     node.created_at = msg_created_at
 
+                # A node created without a parent starts a new thread;
+                # nodes chained onto an existing copy extend an old one.
+                if parent_id is None:
+                    conv_started_new_thread = True
+
                 db.session.add(node)
                 db.session.flush()
 
-                parent_node = node
+                key_index[source_key] = node.id
+                parent_id = node.id
                 nodes_created += 1
 
-            thread_count += 1
+            if conv_started_new_thread:
+                thread_count += 1
 
         db.session.commit()
 

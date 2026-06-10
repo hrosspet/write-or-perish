@@ -40,7 +40,7 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
 
 import flask_login as _real_flask_login          # noqa: E402
 from backend.extensions import db as _db         # noqa: E402
-from backend.models import User                  # noqa: E402
+from backend.models import User, Node            # noqa: E402
 import backend.models as _real_backend_models    # noqa: E402
 
 
@@ -300,3 +300,178 @@ class TestAnalyzeClaudeImport:
         resp = _post_conversations(client, [])
         # flask_login redirects unauthenticated requests (302/401).
         assert resp.status_code in (302, 401)
+
+
+# ── POST /api/import/claude/confirm (dedup) ──────────────────────────────
+
+def _confirm_conversations(client, conversations, **extra):
+    """POST analyzed conversations to the Claude confirm endpoint."""
+    body = {"conversations": conversations}
+    body.update(extra)
+    return client.post(
+        "/api/import/claude/confirm",
+        data=json.dumps(body),
+        content_type="application/json",
+    )
+
+
+def _analyzed_conv(name="First chat", created_at="2023-11-14T22:13:20Z",
+                   messages=None):
+    """Build a confirm-shaped conversation (mirrors analyze output)."""
+    if messages is None:
+        messages = [
+            {
+                "text": "hello world",
+                "sender": "human",
+                "created_at": "2023-11-14T22:13:20Z",
+                "uuid": "m1",
+            },
+            {
+                "text": "hi there, friend",
+                "sender": "assistant",
+                "created_at": "2023-11-14T22:13:21Z",
+                "uuid": "m2",
+            },
+        ]
+    return {
+        "name": name,
+        "created_at": created_at,
+        "messages": messages,
+        "message_count": len(messages),
+        "token_count": sum(len(m["text"]) // 4 for m in messages),
+    }
+
+
+class TestAnalyzeClaudeImportUuid:
+    def test_message_uuid_passes_through_analyze(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        msg = _msg(text="hello world")
+        msg["uuid"] = "msg-uuid-1"
+        resp = _post_conversations(
+            client, [_conv(chat_messages=[msg])]
+        )
+        assert resp.status_code == 200
+        out = resp.get_json()["conversations"][0]["messages"][0]
+        assert out["uuid"] == "msg-uuid-1"
+
+
+class TestConfirmClaudeImportDedup:
+    def _count_nodes(self, user_id):
+        return Node.query.filter_by(human_owner_id=user_id).count()
+
+    def test_reimport_same_archive_creates_zero_new_nodes(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        convs = [_analyzed_conv()]
+
+        r1 = _confirm_conversations(client, convs)
+        assert r1.status_code == 201
+        b1 = r1.get_json()
+        assert b1["created"] == 2
+        assert b1["skipped"] == 0
+        assert self._count_nodes(alice.id) == 2
+
+        r2 = _confirm_conversations(client, convs)
+        assert r2.status_code == 201
+        b2 = r2.get_json()
+        assert b2["created"] == 0
+        assert b2["skipped"] == 2
+        assert b2["thread_count"] == 0
+        assert self._count_nodes(alice.id) == 2
+
+    def test_overlapping_snapshot_chains_onto_existing_thread(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        r1 = _confirm_conversations(client, [_analyzed_conv()])
+        assert r1.get_json()["created"] == 2
+
+        extended = _analyzed_conv(messages=[
+            {
+                "text": "hello world",
+                "sender": "human",
+                "created_at": "2023-11-14T22:13:20Z",
+                "uuid": "m1",
+            },
+            {
+                "text": "hi there, friend",
+                "sender": "assistant",
+                "created_at": "2023-11-14T22:13:21Z",
+                "uuid": "m2",
+            },
+            {
+                "text": "one more question",
+                "sender": "human",
+                "created_at": "2023-11-14T22:14:00Z",
+                "uuid": "m3",
+            },
+        ])
+        r2 = _confirm_conversations(client, [extended])
+        b2 = r2.get_json()
+        assert b2["created"] == 1
+        assert b2["skipped"] == 2
+        assert b2["thread_count"] == 0
+        assert self._count_nodes(alice.id) == 3
+
+        new_node = Node.query.filter_by(
+            human_owner_id=alice.id, source_key="claude:m3"
+        ).one()
+        prev_node = Node.query.filter_by(
+            human_owner_id=alice.id, source_key="claude:m2"
+        ).one()
+        assert new_node.parent_id == prev_node.id
+
+    def test_renamed_conversation_still_dedups(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        r1 = _confirm_conversations(client, [_analyzed_conv(name="Old")])
+        assert r1.get_json()["created"] == 2
+
+        r2 = _confirm_conversations(client, [_analyzed_conv(name="New")])
+        b2 = r2.get_json()
+        assert b2["created"] == 0
+        assert b2["skipped"] == 2
+        assert self._count_nodes(alice.id) == 2
+
+    def test_missing_uuid_falls_back_to_content_hash(self, app):
+        # Older analyze payloads (no uuid field) still dedup via the
+        # generic content-hash fallback.
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        messages = [
+            {
+                "text": "hello world",
+                "sender": "human",
+                "created_at": "2023-11-14T22:13:20Z",
+            },
+            {
+                "text": "hi there, friend",
+                "sender": "assistant",
+                "created_at": "2023-11-14T22:13:21Z",
+            },
+        ]
+        convs = [_analyzed_conv(messages=messages)]
+
+        r1 = _confirm_conversations(client, convs)
+        assert r1.get_json()["created"] == 2
+
+        r2 = _confirm_conversations(client, convs)
+        b2 = r2.get_json()
+        assert b2["created"] == 0
+        assert b2["skipped"] == 2
+        assert self._count_nodes(alice.id) == 2

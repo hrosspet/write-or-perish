@@ -583,7 +583,36 @@ class TestConfirmChatgptImportDedup:
         b2 = r2.get_json()
         assert b2["created"] == 1
         assert b2["skipped"] == 2
+        # No new thread was started: the follow-up extends the old one.
+        assert b2["thread_count"] == 0
         assert self._count_nodes(alice.id) == 3
+
+        # The new message must chain onto the existing copy of the
+        # message that precedes it — not become an orphaned root.
+        new_node = Node.query.filter_by(
+            human_owner_id=alice.id, source_key="chatgpt:u2"
+        ).one()
+        prev_node = Node.query.filter_by(
+            human_owner_id=alice.id, source_key="chatgpt:a1"
+        ).one()
+        assert new_node.parent_id == prev_node.id
+
+    def test_renamed_conversation_still_dedups(self, app):
+        # Renaming a conversation between exports must not change the
+        # dedup keys (they are based on the mapping id alone).
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        r1 = _confirm_conversations(client, [_analyzed_conv(name="Old")])
+        assert r1.get_json()["created"] == 2
+
+        r2 = _confirm_conversations(client, [_analyzed_conv(name="New")])
+        b2 = r2.get_json()
+        assert b2["created"] == 0
+        assert b2["skipped"] == 2
+        assert self._count_nodes(alice.id) == 2
 
     def test_dedup_is_scoped_per_user(self, app):
         alice = _make_user("alice")
@@ -635,3 +664,89 @@ class TestConfirmChatgptImportDedup:
             for n in Node.query.filter_by(human_owner_id=alice.id).all()
         ]
         assert all(k and k.startswith("chatgpt:") for k in keys)
+
+
+# ── POST /api/import/confirm (markdown zip, dedup) ───────────────────────
+
+def _confirm_files(client, files, **extra):
+    """POST analyzed markdown files to the generic confirm endpoint."""
+    body = {"files": files}
+    body.update(extra)
+    return client.post(
+        "/api/import/confirm",
+        data=json.dumps(body),
+        content_type="application/json",
+    )
+
+
+def _md_file(name, content, modified_at):
+    return {
+        "filename_without_ext": name,
+        "content": content,
+        "modified_at": modified_at,
+    }
+
+
+class TestConfirmMarkdownImportDedup:
+    def _count_nodes(self, user_id):
+        return Node.query.filter_by(human_owner_id=user_id).count()
+
+    def test_reimport_separate_nodes_skips_existing(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        files = [
+            _md_file("a", "file a content", "2024-01-01T12:00:00"),
+            _md_file("b", "file b content", "2024-01-02T12:00:00"),
+        ]
+
+        r1 = _confirm_files(client, files, import_type="separate_nodes")
+        assert r1.status_code == 201
+        b1 = r1.get_json()
+        assert b1["created"] == 2
+        assert b1["skipped"] == 0
+        assert self._count_nodes(alice.id) == 2
+
+        r2 = _confirm_files(client, files, import_type="separate_nodes")
+        assert r2.status_code == 201
+        b2 = r2.get_json()
+        assert b2["created"] == 0
+        assert b2["skipped"] == 2
+        assert b2["thread_count"] == 0
+        assert self._count_nodes(alice.id) == 2
+
+    def test_single_thread_overlap_chains_onto_existing(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        files = [
+            _md_file("a", "file a content", "2024-01-01T12:00:00"),
+            _md_file("b", "file b content", "2024-01-02T12:00:00"),
+        ]
+        r1 = _confirm_files(client, files, import_type="single_thread")
+        assert r1.get_json()["created"] == 2
+
+        # Re-import with one extra file: the new node must chain onto
+        # the existing copy of "b", not start a fresh root.
+        files_plus = files + [
+            _md_file("c", "file c content", "2024-01-03T12:00:00"),
+        ]
+        r2 = _confirm_files(client, files_plus, import_type="single_thread")
+        b2 = r2.get_json()
+        assert b2["created"] == 1
+        assert b2["skipped"] == 2
+        assert self._count_nodes(alice.id) == 3
+
+        node_b = Node.query.filter(
+            Node.human_owner_id == alice.id,
+            Node.content.contains("file b content"),
+        ).one()
+        node_c = Node.query.filter(
+            Node.human_owner_id == alice.id,
+            Node.content.contains("file c content"),
+        ).one()
+        assert node_c.parent_id == node_b.id
