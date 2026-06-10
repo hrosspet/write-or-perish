@@ -4,7 +4,7 @@ import re
 from backend.extensions import db
 from backend.models import (
     NodeContextArtifact, UserProfile, UserRecentContext, UserTodo,
-    UserAIPreferences,
+    UserAIPreferences, UserArtifact,
 )
 from backend.utils.privacy import AI_ALLOWED
 
@@ -14,6 +14,10 @@ PLACEHOLDER_TO_ARTIFACT = {
     'user_todo': 'todo',
     'user_recent': 'recent_context',
     'user_ai_preferences': 'ai_preferences',
+    # All three artifact placeholders pin the same multi-row type (#158)
+    'user_memory': 'user_artifact',
+    'user_scratchpad': 'user_artifact',
+    'user_artifacts_index': 'user_artifact',
 }
 
 _PLACEHOLDER_RE = re.compile(
@@ -86,6 +90,16 @@ def attach_context_artifacts(node_id, user_id, prompt_record=None):
             artifact_id=todo.id,
         ))
 
+    # Latest version of every user artifact (memory, scratchpad, custom)
+    # the AI is allowed to see — one row per kind (#158).
+    for artifact in UserArtifact.latest_per_kind(user_id).values():
+        if artifact.ai_usage in AI_ALLOWED:
+            db.session.add(NodeContextArtifact(
+                node_id=node_id,
+                artifact_type="user_artifact",
+                artifact_id=artifact.id,
+            ))
+
     # Latest AI preferences that the AI is allowed to see
     ai_prefs = (
         UserAIPreferences.query
@@ -115,22 +129,35 @@ def sync_context_artifacts(node_id, user_id, content):
         artifact_type = PLACEHOLDER_TO_ARTIFACT[match.group(1)]
         needed.add(artifact_type)
 
-    # Get existing non-prompt artifacts
+    # Get existing non-prompt artifacts. 'user_artifact' is a multi-row
+    # type (one row per artifact kind), so collect rows in lists.
     existing = NodeContextArtifact.query.filter_by(
         node_id=node_id
     ).filter(
         NodeContextArtifact.artifact_type != 'prompt'
     ).all()
-    existing_types = {row.artifact_type: row for row in existing}
+    existing_types = {}
+    for row in existing:
+        existing_types.setdefault(row.artifact_type, []).append(row)
 
     # Remove artifacts no longer referenced
-    for artifact_type, row in existing_types.items():
+    for artifact_type, rows in existing_types.items():
         if artifact_type not in needed:
-            db.session.delete(row)
+            for row in rows:
+                db.session.delete(row)
 
     # Add missing artifacts
     for artifact_type in needed:
         if artifact_type in existing_types:
+            continue
+        if artifact_type == 'user_artifact':
+            for artifact in UserArtifact.latest_per_kind(user_id).values():
+                if artifact.ai_usage in AI_ALLOWED:
+                    db.session.add(NodeContextArtifact(
+                        node_id=node_id,
+                        artifact_type='user_artifact',
+                        artifact_id=artifact.id,
+                    ))
             continue
         artifact_id = _resolve_latest_artifact(
             artifact_type, user_id
