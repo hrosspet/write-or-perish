@@ -18,6 +18,8 @@
 
 ## 0. PROGRESS LOG (read this first)
 
+> **GitHub state snapshot (2026-06-10, reconciled against live issues):** closed-completed among triaged issues — #28, #62, #63, #66, #94, #98, #108, #128, #129, #130, #134, #135, #137, **#138**, #142, **#160**, #161, #191; closed-won't-implement — #93. In-flight PRs (NOT merged): #174 (#136), #175 (#91), #194–#201 (overnight+morning batch 2026-06-10: #85, Sentry/health, #158, #155, #187/#192, #189, Wave-6 #104/#110/#139/#179, #131). #105 and #149 dropped from the plan per maintainer (2026-06-10).
+
 **✅ Wave 1 — COMPLETE & merged to `main`/prod (2026-05-29).** All 7 issues shipped via separate PRs, each verified on staging:
 - #142 nginx Server header (PR #162) — required a manual `server_tokens off` + reload on the **VM edge nginx** (the deploy only updates the container config); done on the VM, confirmed `Server: nginx`.
 - #62 disabled-button tooltips (PR #163) — the working fix wraps the disabled button in a non-disabled `<span title=…>` (a `title` on a `disabled` element never shows).
@@ -55,8 +57,8 @@
 - ~~**Todo polish** (#94, #93)~~ — **RESOLVED 2026-05-29:** #94 fixed & closed completed; #93 closed won't-implement. Todo cluster fully closed out.
 - **Import dedupe:** #136 (re-import / snapshot overlap) — now unblocked since #137/#135 shipped; model column + dedupe key, no manual migration. *Best next pick.*
 - **Profile/UX:** #131 (app-wide toast on profile-generation completion), #101 (transparent favicon — needs brand sign-off).
-- **Security:** #91 (reserved usernames — security-critical, final single-item staging pass) + #160 (mic-denied path).
-- Then the keyword cluster (#139→#149, #105) and #138 (markdown rendering, isolated). Decision-gated items (Section 9) remain parked. ~~Also still open from Wave 1: **#161**~~ — #161 confirmed fixed (2026-06-10). **Update 2026-06-10:** #139/#110/#104 implemented (PR in flight, stacked on the caching batch); #105 dropped — likely no longer reproduces per maintainer; #149 dropped from the current plan per maintainer.
+- **Security:** #91 (reserved usernames — PR #175 open). ~~#160 (mic-denied path)~~ — **#160 CLOSED completed** (shipped as `438406c`, 2026-06-04).
+- Then the keyword cluster (#139→#149, #105) and ~~#138 (markdown rendering, isolated)~~ — **#138 CLOSED completed** (2026-06-10). Decision-gated items (Section 9) remain parked. ~~Also still open from Wave 1: **#161**~~ — #161 confirmed fixed (2026-06-10). **Update 2026-06-10:** #139/#110/#104 implemented (PR in flight, stacked on the caching batch); #105 dropped — likely no longer reproduces per maintainer; #149 dropped from the current plan per maintainer.
 
 ---
 
@@ -286,7 +288,7 @@ Principle: front-load XS/S high-confidence wins, sequence shared-plumbing, isola
 **Final single-item pass:** before merging **#91** to `main`, do a dedicated single-item staging push + Chrome re-check (security-critical; a batch sibling must not mask a regression).
 **Merge:** green PRs → `main`.
 
-### Wave 7 (optional, isolated) — high-regression / decision-gated
+### Wave 7 (optional, isolated) — high-regression / decision-gated — ◐ #138 CLOSED completed (2026-06-10)
 **Issues:** #138 (markdown rendering — touches a component consumed by Feed/NodeDetail/Profile; isolate so a regression is easy to spot), and any unblocked profile-policy verification (#65 verify-and-close-or-fix-by-#32).
 **Why isolated:** #138 has broad consumer surface and theme interactions; give it its own staging cycle. Note: the todo list itself renders via `TodoItem`, not MarkdownBody, so #138's checkbox-construct changes do not affect TodoPage directly — but verify any shared markdown styling.
 **Chrome test cycle:** Seed a node exercising all markdown constructs → assert styled headings/blockquote/table/hr/lists/code in NodeDetail, Feed, Profile; toggle light/dark and re-verify; confirm checkbox-construct rendering still works where MarkdownBody is used.
