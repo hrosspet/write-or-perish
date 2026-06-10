@@ -301,3 +301,139 @@ def test_null_cutoff_high_data_still_triggers(app, monkeypatch):
     exports.maybe_trigger_incremental_profile_update(user)
     assert "yes" in called              # crossed threshold -> triggered
     assert called["yes"][0][0] == user.id
+
+
+# ── #183: full regen preserves user-written profiles ─────────────────────
+
+def _mk_user_profile(user, content, created_at, generated_by="user"):
+    profile = UserProfile(
+        user_id=user.id, generated_by=generated_by, tokens_used=0,
+    )
+    profile.set_content(content)
+    _db.session.add(profile)
+    _db.session.commit()
+    if created_at:
+        profile.created_at = created_at
+        _db.session.commit()
+    return profile
+
+
+def test_183_iterative_injects_at_chronological_chunk(app, monkeypatch):
+    """The hand-written profile lands in the first chunk whose window
+    reaches its creation date — not in earlier chunks."""
+    import backend.tasks.exports as exports
+
+    user = User(username="writer", plan="alpha", approved=True)
+    _db.session.add(user)
+    _db.session.commit()
+    _mk_user_profile(user, "MY HAND-WRITTEN SELF-DESCRIPTION",
+                     datetime(2025, 6, 1))
+
+    chunks = [
+        {"content": "old data", "token_count": 90000,
+         "latest_node_created_at": datetime(2025, 1, 1)},
+        {"content": "newer data", "token_count": 90000,
+         "latest_node_created_at": datetime(2025, 12, 1)},
+        None,
+    ]
+    calls = iter(chunks)
+    monkeypatch.setattr(
+        exports, "build_user_export_content",
+        lambda *a, **k: next(calls))
+
+    prompts = []
+
+    def fake_llm(self_, model_id, prompt, uid, keys, **kw):
+        prompts.append(prompt)
+        return {"content": f"profile v{len(prompts)}", "total_tokens": 1,
+                "input_tokens": 1, "output_tokens": 1}
+
+    monkeypatch.setattr(exports, "_call_llm_with_retries", fake_llm)
+
+    exports._chunked_profile_loop(
+        MagicMock(), user, "test-model", "{existing_profile}{new_data}",
+        {}, first_chunk_prompt_fn=lambda c: "GEN:" + c["content"],
+        user_written_profile=exports._latest_user_written_profile(user.id),
+    )
+
+    assert len(prompts) == 2
+    # Chunk 1 (Jan 2025) predates the profile (Jun 2025) → no injection
+    assert "HAND-WRITTEN" not in prompts[0]
+    # Chunk 2 (Dec 2025) reaches it → injected with the dated note
+    assert "HAND-WRITTEN" in prompts[1]
+    assert "2025-06-01" in prompts[1]
+
+
+def test_183_reconciles_when_profile_newer_than_all_data(app, monkeypatch):
+    """All data predates the hand-written profile → one extra
+    reconciliation pass at the end instead of dropping it."""
+    import backend.tasks.exports as exports
+
+    user = User(username="writer2", plan="alpha", approved=True)
+    _db.session.add(user)
+    _db.session.commit()
+    _mk_user_profile(user, "LATE SELF-DESCRIPTION", datetime(2026, 1, 1))
+
+    chunks = [
+        {"content": "only old data", "token_count": 90000,
+         "latest_node_created_at": datetime(2025, 1, 1)},
+        None,
+    ]
+    calls = iter(chunks)
+    monkeypatch.setattr(
+        exports, "build_user_export_content",
+        lambda *a, **k: next(calls))
+
+    prompts = []
+
+    def fake_llm(self_, model_id, prompt, uid, keys, **kw):
+        prompts.append(prompt)
+        return {"content": f"profile v{len(prompts)}", "total_tokens": 1,
+                "input_tokens": 1, "output_tokens": 1}
+
+    monkeypatch.setattr(exports, "_call_llm_with_retries", fake_llm)
+
+    profile_id, chunk_num, _ = exports._chunked_profile_loop(
+        MagicMock(), user, "test-model", "{existing_profile}|{new_data}",
+        {}, first_chunk_prompt_fn=lambda c: "GEN:" + c["content"],
+        user_written_profile=exports._latest_user_written_profile(user.id),
+    )
+
+    assert len(prompts) == 2  # data chunk + reconciliation pass
+    assert "LATE SELF-DESCRIPTION" in prompts[1]
+    assert "2026-01-01" in prompts[1]
+    assert chunk_num == 2
+    # The reconciliation result is the saved head profile
+    # (_save_profile prepends a coverage-metadata header)
+    head = UserProfile.query.get(profile_id)
+    assert head.get_content().endswith("profile v2")
+
+
+def test_183_single_pass_includes_dated_block(app, monkeypatch):
+    import backend.tasks.exports as exports
+
+    user = User(username="writer3", plan="alpha", approved=True)
+    _db.session.add(user)
+    _db.session.commit()
+    profile = _mk_user_profile(
+        user, "SINGLE PASS SELF-DESC", datetime(2025, 3, 3))
+
+    prompts = []
+
+    def fake_llm(self_, model_id, prompt, uid, keys, **kw):
+        prompts.append(prompt)
+        return {"content": "generated", "total_tokens": 1,
+                "input_tokens": 1, "output_tokens": 1}
+
+    monkeypatch.setattr(exports, "_call_llm_with_retries", fake_llm)
+
+    exports._single_pass_generation(
+        MagicMock(), user, "test-model", "TPL:{user_export}",
+        {"content": "all the data", "token_count": 10,
+         "latest_node_created_at": datetime(2025, 1, 1)},
+        {}, user_written_profile=profile,
+    )
+    assert len(prompts) == 1
+    assert "SINGLE PASS SELF-DESC" in prompts[0]
+    assert "2025-03-03" in prompts[0]
+    assert "all the data" in prompts[0]
