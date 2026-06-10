@@ -52,6 +52,83 @@ function ImportSpinner({ stage, fallback }) {
   );
 }
 
+// Centered modal overlay matching the import-picker pattern: portal to
+// document.body, dimmed blurred backdrop, card with a quiet rise-in.
+// Backdrop click and Escape both call onDismiss.
+function ModalShell({ onDismiss, children, maxWidth = "440px" }) {
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape") onDismiss();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onDismiss]);
+
+  return ReactDOM.createPortal(
+    <div
+      onClick={onDismiss}
+      style={{
+        position: "fixed",
+        top: 0, left: 0, right: 0, bottom: 0,
+        backgroundColor: "rgba(5, 4, 3, 0.75)",
+        backdropFilter: "blur(10px)",
+        WebkitBackdropFilter: "blur(10px)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 2000,
+        animation: "loore-modal-fade 0.25s ease-out",
+      }}
+    >
+      <style>{`
+        @keyframes loore-modal-fade { from { opacity: 0; } }
+        @keyframes loore-modal-rise {
+          from { opacity: 0; transform: translateY(14px) scale(0.98); }
+        }
+      `}</style>
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: "var(--bg-card)",
+          border: "1px solid var(--border)",
+          borderRadius: "12px",
+          padding: "2.5rem",
+          minWidth: "300px",
+          maxWidth,
+          width: "90vw",
+          boxShadow: "0 24px 80px rgba(0,0,0,0.5)",
+          animation: "loore-modal-rise 0.35s cubic-bezier(0.22, 1, 0.36, 1)",
+        }}
+      >
+        {children}
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+// Serif modal heading with a short amber hairline underneath.
+function ModalTitle({ children }) {
+  return (
+    <>
+      <h3 style={{
+        fontFamily: "var(--serif)",
+        fontWeight: 300,
+        fontSize: "1.35rem",
+        color: "var(--text-primary)",
+        margin: 0,
+      }}>{children}</h3>
+      <div style={{
+        width: "2rem",
+        height: "1px",
+        backgroundColor: "var(--accent)",
+        opacity: 0.6,
+        margin: "0.9rem 0 1.4rem",
+      }} />
+    </>
+  );
+}
+
 // Extract the conversations.json blob from a Claude/ChatGPT export zip in
 // the browser, so the full (potentially multi-GB) export with images/audio
 // never has to traverse the network.
@@ -481,71 +558,65 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
 
       {/* Post-import summary: what was actually imported vs skipped */}
       {importResult && (
-        <div style={{
-          marginTop: "20px",
-          padding: "2rem",
-          backgroundColor: "var(--bg-card)",
-          borderRadius: "10px",
-          border: "1px solid var(--border)"
-        }}>
-          <h3 style={{ fontFamily: "var(--serif)", fontWeight: 300, color: "var(--text-primary)", margin: "0 0 12px 0" }}>
-            Import Finished
-          </h3>
-          <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
-            <strong style={{ color: "var(--text-primary)" }}>{importResult.created}</strong>{" "}
-            new node{importResult.created !== 1 ? "s" : ""} imported
-            {importResult.restored > 0 && (
-              <>
-                {", "}
-                <strong style={{ color: "var(--text-primary)" }}>{importResult.restored}</strong>{" "}
-                restored from deleted
-              </>
-            )}
-            {importResult.skipped > 0 && (
-              <>
-                {", "}
-                <strong style={{ color: "var(--text-primary)" }}>{importResult.skipped}</strong>{" "}
-                skipped (already imported)
-              </>
-            )}
-            .
-          </p>
-          {importResult.created === 0 && !importResult.restored && (
-            <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
+        <ModalShell onDismiss={() => window.location.reload()}>
+          <ModalTitle>Import Finished</ModalTitle>
+          <div style={{ display: "flex", gap: "2.4rem", marginBottom: "1.3rem" }}>
+            {[
+              { label: "Imported", value: importResult.created, highlight: importResult.created > 0 },
+              { label: "Restored", value: importResult.restored || 0, highlight: importResult.restored > 0 },
+              { label: "Skipped", value: importResult.skipped || 0, highlight: false },
+            ].filter((s) => s.label === "Imported" || s.value > 0).map((s) => (
+              <div key={s.label}>
+                <div style={{
+                  fontFamily: "var(--serif)",
+                  fontWeight: 300,
+                  fontSize: "2.2rem",
+                  lineHeight: 1.1,
+                  color: s.highlight ? "var(--accent)" : "var(--text-primary)",
+                }}>{s.value}</div>
+                <div style={{
+                  fontFamily: "var(--sans)",
+                  fontWeight: 400,
+                  fontSize: "0.7rem",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.14em",
+                  color: "var(--text-muted)",
+                  marginTop: "0.3rem",
+                }}>{s.label}</div>
+              </div>
+            ))}
+          </div>
+          {importResult.created === 0 && !importResult.restored ? (
+            <p style={{ fontFamily: "var(--serif)", fontStyle: "italic", fontWeight: 300, color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
               Everything in this archive was already imported — nothing new was added.
             </p>
+          ) : (
+            <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.88rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
+              Skipped items were already imported and left untouched.
+            </p>
           )}
-          <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
-            <button
-              onClick={() => window.location.reload()}
-              style={primaryBtnStyle}
-            >
-              OK
-            </button>
-          </div>
-        </div>
+          <button
+            onClick={() => window.location.reload()}
+            style={primaryBtnStyle}
+          >
+            OK
+          </button>
+        </ModalShell>
       )}
 
       {/* Restore-or-skip prompt for imports matching deleted content */}
       {deletedPrompt && (
-        <div style={{
-          marginTop: "20px",
-          padding: "2rem",
-          backgroundColor: "var(--bg-card)",
-          borderRadius: "10px",
-          border: "1px solid var(--border)"
-        }}>
-          <h3 style={{ fontFamily: "var(--serif)", fontWeight: 300, color: "var(--text-primary)", margin: "0 0 12px 0" }}>
-            Previously Deleted Content Found
-          </h3>
-          <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
+        <ModalShell onDismiss={() => setDeletedPrompt(null)}>
+          <ModalTitle>Previously Deleted Content</ModalTitle>
+          <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300, margin: "0 0 1.4rem" }}>
             <strong style={{ color: "var(--text-primary)" }}>{deletedPrompt.count}</strong>{" "}
-            message{deletedPrompt.count !== 1 ? "s" : ""} in this import match
-            content you previously deleted. Do you want to restore{" "}
+            message{deletedPrompt.count !== 1 ? "s" : ""} in this import{" "}
+            {deletedPrompt.count !== 1 ? "match" : "matches"} content you
+            previously deleted. Restore{" "}
             {deletedPrompt.count !== 1 ? "them" : "it"}, or keep{" "}
             {deletedPrompt.count !== 1 ? "them" : "it"} deleted?
           </p>
-          <div style={{ display: "flex", gap: "10px", marginTop: "15px", flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", alignItems: "center" }}>
             <button
               onClick={() => {
                 const retry = deletedPrompt.retry;
@@ -568,12 +639,12 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
             </button>
             <button
               onClick={() => setDeletedPrompt(null)}
-              style={cancelBtnStyle}
+              style={{ ...ghostBtnStyle, border: "none", color: "var(--text-muted)" }}
             >
               Cancel import
             </button>
           </div>
-        </div>
+        </ModalShell>
       )}
 
       {/* Shared import option labels */}
