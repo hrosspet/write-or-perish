@@ -785,6 +785,10 @@ class TTSChunk(db.Model):
     profile_id = db.Column(db.Integer, db.ForeignKey("user_profile.id"), nullable=True)
     # Zero-based index of the chunk
     chunk_index = db.Column(db.Integer, nullable=False)
+    # Chapter metadata (#145): which markdown section this chunk belongs
+    # to. section_title is None for content before the first heading.
+    section_index = db.Column(db.Integer, nullable=True)
+    section_title = db.Column(db.String(256), nullable=True)
     # URL to the audio chunk file
     audio_url = db.Column(db.String, nullable=True)
     # Duration of the audio chunk in seconds (from pydub/ffprobe)
