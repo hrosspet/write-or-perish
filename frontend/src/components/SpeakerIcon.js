@@ -42,10 +42,11 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
   const id = isNode ? nodeId : profileId;
   const baseUrl = isNode ? `/nodes/${id}` : `/profile/${id}`;
 
-  // Extract header from content if available
+  // Extract header from content if available. The "Node N" form is a
+  // fallback only — when the content has a title, show just the title.
   const header = extractMarkdownHeader(content);
   const baseTitle = isNode ? `Node ${id}` : `Profile ${id}`;
-  const fullTitle = header ? `${baseTitle}: ${header}` : baseTitle;
+  const fullTitle = header || baseTitle;
 
   // Chapter list for TTS playback (#145) — empty for unstructured text.
   const fetchChapters = useCallback(async () => {
