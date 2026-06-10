@@ -244,7 +244,8 @@ def _load_prompt(name, user_id=None):
 
 def _call_llm_with_retries(self, model_id, prompt_text, user_id,
                             api_keys, progress_base=50,
-                            status_label='Generating profile'):
+                            status_label='Generating profile',
+                            max_tokens=None):
     """Call LLM with retry logic for prompt-too-long errors.
 
     Returns (response_dict, profile_text, input_tokens, output_tokens).
@@ -263,7 +264,8 @@ def _call_llm_with_retries(self, model_id, prompt_text, user_id,
 
         try:
             response = LLMProvider.get_completion(model_id, messages,
-                                                  api_keys)
+                                                  api_keys,
+                                                  max_tokens=max_tokens)
             return response
         except PromptTooLongError as e:
             if attempt == MAX_RETRIES:
@@ -499,12 +501,13 @@ def _do_incremental_update(self, user, model_id, previous_profile_id,
 
     return _do_iterative_incremental_update(
         self, user, model_id, prev_profile, update_template,
-        cutoff, api_keys
+        cutoff, api_keys, max_output_tokens=max_output_tokens
     )
 
 
 def _do_iterative_incremental_update(self, user, model_id, prev_profile,
-                                     update_template, cutoff, api_keys):
+                                     update_template, cutoff, api_keys,
+                                     max_output_tokens=None):
     """Incremental update with chunked processing."""
     logger.info(
         f"Starting iterative incremental update for user {user.id}, "
@@ -521,6 +524,7 @@ def _do_iterative_incremental_update(self, user, model_id, prev_profile,
     current_profile_id, chunk_num, cumulative_source_tokens = \
         _chunked_profile_loop(
             self, user, model_id, update_template, api_keys,
+            max_output_tokens=max_output_tokens,
             initial_profile_content=base_content,
             initial_profile_id=prev_profile.id,
             initial_source_tokens=prev_profile.source_tokens_used or 0,
@@ -591,7 +595,7 @@ def _do_initial_generation(self, user, model_id, context_window,
         # Single-pass generation
         return _single_pass_generation(
             self, user, model_id, gen_template, total_export,
-            api_keys
+            api_keys, max_output_tokens
         )
     else:
         # Iterative build
@@ -967,6 +971,7 @@ def _iterative_generation(self, user, model_id, gen_template, budget,
     current_profile_id, chunk_num, cumulative_source_tokens = \
         _chunked_profile_loop(
             self, user, model_id, update_template, api_keys,
+            max_output_tokens=max_output_tokens,
             first_chunk_prompt_fn=lambda chunk: gen_template.replace(
                 "{user_export}", chunk["content"]
             ),
