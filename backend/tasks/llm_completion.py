@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from backend.celery_app import celery, flask_app
 from backend.models import (
     Node, User, UserProfile, UserRecentContext, UserTodo, APICostLog,
-    UserAIPreferences, Draft,
+    UserAIPreferences, UserArtifact, UserFeedback, Draft,
 )
 from backend.extensions import db
 from backend.llm_providers import LLMProvider, PromptTooLongError
@@ -44,6 +44,10 @@ USER_RECENT_PLACEHOLDER = "{user_recent}"
 USER_RECENT_RAW_PLACEHOLDER = "{user_recent_raw}"
 # Placeholder for AI interaction preferences
 USER_AI_PREFERENCES_PLACEHOLDER = "{user_ai_preferences}"
+# Placeholders for user artifacts — LLM memory/scratchpad + index (#158)
+USER_MEMORY_PLACEHOLDER = "{user_memory}"
+USER_SCRATCHPAD_PLACEHOLDER = "{user_scratchpad}"
+USER_ARTIFACTS_INDEX_PLACEHOLDER = "{user_artifacts_index}"
 
 # ── Voice tool definitions ──────────────────────────────────────────────
 
@@ -111,7 +115,141 @@ VOICE_TOOLS = [
             "required": ["updated_preferences"],
         },
     },
+    {
+        "name": "update_artifact",
+        "description": (
+            "Create or update one of the user's artifacts — persistent "
+            "documents that survive across sessions. Built-in kinds: "
+            "'memory' (durable facts and observations about the user "
+            "worth remembering long-term — write here whenever you learn "
+            "something that future sessions should know) and 'scratchpad' "
+            "(your working notes for ongoing threads of work). You can "
+            "also create new kinds for the user on request (e.g. "
+            "'reading-list'). The updated_content must be the FULL new "
+            "text of the artifact (not a diff) — it replaces the previous "
+            "version, and old versions stay in history. Call proactively "
+            "for memory-worthy facts; no confirmation is needed. Always "
+            "produce a text response alongside the call."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "description": (
+                        "Artifact slug: 'memory', 'scratchpad', or a "
+                        "short lowercase dash-separated name for a "
+                        "custom artifact."
+                    ),
+                },
+                "updated_content": {
+                    "type": "string",
+                    "description": (
+                        "The complete new artifact text as markdown. "
+                        "Carry forward everything still relevant from "
+                        "the current version."
+                    ),
+                },
+                "title": {
+                    "type": "string",
+                    "description": (
+                        "Display title. Only needed when creating a new "
+                        "custom artifact."
+                    ),
+                },
+            },
+            "required": ["kind", "updated_content"],
+        },
+    },
+    {
+        "name": "read_artifact",
+        "description": (
+            "Request the full content of one of the user's artifacts "
+            "listed in the artifacts index. The content is NOT returned "
+            "immediately — it will be injected into your context at the "
+            "start of the NEXT turn. Use this when the index shows an "
+            "artifact relevant to the conversation that you don't already "
+            "see (memory and scratchpad are always in context — never "
+            "read those). Tell the user you're pulling it up. Always "
+            "produce a text response alongside the call."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "description": "Slug of the artifact to read.",
+                },
+            },
+            "required": ["kind"],
+        },
+    },
+    {
+        "name": "submit_feedback",
+        "description": (
+            "Submit feedback about Loore itself to its creators on the "
+            "user's behalf. Call this when the user expresses feedback "
+            "about the product — praise, frustration, confusion, ideas — "
+            "and either asks you to pass it on or agrees when you offer. "
+            "For concrete bugs or feature requests prefer proposing a "
+            "GitHub issue instead; feedback is for everything that "
+            "doesn't fit an issue. Quote or faithfully summarize the "
+            "user's own words. Always produce a text response alongside "
+            "the call."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": (
+                        "The feedback text, faithful to what the user "
+                        "expressed."
+                    ),
+                },
+                "category": {
+                    "type": "string",
+                    "enum": ["praise", "frustration", "idea", "other"],
+                    "description": "Best-fit category.",
+                },
+            },
+            "required": ["content"],
+        },
+    },
 ]
+
+
+_ARTIFACT_KIND_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,47}$')
+
+
+def get_user_artifacts_context(user_id, pinned_node=None):
+    """Resolve user artifacts for the agentic prompt (#158).
+
+    Returns (memory_content, scratchpad_content, index_text). Pinned to the
+    per-session snapshot recorded on *pinned_node* (#191 semantics), falling
+    back to latest for legacy nodes. ai_usage is re-checked on resolved rows.
+    """
+    artifacts = pinned_node.get_user_artifacts() if pinned_node else {}
+    if not artifacts:
+        artifacts = UserArtifact.latest_per_kind(user_id)
+    artifacts = {
+        kind: a for kind, a in artifacts.items()
+        if a.ai_usage in AI_ALLOWED
+    }
+
+    memory = artifacts.get("memory")
+    scratchpad = artifacts.get("scratchpad")
+    memory_content = memory.get_content() if memory else ""
+    scratchpad_content = scratchpad.get_content() if scratchpad else ""
+
+    index_lines = []
+    for kind, artifact in sorted(artifacts.items()):
+        if kind in ("memory", "scratchpad"):
+            continue
+        tokens = approximate_token_count(artifact.get_content() or "")
+        index_lines.append(f"- {kind} — \"{artifact.title}\" (~{tokens} tokens)")
+    index_text = "\n".join(index_lines) if index_lines else "(none)"
+    return memory_content, scratchpad_content, index_text
 
 
 def get_user_ai_preferences_content(user_id, pinned_node=None):
@@ -269,6 +407,37 @@ def _scan_proposal_statuses(node_chain):
 
             elif name == "update_ai_preferences" and not reported:
                 notes.append("[AI preferences were updated.]")
+                to_mark.append((node, name))
+
+            elif name == "update_artifact" and not reported:
+                if entry.get("status") == "success":
+                    kind = entry.get("kind", "?")
+                    verb = ("created" if entry.get("created")
+                            else "updated")
+                    notes.append(f"[Artifact '{kind}' was {verb}.]")
+                to_mark.append((node, name))
+
+            elif name == "read_artifact" and not reported:
+                if entry.get("status") == "success":
+                    artifact = UserArtifact.query.get(
+                        entry.get("artifact_id"))
+                    if artifact is not None:
+                        # Resolved fresh from the encrypted row — content
+                        # is never stored in tool_calls_meta.
+                        notes.append(
+                            f"[Contents of artifact "
+                            f"'{entry.get('kind', '?')}' you requested:\n"
+                            f"{artifact.get_content()}]"
+                        )
+                else:
+                    err = entry.get("error", "unknown error")
+                    notes.append(f"[read_artifact failed — {err}]")
+                to_mark.append((node, name))
+
+            elif name == "submit_feedback" and not reported:
+                if entry.get("status") == "success":
+                    notes.append(
+                        "[Feedback was submitted to the Loore team.]")
                 to_mark.append((node, name))
 
     return notes, to_mark
@@ -486,6 +655,67 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
                 db.session.flush()
                 result["status"] = "success"
                 result["preferences_id"] = prefs.id
+
+            elif name == "update_artifact":
+                kind = (inp.get("kind") or "").strip().lower()
+                if not _ARTIFACT_KIND_RE.match(kind):
+                    result["status"] = "error"
+                    result["error"] = (
+                        f"Invalid artifact kind: {kind!r}. Use a short "
+                        "lowercase slug (letters, digits, dashes)."
+                    )
+                else:
+                    previous = UserArtifact.latest_for(user_id, kind)
+                    title = (inp.get("title") or "").strip()
+                    if not title:
+                        title = (
+                            previous.title if previous
+                            else UserArtifact.DEFAULT_KINDS.get(
+                                kind, kind.replace("-", " ").title())
+                        )
+                    artifact = UserArtifact(
+                        user_id=user_id,
+                        kind=kind,
+                        title=title[:128],
+                        generated_by=llm_node.llm_model or "agentic_session",
+                        tokens_used=0,
+                    )
+                    artifact.set_content(inp["updated_content"])
+                    db.session.add(artifact)
+                    db.session.flush()
+                    result["status"] = "success"
+                    result["artifact_id"] = artifact.id
+                    result["kind"] = kind
+                    result["created"] = previous is None
+
+            elif name == "read_artifact":
+                kind = (inp.get("kind") or "").strip().lower()
+                artifact = UserArtifact.latest_for(user_id, kind)
+                if artifact is None or artifact.ai_usage not in AI_ALLOWED:
+                    result["status"] = "error"
+                    result["error"] = f"No readable artifact of kind {kind!r}"
+                else:
+                    # Content is NOT stored in tool meta (plaintext column)
+                    # — _scan_proposal_statuses re-resolves it from the
+                    # encrypted row and injects it next turn.
+                    result["status"] = "success"
+                    result["artifact_id"] = artifact.id
+                    result["kind"] = kind
+
+            elif name == "submit_feedback":
+                category = inp.get("category") or "other"
+                if category not in ("praise", "frustration", "idea", "other"):
+                    category = "other"
+                feedback = UserFeedback(
+                    user_id=user_id,
+                    category=category,
+                    source="llm",
+                )
+                feedback.set_content(inp["content"])
+                db.session.add(feedback)
+                db.session.flush()
+                result["status"] = "success"
+                result["feedback_id"] = feedback.id
 
             elif name in ("propose_todo", "propose_github_issue"):
                 # These are no longer tools — proposals are auto-detected
@@ -768,6 +998,18 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             needs_ai_prefs = ai_prefs_node is not None
             user_ai_preferences_content = None
 
+            # User artifacts (#158) — memory/scratchpad content + index.
+            # All three placeholders resolve from one pinned snapshot.
+            artifacts_node = (
+                _placeholder_node(USER_MEMORY_PLACEHOLDER)
+                or _placeholder_node(USER_SCRATCHPAD_PLACEHOLDER)
+                or _placeholder_node(USER_ARTIFACTS_INDEX_PLACEHOLDER)
+            )
+            needs_artifacts = artifacts_node is not None
+            user_memory_content = None
+            user_scratchpad_content = None
+            user_artifacts_index = None
+
             # Check if any node contains {quote:ID} placeholders
             needs_quotes = any(
                 has_quotes(node.get_content())
@@ -813,6 +1055,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             if needs_ai_prefs:
                 user_ai_preferences_content = get_user_ai_preferences_content(
                     user_id, pinned_node=ai_prefs_node
+                )
+
+            if needs_artifacts:
+                (user_memory_content, user_scratchpad_content,
+                 user_artifacts_index) = get_user_artifacts_context(
+                    user_id, pinned_node=artifacts_node
                 )
 
             # Detect if this is an agentic session (enables tools)
@@ -1046,6 +1294,22 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             message_text = message_text.replace(
                                 USER_AI_PREFERENCES_PLACEHOLDER,
                                 user_ai_preferences_content or ""
+                            )
+                        # Replace artifact placeholders — pinned snapshot
+                        if USER_MEMORY_PLACEHOLDER in message_text:
+                            message_text = message_text.replace(
+                                USER_MEMORY_PLACEHOLDER,
+                                user_memory_content or ""
+                            )
+                        if USER_SCRATCHPAD_PLACEHOLDER in message_text:
+                            message_text = message_text.replace(
+                                USER_SCRATCHPAD_PLACEHOLDER,
+                                user_scratchpad_content or ""
+                            )
+                        if USER_ARTIFACTS_INDEX_PLACEHOLDER in message_text:
+                            message_text = message_text.replace(
+                                USER_ARTIFACTS_INDEX_PLACEHOLDER,
+                                user_artifacts_index or "(none)"
                             )
                         # Resolve {quote:ID} placeholders if present
                         if needs_quotes and has_quotes(message_text):

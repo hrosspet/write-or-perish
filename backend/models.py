@@ -296,6 +296,21 @@ class Node(db.Model):
     def has_artifact(self, artifact_type):
         return self.get_artifact_row(artifact_type) is not None
 
+    def get_user_artifacts(self):
+        """Load pinned UserArtifact instances ({kind: artifact}).
+
+        Multiple "user_artifact" rows may exist per node (one per kind,
+        pinned at session start — #191).
+        """
+        result = {}
+        for a in self.context_artifacts:
+            if a.artifact_type != "user_artifact":
+                continue
+            row = UserArtifact.query.get(a.artifact_id)
+            if row is not None:
+                result[row.kind] = row
+        return result
+
     def get_artifact(self, artifact_type):
         """Load and return the actual model instance for *artifact_type*."""
         row = self.get_artifact_row(artifact_type)
@@ -564,6 +579,79 @@ class UserAIPreferences(db.Model):
     ai_usage = db.Column(db.String(16), nullable=False, default="chat")
 
     user = db.relationship("User", backref="ai_preferences")
+
+    def set_content(self, plaintext):
+        self.content = encrypt_content(plaintext)
+
+    def get_content(self):
+        return decrypt_content(self.content)
+
+
+class UserArtifact(db.Model):
+    """Generic named user artifact (issue #158): "memory", "scratchpad",
+    and user/LLM-created artifacts.
+
+    Append-only versioning like UserAIPreferences — each update inserts a
+    new row; the latest row per (user_id, kind) is current. Content is
+    encrypted at rest and included in data exports as a default Loore
+    artifact.
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    # Slug identifying the artifact across versions, e.g. "memory".
+    kind = db.Column(db.String(48), nullable=False, index=True)
+    title = db.Column(db.String(128), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    generated_by = db.Column(db.String(64), nullable=False)
+    tokens_used = db.Column(db.Integer, nullable=False, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    privacy_level = db.Column(db.String(16), nullable=False, default="private")
+    # Artifacts are LLM working memory — must be AI-readable to function.
+    ai_usage = db.Column(db.String(16), nullable=False, default="chat")
+
+    user = db.relationship("User", backref="artifacts")
+
+    # Default artifacts every user has (created lazily on first write).
+    DEFAULT_KINDS = {
+        "memory": "Memory",
+        "scratchpad": "Scratchpad",
+    }
+
+    def set_content(self, plaintext):
+        self.content = encrypt_content(plaintext)
+
+    def get_content(self):
+        return decrypt_content(self.content)
+
+    @classmethod
+    def latest_for(cls, user_id, kind):
+        return cls.query.filter_by(user_id=user_id, kind=kind).order_by(
+            cls.created_at.desc(), cls.id.desc()).first()
+
+    @classmethod
+    def latest_per_kind(cls, user_id):
+        """Latest version of every artifact kind the user has, as a dict."""
+        rows = cls.query.filter_by(user_id=user_id).order_by(
+            cls.created_at.asc(), cls.id.asc()).all()
+        latest = {}
+        for row in rows:
+            latest[row.kind] = row  # later rows overwrite earlier
+        return latest
+
+
+class UserFeedback(db.Model):
+    """User feedback captured via the LLM submit_feedback tool (#158),
+    for batch triage by the creators."""
+    __tablename__ = "user_feedback"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    category = db.Column(db.String(32), nullable=False, default="general")
+    source = db.Column(db.String(16), nullable=False, default="llm")
+    status = db.Column(db.String(16), nullable=False, default="new")
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+
+    user = db.relationship("User", backref="feedback_items")
 
     def set_content(self, plaintext):
         self.content = encrypt_content(plaintext)

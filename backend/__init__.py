@@ -153,6 +153,9 @@ def create_app():
     from backend.routes.ai_preferences import ai_preferences_bp
     app.register_blueprint(ai_preferences_bp, url_prefix="/api/ai-preferences")
 
+    from backend.routes.artifacts import artifacts_bp
+    app.register_blueprint(artifacts_bp, url_prefix="/api/artifacts")
+
     from backend.routes.prompts import prompts_bp
     app.register_blueprint(prompts_bp, url_prefix="/api/prompts")
 

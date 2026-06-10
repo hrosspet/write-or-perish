@@ -25,6 +25,7 @@ import TodoPage from "./pages/TodoPage";
 import ImportPage from "./pages/ImportPage";
 import AccountPage from "./pages/AccountPage";
 import AiPreferencesPage from "./pages/AiPreferencesPage";
+import ArtifactsPage from "./pages/ArtifactsPage";
 import PromptsPage from "./pages/PromptsPage";
 import PromptDetailPage from "./pages/PromptDetailPage";
 import SearchModal from "./components/SearchModal";
@@ -143,6 +144,7 @@ function App() {
           <Route path="/prompts/:promptKey" element={<ProtectedRoute><PromptDetailPage /></ProtectedRoute>} />
           <Route path="/import" element={<ProtectedRoute><ImportPage /></ProtectedRoute>} />
           <Route path="/ai-preferences" element={<ProtectedRoute><AiPreferencesPage /></ProtectedRoute>} />
+          <Route path="/artifacts" element={<ProtectedRoute><ArtifactsPage /></ProtectedRoute>} />
           <Route path="/account" element={<ProtectedRoute><AccountPage /></ProtectedRoute>} />
           <Route path="/node/:id" element={<ProtectedRoute><NodeDetailWrapper /></ProtectedRoute>} />
           <Route path="/admin" element={<ProtectedRoute><AdminPanel /></ProtectedRoute>} />
