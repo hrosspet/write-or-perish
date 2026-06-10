@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from backend.celery_app import celery, flask_app
 from backend.models import (
     Node, User, UserProfile, UserRecentContext, UserTodo, APICostLog,
-    UserAIPreferences, Draft,
+    UserAIPreferences, UserArtifact, UserFeedback, Draft,
 )
 from backend.extensions import db
 from backend.llm_providers import LLMProvider, PromptTooLongError
@@ -18,7 +18,7 @@ from backend.utils.tokens import (
     approximate_token_count, reduce_export_tokens, format_date_metadata,
 )
 from backend.utils.quotes import resolve_quotes, has_quotes
-from backend.utils.timefmt import local_stamp
+from backend.utils.timefmt import local_stamp, strip_edge_timestamps
 from backend.utils.api_keys import determine_api_key_type, get_api_keys_for_usage
 from backend.utils.cost import calculate_llm_cost_microdollars
 from backend.utils.tool_meta import update_tool_meta, parse_github_issue
@@ -44,6 +44,11 @@ USER_RECENT_PLACEHOLDER = "{user_recent}"
 USER_RECENT_RAW_PLACEHOLDER = "{user_recent_raw}"
 # Placeholder for AI interaction preferences
 USER_AI_PREFERENCES_PLACEHOLDER = "{user_ai_preferences}"
+# Placeholders for user artifacts — LLM memory/scratchpad + index (#158)
+USER_MEMORY_PLACEHOLDER = "{user_memory}"
+USER_SCRATCHPAD_PLACEHOLDER = "{user_scratchpad}"
+USER_INTENTIONS_PLACEHOLDER = "{user_intentions}"
+USER_ARTIFACTS_INDEX_PLACEHOLDER = "{user_artifacts_index}"
 
 # ── Voice tool definitions ──────────────────────────────────────────────
 
@@ -111,7 +116,146 @@ VOICE_TOOLS = [
             "required": ["updated_preferences"],
         },
     },
+    {
+        "name": "update_artifact",
+        "description": (
+            "Create or update one of the user's artifacts — persistent "
+            "documents that survive across sessions. Built-in kinds: "
+            "'memory' (durable facts and observations about the user "
+            "worth remembering long-term — write here whenever you learn "
+            "something that future sessions should know), 'scratchpad' "
+            "(your working notes for ongoing threads of work), and "
+            "'intentions' (the user's long-running aspirations you help "
+            "them clarify and track — see the Intentions section of your "
+            "instructions). You can "
+            "also create new kinds for the user on request (e.g. "
+            "'reading-list'). The updated_content must be the FULL new "
+            "text of the artifact (not a diff) — it replaces the previous "
+            "version, and old versions stay in history. Call proactively "
+            "for memory-worthy facts; no confirmation is needed. Always "
+            "produce a text response alongside the call."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "description": (
+                        "Artifact slug: 'memory', 'scratchpad', or a "
+                        "short lowercase dash-separated name for a "
+                        "custom artifact."
+                    ),
+                },
+                "updated_content": {
+                    "type": "string",
+                    "description": (
+                        "The complete new artifact text as markdown. "
+                        "Carry forward everything still relevant from "
+                        "the current version."
+                    ),
+                },
+                "title": {
+                    "type": "string",
+                    "description": (
+                        "Display title. Only needed when creating a new "
+                        "custom artifact."
+                    ),
+                },
+            },
+            "required": ["kind", "updated_content"],
+        },
+    },
+    {
+        "name": "read_artifact",
+        "description": (
+            "Request the full content of one of the user's artifacts "
+            "listed in the artifacts index. The content is NOT returned "
+            "immediately — it will be injected into your context at the "
+            "start of the NEXT turn. Use this when the index shows an "
+            "artifact relevant to the conversation that you don't already "
+            "see (memory and scratchpad are always in context — never "
+            "read those). Tell the user you're pulling it up. Always "
+            "produce a text response alongside the call."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "description": "Slug of the artifact to read.",
+                },
+            },
+            "required": ["kind"],
+        },
+    },
+    {
+        "name": "submit_feedback",
+        "description": (
+            "Submit feedback about Loore itself to its creators on the "
+            "user's behalf. Call this when the user expresses feedback "
+            "about the product — praise, frustration, confusion, ideas — "
+            "and either asks you to pass it on or agrees when you offer. "
+            "For concrete bugs or feature requests prefer proposing a "
+            "GitHub issue instead; feedback is for everything that "
+            "doesn't fit an issue. Quote or faithfully summarize the "
+            "user's own words. Always produce a text response alongside "
+            "the call."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": (
+                        "The feedback text, faithful to what the user "
+                        "expressed."
+                    ),
+                },
+                "category": {
+                    "type": "string",
+                    "enum": ["praise", "frustration", "idea", "other"],
+                    "description": "Best-fit category.",
+                },
+            },
+            "required": ["content"],
+        },
+    },
 ]
+
+
+_ARTIFACT_KIND_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,47}$')
+
+
+def get_user_artifacts_context(user_id, pinned_node=None):
+    """Resolve user artifacts for the agentic prompt (#158).
+
+    Returns (memory_content, scratchpad_content, index_text). Pinned to the
+    per-session snapshot recorded on *pinned_node* (#191 semantics), falling
+    back to latest for legacy nodes. ai_usage is re-checked on resolved rows.
+    """
+    artifacts = pinned_node.get_user_artifacts() if pinned_node else {}
+    if not artifacts:
+        artifacts = UserArtifact.latest_per_kind(user_id)
+    artifacts = {
+        kind: a for kind, a in artifacts.items()
+        if a.ai_usage in AI_ALLOWED
+    }
+
+    memory = artifacts.get("memory")
+    scratchpad = artifacts.get("scratchpad")
+    intentions = artifacts.get("intentions")
+    memory_content = memory.get_content() if memory else ""
+    scratchpad_content = scratchpad.get_content() if scratchpad else ""
+    intentions_content = intentions.get_content() if intentions else ""
+
+    index_lines = []
+    for kind, artifact in sorted(artifacts.items()):
+        if kind in ("memory", "scratchpad", "intentions"):
+            continue  # ambient via their own placeholders, not the index
+        tokens = approximate_token_count(artifact.get_content() or "")
+        index_lines.append(f"- {kind} — \"{artifact.title}\" (~{tokens} tokens)")
+    index_text = "\n".join(index_lines) if index_lines else "(none)"
+    return memory_content, scratchpad_content, intentions_content, index_text
 
 
 def get_user_ai_preferences_content(user_id, pinned_node=None):
@@ -269,6 +413,37 @@ def _scan_proposal_statuses(node_chain):
 
             elif name == "update_ai_preferences" and not reported:
                 notes.append("[AI preferences were updated.]")
+                to_mark.append((node, name))
+
+            elif name == "update_artifact" and not reported:
+                if entry.get("status") == "success":
+                    kind = entry.get("kind", "?")
+                    verb = ("created" if entry.get("created")
+                            else "updated")
+                    notes.append(f"[Artifact '{kind}' was {verb}.]")
+                to_mark.append((node, name))
+
+            elif name == "read_artifact" and not reported:
+                if entry.get("status") == "success":
+                    artifact = UserArtifact.query.get(
+                        entry.get("artifact_id"))
+                    if artifact is not None:
+                        # Resolved fresh from the encrypted row — content
+                        # is never stored in tool_calls_meta.
+                        notes.append(
+                            f"[Contents of artifact "
+                            f"'{entry.get('kind', '?')}' you requested:\n"
+                            f"{artifact.get_content()}]"
+                        )
+                else:
+                    err = entry.get("error", "unknown error")
+                    notes.append(f"[read_artifact failed — {err}]")
+                to_mark.append((node, name))
+
+            elif name == "submit_feedback" and not reported:
+                if entry.get("status") == "success":
+                    notes.append(
+                        "[Feedback was submitted to the Loore team.]")
                 to_mark.append((node, name))
 
     return notes, to_mark
@@ -487,6 +662,67 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
                 result["status"] = "success"
                 result["preferences_id"] = prefs.id
 
+            elif name == "update_artifact":
+                kind = (inp.get("kind") or "").strip().lower()
+                if not _ARTIFACT_KIND_RE.match(kind):
+                    result["status"] = "error"
+                    result["error"] = (
+                        f"Invalid artifact kind: {kind!r}. Use a short "
+                        "lowercase slug (letters, digits, dashes)."
+                    )
+                else:
+                    previous = UserArtifact.latest_for(user_id, kind)
+                    title = (inp.get("title") or "").strip()
+                    if not title:
+                        title = (
+                            previous.title if previous
+                            else UserArtifact.DEFAULT_KINDS.get(
+                                kind, kind.replace("-", " ").title())
+                        )
+                    artifact = UserArtifact(
+                        user_id=user_id,
+                        kind=kind,
+                        title=title[:128],
+                        generated_by=llm_node.llm_model or "agentic_session",
+                        tokens_used=0,
+                    )
+                    artifact.set_content(inp["updated_content"])
+                    db.session.add(artifact)
+                    db.session.flush()
+                    result["status"] = "success"
+                    result["artifact_id"] = artifact.id
+                    result["kind"] = kind
+                    result["created"] = previous is None
+
+            elif name == "read_artifact":
+                kind = (inp.get("kind") or "").strip().lower()
+                artifact = UserArtifact.latest_for(user_id, kind)
+                if artifact is None or artifact.ai_usage not in AI_ALLOWED:
+                    result["status"] = "error"
+                    result["error"] = f"No readable artifact of kind {kind!r}"
+                else:
+                    # Content is NOT stored in tool meta (plaintext column)
+                    # — _scan_proposal_statuses re-resolves it from the
+                    # encrypted row and injects it next turn.
+                    result["status"] = "success"
+                    result["artifact_id"] = artifact.id
+                    result["kind"] = kind
+
+            elif name == "submit_feedback":
+                category = inp.get("category") or "other"
+                if category not in ("praise", "frustration", "idea", "other"):
+                    category = "other"
+                feedback = UserFeedback(
+                    user_id=user_id,
+                    category=category,
+                    source="llm",
+                )
+                feedback.set_content(inp["content"])
+                db.session.add(feedback)
+                db.session.flush()
+                result["status"] = "success"
+                result["feedback_id"] = feedback.id
+
             elif name in ("propose_todo", "propose_github_issue"):
                 # These are no longer tools — proposals are auto-detected
                 # from headings. Ignore gracefully if LLM still calls them.
@@ -648,8 +884,161 @@ class LLMCompletionTask(Task):
                     logger.error(f"LLM completion failed for node {llm_node_id}: {exc}")
 
 
+def render_system_message(system_node, user_id):
+    """Render the system node's full message text exactly as the
+    generation loop would (#192/#187).
+
+    Used by the finalize pre-warm so the provider-cache warm and the
+    real generation share byte-identical prefixes: the result is stored
+    in the #192 Redis cache, and generation prefers those cached bytes.
+    Only valid for prompts without volatile placeholders ({user_export},
+    {quote:..}) — callers must check first.
+    """
+    owner = User.query.get(user_id)
+    user_tz = owner.timezone if owner and owner.timezone else "UTC"
+    author = system_node.user.username if system_node.user else "Unknown"
+    time_prefix = local_stamp(
+        system_node.updated_at or system_node.created_at, user_tz)
+    text = f"{time_prefix} author {author}: {system_node.get_content()}"
+
+    if USER_PROFILE_PLACEHOLDER in text:
+        profile_obj = get_user_profile_content(
+            user_id, pinned_node=system_node)
+        text = text.replace(
+            USER_PROFILE_PLACEHOLDER,
+            profile_obj.get_content() if profile_obj else "")
+    if USER_TODO_PLACEHOLDER in text:
+        text = text.replace(
+            USER_TODO_PLACEHOLDER,
+            get_user_todo_content(user_id, pinned_node=system_node) or "")
+    if USER_RECENT_PLACEHOLDER in text:
+        rc = get_user_recent_content(user_id, pinned_node=system_node)
+        text = text.replace(
+            USER_RECENT_PLACEHOLDER, rc.get_content() if rc else "")
+    if USER_RECENT_RAW_PLACEHOLDER in text:
+        raw_result = get_user_recent_raw_content(
+            user_id, created_before=system_node.created_at)
+        raw_text = ""
+        if raw_result:
+            raw_text = format_date_metadata(
+                covers_start=raw_result.get("earliest"),
+                covers_end=raw_result.get("latest"),
+                tokens=raw_result.get("token_count"),
+            ) + raw_result["content"]
+        text = text.replace(USER_RECENT_RAW_PLACEHOLDER, raw_text)
+    if USER_AI_PREFERENCES_PLACEHOLDER in text:
+        text = text.replace(
+            USER_AI_PREFERENCES_PLACEHOLDER,
+            get_user_ai_preferences_content(
+                user_id, pinned_node=system_node) or "")
+    if (USER_MEMORY_PLACEHOLDER in text
+            or USER_SCRATCHPAD_PLACEHOLDER in text
+            or USER_INTENTIONS_PLACEHOLDER in text
+            or USER_ARTIFACTS_INDEX_PLACEHOLDER in text):
+        memory, scratchpad, intentions, index = get_user_artifacts_context(
+            user_id, pinned_node=system_node)
+        text = text.replace(USER_MEMORY_PLACEHOLDER, memory or "")
+        text = text.replace(USER_SCRATCHPAD_PLACEHOLDER, scratchpad or "")
+        text = text.replace(USER_INTENTIONS_PLACEHOLDER, intentions or "")
+        text = text.replace(
+            USER_ARTIFACTS_INDEX_PLACEHOLDER, index or "(none)")
+    return text
+
+
+@celery.task(name='backend.tasks.llm_completion.prewarm_anthropic_cache')
+def prewarm_anthropic_cache(system_node_id, user_id, model_id,
+                            transcript_so_far, recording_stamp_iso):
+    """Pre-warm the Anthropic prompt cache during voice finalize (#187).
+
+    Fired at the START of finalize for fresh voice threads, overlapping
+    the trailing-batch transcription. Renders the system prefix (storing
+    it in the #192 cache so generation reuses the exact bytes), then
+    sends a max_tokens=1 request with cache breakpoints on the system
+    block and the transcript-so-far block. Generation then reads those
+    entries at 0.1x and prefills only the final batch.
+
+    Every failure path is silent — a missed warm just means today's
+    uncached behavior.
+    """
+    with flask_app.app_context():
+        try:
+            system_node = Node.query.get(system_node_id)
+            if system_node is None:
+                return {"status": "skipped", "reason": "no_system_node"}
+            sys_content = system_node.get_content() or ""
+            if USER_EXPORT_PATTERN.search(sys_content)                     or has_quotes(sys_content):
+                return {"status": "skipped", "reason": "volatile_prompt"}
+
+            model_config = flask_app.config["SUPPORTED_MODELS"].get(model_id)
+            if not model_config or model_config["provider"] != "anthropic":
+                return {"status": "skipped", "reason": "not_anthropic"}
+
+            from backend.utils.prompt_cache import (
+                get_cached_render, store_render,
+            )
+            sys_text = get_cached_render(flask_app.config, system_node)
+            if sys_text is None:
+                sys_text = render_system_message(system_node, user_id)
+                store_render(flask_app.config, system_node, sys_text)
+
+            owner = User.query.get(user_id)
+            user_tz = (owner.timezone if owner and owner.timezone
+                       else "UTC")
+            author = owner.username if owner else "Unknown"
+            stamp = local_stamp(
+                datetime.fromisoformat(recording_stamp_iso), user_tz)
+            transcript_block = (
+                f"{stamp} author {author}: {transcript_so_far}")
+
+            key_type = determine_api_key_type([system_node], logger=logger)
+            api_keys = get_api_keys_for_usage(flask_app.config, key_type)
+            if not api_keys.get("anthropic"):
+                return {"status": "skipped", "reason": "no_key"}
+
+            response = LLMProvider._call_anthropic(
+                model_config["api_model"],
+                [
+                    {"role": "user", "content": [
+                        {"type": "text", "text": sys_text,
+                         "cache_control": {"type": "ephemeral"}},
+                    ]},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": transcript_block,
+                         "cache_control": {"type": "ephemeral"}},
+                    ]},
+                ],
+                api_keys["anthropic"],
+                max_tokens=1,
+                tools=VOICE_TOOLS,
+            )
+            cache_write = response.get("cache_creation_input_tokens", 0)
+            cost = calculate_llm_cost_microdollars(
+                model_id, response.get("input_tokens", 0),
+                response.get("output_tokens", 0),
+                cache_read_tokens=response.get(
+                    "cache_read_input_tokens", 0),
+                cache_write_tokens=cache_write,
+            )
+            db.session.add(APICostLog(
+                user_id=user_id,
+                model_id=model_id,
+                request_type="cache_warm",
+                input_tokens=response.get("input_tokens", 0) + cache_write,
+                output_tokens=response.get("output_tokens", 0),
+                cost_microdollars=cost,
+            ))
+            db.session.commit()
+            logger.info("Cache pre-warm wrote %d tokens (node %s)",
+                        cache_write, system_node_id)
+            return {"status": "ok", "cache_write_tokens": cache_write}
+        except Exception:
+            logger.warning("Cache pre-warm failed; generation proceeds "
+                           "uncached", exc_info=True)
+            return {"status": "failed"}
+
+
 @celery.task(base=LLMCompletionTask, bind=True)
-def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id: str, user_id: int, source_mode: str = None):
+def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id: str, user_id: int, source_mode: str = None, cache_split_offset: int = None):
     """
     Asynchronously generate an LLM response and update a placeholder node.
 
@@ -659,6 +1048,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
         model_id: Model identifier (e.g., "gpt-5", "claude-sonnet-4.5").
         user_id: ID of the user requesting the completion.
         source_mode: 'voice' or 'textmode' — which mode triggered this call.
+        cache_split_offset: char offset splitting the latest voice
+            transcript into [already-warmed prefix][final batch] blocks
+            for provider prompt caching (#187). None = no split.
     """
     logger.info(f"Starting LLM completion task for parent {parent_node_id}, updating node {llm_node_id}, model={model_id}")
 
@@ -735,8 +1127,34 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # drifted mid-thread; only the 10k-raw window was pinned (and it
             # still is, via recent_raw_node.created_at — it's a rolling
             # token window, not a single versioned row).
+            # #192: the system node's rendered text is byte-identical
+            # across turns (#191 pinning), so render once and reuse via
+            # Redis. A hit also lets us skip the heavy artifact fetches
+            # when their placeholders live only in the system prompt.
+            from backend.utils.prompt_cache import (
+                get_cached_render, store_render,
+            )
+            system_node = next(
+                (n for n in node_chain
+                 if n.deleted_at is None and n.has_artifact("prompt")),
+                None)
+            system_render_cacheable = False
+            cached_system_render = None
+            if system_node is not None:
+                _sys_text = system_node.get_content() or ""
+                # Exclude prompts carrying per-call volatile placeholders.
+                system_render_cacheable = (
+                    not USER_EXPORT_PATTERN.search(_sys_text)
+                    and not has_quotes(_sys_text)
+                )
+                if system_render_cacheable:
+                    cached_system_render = get_cached_render(
+                        flask_app.config, system_node)
+
             def _placeholder_node(placeholder):
                 for n in node_chain:
+                    if cached_system_render is not None and n is system_node:
+                        continue  # already rendered — no fetch needed
                     if _alive(n) and placeholder in n.get_content():
                         return n
                 return None
@@ -759,6 +1177,20 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             ai_prefs_node = _placeholder_node(USER_AI_PREFERENCES_PLACEHOLDER)
             needs_ai_prefs = ai_prefs_node is not None
             user_ai_preferences_content = None
+
+            # User artifacts (#158) — memory/scratchpad content + index.
+            # All three placeholders resolve from one pinned snapshot.
+            artifacts_node = (
+                _placeholder_node(USER_MEMORY_PLACEHOLDER)
+                or _placeholder_node(USER_SCRATCHPAD_PLACEHOLDER)
+                or _placeholder_node(USER_INTENTIONS_PLACEHOLDER)
+                or _placeholder_node(USER_ARTIFACTS_INDEX_PLACEHOLDER)
+            )
+            needs_artifacts = artifacts_node is not None
+            user_memory_content = None
+            user_scratchpad_content = None
+            user_intentions_content = None
+            user_artifacts_index = None
 
             # Check if any node contains {quote:ID} placeholders
             needs_quotes = any(
@@ -805,6 +1237,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             if needs_ai_prefs:
                 user_ai_preferences_content = get_user_ai_preferences_content(
                     user_id, pinned_node=ai_prefs_node
+                )
+
+            if needs_artifacts:
+                (user_memory_content, user_scratchpad_content,
+                 user_intentions_content,
+                 user_artifacts_index) = get_user_artifacts_context(
+                    user_id, pinned_node=artifacts_node
                 )
 
             # Detect if this is an agentic session (enables tools)
@@ -921,6 +1360,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 replaced_profile = False
                 replaced_recent = False
                 replaced_recent_raw = False
+                replaced_export = False  # #139: first occurrence only
 
                 # Temporal grounding (#130): every message is prefixed with an
                 # absolute local-time stamp derived from the node's updated_at
@@ -933,10 +1373,24 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                            else "UTC")
 
                 messages = []
+                system_msg_index = None
+                last_assistant_index = None
+                latest_user_msg_index = None
                 for node in node_chain:
                     author = node.user.username if node.user else "Unknown"
                     is_llm_node = node.node_type == "llm" or (node.llm_model is not None)
                     time_prefix = local_stamp(node.updated_at or node.created_at, user_tz)
+
+                    # #192: reuse the cached system-prompt render verbatim.
+                    if (node is system_node
+                            and cached_system_render is not None):
+                        system_msg_index = len(messages)
+                        messages.append({
+                            "role": "user",
+                            "content": [{"type": "text",
+                                         "text": cached_system_render}],
+                        })
+                        continue
 
                     # Soft-deleted ancestor: scrub content so the AI doesn't
                     # ingest deleted user data. We still include the node so
@@ -981,12 +1435,22 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         message_text = (
                             f"{time_prefix} author {author}: {node_content}"
                         )
-                        # Replace {user_export} placeholder if present
+                        # Replace {user_export} — first occurrence gets
+                        # the archive, repeats get a stub (#139): the
+                        # export is the heaviest placeholder and
+                        # duplicating it doubles prompt cost.
                         if user_export_content and export_placeholder_match:
-                            message_text = message_text.replace(
-                                export_placeholder_match,
-                                user_export_content
-                            )
+                            if export_placeholder_match in message_text:
+                                if not replaced_export:
+                                    message_text = message_text.replace(
+                                        export_placeholder_match,
+                                        user_export_content, 1
+                                    )
+                                    replaced_export = True
+                                message_text = message_text.replace(
+                                    export_placeholder_match,
+                                    "(see archive above)"
+                                )
                         # Replace {user_profile} — first occurrence
                         # gets content, subsequent get emptied (dedup)
                         if USER_PROFILE_PLACEHOLDER in message_text:
@@ -1039,12 +1503,66 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 USER_AI_PREFERENCES_PLACEHOLDER,
                                 user_ai_preferences_content or ""
                             )
+                        # Replace artifact placeholders — pinned snapshot
+                        if USER_MEMORY_PLACEHOLDER in message_text:
+                            message_text = message_text.replace(
+                                USER_MEMORY_PLACEHOLDER,
+                                user_memory_content or ""
+                            )
+                        if USER_SCRATCHPAD_PLACEHOLDER in message_text:
+                            message_text = message_text.replace(
+                                USER_SCRATCHPAD_PLACEHOLDER,
+                                user_scratchpad_content or ""
+                            )
+                        if USER_INTENTIONS_PLACEHOLDER in message_text:
+                            message_text = message_text.replace(
+                                USER_INTENTIONS_PLACEHOLDER,
+                                user_intentions_content or ""
+                            )
+                        if USER_ARTIFACTS_INDEX_PLACEHOLDER in message_text:
+                            message_text = message_text.replace(
+                                USER_ARTIFACTS_INDEX_PLACEHOLDER,
+                                user_artifacts_index or "(none)"
+                            )
                         # Resolve {quote:ID} placeholders if present
                         if needs_quotes and has_quotes(message_text):
                             message_text, resolved_ids = resolve_quotes(message_text, user_id, for_llm=True)
                             if resolved_ids:
                                 logger.info(f"Resolved quotes for node IDs: {resolved_ids}")
 
+                    if (node.id == parent_node_id and not is_llm_node
+                            and cache_split_offset
+                            and node.deleted_at is None):
+                        # #187: two-block transcript split. Block A is the
+                        # prefix the finalize pre-warm already cached
+                        # (byte-identical incl. the recording-start stamp);
+                        # block B is the final transcribed batch.
+                        head_len = len(message_text) - len(node_content) \
+                            + cache_split_offset
+                        if 0 < head_len < len(message_text):
+                            latest_user_msg_index = len(messages)
+                            messages.append({
+                                "role": role,
+                                "content": [
+                                    {"type": "text",
+                                     "text": message_text[:head_len]},
+                                    {"type": "text",
+                                     "text": message_text[head_len:]},
+                                ],
+                            })
+                            continue
+
+                    if node.id == parent_node_id and not is_llm_node:
+                        latest_user_msg_index = len(messages)
+                    if node is system_node:
+                        system_msg_index = len(messages)
+                        if (system_render_cacheable
+                                and cached_system_render is None
+                                and attempt == 0):
+                            store_render(
+                                flask_app.config, system_node, message_text)
+                    if role == "assistant":
+                        last_assistant_index = len(messages)
                     messages.append({
                         "role": role,
                         "content": [{"type": "text", "text": message_text}]
@@ -1076,6 +1594,54 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         mode_note = mode_labels.get(source_mode)
                         if mode_note:
                             agentic_notes.append(mode_note)
+                # Semantic retrieval (#155): surface relevant archive
+                # snippets for the latest user message via the notes
+                # channel (after the stable prefix — cache-friendly).
+                # Failures never break a completion.
+                if is_agentic and flask_app.config.get(
+                        "RAG_AGENTIC_INJECTION", True):
+                    try:
+                        from backend.utils.api_keys import (
+                            get_openai_chat_key,
+                        )
+                        from backend.utils.embeddings import (
+                            retrieve_relevant_snippets,
+                        )
+                        latest_user_node = next(
+                            (n for n in reversed(node_chain)
+                             if n.node_type != "llm"
+                             and n.llm_model is None
+                             and n.deleted_at is None), None)
+                        rag_key = get_openai_chat_key(flask_app.config)
+                        query_text = (latest_user_node.get_content() or ""
+                                      ).strip() if latest_user_node else ""
+                        if rag_key and len(query_text) >= 20:
+                            chain_ids = [n.id for n in node_chain]
+                            snippets = retrieve_relevant_snippets(
+                                user_id, query_text[-4000:], chain_ids,
+                                rag_key,
+                                k=flask_app.config.get("RAG_TOP_K", 4),
+                                min_score=flask_app.config.get(
+                                    "RAG_MIN_SCORE", 0.35),
+                            )
+                            if snippets:
+                                lines = [
+                                    "[Possibly relevant entries from the "
+                                    "user's archive (retrieved by semantic "
+                                    "similarity to their latest message — "
+                                    "use only if actually relevant):"
+                                ]
+                                for nid, created, snip, score in snippets:
+                                    stamp = local_stamp(created, user_tz)
+                                    lines.append(
+                                        f"- {stamp} (node {nid}): {snip}")
+                                lines.append("]")
+                                agentic_notes.append("\n".join(lines))
+                    except Exception:
+                        logger.warning(
+                            "Semantic retrieval failed; continuing "
+                            "without it", exc_info=True)
+
                 if is_agentic and agentic_notes:
                     # Synthetic system-side note injected after the latest real
                     # message; stamp it with "now" so the model's most-recent
@@ -1090,6 +1656,23 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         "content": [{"type": "text", "text": injected_text}]
                     })
 
+                # #187: provider-side prompt caching (Anthropic). Mark
+                # cache breakpoints: one on the rendered system prompt
+                # (the big stable prefix) and one on the last assistant
+                # reply (caches the whole prior conversation). Everything
+                # after the last breakpoint — the new user message and the
+                # volatile notes — prefills fresh each turn. Byte-identity
+                # of the prefix across turns is guaranteed by #191/#192.
+                if provider == "anthropic" and is_agentic:
+                    for idx in (system_msg_index, last_assistant_index,
+                                latest_user_msg_index):
+                        if idx is None:
+                            continue
+                        blocks = messages[idx].get("content")
+                        if isinstance(blocks, list) and blocks:
+                            blocks[-1]["cache_control"] = {
+                                "type": "ephemeral"}
+
                 # Step 3: Call LLM API
                 self.update_state(state='PROGRESS', meta={'progress': 40, 'status': 'Generating response'})
                 llm_node.llm_task_progress = 40
@@ -1101,9 +1684,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 logger.info(f"Calling LLM API: model_id={model_id}, api_model={api_model}, provider={provider}, key_type={key_type}, estimated_tokens={estimated_tokens}, total_chars={len(total_content)}")
 
                 try:
+                    # #189: stable per-thread key improves OpenAI's
+                    # automatic prefix-cache routing.
+                    thread_root_id = (node_chain[0].id if node_chain
+                                      else parent_node_id)
                     response = LLMProvider.get_completion(
                         model_id, messages, api_keys,
                         tools=agentic_tools,
+                        prompt_cache_key=f"loore-t{thread_root_id}",
                     )
                     break  # Success
                 except PromptTooLongError as e:
@@ -1119,9 +1707,20 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         f"(attempt {attempt + 2}/{MAX_RETRIES + 1})"
                     )
             llm_text = response["content"]
+            # #179: strip hallucinated context-timestamp echoes from the
+            # response edges before anything stores or speaks the text.
+            scrubbed = strip_edge_timestamps(llm_text)
+            if scrubbed != llm_text:
+                logger.info(
+                    "Stripped edge timestamp(s) from LLM response "
+                    "(model=%s, node=%s)", model_id, llm_node_id)
+                llm_text = scrubbed
             total_tokens = response["total_tokens"]
             input_tokens = response.get("input_tokens", 0)
             output_tokens = response.get("output_tokens", 0)
+            cache_read_tokens = response.get("cache_read_input_tokens", 0)
+            cache_write_tokens = response.get(
+                "cache_creation_input_tokens", 0)
             response_tool_calls = response.get("tool_calls", [])
             response_truncated = response.get("truncated", False)
 
@@ -1132,12 +1731,24 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             llm_node.llm_task_progress = 90
             db.session.commit()
 
-            cost = calculate_llm_cost_microdollars(model_id, input_tokens, output_tokens)
+            cost = calculate_llm_cost_microdollars(
+                model_id, input_tokens, output_tokens,
+                cache_read_tokens=cache_read_tokens,
+                cache_write_tokens=cache_write_tokens,
+                cached_input_tokens=response.get("cached_tokens", 0),
+            )
+            if cache_read_tokens or cache_write_tokens:
+                logger.info(
+                    "Prompt cache usage: read=%d write=%d uncached=%d",
+                    cache_read_tokens, cache_write_tokens, input_tokens)
             cost_log = APICostLog(
                 user_id=user_id,
                 model_id=model_id,
                 request_type="conversation",
-                input_tokens=input_tokens,
+                # Full prompt size for visibility (uncached + cached reads
+                # + cache writes); pricing already accounted above.
+                input_tokens=(input_tokens + cache_read_tokens
+                              + cache_write_tokens),
                 output_tokens=output_tokens,
                 cost_microdollars=cost,
             )

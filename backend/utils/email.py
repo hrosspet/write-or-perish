@@ -147,6 +147,77 @@ def send_welcome_email(to_email, magic_link_url):
         raise
 
 
+def send_spend_alert_email(to_email, provider, spend_usd, limit_usd, threshold):
+    """Alert the admin that month-to-date API spend crossed a threshold
+    of the configured limit (issue #85)."""
+    config = current_app.config
+    sender = config.get("MAIL_DEFAULT_SENDER", "login@loore.org")
+    percent = int(round(threshold * 100))
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = (
+        f"Loore spend alert: {provider} at {percent}% of monthly limit"
+    )
+    msg["From"] = sender
+    msg["To"] = to_email
+
+    text_body = (
+        f"API spend alert\n\n"
+        f"Provider: {provider}\n"
+        f"Month-to-date spend: ${spend_usd:,.2f}\n"
+        f"Monthly limit: ${limit_usd:,.2f}\n"
+        f"Threshold crossed: {percent}%\n\n"
+        f"Review usage in the admin dashboard: https://loore.org/admin\n"
+    )
+
+    html_body = f"""\
+<html>
+<body style="font-family: 'Outfit', -apple-system, sans-serif; background: #0e0d0b; color: #ede8dd; padding: 40px 20px; margin: 0;">
+  <div style="max-width: 460px; margin: 0 auto; background: #181714; border-radius: 10px; border: 1px solid #302c27; padding: 48px 40px;">
+    <div style="font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif; font-size: 14px; font-weight: 300; text-transform: uppercase; letter-spacing: 0.3em; color: #736b5f; margin-bottom: 32px;">
+      Loore
+    </div>
+    <h2 style="font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif; font-weight: 300; font-size: 28px; color: #ede8dd; margin: 0 0 12px 0;">
+      Spend alert: {percent}%
+    </h2>
+    <p style="font-size: 15px; font-weight: 300; color: #a89f91; margin: 0 0 8px 0; line-height: 1.6;">
+      <strong style="color: #ede8dd;">{provider}</strong> month-to-date spend is
+      <strong style="color: #c4956a;">${spend_usd:,.2f}</strong>
+      of the <strong style="color: #ede8dd;">${limit_usd:,.2f}</strong> monthly limit.
+    </p>
+    <a href="https://loore.org/admin"
+       style="display: inline-block; margin-top: 20px; padding: 12px 32px; background: transparent; color: #c4956a;
+              text-decoration: none; border-radius: 6px; border: 1px solid #c4956a;
+              font-family: 'Outfit', -apple-system, sans-serif; font-size: 14px; font-weight: 400;
+              letter-spacing: 0.04em;">
+      Open admin dashboard
+    </a>
+  </div>
+</body>
+</html>"""
+
+    msg.attach(MIMEText(text_body, "plain"))
+    msg.attach(MIMEText(html_body, "html"))
+
+    server = config.get("MAIL_SERVER", "localhost")
+    port = config.get("MAIL_PORT", 587)
+    use_tls = config.get("MAIL_USE_TLS", True)
+    username = config.get("MAIL_USERNAME")
+    password = config.get("MAIL_PASSWORD")
+
+    try:
+        with smtplib.SMTP(server, port) as smtp:
+            if use_tls:
+                smtp.starttls()
+            if username and password:
+                smtp.login(username, password)
+            smtp.sendmail(sender, to_email, msg.as_string())
+        logger.info(f"Spend alert email sent to {to_email} ({percent}%)")
+    except Exception:
+        logger.exception(f"Failed to send spend alert email to {to_email}")
+        raise
+
+
 def send_admin_signup_notification(username, user_email):
     config = current_app.config
     sender = config.get("MAIL_DEFAULT_SENDER", "login@loore.org")
