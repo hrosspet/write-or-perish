@@ -219,3 +219,46 @@ def spend_status():
             for a in alerts
         ],
     }), 200
+
+
+@admin_bp.route("/feedback", methods=["GET"])
+@login_required
+@admin_required
+def list_feedback():
+    """List user feedback submitted via the LLM tool (issue #158)."""
+    from backend.models import UserFeedback
+
+    status = request.args.get("status")
+    query = UserFeedback.query
+    if status:
+        query = query.filter_by(status=status)
+    items = query.order_by(UserFeedback.created_at.desc()).limit(500).all()
+
+    return jsonify({"feedback": [
+        {
+            "id": f.id,
+            "user_id": f.user_id,
+            "username": f.user.username if f.user else None,
+            "content": f.get_content(),
+            "category": f.category,
+            "source": f.source,
+            "status": f.status,
+            "created_at": iso_utc(f.created_at),
+        }
+        for f in items
+    ]}), 200
+
+
+@admin_bp.route("/feedback/<int:feedback_id>", methods=["PUT"])
+@login_required
+@admin_required
+def update_feedback_status(feedback_id):
+    from backend.models import UserFeedback
+
+    feedback = UserFeedback.query.get_or_404(feedback_id)
+    status = (request.get_json() or {}).get("status")
+    if status not in ("new", "reviewed", "done"):
+        return jsonify({"error": "Invalid status"}), 400
+    feedback.status = status
+    db.session.commit()
+    return jsonify({"id": feedback.id, "status": feedback.status}), 200
