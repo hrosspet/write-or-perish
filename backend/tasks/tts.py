@@ -63,6 +63,12 @@ def _strip_heading_sections(text):
     return text.strip()
 
 
+# Silence appended to a chapter's final audio chunk (#145 v3): the
+# audible breath between a chapter's last sentence and the next spoken
+# title. Belongs to the ENDING chapter so chapter start_times (computed
+# from per-chunk durations) stay exact.
+CHAPTER_END_SILENCE_MS = 900
+
 # Audio storage root path (matches the one in routes/nodes.py)
 import pathlib
 AUDIO_STORAGE_ROOT = pathlib.Path(os.environ.get("AUDIO_STORAGE_PATH", "data/audio")).resolve()
@@ -157,6 +163,13 @@ def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
         f"sections: {len({s for _, _, s in chunk_specs})})"
     )
 
+    # Chunks that close a chapter (a different section follows) get
+    # trailing silence appended (#145 v3).
+    section_end_indices = {
+        i for i in range(len(chunk_specs) - 1)
+        if chunk_specs[i][2] != chunk_specs[i + 1][2]
+    }
+
     # Create TTSChunk records for streaming playback (with chapter
     # metadata, #145)
     chunk_fk = {chunk_fk_attr: entity.id}
@@ -240,6 +253,12 @@ def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
                 resp.stream_to_file(part_path)
 
             segment = AudioSegment.from_file(str(part_path), format="mp3")
+            if i in section_end_indices:
+                segment = segment + AudioSegment.silent(
+                    duration=CHAPTER_END_SILENCE_MS)
+                # Re-export so live chunked playback (which streams this
+                # file directly) carries the chapter pause as well.
+                segment.export(str(part_path), format="mp3")
             chunk_duration = len(segment) / 1000.0
             audio_parts.append((i, segment, part_path))
 
