@@ -624,9 +624,11 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
 
         chunk_dir = audio_storage_root / f"drafts/{draft.user_id}/{session_id}"
 
-        # Collect and decrypt chunk files
+        # Collect and decrypt chunk files (keyed by index — sub-batch
+        # partitioning below needs per-chunk paths, #124)
         temp_files = []
-        decrypted_paths = []
+        paths_by_idx = {}
+        merged_by_subbatch = []  # [(sub_indices, merged_path)] (#124)
 
         try:
             for idx in sorted(chunk_indices):
@@ -637,96 +639,147 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                 if enc_path.exists():
                     temp_path = decrypt_file_to_temp(str(enc_path))
                     temp_files.append(temp_path)
-                    decrypted_paths.append(temp_path)
+                    paths_by_idx[idx] = temp_path
                 elif chunk_path.exists():
-                    decrypted_paths.append(str(chunk_path))
+                    paths_by_idx[idx] = str(chunk_path)
                 else:
                     logger.warning(
                         f"Chunk file not found for session {session_id}, "
                         f"index {idx}: {chunk_path}"
                     )
 
-            if not decrypted_paths:
+            if not paths_by_idx:
                 raise FileNotFoundError(
                     f"No chunk files found for session {session_id}, "
                     f"indices {chunk_indices}"
                 )
 
-            # If this batch doesn't include chunk 0, decrypt the cached
-            # init segment so concat_fragmented_media can prepend it —
-            # only chunk 0 carries the format-specific header (WebM:
-            # EBML/Segment/Tracks; fMP4: ftyp+moov), so later batches
-            # would otherwise be header-less fragment data that ffmpeg
-            # can't remux.
-            first_chunk = min(chunk_indices) if chunk_indices else 0
-            init_segment_path = None
-            if first_chunk > 0:
-                init_enc = chunk_dir / f"init{ext}.enc"
-                init_plain = chunk_dir / f"init{ext}"
-                if init_enc.exists():
-                    init_segment_path = decrypt_file_to_temp(str(init_enc))
-                    temp_files.append(init_segment_path)
-                elif init_plain.exists():
-                    init_segment_path = str(init_plain)
+            # Partition into subsessions (#124): a resumed recording's
+            # chunks come from a fresh MediaRecorder whose stream is not
+            # byte-concat-compatible with the chunks before it. The
+            # upload route persists `init.{N}{ext}` for every chunk N>0
+            # that opens a new stream; those N are split points. Each
+            # sub-batch is merged + transcribed independently and the
+            # transcripts are joined — instead of one merged file with a
+            # second init mid-stream, which made ffmpeg silently drop
+            # everything before it.
+            present = sorted(paths_by_idx)
+            boundaries = {
+                idx for idx in present
+                if idx > 0 and (
+                    (chunk_dir / f"init.{idx}{ext}").exists()
+                    or (chunk_dir / f"init.{idx}{ext}.enc").exists()
+                )
+            }
+            sub_batches = []
+            current = []
+            for idx in present:
+                if idx in boundaries and current:
+                    sub_batches.append(current)
+                    current = []
+                current.append(idx)
+            if current:
+                sub_batches.append(current)
+            if len(sub_batches) > 1:
+                logger.info(
+                    f"Session {session_id}: batch {min(present)}-"
+                    f"{max(present)} spans {len(sub_batches)} subsessions "
+                    f"(boundaries at {sorted(boundaries)})"
+                )
+
+            def _resolve_init(sub_indices):
+                """Init segment for a sub-batch, or None.
+
+                A sub-batch starting at a subsession boundary N uses its
+                own `init.{N}{ext}`; a sub-batch starting at chunk 0
+                needs none (chunk 0 self-carries the header); any other
+                start uses the legacy chunk-0 init (`init{ext}`).
+                """
+                start = sub_indices[0]
+                if start in boundaries:
+                    candidates = [
+                        chunk_dir / f"init.{start}{ext}.enc",
+                        chunk_dir / f"init.{start}{ext}",
+                    ]
+                elif start > 0:
+                    candidates = [
+                        chunk_dir / f"init{ext}.enc",
+                        chunk_dir / f"init{ext}",
+                    ]
                 else:
-                    logger.warning(
-                        f"No init segment found for session {session_id} "
-                        f"batch starting at chunk {first_chunk}; "
-                        "concat will likely fail"
-                    )
+                    return None
+                for cand in candidates:
+                    if not cand.exists():
+                        continue
+                    if cand.suffix == '.enc':
+                        path = decrypt_file_to_temp(str(cand))
+                        temp_files.append(path)
+                        return path
+                    return str(cand)
+                logger.warning(
+                    f"No init segment found for session {session_id} "
+                    f"sub-batch starting at chunk {start}; "
+                    "concat will likely fail"
+                )
+                return None
 
-            # Merge MediaRecorder fragments into a single valid file.
-            # Binary-append the fragments and remux — see
-            # concat_fragmented_media for the full rationale. Same code
-            # path handles both Matroska/WebM and fMP4.
-            merged_path = concat_fragmented_media(
-                decrypted_paths,
-                init_segment_path=init_segment_path,
-                output_suffix=ext,
-            )
-            merge_input = merged_path
+            # Merge + transcribe each subsession independently (#124).
+            # Binary-append the fragments and remux per sub-batch — see
+            # concat_fragmented_media for the rationale. Same code path
+            # handles both Matroska/WebM and fMP4.
+            api_key = get_openai_chat_key(flask_app.config)
+            if not api_key:
+                raise ValueError("OpenAI API key not configured")
+            client = OpenAI(api_key=api_key)
 
-            # Compress if needed (no-op for already-compressed WebM/MP4)
-            merge_input_path = pathlib.Path(merge_input)
-            processed_path = compress_audio_if_needed(merge_input_path, logger)
+            transcripts = []
+            batch_duration_sec = 0.0
+            for sub_indices in sub_batches:
+                merged_path = concat_fragmented_media(
+                    [paths_by_idx[i] for i in sub_indices],
+                    init_segment_path=_resolve_init(sub_indices),
+                    output_suffix=ext,
+                )
+                merged_by_subbatch.append((sub_indices, merged_path))
 
-            # Measure duration for cost tracking
-            batch_duration_sec = get_audio_duration(processed_path, logger)
+                # Compress if needed (no-op for compressed WebM/MP4)
+                merge_input_path = pathlib.Path(merged_path)
+                processed_path = compress_audio_if_needed(
+                    merge_input_path, logger)
 
-            try:
-                # Transcribe via gpt-4o-transcribe
-                api_key = get_openai_chat_key(flask_app.config)
-                if not api_key:
-                    raise ValueError(
-                        "OpenAI API key not configured"
-                    )
+                batch_duration_sec += get_audio_duration(
+                    processed_path, logger)
 
-                client = OpenAI(api_key=api_key)
-                with open(processed_path, "rb") as audio_file:
-                    # Pass an explicit (name, file) tuple so the API
-                    # infers the format from `ext` rather than from the
-                    # tempfile's auto-generated suffix.
-                    resp = client.audio.transcriptions.create(
-                        model="gpt-4o-transcribe",
-                        file=(f"audio{ext}", audio_file),
-                        response_format="text"
-                    )
-
-                    if hasattr(resp, "text"):
-                        transcript = resp.text
-                    elif isinstance(resp, dict):
-                        transcript = (
-                            resp.get("text") or resp.get("transcript") or ""
+                try:
+                    with open(processed_path, "rb") as audio_file:
+                        # Explicit (name, file) tuple so the API infers
+                        # the format from `ext` rather than the
+                        # tempfile's auto-generated suffix.
+                        resp = client.audio.transcriptions.create(
+                            model="gpt-4o-transcribe",
+                            file=(f"audio{ext}", audio_file),
+                            response_format="text"
                         )
-                    else:
-                        transcript = str(resp)
 
-            finally:
-                if processed_path != merge_input_path:
-                    try:
-                        os.unlink(processed_path)
-                    except Exception:
-                        pass
+                        if hasattr(resp, "text"):
+                            sub_text = resp.text
+                        elif isinstance(resp, dict):
+                            sub_text = (
+                                resp.get("text")
+                                or resp.get("transcript") or ""
+                            )
+                        else:
+                            sub_text = str(resp)
+                    if sub_text and sub_text.strip():
+                        transcripts.append(sub_text.strip())
+                finally:
+                    if processed_path != merge_input_path:
+                        try:
+                            os.unlink(processed_path)
+                        except Exception:
+                            pass
+
+            transcript = "\n\n".join(transcripts)
 
             # Store transcript in the first chunk of the batch;
             # mark all batch chunks as completed
@@ -760,23 +813,26 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                 )
                 db.session.add(cost_log)
 
-            # Encrypt the merged audio and store as a batch file;
-            # delete individual chunk .enc files.
+            # Encrypt the merged audio and store as batch files — one
+            # per subsession (#124); delete individual chunk .enc files
+            # only for sub-batches whose merge succeeded.
             # IMPORTANT: do this BEFORE committing chunk status to DB,
             # because finalize_draft_streaming polls for completed chunks
             # and may move/delete the directory once all are done.
-            if merged_path and os.path.exists(merged_path):
+            from backend.utils.encryption import encrypt_file
+            for sub_indices, sub_merged in merged_by_subbatch:
+                if not (sub_merged and os.path.exists(sub_merged)):
+                    continue
                 batch_filename = (
-                    f"batch_{min(chunk_indices):04d}-"
-                    f"{max(chunk_indices):04d}{ext}"
+                    f"batch_{min(sub_indices):04d}-"
+                    f"{max(sub_indices):04d}{ext}"
                 )
                 batch_dest = chunk_dir / batch_filename
-                shutil.move(merged_path, str(batch_dest))
-                from backend.utils.encryption import encrypt_file
+                shutil.move(sub_merged, str(batch_dest))
                 encrypt_file(str(batch_dest))
 
-                # Delete individual encrypted chunk files in the batch
-                for idx in chunk_indices:
+                # Delete individual encrypted chunk files in the sub-batch
+                for idx in sub_indices:
                     for chunk_name in [
                         f"chunk_{idx:04d}{ext}.enc",
                         f"chunk_{idx:04d}{ext}",
@@ -874,12 +930,14 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                     os.unlink(tf)
                 except Exception:
                     pass
-            # Clean up merged file if still around
-            if merged_path and os.path.exists(merged_path):
-                try:
-                    os.unlink(merged_path)
-                except Exception:
-                    pass
+            # Clean up any merged files still around (one per
+            # subsession, #124; moved away on success)
+            for _, sub_merged in merged_by_subbatch:
+                if sub_merged and os.path.exists(sub_merged):
+                    try:
+                        os.unlink(sub_merged)
+                    except Exception:
+                        pass
 
 
 class DraftFinalizationTask(Task):
