@@ -116,12 +116,14 @@ def _deleted_match_response(keys, deleted_keys, on_deleted):
     }), 409
 
 
-def _restore_node(node_id, content, token_count=None):
+def _restore_node(node_id, content, privacy_level, ai_usage,
+                  token_count=None):
     """Un-delete a soft-deleted imported node in place.
 
     Refills content from the archive — this also recovers tombstones
     whose content was already wiped by the cleanup task — and keeps the
-    node id, so existing child links stay intact.
+    node id, so existing child links stay intact. Privacy/AI-usage are
+    set to this import's choices, like any other (re)imported node.
     """
     node = Node.query.get(node_id)
     node.content = content
@@ -129,7 +131,37 @@ def _restore_node(node_id, content, token_count=None):
         token_count if token_count is not None
         else approximate_token_count(content)
     )
+    node.privacy_level = privacy_level
+    node.ai_usage = ai_usage
     node.deleted_at = None
+
+
+def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage):
+    """Apply this import's privacy/ai_usage to already-imported nodes.
+
+    Re-importing an archive is also how users change their mind about
+    import settings, so dedup-skipped (alive) nodes adopt the values
+    chosen for this import instead of being a pure no-op. Returns the
+    number of nodes whose settings actually changed; callers report it
+    as ``updated`` and keep it disjoint from ``skipped``.
+    """
+    from sqlalchemy import or_
+    ids = [i for i in node_ids if i is not None]
+    updated = 0
+    # Chunked so a huge archive doesn't produce an unbounded IN clause.
+    for start in range(0, len(ids), 1000):
+        chunk = ids[start:start + 1000]
+        updated += Node.query.filter(
+            Node.id.in_(chunk),
+            or_(
+                Node.privacy_level != privacy_level,
+                Node.ai_usage != ai_usage,
+            ),
+        ).update(
+            {"privacy_level": privacy_level, "ai_usage": ai_usage},
+            synchronize_session=False,
+        )
+    return updated
 
 
 @import_bp.route("/import/analyze", methods=["POST"])
@@ -304,6 +336,7 @@ def confirm_import():
         nodes_skipped = 0
         nodes_restored = 0
         thread_count = 0
+        skipped_alive_ids = []
         key_index, deleted_keys = _load_source_key_index(current_user.id)
 
         def _file_source_key(filename, content):
@@ -340,11 +373,14 @@ def confirm_import():
                     # Chain the next new file onto the existing copy so
                     # partially-skipped imports don't orphan new nodes.
                     if source_key in deleted_keys and on_deleted == 'restore':
-                        _restore_node(key_index[source_key], node_content)
+                        _restore_node(key_index[source_key], node_content,
+                                      privacy_level, ai_usage)
                         deleted_keys.discard(source_key)
                         nodes_restored += 1
                     else:
                         nodes_skipped += 1
+                        if source_key not in deleted_keys:
+                            skipped_alive_ids.append(key_index[source_key])
                     parent_id = key_index[source_key]
                     continue
 
@@ -398,11 +434,14 @@ def confirm_import():
                 source_key = _file_source_key(filename, content)
                 if source_key in key_index:
                     if source_key in deleted_keys and on_deleted == 'restore':
-                        _restore_node(key_index[source_key], node_content)
+                        _restore_node(key_index[source_key], node_content,
+                                      privacy_level, ai_usage)
                         deleted_keys.discard(source_key)
                         nodes_restored += 1
                     else:
                         nodes_skipped += 1
+                        if source_key not in deleted_keys:
+                            skipped_alive_ids.append(key_index[source_key])
                     continue
                 key_index[source_key] = None  # id not needed: no chaining
 
@@ -435,6 +474,11 @@ def confirm_import():
                 nodes_created += 1
 
             thread_count = nodes_created
+
+        nodes_updated = _apply_settings_to_skipped(
+            skipped_alive_ids, privacy_level, ai_usage
+        )
+        nodes_skipped -= nodes_updated
 
         # Commit all nodes
         db.session.commit()
@@ -504,6 +548,7 @@ def confirm_import():
             "created": nodes_created,
             "skipped": nodes_skipped,
             "restored": nodes_restored,
+            "updated": nodes_updated,
         }), 201
 
     except Exception as e:
@@ -846,6 +891,7 @@ def confirm_claude_import():
         nodes_skipped = 0
         nodes_restored = 0
         thread_count = 0
+        skipped_alive_ids = []
 
         # Sort conversations by created_at ascending
         conversations_sorted = sorted(
@@ -884,11 +930,14 @@ def confirm_claude_import():
                     # so overlap re-imports extend the original thread.
                     if (source_key in deleted_keys
                             and on_deleted == 'restore'):
-                        _restore_node(key_index[source_key], node_content)
+                        _restore_node(key_index[source_key], node_content,
+                                      privacy_level, ai_usage)
                         deleted_keys.discard(source_key)
                         nodes_restored += 1
                     else:
                         nodes_skipped += 1
+                        if source_key not in deleted_keys:
+                            skipped_alive_ids.append(key_index[source_key])
                     parent_id = key_index[source_key]
                     continue
 
@@ -934,6 +983,11 @@ def confirm_claude_import():
 
             if conv_started_new_thread:
                 thread_count += 1
+
+        nodes_updated = _apply_settings_to_skipped(
+            skipped_alive_ids, privacy_level, ai_usage
+        )
+        nodes_skipped -= nodes_updated
 
         db.session.commit()
 
@@ -1010,6 +1064,7 @@ def confirm_claude_import():
             "created": nodes_created,
             "skipped": nodes_skipped,
             "restored": nodes_restored,
+            "updated": nodes_updated,
         }), 201
 
     except Exception as e:
@@ -1080,6 +1135,7 @@ def confirm_twitter_import():
         nodes_skipped = 0
         nodes_restored = 0
         thread_count = 0
+        skipped_alive_ids = []
         key_index, deleted_keys = _load_source_key_index(current_user.id)
 
         def _tweet_source_key(tweet_data):
@@ -1115,12 +1171,15 @@ def confirm_twitter_import():
                     # partially-skipped imports don't orphan new nodes.
                     if source_key in deleted_keys and on_deleted == 'restore':
                         _restore_node(
-                            key_index[source_key], content, token_count
+                            key_index[source_key], content,
+                            privacy_level, ai_usage, token_count
                         )
                         deleted_keys.discard(source_key)
                         nodes_restored += 1
                     else:
                         nodes_skipped += 1
+                        if source_key not in deleted_keys:
+                            skipped_alive_ids.append(key_index[source_key])
                     parent_id = key_index[source_key]
                     continue
 
@@ -1170,12 +1229,15 @@ def confirm_twitter_import():
                 if source_key in key_index:
                     if source_key in deleted_keys and on_deleted == 'restore':
                         _restore_node(
-                            key_index[source_key], content, token_count
+                            key_index[source_key], content,
+                            privacy_level, ai_usage, token_count
                         )
                         deleted_keys.discard(source_key)
                         nodes_restored += 1
                     else:
                         nodes_skipped += 1
+                        if source_key not in deleted_keys:
+                            skipped_alive_ids.append(key_index[source_key])
                     continue
                 key_index[source_key] = None  # id not needed: no chaining
 
@@ -1209,6 +1271,11 @@ def confirm_twitter_import():
                 nodes_created += 1
 
             thread_count = nodes_created
+
+        nodes_updated = _apply_settings_to_skipped(
+            skipped_alive_ids, privacy_level, ai_usage
+        )
+        nodes_skipped -= nodes_updated
 
         db.session.commit()
 
@@ -1282,6 +1349,7 @@ def confirm_twitter_import():
             "created": nodes_created,
             "skipped": nodes_skipped,
             "restored": nodes_restored,
+            "updated": nodes_updated,
         }), 201
 
     except Exception as e:
@@ -1546,6 +1614,7 @@ def confirm_chatgpt_import():
         nodes_skipped = 0
         nodes_restored = 0
         thread_count = 0
+        skipped_alive_ids = []
 
         # Sort conversations by created_at ascending
         conversations_sorted = sorted(
@@ -1584,11 +1653,14 @@ def confirm_chatgpt_import():
                     # so overlap re-imports extend the original thread.
                     if (source_key in deleted_keys
                             and on_deleted == 'restore'):
-                        _restore_node(key_index[source_key], node_content)
+                        _restore_node(key_index[source_key], node_content,
+                                      privacy_level, ai_usage)
                         deleted_keys.discard(source_key)
                         nodes_restored += 1
                     else:
                         nodes_skipped += 1
+                        if source_key not in deleted_keys:
+                            skipped_alive_ids.append(key_index[source_key])
                     parent_id = key_index[source_key]
                     continue
 
@@ -1640,6 +1712,11 @@ def confirm_chatgpt_import():
 
             if conv_started_new_thread:
                 thread_count += 1
+
+        nodes_updated = _apply_settings_to_skipped(
+            skipped_alive_ids, privacy_level, ai_usage
+        )
+        nodes_skipped -= nodes_updated
 
         db.session.commit()
 
@@ -1713,6 +1790,7 @@ def confirm_chatgpt_import():
             "created": nodes_created,
             "skipped": nodes_skipped,
             "restored": nodes_restored,
+            "updated": nodes_updated,
         }), 201
 
     except Exception as e:

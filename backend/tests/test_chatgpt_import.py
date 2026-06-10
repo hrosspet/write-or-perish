@@ -921,3 +921,111 @@ class TestConfirmImportDeletedContent:
         assert body["restored"] == 1
         assert body["skipped"] == 1
         assert Node.query.get(node_a.id).deleted_at is None
+
+
+# ── POST confirm endpoints: settings update on re-import ─────────────────
+
+class TestConfirmImportSettingsUpdate:
+    """Re-importing with different privacy/ai_usage updates the
+    already-imported nodes instead of being a pure no-op."""
+
+    def _nodes(self, user_id):
+        return Node.query.filter_by(human_owner_id=user_id).all()
+
+    def test_reimport_with_new_settings_updates_existing_nodes(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        convs = [_analyzed_conv()]
+        r1 = _confirm_conversations(client, convs)  # private / none
+        assert r1.get_json()["created"] == 2
+
+        r2 = _confirm_conversations(
+            client, convs, privacy_level="public", ai_usage="chat"
+        )
+        assert r2.status_code == 201
+        b2 = r2.get_json()
+        assert b2["created"] == 0
+        assert b2["updated"] == 2
+        assert b2["skipped"] == 0
+        nodes = self._nodes(alice.id)
+        assert len(nodes) == 2
+        assert all(n.privacy_level == "public" for n in nodes)
+        assert all(n.ai_usage == "chat" for n in nodes)
+
+    def test_reimport_same_settings_is_pure_skip(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        convs = [_analyzed_conv()]
+        _confirm_conversations(client, convs)
+        b2 = _confirm_conversations(client, convs).get_json()
+        assert b2["updated"] == 0
+        assert b2["skipped"] == 2
+
+    def test_settings_update_leaves_deleted_nodes_untouched(self, app):
+        # With on_deleted="skip", deleted matches keep their old
+        # settings (and stay deleted); only alive duplicates update.
+        from datetime import datetime
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        convs = [_analyzed_conv()]
+        _confirm_conversations(client, convs)
+        deleted_node = Node.query.filter_by(
+            human_owner_id=alice.id, source_key="chatgpt:u1"
+        ).one()
+        deleted_node.deleted_at = datetime.utcnow()
+        _db.session.commit()
+
+        r = _confirm_conversations(
+            client, convs, on_deleted="skip",
+            privacy_level="public", ai_usage="chat",
+        )
+        b = r.get_json()
+        assert b["updated"] == 1
+        assert b["skipped"] == 1
+        assert b["restored"] == 0
+
+        deleted_node = Node.query.filter_by(
+            human_owner_id=alice.id, source_key="chatgpt:u1"
+        ).one()
+        alive_node = Node.query.filter_by(
+            human_owner_id=alice.id, source_key="chatgpt:a1"
+        ).one()
+        assert deleted_node.deleted_at is not None
+        assert deleted_node.privacy_level == "private"
+        assert deleted_node.ai_usage == "none"
+        assert alive_node.privacy_level == "public"
+        assert alive_node.ai_usage == "chat"
+
+    def test_restore_applies_new_settings(self, app):
+        from datetime import datetime
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        convs = [_analyzed_conv()]
+        _confirm_conversations(client, convs)
+        for node in self._nodes(alice.id):
+            node.deleted_at = datetime.utcnow()
+        _db.session.commit()
+
+        r = _confirm_conversations(
+            client, convs, on_deleted="restore",
+            privacy_level="public", ai_usage="chat",
+        )
+        b = r.get_json()
+        assert b["restored"] == 2
+        assert b["updated"] == 0
+        nodes = self._nodes(alice.id)
+        assert all(n.deleted_at is None for n in nodes)
+        assert all(n.privacy_level == "public" for n in nodes)
+        assert all(n.ai_usage == "chat" for n in nodes)

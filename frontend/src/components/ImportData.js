@@ -564,6 +564,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
             {[
               { label: "Imported", value: importResult.created, highlight: importResult.created > 0 },
               { label: "Restored", value: importResult.restored || 0, highlight: importResult.restored > 0 },
+              { label: "Updated", value: importResult.updated || 0, highlight: importResult.updated > 0 },
               { label: "Skipped", value: importResult.skipped || 0, highlight: false },
             ].filter((s) => s.label === "Imported" || s.value > 0).map((s) => (
               <div key={s.label}>
@@ -586,14 +587,24 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
               </div>
             ))}
           </div>
-          {importResult.created === 0 && !importResult.restored ? (
+          {importResult.created === 0 && !importResult.restored && !importResult.updated ? (
             <p style={{ fontFamily: "var(--serif)", fontStyle: "italic", fontWeight: 300, color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
               Everything in this archive was already imported — nothing new was added.
             </p>
           ) : (
-            <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.88rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
-              Skipped items were already imported and left untouched.
-            </p>
+            <>
+              {importResult.updated > 0 && (
+                <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.88rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
+                  Updated items were already imported; their privacy and
+                  AI-usage settings now match this import.
+                </p>
+              )}
+              {importResult.skipped > 0 && (
+                <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.88rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
+                  Skipped items were already imported and left untouched.
+                </p>
+              )}
+            </>
           )}
           <button
             onClick={() => window.location.reload()}
