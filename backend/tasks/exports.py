@@ -606,7 +606,8 @@ def _do_initial_generation(self, user, model_id, context_window,
 
 
 def _single_pass_generation(self, user, model_id, gen_template,
-                            export_result, api_keys):
+                            export_result, api_keys,
+                            max_output_tokens=None):
     """Single-pass profile generation when all data fits in budget."""
     self.update_state(state='PROGRESS', meta={
         'progress': 30, 'status': 'Preparing prompt'
@@ -616,7 +617,8 @@ def _single_pass_generation(self, user, model_id, gen_template,
     prompt = gen_template.replace("{user_export}", content)
 
     response = _call_llm_with_retries(
-        self, model_id, prompt, user.id, api_keys, progress_base=40
+        self, model_id, prompt, user.id, api_keys, progress_base=40,
+        max_tokens=max_output_tokens,
     )
 
     # Use actual input tokens from LLM response for accurate tracking
@@ -827,7 +829,8 @@ def _do_integration(self, user, model_id, last_iterative_profile_id,
 
 
 def _chunked_profile_loop(self, user, model_id, update_template,
-                          api_keys, initial_profile_content=None,
+                          api_keys, max_output_tokens=None,
+                          initial_profile_content=None,
                           initial_profile_id=None,
                           initial_source_tokens=0,
                           initial_cutoff=None,
@@ -903,7 +906,8 @@ def _chunked_profile_loop(self, user, model_id, update_template,
         response = _call_llm_with_retries(
             self, model_id, prompt, user.id, api_keys,
             progress_base=progress,
-            status_label=f'{status_prefix}: Chunk {chunk_num}'
+            status_label=f'{status_prefix}: Chunk {chunk_num}',
+            max_tokens=max_output_tokens,
         )
 
         actual_chunk_tokens = response.get(
