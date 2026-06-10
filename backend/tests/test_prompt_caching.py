@@ -232,3 +232,30 @@ def test_call_anthropic_preserves_blocks_and_cache_usage(app, monkeypatch):
     assert result["cache_read_input_tokens"] == 5000
     assert result["cache_creation_input_tokens"] == 300
     assert result["input_tokens"] == 100
+
+
+# ── OpenAI cached-input pricing (#189) ───────────────────────────────────
+
+def test_openai_cached_input_discount(app):
+    app.config["SUPPORTED_MODELS"]["gpt-5.5"] = {
+        "provider": "openai", "api_model": "gpt-5.5",
+        "input_price_per_mtok": 5.00, "output_price_per_mtok": 30.00,
+        "cached_input_multiplier": 0.25,
+    }
+    with app.app_context():
+        # 1M prompt tokens, 800k of them cached at 0.25x
+        cost = calculate_llm_cost_microdollars(
+            "gpt-5.5", 1_000_000, 0, cached_input_tokens=800_000)
+        assert cost == round(200_000 * 5 + 800_000 * 5 * 0.25)
+        # Default multiplier (0.5) when model doesn't specify one
+        app.config["SUPPORTED_MODELS"]["gpt-5.4"] = {
+            "provider": "openai", "api_model": "gpt-5.4",
+            "input_price_per_mtok": 2.50, "output_price_per_mtok": 15.00,
+        }
+        cost54 = calculate_llm_cost_microdollars(
+            "gpt-5.4", 1_000_000, 0, cached_input_tokens=1_000_000)
+        assert cost54 == round(1_000_000 * 2.5 * 0.5)
+        # cached subset can never exceed input_tokens
+        capped = calculate_llm_cost_microdollars(
+            "gpt-5.5", 100, 0, cached_input_tokens=10_000)
+        assert capped == round(100 * 5 * 0.25)

@@ -1657,9 +1657,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 logger.info(f"Calling LLM API: model_id={model_id}, api_model={api_model}, provider={provider}, key_type={key_type}, estimated_tokens={estimated_tokens}, total_chars={len(total_content)}")
 
                 try:
+                    # #189: stable per-thread key improves OpenAI's
+                    # automatic prefix-cache routing.
+                    thread_root_id = (node_chain[0].id if node_chain
+                                      else parent_node_id)
                     response = LLMProvider.get_completion(
                         model_id, messages, api_keys,
                         tools=agentic_tools,
+                        prompt_cache_key=f"loore-t{thread_root_id}",
                     )
                     break  # Success
                 except PromptTooLongError as e:
@@ -1695,6 +1700,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 model_id, input_tokens, output_tokens,
                 cache_read_tokens=cache_read_tokens,
                 cache_write_tokens=cache_write_tokens,
+                cached_input_tokens=response.get("cached_tokens", 0),
             )
             if cache_read_tokens or cache_write_tokens:
                 logger.info(
