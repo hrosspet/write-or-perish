@@ -30,6 +30,28 @@ MIN_CHUNK_TOKENS = 80000
 # fed to the LLM — as the base for an incremental update or as the root of an
 # integration chain — so the model treats it as the user's own words rather
 # than a prior generated profile.
+def _dated_user_profile_block(profile):
+    """Render a user-written profile as a dated, don't-overindex block
+    for chronological regen injection (#183)."""
+    written_on = (profile.created_at.strftime("%Y-%m-%d")
+                  if profile.created_at else "an unknown date")
+    return (
+        f"---\n"
+        f"On {written_on}, the user wrote the following self-description "
+        f"themselves. Treat it as important input — their own words about "
+        f"who they are — but as one data point among the rest; don't "
+        f"overindex on it, and don't read data written before that date "
+        f"through it:\n\n{profile.get_content()}\n---"
+    )
+
+
+def _latest_user_written_profile(user_id):
+    """Latest profile the user wrote by hand (generated_by == 'user')."""
+    return UserProfile.query.filter_by(
+        user_id=user_id, generated_by="user"
+    ).order_by(UserProfile.created_at.desc()).first()
+
+
 USER_WRITTEN_PROFILE_NOTE = (
     "[NOTE: The profile below was written by the user themselves, not "
     "AI-generated. Treat it as their own self-description - important, but "
@@ -244,7 +266,8 @@ def _load_prompt(name, user_id=None):
 
 def _call_llm_with_retries(self, model_id, prompt_text, user_id,
                             api_keys, progress_base=50,
-                            status_label='Generating profile'):
+                            status_label='Generating profile',
+                            max_tokens=None):
     """Call LLM with retry logic for prompt-too-long errors.
 
     Returns (response_dict, profile_text, input_tokens, output_tokens).
@@ -263,7 +286,8 @@ def _call_llm_with_retries(self, model_id, prompt_text, user_id,
 
         try:
             response = LLMProvider.get_completion(model_id, messages,
-                                                  api_keys)
+                                                  api_keys,
+                                                  max_tokens=max_tokens)
             return response
         except PromptTooLongError as e:
             if attempt == MAX_RETRIES:
@@ -499,12 +523,13 @@ def _do_incremental_update(self, user, model_id, previous_profile_id,
 
     return _do_iterative_incremental_update(
         self, user, model_id, prev_profile, update_template,
-        cutoff, api_keys
+        cutoff, api_keys, max_output_tokens=max_output_tokens
     )
 
 
 def _do_iterative_incremental_update(self, user, model_id, prev_profile,
-                                     update_template, cutoff, api_keys):
+                                     update_template, cutoff, api_keys,
+                                     max_output_tokens=None):
     """Incremental update with chunked processing."""
     logger.info(
         f"Starting iterative incremental update for user {user.id}, "
@@ -521,6 +546,7 @@ def _do_iterative_incremental_update(self, user, model_id, prev_profile,
     current_profile_id, chunk_num, cumulative_source_tokens = \
         _chunked_profile_loop(
             self, user, model_id, update_template, api_keys,
+            max_output_tokens=max_output_tokens,
             initial_profile_content=base_content,
             initial_profile_id=prev_profile.id,
             initial_source_tokens=prev_profile.source_tokens_used or 0,
@@ -587,32 +613,50 @@ def _do_initial_generation(self, user, model_id, context_window,
 
     total_tokens = total_export["token_count"]
 
+    # #183: a full regen must not silently discard a profile the user
+    # wrote by hand. It's injected chronologically (see the per-branch
+    # mechanics) rather than seeded at the start, so older data isn't
+    # read through a future self-description.
+    user_written = _latest_user_written_profile(user.id)
+
     if total_tokens <= budget:
         # Single-pass generation
         return _single_pass_generation(
             self, user, model_id, gen_template, total_export,
-            api_keys
+            api_keys, max_output_tokens,
+            user_written_profile=user_written,
         )
     else:
         # Iterative build
         return _iterative_generation(
             self, user, model_id, gen_template, budget,
-            context_window, max_output_tokens, api_keys
+            context_window, max_output_tokens, api_keys,
+            user_written_profile=user_written
         )
 
 
 def _single_pass_generation(self, user, model_id, gen_template,
-                            export_result, api_keys):
+                            export_result, api_keys,
+                            max_output_tokens=None,
+                            user_written_profile=None):
     """Single-pass profile generation when all data fits in budget."""
     self.update_state(state='PROGRESS', meta={
         'progress': 30, 'status': 'Preparing prompt'
     })
 
     content = export_result["content"]
+    if user_written_profile is not None:
+        # #183 (single-pass): include the hand-written profile with its
+        # date and let the model weight it chronologically.
+        content = (
+            f"{content}\n\n"
+            f"{_dated_user_profile_block(user_written_profile)}"
+        )
     prompt = gen_template.replace("{user_export}", content)
 
     response = _call_llm_with_retries(
-        self, model_id, prompt, user.id, api_keys, progress_base=40
+        self, model_id, prompt, user.id, api_keys, progress_base=40,
+        max_tokens=max_output_tokens,
     )
 
     # Use actual input tokens from LLM response for accurate tracking
@@ -823,7 +867,9 @@ def _do_integration(self, user, model_id, last_iterative_profile_id,
 
 
 def _chunked_profile_loop(self, user, model_id, update_template,
-                          api_keys, initial_profile_content=None,
+                          api_keys, max_output_tokens=None,
+                          user_written_profile=None,
+                          initial_profile_content=None,
                           initial_profile_id=None,
                           initial_source_tokens=0,
                           initial_cutoff=None,
@@ -888,6 +934,20 @@ def _chunked_profile_loop(self, user, model_id, update_template,
             )
             break
 
+        # #183 (iterative): inject the hand-written profile into the
+        # first chunk whose data window reaches its creation time — not
+        # before, so older data isn't read through a future
+        # self-description.
+        if (user_written_profile is not None and latest_ts is not None
+                and user_written_profile.created_at is not None
+                and latest_ts >= user_written_profile.created_at):
+            chunk = dict(chunk)
+            chunk["content"] = (
+                f"{chunk['content']}\n\n"
+                f"{_dated_user_profile_block(user_written_profile)}"
+            )
+            user_written_profile = None  # injected once
+
         if is_first_with_gen:
             prompt = first_chunk_prompt_fn(chunk)
         else:
@@ -899,7 +959,8 @@ def _chunked_profile_loop(self, user, model_id, update_template,
         response = _call_llm_with_retries(
             self, model_id, prompt, user.id, api_keys,
             progress_base=progress,
-            status_label=f'{status_prefix}: Chunk {chunk_num}'
+            status_label=f'{status_prefix}: Chunk {chunk_num}',
+            max_tokens=max_output_tokens,
         )
 
         actual_chunk_tokens = response.get(
@@ -950,11 +1011,44 @@ def _chunked_profile_loop(self, user, model_id, update_template,
         if not has_more:
             break
 
+    # #183 edge: every chunk predated the hand-written profile (it's
+    # newer than all data) — reconcile it in one final pass so it isn't
+    # dropped.
+    if (user_written_profile is not None
+            and current_profile_content is not None):
+        chunk_num += 1
+        prompt = build_chunk_prompt(
+            update_template, current_profile_content,
+            cumulative_source_tokens,
+            {"content": _dated_user_profile_block(user_written_profile),
+             "token_count": 0},
+        )
+        response = _call_llm_with_retries(
+            self, model_id, prompt, user.id, api_keys,
+            progress_base=88,
+            status_label=f'{status_prefix}: Reconciling self-description',
+            max_tokens=max_output_tokens,
+        )
+        profile = _save_profile(
+            user, model_id, response["content"], response,
+            source_tokens_used=cumulative_source_tokens,
+            source_data_cutoff=current_cutoff,
+            generation_type=generation_type,
+            parent_profile_id=current_profile_id,
+        )
+        current_profile_content = response["content"]
+        current_profile_id = profile.id
+        logger.info(
+            f"User {user.id}: reconciled user-written profile in a "
+            f"final pass (profile {profile.id})"
+        )
+
     return current_profile_id, chunk_num, cumulative_source_tokens
 
 
 def _iterative_generation(self, user, model_id, gen_template, budget,
-                          context_window, max_output_tokens, api_keys):
+                          context_window, max_output_tokens, api_keys,
+                          user_written_profile=None):
     """Iterative profile building: process data in chronological chunks."""
     budget = min(budget, CHUNK_BUDGET)
     logger.info(
@@ -967,12 +1061,14 @@ def _iterative_generation(self, user, model_id, gen_template, budget,
     current_profile_id, chunk_num, cumulative_source_tokens = \
         _chunked_profile_loop(
             self, user, model_id, update_template, api_keys,
+            max_output_tokens=max_output_tokens,
             first_chunk_prompt_fn=lambda chunk: gen_template.replace(
                 "{user_export}", chunk["content"]
             ),
             generation_type="iterative",
             status_prefix="Generating profile",
             chunk_budget=budget,
+            user_written_profile=user_written_profile,
         )
 
     # Run integration over the iterative chain

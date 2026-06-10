@@ -114,6 +114,28 @@ export function useStreamingTranscription(options = {}) {
     const family = blobType.split(';')[0].trim().toLowerCase();
     const ext = family === 'audio/mp4' ? '.mp4' : '.webm';
 
+    // #88: if the page is hidden (phone call / lock screen / closing),
+    // a normal XHR may be killed mid-flight. sendBeacon survives page
+    // death; fire it first and still run the normal upload — the server
+    // dedupes by chunk_index, so a double-delivery is harmless.
+    if (typeof document !== 'undefined'
+        && document.visibilityState === 'hidden'
+        && navigator.sendBeacon) {
+      try {
+        const beaconForm = new FormData();
+        beaconForm.append('chunk', blob, `chunk_${chunkIndex}${ext}`);
+        beaconForm.append('chunk_index', chunkIndex.toString());
+        beaconForm.append('mime_type', blobType);
+        const sent = navigator.sendBeacon(
+          `${process.env.REACT_APP_BACKEND_URL}/api/drafts/streaming/${sessionId}/audio-chunk`,
+          beaconForm
+        );
+        console.log(`[StreamingTranscription] sendBeacon fallback for chunk ${chunkIndex}: ${sent ? 'queued' : 'rejected'}`);
+      } catch (e) {
+        console.warn('[StreamingTranscription] sendBeacon failed', e);
+      }
+    }
+
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         const formData = new FormData();

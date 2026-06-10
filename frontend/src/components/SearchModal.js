@@ -5,6 +5,7 @@ import { formatDate } from '../utils/date';
 
 function SearchModal({ onClose }) {
   const [query, setQuery] = useState('');
+  const [mode, setMode] = useState('keyword'); // 'keyword' | 'semantic'
   const [showDateFilter, setShowDateFilter] = useState(false);
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
@@ -45,7 +46,8 @@ function SearchModal({ onClose }) {
       params.per_page = 20;
       params.page = 1;
 
-      const res = await api.get('/search', { params });
+      const endpoint = mode === 'semantic' ? '/search/semantic' : '/search';
+      const res = await api.get(endpoint, { params });
       setResults(res.data.results);
       setTotal(res.data.total);
     } catch (err) {
@@ -57,9 +59,10 @@ function SearchModal({ onClose }) {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [mode]);
 
   const loadMore = useCallback(async () => {
+    if (mode === 'semantic') return; // semantic returns a single ranked set
     const nextPage = page + 1;
     setLoadingMore(true);
     try {
@@ -78,7 +81,7 @@ function SearchModal({ onClose }) {
     } finally {
       setLoadingMore(false);
     }
-  }, [page, query, dateFrom, dateTo]);
+  }, [page, query, dateFrom, dateTo, mode]);
 
   // Auto-load more when the button scrolls into view
   useEffect(() => {
@@ -181,6 +184,25 @@ function SearchModal({ onClose }) {
               fontFamily: 'var(--sans)',
             }}
           />
+          <button
+            onClick={() => setMode(mode === 'keyword' ? 'semantic' : 'keyword')}
+            title={mode === 'semantic'
+              ? 'Semantic: ranked by meaning. Click for exact keyword match.'
+              : 'Keyword: exact match. Click for semantic (by meaning).'}
+            style={{
+              background: mode === 'semantic' ? 'var(--accent-subtle)' : 'transparent',
+              border: '1px solid ' + (mode === 'semantic' ? 'var(--accent-dim)' : 'var(--border)'),
+              borderRadius: '6px',
+              padding: '4px 10px',
+              fontSize: '12px',
+              color: mode === 'semantic' ? 'var(--accent)' : 'var(--text-muted)',
+              cursor: 'pointer',
+              flexShrink: 0,
+              fontFamily: 'var(--sans)',
+            }}
+          >
+            {mode === 'semantic' ? 'Semantic' : 'Keyword'}
+          </button>
           <button
             onClick={() => setShowDateFilter(!showDateFilter)}
             style={{
@@ -293,8 +315,14 @@ function SearchModal({ onClose }) {
 
           {!loading && results.map((r) => (
             <div
-              key={r.id}
-              onClick={(e) => handleResultClick(r.id, e)}
+              key={`${r.kind || 'node'}-${r.id}`}
+              onClick={(e) => {
+                if (r.kind === 'external') {
+                  if (r.external_url) window.open(r.external_url, '_blank', 'noopener');
+                  return;
+                }
+                handleResultClick(r.id, e);
+              }}
               style={{
                 padding: '12px 20px',
                 cursor: 'pointer',
@@ -319,8 +347,15 @@ function SearchModal({ onClose }) {
                   textTransform: 'uppercase',
                   letterSpacing: '0.5px',
                 }}>
-                  {r.node_type}
+                  {r.kind === 'external'
+                    ? (r.source === 'twitter_bookmark' ? 'bookmark' : 'archive')
+                    : r.node_type}
                 </span>
+                {r.kind === 'external' && r.author_handle && (
+                  <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                    @{r.author_handle}
+                  </span>
+                )}
                 <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
                   {formatDate(r.created_at)}
                 </span>
