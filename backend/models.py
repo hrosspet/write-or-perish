@@ -657,6 +657,10 @@ class UserArtifact(db.Model):
         # Slice 5). Always-inline (its own {user_ai_preferences} placeholder),
         # so it's excluded from the agentic index — see ALWAYS_INLINE_KINDS.
         "ai_preferences": "AI Interaction Preferences",
+        # Long-running aspirations the AI helps clarify and track (#150).
+        # Always-inline (its own {user_intentions} placeholder), so it's
+        # excluded from the agentic index — see ALWAYS_INLINE_KINDS.
+        "intentions": "Intentions",
     }
 
     # Pre-filled one-line descriptions for the built-in kinds. Custom kinds
@@ -668,6 +672,7 @@ class UserArtifact(db.Model):
         "scratchpad": "Working notes for ongoing threads — where we left off, open questions.",
         "predictions": "Predictions you want to record and revisit over time.",
         "ai_preferences": "How {name} wants the AI to interact with them — tone, style, boundaries.",
+        "intentions": "Long-running aspirations {name} wants to hold — the AI helps clarify and track them.",
     }
 
     def set_content(self, plaintext):

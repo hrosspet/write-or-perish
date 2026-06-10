@@ -12,6 +12,7 @@ import { formatDate } from '../utils/date';
 const KIND_BLURBS = {
   memory: "Durable facts the AI remembers about you across sessions. It updates this on its own as you talk.",
   scratchpad: "The AI's working notes for ongoing threads — where it left off, open questions.",
+  intentions: "Your longer-running aspirations — noticed, clarified, and tracked together with the AI. Fulfilled or consciously released, both count.",
 };
 
 const titleFromKind = (k) =>

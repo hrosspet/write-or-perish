@@ -157,7 +157,7 @@ def test_list_includes_empty_defaults(app, client):
     resp = client.get("/api/artifacts/")
     assert resp.status_code == 200
     kinds = {a["kind"] for a in resp.get_json()["artifacts"]}
-    assert {"memory", "scratchpad"} <= kinds
+    assert {"memory", "scratchpad", "intentions"} <= kinds
 
 
 def test_put_creates_versions_and_get_returns_latest(app, client):
@@ -734,13 +734,14 @@ def test_artifacts_context_resolution_pinned_vs_latest(app):
         _db.session.commit()
 
         # Pinned: only memory v1 (the node binding wins)
-        memory, scratchpad, index = get_user_artifacts_context(
+        memory, scratchpad, intentions, index = get_user_artifacts_context(
             uid, pinned_node=node)
         assert memory == "mem-v1"
         assert scratchpad == ""
+        assert intentions == ""
 
         # Fallback (no pinned node): latest of everything
-        memory, scratchpad, index = get_user_artifacts_context(uid)
+        memory, scratchpad, intentions, index = get_user_artifacts_context(uid)
         assert memory == "mem-v1"
         assert scratchpad == "pad-v1"
         assert "reading-list" in index
@@ -751,7 +752,7 @@ def test_index_includes_description(app):
         uid = User.query.first().id
         _mk_artifact(uid, "reading-list", "books", title="Reading List",
                      description="Books to read")
-        _, _, index = get_user_artifacts_context(uid)
+        _, _, _, index = get_user_artifacts_context(uid)
         assert "reading-list" in index
         assert "Books to read" in index
 
@@ -762,7 +763,7 @@ def test_index_includes_todo_with_content(app):
     with app.app_context():
         uid = User.query.first().id
         _mk_todo(uid, "task one\ntask two")
-        _, _, index = get_user_artifacts_context(uid)
+        _, _, _, index = get_user_artifacts_context(uid)
         assert "todo" in index
         assert "read_todo" in index
         # No raw todo content leaks into the index line.
@@ -775,7 +776,7 @@ def test_index_lists_empty_todo(app):
     """A user with no todo row still sees the surface listed as empty."""
     with app.app_context():
         uid = User.query.first().id
-        _, _, index = get_user_artifacts_context(uid)
+        _, _, _, index = get_user_artifacts_context(uid)
         assert "todo" in index
         assert "(empty)" in index
 
@@ -785,7 +786,7 @@ def test_index_omits_ai_blocked_todo(app):
     with app.app_context():
         uid = User.query.first().id
         _mk_todo(uid, "private tasks", ai_usage="none")
-        _, _, index = get_user_artifacts_context(uid)
+        _, _, _, index = get_user_artifacts_context(uid)
         assert "read_todo" not in index
 
 
@@ -798,7 +799,7 @@ def test_index_excludes_ai_preferences(app):
         uid = User.query.first().id
         _mk_artifact(uid, "ai_preferences", "be concise",
                      title="AI Interaction Preferences")
-        _, _, index = get_user_artifacts_context(uid)
+        _, _, _, index = get_user_artifacts_context(uid)
         assert "ai_preferences" not in index
 
 
@@ -884,3 +885,30 @@ def test_backfill_ai_preferences_script(app):
         assert mod.run_backfill(execute=True) == (0, 0, 0)
         assert UserArtifact.query.filter_by(
             user_id=uid, kind="ai_preferences").count() == 2
+
+
+def test_intentions_ambient_not_in_index(app):
+    """Intentions (#150) resolve via their own placeholder and stay out
+    of the read_artifact index, like memory/scratchpad."""
+    with app.app_context():
+        uid = User.query.first().id
+        _mk_artifact(uid, "intentions",
+                     "## Write daily\n*held since 2026-06-10 — active*")
+        memory, scratchpad, intentions, index = \
+            get_user_artifacts_context(uid)
+        assert "Write daily" in intentions
+        assert "intentions" not in index
+
+
+def test_update_artifact_tool_handles_intentions(app):
+    with app.app_context():
+        uid = User.query.first().id
+        r = _run_tool(app, "update_artifact", {
+            "kind": "intentions",
+            "updated_content": "## Morning pages\n*held since "
+                               "2026-06-10 — active*\nWrite 3 pages.",
+        }, uid)
+        assert r["status"] == "success"
+        latest = UserArtifact.latest_for(uid, "intentions")
+        assert latest.title == "Intentions"
+        assert "Morning pages" in latest.get_content()
