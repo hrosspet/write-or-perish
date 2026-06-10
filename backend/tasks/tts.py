@@ -16,7 +16,7 @@ from datetime import datetime
 from backend.celery_app import celery, flask_app
 from backend.models import Node, UserProfile, TTSChunk, APICostLog
 from backend.extensions import db
-from backend.utils.audio_processing import adaptive_chunk_text
+from backend.utils.audio_processing import section_aware_chunk_text
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.encryption import encrypt_file
 from backend.utils.cost import calculate_audio_cost_microdollars
@@ -149,17 +149,24 @@ def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
     entity.tts_task_progress = 30
     db.session.commit()
 
-    chunks = adaptive_chunk_text(text)
+    chunk_specs = section_aware_chunk_text(text)
+    chunks = [c for c, _title, _idx in chunk_specs]
     logger.info(
         f"Text split into {len(chunks)} chunks for TTS "
-        f"for {entity_label} (sizes: {[len(c) for c in chunks]})"
+        f"for {entity_label} (sizes: {[len(c) for c in chunks]}, "
+        f"sections: {len({s for _, _, s in chunk_specs})})"
     )
 
-    # Create TTSChunk records for streaming playback
+    # Create TTSChunk records for streaming playback (with chapter
+    # metadata, #145)
     chunk_fk = {chunk_fk_attr: entity.id}
     created_chunks = []
-    for i in range(len(chunks)):
-        tts_chunk = TTSChunk(chunk_index=i, status='pending', **chunk_fk)
+    for i, (_chunk, section_title, section_index) in enumerate(chunk_specs):
+        tts_chunk = TTSChunk(
+            chunk_index=i, status='pending',
+            section_index=section_index,
+            section_title=section_title,
+            **chunk_fk)
         db.session.add(tts_chunk)
         created_chunks.append(tts_chunk)
     db.session.commit()

@@ -2426,3 +2426,45 @@ def delete_node(node_id):
         db.session.rollback()
         current_app.logger.error(f"Error soft-deleting node {node_id}: {e}")
         return jsonify({"error": "Error deleting node", "details": str(e)}), 500
+
+
+@nodes_bp.route("/<int:node_id>/tts-chapters", methods=["GET"])
+@login_required
+def get_tts_chapters(node_id):
+    """Chapter list for a node's generated TTS audio (#145).
+
+    Built from persisted TTSChunk rows: each chapter is the first chunk
+    of a markdown section, with its cumulative start time (sum of prior
+    chunk durations) so the player can jump within the merged file and
+    map chapters onto the chunked queue alike.
+    """
+    node = Node.query.get_or_404(node_id)
+    if not can_user_access_node(node) and not getattr(
+            current_user, "is_admin", False):
+        return jsonify({"error": "Unauthorized"}), 403
+
+    from backend.models import TTSChunk
+    chunks = TTSChunk.query.filter_by(node_id=node_id).order_by(
+        TTSChunk.chunk_index).all()
+    if not chunks:
+        return jsonify({"chapters": []}), 200
+
+    chapters = []
+    elapsed = 0.0
+    seen_sections = set()
+    for chunk in chunks:
+        key = chunk.section_index
+        if key is not None and key not in seen_sections:
+            seen_sections.add(key)
+            chapters.append({
+                "section_index": key,
+                "title": chunk.section_title or "Introduction",
+                "chunk_index": chunk.chunk_index,
+                "start_time": round(elapsed, 2),
+            })
+        elapsed += chunk.duration or 0.0
+
+    # A single untitled section = no real chapters — don't render a list
+    if len(chapters) <= 1:
+        return jsonify({"chapters": []}), 200
+    return jsonify({"chapters": chapters}), 200

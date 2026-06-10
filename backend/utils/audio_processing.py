@@ -4,6 +4,7 @@ Extracted from routes/nodes.py to be shared between API and Celery tasks.
 """
 import os
 import pathlib
+import re
 import tempfile
 import ffmpeg
 from pydub import AudioSegment
@@ -304,3 +305,96 @@ def adaptive_chunk_text(text: str, first_chunk_gen_secs: float = 3.0) -> list:
         remaining = remaining[split_point:].strip()
 
     return chunks
+
+
+# Minimum sensible first chunk (#140): a tiny first sentence ("Okay.")
+# produces a sub-second clip — an audible stitch artifact and a wasted
+# API round-trip. Below this size we split word-aware at the target
+# instead of at the sentence boundary.
+MIN_FIRST_CHUNK_CHARS = 80
+
+_CHAPTER_HEADING_RE = re.compile(r'^(#{1,2})\s+(.+?)\s*$', re.MULTILINE)
+
+
+def split_sections(text):
+    """Split markdown into chapter sections at h1/h2 headings (#145).
+
+    Returns [(title_or_None, body)]. Content before the first heading
+    becomes a section with title None. Heading lines themselves are NOT
+    part of the body (v0 decision: chapter titles are visual labels, not
+    read aloud). h3+ headings stay inside their section's body.
+    """
+    matches = list(_CHAPTER_HEADING_RE.finditer(text or ""))
+    if not matches:
+        return [(None, (text or "").strip())] if (text or "").strip() else []
+
+    sections = []
+    preamble = text[:matches[0].start()].strip()
+    if preamble:
+        sections.append((None, preamble))
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        body = text[m.end():end].strip()
+        sections.append((m.group(2).strip(), body))
+    return sections
+
+
+def section_aware_chunk_text(text, first_chunk_gen_secs: float = 3.0):
+    """Chunk text for streaming TTS without crossing chapter boundaries.
+
+    Returns [(chunk_text, section_title, section_index)]. The adaptive
+    size schedule (small first chunk → medium second → full-size rest)
+    applies GLOBALLY across sections so playback still starts fast, while
+    every chunk belongs to exactly one section — the prerequisite for
+    chapter-accurate jumping in the player (#145).
+
+    Sections whose body is empty (e.g. a heading directly followed by
+    another heading) are skipped — they'd produce zero-length audio.
+    """
+    gen_chars_per_sec = 106.0
+    audio_secs_per_char = 0.062
+    overhead_secs = 2.0
+
+    first_chunk_chars = min(
+        int(first_chunk_gen_secs * gen_chars_per_sec), TTS_MAX_CHARS)
+    first_play_secs = first_chunk_chars * audio_secs_per_char
+    next_budget_secs = max(first_play_secs - overhead_secs, 2.0)
+    second_chunk_chars = min(
+        int(next_budget_secs * gen_chars_per_sec), TTS_MAX_CHARS)
+
+    def _budget(global_idx):
+        if global_idx == 0:
+            return first_chunk_chars
+        if global_idx == 1:
+            return second_chunk_chars
+        return TTS_MAX_CHARS
+
+    out = []
+    for section_index, (title, body) in enumerate(split_sections(text)):
+        remaining = body
+        while remaining:
+            budget = _budget(len(out))
+            if len(remaining) <= budget:
+                out.append((remaining, title, section_index))
+                break
+            split_point = _split_at_sentence(remaining, budget)
+            # #140: a tiny first chunk (short opening sentence) falls
+            # back to a word-aware split at the full budget.
+            if len(out) == 0 and split_point < MIN_FIRST_CHUNK_CHARS:
+                split_point = _split_at_word(remaining, budget)
+            chunk = remaining[:split_point].strip()
+            if chunk:
+                out.append((chunk, title, section_index))
+            remaining = remaining[split_point:].strip()
+    return out
+
+
+def _split_at_word(text, max_chars):
+    """Last word boundary within max_chars (never mid-word)."""
+    if len(text) <= max_chars:
+        return len(text)
+    chunk = text[:max_chars]
+    best = chunk.rfind(' ')
+    for sep in ('\n', '\t'):
+        best = max(best, chunk.rfind(sep))
+    return best + 1 if best > 0 else max_chars
