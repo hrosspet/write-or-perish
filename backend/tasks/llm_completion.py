@@ -878,8 +878,159 @@ class LLMCompletionTask(Task):
                     logger.error(f"LLM completion failed for node {llm_node_id}: {exc}")
 
 
+def render_system_message(system_node, user_id):
+    """Render the system node's full message text exactly as the
+    generation loop would (#192/#187).
+
+    Used by the finalize pre-warm so the provider-cache warm and the
+    real generation share byte-identical prefixes: the result is stored
+    in the #192 Redis cache, and generation prefers those cached bytes.
+    Only valid for prompts without volatile placeholders ({user_export},
+    {quote:..}) — callers must check first.
+    """
+    owner = User.query.get(user_id)
+    user_tz = owner.timezone if owner and owner.timezone else "UTC"
+    author = system_node.user.username if system_node.user else "Unknown"
+    time_prefix = local_stamp(
+        system_node.updated_at or system_node.created_at, user_tz)
+    text = f"{time_prefix} author {author}: {system_node.get_content()}"
+
+    if USER_PROFILE_PLACEHOLDER in text:
+        profile_obj = get_user_profile_content(
+            user_id, pinned_node=system_node)
+        text = text.replace(
+            USER_PROFILE_PLACEHOLDER,
+            profile_obj.get_content() if profile_obj else "")
+    if USER_TODO_PLACEHOLDER in text:
+        text = text.replace(
+            USER_TODO_PLACEHOLDER,
+            get_user_todo_content(user_id, pinned_node=system_node) or "")
+    if USER_RECENT_PLACEHOLDER in text:
+        rc = get_user_recent_content(user_id, pinned_node=system_node)
+        text = text.replace(
+            USER_RECENT_PLACEHOLDER, rc.get_content() if rc else "")
+    if USER_RECENT_RAW_PLACEHOLDER in text:
+        raw_result = get_user_recent_raw_content(
+            user_id, created_before=system_node.created_at)
+        raw_text = ""
+        if raw_result:
+            raw_text = format_date_metadata(
+                covers_start=raw_result.get("earliest"),
+                covers_end=raw_result.get("latest"),
+                tokens=raw_result.get("token_count"),
+            ) + raw_result["content"]
+        text = text.replace(USER_RECENT_RAW_PLACEHOLDER, raw_text)
+    if USER_AI_PREFERENCES_PLACEHOLDER in text:
+        text = text.replace(
+            USER_AI_PREFERENCES_PLACEHOLDER,
+            get_user_ai_preferences_content(
+                user_id, pinned_node=system_node) or "")
+    if (USER_MEMORY_PLACEHOLDER in text
+            or USER_SCRATCHPAD_PLACEHOLDER in text
+            or USER_ARTIFACTS_INDEX_PLACEHOLDER in text):
+        memory, scratchpad, index = get_user_artifacts_context(
+            user_id, pinned_node=system_node)
+        text = text.replace(USER_MEMORY_PLACEHOLDER, memory or "")
+        text = text.replace(USER_SCRATCHPAD_PLACEHOLDER, scratchpad or "")
+        text = text.replace(
+            USER_ARTIFACTS_INDEX_PLACEHOLDER, index or "(none)")
+    return text
+
+
+@celery.task(name='backend.tasks.llm_completion.prewarm_anthropic_cache')
+def prewarm_anthropic_cache(system_node_id, user_id, model_id,
+                            transcript_so_far, recording_stamp_iso):
+    """Pre-warm the Anthropic prompt cache during voice finalize (#187).
+
+    Fired at the START of finalize for fresh voice threads, overlapping
+    the trailing-batch transcription. Renders the system prefix (storing
+    it in the #192 cache so generation reuses the exact bytes), then
+    sends a max_tokens=1 request with cache breakpoints on the system
+    block and the transcript-so-far block. Generation then reads those
+    entries at 0.1x and prefills only the final batch.
+
+    Every failure path is silent — a missed warm just means today's
+    uncached behavior.
+    """
+    with flask_app.app_context():
+        try:
+            system_node = Node.query.get(system_node_id)
+            if system_node is None:
+                return {"status": "skipped", "reason": "no_system_node"}
+            sys_content = system_node.get_content() or ""
+            if USER_EXPORT_PATTERN.search(sys_content)                     or has_quotes(sys_content):
+                return {"status": "skipped", "reason": "volatile_prompt"}
+
+            model_config = flask_app.config["SUPPORTED_MODELS"].get(model_id)
+            if not model_config or model_config["provider"] != "anthropic":
+                return {"status": "skipped", "reason": "not_anthropic"}
+
+            from backend.utils.prompt_cache import (
+                get_cached_render, store_render,
+            )
+            sys_text = get_cached_render(flask_app.config, system_node)
+            if sys_text is None:
+                sys_text = render_system_message(system_node, user_id)
+                store_render(flask_app.config, system_node, sys_text)
+
+            owner = User.query.get(user_id)
+            user_tz = (owner.timezone if owner and owner.timezone
+                       else "UTC")
+            author = owner.username if owner else "Unknown"
+            stamp = local_stamp(
+                datetime.fromisoformat(recording_stamp_iso), user_tz)
+            transcript_block = (
+                f"{stamp} author {author}: {transcript_so_far}")
+
+            key_type = determine_api_key_type([system_node], logger=logger)
+            api_keys = get_api_keys_for_usage(flask_app.config, key_type)
+            if not api_keys.get("anthropic"):
+                return {"status": "skipped", "reason": "no_key"}
+
+            response = LLMProvider._call_anthropic(
+                model_config["api_model"],
+                [
+                    {"role": "user", "content": [
+                        {"type": "text", "text": sys_text,
+                         "cache_control": {"type": "ephemeral"}},
+                    ]},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": transcript_block,
+                         "cache_control": {"type": "ephemeral"}},
+                    ]},
+                ],
+                api_keys["anthropic"],
+                max_tokens=1,
+                tools=VOICE_TOOLS,
+            )
+            cache_write = response.get("cache_creation_input_tokens", 0)
+            cost = calculate_llm_cost_microdollars(
+                model_id, response.get("input_tokens", 0),
+                response.get("output_tokens", 0),
+                cache_read_tokens=response.get(
+                    "cache_read_input_tokens", 0),
+                cache_write_tokens=cache_write,
+            )
+            db.session.add(APICostLog(
+                user_id=user_id,
+                model_id=model_id,
+                request_type="cache_warm",
+                input_tokens=response.get("input_tokens", 0) + cache_write,
+                output_tokens=response.get("output_tokens", 0),
+                cost_microdollars=cost,
+            ))
+            db.session.commit()
+            logger.info("Cache pre-warm wrote %d tokens (node %s)",
+                        cache_write, system_node_id)
+            return {"status": "ok", "cache_write_tokens": cache_write}
+        except Exception:
+            logger.warning("Cache pre-warm failed; generation proceeds "
+                           "uncached", exc_info=True)
+            return {"status": "failed"}
+
+
 @celery.task(base=LLMCompletionTask, bind=True)
-def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id: str, user_id: int, source_mode: str = None):
+def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id: str, user_id: int, source_mode: str = None, cache_split_offset: int = None):
     """
     Asynchronously generate an LLM response and update a placeholder node.
 
@@ -889,6 +1040,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
         model_id: Model identifier (e.g., "gpt-5", "claude-sonnet-4.5").
         user_id: ID of the user requesting the completion.
         source_mode: 'voice' or 'textmode' — which mode triggered this call.
+        cache_split_offset: char offset splitting the latest voice
+            transcript into [already-warmed prefix][final batch] blocks
+            for provider prompt caching (#187). None = no split.
     """
     logger.info(f"Starting LLM completion task for parent {parent_node_id}, updating node {llm_node_id}, model={model_id}")
 
@@ -965,8 +1119,34 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # drifted mid-thread; only the 10k-raw window was pinned (and it
             # still is, via recent_raw_node.created_at — it's a rolling
             # token window, not a single versioned row).
+            # #192: the system node's rendered text is byte-identical
+            # across turns (#191 pinning), so render once and reuse via
+            # Redis. A hit also lets us skip the heavy artifact fetches
+            # when their placeholders live only in the system prompt.
+            from backend.utils.prompt_cache import (
+                get_cached_render, store_render,
+            )
+            system_node = next(
+                (n for n in node_chain
+                 if n.deleted_at is None and n.has_artifact("prompt")),
+                None)
+            system_render_cacheable = False
+            cached_system_render = None
+            if system_node is not None:
+                _sys_text = system_node.get_content() or ""
+                # Exclude prompts carrying per-call volatile placeholders.
+                system_render_cacheable = (
+                    not USER_EXPORT_PATTERN.search(_sys_text)
+                    and not has_quotes(_sys_text)
+                )
+                if system_render_cacheable:
+                    cached_system_render = get_cached_render(
+                        flask_app.config, system_node)
+
             def _placeholder_node(placeholder):
                 for n in node_chain:
+                    if cached_system_render is not None and n is system_node:
+                        continue  # already rendered — no fetch needed
                     if _alive(n) and placeholder in n.get_content():
                         return n
                 return None
@@ -1181,10 +1361,24 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                            else "UTC")
 
                 messages = []
+                system_msg_index = None
+                last_assistant_index = None
+                latest_user_msg_index = None
                 for node in node_chain:
                     author = node.user.username if node.user else "Unknown"
                     is_llm_node = node.node_type == "llm" or (node.llm_model is not None)
                     time_prefix = local_stamp(node.updated_at or node.created_at, user_tz)
+
+                    # #192: reuse the cached system-prompt render verbatim.
+                    if (node is system_node
+                            and cached_system_render is not None):
+                        system_msg_index = len(messages)
+                        messages.append({
+                            "role": "user",
+                            "content": [{"type": "text",
+                                         "text": cached_system_render}],
+                        })
+                        continue
 
                     # Soft-deleted ancestor: scrub content so the AI doesn't
                     # ingest deleted user data. We still include the node so
@@ -1309,6 +1503,39 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             if resolved_ids:
                                 logger.info(f"Resolved quotes for node IDs: {resolved_ids}")
 
+                    if (node.id == parent_node_id and not is_llm_node
+                            and cache_split_offset
+                            and node.deleted_at is None):
+                        # #187: two-block transcript split. Block A is the
+                        # prefix the finalize pre-warm already cached
+                        # (byte-identical incl. the recording-start stamp);
+                        # block B is the final transcribed batch.
+                        head_len = len(message_text) - len(node_content) \
+                            + cache_split_offset
+                        if 0 < head_len < len(message_text):
+                            latest_user_msg_index = len(messages)
+                            messages.append({
+                                "role": role,
+                                "content": [
+                                    {"type": "text",
+                                     "text": message_text[:head_len]},
+                                    {"type": "text",
+                                     "text": message_text[head_len:]},
+                                ],
+                            })
+                            continue
+
+                    if node.id == parent_node_id and not is_llm_node:
+                        latest_user_msg_index = len(messages)
+                    if node is system_node:
+                        system_msg_index = len(messages)
+                        if (system_render_cacheable
+                                and cached_system_render is None
+                                and attempt == 0):
+                            store_render(
+                                flask_app.config, system_node, message_text)
+                    if role == "assistant":
+                        last_assistant_index = len(messages)
                     messages.append({
                         "role": role,
                         "content": [{"type": "text", "text": message_text}]
@@ -1402,6 +1629,23 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         "content": [{"type": "text", "text": injected_text}]
                     })
 
+                # #187: provider-side prompt caching (Anthropic). Mark
+                # cache breakpoints: one on the rendered system prompt
+                # (the big stable prefix) and one on the last assistant
+                # reply (caches the whole prior conversation). Everything
+                # after the last breakpoint — the new user message and the
+                # volatile notes — prefills fresh each turn. Byte-identity
+                # of the prefix across turns is guaranteed by #191/#192.
+                if provider == "anthropic" and is_agentic:
+                    for idx in (system_msg_index, last_assistant_index,
+                                latest_user_msg_index):
+                        if idx is None:
+                            continue
+                        blocks = messages[idx].get("content")
+                        if isinstance(blocks, list) and blocks:
+                            blocks[-1]["cache_control"] = {
+                                "type": "ephemeral"}
+
                 # Step 3: Call LLM API
                 self.update_state(state='PROGRESS', meta={'progress': 40, 'status': 'Generating response'})
                 llm_node.llm_task_progress = 40
@@ -1434,6 +1678,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             total_tokens = response["total_tokens"]
             input_tokens = response.get("input_tokens", 0)
             output_tokens = response.get("output_tokens", 0)
+            cache_read_tokens = response.get("cache_read_input_tokens", 0)
+            cache_write_tokens = response.get(
+                "cache_creation_input_tokens", 0)
             response_tool_calls = response.get("tool_calls", [])
             response_truncated = response.get("truncated", False)
 
@@ -1444,12 +1691,23 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             llm_node.llm_task_progress = 90
             db.session.commit()
 
-            cost = calculate_llm_cost_microdollars(model_id, input_tokens, output_tokens)
+            cost = calculate_llm_cost_microdollars(
+                model_id, input_tokens, output_tokens,
+                cache_read_tokens=cache_read_tokens,
+                cache_write_tokens=cache_write_tokens,
+            )
+            if cache_read_tokens or cache_write_tokens:
+                logger.info(
+                    "Prompt cache usage: read=%d write=%d uncached=%d",
+                    cache_read_tokens, cache_write_tokens, input_tokens)
             cost_log = APICostLog(
                 user_id=user_id,
                 model_id=model_id,
                 request_type="conversation",
-                input_tokens=input_tokens,
+                # Full prompt size for visibility (uncached + cached reads
+                # + cache writes); pricing already accounted above.
+                input_tokens=(input_tokens + cache_read_tokens
+                              + cache_write_tokens),
                 output_tokens=output_tokens,
                 cost_microdollars=cost,
             )

@@ -186,15 +186,18 @@ class LLMProvider:
             if m.get("content")
         ])
 
-        # Convert remaining messages to Anthropic format
+        # Convert remaining messages to Anthropic format. Content blocks
+        # are passed through as-is (#187): block boundaries and any
+        # cache_control markers placed upstream must survive — flattening
+        # to a string would erase the cache breakpoints.
         anthropic_messages = []
         for msg in messages:
             if msg["role"] in ["user", "assistant"]:
                 content = msg["content"]
-                # Convert content format if needed
                 if isinstance(content, list) and len(content) > 0:
-                    if isinstance(content[0], dict) and "text" in content[0]:
-                        content = content[0]["text"]
+                    if not (isinstance(content[0], dict)
+                            and "text" in content[0]):
+                        content = str(content)
                 anthropic_messages.append({
                     "role": msg["role"],
                     "content": content
@@ -208,7 +211,11 @@ class LLMProvider:
             max_tokens = DEFAULT_MAX_OUTPUT_TOKENS
 
         # Log the actual API call details
-        total_input_chars = sum(len(m.get("content", "")) for m in anthropic_messages)
+        total_input_chars = sum(
+            (len(m["content"]) if isinstance(m["content"], str)
+             else sum(len(b.get("text", "")) for b in m["content"]))
+            for m in anthropic_messages
+        )
         logger.info(f"Anthropic API call: model={model}, num_messages={len(anthropic_messages)}, total_input_chars={total_input_chars}, max_tokens={max_tokens}")
 
         kwargs = dict(
@@ -255,11 +262,21 @@ class LLMProvider:
         if truncated:
             logger.warning(f"Anthropic response truncated (max_tokens reached): model={model}, output_tokens={response.usage.output_tokens}")
 
+        cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
+        cache_write = getattr(
+            response.usage, "cache_creation_input_tokens", 0) or 0
+        if cache_read or cache_write:
+            logger.info(
+                f"Anthropic prompt cache: read={cache_read} "
+                f"write={cache_write} uncached={response.usage.input_tokens}")
+
         return {
             "content": content,
             "total_tokens": total_tokens,
             "input_tokens": response.usage.input_tokens,
             "output_tokens": response.usage.output_tokens,
+            "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": cache_write,
             "tool_calls": tool_calls,
             "truncated": truncated,
         }
