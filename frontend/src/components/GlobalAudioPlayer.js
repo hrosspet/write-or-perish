@@ -111,21 +111,29 @@ const GlobalAudioPlayer = () => {
         {currentAudio.title || 'Audio Player'}
       </div>
 
-      {/* Chapters (#145) — only for TTS audio with real sections */}
+      {/* Chapters (#145) — only for TTS audio with real sections.
+          Controlled: shows the chapter currently playing and advances
+          live as playback crosses section boundaries. */}
       {currentAudio.chapters && currentAudio.chapters.length > 1 && (
         <select
-          value=""
+          value={(() => {
+            let idx = 0;
+            for (let i = 0; i < currentAudio.chapters.length; i++) {
+              if (displayTime >= currentAudio.chapters[i].start_time) idx = i;
+              else break;
+            }
+            return idx;
+          })()}
           onChange={(e) => {
             const ch = currentAudio.chapters[Number(e.target.value)];
             if (ch) seekToCumulativeTime(ch.start_time);
-            e.target.value = '';
           }}
-          title="Jump to chapter"
+          title="Current chapter — select to jump"
           style={{
             background: 'var(--bg-input)',
             border: '1px solid var(--border)',
             borderRadius: '4px',
-            color: 'var(--text-muted)',
+            color: 'var(--text-secondary)',
             fontSize: '11px',
             fontFamily: 'var(--sans)',
             padding: '2px 4px',
@@ -134,7 +142,6 @@ const GlobalAudioPlayer = () => {
             flexShrink: 0,
           }}
         >
-          <option value="" disabled>Chapters</option>
           {currentAudio.chapters.map((ch, i) => (
             <option key={i} value={i}>{ch.title}</option>
           ))}
