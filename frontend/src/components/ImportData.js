@@ -588,7 +588,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
             ))}
           </div>
           {importResult.created === 0 && !importResult.restored && !importResult.updated ? (
-            <p style={{ fontFamily: "var(--serif)", fontStyle: "italic", fontWeight: 300, color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
+            <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.92rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
               Everything in this archive was already imported — nothing new was added.
             </p>
           ) : (
