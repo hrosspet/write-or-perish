@@ -1658,8 +1658,15 @@ def get_tts_status(node_id):
                 db.session.commit()
             elif task.state == 'FAILURE':
                 # Surface the worker exception so failures are
-                # diagnosable without SSH access to worker logs.
-                task_info = {"error": str(task.info)[:500]}
+                # diagnosable without SSH access to worker logs —
+                # scrubbed: no API keys, no filesystem paths, no
+                # provider response bodies (security review finding).
+                import re as _re
+                raw = f"{type(task.info).__name__}: {task.info}"
+                raw = _re.sub(r"sk-[A-Za-z0-9_\-]+", "[key]", raw)
+                raw = _re.sub(r"(?:/[\w.\-]+){2,}", "[path]", raw)
+                raw = raw.split("{", 1)[0]  # drop JSON response bodies
+                task_info = {"error": raw[:200]}
         except Exception as e:
             # If Celery check fails, log and continue with DB status
             current_app.logger.warning(f"Failed to check Celery task status: {e}")
