@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useStreamingTranscription } from '../hooks/useStreamingTranscription';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
+import { useToast } from '../contexts/ToastContext';
 
 /**
  * StreamingMicButton - A microphone button that supports real-time streaming transcription.
@@ -47,6 +48,20 @@ export default function StreamingMicButton({
     onComplete,
     onError,
   });
+
+  // #127: warn before the ~60-minute mark so a long recording can be
+  // wrapped up deliberately instead of silently degrading.
+  const { addToast } = useToast();
+  const longRecordingWarnedRef = useRef(false);
+  useEffect(() => {
+    if (duration < 1) longRecordingWarnedRef.current = false;
+    if (duration >= 55 * 60 && !longRecordingWarnedRef.current) {
+      longRecordingWarnedRef.current = true;
+      addToast(
+        'You\u2019ve been recording for 55 minutes — consider stopping '
+        + 'soon and continuing in a new recording.', 10000);
+    }
+  }, [duration, addToast]);
 
   const isOnline = useOnlineStatus();
   const isIdleOffline = !isOnline && sessionState === 'idle';
