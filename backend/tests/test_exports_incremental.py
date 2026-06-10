@@ -459,6 +459,79 @@ class TestBudgetedPath:
         assert reply.id in result["node_ids"]
 
 
+# ── 9b. budgeted cursor regression ──────────────────────────────────────
+# The chunked profile regen uses `latest_node_created_at` as the resume
+# cursor for the next chunk (created_after=cursor). It must therefore
+# reflect the newest node the budget actually INCLUDED, not the newest
+# node in scope — otherwise the cursor leaps to the present after one
+# budgeted chunk and every later chunk is silently skipped.
+
+class TestBudgetCursorDoesNotSkip:
+    def test_cursor_stops_at_budget_window_boundary(self, app):
+        alice = _make_user("alice")
+        _db.session.commit()
+
+        nodes = [
+            _make_node(
+                alice, content=f"entry {i}",
+                ai_usage="chat", token_count=1000,
+                created_at=APR_07 + timedelta(days=i + 1),
+            )
+            for i in range(10)
+        ]
+        _db.session.commit()
+
+        # Budget fits 3 of the 10 nodes (strict fit: 3000 < 3400,
+        # 4000 would overshoot).
+        result = _build(
+            alice, filter_ai_usage=True, created_after=APR_07,
+            max_tokens=3500, chronological_order=True,
+            return_metadata=True,
+        )
+        assert result is not None
+
+        included = [n for n in nodes if n.id in result["node_ids"]]
+        assert [n.id for n in included] == [n.id for n in nodes[:3]]
+        assert result["node_count"] == 3
+        # The cursor: newest INCLUDED node, not newest in scope.
+        assert result["latest_node_created_at"] == nodes[2].created_at
+        assert result["earliest_node_created_at"] == nodes[0].created_at
+
+        # Resuming from the cursor picks up exactly the next window —
+        # nothing skipped, nothing repeated.
+        result2 = _build(
+            alice, filter_ai_usage=True,
+            created_after=result["latest_node_created_at"],
+            max_tokens=3500, chronological_order=True,
+            return_metadata=True,
+        )
+        included2 = [n for n in nodes if n.id in result2["node_ids"]]
+        assert [n.id for n in included2] == [n.id for n in nodes[3:6]]
+        assert result2["latest_node_created_at"] == nodes[5].created_at
+
+    def test_unbudgeted_metadata_still_covers_full_scope(self, app):
+        alice = _make_user("alice")
+        _db.session.commit()
+
+        nodes = [
+            _make_node(
+                alice, content=f"entry {i}",
+                ai_usage="chat", token_count=1000,
+                created_at=APR_07 + timedelta(days=i + 1),
+            )
+            for i in range(3)
+        ]
+        _db.session.commit()
+
+        result = _build(
+            alice, filter_ai_usage=True, created_after=APR_07,
+            return_metadata=True,
+        )
+        assert result["node_count"] == 3
+        assert result["latest_node_created_at"] == nodes[-1].created_at
+        assert {n.id for n in nodes} == result["node_ids"]
+
+
 # ── 10. quote from pre-cutoff node ──────────────────────────────────────
 # Simplified: the resolver's embed-pre-cutoff behavior is exercised by
 # the end-to-end content; the precise embed mechanism is covered in
@@ -555,8 +628,11 @@ class TestBudgetEjectedParent:
         # check fails).
         assert "Continuation of thread started" in content
         assert post_child.id in result["node_ids"]
-        # CTE rows still see parent — node_ids reflects CTE rows
-        assert post_parent.id in result["node_ids"]
+        # node_ids reflects the budget-selected window, so the ejected
+        # parent — which was NOT rendered — is excluded. (It used to
+        # reflect the full CTE scope, which broke the chunked-regen
+        # resume cursor; see TestBudgetCursorDoesNotSkip.)
+        assert post_parent.id not in result["node_ids"]
 
 
 # ── 12. private foreign ancestor exclusion ──────────────────────────────

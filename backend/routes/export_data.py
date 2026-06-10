@@ -944,9 +944,20 @@ def _build_user_export_incremental(
     content = "\n".join(export_lines)
 
     if return_metadata:
-        # Use CTE rows for metadata. They already have created_after
-        # applied in SQL.
-        timestamps = [r.created_at for r in cte_rows]
+        # Metadata must come from the budget-selected window, not the
+        # full in-scope CTE set. Chunked profile generation uses
+        # `latest_node_created_at` as the resume cursor for the next
+        # chunk; reporting the newest node of the *unbudgeted* scope
+        # made the cursor leap past everything the budget excluded, so
+        # multi-chunk regens silently dropped all data after chunk 2's
+        # window. Mirrors the legacy path, which measures selected_ids
+        # ("not inflated by quote dependencies").
+        if selected_ids is not None:
+            selected_id_set = set(selected_ids)
+            meta_rows = [r for r in cte_rows if r.id in selected_id_set]
+        else:
+            meta_rows = cte_rows
+        timestamps = [r.created_at for r in meta_rows]
         latest_ts = max(timestamps) if timestamps else None
         earliest_ts = min(timestamps) if timestamps else None
         return {
@@ -954,8 +965,8 @@ def _build_user_export_incremental(
             "token_count": approximate_token_count(content),
             "latest_node_created_at": latest_ts,
             "earliest_node_created_at": earliest_ts,
-            "node_count": len(cte_rows),
-            "node_ids": cte_row_ids,
+            "node_count": len(meta_rows),
+            "node_ids": {r.id for r in meta_rows},
         }
 
     return content
@@ -1019,7 +1030,11 @@ def build_user_export_content(
         return_metadata: If True, return a dict with `content`,
                         `token_count`, `latest_node_created_at`,
                         `earliest_node_created_at`, `node_count`, and
-                        `node_ids` (set of in-scope node IDs).
+                        `node_ids` (set of included node IDs; when
+                        max_tokens is set this reflects the
+                        budget-selected window, so chunked callers can
+                        use `latest_node_created_at` as a resume
+                        cursor).
         collapse_artifacts: If True, suppress full artifact preambles
                            (artifact ID refs are still inlined).
         include_strategy: Scope topology when `created_after` is None.
