@@ -137,6 +137,11 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
   // confirm with on_deleted set to the user's choice.
   const [deletedPrompt, setDeletedPrompt] = useState(null);
 
+  // Confirm-response stats ({ created, skipped, restored, ... }) shown
+  // as a summary after the import finishes; dismissing it reloads the
+  // page so the new nodes appear.
+  const [importResult, setImportResult] = useState(null);
+
   // Returns true when the error is the backend's 409 "this import
   // matches soft-deleted nodes" conflict, in which case the prompt is
   // shown instead of an error message.
@@ -210,7 +215,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         if (response.data.profile_update_task_id && onProfileUpdateStarted) {
           onProfileUpdateStarted(response.data.profile_update_task_id);
         }
-        window.location.reload();
+        setImportResult(response.data);
       })
       .catch((err) => {
         if (handleDeletedConflict(err, handleConfirmImport)) return;
@@ -277,7 +282,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         if (response.data.profile_update_task_id && onProfileUpdateStarted) {
           onProfileUpdateStarted(response.data.profile_update_task_id);
         }
-        window.location.reload();
+        setImportResult(response.data);
       })
       .catch((err) => {
         if (handleDeletedConflict(err, handleConfirmTwitterImport)) return;
@@ -358,7 +363,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         if (response.data.profile_update_task_id && onProfileUpdateStarted) {
           onProfileUpdateStarted(response.data.profile_update_task_id);
         }
-        window.location.reload();
+        setImportResult(response.data);
       })
       .catch((err) => {
         if (handleDeletedConflict(err, handleConfirmClaudeImport)) return;
@@ -454,7 +459,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         if (response.data.profile_update_task_id && onProfileUpdateStarted) {
           onProfileUpdateStarted(response.data.profile_update_task_id);
         }
-        window.location.reload();
+        setImportResult(response.data);
       })
       .catch((err) => {
         if (handleDeletedConflict(err, handleConfirmChatGPTImport)) return;
@@ -473,6 +478,53 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
   return (
     <div>
       {error && <div style={{ color: "var(--accent)", marginBottom: "0.8rem", fontSize: "0.88rem" }}>{error}</div>}
+
+      {/* Post-import summary: what was actually imported vs skipped */}
+      {importResult && (
+        <div style={{
+          marginTop: "20px",
+          padding: "2rem",
+          backgroundColor: "var(--bg-card)",
+          borderRadius: "10px",
+          border: "1px solid var(--border)"
+        }}>
+          <h3 style={{ fontFamily: "var(--serif)", fontWeight: 300, color: "var(--text-primary)", margin: "0 0 12px 0" }}>
+            Import Finished
+          </h3>
+          <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
+            <strong style={{ color: "var(--text-primary)" }}>{importResult.created}</strong>{" "}
+            new node{importResult.created !== 1 ? "s" : ""} imported
+            {importResult.restored > 0 && (
+              <>
+                {", "}
+                <strong style={{ color: "var(--text-primary)" }}>{importResult.restored}</strong>{" "}
+                restored from deleted
+              </>
+            )}
+            {importResult.skipped > 0 && (
+              <>
+                {", "}
+                <strong style={{ color: "var(--text-primary)" }}>{importResult.skipped}</strong>{" "}
+                skipped (already imported)
+              </>
+            )}
+            .
+          </p>
+          {importResult.created === 0 && !importResult.restored && (
+            <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
+              Everything in this archive was already imported — nothing new was added.
+            </p>
+          )}
+          <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
+            <button
+              onClick={() => window.location.reload()}
+              style={primaryBtnStyle}
+            >
+              OK
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Restore-or-skip prompt for imports matching deleted content */}
       {deletedPrompt && (
