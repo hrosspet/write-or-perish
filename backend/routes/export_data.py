@@ -86,162 +86,45 @@ def _export_visible_filter(model, user_id):
     )
 
 
-def _render_tombstoned_node(
-    node, index_path, processed_nodes, filter_ai_usage,
-    user_id, created_before, embedded_quotes, included_ids,
-    ai_blocked_ids,
-):
-    """Emit a deletion placeholder for a soft-deleted node and recurse
-    into its children. Children may be alive other-user replies that
-    should still surface in the export tree.
-
-    Caller is responsible for the pre-deletion-access check — this
-    helper assumes the viewer is allowed to see the tombstone shell.
-    """
+def _node_header_line(node, index_path):
+    """Markdown header line shared by all node renderings."""
     depth = len(index_path.split('.'))
     header = "#" * min(depth + 1, 6)
     ts = node.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-    result = (
-        f"{header} [{index_path}] {_node_author_label(node)}"
-        f" - {ts}\n"
-        f"[Node deleted by author]\n\n"
-    )
+    return f"{header} [{index_path}] {_node_author_label(node)} - {ts}\n"
 
-    processed_nodes.add(node.id)
+
+def _filtered_children(node, filter_ai_usage, created_before, included_ids,
+                       keep_tombstones):
+    """Children of *node* that should render, sorted chronologically.
+
+    keep_tombstones: when a budget pre-selection (included_ids) is
+    active, tombstones pass through even if not pre-selected — they take
+    no real budget tokens and dropping them creates discontinuities
+    (§5a). The inaccessible-placeholder branch does not extend this
+    courtesy, matching the historical behavior.
+    """
     children = node.children
     if filter_ai_usage:
         children = [c for c in children if c.ai_usage in AI_ALLOWED]
     if created_before:
         children = [c for c in children if c.created_at < created_before]
     if included_ids is not None:
-        # Tombstones below us still need to surface even if they aren't
-        # in the SQL pre-selection set — see _export_visible_filter
-        # rationale.
-        children = [
-            c for c in children
-            if c.id in included_ids or c.deleted_at is not None
-        ]
-    children = sorted(children, key=lambda c: c.created_at)
-
-    for j, gc in enumerate(children):
-        gc_index = f"{index_path}.{j+1}"
-        result += format_node_tree(
-            gc, index_path=gc_index,
-            processed_nodes=processed_nodes,
-            filter_ai_usage=filter_ai_usage,
-            user_id=user_id,
-            created_before=created_before,
-            embedded_quotes=embedded_quotes,
-            included_ids=included_ids,
-            ai_blocked_ids=ai_blocked_ids,
-        )
-    return result
+        if keep_tombstones:
+            children = [
+                c for c in children
+                if c.id in included_ids or c.deleted_at is not None
+            ]
+        else:
+            children = [c for c in children if c.id in included_ids]
+    return sorted(children, key=lambda c: c.created_at)
 
 
-def _render_inaccessible_node(
-    node, index_path, processed_nodes, filter_ai_usage,
-    user_id, created_before, embedded_quotes, included_ids,
-    ai_blocked_ids,
-):
-    """Emit a privacy placeholder for an inaccessible node and recurse
-    into its children (which may themselves be accessible)."""
-    depth = len(index_path.split('.'))
-    header = "#" * min(depth + 1, 6)
-    ts = node.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-    result = (
-        f"{header} [{index_path}] {_node_author_label(node)}"
-        f" - {ts}\n"
-        f"[Content not accessible — private node by another user]\n\n"
-    )
-
-    processed_nodes.add(node.id)
-    children = node.children
-    if filter_ai_usage:
-        children = [c for c in children if c.ai_usage in AI_ALLOWED]
-    if created_before:
-        children = [c for c in children if c.created_at < created_before]
-    if included_ids is not None:
-        children = [c for c in children if c.id in included_ids]
-    children = sorted(children, key=lambda c: c.created_at)
-
-    for j, gc in enumerate(children):
-        gc_index = f"{index_path}.{j+1}"
-        result += format_node_tree(
-            gc, index_path=gc_index,
-            processed_nodes=processed_nodes,
-            filter_ai_usage=filter_ai_usage,
-            user_id=user_id,
-            created_before=created_before,
-            embedded_quotes=embedded_quotes,
-            included_ids=included_ids,
-            ai_blocked_ids=ai_blocked_ids,
-        )
-    return result
-
-
-def format_node_tree(
-    node,
-    index_path="1",
-    processed_nodes=None,
-    filter_ai_usage=False,
-    user_id=None,
-    created_before=None,
-    embedded_quotes=None,
-    included_ids=None,
-    ai_blocked_ids=None
-):
-    """
-    Recursively format a node and its descendants into a human-readable tree structure
-    using Markdown headers. Uses depth-first traversal for maximum readability.
-
-    Args:
-        node: The Node object to format
-        index_path: The hierarchical index (e.g., "1.1.2")
-        processed_nodes: Set of node IDs already processed (to avoid infinite loops)
-        filter_ai_usage: If True, only include child nodes where ai_usage is 'chat' or 'train'
-        user_id: User ID for resolving {quote:ID} placeholders (for access checks)
-        created_before: Optional datetime. If provided, only include child nodes created before
-                       this timestamp.
-        embedded_quotes: Optional dict from ExportQuoteResolver mapping
-                        node_id -> {quoted_id -> content}. When provided, uses smart
-                        quote resolution that embeds only when needed.
-        included_ids: Optional set of node IDs included in the export. Used with
-                     embedded_quotes for reference-based resolution.
-
-    Returns:
-        str: Formatted text representation of the node tree
-    """
-    if processed_nodes is None:
-        processed_nodes = set()
-
-    # Avoid infinite loops from circular references
-    if node.id in processed_nodes:
-        return ""
-
-    # Soft-deleted: render the tombstone shell (no content) and recurse.
-    # The caller is responsible for the pre-deletion-access check before
-    # routing here; format_node_tree's children loop below applies it
-    # via can_user_view_tombstone.
-    if node.deleted_at is not None:
-        return _render_tombstoned_node(
-            node, index_path, processed_nodes, filter_ai_usage,
-            user_id, created_before, embedded_quotes, included_ids,
-            ai_blocked_ids,
-        )
-
-    processed_nodes.add(node.id)
-
-    # Calculate depth from index_path (e.g., "1.2.3" -> depth 3)
-    depth = len(index_path.split('.'))
-
-    # Format the node header using Markdown headers (max 6 levels, then stay at 6)
-    header_level = min(depth + 1, 6)  # +1 because thread title uses #
-    header_prefix = "#" * header_level
-
-    timestamp = node.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-
-    # Build the node text - no content indentation for token efficiency
-    result = f"{header_prefix} [{index_path}] {_node_author_label(node)} - {timestamp}\n"
+def _format_node_text(node, index_path, user_id, embedded_quotes,
+                      ai_blocked_ids):
+    """The node's own text block: header plus artifact refs (system-prompt
+    nodes) or quote-resolved content."""
+    result = _node_header_line(node, index_path)
 
     # System prompt nodes: emit reference instead of full content
     # Check new artifact system first, then legacy FK
@@ -280,59 +163,6 @@ def format_node_tree(
             result += f"[AI Preferences v{ai_prefs_ver} (ref #{ai_prefs.id})]\n"
 
         result += "\n"
-
-        # Process children
-        children = node.children
-        if filter_ai_usage:
-            children = [c for c in children if c.ai_usage in AI_ALLOWED]
-        if created_before:
-            children = [c for c in children if c.created_at < created_before]
-        if included_ids is not None:
-            # Pass tombstones through even if they aren't in the SQL
-            # pre-selection set — they don't take real budget tokens
-            # and dropping them creates discontinuities.
-            children = [
-                c for c in children
-                if c.id in included_ids or c.deleted_at is not None
-            ]
-        children = sorted(children, key=lambda c: c.created_at)
-
-        for i, child in enumerate(children):
-            child_index = f"{index_path}.{i+1}"
-            if len(children) > 1 and i > 0:
-                result += "---\n**BRANCH**\n---\n\n"
-
-            if child.deleted_at is not None:
-                # Tombstone: render only if viewer had pre-deletion
-                # access. Otherwise skip silently — the structural fact
-                # "something is here" would itself leak username/timestamp.
-                from backend.utils.privacy import can_user_view_tombstone
-                if user_id is None or can_user_view_tombstone(child, user_id):
-                    result += _render_tombstoned_node(
-                        child, child_index, processed_nodes,
-                        filter_ai_usage, user_id, created_before,
-                        embedded_quotes, included_ids, ai_blocked_ids,
-                    )
-                continue
-
-            if user_id and not can_user_access_node(child, user_id):
-                result += _render_inaccessible_node(
-                    child, child_index, processed_nodes,
-                    filter_ai_usage, user_id, created_before,
-                    embedded_quotes, included_ids, ai_blocked_ids,
-                )
-                continue
-
-            result += format_node_tree(
-                child, index_path=child_index,
-                processed_nodes=processed_nodes,
-                filter_ai_usage=filter_ai_usage,
-                user_id=user_id,
-                created_before=created_before,
-                embedded_quotes=embedded_quotes,
-                included_ids=included_ids,
-                ai_blocked_ids=ai_blocked_ids
-            )
         return result
 
     # Resolve {quote:ID} placeholders in content
@@ -350,68 +180,132 @@ def format_node_tree(
 
     result += content
     result += "\n\n"
-
-    # Process children (depth-first traversal)
-    # Filter children by AI usage if requested (for AI profile generation)
-    # Also filter by created_before if specified
-    children = node.children
-    if filter_ai_usage:
-        children = [c for c in children if c.ai_usage in AI_ALLOWED]
-    if created_before:
-        children = [c for c in children if c.created_at < created_before]
-
-    # If we have included_ids, filter to only include nodes in the
-    # export. Tombstones pass through even if not in included_ids —
-    # they don't take real budget tokens and dropping them creates
-    # discontinuities (per §5a).
-    if included_ids is not None:
-        children = [
-            c for c in children
-            if c.id in included_ids or c.deleted_at is not None
-        ]
-
-    children = sorted(children, key=lambda c: c.created_at)
-
-    for i, child in enumerate(children):
-        child_index = f"{index_path}.{i+1}"
-
-        # Mark branches (when there are multiple children)
-        if len(children) > 1 and i > 0:
-            result += "---\n**BRANCH**\n---\n\n"
-
-        if child.deleted_at is not None:
-            # Tombstone: render only with pre-deletion access; otherwise
-            # skip (don't leak structural "something is here").
-            from backend.utils.privacy import can_user_view_tombstone
-            if user_id is None or can_user_view_tombstone(child, user_id):
-                result += _render_tombstoned_node(
-                    child, child_index, processed_nodes,
-                    filter_ai_usage, user_id, created_before,
-                    embedded_quotes, included_ids, ai_blocked_ids,
-                )
-            continue
-
-        if user_id and not can_user_access_node(child, user_id):
-            result += _render_inaccessible_node(
-                child, child_index, processed_nodes,
-                filter_ai_usage, user_id, created_before,
-                embedded_quotes, included_ids, ai_blocked_ids,
-            )
-            continue
-
-        result += format_node_tree(
-            child,
-            index_path=child_index,
-            processed_nodes=processed_nodes,
-            filter_ai_usage=filter_ai_usage,
-            user_id=user_id,
-            created_before=created_before,
-            embedded_quotes=embedded_quotes,
-            included_ids=included_ids,
-            ai_blocked_ids=ai_blocked_ids
-        )
-
     return result
+
+
+def format_node_tree(
+    node,
+    index_path="1",
+    processed_nodes=None,
+    filter_ai_usage=False,
+    user_id=None,
+    created_before=None,
+    embedded_quotes=None,
+    included_ids=None,
+    ai_blocked_ids=None
+):
+    """
+    Format a node and its descendants into a human-readable tree structure
+    using Markdown headers. Depth-first traversal for maximum readability.
+
+    Iterative (explicit work stack) rather than recursive: the renderer
+    used one Python frame per reply-depth (plus the frames SQLAlchemy
+    burns lazy-loading children each level), so deep reply chains
+    overflowed the call stack — the same failure
+    `_collect_all_nodes_in_tree` had before c556e4d, one stage later in
+    the pipeline. Stack frames are (kind, node, index_path), where kind
+    mirrors the old mutual recursion: "node" (cycle-checked; routes
+    soft-deleted nodes to the tombstone shell), "tombstone", and
+    "inaccessible". Branch separators are pushed as ("text", str)
+    frames, so the concatenated output is identical to the recursive
+    version's.
+
+    Args:
+        node: The Node object to format
+        index_path: The hierarchical index (e.g., "1.1.2")
+        processed_nodes: Set of node IDs already processed (to avoid infinite loops)
+        filter_ai_usage: If True, only include child nodes where ai_usage is 'chat' or 'train'
+        user_id: User ID for resolving {quote:ID} placeholders (for access checks)
+        created_before: Optional datetime. If provided, only include child nodes created before
+                       this timestamp.
+        embedded_quotes: Optional dict from ExportQuoteResolver mapping
+                        node_id -> {quoted_id -> content}. When provided, uses smart
+                        quote resolution that embeds only when needed.
+        included_ids: Optional set of node IDs included in the export. Used with
+                     embedded_quotes for reference-based resolution.
+
+    Returns:
+        str: Formatted text representation of the node tree
+    """
+    from backend.utils.privacy import can_user_view_tombstone
+
+    if processed_nodes is None:
+        processed_nodes = set()
+
+    parts = []
+    stack = [("node", node, index_path)]
+    while stack:
+        frame = stack.pop()
+        if frame[0] == "text":
+            parts.append(frame[1])
+            continue
+        kind, current, path = frame
+
+        if kind == "node":
+            # Avoid infinite loops from circular references
+            if current.id in processed_nodes:
+                continue
+            # Soft-deleted: render the tombstone shell (no content). The
+            # caller is responsible for the pre-deletion-access check on
+            # the entry node; child tombstones are checked at push time
+            # below via can_user_view_tombstone.
+            if current.deleted_at is not None:
+                kind = "tombstone"
+
+        if kind == "node":
+            processed_nodes.add(current.id)
+            parts.append(_format_node_text(
+                current, path, user_id, embedded_quotes, ai_blocked_ids))
+            children = _filtered_children(
+                current, filter_ai_usage, created_before, included_ids,
+                keep_tombstones=True)
+            child_frames = []
+            for i, child in enumerate(children):
+                child_index = f"{path}.{i+1}"
+                # Mark branches (when there are multiple children)
+                if len(children) > 1 and i > 0:
+                    child_frames.append(("text", "---\n**BRANCH**\n---\n\n"))
+                if child.deleted_at is not None:
+                    # Tombstone: render only with pre-deletion access;
+                    # otherwise skip (don't leak structural "something
+                    # is here").
+                    if user_id is None or can_user_view_tombstone(
+                            child, user_id):
+                        child_frames.append(
+                            ("tombstone", child, child_index))
+                    continue
+                if user_id and not can_user_access_node(child, user_id):
+                    child_frames.append(
+                        ("inaccessible", child, child_index))
+                    continue
+                child_frames.append(("node", child, child_index))
+            # LIFO: push reversed so children pop left-to-right,
+            # preserving the recursive version's pre-order output.
+            stack.extend(reversed(child_frames))
+            continue
+
+        # Placeholder shells (tombstone / inaccessible). Children still
+        # render — they may be alive, accessible replies. All children
+        # route through the "node" kind (cycle check + deleted routing)
+        # with no BRANCH markers, matching the old recursive helpers.
+        if kind == "tombstone":
+            placeholder = "[Node deleted by author]\n\n"
+            keep_tombstones = True
+        else:
+            placeholder = ("[Content not accessible — private node by "
+                           "another user]\n\n")
+            keep_tombstones = False
+        parts.append(_node_header_line(current, path) + placeholder)
+        processed_nodes.add(current.id)
+        children = _filtered_children(
+            current, filter_ai_usage, created_before, included_ids,
+            keep_tombstones=keep_tombstones)
+        stack.extend(reversed([
+            ("node", gc, f"{path}.{j+1}")
+            for j, gc in enumerate(children)
+        ]))
+
+    return "".join(parts)
 
 
 def _collect_all_nodes_in_tree(node, filter_ai_usage=False, created_before=None,
@@ -849,11 +743,15 @@ def _build_user_export_incremental(
             children_by_parent.setdefault(r.parent_id, []).append(r)
 
     def _subtree_has_alive(row):
-        if row.deleted_at is None:
-            return True
-        for child in children_by_parent.get(row.id, []):
-            if _subtree_has_alive(child):
+        # Iterative: recursion depth would equal thread depth, which
+        # overflows on very deep reply chains (same class of bug as the
+        # old recursive format_node_tree).
+        pending = [row]
+        while pending:
+            r = pending.pop()
+            if r.deleted_at is None:
                 return True
+            pending.extend(children_by_parent.get(r.id, []))
         return False
 
     # Entry points. Iterate CTE rows so quoted-pre-cutoff embeds added
@@ -1084,7 +982,7 @@ def build_user_export_content(
     # doesn't show a chain of `[Node deleted by author]` placeholders
     # for content the user explicitly removed. Mixed threads (some
     # alive, some deleted) still show through with tombstones rendered
-    # by `_render_tombstoned_node`.
+    # by format_node_tree's tombstone shell.
     all_top_level_nodes = [
         n for n in all_top_level_nodes if _thread_has_alive_node(n.id)
     ]

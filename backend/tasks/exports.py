@@ -76,6 +76,25 @@ def build_user_export_content(user, max_tokens=None, filter_ai_usage=False,
     return _build(user, max_tokens, filter_ai_usage, **kwargs)
 
 
+def _has_more_source_after(user, ts):
+    """Any AI-readable source data newer than *ts*, in the anchor scope
+    the profile pipeline reads (own + addressed nodes)?
+
+    Used to tell a genuine corpus tail (defer to the next update cycle)
+    from a mid-corpus chunk that merely *renders* compactly — the
+    rendered chars/4 estimate and the stored token_count are different
+    measures, so a budget-full window can re-measure below
+    MIN_CHUNK_TOKENS while plenty of data remains beyond it.
+    """
+    from sqlalchemy import or_
+    from backend.models import Node
+    return Node.query.filter(
+        or_(Node.user_id == user.id, Node.human_owner_id == user.id),
+        Node.created_at > ts,
+        Node.ai_usage.in_(['chat', 'train']),
+    ).first() is not None
+
+
 class ProfileGenerationTask(Task):
     """Custom task class with error handling."""
 
@@ -576,10 +595,15 @@ def _do_initial_generation(self, user, model_id, context_window,
         5000
     )
 
-    # First pass: get metadata to decide if iterative is needed
+    # First pass: get metadata to decide if iterative is needed.
+    # engaged_threads: profiles read the user's full conversational
+    # scope — their own threads AND their replies in other users'
+    # threads (anchor-based selection, same scope incremental updates
+    # already use). The legacy authored_threads scope missed the latter
+    # entirely (#110).
     total_export = build_user_export_content(
         user, max_tokens=None, filter_ai_usage=True,
-        return_metadata=True
+        return_metadata=True, include_strategy="engaged_threads"
     )
 
     if not total_export or not total_export.get("content"):
@@ -865,7 +889,7 @@ def _chunked_profile_loop(self, user, model_id, update_template,
         chunk = build_user_export_content(
             user, max_tokens=chunk_budget, filter_ai_usage=True,
             created_after=current_cutoff, chronological_order=True,
-            return_metadata=True
+            return_metadata=True, include_strategy="engaged_threads"
         )
 
         if not chunk or not chunk.get("content"):
@@ -874,19 +898,30 @@ def _chunked_profile_loop(self, user, model_id, update_template,
         chunk_tokens_est = chunk["token_count"]
         latest_ts = chunk["latest_node_created_at"]
 
-        # Skip undersized chunks. When first_chunk_prompt_fn is set,
-        # the first chunk is always processed (initial generation
-        # must produce something even with little data).
+        # Skip undersized chunks — but only when they are the genuine
+        # corpus tail. A chunk can re-measure below the threshold while
+        # being a full budget window (the rendered chars/4 estimate vs
+        # stored token_count unit mismatch); deferring those starves the
+        # rebuild mid-corpus. When first_chunk_prompt_fn is set, the
+        # first chunk is always processed (initial generation must
+        # produce something even with little data).
         is_first_with_gen = (
             first_chunk_prompt_fn and current_profile_content is None
         )
         if not is_first_with_gen and chunk_tokens_est < MIN_CHUNK_TOKENS:
+            if not _has_more_source_after(user, latest_ts):
+                logger.info(
+                    f"User {user.id}: stopping chunked loop — "
+                    f"tail chunk {chunk_num} has {chunk_tokens_est} "
+                    f"formatted tokens < {MIN_CHUNK_TOKENS} min threshold "
+                    f"and no data remains after {latest_ts}"
+                )
+                break
             logger.info(
-                f"User {user.id}: stopping chunked loop — "
-                f"chunk {chunk_num} has {chunk_tokens_est} formatted "
-                f"tokens < {MIN_CHUNK_TOKENS} min threshold"
+                f"User {user.id}: chunk {chunk_num} renders to "
+                f"{chunk_tokens_est} formatted tokens (< {MIN_CHUNK_TOKENS}) "
+                f"but more data remains after {latest_ts} — processing"
             )
-            break
 
         if is_first_with_gen:
             prompt = first_chunk_prompt_fn(chunk)
@@ -940,14 +975,9 @@ def _chunked_profile_loop(self, user, model_id, update_template,
             f"cumulative={cumulative_source_tokens}"
         )
 
-        # Check if there's more data after this cutoff
-        from backend.models import Node
-        has_more = Node.query.filter(
-            Node.user_id == user.id,
-            Node.created_at > current_cutoff,
-            Node.ai_usage.in_(['chat', 'train'])
-        ).first() is not None
-        if not has_more:
+        # Check if there's more data after this cutoff (anchor scope:
+        # own + addressed nodes, matching what the export reads)
+        if not _has_more_source_after(user, current_cutoff):
             break
 
     return current_profile_id, chunk_num, cumulative_source_tokens

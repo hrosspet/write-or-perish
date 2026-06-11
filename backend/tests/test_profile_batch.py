@@ -133,6 +133,67 @@ def test_build_next_request_chunk(app, monkeypatch):
     assert CUSTOM_ID_RE.match(req["request"]["custom_id"])
 
 
+def test_build_next_request_uses_engaged_scope(app, monkeypatch):
+    """Profile chunks read the anchor scope (own + addressed nodes, #110),
+    not the legacy authored_threads scope that missed the user's replies
+    in other users' threads and silently returned None whenever no
+    thread root fit the budget window."""
+    u = _user()
+    _prev_profile(u, datetime(2026, 5, 1))
+    db.session.commit()
+    export = MagicMock(
+        return_value={"content": "DATA", "token_count": 90000,
+                      "latest_node_created_at": datetime(2026, 6, 1)})
+    monkeypatch.setattr(pb, "build_user_export_content", export)
+    monkeypatch.setattr(pb, "build_update_template", lambda uid: (
+        "T {existing_profile}|{new_data}|{source_tokens_past}"
+        "|{source_tokens_new}|{ratio_percent}"))
+
+    pb._build_next_profile_request(u)
+
+    assert export.call_args.kwargs["include_strategy"] == "engaged_threads"
+
+
+def test_build_next_request_small_chunk_mid_corpus_still_chunks(
+        app, monkeypatch):
+    """A chunk that re-measures below MIN_CHUNK_TOKENS but has data
+    remaining beyond it is a full budget window, not a tail — it must
+    be processed, not deferred (the unit-mismatch starvation that froze
+    a regen at a months-old cutoff with ~320k stored tokens left)."""
+    u = _user()
+    _prev_profile(u, datetime(2026, 5, 1))
+    db.session.commit()
+    monkeypatch.setattr(pb, "build_user_export_content", MagicMock(
+        return_value={"content": "SMALL RENDER", "token_count": 50000,
+                      "latest_node_created_at": datetime(2026, 6, 1)}))
+    monkeypatch.setattr(pb, "build_update_template", lambda uid: (
+        "T {existing_profile}|{new_data}|{source_tokens_past}"
+        "|{source_tokens_new}|{ratio_percent}"))
+    monkeypatch.setattr(pb, "_has_more_source_after", lambda u, ts: True)
+
+    req = pb._build_next_profile_request(u)
+
+    assert req is not None and req["meta"]["kind"] == "chunk"
+
+
+def test_build_next_request_small_tail_defers(app, monkeypatch):
+    """A genuinely small tail (nothing beyond it) is deferred to the
+    next update cycle — the threshold's original purpose."""
+    u = _user()
+    _prev_profile(u, datetime(2026, 5, 1))
+    db.session.commit()
+    monkeypatch.setattr(pb, "build_user_export_content", MagicMock(
+        return_value={"content": "TINY TAIL", "token_count": 5000,
+                      "latest_node_created_at": datetime(2026, 6, 1)}))
+    monkeypatch.setattr(pb, "_has_more_source_after", lambda u, ts: False)
+    monkeypatch.setattr(pb, "build_integration_messages",
+                        lambda uid, pid: (None, None))
+
+    req = pb._build_next_profile_request(u)
+
+    assert req is None  # not a chunk; single-version chain → no integration
+
+
 def test_build_next_request_none_when_no_data(app, monkeypatch):
     u = _user()
     _prev_profile(u, datetime(2026, 5, 1))   # single version → no integration
