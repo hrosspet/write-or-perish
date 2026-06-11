@@ -269,6 +269,58 @@ def test_poll_clears_flag_only_for_from_scratch_chunk(app, monkeypatch):
     assert saved is not None and saved.parent_profile_id is None
 
 
+def test_poll_saves_from_scratch_chunk_despite_historic_twin(app, monkeypatch):
+    """A repeated from-scratch rebuild reproduces its predecessor's exact
+    idempotency key (parent=None, same deterministic chunk-1 cutoff). The
+    duplicate check must be scoped to this job's submission time, or the
+    result is discarded, the flag survives, and the builder re-submits
+    chunk 1 forever (observed in prod, user 27)."""
+    u = _user()
+    u.profile_needs_full_regen = True
+    # Historic truncated regen: chunk-1 row with the SAME key tuple.
+    old = UserProfile(
+        user_id=u.id, generated_by="test-model", tokens_used=0,
+        generation_type="iterative", source_tokens_used=100,
+        source_data_cutoff=datetime(2024, 12, 13, 10, 52, 57),
+        parent_profile_id=None)
+    old.set_content("OLD TRUNCATED CHUNK 1")
+    old.created_at = datetime.utcnow() - timedelta(days=30)
+    db.session.add(old)
+    item = {
+        "custom_id": f"profile_{u.id}_0_chunk", "user_id": u.id,
+        "kind": "chunk", "prev_profile_id": None,
+        "generation_type": "iterative", "prev_cumulative": 0,
+        "source_data_cutoff": "2024-12-13T10:52:57",
+        "model_id": "test-model",
+    }
+    db.session.add(ProfileBatchJob(
+        provider_key="anthropic", batch_id="b7", status="pending",
+        items=[item], submitted_at=datetime.utcnow()))
+    u.profile_batch_pending = True
+    db.session.commit()
+
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        {item["custom_id"]: {"content": "REBUILT CHUNK 1",
+                             "input_tokens": 100, "output_tokens": 50}},
+        {}, {}))
+    monkeypatch.setattr(pb, "build_user_export_content",
+                        MagicMock(return_value=None))
+    monkeypatch.setattr(pb, "build_integration_messages",
+                        lambda uid, pid: (None, None))
+    submit = MagicMock(return_value={})
+    monkeypatch.setattr(pb, "batch_submit", submit)
+
+    pb._poll_profile_batches()
+
+    twins = UserProfile.query.filter_by(
+        user_id=u.id, parent_profile_id=None,
+        generation_type="iterative").order_by(UserProfile.id).all()
+    assert len(twins) == 2                      # old row + the new save
+    assert twins[1].get_content().endswith("REBUILT CHUNK 1")
+    assert User.query.get(u.id).profile_needs_full_regen is False
+    submit.assert_not_called()                  # no re-submit loop
+
+
 # ── poll cycle ────────────────────────────────────────────────────────────
 
 def _chunk_job(user, prev):

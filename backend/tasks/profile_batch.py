@@ -224,10 +224,17 @@ def _response_from_result(result):
             "output_tokens": out, "total_tokens": inp + out}
 
 
-def _apply_result(user, item, result):
+def _apply_result(user, item, result, submitted_at):
     """Save a collected batch result (advancing the user's chain) and return
     the next request, or None if the pipeline is complete. Idempotent: a step
-    that already produced its profile is not saved twice."""
+    that already produced its profile is not saved twice.
+
+    The duplicate check is scoped to rows created after this job was
+    submitted: it must only catch THIS item being applied twice (poll
+    races), not rows from earlier runs. A repeated from-scratch rebuild
+    reproduces its predecessor's exact key tuple (parent=None, same
+    deterministic chunk-1 cutoff), and matching those historic rows
+    discarded every result and re-submitted chunk 1 forever."""
     response = _response_from_result(result)
     cutoff = (datetime.fromisoformat(item["source_data_cutoff"])
               if item.get("source_data_cutoff") else None)
@@ -236,7 +243,8 @@ def _apply_result(user, item, result):
         existing = UserProfile.query.filter_by(
             user_id=user.id, parent_profile_id=item["prev_profile_id"],
             source_data_cutoff=cutoff,
-            generation_type=item["generation_type"]).first()
+            generation_type=item["generation_type"]).filter(
+            UserProfile.created_at >= submitted_at).first()
         if existing:
             logger.info(f"User {user.id}: chunk already saved (idempotent)")
         else:
@@ -259,10 +267,12 @@ def _apply_result(user, item, result):
         user.profile_batch_attempts = 0
         return _build_next_profile_request(user)
 
-    # integration
+    # integration (parent_profile_id is the chain tip, unique per run,
+    # but scope by submission time anyway for consistency)
     existing = UserProfile.query.filter_by(
         user_id=user.id, generation_type="integration",
-        parent_profile_id=item["prev_profile_id"]).first()
+        parent_profile_id=item["prev_profile_id"]).filter(
+        UserProfile.created_at >= submitted_at).first()
     if not existing:
         _save_profile(
             user, item["model_id"], response["content"], response,
@@ -413,7 +423,7 @@ def _poll_profile_batches():
                     f"{user.profile_batch_attempts}")
                 continue
             try:
-                nxt = _apply_result(user, item, result)
+                nxt = _apply_result(user, item, result, job.submitted_at)
             except Exception as e:
                 logger.error(
                     f"Apply batch result failed for user {user.id}: {e}",
