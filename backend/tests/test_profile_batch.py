@@ -180,6 +180,95 @@ def test_should_seed_null_cutoff_high_data_true(app):
     assert pb._should_seed(u) is True
 
 
+# ── full-regen flag (profile_needs_full_regen) ────────────────────────────
+# The batch pipeline used to be blind to the flag: the seeder's gates
+# measure "new tokens since cutoff" (a cutoff the flag often exists to
+# disavow) and the builder always resumed from the latest profile, so a
+# requested full rebuild was silently downgraded to an incremental
+# update and the flag swallowed.
+
+def test_should_seed_full_regen_flag_overrides_gates(app):
+    """Flag set → seed, even when interval/token gates would refuse."""
+    u = _user()
+    _prev_profile(u, datetime.utcnow())   # fresh profile → MIN_INTERVAL fails
+    u.profile_needs_full_regen = True
+    db.session.commit()
+    assert pb._should_seed(u) is True
+
+
+def test_build_next_request_full_regen_starts_from_scratch(app, monkeypatch):
+    """Flag set → builder ignores the existing chain: from-scratch chunk 1
+    (initial-generation prompt, no parent, cumulative from zero)."""
+    u = _user()
+    _prev_profile(u, datetime(2026, 5, 1))
+    u.profile_needs_full_regen = True
+    db.session.commit()
+    export = MagicMock(
+        return_value={"content": "ALL DATA", "token_count": 90000,
+                      "latest_node_created_at": datetime(2026, 6, 1)})
+    monkeypatch.setattr(pb, "build_user_export_content", export)
+    monkeypatch.setattr(pb, "_load_prompt",
+                        lambda *a, **k: "GEN {user_export}")
+
+    req = pb._build_next_profile_request(u)
+
+    # Export builds from the beginning of time, not from prev's cutoff.
+    assert export.call_args.kwargs["created_after"] is None
+    assert req["meta"]["prev_profile_id"] is None
+    assert req["meta"]["generation_type"] == "iterative"
+    assert req["meta"]["prev_cumulative"] == 0
+    text = req["request"]["messages"][0]["content"][0]["text"]
+    assert "ALL DATA" in text and "PREVIOUS PROFILE" not in text
+
+
+def test_poll_clears_flag_only_for_from_scratch_chunk(app, monkeypatch):
+    """A flag set while an incremental chunk is in flight survives that
+    chunk (so the next build honors it); a from-scratch chunk commits the
+    rebuild and clears it."""
+    monkeypatch.setattr(pb, "build_user_export_content",
+                        MagicMock(return_value=None))
+    monkeypatch.setattr(pb, "build_integration_messages",
+                        lambda uid, pid: (None, None))
+    monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
+
+    # 1. incremental chunk (prev_profile_id set): flag survives
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    u.profile_needs_full_regen = True
+    db.session.commit()
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        {item["custom_id"]: {"content": "P", "input_tokens": 100,
+                             "output_tokens": 50}}, {}, {}))
+    pb._poll_profile_batches()
+    assert User.query.get(u.id).profile_needs_full_regen is True
+
+    # 2. from-scratch chunk (prev_profile_id None): flag cleared
+    u2 = _user()
+    u2.profile_needs_full_regen = True
+    item2 = {
+        "custom_id": f"profile_{u2.id}_0_chunk", "user_id": u2.id,
+        "kind": "chunk", "prev_profile_id": None,
+        "generation_type": "iterative", "prev_cumulative": 0,
+        "source_data_cutoff": "2026-06-01T00:00:00",
+        "model_id": "test-model",
+    }
+    db.session.add(ProfileBatchJob(
+        provider_key="anthropic", batch_id="b9", status="pending",
+        items=[item2], submitted_at=datetime.utcnow()))
+    u2.profile_batch_pending = True
+    db.session.commit()
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        {item2["custom_id"]: {"content": "P2", "input_tokens": 100,
+                              "output_tokens": 50}}, {}, {}))
+    pb._poll_profile_batches()
+    u2_fresh = User.query.get(u2.id)
+    assert u2_fresh.profile_needs_full_regen is False
+    saved = UserProfile.query.filter_by(
+        user_id=u2.id, generation_type="iterative").first()
+    assert saved is not None and saved.parent_profile_id is None
+
+
 # ── poll cycle ────────────────────────────────────────────────────────────
 
 def _chunk_job(user, prev):

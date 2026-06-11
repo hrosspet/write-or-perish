@@ -96,6 +96,12 @@ def _should_seed(user):
     """Whether the user has crossed the trigger gates right now. Mirrors
     maybe_trigger_incremental_profile_update (inactivity, interval, tokens)
     without dispatching."""
+    # A pending full rebuild overrides the volume/interval gates: the
+    # rebuild was explicitly requested (regen button, failure recovery,
+    # repair script) and the gates measure "new tokens since cutoff" —
+    # a cutoff the flag often exists to disavow.
+    if user.profile_needs_full_regen:
+        return True
     last_node = (Node.query.filter_by(user_id=user.id)
                  .order_by(Node.created_at.desc()).first())
     if last_node and (datetime.utcnow() - last_node.created_at) < MIN_INACTIVITY:
@@ -125,7 +131,12 @@ def _build_next_profile_request(user):
     model_id = _model_for(user)
     provider, api_model = _provider_and_model(model_id)
 
-    prev = _latest_non_integration_profile(user.id)
+    # A pending full rebuild starts from scratch — ignore the existing
+    # chain, mirroring the sync endpoint's force_full_regen → prev_id=None.
+    # The flag is cleared once the from-scratch chunk 1 commits
+    # (_apply_result), so subsequent chunks chain normally.
+    prev = (None if user.profile_needs_full_regen
+            else _latest_non_integration_profile(user.id))
     prev_id = prev.id if prev else None
     cutoff = prev.source_data_cutoff if prev else None
     cumulative = (prev.source_tokens_used or 0) if prev else 0
@@ -236,8 +247,12 @@ def _apply_result(user, item, result):
                 generation_type=item["generation_type"],
                 parent_profile_id=item["prev_profile_id"], batch=True)
             # mirror PR #181: a from-scratch full regen is no longer needed
-            # once the first chunk is committed.
-            if user.profile_needs_full_regen:
+            # once its first chunk is committed. Only a from-scratch chunk
+            # (prev_profile_id None) satisfies the flag — a flag set while
+            # an incremental chunk was already in flight must survive that
+            # chunk so the next build honors it.
+            if (user.profile_needs_full_regen
+                    and item["prev_profile_id"] is None):
                 user.profile_needs_full_regen = False
             logger.info(
                 f"User {user.id}: saved batch chunk profile {profile.id}")
