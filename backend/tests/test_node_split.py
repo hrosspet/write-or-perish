@@ -145,6 +145,29 @@ def test_chain_split_preserves_content_and_order(app):
     assert node.token_count == len(node.get_content()) // 4
 
 
+def test_voice_node_split_keeps_audio_on_head(app):
+    """Splitting a transcribed voice node leaves the audio linkage on
+    the head node only — playback plays the full recording from the
+    chain head; parts carry transcript text, not audio."""
+    user = _user()
+    transcript = "\n".join(f"spoken sentence {i}" for i in range(200))
+    node = _node(user, transcript)
+    node.audio_original_url = "/media/nodes/1/original.webm"
+    db.session.commit()
+
+    parts = split_node_into_chain(
+        node, segments=split_text_at_cap(transcript, cap=800))
+    db.session.commit()
+
+    assert len(parts) >= 1
+    assert node.audio_original_url == "/media/nodes/1/original.webm"
+    for p in parts:
+        assert p.audio_original_url is None
+    chain_text = node.get_content() + "".join(
+        p.get_content() for p in parts)
+    assert chain_text == transcript
+
+
 def test_chain_split_noop_below_cap(app):
     user = _user()
     node = _node(user, "small content")

@@ -241,7 +241,15 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
             else:
                 final_content = transcript
 
-            node.set_content(final_content or node.get_content())
+            final_content = final_content or node.get_content()
+            node.set_content(final_content)
+            from backend.utils.tokens import approximate_token_count
+            node.token_count = approximate_token_count(final_content)
+            # Per-node cap: very long recordings (~2h+ of speech) can
+            # exceed it; split into a serial chain. Audio stays on this
+            # head node; the transcript continues across the chain.
+            from backend.utils.node_split import split_node_into_chain
+            split_node_into_chain(node)
             node.transcription_status = 'completed'
             node.transcription_progress = 100
             node.transcription_completed_at = datetime.utcnow()
