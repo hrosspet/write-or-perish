@@ -242,6 +242,24 @@ def test_create_small_node_not_split(app, client, monkeypatch):
     assert data["tip_id"] == data["id"]
 
 
+def test_update_node_recomputes_token_count(app, client, monkeypatch):
+    """Edits must keep token_count in sync with the new content — it
+    was frozen at the creation-time count, drifting the measure that
+    chunk windowing and update gates sum."""
+    monkeypatch.setattr(
+        "backend.utils.context_artifacts.sync_context_artifacts",
+        lambda *a, **k: None)
+    res = client.post("/api/nodes/", json={
+        "content": "tiny", "ai_usage": "chat", "privacy_level": "private"})
+    nid = res.get_json()["id"]
+    longer = "much longer content " * 200
+    res = client.put(f"/api/nodes/{nid}", json={"content": longer})
+    assert res.status_code == 200
+    with app.app_context():
+        node = db.session.get(Node, nid)
+        assert node.token_count == len(longer) // 4
+
+
 def test_update_node_rejects_oversized(app, client, monkeypatch):
     monkeypatch.setattr(
         "backend.utils.context_artifacts.sync_context_artifacts",
