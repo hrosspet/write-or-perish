@@ -297,6 +297,10 @@ def finalize_streaming(self, node_id: int, session_id: str, total_chunks: int):
         from backend.utils.tokens import approximate_token_count
         node.set_content(final_content)
         node.token_count = approximate_token_count(final_content)
+        # Per-node cap: very long recordings (~2h+ of speech) can exceed
+        # it; split into a serial chain (audio stays on this head node).
+        from backend.utils.node_split import split_node_into_chain
+        split_node_into_chain(node)
         node.transcription_status = 'completed'
         node.transcription_completed_at = datetime.utcnow()
         node.transcription_progress = 100
@@ -1056,6 +1060,14 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     db.session.add(user_node)
     db.session.flush()
 
+    # Per-node cap: split very long transcripts into a serial chain.
+    # Audio and transcript-chunk rows stay on this head node; the LLM
+    # reply chains after the tip so its context walk sees the full
+    # transcript above it.
+    from backend.utils.node_split import split_node_into_chain
+    _split_parts = split_node_into_chain(user_node)
+    tip_node = _split_parts[-1] if _split_parts else user_node
+
     # Move streaming audio to user node — inline version of
     # attach_streaming_audio_to_node that does NOT delete the draft
     # (we still need it for the SSE all_complete event).
@@ -1087,7 +1099,7 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     from backend.utils.task_warnings import record_task_warning
     try:
         llm_node, _ = create_llm_placeholder(
-            user_node.id, model, user_id, enqueue=False,
+            tip_node.id, model, user_id, enqueue=False,
             ai_usage=ai_usage,
         )
     except (UserExportValidationError, ParentDeletedError) as e:
@@ -1119,7 +1131,7 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     # Chain: LLM generation → TTS generation
     celery_chain(
         generate_llm_response.si(
-            user_node.id, llm_node.id, model, user_id,
+            tip_node.id, llm_node.id, model, user_id,
             source_mode='voice',
         ),
         generate_tts_audio.si(

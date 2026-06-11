@@ -145,6 +145,29 @@ def test_chain_split_preserves_content_and_order(app):
     assert node.token_count == len(node.get_content()) // 4
 
 
+def test_voice_node_split_keeps_audio_on_head(app):
+    """Splitting a transcribed voice node leaves the audio linkage on
+    the head node only — playback plays the full recording from the
+    chain head; parts carry transcript text, not audio."""
+    user = _user()
+    transcript = "\n".join(f"spoken sentence {i}" for i in range(200))
+    node = _node(user, transcript)
+    node.audio_original_url = "/media/nodes/1/original.webm"
+    db.session.commit()
+
+    parts = split_node_into_chain(
+        node, segments=split_text_at_cap(transcript, cap=800))
+    db.session.commit()
+
+    assert len(parts) >= 1
+    assert node.audio_original_url == "/media/nodes/1/original.webm"
+    for p in parts:
+        assert p.audio_original_url is None
+    chain_text = node.get_content() + "".join(
+        p.get_content() for p in parts)
+    assert chain_text == transcript
+
+
 def test_chain_split_noop_below_cap(app):
     user = _user()
     node = _node(user, "small content")
@@ -217,6 +240,24 @@ def test_create_small_node_not_split(app, client, monkeypatch):
     data = res.get_json()
     assert data["split_into"] == 1
     assert data["tip_id"] == data["id"]
+
+
+def test_update_node_recomputes_token_count(app, client, monkeypatch):
+    """Edits must keep token_count in sync with the new content — it
+    was frozen at the creation-time count, drifting the measure that
+    chunk windowing and update gates sum."""
+    monkeypatch.setattr(
+        "backend.utils.context_artifacts.sync_context_artifacts",
+        lambda *a, **k: None)
+    res = client.post("/api/nodes/", json={
+        "content": "tiny", "ai_usage": "chat", "privacy_level": "private"})
+    nid = res.get_json()["id"]
+    longer = "much longer content " * 200
+    res = client.put(f"/api/nodes/{nid}", json={"content": longer})
+    assert res.status_code == 200
+    with app.app_context():
+        node = db.session.get(Node, nid)
+        assert node.token_count == len(longer) // 4
 
 
 def test_update_node_rejects_oversized(app, client, monkeypatch):

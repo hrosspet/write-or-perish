@@ -943,6 +943,11 @@ def save_streaming_as_node(session_id):
     node.set_content(content)
     node.token_count = approximate_token_count(content)
     db.session.add(node)
+    db.session.flush()
+    # Per-node cap: split very long transcripts into a serial chain
+    # (audio stays on this head node).
+    from backend.utils.node_split import split_node_into_chain
+    split_node_into_chain(node)
     db.session.commit()
 
     # Move audio files from drafts folder to nodes folder

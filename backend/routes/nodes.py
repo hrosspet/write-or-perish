@@ -775,6 +775,10 @@ def update_node(node_id):
         clear_tts_artifacts(node)
 
     node.set_content(new_content)
+    # Keep the stored information-content measure in sync with the
+    # edited text — chunk windowing and update gates sum this column.
+    from backend.utils.tokens import approximate_token_count as _atc_upd
+    node.token_count = _atc_upd(new_content)
     try:
         db.session.commit()
     except Exception as e:
