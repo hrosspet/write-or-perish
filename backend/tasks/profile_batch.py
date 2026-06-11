@@ -36,7 +36,7 @@ from backend.tasks.exports import (
     CHUNK_BUDGET, MIN_CHUNK_TOKENS,
     build_user_export_content, build_update_template, build_chunk_prompt,
     build_integration_messages, _save_profile, _load_prompt,
-    _collect_iterative_chain,
+    _collect_iterative_chain, _has_more_source_after,
 )
 
 logger = get_task_logger(__name__)
@@ -141,14 +141,27 @@ def _build_next_profile_request(user):
     cutoff = prev.source_data_cutoff if prev else None
     cumulative = (prev.source_tokens_used or 0) if prev else 0
 
+    # engaged_threads: profiles read the user's full conversational
+    # scope — own threads AND replies in other users' threads (#110).
+    # This also routes from-scratch builds (cutoff=None) through the
+    # incremental machinery, which renders budget windows correctly via
+    # entry-point preambles; the legacy authored_threads path silently
+    # returned None whenever no thread *root* fit the budget window.
     chunk = build_user_export_content(
         user, max_tokens=CHUNK_BUDGET, filter_ai_usage=True,
-        created_after=cutoff, chronological_order=True, return_metadata=True)
+        created_after=cutoff, chronological_order=True, return_metadata=True,
+        include_strategy="engaged_threads")
 
     have_chunk = bool(chunk and chunk.get("content"))
     is_first_initial = prev is None
+    # Tail-aware threshold: defer only a genuine corpus tail. A chunk
+    # can re-measure below MIN_CHUNK_TOKENS while being a full budget
+    # window (rendered chars/4 vs stored token_count unit mismatch);
+    # if data remains beyond it, process it anyway.
     big_enough = have_chunk and (
-        is_first_initial or chunk["token_count"] >= MIN_CHUNK_TOKENS)
+        is_first_initial
+        or chunk["token_count"] >= MIN_CHUNK_TOKENS
+        or _has_more_source_after(user, chunk["latest_node_created_at"]))
 
     if big_enough:
         if is_first_initial:

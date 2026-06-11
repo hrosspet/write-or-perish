@@ -1167,7 +1167,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 }
 
             llm_node.set_content(llm_text)
-            llm_node.token_count = output_tokens or approximate_token_count(llm_text)
+            # chars/4, NOT the provider's output_tokens: Node.token_count
+            # is the platform's stable information-content measure (gates,
+            # chunk windowing, balance decisions all sum it). Provider
+            # tokenizer counts drift upward across model generations
+            # (~1.5x chars/4 already), which skewed every window that
+            # mixed LLM replies with chars/4-counted user text. Real
+            # token usage lives in APICostLog.
+            llm_node.token_count = approximate_token_count(llm_text)
 
             # Step 5b: Execute tool calls if any
             tool_meta = None

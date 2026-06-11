@@ -1077,3 +1077,100 @@ class TestCollectAllNodesDeepChain:
         # root before A before A1; A's subtree (incl. A1) before sibling B
         assert order.index(root.id) < order.index(a.id) < order.index(a1.id)
         assert order.index(a1.id) < order.index(b.id)
+
+
+# ── 17. format_node_tree: deep chain (renderer recursion regression) ─────
+
+class TestFormatNodeTreeDeepChain:
+    def _deep_chain(self, alice, depth):
+        parent_id = None
+        for i in range(depth):
+            n = _make_node(
+                alice, parent_id=parent_id, content=f"link {i}",
+                ai_usage="chat", token_count=1,
+                created_at=DEC_15 + timedelta(seconds=i),
+            )
+            parent_id = n.id
+        _db.session.commit()
+
+    def test_deep_chain_renders_without_overflow(self, app):
+        """The renderer had the same one-frame-per-depth recursion the
+        collector had before c556e4d, one stage later in the pipeline —
+        it crashed unbudgeted exports (and thus from-scratch profile
+        regens) on the deepest-thread users."""
+        from backend.routes.export_data import format_node_tree
+
+        alice = _make_user("alice")
+        _db.session.commit()
+        depth = 1500  # comfortably past the default recursion limit (1000)
+        self._deep_chain(alice, depth)
+
+        root = Node.query.filter_by(
+            user_id=alice.id, parent_id=None
+        ).first()
+        text = format_node_tree(root, filter_ai_usage=True,
+                                user_id=alice.id)
+        assert "link 0" in text
+        assert f"link {depth - 1}" in text
+        assert text.count("link ") == depth
+
+    def test_deep_chain_full_export_paths(self, app):
+        """End-to-end: both the unbudgeted legacy export and the
+        incremental export survive a deep chain (renderer +
+        _subtree_has_alive)."""
+        alice = _make_user("alice")
+        _db.session.commit()
+        depth = 1500
+        self._deep_chain(alice, depth)
+
+        legacy = _build(alice, filter_ai_usage=True, return_metadata=True)
+        assert legacy["node_count"] == depth
+
+        incremental = _build(
+            alice, filter_ai_usage=True, return_metadata=True,
+            created_after=DEC_15 - timedelta(days=1),
+        )
+        assert incremental["node_count"] == depth
+
+    def test_structure_matches_recursive_output(self, app):
+        """Branch markers, chronological sibling order, tombstone shells,
+        and subtree-before-next-sibling ordering are preserved exactly."""
+        from backend.routes.export_data import format_node_tree
+
+        alice = _make_user("alice")
+        _db.session.commit()
+
+        root = _make_node(alice, content="ROOT", ai_usage="chat",
+                          token_count=1, created_at=DEC_15)
+        a = _make_node(alice, parent_id=root.id, content="CHILD-A",
+                       ai_usage="chat", token_count=1,
+                       created_at=DEC_15 + timedelta(hours=1))
+        b = _make_node(alice, parent_id=root.id, content="CHILD-B",
+                       ai_usage="chat", token_count=1,
+                       created_at=DEC_15 + timedelta(hours=2))
+        a1 = _make_node(alice, parent_id=a.id, content="GRANDCHILD-A1",
+                        ai_usage="chat", token_count=1,
+                        created_at=DEC_15 + timedelta(hours=3))
+        b.deleted_at = DEC_15 + timedelta(days=1)
+        b1 = _make_node(alice, parent_id=b.id, content="UNDER-TOMBSTONE",
+                        ai_usage="chat", token_count=1,
+                        created_at=DEC_15 + timedelta(hours=4))
+        _db.session.commit()
+
+        text = format_node_tree(root, filter_ai_usage=True,
+                                user_id=alice.id)
+
+        # A's subtree before sibling B; B is a tombstone shell whose
+        # child still renders; exactly one BRANCH (two siblings).
+        i_root = text.index("ROOT")
+        i_a = text.index("CHILD-A")
+        i_a1 = text.index("GRANDCHILD-A1")
+        i_tomb = text.index("[Node deleted by author]")
+        i_b1 = text.index("UNDER-TOMBSTONE")
+        assert i_root < i_a < i_a1 < i_tomb < i_b1
+        assert "CHILD-B" not in text  # deleted content never renders
+        assert text.count("---\n**BRANCH**\n---") == 1
+        # index paths: A=1.1, A1=1.1.1, B(tombstone)=1.2, B1=1.2.1
+        assert "[1.1] " in text and "[1.1.1] " in text
+        assert "[1.2] " in text and "[1.2.1] " in text
+        assert b1.id is not None  # silence unused warnings
