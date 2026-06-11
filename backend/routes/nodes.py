@@ -649,9 +649,16 @@ def create_node():
     if err is not None:
         return err
 
+    # Content above the per-node cap is auto-split into a serial chain
+    # of nodes (first segment keeps this node's id). A single oversized
+    # node stalls chunked profile generation — see utils/node_split.py.
+    from backend.utils.node_split import split_text_at_cap, split_node_into_chain
+    segments = split_text_at_cap(content)
+    first_content = segments[0]
+
     # Calculate token count before encryption
     from backend.utils.tokens import approximate_token_count as _atc
-    token_count = _atc(content)
+    token_count = _atc(first_content)
 
     node = Node(
         user_id=current_user.id,
@@ -663,13 +670,17 @@ def create_node():
         privacy_level=privacy_level,
         ai_usage=ai_usage
     )
-    node.set_content(content)
+    node.set_content(first_content)
     db.session.add(node)
     db.session.flush()
 
+    parts = split_node_into_chain(node, segments=segments)
+
     # Attach context artifacts for any placeholders in the content
     from backend.utils.context_artifacts import sync_context_artifacts
-    sync_context_artifacts(node.id, current_user.id, content)
+    sync_context_artifacts(node.id, current_user.id, first_content)
+    for part in parts:
+        sync_context_artifacts(part.id, current_user.id, part.get_content())
 
     try:
         db.session.commit()
@@ -686,7 +697,9 @@ def create_node():
         "created_at": iso_utc(node.created_at),
         "username": current_user.username,
         "privacy_level": node.privacy_level,
-        "ai_usage": node.ai_usage
+        "ai_usage": node.ai_usage,
+        "split_into": 1 + len(parts),
+        "tip_id": parts[-1].id if parts else node.id
     }), 201
 
 # Update (edit) a node. (The node's prior content is saved in NodeVersion.)
@@ -702,6 +715,19 @@ def update_node(node_id):
     new_content = data.get("content")
     if new_content is None:
         return jsonify({"error": "Content required for update"}), 400
+
+    # Edits don't auto-split (re-parenting children mid-edit would be
+    # surprising); above-cap content is rejected and the UI guides the
+    # user to split into separate entries instead.
+    from backend.utils.node_split import NODE_CHAR_CAP
+    if len(new_content) > NODE_CHAR_CAP:
+        return jsonify({
+            "error": (
+                f"Content exceeds the {NODE_CHAR_CAP:,}-character "
+                f"per-entry limit. Please split it into multiple entries."
+            ),
+            "char_cap": NODE_CHAR_CAP,
+        }), 422
 
     # Handle privacy settings updates (optional)
     if "privacy_level" in data:
