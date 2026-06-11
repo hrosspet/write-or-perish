@@ -65,6 +65,18 @@ def start_conversation():
     if not content or not content.strip():
         return jsonify({"error": "Content is required"}), 400
 
+    # Agentic conversations don't auto-split; the UI routes oversized
+    # content through the plain entry path (which splits server-side).
+    from backend.utils.node_split import NODE_CHAR_CAP
+    if len(content) > NODE_CHAR_CAP:
+        return jsonify({
+            "error": (
+                f"Content exceeds the {NODE_CHAR_CAP:,}-character "
+                f"per-entry limit."
+            ),
+            "char_cap": NODE_CHAR_CAP,
+        }), 422
+
     if privacy_level not in VALID_PRIVACY_LEVELS:
         return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
 
@@ -156,6 +168,15 @@ def add_message(conversation_id):
     parent_id = data.get("parent_id")
     if not content or not content.strip():
         return jsonify({"error": "Content is required"}), 400
+    from backend.utils.node_split import NODE_CHAR_CAP
+    if len(content) > NODE_CHAR_CAP:
+        return jsonify({
+            "error": (
+                f"Content exceeds the {NODE_CHAR_CAP:,}-character "
+                f"per-entry limit."
+            ),
+            "char_cap": NODE_CHAR_CAP,
+        }), 422
     if not parent_id:
         return jsonify({"error": "parent_id is required"}), 400
 

@@ -5,6 +5,7 @@ import { useUser } from "../contexts/UserContext";
 import StreamingMicButton from "./StreamingMicButton";
 import PrivacySelector from "./PrivacySelector";
 import RegenerateTtsDialog from "./RegenerateTtsDialog";
+import SplitContentDialog, { NODE_CHAR_CAP } from "./SplitContentDialog";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import api from "../api";
 import { uploadFileInChunks } from "../utils/chunkedUpload";
@@ -27,6 +28,14 @@ const NodeForm = forwardRef(
     // When editing an entry that has generated TTS, ask whether to keep or
     // regenerate the now-stale audio before saving (#66).
     const [showTtsDialog, setShowTtsDialog] = useState(false);
+
+    // Per-entry character cap: oversized new entries are split
+    // server-side into serially connected entries after explicit
+    // consent (paste or submit opens the dialog). pendingPaste holds
+    // paste text awaiting that consent.
+    const [showSplitDialog, setShowSplitDialog] = useState(false);
+    const [pendingPaste, setPendingPaste] = useState(null);
+    const [splitAcknowledged, setSplitAcknowledged] = useState(false);
 
     // Remember the user's last privacy / AI-usage choices for fresh
     // top-level entries (#63), so they don't have to re-pick every time.
@@ -285,7 +294,7 @@ const NodeForm = forwardRef(
       setContent("");
     };
 
-    const handleSubmit = async (event, regenerateTts) => {
+    const handleSubmit = async (event, regenerateTts, splitConfirmed) => {
       event && event.preventDefault();
       // Validate: require content or audio
       if (!editMode && uploadedFile) {
@@ -305,6 +314,25 @@ const NodeForm = forwardRef(
       ) {
         setShowTtsDialog(true);
         return;
+      }
+
+      // Per-entry character cap. New entries can split into serially
+      // connected entries (server-side, after consent via the dialog);
+      // edits and custom-submit conversations can't, so they get a
+      // plain error instead.
+      if (content.length > NODE_CHAR_CAP && !uploadedFile) {
+        if (editMode || onSubmitOverride) {
+          setError(
+            `This entry is ${content.length.toLocaleString()} characters — ` +
+            `above the ${NODE_CHAR_CAP.toLocaleString()}-character limit. ` +
+            `Please move part of it into separate entries.`
+          );
+          return;
+        }
+        if (!splitAcknowledged && !splitConfirmed) {
+          setShowSplitDialog(true);
+          return;
+        }
       }
 
       setLoading(true);
@@ -336,7 +364,8 @@ const NodeForm = forwardRef(
         // letting the user click LLM Response manually later after any
         // edits or follow-up nodes they want to add first.
         if (useAgenticPrompt && !editMode && !uploadedFile
-            && !streamingSessionId && !parentId && aiUsage !== 'none') {
+            && !streamingSessionId && !parentId && aiUsage !== 'none'
+            && content.length <= NODE_CHAR_CAP) {
           const res = await api.post('/textmode/start', {
             content,
             privacy_level: privacyLevel,
@@ -555,6 +584,29 @@ const NodeForm = forwardRef(
             if (!editMode && uploadedFile) {
               setUploadedFile(null);
             }
+          }}
+          onPaste={(e) => {
+            // Per-entry cap: intercept pastes that would exceed it and
+            // offer to split (new entries) or explain the limit
+            // (edits / custom-submit conversations).
+            const pasted = e.clipboardData
+              ? e.clipboardData.getData("text") : "";
+            if (!pasted) return;
+            const el = e.target;
+            const next = content.slice(0, el.selectionStart)
+              + pasted + content.slice(el.selectionEnd);
+            if (next.length <= NODE_CHAR_CAP) return;
+            e.preventDefault();
+            if (editMode || onSubmitOverride) {
+              setError(
+                `Pasting this would make the entry ` +
+                `${next.length.toLocaleString()} characters — above the ` +
+                `${NODE_CHAR_CAP.toLocaleString()}-character limit.`
+              );
+              return;
+            }
+            setPendingPaste(next);
+            setShowSplitDialog(true);
           }}
           rows={compact ? 3 : 6}
           style={{
@@ -912,6 +964,29 @@ const NodeForm = forwardRef(
           setShowTtsDialog(false);
           // Resume the save with the user's choice (no event object).
           handleSubmit(null, regenerate);
+        }}
+      />
+      <SplitContentDialog
+        open={showSplitDialog}
+        charCount={pendingPaste ? pendingPaste.length : content.length}
+        onClose={() => {
+          setShowSplitDialog(false);
+          setPendingPaste(null);
+        }}
+        onConfirm={() => {
+          setShowSplitDialog(false);
+          setSplitAcknowledged(true);
+          if (pendingPaste) {
+            // Paste path: insert the text; the split happens at save.
+            setContent(pendingPaste);
+            saveDraft(pendingPaste);
+            setHasDraft(true);
+            setPendingPaste(null);
+          } else {
+            // Submit path: resume the save (no event object); the
+            // server splits into connected entries.
+            handleSubmit(null, undefined, true);
+          }
         }}
       />
       </>

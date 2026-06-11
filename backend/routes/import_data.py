@@ -3,7 +3,7 @@ from flask_login import login_required, current_user
 from backend.models import Node, User, UserProfile
 from backend.extensions import db
 from backend.utils.privacy import AI_ALLOWED
-from datetime import datetime
+from datetime import datetime, timedelta
 import hashlib
 import zipfile
 import io
@@ -94,6 +94,44 @@ def _chatgpt_msg_key(msg):
         msg.get('role', 'user'), msg.get('created_at', ''),
         msg.get('text', ''),
     )
+
+
+def _add_imported_message_nodes(user_id, human_owner_id, parent_id,
+                                node_type, llm_model, node_content,
+                                privacy_level, ai_usage, source_key,
+                                msg_created_at):
+    """Create the node(s) for one imported message, splitting content
+    above NODE_CHAR_CAP into a serial parent→child chain.
+
+    source_key lands on the chain TIP (last part): both the dedup index
+    and the next message's parent resolve via source_key, so keeping it
+    on the tip means re-imports skip the whole message and follow-ups
+    chain after the full content — identical to a fresh import.
+
+    Returns (tip_node, nodes_created_count).
+    """
+    from backend.utils.node_split import split_text_at_cap
+    segments = split_text_at_cap(node_content)
+    tip = None
+    for j, seg in enumerate(segments):
+        n = Node(
+            user_id=user_id,
+            human_owner_id=human_owner_id,
+            parent_id=parent_id if tip is None else tip.id,
+            node_type=node_type,
+            llm_model=llm_model,
+            content=seg,
+            token_count=approximate_token_count(seg),
+            privacy_level=privacy_level,
+            ai_usage=ai_usage,
+            source_key=source_key if j == len(segments) - 1 else None,
+        )
+        if msg_created_at:
+            n.created_at = msg_created_at + timedelta(milliseconds=j)
+        db.session.add(n)
+        db.session.flush()
+        tip = n
+    return tip, len(segments)
 
 
 def _deleted_match_response(keys, deleted_keys, on_deleted):
@@ -393,33 +431,30 @@ def confirm_import():
                     except (ValueError, TypeError):
                         pass
 
-                # Create node
-                node = Node(
+                # Create node(s) — files above the per-node cap split
+                # into a serial chain
+                tip, created_count = _add_imported_message_nodes(
                     user_id=current_user.id,
                     human_owner_id=current_user.id,
                     parent_id=parent_id,
                     node_type="user",
-                    content=node_content,
-                    token_count=approximate_token_count(node_content),
+                    llm_model=None,
+                    node_content=node_content,
                     privacy_level=privacy_level,
                     ai_usage=ai_usage,
                     source_key=source_key,
+                    msg_created_at=node_created_at,
                 )
 
-                if node_created_at:
-                    node.created_at = node_created_at
-
-                db.session.add(node)
-                db.session.flush()  # Get the node ID
-
-                key_index[source_key] = node.id
-                parent_id = node.id
-                nodes_created += 1
+                key_index[source_key] = tip.id
+                parent_id = tip.id
+                nodes_created += created_count
 
             thread_count = 1
 
         else:  # separate_nodes
             # Create separate top-level threads for each file
+            threads_created = 0
             for file_data in files_sorted:
                 filename = file_data.get('filename_without_ext', 'Untitled')
                 content = file_data.get('content', '')
@@ -454,26 +489,25 @@ def confirm_import():
                     except (ValueError, TypeError):
                         pass
 
-                # Create top-level node (parent_id=None)
-                node = Node(
+                # Create top-level node (parent_id=None); files above the
+                # per-node cap split into a serial chain under the root
+                _, created_count = _add_imported_message_nodes(
                     user_id=current_user.id,
                     human_owner_id=current_user.id,
                     parent_id=None,
                     node_type="user",
-                    content=node_content,
-                    token_count=approximate_token_count(node_content),
+                    llm_model=None,
+                    node_content=node_content,
                     privacy_level=privacy_level,
                     ai_usage=ai_usage,
                     source_key=source_key,
+                    msg_created_at=node_created_at,
                 )
 
-                if node_created_at:
-                    node.created_at = node_created_at
+                nodes_created += created_count
+                threads_created += 1
 
-                db.session.add(node)
-                nodes_created += 1
-
-            thread_count = nodes_created
+            thread_count = threads_created
 
         nodes_updated = _apply_settings_to_skipped(
             skipped_alive_ids, privacy_level, ai_usage
@@ -953,33 +987,29 @@ def confirm_claude_import():
                     except (ValueError, TypeError):
                         pass
 
-                node = Node(
-                    user_id=llm_user.id if is_assistant else current_user.id,
-                    human_owner_id=current_user.id,
-                    parent_id=parent_id,
-                    node_type="llm" if is_assistant else "user",
-                    llm_model="claude-web" if is_assistant else None,
-                    content=node_content,
-                    token_count=approximate_token_count(node_content),
-                    privacy_level=privacy_level,
-                    ai_usage=ai_usage,
-                    source_key=source_key,
-                )
-
-                if msg_created_at:
-                    node.created_at = msg_created_at
-
                 # A node created without a parent starts a new thread;
                 # nodes chained onto an existing copy extend an old one.
                 if parent_id is None:
                     conv_started_new_thread = True
 
-                db.session.add(node)
-                db.session.flush()
+                tip, created_count = _add_imported_message_nodes(
+                    user_id=(
+                        llm_user.id if is_assistant else current_user.id
+                    ),
+                    human_owner_id=current_user.id,
+                    parent_id=parent_id,
+                    node_type="llm" if is_assistant else "user",
+                    llm_model="claude-web" if is_assistant else None,
+                    node_content=node_content,
+                    privacy_level=privacy_level,
+                    ai_usage=ai_usage,
+                    source_key=source_key,
+                    msg_created_at=msg_created_at,
+                )
 
-                key_index[source_key] = node.id
-                parent_id = node.id
-                nodes_created += 1
+                key_index[source_key] = tip.id
+                parent_id = tip.id
+                nodes_created += created_count
 
             if conv_started_new_thread:
                 thread_count += 1
@@ -1678,7 +1708,12 @@ def confirm_chatgpt_import():
                 # Get model slug for assistant messages
                 model_slug = msg.get('model', '') if is_assistant else None
 
-                node = Node(
+                # A node created without a parent starts a new thread;
+                # nodes chained onto an existing copy extend an old one.
+                if parent_id is None:
+                    conv_started_new_thread = True
+
+                tip, created_count = _add_imported_message_nodes(
                     user_id=(
                         llm_user.id if is_assistant else current_user.id
                     ),
@@ -1688,27 +1723,16 @@ def confirm_chatgpt_import():
                     llm_model=model_slug or (
                         "chatgpt" if is_assistant else None
                     ),
-                    content=node_content,
-                    token_count=approximate_token_count(node_content),
+                    node_content=node_content,
                     privacy_level=privacy_level,
                     ai_usage=ai_usage,
                     source_key=source_key,
+                    msg_created_at=msg_created_at,
                 )
 
-                if msg_created_at:
-                    node.created_at = msg_created_at
-
-                # A node created without a parent starts a new thread;
-                # nodes chained onto an existing copy extend an old one.
-                if parent_id is None:
-                    conv_started_new_thread = True
-
-                db.session.add(node)
-                db.session.flush()
-
-                key_index[source_key] = node.id
-                parent_id = node.id
-                nodes_created += 1
+                key_index[source_key] = tip.id
+                parent_id = tip.id
+                nodes_created += created_count
 
             if conv_started_new_thread:
                 thread_count += 1
