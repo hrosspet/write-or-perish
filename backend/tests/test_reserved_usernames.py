@@ -48,9 +48,9 @@ class TestIsReservedExact:
 class TestIsReservedBrandSubstring:
     @pytest.mark.parametrize("name", [
         "loore", "LOORE", "Loore", "myloore", "loore123",
-        # Any number of repeated o's (>= 2) and e's (>= 1) -- #175 follow-up
+        # Any number of repeated letters (o's >= 2) -- #175 follow-up
         "looore", "loooooore", "looree", "loooreee", "LoOoRe",
-        "my_loooree_123",
+        "my_loooree_123", "lloore", "loorre", "lloorree", "llooorrreee",
     ])
     def test_brand_substring_blocked(self, name):
         assert is_username_reserved(name) is True
