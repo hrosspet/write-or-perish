@@ -15,11 +15,14 @@ logger = logging.getLogger(__name__)
 
 admin_bp = Blueprint("admin_bp", __name__)
 
-# Decorator to check that the current user is the admin (placeholder check by username)
+# Decorator to check that the current user is an admin. Keyed on the
+# is_admin column (matching nodes.py/sse.py), NOT the username — usernames
+# are renamable, and #91 made 'hrosspet' reserved, so a username-keyed check
+# turns an admin rename into a permanent lockout.
 def admin_required(func):
     @wraps(func)
     def decorated_function(*args, **kwargs):
-        if not current_user.is_authenticated or current_user.username != "hrosspet":
+        if not current_user.is_authenticated or not getattr(current_user, "is_admin", False):
             abort(403)  # Forbidden if not admin
         return func(*args, **kwargs)
     return decorated_function
