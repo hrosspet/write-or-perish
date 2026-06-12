@@ -26,14 +26,22 @@ def _derive_non_reserved_username(handle):
     """Derive a username that is neither reserved nor already taken.
 
     Appends an incrementing numeric suffix to the original handle until both
-    the reserved check and the uniqueness check pass. Used when a Twitter
-    screen_name collides with a reserved name during OAuth signup.
+    the reserved check and the uniqueness check (case-insensitive, matching
+    validate_username) pass. Used when a Twitter screen_name collides with a
+    reserved name during OAuth signup.
     """
+    # Brand-substring / founder-prefix reserved matches can't be escaped by
+    # appending digits (e.g. 'myloore1' still contains 'loore'), so fall back
+    # to the neutral 'user' base instead of suffixing forever.
+    if is_username_reserved(f"{handle}1"):
+        handle = "user"
     suffix = 1
     while True:
         candidate = f"{handle}{suffix}"
         if (not is_username_reserved(candidate)
-                and not User.query.filter_by(username=candidate).first()):
+                and not User.query.filter(
+                    db.func.lower(User.username) == candidate.lower()
+                ).first()):
             return candidate
         suffix += 1
 

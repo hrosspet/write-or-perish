@@ -51,7 +51,7 @@ class TestIsReservedBrandSubstring:
 
 
 class TestIsReservedFounderPrefix:
-    @pytest.mark.parametrize("name", ["hrosspet", "peter", "peta", "peterx", "hrosspet_official"])
+    @pytest.mark.parametrize("name", ["hrosspet", "HRosspet", "hrosspetx", "hrosspet_official"])
     def test_founder_prefix_blocked(self, name):
         assert is_username_reserved(name) is True
 
@@ -63,14 +63,12 @@ class TestNotReserved:
         "alice",
         "bob123",
         "writer",
-        "petersen_is_not_me",  # does NOT start with a founder prefix? -> starts with 'peter'
+        "peter",       # common first names are deliberately not founder-blocked
+        "peta",
+        "petersen_is_not_me",
     ])
     def test_allowed(self, name):
-        # 'petersen_is_not_me' DOES start with 'peter' -> reserved; handle it separately.
-        if name == "petersen_is_not_me":
-            assert is_username_reserved(name) is True
-        else:
-            assert is_username_reserved(name) is False
+        assert is_username_reserved(name) is False
 
     def test_explore_explicitly_allowed(self):
         # Critical: the short exact tokens 'lore'/'lor' must not block 'explore'.
@@ -93,7 +91,7 @@ class TestValidateUsernamePureChecks:
         err = validate_username("bad name!")
         assert err == "Username may only contain letters, numbers, and underscores."
 
-    @pytest.mark.parametrize("name", ["admin", "LOORE", "Loore", "myloore", "loore123", "peterx"])
+    @pytest.mark.parametrize("name", ["admin", "LOORE", "Loore", "myloore", "loore123", "hrosspetx"])
     def test_reserved(self, name):
         assert validate_username(name) == "That username is reserved."
 

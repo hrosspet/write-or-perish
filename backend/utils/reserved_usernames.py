@@ -13,7 +13,7 @@ Matching strategy (after normalizing to lowercase alphanumerics):
     (so 'myloore', 'loore123' are blocked) -- it does not appear inside common
     English words, so 'explore' is safe.
   - FOUNDER_PREFIXES: blocked when the normalized name *starts with* one of
-    these (e.g. 'peterx', 'hrosspet_official').
+    these (e.g. 'hrosspetx', 'hrosspet_official').
 """
 
 import re
@@ -36,8 +36,9 @@ RESERVED_EXACT = frozenset({
 # Coined brand name -- substring match (does not collide with English words).
 BRAND_SUBSTRING = ("loore",)
 
-# Founder identifiers -- prefix match.
-FOUNDER_PREFIXES = ("hrosspet", "peter", "peta")
+# Founder identifiers -- prefix match. Common first names ('peter', 'peta')
+# are deliberately NOT listed: prefix-blocking them locks out real people.
+FOUNDER_PREFIXES = ("hrosspet",)
 
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]")
 
