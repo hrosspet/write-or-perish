@@ -39,37 +39,9 @@ def hash_token(token):
 
 
 def generate_unique_username(email):
-    from backend.models import User
-    from backend.extensions import db
-    from backend.utils.reserved_usernames import is_username_reserved
+    from backend.utils.reserved_usernames import derive_available_username
 
     prefix = email.split("@")[0]
     # Clean up prefix: keep only alphanumeric and underscores
     clean = "".join(c for c in prefix if c.isalnum() or c == "_")
-    if not clean:
-        clean = "user"
-
-    # Brand-substring / founder-prefix reserved matches can't be escaped by
-    # appending digits (e.g. 'myloore2' still contains 'loore'), so fall back
-    # to the neutral base instead of suffixing forever.
-    if is_username_reserved(clean) and is_username_reserved(f"{clean}2"):
-        clean = "user"
-
-    def _ok(candidate):
-        # Candidate must be neither reserved nor already taken
-        # (case-insensitive, matching validate_username).
-        if is_username_reserved(candidate):
-            return False
-        return not User.query.filter(
-            db.func.lower(User.username) == candidate.lower()
-        ).first()
-
-    if _ok(clean):
-        return clean
-
-    suffix = 2
-    while True:
-        candidate = f"{clean}{suffix}"
-        if _ok(candidate):
-            return candidate
-        suffix += 1
+    return derive_available_username(clean)

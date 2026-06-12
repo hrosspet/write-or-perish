@@ -12,7 +12,9 @@ from backend.utils.magic_link import (
     hash_token, generate_unique_username,
 )
 from backend.utils.email import send_magic_link_email
-from backend.utils.reserved_usernames import is_username_reserved
+from backend.utils.reserved_usernames import (
+    is_username_reserved, derive_available_username,
+)
 import logging
 from urllib.parse import urlparse
 
@@ -20,30 +22,6 @@ logger = logging.getLogger(__name__)
 auth_bp = Blueprint("auth_bp", __name__)
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-
-
-def _derive_non_reserved_username(handle):
-    """Derive a username that is neither reserved nor already taken.
-
-    Appends an incrementing numeric suffix to the original handle until both
-    the reserved check and the uniqueness check (case-insensitive, matching
-    validate_username) pass. Used when a Twitter screen_name collides with a
-    reserved name during OAuth signup.
-    """
-    # Brand-substring / founder-prefix reserved matches can't be escaped by
-    # appending digits (e.g. 'myloore1' still contains 'loore'), so fall back
-    # to the neutral 'user' base instead of suffixing forever.
-    if is_username_reserved(f"{handle}1"):
-        handle = "user"
-    suffix = 1
-    while True:
-        candidate = f"{handle}{suffix}"
-        if (not is_username_reserved(candidate)
-                and not User.query.filter(
-                    db.func.lower(User.username) == candidate.lower()
-                ).first()):
-            return candidate
-        suffix += 1
 
 
 def is_safe_redirect_url(target):
@@ -98,7 +76,7 @@ def login():
             # name (brand/founder/system), derive a non-reserved, unique
             # fallback rather than 400-ing the OAuth callback.
             if is_username_reserved(username):
-                username = _derive_non_reserved_username(username)
+                username = derive_available_username(username)
             user = User(twitter_id=twitter_id, username=username)
             db.session.add(user)
             db.session.commit()

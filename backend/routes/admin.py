@@ -9,7 +9,7 @@ from backend.utils.timefmt import iso_utc
 from sqlalchemy import func
 from backend.utils.magic_link import generate_magic_link_token, hash_token
 from backend.utils.email import send_welcome_email
-from backend.utils.reserved_usernames import is_username_reserved
+from backend.utils.reserved_usernames import validate_username
 
 logger = logging.getLogger(__name__)
 
@@ -106,13 +106,11 @@ def whitelist_user():
     if not handle:
         return jsonify({"error": "Handle is required."}), 400
 
-    # Reject reserved/protected handles (brand/founder/system names).
-    if is_username_reserved(handle):
-        return jsonify({"error": "That username is reserved."}), 400
-
-    # Check if a user with that handle already exists.
-    if User.query.filter_by(username=handle).first():
-        return jsonify({"error": "User with that handle already exists."}), 400
+    # Full username validation: format, length, reserved/protected names
+    # (brand/founder/system), and case-insensitive uniqueness.
+    error = validate_username(handle)
+    if error:
+        return jsonify({"error": error}), 400
 
     # Create a new user with the handle
     user = User(twitter_id=None, username=handle, approved=True)

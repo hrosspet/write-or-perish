@@ -99,3 +99,43 @@ def validate_username(username: str, exclude_user_id=None) -> Optional[str]:
         return "That username is already taken."
 
     return None
+
+
+def derive_available_username(base):
+    """Derive a username from ``base`` that is neither reserved nor taken.
+
+    Returns ``base`` itself when it passes both checks (case-insensitive
+    uniqueness, matching validate_username); otherwise appends an
+    incrementing numeric suffix starting at 2. Used by the magic-link signup
+    (email prefix) and Twitter OAuth signup (screen_name) to pick a fallback
+    instead of failing the auth callback.
+    """
+    from backend.models import User
+    from backend.extensions import db
+
+    if not base:
+        base = "user"
+    # Brand-substring / founder-prefix reserved matches can't be escaped by
+    # appending digits (e.g. 'myloore2' still contains 'loore'), while
+    # exact-match reservations can ('admin2'). Probe with a suffix appended to
+    # tell them apart, and fall back to the neutral base instead of suffixing
+    # forever.
+    if is_username_reserved(base) and is_username_reserved(f"{base}2"):
+        base = "user"
+
+    def _available(candidate):
+        if is_username_reserved(candidate):
+            return False
+        return not User.query.filter(
+            db.func.lower(User.username) == candidate.lower()
+        ).first()
+
+    if _available(base):
+        return base
+
+    suffix = 2
+    while True:
+        candidate = f"{base}{suffix}"
+        if _available(candidate):
+            return candidate
+        suffix += 1

@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from backend.utils.reserved_usernames import (
+    derive_available_username,
     is_username_reserved,
     validate_username,
     _normalize,
@@ -125,3 +126,47 @@ class TestValidateUsernameUniqueness:
     def test_valid_unique_with_exclude(self):
         with patch.dict(sys.modules, self._patch_modules(exists=False)):
             assert validate_username("alice", exclude_user_id=42) is None
+
+
+class TestDeriveAvailableUsername:
+    """Shared fallback generator used by magic-link and Twitter OAuth signup.
+
+    Mocks the deferred User/db imports; ``side_effect`` is the sequence of
+    .first() results, one per uniqueness DB query (reserved candidates are
+    rejected before any query).
+    """
+
+    def _patch_modules(self, side_effect):
+        mock_user = MagicMock()
+        mock_user.query.filter.return_value.first.side_effect = side_effect
+        return {
+            "backend.models": MagicMock(User=mock_user),
+            "backend.extensions": MagicMock(),
+        }
+
+    def test_available_base_kept(self):
+        with patch.dict(sys.modules, self._patch_modules([None])):
+            assert derive_available_username("alice") == "alice"
+
+    def test_taken_base_gets_suffix(self):
+        with patch.dict(sys.modules, self._patch_modules([MagicMock(), None])):
+            assert derive_available_username("alice") == "alice2"
+
+    def test_exact_reserved_escapes_with_suffix(self):
+        # 'admin' is rejected without a DB query; 'admin2' is queried once.
+        with patch.dict(sys.modules, self._patch_modules([None])):
+            assert derive_available_username("admin") == "admin2"
+
+    def test_brand_substring_falls_back_to_user(self):
+        # Digits never escape a substring match, so the base flips to 'user'
+        # ('user' itself is exact-reserved, hence 'user2').
+        with patch.dict(sys.modules, self._patch_modules([None])):
+            assert derive_available_username("myloore") == "user2"
+
+    def test_founder_prefix_falls_back_to_user(self):
+        with patch.dict(sys.modules, self._patch_modules([None])):
+            assert derive_available_username("hrosspetfan") == "user2"
+
+    def test_empty_base_falls_back_to_user(self):
+        with patch.dict(sys.modules, self._patch_modules([None])):
+            assert derive_available_username("") == "user2"
