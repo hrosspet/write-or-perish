@@ -1,5 +1,9 @@
 # Claude Code Instructions for Write-or-Perish
 
+## Product Intent — Read First for Feature Work
+
+When implementing a feature that is underspecified, ambiguous, or specified in a possibly outdated doc, read `docs/LOORE-ESSENCE.md` first. It characterizes what Loore is and aspires to be, the vibes it should give, and the decision heuristics for resolving ambiguity (plus when to placeholder and ask instead of deciding).
+
 ## CI/CD Pipeline - IMPORTANT
 
 **Pushing to `main` branch triggers automatic deployment to production.**
