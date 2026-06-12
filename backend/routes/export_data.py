@@ -2,7 +2,7 @@ from flask import Blueprint, jsonify, Response, request, current_app
 from flask_login import login_required, current_user
 from backend.models import (
     Node, NodeVersion, UserProfile, UserPrompt, UserTodo,
-    UserAIPreferences,
+    UserAIPreferences, UserArtifact,
 )
 from backend.extensions import db
 from backend.utils.tokens import approximate_token_count, get_model_context_window
@@ -161,6 +161,17 @@ def _format_node_text(node, index_path, user_id, embedded_quotes,
                 UserAIPreferences.created_at <= ai_prefs.created_at,
             ).count()
             result += f"[AI Preferences v{ai_prefs_ver} (ref #{ai_prefs.id})]\n"
+
+        for kind, artifact in sorted(node.get_user_artifacts().items()):
+            artifact_ver = UserArtifact.query.filter(
+                UserArtifact.user_id == artifact.user_id,
+                UserArtifact.kind == kind,
+                UserArtifact.created_at <= artifact.created_at,
+            ).count()
+            result += (
+                f"[Artifact '{kind}' v{artifact_ver} "
+                f"(ref #{artifact.id})]\n"
+            )
 
         result += "\n"
         return result
