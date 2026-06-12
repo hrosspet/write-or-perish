@@ -191,6 +191,10 @@ def _tts_stream_generator(app, entity_cls, entity_id, chunk_fk_attr,
                 }
                 if chunk.duration is not None:
                     chunk_data["duration"] = chunk.duration
+                # Chapter metadata (#145)
+                if chunk.section_index is not None:
+                    chunk_data["section_index"] = chunk.section_index
+                    chunk_data["section_title"] = chunk.section_title
                 yield format_sse_message(chunk_data, event="chunk_ready")
                 last_sent_chunk = chunk.chunk_index
 

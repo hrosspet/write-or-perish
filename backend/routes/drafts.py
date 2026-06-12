@@ -10,7 +10,9 @@ import shutil
 from backend.utils.audio_storage import move_draft_audio_to_node_dir
 from backend.utils.encryption import encrypt_file
 from backend.utils.llm_nodes import pick_model_for_generation
-from backend.utils.webm_utils import persist_init_segment
+from backend.utils.webm_utils import (
+    chunk_is_init_bearing, persist_init_segment,
+)
 
 drafts_bp = Blueprint("drafts_bp", __name__)
 
@@ -615,6 +617,29 @@ def upload_streaming_chunk(session_id):
         # if persist_init_segment raised, we don't want a half-committed
         # mime that'd survive a future early-commit refactor.
         draft.streaming_mime_type = form_mime_family
+    elif chunk_is_init_bearing(chunk_path):
+        # A chunk N>0 that carries its own stream header came from a
+        # fresh MediaRecorder — the user resumed a recovered recording
+        # (#124). Persist its init under an index-suffixed name so
+        # transcription can split the batch into subsessions instead of
+        # binary-concatenating incompatible streams (which silently
+        # drops the pre-resume audio at remux).
+        #
+        # Unlike chunk 0 we do NOT reject the upload on extraction
+        # failure: the chunk's audio is real and already streamed once —
+        # rejecting would lose it outright, while keeping it preserves
+        # at worst today's behavior for this subsession.
+        try:
+            persist_init_segment(chunk_path, chunk_dir, index=chunk_index)
+            current_app.logger.info(
+                f"Session {session_id}: chunk {chunk_index} opens a new "
+                f"subsession (resumed recording); init persisted"
+            )
+        except (ValueError, OSError) as exc:
+            current_app.logger.error(
+                f"Failed to extract subsession init from chunk "
+                f"{chunk_index} of session {session_id}: {exc}"
+            )
 
     # Encrypt the audio chunk at rest
     encrypted_path = encrypt_file(str(chunk_path))

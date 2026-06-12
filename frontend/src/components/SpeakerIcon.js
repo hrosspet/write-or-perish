@@ -42,10 +42,24 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
   const id = isNode ? nodeId : profileId;
   const baseUrl = isNode ? `/nodes/${id}` : `/profile/${id}`;
 
-  // Extract header from content if available
+  // Extract header from content if available. The "Node N" form is a
+  // fallback only — when the content has a title, show just the title.
   const header = extractMarkdownHeader(content);
   const baseTitle = isNode ? `Node ${id}` : `Profile ${id}`;
-  const fullTitle = header ? `${baseTitle}: ${header}` : baseTitle;
+  const fullTitle = header || baseTitle;
+
+  // Chapter list for TTS playback (#145) — empty for unstructured text.
+  const fetchChapters = useCallback(async () => {
+    if (!isNode) return [];
+    try {
+      const res = await api.get(`/nodes/${id}/tts-chapters`, {
+        validateStatus: (s) => s === 200 || s === 404,
+      });
+      return res.status === 200 ? (res.data.chapters || []) : [];
+    } catch (e) {
+      return [];
+    }
+  }, [id, isNode]);
 
   // SSE streaming for TTS chunks
   const handleChunkReady = useCallback((data) => {
@@ -59,16 +73,16 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
     if (sseChunkCountRef.current === 1) {
       // First chunk: start playback immediately via loadAudioQueue
       setLoading(false);
-      loadAudioQueue(
+      fetchChapters().then((chapters) => loadAudioQueue(
         [chunkUrl],
-        { title: fullTitle, id, type: isNode ? 'node' : 'profile' },
+        { title: fullTitle, id, type: isNode ? 'node' : 'profile', chapters },
         chunkDuration != null ? [chunkDuration] : null
-      );
+      ));
     } else {
       // Subsequent chunks: append to the active queue
       appendChunkToQueue(chunkUrl, chunkDuration);
     }
-  }, [fullTitle, id, isNode, loadAudioQueue, appendChunkToQueue]);
+  }, [fullTitle, id, isNode, loadAudioQueue, appendChunkToQueue, fetchChapters]);
 
   const handleAllComplete = useCallback((data) => {
     setSseActive(false);
@@ -285,8 +299,10 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
         : `${process.env.REACT_APP_BACKEND_URL}${urlPath}`;
       setAudioSrc(srcUrl);
 
-      // Load audio into global player
-      await loadAudio({ url: srcUrl, title: fullTitle, id, type: isNode ? 'node' : 'profile' });
+      // Load audio into global player (chapters only for TTS audio —
+      // recorded-original playback has no section structure, #145)
+      const chapters = (!original_url && tts_url) ? await fetchChapters() : [];
+      await loadAudio({ url: srcUrl, title: fullTitle, id, type: isNode ? 'node' : 'profile', chapters });
       setLoading(false);
     } catch (err) {
       console.error('Error playing audio:', err);

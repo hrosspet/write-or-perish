@@ -103,3 +103,43 @@ def test_is_valid_timezone_rejects_garbage():
 def test_is_valid_timezone_rejects_empty_and_none():
     assert is_valid_timezone("") is False
     assert is_valid_timezone(None) is False
+
+
+class TestStripEdgeTimestamps:
+    def test_leading_stamp_removed(self):
+        from backend.utils.timefmt import strip_edge_timestamps
+        assert strip_edge_timestamps(
+            "[2026-06-01 20:39 CEST] Okay, hot takes, no hedging."
+        ) == "Okay, hot takes, no hedging."
+
+    def test_trailing_stamp_removed(self):
+        from backend.utils.timefmt import strip_edge_timestamps
+        assert strip_edge_timestamps(
+            "One sentence to set it down.\n\n[2026-06-10 08:27 UTC]"
+        ) == "One sentence to set it down."
+
+    def test_both_edges_and_repeats(self):
+        from backend.utils.timefmt import strip_edge_timestamps
+        assert strip_edge_timestamps(
+            "[2026-06-10 08:27 UTC] [2026-06-10 08:28 UTC] body "
+            "[2026-06-10 08:29 UTC]"
+        ) == "body"
+
+    def test_unknown_time_marker(self):
+        from backend.utils.timefmt import strip_edge_timestamps
+        assert strip_edge_timestamps("[unknown time] hi") == "hi"
+
+    def test_mid_text_untouched(self):
+        from backend.utils.timefmt import strip_edge_timestamps
+        text = "We met at [2026-06-01 20:39 CEST] according to the log."
+        assert strip_edge_timestamps(text) == text
+
+    def test_legit_brackets_untouched(self):
+        from backend.utils.timefmt import strip_edge_timestamps
+        text = "[important] remember this [note]"
+        assert strip_edge_timestamps(text) == text
+
+    def test_empty_and_none(self):
+        from backend.utils.timefmt import strip_edge_timestamps
+        assert strip_edge_timestamps("") == ""
+        assert strip_edge_timestamps(None) is None

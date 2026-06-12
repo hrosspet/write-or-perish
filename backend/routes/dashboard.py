@@ -3,6 +3,8 @@ import re
 from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
 from backend.models import Node, User, UserProfile
+from datetime import datetime
+
 from backend.extensions import db
 from backend.utils.timefmt import iso_utc, is_valid_timezone
 from backend.utils.privacy import (
@@ -111,6 +113,7 @@ def get_dashboard():
             "description": current_user.description,
             "accepted_terms_at": iso_utc(current_user.accepted_terms_at),
             "terms_up_to_date": _terms_up_to_date(current_user),
+            "onboarding_completed": current_user.onboarding_completed_at is not None,
             "approved": current_user.approved,
             "email": current_user.email,
             "is_admin": current_user.is_admin,
@@ -245,6 +248,7 @@ def update_user():
                 "approved": current_user.approved,
                 "accepted_terms_at": iso_utc(current_user.accepted_terms_at),
                 "terms_up_to_date": _terms_up_to_date(current_user),
+            "onboarding_completed": current_user.onboarding_completed_at is not None,
                 "is_admin": current_user.is_admin,
                 "plan": current_user.plan,
                 "voice_mode_enabled": voice_mode_enabled,
@@ -280,3 +284,16 @@ def update_timezone():
         return jsonify({"error": "Failed to update timezone.",
                         "details": str(e)}), 500
     return jsonify({"timezone": current_user.timezone}), 200
+
+
+@dashboard_bp.route("/onboarding/complete", methods=["POST"])
+@login_required
+def complete_onboarding():
+    """Mark the first-login onboarding walkthrough as completed (#147).
+
+    Idempotent — both finishing and skipping the flow land here.
+    """
+    if current_user.onboarding_completed_at is None:
+        current_user.onboarding_completed_at = datetime.utcnow()
+        db.session.commit()
+    return jsonify({"onboarding_completed": True}), 200
