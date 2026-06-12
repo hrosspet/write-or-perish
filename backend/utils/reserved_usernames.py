@@ -9,9 +9,11 @@ Matching strategy (after normalizing to lowercase alphanumerics):
   - RESERVED_EXACT: blocked only on an *exact* normalized match. This keeps
     short tokens like 'lore'/'lor' from collateral-blocking words such as
     'explore' or 'folklore'.
-  - BRAND_SUBSTRING: the coined brand name 'loore' is blocked as a substring
-    (so 'myloore', 'loore123' are blocked) -- it does not appear inside common
-    English words, so 'explore' is safe.
+  - BRAND_SUBSTRING_RE: the coined brand name 'loore' -- with any number of
+    repeated o's and e's (loore, looore, looree, ...) -- is blocked as a
+    substring (so 'myloore', 'loore123', 'looore' are blocked). Two o's
+    minimum: the single-o 'lore' appears inside common English words
+    ('explore', 'folklore'), so it is exact-match-only via RESERVED_EXACT.
   - FOUNDER_PREFIXES: blocked when the normalized name *starts with* one of
     these (e.g. 'hrosspetx', 'hrosspet_official').
 """
@@ -33,8 +35,10 @@ RESERVED_EXACT = frozenset({
     "founder", "creator", "www", "mail", "smtp", "lore", "lor",
 })
 
-# Coined brand name -- substring match (does not collide with English words).
-BRAND_SUBSTRING = ("loore",)
+# Coined brand name -- substring match with any number of repeated o's (>= 2,
+# so the single-o English 'lore' in 'explore'/'folklore' stays available) and
+# e's (>= 1). Does not collide with English words.
+BRAND_SUBSTRING_RE = re.compile(r"lo{2,}re+")
 
 # Founder identifiers -- prefix match. Common first names ('peter', 'peta')
 # are deliberately NOT listed: prefix-blocking them locks out real people.
@@ -61,7 +65,7 @@ def is_username_reserved(username: str) -> bool:
         return False
     if norm in RESERVED_EXACT:
         return True
-    if any(brand in norm for brand in BRAND_SUBSTRING):
+    if BRAND_SUBSTRING_RE.search(norm):
         return True
     if any(norm.startswith(prefix) for prefix in FOUNDER_PREFIXES):
         return True

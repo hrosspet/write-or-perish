@@ -46,9 +46,20 @@ class TestIsReservedExact:
 
 
 class TestIsReservedBrandSubstring:
-    @pytest.mark.parametrize("name", ["loore", "LOORE", "Loore", "myloore", "loore123"])
+    @pytest.mark.parametrize("name", [
+        "loore", "LOORE", "Loore", "myloore", "loore123",
+        # Any number of repeated o's (>= 2) and e's (>= 1) -- #175 follow-up
+        "looore", "loooooore", "looree", "loooreee", "LoOoRe",
+        "my_loooree_123",
+    ])
     def test_brand_substring_blocked(self, name):
         assert is_username_reserved(name) is True
+
+    @pytest.mark.parametrize("name", ["loor", "looor"])
+    def test_no_trailing_e_not_brand(self, name):
+        # Without the final 'e' it isn't the brand name. 'loor'/'looor' are
+        # not exact-reserved either, so they remain available.
+        assert is_username_reserved(name) is False
 
 
 class TestIsReservedFounderPrefix:
