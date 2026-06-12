@@ -24,6 +24,18 @@ class Config:
     # Default model (for backward compatibility and fallback)
     DEFAULT_LLM_MODEL = os.environ.get("LLM_NAME", "claude-opus-4.6")
 
+    # --- API spend monitoring (issue #85) ---
+    # Monthly Anthropic spend cap in USD. 0 (default) disables the check.
+    ANTHROPIC_SPEND_LIMIT_USD = float(
+        os.environ.get("ANTHROPIC_SPEND_LIMIT_USD", "0") or "0"
+    )
+    # Comma-separated fractions of the limit at which to alert.
+    SPEND_ALERT_THRESHOLDS = os.environ.get(
+        "SPEND_ALERT_THRESHOLDS", "0.5,0.8,0.95"
+    )
+    # Recipient for spend alerts (admin inbox also used for signup notices).
+    SPEND_ALERT_EMAIL = os.environ.get("SPEND_ALERT_EMAIL", "signup@loore.org")
+
     # --- Profile-generation batch processing (issue #173, Part A) ---
     # A user takes the Batch API path if the global switch is on OR their id
     # is in the canary allowlist. Both default off → batch ships dark.

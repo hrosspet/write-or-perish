@@ -182,3 +182,46 @@ def activate_and_welcome(user_id):
         "approved": True,
         "email_sent": True,
     }), 200
+
+
+@admin_bp.route("/spend", methods=["GET"])
+@login_required
+@admin_required
+def spend_status():
+    """Month-to-date API spend + limit status (issue #85)."""
+    from backend.models import SpendAlert
+    from backend.utils.spend import (
+        get_month_spend_microdollars, parse_thresholds,
+    )
+
+    config = current_app.config
+    now = datetime.utcnow()
+    month = now.strftime("%Y-%m")
+
+    total = get_month_spend_microdollars(config, now=now)
+    anthropic = get_month_spend_microdollars(config, provider="anthropic", now=now)
+    openai = get_month_spend_microdollars(config, provider="openai", now=now)
+
+    limit_usd = config.get("ANTHROPIC_SPEND_LIMIT_USD") or 0
+    alerts = SpendAlert.query.filter_by(month=month).order_by(
+        SpendAlert.threshold).all()
+
+    return jsonify({
+        "month": month,
+        "total_usd": total / 1_000_000,
+        "anthropic_usd": anthropic / 1_000_000,
+        "openai_usd": openai / 1_000_000,
+        "limit_usd": limit_usd,
+        "limit_fraction_used": (
+            (anthropic / 1_000_000) / limit_usd if limit_usd > 0 else None
+        ),
+        "thresholds": parse_thresholds(config.get("SPEND_ALERT_THRESHOLDS")),
+        "alerts_fired": [
+            {
+                "threshold": a.threshold,
+                "spend_usd": a.spend_usd,
+                "at": iso_utc(a.created_at),
+            }
+            for a in alerts
+        ],
+    }), 200
