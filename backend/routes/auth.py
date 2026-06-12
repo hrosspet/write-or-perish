@@ -12,6 +12,9 @@ from backend.utils.magic_link import (
     hash_token, generate_unique_username,
 )
 from backend.utils.email import send_magic_link_email
+from backend.utils.reserved_usernames import (
+    is_username_reserved, derive_available_username,
+)
 import logging
 from urllib.parse import urlparse
 
@@ -69,7 +72,11 @@ def login():
             user.twitter_id = twitter_id
             db.session.commit()
         else:
-            # create new user
+            # create new user. If the Twitter handle collides with a reserved
+            # name (brand/founder/system), derive a non-reserved, unique
+            # fallback rather than 400-ing the OAuth callback.
+            if is_username_reserved(username):
+                username = derive_available_username(username)
             user = User(twitter_id=twitter_id, username=username)
             db.session.add(user)
             db.session.commit()

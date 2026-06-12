@@ -92,19 +92,27 @@ class TestHashToken:
 class TestGenerateUniqueUsername:
     """Test username generation from email.
 
-    generate_unique_username does a deferred import of User from
-    backend.models, so we mock it via the module that gets imported.
+    generate_unique_username does deferred imports of User (backend.models)
+    and db (backend.extensions), so we mock them via the modules that get
+    imported. The uniqueness check is case-insensitive (query.filter with
+    lower()), so the mock tracks .filter, not .filter_by.
     """
 
     def _make_mock_user(self, side_effect):
         mock_user = MagicMock()
-        mock_user.query.filter_by.return_value.first.side_effect = side_effect
+        mock_user.query.filter.return_value.first.side_effect = side_effect
         return mock_user
+
+    def _patched_modules(self, mock_user):
+        return {
+            "backend.models": MagicMock(User=mock_user),
+            "backend.extensions": MagicMock(),
+        }
 
     def test_simple_email(self, app):
         mock_user = self._make_mock_user([None])
         with app.app_context(), \
-                patch.dict("sys.modules", {"backend.models": MagicMock(User=mock_user)}):
+                patch.dict("sys.modules", self._patched_modules(mock_user)):
             # Re-import to pick up the patched module
             import backend.utils.magic_link as ml
             result = ml.generate_unique_username("john@gmail.com")
@@ -114,7 +122,7 @@ class TestGenerateUniqueUsername:
         existing = MagicMock()
         mock_user = self._make_mock_user([existing, None])
         with app.app_context(), \
-                patch.dict("sys.modules", {"backend.models": MagicMock(User=mock_user)}):
+                patch.dict("sys.modules", self._patched_modules(mock_user)):
             import backend.utils.magic_link as ml
             result = ml.generate_unique_username("john@gmail.com")
             assert result == "john2"
@@ -123,7 +131,7 @@ class TestGenerateUniqueUsername:
         existing = MagicMock()
         mock_user = self._make_mock_user([existing, existing, existing, None])
         with app.app_context(), \
-                patch.dict("sys.modules", {"backend.models": MagicMock(User=mock_user)}):
+                patch.dict("sys.modules", self._patched_modules(mock_user)):
             import backend.utils.magic_link as ml
             result = ml.generate_unique_username("john@gmail.com")
             assert result == "john4"
@@ -131,15 +139,46 @@ class TestGenerateUniqueUsername:
     def test_email_with_dots_and_plus(self, app):
         mock_user = self._make_mock_user([None])
         with app.app_context(), \
-                patch.dict("sys.modules", {"backend.models": MagicMock(User=mock_user)}):
+                patch.dict("sys.modules", self._patched_modules(mock_user)):
             import backend.utils.magic_link as ml
             result = ml.generate_unique_username("john.doe+tag@gmail.com")
             assert result == "johndoetag"
 
     def test_empty_prefix_fallback(self, app):
-        mock_user = self._make_mock_user([None])
+        # The bare 'user' fallback is itself a reserved name (issue #91), so
+        # generate_unique_username must skip it and append a suffix.
+        mock_user = self._make_mock_user([None, None])
         with app.app_context(), \
-                patch.dict("sys.modules", {"backend.models": MagicMock(User=mock_user)}):
+                patch.dict("sys.modules", self._patched_modules(mock_user)):
             import backend.utils.magic_link as ml
             result = ml.generate_unique_username("@example.com")
-            assert result == "user"
+            assert result == "user2"
+
+    def test_brand_substring_email_falls_back_to_user(self, app):
+        # 'myloore' contains the brand substring; appending digits never
+        # escapes it, so the generator must fall back to the 'user' base
+        # instead of looping forever.
+        mock_user = self._make_mock_user([None])
+        with app.app_context(), \
+                patch.dict("sys.modules", self._patched_modules(mock_user)):
+            import backend.utils.magic_link as ml
+            result = ml.generate_unique_username("myloore@example.com")
+            assert result == "user2"
+
+    def test_founder_prefix_email_falls_back_to_user(self, app):
+        mock_user = self._make_mock_user([None])
+        with app.app_context(), \
+                patch.dict("sys.modules", self._patched_modules(mock_user)):
+            import backend.utils.magic_link as ml
+            result = ml.generate_unique_username("hrosspetfan@example.com")
+            assert result == "user2"
+
+    def test_exact_reserved_email_keeps_base(self, app):
+        # Exact-match reservations ARE escaped by a suffix, so the original
+        # base is kept: admin -> admin2.
+        mock_user = self._make_mock_user([None])
+        with app.app_context(), \
+                patch.dict("sys.modules", self._patched_modules(mock_user)):
+            import backend.utils.magic_link as ml
+            result = ml.generate_unique_username("admin@example.com")
+            assert result == "admin2"

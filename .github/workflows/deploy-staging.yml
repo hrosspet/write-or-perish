@@ -67,13 +67,15 @@ jobs:
         env:
           VM_HOST: ${{ secrets.VM_HOST }}
           VM_USER: ${{ secrets.VM_USER }}
+          STAGING_ADMIN_EMAIL: ${{ secrets.STAGING_ADMIN_EMAIL }}
           PROJECT_PATH: /home/hrosspet/write-or-perish
         run: |
           # Upload pre-built frontend
           scp -i ~/.ssh/deploy_key frontend-build.tar.gz $VM_USER@$VM_HOST:$PROJECT_PATH/
 
-          # Deploy on VM
-          ssh -i ~/.ssh/deploy_key $VM_USER@$VM_HOST << 'ENDSSH'
+          # Deploy on VM. The heredoc is quoted (no local expansion), so the
+          # admin email is passed as an env var into the remote shell.
+          ssh -i ~/.ssh/deploy_key $VM_USER@$VM_HOST "STAGING_ADMIN_EMAIL='$STAGING_ADMIN_EMAIL' bash -s" << 'ENDSSH'
             set -e
             cd /home/hrosspet/write-or-perish
             git fetch origin
@@ -143,9 +145,9 @@ jobs:
             echo "Seeding admin user..."
             docker compose -p wop-staging exec -T db \
               psql -U staging -d writeorperish_staging \
-              -c "INSERT INTO \"user\" (username, approved, is_admin, craft_mode, plan, created_at, profile_needs_full_regen)
-                  VALUES ('hrosspet', true, true, false, 'alpha', NOW(), false)
-                  ON CONFLICT (username) DO UPDATE SET approved = true, is_admin = true;" < /dev/null
+              -c "INSERT INTO \"user\" (username, email, approved, is_admin, craft_mode, plan, created_at, profile_needs_full_regen)
+                  VALUES ('hrosspet', NULLIF('$STAGING_ADMIN_EMAIL', ''), true, true, false, 'alpha', NOW(), false)
+                  ON CONFLICT (username) DO UPDATE SET email = NULLIF('$STAGING_ADMIN_EMAIL', ''), approved = true, is_admin = true;" < /dev/null
             echo "Database setup complete."
 
             # Switch back to main so production deploys aren't blocked

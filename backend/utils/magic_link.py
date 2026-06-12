@@ -39,21 +39,9 @@ def hash_token(token):
 
 
 def generate_unique_username(email):
-    from backend.models import User
+    from backend.utils.reserved_usernames import derive_available_username
 
     prefix = email.split("@")[0]
     # Clean up prefix: keep only alphanumeric and underscores
     clean = "".join(c for c in prefix if c.isalnum() or c == "_")
-    if not clean:
-        clean = "user"
-
-    candidate = clean
-    if not User.query.filter_by(username=candidate).first():
-        return candidate
-
-    suffix = 2
-    while True:
-        candidate = f"{clean}{suffix}"
-        if not User.query.filter_by(username=candidate).first():
-            return candidate
-        suffix += 1
+    return derive_available_username(clean)
