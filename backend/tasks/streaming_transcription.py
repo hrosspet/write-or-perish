@@ -65,6 +65,14 @@ def transcribe_chunk(self, node_id: int, chunk_index: int, chunk_path: str):
     logger.info(f"Starting chunk transcription for node {node_id}, chunk {chunk_index}")
 
     with flask_app.app_context():
+        from backend.utils.spend import user_is_capped
+        _node = Node.query.get(node_id)
+        if _node and user_is_capped(_node.user_id):
+            logger.warning(
+                "User %s is spend-capped; skipping chunk transcription",
+                _node.user_id)
+            return
+
         # Get the transcript chunk record
         chunk_record = NodeTranscriptChunk.query.filter_by(
             node_id=node_id,
@@ -376,6 +384,14 @@ def transcribe_draft_chunk(self, session_id: str, chunk_index: int, chunk_path: 
     logger.info(f"Starting draft chunk transcription for session {session_id}, chunk {chunk_index}")
 
     with flask_app.app_context():
+        from backend.utils.spend import user_is_capped
+        _draft = Draft.query.filter_by(session_id=session_id).first()
+        if _draft and user_is_capped(_draft.user_id):
+            logger.warning(
+                "User %s is spend-capped; skipping draft chunk transcription",
+                _draft.user_id)
+            return
+
         # Get the transcript chunk record
         chunk_record = NodeTranscriptChunk.query.filter_by(
             session_id=session_id,
@@ -558,6 +574,13 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
         draft = Draft.query.filter_by(session_id=session_id).first()
         if not draft:
             raise ValueError(f"Draft not found for session {session_id}")
+
+        from backend.utils.spend import user_is_capped
+        if user_is_capped(draft.user_id):
+            logger.warning(
+                "User %s is spend-capped; skipping batch transcription",
+                draft.user_id)
+            return
 
         # Family-only mime drives the on-disk extension. Defensive None
         # handling in case a row was inserted before the default backfill;

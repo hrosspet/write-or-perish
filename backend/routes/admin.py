@@ -215,6 +215,9 @@ def spend_status():
         "limit_fraction_used": (
             (anthropic / 1_000_000) / limit_usd if limit_usd > 0 else None
         ),
+        "per_user_limit_usd": config.get("PER_USER_MONTHLY_LIMIT_USD") or 0,
+        "users_blocked_this_month": User.query.filter_by(
+            spend_blocked_month=month).count(),
         "thresholds": parse_thresholds(config.get("SPEND_ALERT_THRESHOLDS")),
         "alerts_fired": [
             {

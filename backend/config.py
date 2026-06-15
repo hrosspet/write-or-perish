@@ -36,6 +36,15 @@ class Config:
     # Recipient for spend alerts (admin inbox also used for signup notices).
     SPEND_ALERT_EMAIL = os.environ.get("SPEND_ALERT_EMAIL", "signup@loore.org")
 
+    # Per-user monthly spend hard cap in USD, summed across ALL providers
+    # (issue #85 follow-up; free-alpha guardrail). 0 (default) disables the
+    # cap. When a user's month-to-date spend reaches this, they are
+    # hard-blocked from new cost-incurring actions until the month rolls
+    # over, and an alert goes to SPEND_ALERT_EMAIL. Ships dark; set in prod.
+    PER_USER_MONTHLY_LIMIT_USD = float(
+        os.environ.get("PER_USER_MONTHLY_LIMIT_USD", "0") or "0"
+    )
+
     # --- Profile-generation batch processing (issue #173, Part A) ---
     # A user takes the Batch API path if the global switch is on OR their id
     # is in the canary allowlist. Both default off → batch ships dark.

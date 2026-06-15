@@ -11,6 +11,7 @@ from backend.utils.quotes import (
     resolve_quotes, has_quotes, ExportQuoteResolver, resolve_quotes_for_export
 )
 from backend.utils.timefmt import iso_utc
+from backend.utils.spend import require_spend_headroom
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import subqueryload
 from datetime import datetime
@@ -1400,6 +1401,7 @@ def estimate_profile_tokens():
 
 @export_bp.route("/export/update_profile", methods=["POST"])
 @login_required
+@require_spend_headroom
 def update_profile():
     """
     Unified endpoint for initial profile generation and incremental updates.
@@ -1502,6 +1504,7 @@ def update_profile():
 
 @export_bp.route("/export/integrate_profile", methods=["POST"])
 @login_required
+@require_spend_headroom
 def integrate_profile():
     """
     Manually trigger profile integration: collect all iterative/update
@@ -1574,6 +1577,7 @@ def integrate_profile():
 
 @export_bp.route("/export/generate_profile", methods=["POST"])
 @login_required
+@require_spend_headroom
 def generate_profile():
     """
     Generate a comprehensive user profile using an LLM to analyze all of the user's writing.

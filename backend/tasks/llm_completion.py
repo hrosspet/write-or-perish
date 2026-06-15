@@ -671,6 +671,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
         if not llm_node:
             raise ValueError(f"LLM node {llm_node_id} not found")
 
+        from backend.utils.spend import user_is_capped
+        if user_is_capped(user_id):
+            logger.warning(
+                "User %s is spend-capped; skipping LLM completion", user_id)
+            llm_node.llm_task_status = 'failed'
+            db.session.commit()
+            return
+
         # Update status on the new llm_node
         llm_node.llm_task_status = 'processing'
         llm_node.llm_task_progress = 10

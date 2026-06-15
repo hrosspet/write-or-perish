@@ -218,6 +218,76 @@ def send_spend_alert_email(to_email, provider, spend_usd, limit_usd, threshold):
         raise
 
 
+def send_user_spend_block_email(to_email, username, spend_usd, limit_usd):
+    """Alert the admin that a single user hit their monthly spend cap and has
+    been hard-blocked until month rollover (issue #85 follow-up)."""
+    config = current_app.config
+    sender = config.get("MAIL_DEFAULT_SENDER", "login@loore.org")
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"Loore: user {username} hit the ${limit_usd:,.0f} monthly cap"
+    msg["From"] = sender
+    msg["To"] = to_email
+
+    text_body = (
+        f"Per-user spend cap reached\n\n"
+        f"User: {username}\n"
+        f"Month-to-date spend: ${spend_usd:,.2f}\n"
+        f"Monthly cap: ${limit_usd:,.2f}\n\n"
+        f"This user is now hard-blocked from cost-incurring actions until the "
+        f"month rolls over.\n"
+        f"Review usage in the admin dashboard: https://loore.org/admin\n"
+    )
+
+    html_body = f"""\
+<html>
+<body style="font-family: 'Outfit', -apple-system, sans-serif; background: #0e0d0b; color: #ede8dd; padding: 40px 20px; margin: 0;">
+  <div style="max-width: 460px; margin: 0 auto; background: #181714; border-radius: 10px; border: 1px solid #302c27; padding: 48px 40px;">
+    <div style="font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif; font-size: 14px; font-weight: 300; text-transform: uppercase; letter-spacing: 0.3em; color: #736b5f; margin-bottom: 32px;">
+      Loore
+    </div>
+    <h2 style="font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif; font-weight: 300; font-size: 28px; color: #ede8dd; margin: 0 0 12px 0;">
+      User hit monthly cap
+    </h2>
+    <p style="font-size: 15px; font-weight: 300; color: #a89f91; margin: 0 0 8px 0; line-height: 1.6;">
+      <strong style="color: #ede8dd;">{username}</strong> reached
+      <strong style="color: #c4956a;">${spend_usd:,.2f}</strong>
+      of the <strong style="color: #ede8dd;">${limit_usd:,.2f}</strong> monthly cap
+      and is now hard-blocked until the month rolls over.
+    </p>
+    <a href="https://loore.org/admin"
+       style="display: inline-block; margin-top: 20px; padding: 12px 32px; background: transparent; color: #c4956a;
+              text-decoration: none; border-radius: 6px; border: 1px solid #c4956a;
+              font-family: 'Outfit', -apple-system, sans-serif; font-size: 14px; font-weight: 400;
+              letter-spacing: 0.04em;">
+      Open admin dashboard
+    </a>
+  </div>
+</body>
+</html>"""
+
+    msg.attach(MIMEText(text_body, "plain"))
+    msg.attach(MIMEText(html_body, "html"))
+
+    server = config.get("MAIL_SERVER", "localhost")
+    port = config.get("MAIL_PORT", 587)
+    use_tls = config.get("MAIL_USE_TLS", True)
+    username_smtp = config.get("MAIL_USERNAME")
+    password = config.get("MAIL_PASSWORD")
+
+    try:
+        with smtplib.SMTP(server, port) as smtp:
+            if use_tls:
+                smtp.starttls()
+            if username_smtp and password:
+                smtp.login(username_smtp, password)
+            smtp.sendmail(sender, to_email, msg.as_string())
+        logger.info(f"Spend block email sent to {to_email} (user {username})")
+    except Exception:
+        logger.exception(f"Failed to send spend block email to {to_email}")
+        raise
+
+
 def send_admin_signup_notification(username, user_email):
     config = current_app.config
     sender = config.get("MAIL_DEFAULT_SENDER", "login@loore.org")

@@ -60,6 +60,14 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
         if not node:
             raise ValueError(f"Node {node_id} not found")
 
+        from backend.utils.spend import user_is_capped
+        if user_is_capped(node.user_id):
+            logger.warning(
+                "User %s is spend-capped; skipping transcription", node.user_id)
+            node.transcription_status = 'failed'
+            db.session.commit()
+            return
+
         # Update status to processing
         node.transcription_status = 'processing'
         node.transcription_started_at = datetime.utcnow()

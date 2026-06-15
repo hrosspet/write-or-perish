@@ -48,6 +48,16 @@ def apply_voice_todo(self, llm_node_id: int, model_id: str, user_id: int,
             logger.error(f"LLM node {llm_node_id} not found")
             return
 
+        from backend.utils.spend import user_is_capped
+        if user_is_capped(user_id):
+            logger.warning(
+                "User %s is spend-capped; skipping voice todo merge", user_id)
+            _update_apply_status(
+                llm_node, "failed", error="Monthly spend limit reached",
+                confirm_node_id=confirm_node_id)
+            db.session.commit()
+            return
+
         update_summary = llm_node.get_content()
         if not update_summary:
             logger.error(f"LLM node {llm_node_id} has no content")

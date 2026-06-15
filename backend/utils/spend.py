@@ -11,18 +11,28 @@ models that have since been removed from config still count correctly.
 """
 import logging
 from datetime import datetime
+from functools import wraps
 
-from sqlalchemy import func, or_
+from sqlalchemy import event, func, or_
 
 from backend.extensions import db
 from backend.models import APICostLog, SpendAlert
 
 logger = logging.getLogger(__name__)
 
+# Seconds to defer the per-user cap check after a cost row is inserted, so the
+# inserting transaction has committed before we aggregate committed spend.
+ENFORCE_CAP_DELAY_SECONDS = 15
+
 
 def month_start(now=None):
     now = now or datetime.utcnow()
     return datetime(now.year, now.month, 1)
+
+
+def current_month(now=None):
+    """Current calendar month as "YYYY-MM" (UTC)."""
+    return (now or datetime.utcnow()).strftime("%Y-%m")
 
 
 def _anthropic_filter(config):
@@ -122,3 +132,132 @@ def check_and_alert(config, now=None, send_email=None):
         "limit_usd": limit_usd,
         "fired": fired,
     }
+
+
+# --- Per-user monthly hard cap (issue #85 follow-up) -----------------------
+
+def get_user_month_spend_microdollars(user_id, now=None):
+    """Month-to-date spend in microdollars for one user, ALL providers."""
+    q = db.session.query(
+        func.coalesce(func.sum(APICostLog.cost_microdollars), 0)
+    ).filter(
+        APICostLog.user_id == user_id,
+        APICostLog.created_at >= month_start(now),
+    )
+    return int(q.scalar() or 0)
+
+
+def user_is_capped(user, now=None):
+    """Cheap, query-light check of whether a user is currently spend-blocked.
+
+    Pass a loaded User to avoid any query (the flag is already on the row);
+    a bare id triggers a single primary-key lookup. The block auto-expires at
+    month rollover because we compare the stored month to the current one.
+    """
+    from backend.models import User
+    if user is None:
+        return False
+    if not isinstance(user, User):
+        user = db.session.get(User, user)
+        if user is None:
+            return False
+    blocked = user.spend_blocked_month
+    return bool(blocked) and blocked == current_month(now)
+
+
+def enforce_user_spend_cap(user_id, config, now=None, send_email=None):
+    """Block a user whose month-to-date spend (all providers) has reached
+    PER_USER_MONTHLY_LIMIT_USD, and alert the admin once. Idempotent within a
+    month. Runs in its own transaction (safe to call out-of-band).
+
+    `send_email` is injectable for tests; defaults to the real sender.
+    """
+    from backend.models import User
+    limit_usd = config.get("PER_USER_MONTHLY_LIMIT_USD") or 0
+    if limit_usd <= 0:
+        return {"status": "disabled"}
+
+    now = now or datetime.utcnow()
+    month = current_month(now)
+    user = db.session.get(User, user_id)
+    if user is None:
+        return {"status": "no_user", "user_id": user_id}
+    if user.spend_blocked_month == month:
+        return {"status": "already_blocked", "user_id": user_id, "month": month}
+
+    spend_usd = get_user_month_spend_microdollars(user_id, now=now) / 1_000_000
+    if spend_usd < limit_usd:
+        return {
+            "status": "ok", "user_id": user_id,
+            "spend_usd": round(spend_usd, 4), "limit_usd": limit_usd,
+            "blocked": False,
+        }
+
+    # Over the cap. Persist the block first (the critical effect), then alert
+    # best-effort — a failed email must not leave the user un-blocked.
+    user.spend_blocked_month = month
+    db.session.commit()
+
+    if send_email is None:
+        from backend.utils.email import send_user_spend_block_email
+        send_email = send_user_spend_block_email
+    try:
+        send_email(
+            to_email=config.get("SPEND_ALERT_EMAIL") or "signup@loore.org",
+            username=user.username,
+            spend_usd=spend_usd,
+            limit_usd=limit_usd,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to send per-user spend block email for user %s", user_id)
+
+    logger.warning(
+        "User %s hard-blocked: $%.2f >= $%.2f cap for %s",
+        user_id, spend_usd, limit_usd, month)
+    return {
+        "status": "blocked", "user_id": user_id, "month": month,
+        "spend_usd": round(spend_usd, 4), "limit_usd": limit_usd,
+        "blocked": True,
+    }
+
+
+def require_spend_headroom(fn):
+    """Route decorator: reject cost-incurring requests from a capped user with
+    402 + a clear message. Place below @login_required so current_user is set.
+    """
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        from flask import jsonify
+        from flask_login import current_user
+        if getattr(current_user, "is_authenticated", False) and \
+                user_is_capped(current_user):
+            return jsonify({
+                "error": "monthly_spend_limit_reached",
+                "message": (
+                    "You've reached your monthly usage limit for the free "
+                    "alpha. It resets at the start of next month."
+                ),
+            }), 402
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+@event.listens_for(APICostLog, "after_insert")
+def _dispatch_user_cap_check(mapper, connection, target):
+    """After any cost row is written, schedule a (deferred, out-of-band)
+    per-user cap check. No-op unless the cap is enabled, so tests and the
+    default config incur zero broker traffic."""
+    try:
+        from flask import current_app, has_app_context
+        if not has_app_context():
+            return
+        if (current_app.config.get("PER_USER_MONTHLY_LIMIT_USD") or 0) <= 0:
+            return
+        if target.user_id is None:
+            return
+        from backend.tasks.spend_monitor import enforce_user_cap
+        enforce_user_cap.apply_async(
+            args=[target.user_id], countdown=ENFORCE_CAP_DELAY_SECONDS)
+    except Exception:
+        logger.exception("Failed to dispatch per-user spend cap check")
