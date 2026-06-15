@@ -5,6 +5,7 @@ import Dashboard from "./components/Dashboard";
 import Feed from "./components/Feed";
 import NavBar from "./components/NavBar";
 import NodeFormModal from "./components/NodeFormModal";
+import SpendCapBanner from "./components/SpendCapBanner";
 import TermsModal from "./components/TermsModal";
 import AdminPanel from "./components/AdminPanel";
 import NodeDetailWrapper from "./components/NodeDetailWrapper";
@@ -74,6 +75,7 @@ function App() {
     <AudioProvider>
       <div>
         <NavBar onNewEntryClick={() => setShowNewEntry(true)} />
+        <SpendCapBanner />
         <div style={{ paddingTop: "60px" }}>
         {showNewEntry && (
           <NodeFormModal

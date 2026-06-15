@@ -25,4 +25,25 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+// Surface the per-user monthly spend cap (HTTP 402) as a global banner,
+// regardless of which cost action hit it. The call site's own error handling
+// still runs (we re-reject), so spinners stop as usual. SpendCapBanner listens.
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    const data = error.response && error.response.data;
+    if (error.response && error.response.status === 402 &&
+        data && data.error === "monthly_spend_limit_reached") {
+      try {
+        window.dispatchEvent(new CustomEvent("loore:spend-capped", {
+          detail: { message: data.message },
+        }));
+      } catch (e) {
+        // Ignore — CustomEvent unavailable; the rejection below still flows.
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
 export default api;
