@@ -51,6 +51,11 @@ celery.conf.update(
             'task': 'backend.tasks.profile_batch.poll_profile_batches',
             'schedule': 60.0,  # ~1 min — batches typically finish in 1-5 min
         },
+        # No-op unless ANTHROPIC_SPEND_LIMIT_USD is set (issue #85).
+        'check-api-spend': {
+            'task': 'backend.tasks.spend_monitor.check_api_spend',
+            'schedule': 3600.0,  # hourly
+        },
     },
 )
 
@@ -73,3 +78,4 @@ from backend.tasks import voice_todo_merge  # noqa: F401
 from backend.tasks import recent_context  # noqa: F401
 from backend.tasks import node_cleanup  # noqa: F401
 from backend.tasks import profile_batch  # noqa: F401
+from backend.tasks import spend_monitor  # noqa: F401
