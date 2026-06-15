@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from "react";
 import api from "../api";
+import { markSpendBlocked } from "../utils/spendCap";
 
 // Create a new context
 const UserContext = createContext(null);
@@ -18,6 +19,9 @@ export const UserProvider = ({ children }) => {
         const fetchedUser = response.data.user;
         setUser(fetchedUser);
         setLoading(false);
+        // Remember an already-capped user so cost actions (e.g. starting a
+        // voice recording) can be blocked up front this session (issue #85).
+        if (fetchedUser?.spend_blocked) markSpendBlocked();
 
         // Persist the browser timezone so the LLM context can render absolute
         // local-time stamps (#130). Only PATCH when it differs from what the

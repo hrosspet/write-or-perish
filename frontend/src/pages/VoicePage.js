@@ -8,6 +8,7 @@ import RecoveryBanner from '../components/RecoveryBanner';
 import OfflineBanner from '../components/OfflineBanner';
 import ProposalInline from '../components/ProposalInline';
 import { useToast } from '../contexts/ToastContext';
+import { isSpendBlocked, notifySpendBlocked } from '../utils/spendCap';
 import api from '../api';
 
 function formatDuration(seconds) {
@@ -334,6 +335,7 @@ export default function VoicePage() {
         <RecoveryBanner
           draft={interruptedDraft}
           onContinue={() => {
+            if (isSpendBlocked()) { notifySpendBlocked(); return; }
             const { session_id, id, chunk_count, parent_id, streaming_mime_type } = interruptedDraft;
             clearInterrupted();
             handleResumeSession({
@@ -405,7 +407,12 @@ export default function VoicePage() {
 
         {phase === 'ready' && (
           <button
-            onClick={handleStart}
+            onClick={() => {
+              // Block before any recording starts — a long recording stopped
+              // only at the end would be lost work (issue #85).
+              if (isSpendBlocked()) { notifySpendBlocked(); return; }
+              handleStart();
+            }}
             disabled={!isOnline}
             style={{
               width: '72px', height: '72px', borderRadius: '50%',
@@ -609,7 +616,10 @@ export default function VoicePage() {
 
       {/* Record button to continue */}
       <button
-        onClick={() => handleContinue(voiceReset)}
+        onClick={() => {
+          if (isSpendBlocked()) { notifySpendBlocked(); return; }
+          handleContinue(voiceReset);
+        }}
         disabled={!isOnline}
         title={isOnline ? 'Continue' : "You're offline"}
         style={{

@@ -8,6 +8,7 @@ from backend.utils.privacy import (
 )
 from backend.routes.terms import CURRENT_TERMS_VERSION
 from backend.utils.reserved_usernames import validate_username
+from backend.utils.spend import user_is_capped
 
 dashboard_bp = Blueprint("dashboard_bp", __name__)
 
@@ -121,6 +122,9 @@ def get_dashboard():
             "default_privacy_level": current_user.default_privacy_level,
             "default_ai_usage": current_user.default_ai_usage,
             "timezone": current_user.timezone or "UTC",
+            # Lets the client block cost actions (e.g. starting a long voice
+            # recording) up front instead of after the fact (issue #85).
+            "spend_blocked": user_is_capped(current_user),
         },
         "pinned_nodes": pinned_list,
         "nodes": nodes_list,
@@ -242,6 +246,7 @@ def update_user():
                 "profile_generation_task_id": current_user.profile_generation_task_id,
                 "default_privacy_level": current_user.default_privacy_level,
                 "default_ai_usage": current_user.default_ai_usage,
+                "spend_blocked": user_is_capped(current_user),
             }
         }), 200
     except Exception as e:
