@@ -485,8 +485,11 @@ function NodeDetail() {
       })
       .catch((err) => {
         console.error(err);
-        setError(err.response?.data?.error || `Error starting ${sessionType} session.`);
         setVoiceLoading(false);
+        // 402 = spend cap, surfaced globally by SpendCapBanner; don't echo
+        // the raw error code into the view.
+        if (err?.response?.status === 402) return;
+        setError(err.response?.data?.error || `Error starting ${sessionType} session.`);
       });
   };
 

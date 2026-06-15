@@ -81,6 +81,15 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     Validation runs BEFORE any DB writes so a misconfigured placeholder
     never produces an orphan LLM node and never incurs LLM API spend.
     """
+    # Spend-cap guard: a blocked user must never get an LLM placeholder node
+    # (and never incur generation spend). Raised before any DB write so no
+    # orphan node is created; HTTP callers surface it as a 402 → banner via
+    # the SpendCapExceeded error handler. This is the single chokepoint for
+    # every placeholder-creating path (textmode, converse, voice, replies).
+    from backend.utils.spend import SpendCapExceeded, user_is_capped
+    if user_is_capped(human_owner_id):
+        raise SpendCapExceeded()
+
     # Race A guard: lock the parent row and reject if soft-deleted. The
     # locking is what closes the create-vs-soft-delete race under READ
     # COMMITTED — a plain SELECT-then-INSERT can't see the concurrent

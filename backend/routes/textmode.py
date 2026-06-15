@@ -131,6 +131,19 @@ def start_conversation():
     db.session.add(user_node)
     db.session.flush()
 
+    # Spend cap: keep the system + user nodes (the user's writing is never
+    # blocked), but skip the LLM placeholder and signal the frontend to show
+    # the cap banner. Handled inline (not via the chokepoint's 402) so the
+    # committed nodes aren't rolled back and the UI lands on the new thread.
+    from backend.utils.spend import user_is_capped
+    if auto_generate and user_is_capped(current_user):
+        db.session.commit()
+        return jsonify({
+            "conversation_id": system_node.id,
+            "user_node_id": user_node.id,
+            "spend_capped": True,
+        }), 202
+
     # 3. Placeholder LLM node and enqueue task — unless the caller
     # explicitly opted out (Agentic Reply ON + Auto-generate OFF).
     if auto_generate:

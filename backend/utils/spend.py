@@ -25,6 +25,13 @@ logger = logging.getLogger(__name__)
 ENFORCE_CAP_DELAY_SECONDS = 15
 
 
+class SpendCapExceeded(Exception):
+    """Raised when a spend-blocked user would incur a cost-bearing action.
+    Registered with a 402 error handler so any HTTP path that hits it
+    surfaces the standard monthly_spend_limit_reached payload (→ banner)."""
+    pass
+
+
 def month_start(now=None):
     now = now or datetime.utcnow()
     return datetime(now.year, now.month, 1)

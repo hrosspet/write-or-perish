@@ -374,6 +374,14 @@ const NodeForm = forwardRef(
           });
           deleteDraft();
           setHasDraft(false);
+          // Spend cap: backend kept the system + user nodes but skipped the
+          // LLM placeholder. Surface the banner; the no-llm_node_id branch
+          // below lands the user on their new thread without a placeholder.
+          if (res.data.spend_capped) {
+            try {
+              window.dispatchEvent(new CustomEvent('loore:spend-capped', {}));
+            } catch (e) { /* no-op */ }
+          }
           if (res.data.llm_node_id) {
             onSuccess({
               id: res.data.llm_node_id,

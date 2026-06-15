@@ -157,6 +157,22 @@ def create_app():
     from backend.routes.sse import sse_bp
     app.register_blueprint(sse_bp, url_prefix="/api/sse")
 
+    # Per-user spend cap: any HTTP path that tries to create an LLM
+    # placeholder for a blocked user raises SpendCapExceeded; surface it as
+    # the standard 402 payload so the frontend shows the spend-cap banner.
+    from backend.utils.spend import SpendCapExceeded
+
+    @app.errorhandler(SpendCapExceeded)
+    def _handle_spend_cap(_exc):
+        from flask import jsonify
+        return jsonify({
+            "error": "monthly_spend_limit_reached",
+            "message": (
+                "You've reached your monthly usage limit for the free "
+                "alpha. It resets at the start of next month."
+            ),
+        }), 402
+
     # Register CLI commands
     from backend.init_db import (
         init_db_command, backfill_human_owner_command,

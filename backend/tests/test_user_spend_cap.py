@@ -151,6 +151,23 @@ def test_user_is_capped_flag_and_month_rollover(app):
     assert user_is_capped(u.id, now=NOW) is True
 
 
+def test_create_llm_placeholder_blocked_when_capped(app):
+    from backend.models import Node
+    from backend.utils.llm_nodes import create_llm_placeholder
+    from backend.utils.spend import SpendCapExceeded, current_month
+    u = User.query.filter_by(username="tester").first()
+    parent = Node(user_id=u.id, human_owner_id=u.id, node_type="user")
+    _db.session.add(parent)
+    _db.session.commit()
+    u.spend_blocked_month = current_month()
+    _db.session.commit()
+    before = Node.query.count()
+    with pytest.raises(SpendCapExceeded):
+        create_llm_placeholder(parent.id, "claude-opus-4.6", u.id, enqueue=False)
+    # No orphan placeholder node created.
+    assert Node.query.count() == before
+
+
 def test_require_spend_headroom_decorator(app, monkeypatch):
     from backend.utils import spend as spendmod
 
