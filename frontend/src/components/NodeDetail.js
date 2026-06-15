@@ -426,6 +426,13 @@ function NodeDetail() {
         navigate(`/node/${newNodeId}`);
       }
     } catch (err) {
+      // Spend cap: the user's node WAS created; only the LLM reply was
+      // blocked. Land on the new node (same as the auto-generate-off path)
+      // so it shows and the input resets — the banner fires globally.
+      if (err?.response?.status === 402) {
+        navigate(`/node/${newNodeId}`);
+        return;
+      }
       handleLlmRequestError(err);
     }
   };

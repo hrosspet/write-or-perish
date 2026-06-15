@@ -351,6 +351,13 @@ const NodeForm = forwardRef(
           });
           deleteDraft();
           setHasDraft(false);
+          // Spend cap: backend kept the system + user nodes but skipped the
+          // LLM placeholder (e.g. /textmode/start). Surface the banner.
+          if (data && data.spend_capped) {
+            try {
+              window.dispatchEvent(new CustomEvent('loore:spend-capped', {}));
+            } catch (e) { /* no-op */ }
+          }
           onSuccess(data);
           setLoading(false);
           return;
