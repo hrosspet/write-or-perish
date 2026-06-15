@@ -26,20 +26,23 @@ export default function SpendCapBanner() {
   return (
     <div style={{
       position: 'fixed',
-      top: 60,
-      left: 0,
-      right: 0,
-      zIndex: 1000,
-      display: 'flex',
-      justifyContent: 'center',
+      // Bottom-center, sitting above the mobile floating audio player when
+      // present (GlobalAudioPlayer publishes its height as
+      // --floating-player-offset; 0px when absent) — matches the toast
+      // placement so the player is never occluded. #28.
+      bottom: 'calc(24px + var(--floating-player-offset, 0px))',
+      left: '50%',
+      transform: 'translateX(-50%)',
+      zIndex: 9999,
+      width: '100%',
+      maxWidth: 680,
       padding: '0 16px',
+      boxSizing: 'border-box',
       pointerEvents: 'none',
     }}>
       <div style={{
         pointerEvents: 'auto',
-        maxWidth: 680,
         width: '100%',
-        marginTop: 12,
         background: 'var(--bg-card)',
         border: '1px solid var(--accent)',
         borderRadius: 8,
@@ -82,7 +85,7 @@ export default function SpendCapBanner() {
       </div>
       <style>{`
         @keyframes spendcap-in {
-          from { opacity: 0; transform: translateY(-8px); }
+          from { opacity: 0; transform: translateY(8px); }
           to { opacity: 1; transform: translateY(0); }
         }
       `}</style>

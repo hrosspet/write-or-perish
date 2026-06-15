@@ -374,6 +374,10 @@ function NodeDetail() {
         // something the user just needs to fix and resend.
         const status = err?.response?.status;
         const apiErr = err?.response?.data?.error;
+        // 402 = monthly spend cap. It's surfaced globally by SpendCapBanner,
+        // so keep the node view exactly where the user was and don't echo
+        // the raw error code into the page.
+        if (status === 402) return;
         if (status === 400 && apiErr) {
           addToast(apiErr, 8000);
           return;
