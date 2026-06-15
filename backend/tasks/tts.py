@@ -294,6 +294,15 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str,
         if not node:
             raise ValueError(f"Node {node_id} not found")
 
+        from backend.utils.spend import user_is_capped
+        if user_is_capped(requesting_user_id or node.user_id):
+            logger.warning(
+                "User %s is spend-capped; skipping node TTS",
+                requesting_user_id or node.user_id)
+            node.tts_task_status = 'failed'
+            db.session.commit()
+            return
+
         node.tts_task_status = 'processing'
         node.tts_task_progress = 10
         db.session.commit()
@@ -401,6 +410,15 @@ def generate_tts_audio_for_profile(self, profile_id: int,
         profile = UserProfile.query.get(profile_id)
         if not profile:
             raise ValueError(f"UserProfile {profile_id} not found")
+
+        from backend.utils.spend import user_is_capped
+        if user_is_capped(requesting_user_id or profile.user_id):
+            logger.warning(
+                "User %s is spend-capped; skipping profile TTS",
+                requesting_user_id or profile.user_id)
+            profile.tts_task_status = 'failed'
+            db.session.commit()
+            return
 
         profile.tts_task_status = 'processing'
         profile.tts_task_progress = 10

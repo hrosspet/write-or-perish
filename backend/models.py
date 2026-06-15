@@ -47,6 +47,12 @@ class User(db.Model, UserMixin):
     # Subscription plan ("free", "alpha", "pro", etc.).
     plan = db.Column(db.String(16), nullable=False, default="alpha")
 
+    # Per-user monthly spend hard cap (issue: free-alpha guardrail). Stores the
+    # "YYYY-MM" (UTC) in which the user crossed PER_USER_MONTHLY_LIMIT_USD. While
+    # this equals the current month the user is blocked from cost-incurring
+    # actions; it auto-clears at month rollover (stored month no longer matches).
+    spend_blocked_month = db.Column(db.String(7), nullable=True)
+
     # Per-user defaults for new nodes (overridable per-node)
     default_privacy_level = db.Column(
         db.String(16), nullable=False, default="private",

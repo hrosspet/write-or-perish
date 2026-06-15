@@ -209,6 +209,12 @@ def generate_recent_context(user_id, profile_id=None, data_cutoff_iso=None):
             logger.warning(f"User {user_id} not found")
             return
 
+        from backend.utils.spend import user_is_capped
+        if user_is_capped(user):
+            logger.info(
+                "User %s is spend-capped; skipping recent context", user_id)
+            return
+
         data_cutoff = (
             datetime.fromisoformat(data_cutoff_iso)
             if data_cutoff_iso else None

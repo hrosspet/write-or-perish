@@ -122,6 +122,12 @@ def generate_user_profile(self, user_id: int, model_id: str):
         if not user:
             raise ValueError(f"User {user_id} not found")
 
+        from backend.utils.spend import user_is_capped
+        if user_is_capped(user):
+            logger.warning(
+                "User %s is spend-capped; skipping profile generation", user_id)
+            return
+
         try:
             # Validate model is supported
             if model_id not in flask_app.config["SUPPORTED_MODELS"]:
@@ -427,6 +433,12 @@ def update_user_profile(self, user_id: int, model_id: str,
         user = User.query.get(user_id)
         if not user:
             raise ValueError(f"User {user_id} not found")
+
+        from backend.utils.spend import user_is_capped
+        if user_is_capped(user):
+            logger.warning(
+                "User %s is spend-capped; skipping profile update", user_id)
+            return
 
         # Set concurrency guard
         user.profile_generation_task_id = self.request.id
@@ -1099,6 +1111,12 @@ def integrate_user_profile(self, user_id: int, model_id: str,
         user = User.query.get(user_id)
         if not user:
             raise ValueError(f"User {user_id} not found")
+
+        from backend.utils.spend import user_is_capped
+        if user_is_capped(user):
+            logger.warning(
+                "User %s is spend-capped; skipping profile integration", user_id)
+            return
 
         user.profile_generation_task_id = self.request.id
         user.profile_generation_task_dispatched_at = datetime.utcnow()

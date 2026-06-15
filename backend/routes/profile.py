@@ -14,6 +14,7 @@ from backend.utils.privacy import (
     PrivacyLevel,
 )
 from backend.utils.api_keys import get_openai_chat_key
+from backend.utils.spend import require_spend_headroom
 
 profile_bp = Blueprint("profile", __name__)
 
@@ -97,6 +98,7 @@ def get_audio(profile_id):
 
 @profile_bp.route("/<int:profile_id>/tts", methods=["POST"])
 @login_required
+@require_spend_headroom
 def generate_tts(profile_id):
     """Trigger TTS generation for the user profile."""
     profile = UserProfile.query.get_or_404(profile_id)

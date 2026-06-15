@@ -27,6 +27,7 @@ from backend.utils.privacy import (
 )
 from backend.utils.quotes import find_quote_ids, get_quote_data, has_quotes
 from backend.utils.api_keys import get_openai_chat_key
+from backend.utils.spend import require_spend_headroom
 from backend.utils.webm_utils import get_webm_duration
 from backend.utils.encryption import encrypt_file, decrypt_file_to_temp
 from backend.utils.audio_storage import list_streaming_audio_files
@@ -1075,6 +1076,7 @@ def get_suggested_model(node_id):
 # Request an LLM response based on the thread (the ancestors' texts are joined as a prompt).
 @nodes_bp.route("/<int:node_id>/llm", methods=["POST"])
 @login_required
+@require_spend_headroom
 def request_llm_response(node_id):
     from backend.llm_providers import LLMProvider
 
@@ -1433,6 +1435,7 @@ def download_audio(node_id):
 @nodes_bp.route("/<int:node_id>/tts", methods=["POST"])
 @login_required
 @voice_mode_required
+@require_spend_headroom
 def generate_tts(node_id):
     """Trigger (mock) TTS generation for the node.
 

@@ -158,8 +158,14 @@ export function useStreamingTTS(nodeId, options = {}) {
 
     } catch (err) {
       console.error('Failed to start TTS:', err);
-      setState('error');
       setIsGenerating(false);
+      // 402 = monthly spend cap, surfaced globally by SpendCapBanner. Reset
+      // cleanly instead of showing the raw error code in the TTS control.
+      if (err.response?.status === 402) {
+        setState('idle');
+        return;
+      }
+      setState('error');
       setErrorMessage(err.response?.data?.error || err.message);
       if (onError) {
         onError(err);

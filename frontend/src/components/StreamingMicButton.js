@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useStreamingTranscription } from '../hooks/useStreamingTranscription';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
+import { isSpendBlocked, notifySpendBlocked } from '../utils/spendCap';
 
 /**
  * StreamingMicButton - A microphone button that supports real-time streaming transcription.
@@ -98,6 +99,9 @@ export default function StreamingMicButton({
 
   const handleClick = useCallback(() => {
     if (sessionState === 'idle') {
+      // Block before any recording starts — a long recording stopped only at
+      // the end would be lost work (issue #85).
+      if (isSpendBlocked()) { notifySpendBlocked(); return; }
       // Call onRecordingStart before starting to capture pre-existing content
       if (onRecordingStart) {
         onRecordingStart();

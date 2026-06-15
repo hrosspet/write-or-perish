@@ -361,25 +361,32 @@ function NodeDetail() {
     return newNodeId;
   };
 
+  // Shared handling for a failed LLM-request (the /nodes/:id/llm POST),
+  // used by the explicit button and the auto-generate-on-submit/edit paths.
+  // - 402 (monthly spend cap): surfaced globally by SpendCapBanner — return
+  //   silently so the thread stays exactly where the user was. setError()
+  //   here replaces the whole node view with the message, so echoing the
+  //   raw code would both blank the thread and look technical.
+  // - 400 (user-correctable, e.g. a bad {user_export} placeholder): toast,
+  //   keep the page intact.
+  // - otherwise: surface in the node view.
+  const handleLlmRequestError = (err) => {
+    console.error(err);
+    const status = err?.response?.status;
+    const apiErr = err?.response?.data?.error;
+    if (status === 402) return;
+    if (status === 400 && apiErr) {
+      addToast(apiErr, 8000);
+      return;
+    }
+    setError(apiErr || err.message || "Error requesting LLM response.");
+  };
+
   const handleLLMResponse = () => {
     setError("");
     requestLlmFor(id)
       .then((newNodeId) => setLlmTaskNodeId(newNodeId))
-      .catch((err) => {
-        console.error(err);
-        // 400 = user-correctable validation (e.g. misconfigured
-        // {user_export} placeholder). Surface as a toast so the page
-        // stays intact; setError() at this level replaces the whole
-        // node view with the message, which feels destructive for
-        // something the user just needs to fix and resend.
-        const status = err?.response?.status;
-        const apiErr = err?.response?.data?.error;
-        if (status === 400 && apiErr) {
-          addToast(apiErr, 8000);
-          return;
-        }
-        setError(apiErr || err.message || "Error requesting LLM response.");
-      });
+      .catch(handleLlmRequestError);
   };
 
   // Gate + fire a child LLM generation under `parentNodeId`. Returns the
@@ -419,8 +426,14 @@ function NodeDetail() {
         navigate(`/node/${newNodeId}`);
       }
     } catch (err) {
-      console.error(err);
-      setError(err.response?.data?.error || err.message || "Error sending message.");
+      // Spend cap: the user's node WAS created; only the LLM reply was
+      // blocked. Land on the new node (same as the auto-generate-off path)
+      // so it shows and the input resets — the banner fires globally.
+      if (err?.response?.status === 402) {
+        navigate(`/node/${newNodeId}`);
+        return;
+      }
+      handleLlmRequestError(err);
     }
   };
 
@@ -457,14 +470,7 @@ function NodeDetail() {
       const llmNodeId = await tryAutoGenerateFor(updated.id, chain);
       if (llmNodeId) navigate(`/node/${llmNodeId}?awaitLlm=${llmNodeId}`);
     } catch (err) {
-      console.error(err);
-      const status = err?.response?.status;
-      const apiErr = err?.response?.data?.error;
-      if (status === 400 && apiErr) {
-        addToast(apiErr, 8000);
-        return;
-      }
-      setError(apiErr || err.message || "Error requesting LLM response.");
+      handleLlmRequestError(err);
     }
   };
 
@@ -486,8 +492,11 @@ function NodeDetail() {
       })
       .catch((err) => {
         console.error(err);
-        setError(err.response?.data?.error || `Error starting ${sessionType} session.`);
         setVoiceLoading(false);
+        // 402 = spend cap, surfaced globally by SpendCapBanner; don't echo
+        // the raw error code into the view.
+        if (err?.response?.status === 402) return;
+        setError(err.response?.data?.error || `Error starting ${sessionType} session.`);
       });
   };
 
