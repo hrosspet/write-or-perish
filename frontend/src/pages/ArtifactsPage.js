@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import MarkdownBody from '../components/MarkdownBody';
 import api from '../api';
+import ArtifactsNav from '../components/ArtifactsNav';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
 import useSubmitShortcut from '../hooks/useSubmitShortcut';
 import { compareArtifacts } from '../utils/artifactKinds';
@@ -17,9 +18,9 @@ const titleFromKind = (k) =>
 
 export default function ArtifactsPage() {
   const { kind: kindParam } = useParams();
-  const navigate = useNavigate();
   const [artifacts, setArtifacts] = useState([]);
   const [activeKind, setActiveKind] = useState(kindParam || 'memory');
+  const [versionNumber, setVersionNumber] = useState(null);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
   const [editContent, setEditContent] = useState('');
@@ -55,6 +56,16 @@ export default function ArtifactsPage() {
   useEffect(() => {
     if (kindParam) setActiveKind(kindParam);
   }, [kindParam]);
+
+  // Version count for the active artifact's header badge (only when it has
+  // content). Refetched on kind switch and after a save (artifacts reload).
+  useEffect(() => {
+    const a = artifacts.find((x) => x.kind === activeKind);
+    if (!a || !a.created_at) { setVersionNumber(null); return; }
+    api.get(`/artifacts/${activeKind}/versions`)
+      .then((res) => setVersionNumber(res.data.versions.length))
+      .catch(() => setVersionNumber(null));
+  }, [activeKind, artifacts]);
 
   // Surface a kind that has no row yet (not a default, not created) as an
   // empty, editable artifact so deep links never land on a blank page.
@@ -136,62 +147,7 @@ export default function ArtifactsPage() {
 
   return (
     <div style={{ padding: '60px 24px', maxWidth: '800px', margin: '0 auto' }}>
-      <h1 style={{
-        fontFamily: 'var(--serif)',
-        fontSize: '2rem',
-        fontWeight: 300,
-        color: 'var(--text-primary)',
-        margin: '0 0 16px 0',
-      }}>
-        Artifacts
-      </h1>
-
-      {/* Kind tabs */}
-      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '20px' }}>
-        {/* Non-artifact curated links (own pages), matching the nav dropdown
-            order: Profile, Todo, then the built-in artifact kinds below. */}
-        {[
-          { label: 'Profile', to: '/profile' },
-          { label: 'Todo', to: '/todo' },
-        ].map((nav) => (
-          <button
-            key={nav.to}
-            onClick={() => navigate(nav.to)}
-            style={{
-              padding: '6px 14px',
-              background: 'none',
-              border: '1px solid var(--border)',
-              borderRadius: '16px',
-              color: 'var(--text-muted)',
-              fontFamily: 'var(--sans)',
-              fontSize: '0.8rem',
-              fontWeight: 300,
-              cursor: 'pointer',
-            }}
-          >
-            {nav.label}
-          </button>
-        ))}
-        {tabArtifacts.map((a) => (
-          <button
-            key={a.kind}
-            onClick={() => { setEditing(false); navigate(`/artifacts/${a.kind}`); }}
-            style={{
-              padding: '6px 14px',
-              background: a.kind === activeKind ? 'var(--bg-card)' : 'none',
-              border: '1px solid',
-              borderColor: a.kind === activeKind ? 'var(--accent)' : 'var(--border)',
-              borderRadius: '16px',
-              color: a.kind === activeKind ? 'var(--text-primary)' : 'var(--text-muted)',
-              fontFamily: 'var(--sans)',
-              fontSize: '0.8rem',
-              fontWeight: 300,
-              cursor: 'pointer',
-            }}
-          >
-            {a.title}
-          </button>
-        ))}
+      <ArtifactsNav activeKind={activeKind}>
         <button
           onClick={() => { setCreatingKind(true); setNewKind(''); setEditContent(''); setEditDescription(''); setEditing(true); }}
           title="Create a new artifact"
@@ -208,21 +164,48 @@ export default function ArtifactsPage() {
         >
           +
         </button>
-      </div>
+      </ArtifactsNav>
 
-      {/* Meta line */}
-      {active && !creatingKind && (
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: '12px', marginBottom: '16px', flexWrap: 'wrap' }}>
-          <p style={{
-            fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
-            color: 'var(--text-muted)', margin: 0, opacity: 0.7,
-          }}>
-            {active.description || KIND_BLURBS[active.kind] || 'A persistent document shared between you and the AI.'}
-            {active.created_at && (
-              <> &middot; last updated by {generatedByLabel(active.generated_by)} &middot; {formatDate(active.created_at)}</>
-            )}
-          </p>
-          {active.created_at && (
+      {/* Header: artifact title + version (click -> edit) + date + history */}
+      <div style={{ marginBottom: '8px', display: 'flex', alignItems: 'baseline', gap: '16px', flexWrap: 'wrap' }}>
+        <h1 style={{
+          fontFamily: 'var(--serif)', fontSize: '2rem', fontWeight: 300,
+          color: 'var(--text-primary)', margin: 0,
+        }}>
+          {creatingKind ? 'New artifact' : (active ? active.title : 'Artifacts')}
+        </h1>
+
+        {active && !creatingKind && active.created_at && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <button
+              onClick={() => {
+                if (!editing) {
+                  setEditing(true);
+                  setEditContent(active.content || '');
+                  setEditDescription(active.description || '');
+                }
+              }}
+              title="Edit"
+              style={{
+                background: 'none', border: 'none',
+                cursor: editing ? 'default' : 'pointer', padding: 0,
+                fontFamily: 'var(--sans)', fontSize: '0.8rem', fontWeight: 300,
+                color: editing ? 'var(--accent)' : 'var(--text-muted)',
+                display: 'flex', alignItems: 'center', gap: '6px',
+              }}
+            >
+              <span style={{
+                width: '6px', height: '6px', borderRadius: '50%',
+                background: 'var(--success)', display: 'inline-block',
+              }} />
+              v{versionNumber || 1}
+            </button>
+            <span style={{
+              fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
+              color: 'var(--text-muted)', opacity: 0.7,
+            }}>
+              {formatDate(active.created_at)}
+            </span>
             <button
               onClick={handleOpenHistory}
               style={{
@@ -233,20 +216,35 @@ export default function ArtifactsPage() {
             >
               history
             </button>
+          </div>
+        )}
+
+        {/* Empty artifact (no version yet): a plain edit affordance. */}
+        {active && !creatingKind && !active.created_at && !editing && (
+          <button
+            onClick={() => { setEditing(true); setEditContent(active.content || ''); setEditDescription(active.description || ''); }}
+            style={{
+              background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+              fontFamily: 'var(--sans)', fontSize: '0.8rem', fontWeight: 300,
+              color: 'var(--accent)', textDecoration: 'underline',
+            }}
+          >
+            edit
+          </button>
+        )}
+      </div>
+
+      {/* Subtitle: description + provenance */}
+      {active && !creatingKind && (
+        <p style={{
+          fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
+          color: 'var(--text-muted)', margin: '0 0 16px 0', opacity: 0.7,
+        }}>
+          {active.description || KIND_BLURBS[active.kind] || 'A persistent document shared between you and the AI.'}
+          {active.created_at && (
+            <> &middot; last updated by {generatedByLabel(active.generated_by)}</>
           )}
-          {!editing && (
-            <button
-              onClick={() => { setEditing(true); setEditContent(active.content || ''); setEditDescription(active.description || ''); }}
-              style={{
-                background: 'none', border: 'none', cursor: 'pointer', padding: 0,
-                fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
-                color: 'var(--accent)', textDecoration: 'underline',
-              }}
-            >
-              edit
-            </button>
-          )}
-        </div>
+        </p>
       )}
 
       <div style={{ height: '1px', background: 'var(--accent-dim)', opacity: 0.3, marginBottom: '24px' }} />

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import MarkdownBody from '../components/MarkdownBody';
 import api from '../api';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
+import ArtifactsNav from '../components/ArtifactsNav';
 import SpeakerIcon from '../components/SpeakerIcon';
 import RegenerateTtsDialog from '../components/RegenerateTtsDialog';
 import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
@@ -171,6 +172,7 @@ export default function ProfilePage() {
 
   return (
     <div style={{ padding: '60px 24px', maxWidth: '800px', margin: '0 auto' }}>
+      <ArtifactsNav />
       {/* Header */}
       <div style={{ marginBottom: '8px', display: 'flex', alignItems: 'baseline', gap: '16px', flexWrap: 'wrap' }}>
         <h1 style={{

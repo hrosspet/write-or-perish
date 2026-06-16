@@ -3,6 +3,7 @@ import api from '../api';
 import { useCheckboxToggle, useTaskInsert, appendItemToSection } from '../utils/markdown';
 import { formatDate } from '../utils/date';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
+import ArtifactsNav from '../components/ArtifactsNav';
 import useSubmitShortcut from '../hooks/useSubmitShortcut';
 
 /**
@@ -391,6 +392,7 @@ export default function TodoPage() {
 
   return (
     <div style={{ padding: '60px 24px', maxWidth: '800px', margin: '0 auto' }}>
+      <ArtifactsNav />
       {/* Header */}
       <div style={{ marginBottom: '8px', display: 'flex', alignItems: 'baseline', gap: '16px', flexWrap: 'wrap' }}>
         <h1 style={{
