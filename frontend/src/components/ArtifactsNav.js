@@ -7,6 +7,13 @@ import { BUILTIN_KIND_ORDER, isBuiltinKind } from '../utils/artifactKinds';
 // on the Profile, Todo, and Artifacts pages so they cross-link. Bubbles, in
 // order: Profile · Todo · built-in artifacts (canonical order) · custom
 // artifacts (alphabetical) · {children} (e.g. the Artifacts page's + button).
+// Module-level cache of the last-fetched artifact list. Lets the bubble row
+// render instantly when ArtifactsNav remounts on cross-page navigation
+// (Profile/Todo/Artifacts are separate routes) instead of flashing empty
+// while it re-fetches. Refreshed in the background on every mount + on the
+// loore_artifacts_changed event.
+let _artifactsCache = [];
+
 const bubbleStyle = (active) => ({
   padding: '6px 14px',
   background: active ? 'var(--bg-card)' : 'none',
@@ -27,12 +34,13 @@ export default function ArtifactsNav({ activeKind, onNavigate, children }) {
   // onNavigate lets a host page intercept bubble clicks (e.g. the Artifacts
   // page guarding unsaved edits). Falls back to direct navigation.
   const go = (to) => (onNavigate ? onNavigate(to) : navigate(to));
-  const [artifacts, setArtifacts] = useState([]);
+  const [artifacts, setArtifacts] = useState(_artifactsCache);
 
   const fetchArtifacts = useCallback(async () => {
     try {
       const res = await api.get('/artifacts');
-      setArtifacts(res.data.artifacts || []);
+      _artifactsCache = res.data.artifacts || [];
+      setArtifacts(_artifactsCache);
     } catch (err) {
       // Profile/Todo bubbles still render; the artifact list just stays empty.
       console.error('ArtifactsNav: failed to load artifacts', err);

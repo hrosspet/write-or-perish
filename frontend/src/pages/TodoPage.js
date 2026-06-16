@@ -385,6 +385,7 @@ export default function TodoPage() {
   if (loading) {
     return (
       <div style={{ padding: '60px 24px', maxWidth: '800px', margin: '0 auto' }}>
+        <ArtifactsNav />
         <p style={{ color: 'var(--text-muted)' }}>Loading...</p>
       </div>
     );
