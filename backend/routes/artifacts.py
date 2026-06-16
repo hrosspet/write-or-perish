@@ -18,12 +18,20 @@ artifacts_bp = Blueprint("artifacts", __name__)
 _KIND_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,47}$')
 
 
+def _render_desc(desc):
+    """Substitute {name} with the current user's username (e.g. the default
+    memory description "Durable facts about {name}, ...")."""
+    if desc and "{name}" in desc:
+        return desc.replace("{name}", current_user.username)
+    return desc
+
+
 def _serialize(artifact, version_number=None, include_content=True):
     data = {
         "id": artifact.id,
         "kind": artifact.kind,
         "title": artifact.title,
-        "description": artifact.description,
+        "description": _render_desc(artifact.description),
         "generated_by": artifact.generated_by,
         "created_at": iso_utc(artifact.created_at),
         "privacy_level": artifact.privacy_level,
@@ -48,7 +56,8 @@ def list_artifacts():
             continue
         items.append({
             "id": None, "kind": kind, "title": title, "content": "",
-            "description": UserArtifact.DEFAULT_DESCRIPTIONS.get(kind),
+            "description": _render_desc(
+                UserArtifact.DEFAULT_DESCRIPTIONS.get(kind)),
             "generated_by": None, "created_at": None,
             "privacy_level": "private", "ai_usage": "chat",
         })
@@ -66,7 +75,8 @@ def get_artifact(kind):
             return jsonify({"artifact": {
                 "id": None, "kind": kind,
                 "title": UserArtifact.DEFAULT_KINDS[kind],
-                "description": UserArtifact.DEFAULT_DESCRIPTIONS.get(kind),
+                "description": _render_desc(
+                    UserArtifact.DEFAULT_DESCRIPTIONS.get(kind)),
                 "content": "", "generated_by": None, "created_at": None,
                 "privacy_level": "private", "ai_usage": "chat",
             }}), 200

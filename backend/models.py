@@ -643,8 +643,9 @@ class UserArtifact(db.Model):
     # Pre-filled one-line descriptions for the built-in kinds. Custom kinds
     # get their description from whoever creates them (the AI sets it when it
     # creates a new kind; the user can set it in the create modal).
+    # "{name}" is substituted with the user's username when served/rendered.
     DEFAULT_DESCRIPTIONS = {
-        "memory": "Durable facts about you, remembered across sessions.",
+        "memory": "Durable facts about {name}, remembered across sessions.",
         "scratchpad": "Working notes for ongoing threads — where we left off, open questions.",
         "predictions": "Predictions you want to record and revisit over time.",
     }
