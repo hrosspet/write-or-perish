@@ -11,6 +11,7 @@ from backend.celery_app import celery, flask_app
 from backend.models import (
     Node, User, UserProfile, UserRecentContext, UserTodo, APICostLog,
     UserAIPreferences, UserArtifact, UserFeedback, Draft,
+    NodeContextArtifact,
 )
 from backend.extensions import db
 from backend.llm_providers import LLMProvider, PromptTooLongError
@@ -48,6 +49,14 @@ USER_AI_PREFERENCES_PLACEHOLDER = "{user_ai_preferences}"
 USER_MEMORY_PLACEHOLDER = "{user_memory}"
 USER_SCRATCHPAD_PLACEHOLDER = "{user_scratchpad}"
 USER_ARTIFACTS_INDEX_PLACEHOLDER = "{user_artifacts_index}"
+
+# Within-turn retrieval loop (#158, text mode only). When the model calls one
+# of these tools, the retrieved content is injected back into the message
+# stream and the model is re-called so it answers WITH the content in the same
+# turn — instead of the cross-turn injection done by _scan_proposal_statuses.
+RETRIEVAL_TOOLS = {"read_artifact"}
+# Max number of interim retrieval round-trips before the model must answer.
+MAX_RETRIEVAL_ROUNDS = 2
 
 # ── Voice tool definitions ──────────────────────────────────────────────
 
@@ -1393,118 +1402,289 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         f"retrying with max_export_tokens={max_export_tokens} "
                         f"(attempt {attempt + 2}/{MAX_RETRIES + 1})"
                     )
-            llm_text = response["content"]
-            total_tokens = response["total_tokens"]
-            input_tokens = response.get("input_tokens", 0)
-            output_tokens = response.get("output_tokens", 0)
-            response_tool_calls = response.get("tool_calls", [])
-            response_truncated = response.get("truncated", False)
+            # ── Helpers shared by the single-shot and retrieval paths ──────
 
-            logger.info(f"LLM response generated: {len(llm_text)} chars, {total_tokens} tokens, {len(response_tool_calls)} tool calls")
+            def _log_api_cost(resp):
+                """Log an APICostLog row for one model call. Every model call
+                costs money — the retrieval loop logs once per round."""
+                in_toks = resp.get("input_tokens", 0)
+                out_toks = resp.get("output_tokens", 0)
+                cost = calculate_llm_cost_microdollars(
+                    model_id, in_toks, out_toks)
+                db.session.add(APICostLog(
+                    user_id=user_id,
+                    model_id=model_id,
+                    request_type="conversation",
+                    input_tokens=in_toks,
+                    output_tokens=out_toks,
+                    cost_microdollars=cost,
+                ))
 
-            # Step 4: Log API cost
-            self.update_state(state='PROGRESS', meta={'progress': 90, 'status': 'Logging cost'})
-            llm_node.llm_task_progress = 90
-            db.session.commit()
+            def _finalize(target_node, resp):
+                """Write *resp* as the final answer on *target_node* using the
+                EXACT existing single-shot finalize behavior (cost log, Race B
+                guard, content, tool calls, proposal auto-detect, _mode meta,
+                status_reported marking, completed status, commit).
 
-            cost = calculate_llm_cost_microdollars(model_id, input_tokens, output_tokens)
-            cost_log = APICostLog(
-                user_id=user_id,
-                model_id=model_id,
-                request_type="conversation",
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cost_microdollars=cost,
-            )
-            db.session.add(cost_log)
+                Returns the result dict, or a 'cancelled' dict if the node was
+                soft-deleted mid-generation.
+                """
+                f_llm_text = resp["content"]
+                f_total_tokens = resp["total_tokens"]
+                f_tool_calls = resp.get("tool_calls", [])
+                f_truncated = resp.get("truncated", False)
 
-            # Step 5: Update the placeholder LLM node with the response
-            self.update_state(state='PROGRESS', meta={'progress': 95, 'status': 'Finalizing'})
+                logger.info(
+                    f"LLM response generated: {len(f_llm_text)} chars, "
+                    f"{f_total_tokens} tokens, {len(f_tool_calls)} tool calls")
 
-            # Race B guard: re-fetch the target node and bail if it was
-            # soft-deleted while we were generating. Without this we'd
-            # write generated content into a tombstone-bound node and waste
-            # both the compute and the storage until the 30-day wipe.
-            db.session.refresh(llm_node)
-            if llm_node.deleted_at is not None:
-                logger.warning(
-                    "LLM target node %s was soft-deleted mid-generation; "
-                    "discarding response", llm_node.id,
-                )
-                llm_node.llm_task_status = 'cancelled'
-                llm_node.llm_task_progress = 100
+                # Step 4: Log API cost
+                self.update_state(state='PROGRESS', meta={
+                    'progress': 90, 'status': 'Logging cost'})
+                target_node.llm_task_progress = 90
                 db.session.commit()
-                return {
+                _log_api_cost(resp)
+
+                # Step 5: Update the placeholder LLM node with the response
+                self.update_state(state='PROGRESS', meta={
+                    'progress': 95, 'status': 'Finalizing'})
+
+                # Race B guard: re-fetch the target node and bail if it was
+                # soft-deleted while we were generating. Without this we'd
+                # write generated content into a tombstone-bound node and waste
+                # both the compute and the storage until the 30-day wipe.
+                db.session.refresh(target_node)
+                if target_node.deleted_at is not None:
+                    logger.warning(
+                        "LLM target node %s was soft-deleted mid-generation; "
+                        "discarding response", target_node.id,
+                    )
+                    target_node.llm_task_status = 'cancelled'
+                    target_node.llm_task_progress = 100
+                    db.session.commit()
+                    return {
+                        'parent_node_id': parent_node_id,
+                        'llm_node_id': target_node.id,
+                        'status': 'cancelled',
+                        'reason': 'target_soft_deleted',
+                    }
+
+                target_node.set_content(f_llm_text)
+                # chars/4, NOT the provider's output_tokens: Node.token_count
+                # is the platform's stable information-content measure (gates,
+                # chunk windowing, balance decisions all sum it). Provider
+                # tokenizer counts drift upward across model generations
+                # (~1.5x chars/4 already), which skewed every window that
+                # mixed LLM replies with chars/4-counted user text. Real
+                # token usage lives in APICostLog.
+                target_node.token_count = approximate_token_count(f_llm_text)
+
+                # Step 5b: Execute tool calls if any
+                f_tool_meta = None
+                if f_tool_calls:
+                    logger.info(
+                        f"Executing {len(f_tool_calls)} tool calls")
+                    tool_results = _execute_tool_calls(
+                        f_tool_calls, target_node, node_chain, user_id
+                    )
+                    if f_truncated:
+                        for tr in tool_results:
+                            tr["response_truncated"] = True
+                    f_tool_meta = tool_results
+
+                # Step 5c: Auto-detect proposals in LLM text (agentic)
+                if is_agentic:
+                    auto_drafts = _auto_create_drafts(
+                        f_llm_text, target_node, node_chain, user_id
+                    )
+                    if auto_drafts:
+                        if f_tool_meta is None:
+                            f_tool_meta = []
+                        f_tool_meta.extend(auto_drafts)
+
+                # Store source_mode for future mode-switch detection
+                if is_agentic and source_mode:
+                    if f_tool_meta is None:
+                        f_tool_meta = []
+                    f_tool_meta.append({
+                        "name": "_mode",
+                        "source_mode": source_mode,
+                    })
+
+                if f_tool_meta:
+                    target_node.tool_calls_meta = json.dumps(f_tool_meta)
+
+                # Mark proposal statuses as reported (deferred until
+                # after LLM success so they re-inject on retry)
+                if proposal_to_mark:
+                    _mark_status_reported(proposal_to_mark)
+
+                target_node.llm_task_status = 'completed'
+                target_node.llm_task_progress = 100
+                db.session.commit()
+
+                logger.info(
+                    f"LLM completion successful, updated node "
+                    f"{target_node.id}")
+
+                f_result = {
                     'parent_node_id': parent_node_id,
-                    'llm_node_id': llm_node.id,
-                    'status': 'cancelled',
-                    'reason': 'target_soft_deleted',
+                    'llm_node_id': target_node.id,
+                    'status': 'completed',
+                    'total_tokens': f_total_tokens,
                 }
+                if f_tool_meta:
+                    f_result['tool_calls_meta'] = f_tool_meta
+                return f_result
 
-            llm_node.set_content(llm_text)
-            # chars/4, NOT the provider's output_tokens: Node.token_count
-            # is the platform's stable information-content measure (gates,
-            # chunk windowing, balance decisions all sum it). Provider
-            # tokenizer counts drift upward across model generations
-            # (~1.5x chars/4 already), which skewed every window that
-            # mixed LLM replies with chars/4-counted user text. Real
-            # token usage lives in APICostLog.
-            llm_node.token_count = approximate_token_count(llm_text)
+            # ── Non-textmode: EXACT existing single-shot behavior ──────────
+            # Voice and all other modes keep their byte-for-byte behavior:
+            # one model call, one node, no within-turn retrieval loop.
+            if source_mode != "textmode":
+                return _finalize(llm_node, response)
 
-            # Step 5b: Execute tool calls if any
-            tool_meta = None
-            if response_tool_calls:
-                logger.info(f"Executing {len(response_tool_calls)} tool calls")
-                tool_results = _execute_tool_calls(
-                    response_tool_calls, llm_node, node_chain, user_id
-                )
-                if response_truncated:
+            # ── Text mode: bounded within-turn retrieval loop (#158) ───────
+            # When the model calls a retrieval tool, execute it, inject the
+            # retrieved content back into `messages` as a plain user message,
+            # finalize the current node as an interim step, create a
+            # continuation node, and re-call the model so it answers WITH the
+            # content in the same turn.
+            rounds_done = 0
+            current_node = llm_node
+            while True:
+                response_tool_calls = response.get("tool_calls", [])
+                retrieval_calls = [
+                    tc for tc in response_tool_calls
+                    if tc["name"] in RETRIEVAL_TOOLS
+                ]
+
+                # Race B guard on the node we're about to write to.
+                db.session.refresh(current_node)
+                if current_node.deleted_at is not None:
+                    logger.warning(
+                        "LLM target node %s was soft-deleted mid-generation; "
+                        "discarding response", current_node.id,
+                    )
+                    current_node.llm_task_status = 'cancelled'
+                    current_node.llm_task_progress = 100
+                    db.session.commit()
+                    return {
+                        'parent_node_id': parent_node_id,
+                        'llm_node_id': current_node.id,
+                        'status': 'cancelled',
+                        'reason': 'target_soft_deleted',
+                    }
+
+                # INTERIM step: retrieval requested and budget remaining.
+                if retrieval_calls and rounds_done < MAX_RETRIEVAL_ROUNDS:
+                    interim_text = response.get("content") or ""
+                    interim_truncated = response.get("truncated", False)
+
+                    # Cost for THIS model call (every call costs).
+                    _log_api_cost(response)
+
+                    # Execute ALL tool calls on the interim node.
+                    tool_results = _execute_tool_calls(
+                        response_tool_calls, current_node, node_chain,
+                        user_id,
+                    )
+                    if interim_truncated:
+                        for tr in tool_results:
+                            tr["response_truncated"] = True
+
+                    # Build the injection text for each successful
+                    # read_artifact, re-checking ai_usage, pinning the
+                    # artifact to the interim node, and marking the result
+                    # reported so the cross-turn scan won't double-inject.
+                    injection_strings = []
                     for tr in tool_results:
-                        tr["response_truncated"] = True
-                tool_meta = tool_results
+                        if (tr.get("name") not in RETRIEVAL_TOOLS
+                                or tr.get("status") != "success"):
+                            continue
+                        artifact = UserArtifact.query.get(
+                            tr.get("artifact_id"))
+                        if (artifact is None
+                                or artifact.ai_usage not in AI_ALLOWED):
+                            continue
+                        injection_strings.append(
+                            f"[Contents of artifact "
+                            f"'{tr.get('kind', '?')}' you requested:\n"
+                            f"{artifact.get_content()}]"
+                        )
+                        tr["status_reported"] = True
+                        db.session.add(NodeContextArtifact(
+                            node_id=current_node.id,
+                            artifact_type="user_artifact",
+                            artifact_id=tr.get("artifact_id"),
+                        ))
 
-            # Step 5c: Auto-detect proposals in LLM text (Voice sessions)
-            if is_agentic:
-                auto_drafts = _auto_create_drafts(
-                    llm_text, llm_node, node_chain, user_id
-                )
-                if auto_drafts:
-                    if tool_meta is None:
-                        tool_meta = []
-                    tool_meta.extend(auto_drafts)
+                    # Finalize the interim node (NO _mode, NO proposal
+                    # auto-detect — that belongs to the final answer only).
+                    current_node.set_content(
+                        interim_text or "(looking that up…)")
+                    current_node.token_count = approximate_token_count(
+                        interim_text or "(looking that up…)")
+                    current_node.tool_calls_meta = json.dumps(tool_results)
+                    current_node.llm_task_status = 'completed'
+                    current_node.llm_task_progress = 100
 
-            # Store source_mode for future mode-switch detection
-            if is_agentic and source_mode:
-                if tool_meta is None:
-                    tool_meta = []
-                tool_meta.append({
-                    "name": "_mode",
-                    "source_mode": source_mode,
-                })
+                    # Create the continuation node that will hold the answer.
+                    llm_user = User.query.filter_by(
+                        username=model_id).first()
+                    continuation = Node(
+                        user_id=llm_user.id,
+                        parent_id=current_node.id,
+                        human_owner_id=user_id,
+                        node_type="llm",
+                        llm_model=model_id,
+                        llm_task_status='processing',
+                        privacy_level=current_node.privacy_level,
+                        ai_usage=current_node.ai_usage,
+                    )
+                    continuation.set_content(
+                        "[LLM response generation pending...]")
+                    continuation.token_count = approximate_token_count(
+                        "[LLM response generation pending...]")
+                    db.session.add(continuation)
+                    db.session.flush()
+                    current_node.continuation_node_id = continuation.id
+                    db.session.commit()
 
-            if tool_meta:
-                llm_node.tool_calls_meta = json.dumps(tool_meta)
+                    # Inject the assistant turn + retrieved content into the
+                    # message stream and re-call so the model answers WITH it.
+                    messages.append({
+                        "role": "assistant",
+                        "content": [{
+                            "type": "text",
+                            "text": interim_text or "(looking that up…)",
+                        }],
+                    })
+                    messages.append({
+                        "role": "user",
+                        "content": [{
+                            "type": "text",
+                            "text": "\n\n".join(injection_strings),
+                        }],
+                    })
 
-            # Mark proposal statuses as reported (deferred until
-            # after LLM success so they re-inject on retry)
-            if proposal_to_mark:
-                _mark_status_reported(proposal_to_mark)
+                    current_node = continuation
+                    rounds_done += 1
 
-            llm_node.llm_task_status = 'completed'
-            llm_node.llm_task_progress = 100
-            db.session.commit()
+                    self.update_state(state='PROGRESS', meta={
+                        'progress': 40,
+                        'status': 'Retrieving and continuing'})
+                    # Continuation call: plain call (no PromptTooLong retry).
+                    # The base messages already had any export reduction
+                    # applied on the first call; the injection adds only an
+                    # artifact body, which is small relative to the export.
+                    response = LLMProvider.get_completion(
+                        model_id, messages, api_keys,
+                        tools=agentic_tools,
+                    )
+                    continue
 
-            logger.info(f"LLM completion successful, updated node {llm_node.id}")
-
-            result = {
-                'parent_node_id': parent_node_id,
-                'llm_node_id': llm_node.id,
-                'status': 'completed',
-                'total_tokens': total_tokens,
-            }
-            if tool_meta:
-                result['tool_calls_meta'] = tool_meta
-            return result
+                # FINAL answer: no retrieval (or budget exhausted).
+                return _finalize(current_node, response)
 
         except Exception as e:
             error_message = str(e)

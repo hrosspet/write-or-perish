@@ -1591,7 +1591,11 @@ def get_llm_status(node_id):
         "status": node.llm_task_status,
         "progress": node.llm_task_progress or 0,
         "error": node.llm_task_error,
-        "task_info": task_info
+        "task_info": task_info,
+        # Within-turn retrieval chaining (#158): non-null when this node was
+        # finalized as an interim retrieval step and the answer lives on the
+        # linked continuation node.
+        "continuation_node_id": node.continuation_node_id,
     }
 
     # Include content when completed (needed by VoicePage polling)

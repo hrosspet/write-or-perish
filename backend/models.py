@@ -243,6 +243,15 @@ class Node(db.Model):
     # Tool call metadata for LLM nodes (JSON list of tool call logs)
     tool_calls_meta = db.Column(db.Text, nullable=True)
 
+    # Within-turn retrieval chaining (#158): when a text-mode LLM node makes
+    # a retrieval tool call, it is finalized as an interim node and a
+    # continuation node is created to hold the answer. This self-FK links the
+    # interim node to its continuation so callers can follow the chain to the
+    # final answer within a single turn.
+    continuation_node_id = db.Column(
+        db.Integer, db.ForeignKey("node.id"), nullable=True
+    )
+
     # Pin-to-profile: surfaces any node on Dashboard & Feed
     pinned_at = db.Column(db.DateTime, nullable=True)
     pinned_by = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
