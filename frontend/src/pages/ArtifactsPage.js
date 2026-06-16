@@ -148,6 +148,30 @@ export default function ArtifactsPage() {
 
       {/* Kind tabs */}
       <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '20px' }}>
+        {/* Non-artifact curated links (own pages), matching the nav dropdown
+            order: Profile, Todo, then the built-in artifact kinds below. */}
+        {[
+          { label: 'Profile', to: '/profile' },
+          { label: 'Todo', to: '/todo' },
+        ].map((nav) => (
+          <button
+            key={nav.to}
+            onClick={() => navigate(nav.to)}
+            style={{
+              padding: '6px 14px',
+              background: 'none',
+              border: '1px solid var(--border)',
+              borderRadius: '16px',
+              color: 'var(--text-muted)',
+              fontFamily: 'var(--sans)',
+              fontSize: '0.8rem',
+              fontWeight: 300,
+              cursor: 'pointer',
+            }}
+          >
+            {nav.label}
+          </button>
+        ))}
         {tabArtifacts.map((a) => (
           <button
             key={a.kind}
