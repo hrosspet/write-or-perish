@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useUser } from "../contexts/UserContext";
 import { useTheme } from "../contexts/ThemeContext";
 import GlobalAudioPlayer from "./GlobalAudioPlayer";
+import ArtifactsMenu from "./ArtifactsMenu";
 import api from "../api";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL;
@@ -248,7 +249,17 @@ function NavBar({ onNewEntryClick }) {
           )}
         </div>
 
-        {(!user || user.approved) && (
+        {/* Artifacts dropdown (consolidates Profile, Todo, AI preferences and
+            all user/AI artifacts) — for approved, logged-in users. */}
+        {user && user.approved && (
+          <ArtifactsMenu
+            dropdownStyle={dropdownStyle}
+            dropdownItemStyle={dropdownItemStyle}
+          />
+        )}
+
+        {/* Logged-out visitors keep the plain links (they route to login). */}
+        {!user && (
           <>
             <Link to="/profile" style={linkStyle("/profile")}>
               Profile
@@ -256,10 +267,13 @@ function NavBar({ onNewEntryClick }) {
             <Link to="/todo" style={linkStyle("/todo")}>
               Todo
             </Link>
-            <Link to="/log" style={linkStyle("/log")}>
-              Log
-            </Link>
           </>
+        )}
+
+        {(!user || user.approved) && (
+          <Link to="/log" style={linkStyle("/log")}>
+            Log
+          </Link>
         )}
 
         {!user && (

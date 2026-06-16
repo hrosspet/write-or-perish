@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { useParams } from 'react-router-dom';
 import MarkdownBody from '../components/MarkdownBody';
 import api from '../api';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
@@ -9,9 +10,13 @@ const KIND_BLURBS = {
   scratchpad: "The AI's working notes for ongoing threads — where it left off, open questions.",
 };
 
+const titleFromKind = (k) =>
+  k.replace(/[-_]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+
 export default function ArtifactsPage() {
+  const { kind: kindParam } = useParams();
   const [artifacts, setArtifacts] = useState([]);
-  const [activeKind, setActiveKind] = useState('memory');
+  const [activeKind, setActiveKind] = useState(kindParam || 'memory');
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
   const [editContent, setEditContent] = useState('');
@@ -39,7 +44,23 @@ export default function ArtifactsPage() {
     fetchArtifacts();
   }, [fetchArtifacts]);
 
-  const active = artifacts.find((a) => a.kind === activeKind) || null;
+  // Deep-link: /artifacts/:kind selects that artifact (e.g. predictions, or
+  // a custom one opened from the nav dropdown).
+  useEffect(() => {
+    if (kindParam) setActiveKind(kindParam);
+  }, [kindParam]);
+
+  // Surface a kind that has no row yet (not a default, not created) as an
+  // empty, editable artifact so deep links never land on a blank page.
+  const synthetic = !artifacts.some((a) => a.kind === activeKind)
+    ? {
+        id: null, kind: activeKind, title: titleFromKind(activeKind),
+        content: '', generated_by: null, created_at: null,
+        privacy_level: 'private', ai_usage: 'chat',
+      }
+    : null;
+  const tabArtifacts = synthetic ? [...artifacts, synthetic] : artifacts;
+  const active = tabArtifacts.find((a) => a.kind === activeKind) || null;
 
   const handleSave = async (kind) => {
     setSaving(true);
@@ -108,7 +129,7 @@ export default function ArtifactsPage() {
 
       {/* Kind tabs */}
       <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '20px' }}>
-        {artifacts.map((a) => (
+        {tabArtifacts.map((a) => (
           <button
             key={a.kind}
             onClick={() => { setActiveKind(a.kind); setEditing(false); }}

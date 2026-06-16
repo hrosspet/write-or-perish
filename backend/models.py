@@ -612,9 +612,13 @@ class UserArtifact(db.Model):
     user = db.relationship("User", backref="artifacts")
 
     # Default artifacts every user has (created lazily on first write).
+    # "predictions" is surfaced in the UI as an empty editable artifact, but
+    # has no dedicated agentic-prompt wiring yet (no {user_predictions}
+    # placeholder) — it behaves like any custom artifact until written.
     DEFAULT_KINDS = {
         "memory": "Memory",
         "scratchpad": "Scratchpad",
+        "predictions": "Predictions",
     }
 
     def set_content(self, plaintext):

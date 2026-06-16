@@ -326,31 +326,6 @@ export default function AccountPage() {
           Tone, style, boundaries. Updated automatically during Voice sessions.
         </div>
       </div>
-
-      <div style={rowStyle}>
-        <div style={labelStyle}>Artifacts</div>
-        <button
-          onClick={() => navigate("/artifacts")}
-          style={{
-            ...inputStyle,
-            cursor: "pointer",
-            textAlign: "left",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-          }}
-        >
-          <span style={{ color: "var(--text-muted)", fontWeight: 300 }}>
-            Memory, scratchpad &amp; custom documents
-          </span>
-          <span style={{ color: "var(--accent)", fontSize: "0.85rem" }}>
-            View
-          </span>
-        </button>
-        <div style={helperStyle}>
-          Persistent documents the AI maintains across sessions.
-        </div>
-      </div>
     </div>
   );
 }
