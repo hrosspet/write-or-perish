@@ -67,6 +67,9 @@ jobs:
         env:
           REACT_APP_BACKEND_URL: https://loore.org
           REACT_APP_API_URL: https://loore.org/api
+          # Baked into the prod bundle so @sentry/react initializes. Public by
+          # design (ships in the browser); empty secret → Sentry stays dark.
+          REACT_APP_SENTRY_DSN: ${{ secrets.REACT_APP_SENTRY_DSN }}
         run: npm run build
 
       - name: Upload build artifact
