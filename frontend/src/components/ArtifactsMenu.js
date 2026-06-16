@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import api from "../api";
 import useSubmitShortcut from "../hooks/useSubmitShortcut";
 import { BUILTIN_KIND_ORDER, isBuiltinKind } from "../utils/artifactKinds";
@@ -20,7 +20,6 @@ const slugify = (name) =>
 
 function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
   const location = useLocation();
-  const navigate = useNavigate();
   const currentPath = location.pathname;
 
   const [open, setOpen] = useState(false);
@@ -118,9 +117,13 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
       setNewName("");
       setNewDescription("");
       setNewContent("");
+      // Created from the top-nav dropdown: keep the user where they are.
+      // Just refresh this menu's own list and the ArtifactsNav bubble row so
+      // the new artifact shows up — no navigation. (The /artifacts-page inline
+      // create, ArtifactsPage.handleSave, *does* navigate to the new artifact;
+      // there the workspace view is the point, here it isn't.)
       await fetchArtifacts();
       window.dispatchEvent(new CustomEvent('loore_artifacts_changed'));
-      navigate(`/artifacts/${slug}`);
     } catch (err) {
       console.error("Failed to create artifact:", err);
       setCreateError(
