@@ -5,6 +5,7 @@ import api from '../api';
 import ArtifactsNav from '../components/ArtifactsNav';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
 import useSubmitShortcut from '../hooks/useSubmitShortcut';
+import useEscapeKey from '../hooks/useEscapeKey';
 import { compareArtifacts } from '../utils/artifactKinds';
 import { formatDate } from '../utils/date';
 
@@ -167,6 +168,8 @@ export default function ArtifactsPage() {
   useSubmitShortcut(newKindRef, saveShortcut, saveEnabled);
   useSubmitShortcut(editDescRef, saveShortcut, saveEnabled);
   useSubmitShortcut(editTextareaRef, saveShortcut, saveEnabled);
+  // Esc cancels the edit/create form (matches the Cancel button at l.343).
+  useEscapeKey(() => { setEditing(false); setCreatingKind(false); }, editing && !saving);
 
   const handleOpenHistory = async () => {
     setDrawerOpen(true);

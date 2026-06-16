@@ -8,6 +8,7 @@ import RegenerateTtsDialog from '../components/RegenerateTtsDialog';
 import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
 import { useUser } from '../contexts/UserContext';
 import useSubmitShortcut from '../hooks/useSubmitShortcut';
+import useEscapeKey from '../hooks/useEscapeKey';
 import { formatDate } from '../utils/date';
 
 export default function ProfilePage() {
@@ -161,6 +162,8 @@ export default function ProfilePage() {
 
   // Cmd+Return / Ctrl+Enter saves the profile while editing (#129).
   useSubmitShortcut(editTextareaRef, () => handleSave(), editing && !saving && !!editContent.trim());
+  // Esc cancels the edit (matches the Cancel button).
+  useEscapeKey(() => setEditing(false), editing && !saving);
 
   if (loading) {
     return (

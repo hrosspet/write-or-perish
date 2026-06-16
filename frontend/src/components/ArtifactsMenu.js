@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from "react";
 import { Link, useLocation } from "react-router-dom";
 import api from "../api";
 import useSubmitShortcut from "../hooks/useSubmitShortcut";
+import useEscapeKey from "../hooks/useEscapeKey";
 import { BUILTIN_KIND_ORDER, isBuiltinKind } from "../utils/artifactKinds";
 
 // Show at most this many artifacts before the list becomes scrollable.
@@ -71,14 +72,7 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
 
   // Esc cancels the create modal. The dropdown stays open behind it, so
   // closing the modal reveals it again (matching Cancel / backdrop click).
-  useEffect(() => {
-    if (!modalOpen) return;
-    const handleKey = (e) => {
-      if (e.key === "Escape" && !creating) setModalOpen(false);
-    };
-    document.addEventListener("keydown", handleKey);
-    return () => document.removeEventListener("keydown", handleKey);
-  }, [modalOpen, creating]);
+  useEscapeKey(() => setModalOpen(false), modalOpen && !creating);
 
   const byKind = Object.fromEntries((artifacts || []).map((a) => [a.kind, a]));
   // Built-in artifacts (memory, scratchpad, predictions, intentions-when-it

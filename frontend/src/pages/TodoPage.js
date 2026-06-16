@@ -5,6 +5,7 @@ import { formatDate } from '../utils/date';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
 import ArtifactsNav from '../components/ArtifactsNav';
 import useSubmitShortcut from '../hooks/useSubmitShortcut';
+import useEscapeKey from '../hooks/useEscapeKey';
 
 /**
  * Parse markdown checklist into sections with nested items.
@@ -370,6 +371,9 @@ export default function TodoPage() {
   // textarea; the quick-add input handles plain Enter itself.
   useSubmitShortcut(editTextareaRef, () => handleSave(), editing && !saving && !!editContent.trim());
   useSubmitShortcut(quickAddInputRef, () => handleQuickAdd(), quickAddOpen && !quickAddSaving && !!quickAddText.trim());
+  // Esc cancels the edit (matches the Cancel button). The quick-add input
+  // handles its own Esc inline.
+  useEscapeKey(() => { setEditing(false); if (todo) setEditContent(todo.content); }, editing && !saving);
 
   const generatedByLabel = (g) => {
     if (g === 'user' || g === 'manual') return 'edited manually';

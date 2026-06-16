@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import MarkdownBody from '../components/MarkdownBody';
 import api from '../api';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
+import useEscapeKey from '../hooks/useEscapeKey';
 import { formatDate } from '../utils/date';
 
 export default function AiPreferencesPage() {
@@ -54,6 +55,9 @@ export default function AiPreferencesPage() {
     setEditContent('');
     setEditing(true);
   };
+
+  // Esc cancels the edit (matches the Cancel button).
+  useEscapeKey(() => { setEditing(false); if (prefs) setEditContent(prefs.content); }, editing && !saving);
 
   const handleOpenHistory = async () => {
     setDrawerOpen(true);
