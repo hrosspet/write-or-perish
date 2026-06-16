@@ -69,6 +69,17 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
     setOpen(false);
   }, [currentPath]);
 
+  // Esc cancels the create modal. The dropdown stays open behind it, so
+  // closing the modal reveals it again (matching Cancel / backdrop click).
+  useEffect(() => {
+    if (!modalOpen) return;
+    const handleKey = (e) => {
+      if (e.key === "Escape" && !creating) setModalOpen(false);
+    };
+    document.addEventListener("keydown", handleKey);
+    return () => document.removeEventListener("keydown", handleKey);
+  }, [modalOpen, creating]);
+
   const byKind = Object.fromEntries((artifacts || []).map((a) => [a.kind, a]));
   // Built-in artifacts (memory, scratchpad, predictions, intentions-when-it
   // exists) are pinned above the divider in canonical order — they're not
@@ -90,7 +101,9 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
     currentPath === "/ai-preferences";
 
   const openCreateModal = () => {
-    setOpen(false);
+    // Leave the dropdown open behind the modal (modal zIndex 2000 > dropdown
+    // 1001, so it's covered by the backdrop). On a successful create it's
+    // revealed instantly when the modal closes — no close/reopen, no delay.
     setNewName("");
     setNewDescription("");
     setNewContent("");
@@ -124,9 +137,6 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
       // there the workspace view is the point, here it isn't.)
       await fetchArtifacts();
       window.dispatchEvent(new CustomEvent('loore_artifacts_changed'));
-      // Re-open the dropdown the user came from so they see the new artifact
-      // land in the list (the + that opened the modal closed it).
-      setOpen(true);
     } catch (err) {
       console.error("Failed to create artifact:", err);
       setCreateError(
