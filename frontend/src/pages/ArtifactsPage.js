@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import MarkdownBody from '../components/MarkdownBody';
 import api from '../api';
 import ArtifactsNav from '../components/ArtifactsNav';
@@ -19,6 +19,7 @@ const titleFromKind = (k) =>
 export default function ArtifactsPage() {
   const { kind: kindParam } = useParams();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [artifacts, setArtifacts] = useState([]);
   const [activeKind, setActiveKind] = useState(kindParam || 'memory');
   const [versionNumber, setVersionNumber] = useState(null);
@@ -63,6 +64,22 @@ export default function ArtifactsPage() {
       setCreatingKind(false);
     }
   }, [kindParam]);
+
+  // The nav "+" (on any page) routes here with ?create=1 — open the inline
+  // create form, then clear the flag.
+  useEffect(() => {
+    if (searchParams.get('create') === '1') {
+      setCreatingKind(true);
+      setNewKind('');
+      setEditContent('');
+      setEditDescription('');
+      setEditing(true);
+      const next = new URLSearchParams(searchParams);
+      next.delete('create');
+      setSearchParams(next, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   // Version count for the active artifact's header badge (only when it has
   // content). Refetched on kind switch and after a save (artifacts reload).
@@ -179,31 +196,13 @@ export default function ArtifactsPage() {
     return (
       <div style={{ padding: '60px 24px', maxWidth: '800px', margin: '0 auto' }}>
         <ArtifactsNav activeKind={activeKind} onNavigate={handleNavGuard} />
-        <p style={{ color: 'var(--text-muted)' }}>Loading...</p>
       </div>
     );
   }
 
   return (
     <div style={{ padding: '60px 24px', maxWidth: '800px', margin: '0 auto' }}>
-      <ArtifactsNav activeKind={activeKind} onNavigate={handleNavGuard}>
-        <button
-          onClick={() => { setCreatingKind(true); setNewKind(''); setEditContent(''); setEditDescription(''); setEditing(true); }}
-          title="Create a new artifact"
-          style={{
-            padding: '6px 14px',
-            background: 'none',
-            border: '1px dashed var(--border)',
-            borderRadius: '16px',
-            color: 'var(--text-muted)',
-            fontFamily: 'var(--sans)',
-            fontSize: '0.8rem',
-            cursor: 'pointer',
-          }}
-        >
-          +
-        </button>
-      </ArtifactsNav>
+      <ArtifactsNav activeKind={activeKind} onNavigate={handleNavGuard} />
 
       {/* Header: artifact title + version (click -> edit) + date + history */}
       <div style={{ marginBottom: '8px', display: 'flex', alignItems: 'baseline', gap: '16px', flexWrap: 'wrap' }}>

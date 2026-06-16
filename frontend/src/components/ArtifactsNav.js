@@ -94,6 +94,18 @@ export default function ArtifactsNav({ activeKind, onNavigate, children }) {
       {navBubble('Todo', '/todo')}
       {pinned.map(artBubble)}
       {custom.map(artBubble)}
+      <button
+        onClick={() => go('/artifacts?create=1')}
+        title="Create a new artifact"
+        style={{
+          padding: '6px 14px', background: 'none',
+          border: '1px dashed var(--border)', borderRadius: '16px',
+          color: 'var(--text-muted)', fontFamily: 'var(--sans)',
+          fontSize: '0.8rem', cursor: 'pointer',
+        }}
+      >
+        +
+      </button>
       {children}
     </div>
   );
