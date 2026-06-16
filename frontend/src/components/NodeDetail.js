@@ -200,6 +200,16 @@ function NodeDetail() {
       // Prefer the id of the node returned in payload; fall back to the
       // polled node id (llmTaskNodeId).
       const completedId = llmData.node?.id || llmTaskNodeId;
+      // Within-turn retrieval (#158): an interim node carries a
+      // continuation_node_id pointing at the node that holds (or will hold)
+      // the answer. Follow the chain — view the continuation and keep polling
+      // it — so the interim retrieval step renders as its own bubble and the
+      // final answer arrives in the next. Repeats for each retrieval round.
+      if (llmData.continuation_node_id) {
+        setLlmTaskNodeId(llmData.continuation_node_id);
+        navigate(`/node/${llmData.continuation_node_id}`);
+        return;
+      }
       if (completedId && String(completedId) === String(id)) {
         // We're already viewing the pending LLM node — patch its state
         // in place so the rendered content switches from "Thinking…" to
