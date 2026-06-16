@@ -174,12 +174,11 @@ VOICE_TOOLS = [
         "name": "read_artifact",
         "description": (
             "Request the full content of one of the user's artifacts "
-            "listed in the artifacts index. The content is NOT returned "
-            "immediately — it will be injected into your context at the "
-            "start of the NEXT turn. Use this when the index shows an "
-            "artifact relevant to the conversation that you don't already "
-            "see (memory and scratchpad are always in context — never "
-            "read those). Tell the user you're pulling it up. Always "
+            "listed in the artifacts index. The content is injected back "
+            "into your context within the same turn and you answer with "
+            "it. Use this only for artifacts in the index — anything "
+            "already shown inline in your context is always present and "
+            "should not be read. Tell the user you're pulling it up. Always "
             "produce a text response alongside the call."
         ),
         "input_schema": {
