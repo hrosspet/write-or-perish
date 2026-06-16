@@ -206,8 +206,13 @@ function NodeDetail() {
       // it — so the interim retrieval step renders as its own bubble and the
       // final answer arrives in the next. Repeats for each retrieval round.
       if (llmData.continuation_node_id) {
-        setLlmTaskNodeId(llmData.continuation_node_id);
-        navigate(`/node/${llmData.continuation_node_id}`);
+        const contId = llmData.continuation_node_id;
+        // Navigate WITH ?awaitLlm so polling re-establishes on the
+        // continuation node — NodeDetail remounts on :id change, so bare
+        // llmTaskNodeId state would be lost (this matches WritePage's
+        // handoff). The awaitLlm effect picks it up after the remount.
+        setLlmTaskNodeId(null);
+        navigate(`/node/${contId}?awaitLlm=${contId}`);
         return;
       }
       if (completedId && String(completedId) === String(id)) {
