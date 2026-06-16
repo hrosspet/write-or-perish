@@ -808,7 +808,14 @@ function NodeDetail() {
                       tc.status === 'success' ? 'Issue creation confirmed' : 'Issue creation failed'
                     )}
                     {tc.name === 'update_ai_preferences' && 'Preferences updated'}
-                    {!['propose_todo', 'propose_github_issue', 'apply_todo_changes', 'apply_github_issue', 'update_ai_preferences'].includes(tc.name) && tc.name}
+                    {tc.name === 'update_artifact' && (
+                      <>{tc.created ? 'Created' : 'Updated'} artifact{tc.kind ? <> <code style={{ fontSize: '0.95em' }}>{tc.kind}</code></> : ''}</>
+                    )}
+                    {tc.name === 'read_artifact' && (
+                      <>Read artifact{tc.kind ? <> <code style={{ fontSize: '0.95em' }}>{tc.kind}</code></> : ''}</>
+                    )}
+                    {tc.name === 'submit_feedback' && 'Feedback submitted'}
+                    {!['propose_todo', 'propose_github_issue', 'apply_todo_changes', 'apply_github_issue', 'update_ai_preferences', 'update_artifact', 'read_artifact', 'submit_feedback'].includes(tc.name) && tc.name}
                     {tc.error && <span style={{ color: 'var(--accent)', marginLeft: '8px' }}> — {tc.error}</span>}
                   </div>
                 ))}

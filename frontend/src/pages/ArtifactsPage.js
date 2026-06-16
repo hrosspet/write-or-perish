@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import MarkdownBody from '../components/MarkdownBody';
 import api from '../api';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
 import useSubmitShortcut from '../hooks/useSubmitShortcut';
+import { compareArtifacts } from '../utils/artifactKinds';
 import { formatDate } from '../utils/date';
 
 const KIND_BLURBS = {
@@ -16,6 +17,7 @@ const titleFromKind = (k) =>
 
 export default function ArtifactsPage() {
   const { kind: kindParam } = useParams();
+  const navigate = useNavigate();
   const [artifacts, setArtifacts] = useState([]);
   const [activeKind, setActiveKind] = useState(kindParam || 'memory');
   const [loading, setLoading] = useState(true);
@@ -63,7 +65,11 @@ export default function ArtifactsPage() {
         privacy_level: 'private', ai_usage: 'chat',
       }
     : null;
-  const tabArtifacts = synthetic ? [...artifacts, synthetic] : artifacts;
+  // Built-in kinds first (canonical order), then custom kinds alphabetically
+  // — same ordering as the nav dropdown.
+  const tabArtifacts = (synthetic ? [...artifacts, synthetic] : artifacts)
+    .slice()
+    .sort(compareArtifacts);
   const active = tabArtifacts.find((a) => a.kind === activeKind) || null;
 
   const handleSave = async (kind) => {
@@ -145,7 +151,7 @@ export default function ArtifactsPage() {
         {tabArtifacts.map((a) => (
           <button
             key={a.kind}
-            onClick={() => { setActiveKind(a.kind); setEditing(false); }}
+            onClick={() => { setEditing(false); navigate(`/artifacts/${a.kind}`); }}
             style={{
               padding: '6px 14px',
               background: a.kind === activeKind ? 'var(--bg-card)' : 'none',

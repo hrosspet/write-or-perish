@@ -2,13 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import api from "../api";
 import useSubmitShortcut from "../hooks/useSubmitShortcut";
-
-// Curated artifact kinds pinned above the divider, in this display order.
-// They are shown only once the kind exists (predictions is a default kind
-// now; intentions becomes one when #202 lands and will then appear here
-// automatically). Excluded from the dynamic list below so they never appear
-// twice.
-const PINNED_KINDS = ["intentions", "predictions"];
+import { BUILTIN_KIND_ORDER, isBuiltinKind } from "../utils/artifactKinds";
 
 // Show at most this many artifacts before the list becomes scrollable.
 const MAX_VISIBLE = 5;
@@ -76,15 +70,14 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
   }, [currentPath]);
 
   const byKind = Object.fromEntries((artifacts || []).map((a) => [a.kind, a]));
-  // Curated kinds (intentions, predictions) shown above the divider, in
-  // PINNED_KINDS order, only when they exist.
-  const pinnedArtifacts = PINNED_KINDS
+  // Built-in artifacts (memory, scratchpad, predictions, intentions-when-it
+  // exists) are pinned above the divider in canonical order — they're not
+  // user-created. Only user/AI-created custom kinds go in the list below.
+  const pinnedArtifacts = BUILTIN_KIND_ORDER
     .filter((k) => byKind[k])
     .map((k) => byKind[k]);
-  // Everything else (memory, scratchpad, custom kinds) listed alphabetically
-  // below the divider.
   const dynamicArtifacts = (artifacts || [])
-    .filter((a) => !PINNED_KINDS.includes(a.kind))
+    .filter((a) => !isBuiltinKind(a.kind))
     .slice()
     .sort((a, b) =>
       (a.title || a.kind).localeCompare(b.title || b.kind)
@@ -182,7 +175,8 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
           <Link to="/todo" style={itemStyle(currentPath === "/todo")}>
             Todo
           </Link>
-          {/* Curated artifacts (intentions, predictions) pinned here */}
+          {/* Built-in artifacts (intentions, predictions, memory, scratchpad)
+              pinned here in canonical order */}
           {pinnedArtifacts.map((a) => (
             <Link
               key={a.kind}

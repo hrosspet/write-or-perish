@@ -252,14 +252,25 @@ def get_user_artifacts_context(user_id, pinned_node=None):
     scratchpad_content = scratchpad.get_content() if scratchpad else ""
 
     index_lines = []
+    present = set()
     for kind, artifact in sorted(artifacts.items()):
         if kind in ("memory", "scratchpad"):
             continue
+        present.add(kind)
         tokens = approximate_token_count(artifact.get_content() or "")
         desc = (artifact.description or "").strip()
         desc_part = f": {desc}" if desc else ""
         index_lines.append(
             f"- {kind} — \"{artifact.title}\"{desc_part} (~{tokens} tokens)")
+    # Built-in default kinds with no content yet still belong in the index so
+    # the model knows they exist and writes to them (e.g. predictions)
+    # rather than creating a duplicate custom artifact.
+    for kind, title in UserArtifact.DEFAULT_KINDS.items():
+        if kind in ("memory", "scratchpad") or kind in present:
+            continue
+        desc = (UserArtifact.DEFAULT_DESCRIPTIONS.get(kind) or "").strip()
+        desc_part = f": {desc}" if desc else ""
+        index_lines.append(f"- {kind} — \"{title}\"{desc_part} (empty)")
     index_text = "\n".join(index_lines) if index_lines else "(none)"
     return memory_content, scratchpad_content, index_text
 
