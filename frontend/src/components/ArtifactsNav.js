@@ -41,6 +41,15 @@ export default function ArtifactsNav({ activeKind, onNavigate, children }) {
 
   useEffect(() => { fetchArtifacts(); }, [fetchArtifacts]);
 
+  // Refetch when an artifact is created/updated elsewhere (the page's inline
+  // "+" or the nav dropdown's create modal) so the bubble row updates without
+  // a reload. Dispatched by ArtifactsPage.handleSave / ArtifactsMenu.handleCreate.
+  useEffect(() => {
+    const handler = () => fetchArtifacts();
+    window.addEventListener('loore_artifacts_changed', handler);
+    return () => window.removeEventListener('loore_artifacts_changed', handler);
+  }, [fetchArtifacts]);
+
   const byKind = Object.fromEntries(artifacts.map((a) => [a.kind, a]));
   const pinned = BUILTIN_KIND_ORDER
     .filter((k) => byKind[k])

@@ -126,6 +126,7 @@ export default function ArtifactsPage() {
         generated_by: 'user',
       });
       await fetchArtifacts();
+      window.dispatchEvent(new CustomEvent('loore_artifacts_changed'));
       setEditing(false);
       setCreatingKind(false);
       setActiveKind(kind);

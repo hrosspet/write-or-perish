@@ -118,6 +118,7 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
       setNewDescription("");
       setNewContent("");
       await fetchArtifacts();
+      window.dispatchEvent(new CustomEvent('loore_artifacts_changed'));
       navigate(`/artifacts/${slug}`);
     } catch (err) {
       console.error("Failed to create artifact:", err);
