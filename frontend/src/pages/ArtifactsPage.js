@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import MarkdownBody from '../components/MarkdownBody';
 import api from '../api';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
+import useSubmitShortcut from '../hooks/useSubmitShortcut';
 import { formatDate } from '../utils/date';
 
 const KIND_BLURBS = {
@@ -28,6 +29,8 @@ export default function ArtifactsPage() {
   const [versions, setVersions] = useState([]);
   const [selectedVersionId, setSelectedVersionId] = useState(null);
   const [versionContent, setVersionContent] = useState(null);
+
+  const editTextareaRef = useRef(null);
 
   const fetchArtifacts = useCallback(async () => {
     try {
@@ -78,6 +81,14 @@ export default function ArtifactsPage() {
     }
     setSaving(false);
   };
+
+  // Cmd+Return / Ctrl+Enter saves while editing (#129), matching the save
+  // button's enabled state (a new kind needs a name first).
+  useSubmitShortcut(
+    editTextareaRef,
+    () => handleSave(creatingKind ? newKind : activeKind),
+    editing && !saving && !(creatingKind && !newKind),
+  );
 
   const handleOpenHistory = async () => {
     setDrawerOpen(true);
@@ -228,6 +239,7 @@ export default function ArtifactsPage() {
       {editing && (
         <div>
           <textarea
+            ref={editTextareaRef}
             value={editContent}
             onChange={(e) => setEditContent(e.target.value)}
             placeholder={activeKind === 'memory' && !creatingKind

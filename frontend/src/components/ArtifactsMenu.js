@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import api from "../api";
+import useSubmitShortcut from "../hooks/useSubmitShortcut";
 
 // Curated artifact kinds pinned above the divider, in this display order.
 // They are shown only once the kind exists (predictions is a default kind
@@ -38,6 +39,8 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
   const [createError, setCreateError] = useState("");
 
   const menuRef = useRef(null);
+  const modalNameRef = useRef(null);
+  const modalContentRef = useRef(null);
 
   const fetchArtifacts = useCallback(async () => {
     try {
@@ -127,6 +130,12 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
     }
     setCreating(false);
   };
+
+  // Cmd+Return / Ctrl+Enter creates the artifact (#129) from either modal
+  // field, matching the Create button's enabled state (a name is required).
+  const createEnabled = modalOpen && !creating && !!newName.trim();
+  useSubmitShortcut(modalNameRef, () => handleCreate(), createEnabled);
+  useSubmitShortcut(modalContentRef, () => handleCreate(), createEnabled);
 
   const itemStyle = (active) => ({
     ...dropdownItemStyle,
@@ -298,6 +307,7 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
             </h2>
 
             <input
+              ref={modalNameRef}
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
               placeholder="Name"
@@ -318,6 +328,7 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
             />
 
             <textarea
+              ref={modalContentRef}
               value={newContent}
               onChange={(e) => setNewContent(e.target.value)}
               placeholder="Content (markdown)…"
