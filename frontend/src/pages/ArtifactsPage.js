@@ -130,6 +130,9 @@ export default function ArtifactsPage() {
       setEditing(false);
       setCreatingKind(false);
       setActiveKind(kind);
+      // Keep the URL in sync with the active artifact (a fresh create came
+      // from a different kind's URL) so only one bubble highlights.
+      navigate(`/artifacts/${kind}`);
     } catch (err) {
       console.error('Failed to save artifact:', err);
     }
