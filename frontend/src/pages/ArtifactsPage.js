@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useBlocker } from 'react-router-dom';
 import MarkdownBody from '../components/MarkdownBody';
 import api from '../api';
 import ArtifactsNav from '../components/ArtifactsNav';
@@ -52,9 +52,14 @@ export default function ArtifactsPage() {
   }, [fetchArtifacts]);
 
   // Deep-link: /artifacts/:kind selects that artifact (e.g. predictions, or
-  // a custom one opened from the nav dropdown).
+  // a custom one opened from the nav dropdown). Switching kinds always
+  // leaves edit mode so one artifact's draft can't leak onto another.
   useEffect(() => {
-    if (kindParam) setActiveKind(kindParam);
+    if (kindParam) {
+      setActiveKind(kindParam);
+      setEditing(false);
+      setCreatingKind(false);
+    }
   }, [kindParam]);
 
   // Version count for the active artifact's header badge (only when it has
@@ -82,6 +87,20 @@ export default function ArtifactsPage() {
     .slice()
     .sort(compareArtifacts);
   const active = tabArtifacts.find((a) => a.kind === activeKind) || null;
+
+  // Unsaved-changes guard: block in-app navigation (bubble clicks, top nav,
+  // back) while the edit UI holds changes, so edits aren't silently lost or
+  // misattributed to whatever the user navigates to.
+  const dirty = editing && (
+    creatingKind
+      ? !!(newKind || editContent.trim() || editDescription.trim())
+      : (editContent !== (active?.content || '')
+         || editDescription !== (active?.description || ''))
+  );
+  const blocker = useBlocker(
+    ({ currentLocation, nextLocation }) =>
+      dirty && currentLocation.pathname !== nextLocation.pathname
+  );
 
   const handleSave = async (kind) => {
     setSaving(true);
@@ -219,19 +238,6 @@ export default function ArtifactsPage() {
           </div>
         )}
 
-        {/* Empty artifact (no version yet): a plain edit affordance. */}
-        {active && !creatingKind && !active.created_at && !editing && (
-          <button
-            onClick={() => { setEditing(true); setEditContent(active.content || ''); setEditDescription(active.description || ''); }}
-            style={{
-              background: 'none', border: 'none', cursor: 'pointer', padding: 0,
-              fontFamily: 'var(--sans)', fontSize: '0.8rem', fontWeight: 300,
-              color: 'var(--accent)', textDecoration: 'underline',
-            }}
-          >
-            edit
-          </button>
-        )}
       </div>
 
       {/* Subtitle: description + provenance */}
@@ -333,10 +339,75 @@ export default function ArtifactsPage() {
             <MarkdownBody>{active.content}</MarkdownBody>
           </div>
         ) : (
-          <p style={{ color: 'var(--text-muted)', fontFamily: 'var(--sans)', fontSize: '0.9rem' }}>
-            Nothing here yet. The AI fills this in during Voice and Text sessions — or click edit to start it yourself.
-          </p>
+          <div style={{ textAlign: 'center', padding: '40px 0' }}>
+            <p style={{ color: 'var(--text-muted)', fontFamily: 'var(--sans)', fontSize: '0.9rem', marginBottom: '16px' }}>
+              Nothing here yet. The AI fills this in during Voice and Text sessions,
+              <br />or write your own.
+            </p>
+            <button
+              onClick={() => { setEditing(true); setEditContent(''); setEditDescription(active.description || ''); }}
+              style={{
+                padding: '10px 24px', background: 'var(--accent)', border: 'none',
+                borderRadius: '6px', color: 'var(--bg-deep)',
+                fontFamily: 'var(--sans)', fontSize: '0.85rem', fontWeight: 400,
+                cursor: 'pointer',
+              }}
+            >
+              Write {active.title}
+            </button>
+          </div>
         )
+      )}
+
+      {blocker && blocker.state === 'blocked' && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 2000, padding: '24px',
+        }}>
+          <div style={{
+            background: 'var(--bg-card)', border: '1px solid var(--border)',
+            borderRadius: '12px', padding: '24px', width: 'min(420px, 92vw)',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+          }}>
+            <h2 style={{
+              fontFamily: 'var(--serif)', fontWeight: 300, fontSize: '1.3rem',
+              color: 'var(--text-primary)', margin: '0 0 12px 0',
+            }}>
+              Unsaved changes
+            </h2>
+            <p style={{
+              fontFamily: 'var(--sans)', fontSize: '0.9rem', fontWeight: 300,
+              color: 'var(--text-secondary)', margin: '0 0 20px 0', lineHeight: 1.5,
+            }}>
+              You have unsaved edits to this artifact. Leave without saving?
+            </p>
+            <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => blocker.reset()}
+                style={{
+                  padding: '8px 18px', background: 'none',
+                  border: '1px solid var(--border)', borderRadius: '6px',
+                  color: 'var(--text-muted)', fontFamily: 'var(--sans)',
+                  fontSize: '0.85rem', cursor: 'pointer',
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => { setEditing(false); setCreatingKind(false); blocker.proceed(); }}
+                style={{
+                  padding: '8px 18px', background: 'var(--accent)', border: 'none',
+                  borderRadius: '6px', color: 'var(--bg-deep)',
+                  fontFamily: 'var(--sans)', fontSize: '0.85rem', fontWeight: 400,
+                  cursor: 'pointer',
+                }}
+              >
+                Leave
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       <VersionHistoryDrawer
