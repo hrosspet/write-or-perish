@@ -377,10 +377,16 @@ class NodeContextArtifact(db.Model):
         single_parent=True,
     )
 
+    # artifact_id is part of the key because "user_artifact" is a multi-row
+    # type (#158) — one pinned row per artifact kind on the same node. A
+    # (node_id, artifact_type) unique constraint wrongly forbade that and
+    # 500'd attach_context_artifacts whenever a user had 2+ artifact kinds.
+    # Including artifact_id still prevents exact-duplicate pins while allowing
+    # the per-kind rows (single-row types pin one artifact_id, so unaffected).
     __table_args__ = (
         db.UniqueConstraint(
-            'node_id', 'artifact_type',
-            name='uq_node_artifact_type',
+            'node_id', 'artifact_type', 'artifact_id',
+            name='uq_node_artifact_type_id',
         ),
     )
 

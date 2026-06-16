@@ -334,6 +334,28 @@ def test_attach_pins_artifacts_and_node_resolves_them(app):
             "pinned-memory-v1"
 
 
+def test_attach_pins_multiple_artifact_kinds(app):
+    # Regression: attach_context_artifacts pins one user_artifact row per
+    # kind. A (node_id, artifact_type) unique constraint 500'd this whenever
+    # a user had 2+ kinds; the key must include artifact_id.
+    from backend.utils.context_artifacts import attach_context_artifacts
+    with app.app_context():
+        uid = User.query.first().id
+        _mk_artifact(uid, "memory", "m")
+        _mk_artifact(uid, "scratchpad", "s")
+        _mk_artifact(uid, "reading-list", "books", title="Reading List")
+        node = Node(user_id=uid, node_type="system")
+        node.set_content("{user_artifacts_index}")
+        _db.session.add(node)
+        _db.session.flush()
+
+        attach_context_artifacts(node.id, uid)
+        _db.session.commit()  # must not raise IntegrityError
+
+        assert set(node.get_user_artifacts()) == {
+            "memory", "scratchpad", "reading-list"}
+
+
 def test_artifacts_context_resolution_pinned_vs_latest(app):
     with app.app_context():
         uid = User.query.first().id
