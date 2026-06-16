@@ -2,8 +2,18 @@ import React, { useState, useRef, useEffect, useCallback } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import api from "../api";
 
+// Curated artifact kinds pinned above the divider, in this display order.
+// They are shown only once the kind exists (predictions is a default kind
+// now; intentions becomes one when #202 lands and will then appear here
+// automatically). Excluded from the dynamic list below so they never appear
+// twice.
+const PINNED_KINDS = ["intentions", "predictions"];
+
 // Show at most this many artifacts before the list becomes scrollable.
 const MAX_VISIBLE = 5;
+
+const titleFromKind = (k) =>
+  k.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
 const slugify = (name) =>
   name
@@ -61,7 +71,16 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
     setOpen(false);
   }, [currentPath]);
 
+  const byKind = Object.fromEntries((artifacts || []).map((a) => [a.kind, a]));
+  // Curated kinds (intentions, predictions) shown above the divider, in
+  // PINNED_KINDS order, only when they exist.
+  const pinnedArtifacts = PINNED_KINDS
+    .filter((k) => byKind[k])
+    .map((k) => byKind[k]);
+  // Everything else (memory, scratchpad, custom kinds) listed alphabetically
+  // below the divider.
   const dynamicArtifacts = (artifacts || [])
+    .filter((a) => !PINNED_KINDS.includes(a.kind))
     .slice()
     .sort((a, b) =>
       (a.title || a.kind).localeCompare(b.title || b.kind)
@@ -72,9 +91,6 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
     currentPath === "/profile" ||
     currentPath === "/todo" ||
     currentPath === "/ai-preferences";
-  // Profile, Todo and AI preferences are fixed entries; every UserArtifact
-  // (memory, scratchpad, predictions, intentions once #202 lands, and any
-  // custom kind) is listed dynamically below.
 
   const openCreateModal = () => {
     setOpen(false);
@@ -153,6 +169,16 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
           <Link to="/todo" style={itemStyle(currentPath === "/todo")}>
             Todo
           </Link>
+          {/* Curated artifacts (intentions, predictions) pinned here */}
+          {pinnedArtifacts.map((a) => (
+            <Link
+              key={a.kind}
+              to={`/artifacts/${a.kind}`}
+              style={itemStyle(currentPath === `/artifacts/${a.kind}`)}
+            >
+              {a.title || titleFromKind(a.kind)}
+            </Link>
+          ))}
           <Link
             to="/ai-preferences"
             style={itemStyle(currentPath === "/ai-preferences")}
