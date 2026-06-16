@@ -27,7 +27,7 @@ const bubbleStyle = (active) => ({
   cursor: 'pointer',
 });
 
-export default function ArtifactsNav({ activeKind, onNavigate, children }) {
+export default function ArtifactsNav({ activeKind, onNavigate, creating, children }) {
   const location = useLocation();
   const navigate = useNavigate();
   const path = location.pathname;
@@ -75,7 +75,10 @@ export default function ArtifactsNav({ activeKind, onNavigate, children }) {
 
   const artBubble = (a) => {
     const to = `/artifacts/${a.kind}`;
-    const active = path === to || (!!activeKind && a.kind === activeKind);
+    // While creating a new artifact the "+" is the active item, so no
+    // existing artifact bubble should highlight.
+    const active = !creating
+      && (path === to || (!!activeKind && a.kind === activeKind));
     return (
       <button
         key={a.kind}
@@ -98,10 +101,13 @@ export default function ArtifactsNav({ activeKind, onNavigate, children }) {
         onClick={() => go('/artifacts?create=1')}
         title="Create a new artifact"
         style={{
-          padding: '6px 14px', background: 'none',
-          border: '1px dashed var(--border)', borderRadius: '16px',
-          color: 'var(--text-muted)', fontFamily: 'var(--sans)',
-          fontSize: '0.8rem', cursor: 'pointer',
+          padding: '6px 14px',
+          background: creating ? 'var(--bg-card)' : 'none',
+          border: '1px dashed',
+          borderColor: creating ? 'var(--accent)' : 'var(--border)',
+          borderRadius: '16px',
+          color: creating ? 'var(--text-primary)' : 'var(--text-muted)',
+          fontFamily: 'var(--sans)', fontSize: '0.8rem', cursor: 'pointer',
         }}
       >
         +

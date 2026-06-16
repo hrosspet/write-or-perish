@@ -38,6 +38,8 @@ export default function ArtifactsPage() {
   const [versionContent, setVersionContent] = useState(null);
 
   const editTextareaRef = useRef(null);
+  const editDescRef = useRef(null);
+  const newKindRef = useRef(null);
 
   const fetchArtifacts = useCallback(async () => {
     try {
@@ -156,13 +158,15 @@ export default function ArtifactsPage() {
     setSaving(false);
   };
 
-  // Cmd+Return / Ctrl+Enter saves while editing (#129), matching the save
-  // button's enabled state (a new kind needs a name first).
-  useSubmitShortcut(
-    editTextareaRef,
-    () => handleSave(creatingKind ? newKind : activeKind),
-    editing && !saving && !(creatingKind && !newKind),
-  );
+  // Cmd+Return / Ctrl+Enter saves while editing (#129), from any of the edit
+  // fields. Matches the Save button's enabled state: a description is always
+  // required, and a new kind also needs a name (content stays optional).
+  const saveEnabled = editing && !saving
+    && !(creatingKind && !newKind) && !!editDescription.trim();
+  const saveShortcut = () => handleSave(creatingKind ? newKind : activeKind);
+  useSubmitShortcut(newKindRef, saveShortcut, saveEnabled);
+  useSubmitShortcut(editDescRef, saveShortcut, saveEnabled);
+  useSubmitShortcut(editTextareaRef, saveShortcut, saveEnabled);
 
   const handleOpenHistory = async () => {
     setDrawerOpen(true);
@@ -195,14 +199,14 @@ export default function ArtifactsPage() {
   if (loading) {
     return (
       <div style={{ padding: '60px 24px', maxWidth: '800px', margin: '0 auto' }}>
-        <ArtifactsNav activeKind={activeKind} onNavigate={handleNavGuard} />
+        <ArtifactsNav activeKind={activeKind} onNavigate={handleNavGuard} creating={creatingKind} />
       </div>
     );
   }
 
   return (
     <div style={{ padding: '60px 24px', maxWidth: '800px', margin: '0 auto' }}>
-      <ArtifactsNav activeKind={activeKind} onNavigate={handleNavGuard} />
+      <ArtifactsNav activeKind={activeKind} onNavigate={handleNavGuard} creating={creatingKind} />
 
       {/* Header: artifact title + version (click -> edit) + date + history */}
       <div style={{ marginBottom: '8px', display: 'flex', alignItems: 'baseline', gap: '16px', flexWrap: 'wrap' }}>
@@ -277,6 +281,7 @@ export default function ArtifactsPage() {
       {/* New-kind name input */}
       {creatingKind && editing && (
         <input
+          ref={newKindRef}
           value={newKind}
           onChange={(e) => setNewKind(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, '-'))}
           placeholder="artifact-name (lowercase, dashes)"
@@ -294,9 +299,10 @@ export default function ArtifactsPage() {
       {editing && (
         <div>
           <input
+            ref={editDescRef}
             value={editDescription}
             onChange={(e) => setEditDescription(e.target.value)}
-            placeholder="One-line description (optional) — what this artifact is for"
+            placeholder="One-line description — what this artifact is for"
             style={{
               width: '100%', marginBottom: '12px',
               background: 'var(--bg-input)', border: '1px solid var(--border)',
@@ -323,12 +329,12 @@ export default function ArtifactsPage() {
           <div style={{ marginTop: '12px', display: 'flex', gap: '8px' }}>
             <button
               onClick={() => handleSave(creatingKind ? newKind : activeKind)}
-              disabled={saving || (creatingKind && !newKind)}
+              disabled={!saveEnabled}
               style={{
                 padding: '8px 20px', background: 'var(--accent)', border: 'none',
                 borderRadius: '6px', color: 'var(--bg-deep)',
                 fontFamily: 'var(--sans)', fontSize: '0.85rem', fontWeight: 400,
-                cursor: saving ? 'not-allowed' : 'pointer', opacity: saving ? 0.6 : 1,
+                cursor: !saveEnabled ? 'not-allowed' : 'pointer', opacity: !saveEnabled ? 0.6 : 1,
               }}
             >
               {saving ? 'Saving...' : 'Save'}

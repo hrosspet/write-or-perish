@@ -35,6 +35,7 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
 
   const menuRef = useRef(null);
   const modalNameRef = useRef(null);
+  const modalDescRef = useRef(null);
   const modalContentRef = useRef(null);
 
   const fetchArtifacts = useCallback(async () => {
@@ -131,8 +132,10 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
 
   // Cmd+Return / Ctrl+Enter creates the artifact (#129) from either modal
   // field, matching the Create button's enabled state (a name is required).
-  const createEnabled = modalOpen && !creating && !!newName.trim();
+  const createEnabled = modalOpen && !creating
+    && !!newName.trim() && !!newDescription.trim();
   useSubmitShortcut(modalNameRef, () => handleCreate(), createEnabled);
+  useSubmitShortcut(modalDescRef, () => handleCreate(), createEnabled);
   useSubmitShortcut(modalContentRef, () => handleCreate(), createEnabled);
 
   const itemStyle = (active) => ({
@@ -329,9 +332,10 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
             />
 
             <input
+              ref={modalDescRef}
               value={newDescription}
               onChange={(e) => setNewDescription(e.target.value)}
-              placeholder="One-line description (optional)"
+              placeholder="One-line description (what it's for)"
               style={{
                 width: "100%",
                 boxSizing: "border-box",
@@ -401,7 +405,7 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
               </button>
               <button
                 onClick={handleCreate}
-                disabled={creating || !newName.trim()}
+                disabled={!createEnabled}
                 style={{
                   padding: "8px 18px",
                   background: "var(--accent)",
@@ -411,8 +415,8 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
                   fontFamily: "var(--sans)",
                   fontSize: "0.85rem",
                   fontWeight: 400,
-                  cursor: creating || !newName.trim() ? "not-allowed" : "pointer",
-                  opacity: creating || !newName.trim() ? 0.6 : 1,
+                  cursor: !createEnabled ? "not-allowed" : "pointer",
+                  opacity: !createEnabled ? 0.6 : 1,
                 }}
               >
                 {creating ? "Creating…" : "Create"}
