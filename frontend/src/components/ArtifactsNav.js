@@ -103,7 +103,7 @@ export default function ArtifactsNav({ activeKind, onNavigate, creating, childre
         style={{
           padding: '6px 14px',
           background: creating ? 'var(--bg-card)' : 'none',
-          border: '1px dashed',
+          border: '1px solid',
           borderColor: creating ? 'var(--accent)' : 'var(--border)',
           borderRadius: '16px',
           color: creating ? 'var(--text-primary)' : 'var(--text-muted)',
