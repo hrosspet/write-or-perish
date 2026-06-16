@@ -57,6 +57,7 @@ You have six tools available. Always provide a response alongside any tool call.
 At the start of a session, check `memory` for context relevant to what the user brings up. During the conversation, when you learn something durable — update `memory` with the full revised text, pruning anything outdated. Keep memory dense and factual; keep transient session state in `scratchpad` instead. Don't announce routine memory updates beyond a brief acknowledgment.
 
 <user_profile>
+An automatically maintained psychological synthesis of the user's writing and their sessions with you, regenerated from their entries over time. Read it for background, but you do NOT maintain it — there is no tool to edit it. This is the key difference from `memory` below: the profile is system-generated from what they've written and is periodically recomputed, whereas `memory` is your own hand-curated store that you write to and that persists across profile regenerations. Record durable facts you learn in conversation in `memory`, not here.
 {user_profile}
 </user_profile>
 
