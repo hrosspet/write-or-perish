@@ -20,10 +20,13 @@ const bubbleStyle = (active) => ({
   cursor: 'pointer',
 });
 
-export default function ArtifactsNav({ activeKind, children }) {
+export default function ArtifactsNav({ activeKind, onNavigate, children }) {
   const location = useLocation();
   const navigate = useNavigate();
   const path = location.pathname;
+  // onNavigate lets a host page intercept bubble clicks (e.g. the Artifacts
+  // page guarding unsaved edits). Falls back to direct navigation.
+  const go = (to) => (onNavigate ? onNavigate(to) : navigate(to));
   const [artifacts, setArtifacts] = useState([]);
 
   const fetchArtifacts = useCallback(async () => {
@@ -48,7 +51,7 @@ export default function ArtifactsNav({ activeKind, children }) {
     .sort((a, b) => (a.title || a.kind).localeCompare(b.title || b.kind));
 
   const navBubble = (label, to) => (
-    <button key={to} onClick={() => navigate(to)} style={bubbleStyle(path === to)}>
+    <button key={to} onClick={() => go(to)} style={bubbleStyle(path === to)}>
       {label}
     </button>
   );
@@ -59,7 +62,7 @@ export default function ArtifactsNav({ activeKind, children }) {
     return (
       <button
         key={a.kind}
-        onClick={() => navigate(to)}
+        onClick={() => go(to)}
         title={a.description || undefined}
         style={bubbleStyle(active)}
       >

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { useParams, useBlocker } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import MarkdownBody from '../components/MarkdownBody';
 import api from '../api';
 import ArtifactsNav from '../components/ArtifactsNav';
@@ -18,9 +18,11 @@ const titleFromKind = (k) =>
 
 export default function ArtifactsPage() {
   const { kind: kindParam } = useParams();
+  const navigate = useNavigate();
   const [artifacts, setArtifacts] = useState([]);
   const [activeKind, setActiveKind] = useState(kindParam || 'memory');
   const [versionNumber, setVersionNumber] = useState(null);
+  const [pendingNav, setPendingNav] = useState(null);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
   const [editContent, setEditContent] = useState('');
@@ -97,10 +99,23 @@ export default function ArtifactsPage() {
       : (editContent !== (active?.content || '')
          || editDescription !== (active?.description || ''))
   );
-  const blocker = useBlocker(
-    ({ currentLocation, nextLocation }) =>
-      dirty && currentLocation.pathname !== nextLocation.pathname
-  );
+  // The app uses a component <BrowserRouter>, so router-level useBlocker
+  // isn't available. Guard the ArtifactsNav bubbles directly (the reported
+  // vector) and use beforeunload for tab close — same pattern as
+  // useVoiceSession. Switching kinds also resets edit state (see the
+  // kindParam effect), so a draft can never be saved to the wrong artifact.
+  const handleNavGuard = (to) => {
+    if (dirty) setPendingNav(to);
+    else navigate(to);
+  };
+
+  // Warn on tab close / reload while editing with unsaved changes.
+  useEffect(() => {
+    if (!dirty) return undefined;
+    const handler = (e) => { e.preventDefault(); e.returnValue = ''; };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [dirty]);
 
   const handleSave = async (kind) => {
     setSaving(true);
@@ -166,7 +181,7 @@ export default function ArtifactsPage() {
 
   return (
     <div style={{ padding: '60px 24px', maxWidth: '800px', margin: '0 auto' }}>
-      <ArtifactsNav activeKind={activeKind}>
+      <ArtifactsNav activeKind={activeKind} onNavigate={handleNavGuard}>
         <button
           onClick={() => { setCreatingKind(true); setNewKind(''); setEditContent(''); setEditDescription(''); setEditing(true); }}
           title="Create a new artifact"
@@ -359,7 +374,7 @@ export default function ArtifactsPage() {
         )
       )}
 
-      {blocker && blocker.state === 'blocked' && (
+      {pendingNav && (
         <div style={{
           position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -384,7 +399,7 @@ export default function ArtifactsPage() {
             </p>
             <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
               <button
-                onClick={() => blocker.reset()}
+                onClick={() => setPendingNav(null)}
                 style={{
                   padding: '8px 18px', background: 'none',
                   border: '1px solid var(--border)', borderRadius: '6px',
@@ -395,7 +410,7 @@ export default function ArtifactsPage() {
                 Cancel
               </button>
               <button
-                onClick={() => { setEditing(false); setCreatingKind(false); blocker.proceed(); }}
+                onClick={() => { setEditing(false); setCreatingKind(false); const to = pendingNav; setPendingNav(null); navigate(to); }}
                 style={{
                   padding: '8px 18px', background: 'var(--accent)', border: 'none',
                   borderRadius: '6px', color: 'var(--bg-deep)',
