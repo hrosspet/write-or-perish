@@ -23,6 +23,7 @@ def _serialize(artifact, version_number=None, include_content=True):
         "id": artifact.id,
         "kind": artifact.kind,
         "title": artifact.title,
+        "description": artifact.description,
         "generated_by": artifact.generated_by,
         "created_at": iso_utc(artifact.created_at),
         "privacy_level": artifact.privacy_level,
@@ -47,6 +48,7 @@ def list_artifacts():
             continue
         items.append({
             "id": None, "kind": kind, "title": title, "content": "",
+            "description": UserArtifact.DEFAULT_DESCRIPTIONS.get(kind),
             "generated_by": None, "created_at": None,
             "privacy_level": "private", "ai_usage": "chat",
         })
@@ -64,6 +66,7 @@ def get_artifact(kind):
             return jsonify({"artifact": {
                 "id": None, "kind": kind,
                 "title": UserArtifact.DEFAULT_KINDS[kind],
+                "description": UserArtifact.DEFAULT_DESCRIPTIONS.get(kind),
                 "content": "", "generated_by": None, "created_at": None,
                 "privacy_level": "private", "ai_usage": "chat",
             }}), 200
@@ -98,10 +101,20 @@ def update_artifact(kind):
                  else UserArtifact.DEFAULT_KINDS.get(
                      kind, kind.replace("-", " ").title()))
 
+    # Description: explicit value wins; otherwise carry forward the previous
+    # version's, falling back to the built-in default for this kind.
+    if "description" in data:
+        description = (data.get("description") or "").strip() or None
+    elif previous is not None:
+        description = previous.description
+    else:
+        description = UserArtifact.DEFAULT_DESCRIPTIONS.get(kind)
+
     artifact = UserArtifact(
         user_id=current_user.id,
         kind=kind,
         title=title[:128],
+        description=(description[:255] if description else None),
         generated_by=data.get("generated_by", "user"),
         tokens_used=0,
     )

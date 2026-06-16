@@ -21,6 +21,7 @@ export default function ArtifactsPage() {
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
   const [editContent, setEditContent] = useState('');
+  const [editDescription, setEditDescription] = useState('');
   const [saving, setSaving] = useState(false);
   const [creatingKind, setCreatingKind] = useState(false);
   const [newKind, setNewKind] = useState('');
@@ -70,6 +71,7 @@ export default function ArtifactsPage() {
     try {
       await api.put(`/artifacts/${kind}`, {
         content: editContent,
+        description: editDescription.trim(),
         generated_by: 'user',
       });
       await fetchArtifacts();
@@ -161,7 +163,7 @@ export default function ArtifactsPage() {
           </button>
         ))}
         <button
-          onClick={() => { setCreatingKind(true); setNewKind(''); setEditContent(''); setEditing(true); }}
+          onClick={() => { setCreatingKind(true); setNewKind(''); setEditContent(''); setEditDescription(''); setEditing(true); }}
           title="Create a new artifact"
           style={{
             padding: '6px 14px',
@@ -185,7 +187,7 @@ export default function ArtifactsPage() {
             fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
             color: 'var(--text-muted)', margin: 0, opacity: 0.7,
           }}>
-            {KIND_BLURBS[active.kind] || 'A persistent document shared between you and the AI.'}
+            {active.description || KIND_BLURBS[active.kind] || 'A persistent document shared between you and the AI.'}
             {active.created_at && (
               <> &middot; last updated by {generatedByLabel(active.generated_by)} &middot; {formatDate(active.created_at)}</>
             )}
@@ -204,7 +206,7 @@ export default function ArtifactsPage() {
           )}
           {!editing && (
             <button
-              onClick={() => { setEditing(true); setEditContent(active.content || ''); }}
+              onClick={() => { setEditing(true); setEditContent(active.content || ''); setEditDescription(active.description || ''); }}
               style={{
                 background: 'none', border: 'none', cursor: 'pointer', padding: 0,
                 fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
@@ -238,6 +240,18 @@ export default function ArtifactsPage() {
       {/* Editing mode */}
       {editing && (
         <div>
+          <input
+            value={editDescription}
+            onChange={(e) => setEditDescription(e.target.value)}
+            placeholder="One-line description (optional) — what this artifact is for"
+            style={{
+              width: '100%', marginBottom: '12px',
+              background: 'var(--bg-input)', border: '1px solid var(--border)',
+              borderRadius: '8px', color: 'var(--text-primary)',
+              fontFamily: 'var(--sans)', fontSize: '0.85rem', fontWeight: 300,
+              padding: '10px 16px',
+            }}
+          />
           <textarea
             ref={editTextareaRef}
             value={editContent}

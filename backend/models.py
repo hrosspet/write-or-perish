@@ -601,6 +601,10 @@ class UserArtifact(db.Model):
     # Slug identifying the artifact across versions, e.g. "memory".
     kind = db.Column(db.String(48), nullable=False, index=True)
     title = db.Column(db.String(128), nullable=False)
+    # One-line summary of what this artifact is for / contains. Powers the
+    # agentic artifacts index (so the AI can judge what to read) and the nav
+    # dropdown subtitle. Carried forward across versions like title.
+    description = db.Column(db.String(255), nullable=True)
     content = db.Column(db.Text, nullable=False)
     generated_by = db.Column(db.String(64), nullable=False)
     tokens_used = db.Column(db.Integer, nullable=False, default=0)
@@ -619,6 +623,15 @@ class UserArtifact(db.Model):
         "memory": "Memory",
         "scratchpad": "Scratchpad",
         "predictions": "Predictions",
+    }
+
+    # Pre-filled one-line descriptions for the built-in kinds. Custom kinds
+    # get their description from whoever creates them (the AI sets it when it
+    # creates a new kind; the user can set it in the create modal).
+    DEFAULT_DESCRIPTIONS = {
+        "memory": "Durable facts about you, remembered across sessions.",
+        "scratchpad": "Working notes for ongoing threads — where we left off, open questions.",
+        "predictions": "Predictions you want to record and revisit over time.",
     }
 
     def set_content(self, plaintext):

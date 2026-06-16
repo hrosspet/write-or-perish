@@ -247,7 +247,10 @@ def get_user_artifacts_context(user_id, pinned_node=None):
         if kind in ("memory", "scratchpad"):
             continue
         tokens = approximate_token_count(artifact.get_content() or "")
-        index_lines.append(f"- {kind} — \"{artifact.title}\" (~{tokens} tokens)")
+        desc = (artifact.description or "").strip()
+        desc_part = f": {desc}" if desc else ""
+        index_lines.append(
+            f"- {kind} — \"{artifact.title}\"{desc_part} (~{tokens} tokens)")
     index_text = "\n".join(index_lines) if index_lines else "(none)"
     return memory_content, scratchpad_content, index_text
 

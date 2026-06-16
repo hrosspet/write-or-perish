@@ -34,6 +34,7 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
 
   const [modalOpen, setModalOpen] = useState(false);
   const [newName, setNewName] = useState("");
+  const [newDescription, setNewDescription] = useState("");
   const [newContent, setNewContent] = useState("");
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState("");
@@ -98,6 +99,7 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
   const openCreateModal = () => {
     setOpen(false);
     setNewName("");
+    setNewDescription("");
     setNewContent("");
     setCreateError("");
     setModalOpen(true);
@@ -115,10 +117,12 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
       await api.put(`/artifacts/${slug}`, {
         content: newContent,
         title: newName.trim(),
+        description: newDescription.trim() || undefined,
         generated_by: "user",
       });
       setModalOpen(false);
       setNewName("");
+      setNewDescription("");
       setNewContent("");
       await fetchArtifacts();
       navigate(`/artifacts/${slug}`);
@@ -183,6 +187,7 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
             <Link
               key={a.kind}
               to={`/artifacts/${a.kind}`}
+              title={a.description || undefined}
               style={itemStyle(currentPath === `/artifacts/${a.kind}`)}
             >
               {a.title || titleFromKind(a.kind)}
@@ -258,6 +263,7 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
                 <Link
                   key={a.kind}
                   to={`/artifacts/${a.kind}`}
+                  title={a.description || undefined}
                   style={itemStyle(currentPath === `/artifacts/${a.kind}`)}
                 >
                   {a.title || a.kind}
@@ -312,6 +318,25 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
               onChange={(e) => setNewName(e.target.value)}
               placeholder="Name"
               autoFocus
+              style={{
+                width: "100%",
+                boxSizing: "border-box",
+                marginBottom: "12px",
+                background: "var(--bg-input)",
+                border: "1px solid var(--border)",
+                borderRadius: "8px",
+                color: "var(--text-primary)",
+                fontFamily: "var(--sans)",
+                fontSize: "0.9rem",
+                fontWeight: 300,
+                padding: "10px 14px",
+              }}
+            />
+
+            <input
+              value={newDescription}
+              onChange={(e) => setNewDescription(e.target.value)}
+              placeholder="One-line description (optional)"
               style={{
                 width: "100%",
                 boxSizing: "border-box",

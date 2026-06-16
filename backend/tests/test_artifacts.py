@@ -101,10 +101,11 @@ def client(app):
     return client
 
 
-def _mk_artifact(user_id, kind, content, title=None):
+def _mk_artifact(user_id, kind, content, title=None, description=None):
     artifact = UserArtifact(
         user_id=user_id, kind=kind,
         title=title or kind.title(), generated_by="test",
+        description=description,
     )
     artifact.set_content(content)
     _db.session.add(artifact)
@@ -164,6 +165,25 @@ def test_put_custom_kind_with_title(app, client):
     artifact = resp.get_json()["artifact"]
     assert artifact["kind"] == "reading-list"
     assert artifact["title"] == "Reading List"
+
+
+def test_description_default_store_and_carry_forward(app, client):
+    # Built-in default exposes its pre-filled description.
+    items = client.get("/api/artifacts/").get_json()["artifacts"]
+    memory = next(a for a in items if a["kind"] == "memory")
+    assert memory["description"]  # non-empty default
+
+    # Explicit description on a custom kind is stored and returned.
+    r = client.put("/api/artifacts/reading-list", json={
+        "content": "- book", "title": "Reading List",
+        "description": "Books to read"})
+    assert r.get_json()["artifact"]["description"] == "Books to read"
+
+    # Omitting description on a later version carries it forward.
+    client.put("/api/artifacts/reading-list", json={"content": "- book2"})
+    got = client.get("/api/artifacts/reading-list").get_json()["artifact"]
+    assert got["description"] == "Books to read"
+    assert got["content"] == "- book2"
 
 
 def test_put_rejects_bad_kind(app, client):
@@ -341,3 +361,13 @@ def test_artifacts_context_resolution_pinned_vs_latest(app):
         assert memory == "mem-v1"
         assert scratchpad == "pad-v1"
         assert "reading-list" in index
+
+
+def test_index_includes_description(app):
+    with app.app_context():
+        uid = User.query.first().id
+        _mk_artifact(uid, "reading-list", "books", title="Reading List",
+                     description="Books to read")
+        _, _, index = get_user_artifacts_context(uid)
+        assert "reading-list" in index
+        assert "Books to read" in index
