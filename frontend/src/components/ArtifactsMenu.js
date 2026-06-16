@@ -124,6 +124,9 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
       // there the workspace view is the point, here it isn't.)
       await fetchArtifacts();
       window.dispatchEvent(new CustomEvent('loore_artifacts_changed'));
+      // Re-open the dropdown the user came from so they see the new artifact
+      // land in the list (the + that opened the modal closed it).
+      setOpen(true);
     } catch (err) {
       console.error("Failed to create artifact:", err);
       setCreateError(
