@@ -1174,3 +1174,51 @@ class TestFormatNodeTreeDeepChain:
         assert "[1.1] " in text and "[1.1.1] " in text
         assert "[1.2] " in text and "[1.2.1] " in text
         assert b1.id is not None  # silence unused warnings
+
+
+class TestFullExportArtifactContent:
+    """Full export surfaces user-artifact refs on any node (not just system
+    nodes) AND the artifact content in the preamble (#158 export fix)."""
+
+    def test_artifact_refs_and_content_in_full_export(self, app):
+        from backend.models import UserArtifact, NodeContextArtifact
+        alice = _make_user("alice")
+        _db.session.commit()
+
+        art = UserArtifact(
+            user_id=alice.id, kind="reading-list",
+            title="Reading List", generated_by="user",
+        )
+        art.set_content("- Godel Escher Bach")
+        _db.session.add(art)
+        _db.session.flush()
+
+        # A non-system node pinning the artifact (mirrors an interim
+        # retrieval node that read it).
+        node = _make_node(
+            alice, content="thread body", ai_usage="chat", token_count=100,
+        )
+        _db.session.add(NodeContextArtifact(
+            node_id=node.id, artifact_type="user_artifact",
+            artifact_id=art.id,
+        ))
+        _db.session.commit()
+
+        content = _build(alice, filter_ai_usage=True)
+
+        # Ref emitted on a non-system node (every node is checked).
+        assert f"[Artifact 'reading-list' v1 (ref #{art.id})]" in content
+        # Full content present in the preamble.
+        assert "## Artifacts Referenced" in content
+        assert "- Godel Escher Bach" in content
+
+    def test_pinless_node_has_no_artifact_refs(self, app):
+        bob = _make_user("bob")
+        _db.session.commit()
+        _make_node(bob, content="just text", ai_usage="chat", token_count=50)
+        _db.session.commit()
+
+        content = _build(bob, filter_ai_usage=True)
+        assert "just text" in content
+        assert "[Artifact " not in content
+        assert "## Artifacts Referenced" not in content

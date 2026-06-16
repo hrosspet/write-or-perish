@@ -121,14 +121,14 @@ def _filtered_children(node, filter_ai_usage, created_before, included_ids,
     return sorted(children, key=lambda c: c.created_at)
 
 
-def _format_node_text(node, index_path, user_id, embedded_quotes,
-                      ai_blocked_ids):
-    """The node's own text block: header plus artifact refs (system-prompt
-    nodes) or quote-resolved content."""
-    result = _node_header_line(node, index_path)
+def _artifact_ref_lines(node):
+    """Reference lines for whatever context artifacts are pinned on *node*.
 
-    # System prompt nodes: emit reference instead of full content
-    # Check new artifact system first, then legacy FK
+    Returns [] when nothing is pinned. Emitted for EVERY node (not just
+    system-prompt nodes) so any node carrying pins — including interim
+    retrieval nodes that pinned the artifact they read — surfaces them.
+    """
+    lines = []
     prompt = node.get_artifact("prompt")
     if prompt is not None:
         version_num = UserPrompt.query.filter(
@@ -136,46 +136,68 @@ def _format_node_text(node, index_path, user_id, embedded_quotes,
             UserPrompt.prompt_key == prompt.prompt_key,
             UserPrompt.created_at <= prompt.created_at,
         ).count()
-        result += f"[System Prompt: {prompt.title} v{version_num} (ref #{prompt.id})]\n"
+        lines.append(
+            f"[System Prompt: {prompt.title} v{version_num} "
+            f"(ref #{prompt.id})]")
 
-        # Emit profile/todo artifact refs if present
-        profile = node.get_artifact("profile")
-        if profile is not None:
-            profile_ver = UserProfile.query.filter(
-                UserProfile.user_id == profile.user_id,
-                UserProfile.created_at <= profile.created_at,
-            ).count()
-            result += f"[User Profile v{profile_ver} (ref #{profile.id})]\n"
+    profile = node.get_artifact("profile")
+    if profile is not None:
+        profile_ver = UserProfile.query.filter(
+            UserProfile.user_id == profile.user_id,
+            UserProfile.created_at <= profile.created_at,
+        ).count()
+        lines.append(f"[User Profile v{profile_ver} (ref #{profile.id})]")
 
-        todo = node.get_artifact("todo")
-        if todo is not None:
-            todo_ver = UserTodo.query.filter(
-                UserTodo.user_id == todo.user_id,
-                UserTodo.created_at <= todo.created_at,
-            ).count()
-            result += f"[User TODO v{todo_ver} (ref #{todo.id})]\n"
+    todo = node.get_artifact("todo")
+    if todo is not None:
+        todo_ver = UserTodo.query.filter(
+            UserTodo.user_id == todo.user_id,
+            UserTodo.created_at <= todo.created_at,
+        ).count()
+        lines.append(f"[User TODO v{todo_ver} (ref #{todo.id})]")
 
-        ai_prefs = node.get_artifact("ai_preferences")
-        if ai_prefs is not None:
-            ai_prefs_ver = UserAIPreferences.query.filter(
-                UserAIPreferences.user_id == ai_prefs.user_id,
-                UserAIPreferences.created_at <= ai_prefs.created_at,
-            ).count()
-            result += f"[AI Preferences v{ai_prefs_ver} (ref #{ai_prefs.id})]\n"
+    ai_prefs = node.get_artifact("ai_preferences")
+    if ai_prefs is not None:
+        ai_prefs_ver = UserAIPreferences.query.filter(
+            UserAIPreferences.user_id == ai_prefs.user_id,
+            UserAIPreferences.created_at <= ai_prefs.created_at,
+        ).count()
+        lines.append(
+            f"[AI Preferences v{ai_prefs_ver} (ref #{ai_prefs.id})]")
 
-        for kind, artifact in sorted(node.get_user_artifacts().items()):
-            artifact_ver = UserArtifact.query.filter(
-                UserArtifact.user_id == artifact.user_id,
-                UserArtifact.kind == kind,
-                UserArtifact.created_at <= artifact.created_at,
-            ).count()
-            result += (
-                f"[Artifact '{kind}' v{artifact_ver} "
-                f"(ref #{artifact.id})]\n"
-            )
+    for kind, artifact in sorted(node.get_user_artifacts().items()):
+        artifact_ver = UserArtifact.query.filter(
+            UserArtifact.user_id == artifact.user_id,
+            UserArtifact.kind == kind,
+            UserArtifact.created_at <= artifact.created_at,
+        ).count()
+        lines.append(
+            f"[Artifact '{kind}' v{artifact_ver} (ref #{artifact.id})]")
 
+    return lines
+
+
+def _format_node_text(node, index_path, user_id, embedded_quotes,
+                      ai_blocked_ids):
+    """The node's own text block: header, any pinned-artifact refs, then
+    content. System-prompt nodes emit refs only (their content IS the
+    prompt, shown as a ref)."""
+    result = _node_header_line(node, index_path)
+
+    ref_lines = _artifact_ref_lines(node)
+    is_prompt_node = node.get_artifact("prompt") is not None
+
+    if is_prompt_node:
+        # System prompt nodes: references instead of full content.
+        for line in ref_lines:
+            result += line + "\n"
         result += "\n"
         return result
+
+    # Other nodes: emit any pinned-artifact refs (e.g. interim retrieval
+    # nodes that read an artifact), then the quote-resolved content.
+    for line in ref_lines:
+        result += line + "\n"
 
     # Resolve {quote:ID} placeholders in content
     content = node.get_content()
@@ -1122,6 +1144,7 @@ def build_user_export_content(
         profile_versions = {}
         todo_versions = {}
         ai_prefs_versions = {}
+        artifact_versions = {}
         for top_node in top_level_nodes:
             tree_nodes = _collect_all_nodes_in_tree(
                 top_node, filter_ai_usage, created_before,
@@ -1174,10 +1197,26 @@ def build_user_export_content(
                         "version": aver,
                         "content": ai_prefs.get_content(),
                     }
+                # User artifacts (memory, scratchpad, predictions, custom):
+                # one entry per referenced version, full content.
+                for kind, artifact in sorted(n.get_user_artifacts().items()):
+                    if artifact.id in artifact_versions:
+                        continue
+                    art_ver = UserArtifact.query.filter(
+                        UserArtifact.user_id == artifact.user_id,
+                        UserArtifact.kind == kind,
+                        UserArtifact.created_at <= artifact.created_at,
+                    ).count()
+                    artifact_versions[artifact.id] = {
+                        "kind": kind,
+                        "title": artifact.title,
+                        "version": art_ver,
+                        "content": artifact.get_content(),
+                    }
 
         has_any_preamble = (
             prompt_versions or profile_versions or todo_versions
-            or ai_prefs_versions
+            or ai_prefs_versions or artifact_versions
         )
         if prompt_versions:
             export_lines.append("## System Prompts Referenced\n")
@@ -1232,6 +1271,22 @@ def build_user_export_content(
                 export_lines.append(av["content"])
                 export_lines.append("")
                 if i < len(sorted_aids) - 1:
+                    export_lines.append("===\n")
+        if artifact_versions:
+            if (prompt_versions or profile_versions or todo_versions
+                    or ai_prefs_versions):
+                export_lines.append("===\n")
+            export_lines.append("## Artifacts Referenced\n")
+            sorted_artids = sorted(artifact_versions)
+            for i, artid in enumerate(sorted_artids):
+                arv = artifact_versions[artid]
+                export_lines.append(
+                    f"### {arv['title']} ('{arv['kind']}') "
+                    f"v{arv['version']} (ref #{artid})\n"
+                )
+                export_lines.append(arv["content"])
+                export_lines.append("")
+                if i < len(sorted_artids) - 1:
                     export_lines.append("===\n")
         if has_any_preamble:
             export_lines.append("===")
