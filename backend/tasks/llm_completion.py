@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 from backend.celery_app import celery, flask_app
 from backend.models import (
     Node, User, UserProfile, UserRecentContext, UserTodo, APICostLog,
-    UserAIPreferences, Draft,
+    UserArtifact, Draft,
+    NodeContextArtifact,
 )
 from backend.extensions import db
 from backend.llm_providers import LLMProvider, PromptTooLongError
@@ -44,6 +45,20 @@ USER_RECENT_PLACEHOLDER = "{user_recent}"
 USER_RECENT_RAW_PLACEHOLDER = "{user_recent_raw}"
 # Placeholder for AI interaction preferences
 USER_AI_PREFERENCES_PLACEHOLDER = "{user_ai_preferences}"
+# Placeholders for user artifacts — LLM memory/scratchpad + index (#158)
+USER_MEMORY_PLACEHOLDER = "{user_memory}"
+USER_SCRATCHPAD_PLACEHOLDER = "{user_scratchpad}"
+USER_ARTIFACTS_INDEX_PLACEHOLDER = "{user_artifacts_index}"
+
+# Within-turn retrieval loop (#158, text mode only). When the model calls one
+# of these tools, the retrieved content is injected back into the message
+# stream and the model is re-called so it answers WITH the content in the same
+# turn — instead of the cross-turn injection done by _scan_proposal_statuses.
+# read_artifact pulls a UserArtifact by kind; read_todo pulls the user's todo
+# list (its own model, no longer shown inline — #158 Slice 3).
+RETRIEVAL_TOOLS = {"read_artifact", "read_todo"}
+# Max number of interim retrieval round-trips before the model must answer.
+MAX_RETRIEVAL_ROUNDS = 2
 
 # ── Voice tool definitions ──────────────────────────────────────────────
 
@@ -84,56 +99,243 @@ VOICE_TOOLS = [
         },
     },
     {
-        "name": "update_ai_preferences",
+        "name": "update_artifact",
         "description": (
-            "Update the user's AI interaction preferences. Call this when "
-            "the user expresses how they want AI to interact with them — "
-            "tone, style, boundaries, topics to avoid, interaction "
-            "patterns. Examples: 'don't bring up family unless I do', "
-            "'be more direct', 'keep todo updates concise'. The "
-            "updated_preferences should be the FULL updated text (not "
-            "just the diff), incorporating the new preference into the "
-            "existing ones. Always produce a text response — the user "
-            "needs to hear what happened as they are interacting via voice."
+            "Create or update one of the user's artifacts — persistent "
+            "documents that survive across sessions. Built-in kinds: "
+            "'memory' (durable facts and observations about the user "
+            "worth remembering long-term — write here whenever you learn "
+            "something that future sessions should know) and 'scratchpad' "
+            "(your working notes for ongoing threads of work). You can "
+            "also create new kinds for the user on request (e.g. "
+            "'reading-list'). The updated_content must be the FULL new "
+            "text of the artifact (not a diff) — it replaces the previous "
+            "version, and old versions stay in history. Call proactively "
+            "for memory-worthy facts; no confirmation is needed. Always "
+            "produce a text response alongside the call."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "updated_preferences": {
+                "kind": {
                     "type": "string",
                     "description": (
-                        "The complete updated AI interaction preferences "
-                        "as markdown text. Incorporate the new preference "
-                        "into the existing text. Keep it concise."
+                        "Artifact slug: 'memory', 'scratchpad', or a "
+                        "short lowercase dash-separated name for a "
+                        "custom artifact."
+                    ),
+                },
+                "updated_content": {
+                    "type": "string",
+                    "description": (
+                        "The complete new artifact text as markdown. "
+                        "Carry forward everything still relevant from "
+                        "the current version."
+                    ),
+                },
+                "title": {
+                    "type": "string",
+                    "description": (
+                        "Display title. Only needed when creating a new "
+                        "custom artifact."
+                    ),
+                },
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "One-line summary of what this artifact is for, "
+                        "shown in the index/nav. Set it when creating a new "
+                        "kind; for built-in kinds and updates you can omit "
+                        "it (the existing/default description is kept)."
                     ),
                 },
             },
-            "required": ["updated_preferences"],
+            "required": ["kind", "updated_content"],
+        },
+    },
+    {
+        "name": "read_artifact",
+        "description": (
+            "Request the full content of one of the user's artifacts "
+            "listed in the artifacts index. The content is injected back "
+            "into your context within the same turn and you answer with "
+            "it. Use this only for artifacts in the index — anything "
+            "already shown inline in your context is always present and "
+            "should not be read. Tell the user you're pulling it up. Always "
+            "produce a text response alongside the call."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "description": "Slug of the artifact to read.",
+                },
+            },
+            "required": ["kind"],
+        },
+    },
+    {
+        "name": "read_todo",
+        "description": (
+            "Pull the user's current todo list into context. The todo "
+            "list is listed in the artifacts index (as 'todo') rather than "
+            "shown inline, so read it on demand whenever the conversation "
+            "turns to their tasks, plans, or priorities — and before "
+            "proposing todo changes, so your proposal builds on what's "
+            "actually there. Like read_artifact, the content is injected "
+            "back into your context within the same turn and you answer "
+            "with it, so tell the user you're pulling it up. Always produce "
+            "a text response alongside the call."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "apply_feedback",
+        "description": (
+            "Send the previously proposed feedback to the Loore team. Call "
+            "this ONLY when the user explicitly confirms they want it sent "
+            "(e.g. 'yes send it', 'go ahead', 'pass that on'). Do not call "
+            "proactively. Do not call if the feedback was already sent "
+            "(check the context notes for apply status). To PROPOSE feedback "
+            "in the first place, write it under a `### Feedback` heading "
+            "instead (see the submit-feedback guidance) — that shows the user "
+            "what you'd send and gives them a Send button. "
+            "Always produce a text response — the user needs to hear what "
+            "happened as they are interacting via voice."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
         },
     },
 ]
 
 
+_ARTIFACT_KIND_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,47}$')
+
+# UserArtifact kinds that are injected INLINE in the agentic prompt (each has
+# its own placeholder/tag) and therefore must be EXCLUDED from the artifacts
+# index — otherwise they'd appear both inline and in the index. Single source
+# of truth for both index-exclusion spots in get_user_artifacts_context.
+# (#202 intentions joins this when it lands — it has an ambient
+# {user_intentions} placeholder too.)
+ALWAYS_INLINE_KINDS = ("memory", "scratchpad", "ai_preferences")
+
+# Kinds that are NOT UserArtifacts — they're separate single-row models or
+# system-managed, so update_artifact must refuse them. Without this guard the
+# model could create a UserArtifact named e.g. "todo" that shadows and
+# silently diverges from the real UserTodo. Each value is a message pointing
+# the model at the correct path. (ai_preferences is NOT here — Slice 5 folded
+# it into the UserArtifact model, so it's a normal writable artifact now.)
+RESERVED_ARTIFACT_KINDS = {
+    "todo": ("Todo changes go through proposals — put them under the "
+             "### Completed / ### New Tasks / ### Priority Order headings in "
+             "your reply; don't write the todo with update_artifact."),
+    "profile": ("The profile is system-generated and read-only — there is no "
+                "tool to edit it."),
+    "recent_context": "Recent context is system-generated and can't be edited.",
+}
+
+
+def _todo_index_line(user_id, pinned_node=None):
+    """Index line for the user's todo list, or None if it's AI-blocked.
+
+    Todo is its own model (not a UserArtifact) and since #158 Slice 3 is no
+    longer shown inline — it appears in the index and is pulled on demand via
+    read_todo. Resolved from the session's pinned snapshot, falling back to
+    latest. A todo the user opted out of AI access is omitted entirely; an
+    absent or empty todo is still listed (as ``(empty)``) so the model knows
+    the surface exists. No open/priority counts (noise).
+    """
+    todo = pinned_node.get_artifact("todo") if pinned_node else None
+    if todo is None:
+        todo = UserTodo.query.filter_by(user_id=user_id).order_by(
+            UserTodo.created_at.desc()
+        ).first()
+    if todo is not None and todo.ai_usage not in AI_ALLOWED:
+        return None  # privacy: user opted this todo out of AI access
+    content = (todo.get_content() if todo else "") or ""
+    if content.strip():
+        suffix = f"(~{approximate_token_count(content)} tokens)"
+    else:
+        suffix = "(empty)"
+    return (f"- todo — the user's running task list; pull it with "
+            f"read_todo {suffix}")
+
+
+def get_user_artifacts_context(user_id, pinned_node=None):
+    """Resolve user artifacts for the agentic prompt (#158).
+
+    Returns (memory_content, scratchpad_content, index_text). Pinned to the
+    per-session snapshot recorded on *pinned_node* (#191 semantics), falling
+    back to latest for legacy nodes. ai_usage is re-checked on resolved rows.
+    The todo list (its own model) is listed in the index too, pulled via
+    read_todo (#158 Slice 3).
+    """
+    artifacts = pinned_node.get_user_artifacts() if pinned_node else {}
+    if not artifacts:
+        artifacts = UserArtifact.latest_per_kind(user_id)
+    artifacts = {
+        kind: a for kind, a in artifacts.items()
+        if a.ai_usage in AI_ALLOWED
+    }
+
+    memory = artifacts.get("memory")
+    scratchpad = artifacts.get("scratchpad")
+    memory_content = memory.get_content() if memory else ""
+    scratchpad_content = scratchpad.get_content() if scratchpad else ""
+
+    index_lines = []
+    # Todo first — it's a curated logistics surface, not a freeform artifact.
+    todo_line = _todo_index_line(user_id, pinned_node=pinned_node)
+    if todo_line is not None:
+        index_lines.append(todo_line)
+    present = set()
+    for kind, artifact in sorted(artifacts.items()):
+        if kind in ALWAYS_INLINE_KINDS:
+            continue
+        present.add(kind)
+        tokens = approximate_token_count(artifact.get_content() or "")
+        desc = (artifact.description or "").strip()
+        desc_part = f": {desc}" if desc else ""
+        index_lines.append(
+            f"- {kind} — \"{artifact.title}\"{desc_part} (~{tokens} tokens)")
+    # Built-in default kinds with no content yet still belong in the index so
+    # the model knows they exist and writes to them (e.g. predictions)
+    # rather than creating a duplicate custom artifact.
+    for kind, title in UserArtifact.DEFAULT_KINDS.items():
+        if kind in ALWAYS_INLINE_KINDS or kind in present:
+            continue
+        desc = (UserArtifact.DEFAULT_DESCRIPTIONS.get(kind) or "").strip()
+        desc_part = f": {desc}" if desc else ""
+        index_lines.append(f"- {kind} — \"{title}\"{desc_part} (empty)")
+    index_text = "\n".join(index_lines) if index_lines else "(none)"
+    return memory_content, scratchpad_content, index_text
+
+
 def get_user_ai_preferences_content(user_id, pinned_node=None):
     """Resolve the AI preferences for an LLM prompt.
 
-    If *pinned_node* carries a recorded version (NodeContextArtifact, written
-    by ``attach_context_artifacts`` when the session's system node was
-    created — see #191), that exact version is used: the same one the data
-    export references, so the session sees one coherent point-in-time
-    snapshot instead of re-fetching "latest now" each turn. Falls back to the
-    latest when the node has no binding (e.g. legacy nodes). ai_usage is
-    re-checked on the resolved row (AI_ALLOWED — 'chat' or 'train', matching
-    attach_context_artifacts and the other artifacts) so a mid-session
-    opt-out is honored.
+    Since #158 Slice 5, AI preferences are a ``UserArtifact`` kind
+    ('ai_preferences'): the node's pinned snapshot (#191) if present, else the
+    latest. ai_usage is re-checked on the resolved row so a mid-session
+    opt-out is honored. (The pre-fold UserAIPreferences fallback was removed
+    once the backfill migrates rows + node pins; the table is dropped in
+    #219.)
     """
-    prefs = pinned_node.get_artifact("ai_preferences") if pinned_node else None
-    if prefs is None:
-        prefs = UserAIPreferences.query.filter_by(user_id=user_id).order_by(
-            UserAIPreferences.created_at.desc()
-        ).first()
-    if prefs and prefs.ai_usage in AI_ALLOWED:
-        return prefs.get_content()
+    if pinned_node is not None:
+        art = pinned_node.get_user_artifacts().get("ai_preferences")
+        if art is not None and art.ai_usage in AI_ALLOWED:
+            return art.get_content()
+    art = UserArtifact.latest_for(user_id, "ai_preferences")
+    if art is not None and art.ai_usage in AI_ALLOWED:
+        return art.get_content()
     return None
 
 
@@ -191,6 +393,19 @@ def _find_pending_github_issue_draft(node_chain, user_id):
     return None
 
 
+def _find_pending_feedback_draft(node_chain, user_id):
+    """Walk the node chain to find a pending feedback draft."""
+    for node in reversed(node_chain):
+        draft = Draft.query.filter_by(
+            parent_id=node.id,
+            user_id=user_id,
+            label='feedback_pending',
+        ).first()
+        if draft:
+            return draft
+    return None
+
+
 def _detect_todo_proposal(text):
     """Check if LLM text contains todo proposal headings.
 
@@ -219,6 +434,52 @@ def _detect_github_issue_proposal(text):
     return has_title and has_desc
 
 
+def _detect_feedback_proposal(text):
+    """Check if LLM text contains a feedback proposal heading.
+
+    A single exact ``### Feedback`` heading marks the block the AI proposes to
+    send to the team. Exact match (not substring) keeps it from firing on
+    incidental prose like '### Feedback I've heard'."""
+    if not text:
+        return False
+    headings = [h.strip().lower() for h in re.findall(
+        r'^###\s+(.+)', text, re.MULTILINE)]
+    return any(h == 'feedback' for h in headings)
+
+
+def _retrieval_injection_text(tr):
+    """Build the context-injection string for a successful retrieval tool
+    result (read_artifact / read_todo), re-resolving the content fresh from
+    the encrypted row — content is never stored in tool_calls_meta. Re-checks
+    ai_usage so a mid-session opt-out is honored. Returns None if the
+    artifact is gone or no longer AI-readable.
+    """
+    name = tr.get("name")
+    if name == "read_artifact":
+        artifact = UserArtifact.query.get(tr.get("artifact_id"))
+        if artifact is None or artifact.ai_usage not in AI_ALLOWED:
+            return None
+        return (f"[Contents of artifact '{tr.get('kind', '?')}' you "
+                f"requested:\n{artifact.get_content()}]")
+    if name == "read_todo":
+        todo = UserTodo.query.get(tr.get("todo_id"))
+        if todo is None or todo.ai_usage not in AI_ALLOWED:
+            return None
+        return f"[Your current todo list:\n{todo.get_content()}]"
+    return None
+
+
+def _retrieval_pin(tr):
+    """(artifact_type, artifact_id) to pin on the interim node for a
+    successful retrieval result, so the export references the exact version
+    read. Returns (None, None) for unrecognized/unpinnable results."""
+    if tr.get("name") == "read_artifact":
+        return ("user_artifact", tr.get("artifact_id"))
+    if tr.get("name") == "read_todo":
+        return ("todo", tr.get("todo_id"))
+    return (None, None)
+
+
 def _scan_proposal_statuses(node_chain):
     """Walk all nodes and collect proposal/tool status notes to inject.
 
@@ -226,9 +487,6 @@ def _scan_proposal_statuses(node_chain):
     tool_calls_meta asynchronously). Returns (notes_list, nodes_to_mark)
     where nodes_to_mark is a list of (node, tool_name) tuples whose
     status_reported flag should be set after a successful LLM call.
-
-    Also handles update_ai_preferences with the same status_reported
-    pattern so the LLM is told about preference updates exactly once.
     """
     notes = []
     to_mark = []
@@ -247,10 +505,14 @@ def _scan_proposal_statuses(node_chain):
             name = entry.get("name")
             reported = entry.get("status_reported")
 
-            if name in ("propose_todo", "propose_github_issue"):
+            if name in ("propose_todo", "propose_github_issue",
+                        "propose_feedback"):
                 status = entry.get("apply_status")
-                tag = ("todo-proposal" if name == "propose_todo"
-                       else "issue-proposal")
+                tag = {
+                    "propose_todo": "todo-proposal",
+                    "propose_github_issue": "issue-proposal",
+                    "propose_feedback": "feedback-proposal",
+                }[name]
                 if status == "started":
                     notes.append(
                         f"[{tag}:{node.id}: merge in progress.]"
@@ -267,8 +529,28 @@ def _scan_proposal_statuses(node_chain):
                     )
                     to_mark.append((node, name))
 
-            elif name == "update_ai_preferences" and not reported:
-                notes.append("[AI preferences were updated.]")
+            elif name == "update_artifact" and not reported:
+                if entry.get("status") == "success":
+                    kind = entry.get("kind", "?")
+                    verb = ("created" if entry.get("created")
+                            else "updated")
+                    notes.append(f"[Artifact '{kind}' was {verb}.]")
+                to_mark.append((node, name))
+
+            elif name in RETRIEVAL_TOOLS and not reported:
+                # Cross-turn delivery (voice / single-shot): the retrieval
+                # ran last turn; inject the content now. Text mode resolves
+                # these within the same turn (the loop marks them reported),
+                # so this path only fires for the single-shot modes.
+                if entry.get("status") == "success":
+                    # Re-resolved fresh from the encrypted row — content is
+                    # never stored in tool_calls_meta.
+                    text = _retrieval_injection_text(entry)
+                    if text is not None:
+                        notes.append(text)
+                else:
+                    err = entry.get("error", "unknown error")
+                    notes.append(f"[{name} failed — {err}]")
                 to_mark.append((node, name))
 
     return notes, to_mark
@@ -377,7 +659,56 @@ def _auto_create_drafts(llm_text, llm_node, node_chain, user_id):
                 "apply_status": "pending_approval",
             })
 
+    if _detect_feedback_proposal(llm_text):
+        already = Draft.query.filter_by(
+            parent_id=llm_node.id, user_id=user_id,
+            label='feedback_pending',
+        ).first()
+        if not already:
+            existing = _find_pending_feedback_draft(node_chain, user_id)
+            draft = Draft(
+                user_id=user_id,
+                parent_id=llm_node.id,
+                label='feedback_pending',
+            )
+            draft.set_content("")
+            db.session.add(draft)
+            db.session.flush()
+            if existing:
+                db.session.delete(existing)
+                db.session.flush()
+            # Supersede old pending_approval feedback proposals
+            _supersede_old_proposals(
+                node_chain, "propose_feedback", llm_node.id)
+            results.append({
+                "name": "propose_feedback",
+                "status": "success",
+                "draft_id": draft.id,
+                "apply_status": "pending_approval",
+            })
+
     return results
+
+
+# Tool-input keys that carry free-text user content. These are stripped
+# before the input is persisted to the plaintext ``tool_calls_meta`` column:
+# the content is already stored encrypted in its own row (UserArtifact /
+# UserFeedback / Draft), and a plaintext copy on the node would defeat
+# encryption-at-rest. Nothing reads ``input`` back out of tool_calls_meta
+# (the cross-turn scan, the frontend, and exports all key on other fields),
+# so redaction is lossless for every consumer.
+_REDACTED_INPUT_KEYS = {"content", "updated_content"}
+
+
+def _redact_tool_input(inp):
+    """Return a copy of a tool-call input with free-text content removed,
+    safe to persist to the plaintext tool_calls_meta column."""
+    if not isinstance(inp, dict):
+        return inp
+    return {
+        k: ("[redacted]" if k in _REDACTED_INPUT_KEYS else v)
+        for k, v in inp.items()
+    }
 
 
 def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
@@ -387,7 +718,9 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
     for tc in tool_calls:
         name = tc["name"]
         inp = tc.get("input", {})
-        result = {"name": name, "input": inp}
+        # Persisted to plaintext tool_calls_meta — redact free-text content
+        # (handlers below read the live ``inp``, which keeps the real values).
+        result = {"name": name, "input": _redact_tool_input(inp)}
 
         try:
             if name == "apply_todo_changes":
@@ -471,21 +804,118 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
                             result["issue_url"] = gh_result["url"]
                             result["issue_number"] = gh_result["number"]
 
-            elif name == "update_ai_preferences":
-                pref_user = User.query.get(user_id)
-                prefs = UserAIPreferences(
-                    user_id=user_id,
-                    generated_by=llm_node.llm_model or "voice_session",
-                    tokens_used=0,
-                    # ai_usage follows the user's global default (#191).
-                    ai_usage=(pref_user.default_ai_usage
-                              if pref_user else "chat"),
-                )
-                prefs.set_content(inp["updated_preferences"])
-                db.session.add(prefs)
-                db.session.flush()
-                result["status"] = "success"
-                result["preferences_id"] = prefs.id
+            elif name == "update_artifact":
+                kind = (inp.get("kind") or "").strip().lower()
+                if kind in RESERVED_ARTIFACT_KINDS:
+                    result["status"] = "error"
+                    result["error"] = RESERVED_ARTIFACT_KINDS[kind]
+                elif not _ARTIFACT_KIND_RE.match(kind):
+                    result["status"] = "error"
+                    result["error"] = (
+                        f"Invalid artifact kind: {kind!r}. Use a short "
+                        "lowercase slug (letters, digits, dashes)."
+                    )
+                else:
+                    previous = UserArtifact.latest_for(user_id, kind)
+                    title = (inp.get("title") or "").strip()
+                    if not title:
+                        title = (
+                            previous.title if previous
+                            else UserArtifact.DEFAULT_KINDS.get(
+                                kind, kind.replace("-", " ").title())
+                        )
+                    # Description: explicit value wins; else carry forward the
+                    # previous version's; else the built-in default for the
+                    # kind. Mirrors the REST route so AI writes don't leave a
+                    # null description (which blocked editing in the UI).
+                    description = (inp.get("description") or "").strip()
+                    if not description:
+                        description = (
+                            previous.description if previous
+                            else UserArtifact.DEFAULT_DESCRIPTIONS.get(kind)
+                        )
+                    artifact = UserArtifact(
+                        user_id=user_id,
+                        kind=kind,
+                        title=title[:128],
+                        description=description,
+                        generated_by=llm_node.llm_model or "agentic_session",
+                        tokens_used=0,
+                    )
+                    artifact.set_content(inp["updated_content"])
+                    db.session.add(artifact)
+                    db.session.flush()
+                    result["status"] = "success"
+                    result["artifact_id"] = artifact.id
+                    result["kind"] = kind
+                    result["created"] = previous is None
+
+            elif name == "read_artifact":
+                kind = (inp.get("kind") or "").strip().lower()
+                artifact = UserArtifact.latest_for(user_id, kind)
+                if artifact is None or artifact.ai_usage not in AI_ALLOWED:
+                    result["status"] = "error"
+                    result["error"] = f"No readable artifact of kind {kind!r}"
+                else:
+                    # Content is NOT stored in tool meta (plaintext column)
+                    # — the retrieval loop / _scan_proposal_statuses
+                    # re-resolves it from the encrypted row and injects it.
+                    result["status"] = "success"
+                    result["artifact_id"] = artifact.id
+                    result["kind"] = kind
+
+            elif name == "read_todo":
+                # Todo is its own model (not a UserArtifact), pulled on
+                # demand since it's no longer shown inline (#158 Slice 3).
+                todo = UserTodo.query.filter_by(user_id=user_id).order_by(
+                    UserTodo.created_at.desc()
+                ).first()
+                if todo is None or todo.ai_usage not in AI_ALLOWED:
+                    result["status"] = "error"
+                    result["error"] = "The todo list is empty or unavailable."
+                else:
+                    # Content re-resolved from the encrypted row at injection
+                    # time; only the row id sits in tool meta.
+                    result["status"] = "success"
+                    result["todo_id"] = todo.id
+
+            elif name == "apply_feedback":
+                # Send the feedback the AI proposed under a ### Feedback
+                # heading — mirrors apply_github_issue. Gated on a pending
+                # draft, so it can't self-confirm in the same turn it
+                # proposed (the draft is auto-created after tool execution).
+                draft = _find_pending_feedback_draft(node_chain, user_id)
+                if not draft:
+                    result["status"] = "error"
+                    result["error"] = "No pending feedback found"
+                else:
+                    origin_node = Node.query.get(draft.parent_id)
+                    if not origin_node:
+                        result["status"] = "error"
+                        result["error"] = "Origin node not found"
+                    else:
+                        from backend.utils.feedback import (
+                            submit_feedback_from_node,
+                        )
+                        feedback, err = submit_feedback_from_node(
+                            origin_node, user_id
+                        )
+                        if err:
+                            result["status"] = "error"
+                            result["error"] = err
+                        else:
+                            db.session.delete(draft)
+                            db.session.flush()
+                            update_tool_meta(
+                                origin_node,
+                                "propose_feedback",
+                                {
+                                    "apply_status": "completed",
+                                    "feedback_id": feedback.id,
+                                },
+                            )
+                            result["status"] = "success"
+                            result["feedback_id"] = feedback.id
 
             elif name in ("propose_todo", "propose_github_issue"):
                 # These are no longer tools — proposals are auto-detected
@@ -768,6 +1198,18 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             needs_ai_prefs = ai_prefs_node is not None
             user_ai_preferences_content = None
 
+            # User artifacts (#158) — memory/scratchpad content + index.
+            # All three placeholders resolve from one pinned snapshot.
+            artifacts_node = (
+                _placeholder_node(USER_MEMORY_PLACEHOLDER)
+                or _placeholder_node(USER_SCRATCHPAD_PLACEHOLDER)
+                or _placeholder_node(USER_ARTIFACTS_INDEX_PLACEHOLDER)
+            )
+            needs_artifacts = artifacts_node is not None
+            user_memory_content = None
+            user_scratchpad_content = None
+            user_artifacts_index = None
+
             # Check if any node contains {quote:ID} placeholders
             needs_quotes = any(
                 has_quotes(node.get_content())
@@ -815,6 +1257,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     user_id, pinned_node=ai_prefs_node
                 )
 
+            if needs_artifacts:
+                (user_memory_content, user_scratchpad_content,
+                 user_artifacts_index) = get_user_artifacts_context(
+                    user_id, pinned_node=artifacts_node
+                )
+
             # Detect if this is an agentic session (enables tools)
             is_agentic = _is_agentic_prompt(node_chain)
             agentic_tools = VOICE_TOOLS if is_agentic else None
@@ -852,9 +1300,6 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 proposal_notes, proposal_to_mark = (
                     _scan_proposal_statuses(node_chain)
                 )
-
-            # (ai_preferences status is now handled by
-            # _scan_proposal_statuses above)
 
             if needs_export:
                 # Defense-in-depth log only: validate_user_export_placeholders
@@ -982,6 +1427,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                             f"\n\n[issue-proposal:"
                                             f"{node.id}]"
                                         )
+                                    elif ename == "propose_feedback":
+                                        message_text += (
+                                            f"\n\n[feedback-proposal:"
+                                            f"{node.id}]"
+                                        )
                             except (json.JSONDecodeError, TypeError):
                                 pass
                     else:
@@ -1046,6 +1496,22 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             message_text = message_text.replace(
                                 USER_AI_PREFERENCES_PLACEHOLDER,
                                 user_ai_preferences_content or ""
+                            )
+                        # Replace artifact placeholders — pinned snapshot
+                        if USER_MEMORY_PLACEHOLDER in message_text:
+                            message_text = message_text.replace(
+                                USER_MEMORY_PLACEHOLDER,
+                                user_memory_content or ""
+                            )
+                        if USER_SCRATCHPAD_PLACEHOLDER in message_text:
+                            message_text = message_text.replace(
+                                USER_SCRATCHPAD_PLACEHOLDER,
+                                user_scratchpad_content or ""
+                            )
+                        if USER_ARTIFACTS_INDEX_PLACEHOLDER in message_text:
+                            message_text = message_text.replace(
+                                USER_ARTIFACTS_INDEX_PLACEHOLDER,
+                                user_artifacts_index or "(none)"
                             )
                         # Resolve {quote:ID} placeholders if present
                         if needs_quotes and has_quotes(message_text):
@@ -1126,118 +1592,296 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         f"retrying with max_export_tokens={max_export_tokens} "
                         f"(attempt {attempt + 2}/{MAX_RETRIES + 1})"
                     )
-            llm_text = response["content"]
-            total_tokens = response["total_tokens"]
-            input_tokens = response.get("input_tokens", 0)
-            output_tokens = response.get("output_tokens", 0)
-            response_tool_calls = response.get("tool_calls", [])
-            response_truncated = response.get("truncated", False)
+            # ── Helpers shared by the single-shot and retrieval paths ──────
 
-            logger.info(f"LLM response generated: {len(llm_text)} chars, {total_tokens} tokens, {len(response_tool_calls)} tool calls")
+            def _log_api_cost(resp):
+                """Log an APICostLog row for one model call. Every model call
+                costs money — the retrieval loop logs once per round."""
+                in_toks = resp.get("input_tokens", 0)
+                out_toks = resp.get("output_tokens", 0)
+                cost = calculate_llm_cost_microdollars(
+                    model_id, in_toks, out_toks)
+                db.session.add(APICostLog(
+                    user_id=user_id,
+                    model_id=model_id,
+                    request_type="conversation",
+                    input_tokens=in_toks,
+                    output_tokens=out_toks,
+                    cost_microdollars=cost,
+                ))
 
-            # Step 4: Log API cost
-            self.update_state(state='PROGRESS', meta={'progress': 90, 'status': 'Logging cost'})
-            llm_node.llm_task_progress = 90
-            db.session.commit()
+            def _finalize(target_node, resp):
+                """Write *resp* as the final answer on *target_node* using the
+                EXACT existing single-shot finalize behavior (cost log, Race B
+                guard, content, tool calls, proposal auto-detect, _mode meta,
+                status_reported marking, completed status, commit).
 
-            cost = calculate_llm_cost_microdollars(model_id, input_tokens, output_tokens)
-            cost_log = APICostLog(
-                user_id=user_id,
-                model_id=model_id,
-                request_type="conversation",
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cost_microdollars=cost,
-            )
-            db.session.add(cost_log)
+                Returns the result dict, or a 'cancelled' dict if the node was
+                soft-deleted mid-generation.
+                """
+                f_llm_text = resp["content"]
+                f_total_tokens = resp["total_tokens"]
+                f_tool_calls = resp.get("tool_calls", [])
+                f_truncated = resp.get("truncated", False)
 
-            # Step 5: Update the placeholder LLM node with the response
-            self.update_state(state='PROGRESS', meta={'progress': 95, 'status': 'Finalizing'})
+                logger.info(
+                    f"LLM response generated: {len(f_llm_text)} chars, "
+                    f"{f_total_tokens} tokens, {len(f_tool_calls)} tool calls")
 
-            # Race B guard: re-fetch the target node and bail if it was
-            # soft-deleted while we were generating. Without this we'd
-            # write generated content into a tombstone-bound node and waste
-            # both the compute and the storage until the 30-day wipe.
-            db.session.refresh(llm_node)
-            if llm_node.deleted_at is not None:
-                logger.warning(
-                    "LLM target node %s was soft-deleted mid-generation; "
-                    "discarding response", llm_node.id,
-                )
-                llm_node.llm_task_status = 'cancelled'
-                llm_node.llm_task_progress = 100
+                # Step 4: Log API cost
+                self.update_state(state='PROGRESS', meta={
+                    'progress': 90, 'status': 'Logging cost'})
+                target_node.llm_task_progress = 90
                 db.session.commit()
-                return {
+                _log_api_cost(resp)
+
+                # Step 5: Update the placeholder LLM node with the response
+                self.update_state(state='PROGRESS', meta={
+                    'progress': 95, 'status': 'Finalizing'})
+
+                # Race B guard: re-fetch the target node and bail if it was
+                # soft-deleted while we were generating. Without this we'd
+                # write generated content into a tombstone-bound node and waste
+                # both the compute and the storage until the 30-day wipe.
+                db.session.refresh(target_node)
+                if target_node.deleted_at is not None:
+                    logger.warning(
+                        "LLM target node %s was soft-deleted mid-generation; "
+                        "discarding response", target_node.id,
+                    )
+                    target_node.llm_task_status = 'cancelled'
+                    target_node.llm_task_progress = 100
+                    db.session.commit()
+                    return {
+                        'parent_node_id': parent_node_id,
+                        'llm_node_id': target_node.id,
+                        'status': 'cancelled',
+                        'reason': 'target_soft_deleted',
+                    }
+
+                target_node.set_content(f_llm_text)
+                # chars/4, NOT the provider's output_tokens: Node.token_count
+                # is the platform's stable information-content measure (gates,
+                # chunk windowing, balance decisions all sum it). Provider
+                # tokenizer counts drift upward across model generations
+                # (~1.5x chars/4 already), which skewed every window that
+                # mixed LLM replies with chars/4-counted user text. Real
+                # token usage lives in APICostLog.
+                target_node.token_count = approximate_token_count(f_llm_text)
+
+                # Step 5b: Execute tool calls if any
+                f_tool_meta = None
+                if f_tool_calls:
+                    logger.info(
+                        f"Executing {len(f_tool_calls)} tool calls")
+                    tool_results = _execute_tool_calls(
+                        f_tool_calls, target_node, node_chain, user_id
+                    )
+                    if f_truncated:
+                        for tr in tool_results:
+                            tr["response_truncated"] = True
+                    f_tool_meta = tool_results
+
+                # Step 5c: Auto-detect proposals in LLM text (agentic)
+                if is_agentic:
+                    auto_drafts = _auto_create_drafts(
+                        f_llm_text, target_node, node_chain, user_id
+                    )
+                    if auto_drafts:
+                        if f_tool_meta is None:
+                            f_tool_meta = []
+                        f_tool_meta.extend(auto_drafts)
+
+                # Store source_mode for future mode-switch detection
+                if is_agentic and source_mode:
+                    if f_tool_meta is None:
+                        f_tool_meta = []
+                    f_tool_meta.append({
+                        "name": "_mode",
+                        "source_mode": source_mode,
+                    })
+
+                if f_tool_meta:
+                    target_node.tool_calls_meta = json.dumps(f_tool_meta)
+
+                # Mark proposal statuses as reported (deferred until
+                # after LLM success so they re-inject on retry)
+                if proposal_to_mark:
+                    _mark_status_reported(proposal_to_mark)
+
+                target_node.llm_task_status = 'completed'
+                target_node.llm_task_progress = 100
+                db.session.commit()
+
+                logger.info(
+                    f"LLM completion successful, updated node "
+                    f"{target_node.id}")
+
+                f_result = {
                     'parent_node_id': parent_node_id,
-                    'llm_node_id': llm_node.id,
-                    'status': 'cancelled',
-                    'reason': 'target_soft_deleted',
+                    'llm_node_id': target_node.id,
+                    'status': 'completed',
+                    'total_tokens': f_total_tokens,
                 }
+                if f_tool_meta:
+                    f_result['tool_calls_meta'] = f_tool_meta
+                return f_result
 
-            llm_node.set_content(llm_text)
-            # chars/4, NOT the provider's output_tokens: Node.token_count
-            # is the platform's stable information-content measure (gates,
-            # chunk windowing, balance decisions all sum it). Provider
-            # tokenizer counts drift upward across model generations
-            # (~1.5x chars/4 already), which skewed every window that
-            # mixed LLM replies with chars/4-counted user text. Real
-            # token usage lives in APICostLog.
-            llm_node.token_count = approximate_token_count(llm_text)
+            # ── Within-turn retrieval loop gating (#158) ───────────────────
+            # Both agentic modes (text + voice) run the bounded within-turn
+            # retrieval loop so read_artifact/read_todo resolve same-turn. Any
+            # other (non-agentic) caller — source_mode None — stays single-shot.
+            if source_mode not in ("textmode", "voice"):
+                # Single-shot: one model call, one node, no within-turn loop.
+                return _finalize(llm_node, response)
 
-            # Step 5b: Execute tool calls if any
-            tool_meta = None
-            if response_tool_calls:
-                logger.info(f"Executing {len(response_tool_calls)} tool calls")
-                tool_results = _execute_tool_calls(
-                    response_tool_calls, llm_node, node_chain, user_id
-                )
-                if response_truncated:
+            # ── Bounded within-turn retrieval loop (#158) ──────────────────
+            # When the model calls a retrieval tool, execute it, inject the
+            # retrieved content back into `messages` as a plain user message,
+            # finalize the current node as an interim step, create a
+            # continuation node, and re-call the model so it answers WITH the
+            # content in the same turn.
+            rounds_done = 0
+            current_node = llm_node
+            while True:
+                response_tool_calls = response.get("tool_calls", [])
+                retrieval_calls = [
+                    tc for tc in response_tool_calls
+                    if tc["name"] in RETRIEVAL_TOOLS
+                ]
+
+                # Race B guard on the node we're about to write to.
+                db.session.refresh(current_node)
+                if current_node.deleted_at is not None:
+                    logger.warning(
+                        "LLM target node %s was soft-deleted mid-generation; "
+                        "discarding response", current_node.id,
+                    )
+                    current_node.llm_task_status = 'cancelled'
+                    current_node.llm_task_progress = 100
+                    db.session.commit()
+                    return {
+                        'parent_node_id': parent_node_id,
+                        'llm_node_id': current_node.id,
+                        'status': 'cancelled',
+                        'reason': 'target_soft_deleted',
+                    }
+
+                # INTERIM step: retrieval requested and budget remaining.
+                if retrieval_calls and rounds_done < MAX_RETRIEVAL_ROUNDS:
+                    interim_text = response.get("content") or ""
+                    interim_truncated = response.get("truncated", False)
+
+                    # Cost for THIS model call (every call costs).
+                    _log_api_cost(response)
+
+                    # Execute ALL tool calls on the interim node.
+                    tool_results = _execute_tool_calls(
+                        response_tool_calls, current_node, node_chain,
+                        user_id,
+                    )
+                    if interim_truncated:
+                        for tr in tool_results:
+                            tr["response_truncated"] = True
+
+                    # Build the injection text for each retrieval call,
+                    # re-resolving content from the encrypted row, pinning the
+                    # exact version read to the interim node (faithful export),
+                    # and marking each handled here so the cross-turn scan
+                    # won't double-inject. Errors and vanished artifacts are
+                    # surfaced too, so the model isn't re-called blind.
+                    injection_strings = []
                     for tr in tool_results:
-                        tr["response_truncated"] = True
-                tool_meta = tool_results
+                        if tr.get("name") not in RETRIEVAL_TOOLS:
+                            continue
+                        tr["status_reported"] = True
+                        if tr.get("status") == "success":
+                            text = _retrieval_injection_text(tr)
+                            if text is not None:
+                                injection_strings.append(text)
+                                a_type, a_id = _retrieval_pin(tr)
+                                if a_type and a_id:
+                                    db.session.add(NodeContextArtifact(
+                                        node_id=current_node.id,
+                                        artifact_type=a_type,
+                                        artifact_id=a_id,
+                                    ))
+                            else:
+                                injection_strings.append(
+                                    f"[{tr.get('name')}: the requested item "
+                                    f"is no longer available.]")
+                        else:
+                            injection_strings.append(
+                                f"[{tr.get('name')} failed — "
+                                f"{tr.get('error', 'unknown error')}]")
 
-            # Step 5c: Auto-detect proposals in LLM text (Voice sessions)
-            if is_agentic:
-                auto_drafts = _auto_create_drafts(
-                    llm_text, llm_node, node_chain, user_id
-                )
-                if auto_drafts:
-                    if tool_meta is None:
-                        tool_meta = []
-                    tool_meta.extend(auto_drafts)
+                    # Finalize the interim node (NO _mode, NO proposal
+                    # auto-detect — that belongs to the final answer only).
+                    current_node.set_content(
+                        interim_text or "(looking that up…)")
+                    current_node.token_count = approximate_token_count(
+                        interim_text or "(looking that up…)")
+                    current_node.tool_calls_meta = json.dumps(tool_results)
+                    current_node.llm_task_status = 'completed'
+                    current_node.llm_task_progress = 100
 
-            # Store source_mode for future mode-switch detection
-            if is_agentic and source_mode:
-                if tool_meta is None:
-                    tool_meta = []
-                tool_meta.append({
-                    "name": "_mode",
-                    "source_mode": source_mode,
-                })
+                    # Create the continuation node that will hold the answer.
+                    llm_user = User.query.filter_by(
+                        username=model_id).first()
+                    continuation = Node(
+                        user_id=llm_user.id,
+                        parent_id=current_node.id,
+                        human_owner_id=user_id,
+                        node_type="llm",
+                        llm_model=model_id,
+                        llm_task_status='processing',
+                        privacy_level=current_node.privacy_level,
+                        ai_usage=current_node.ai_usage,
+                    )
+                    continuation.set_content(
+                        "[LLM response generation pending...]")
+                    continuation.token_count = approximate_token_count(
+                        "[LLM response generation pending...]")
+                    db.session.add(continuation)
+                    db.session.flush()
+                    current_node.continuation_node_id = continuation.id
+                    db.session.commit()
 
-            if tool_meta:
-                llm_node.tool_calls_meta = json.dumps(tool_meta)
+                    # Inject the assistant turn + retrieved content into the
+                    # message stream and re-call so the model answers WITH it.
+                    messages.append({
+                        "role": "assistant",
+                        "content": [{
+                            "type": "text",
+                            "text": interim_text or "(looking that up…)",
+                        }],
+                    })
+                    messages.append({
+                        "role": "user",
+                        "content": [{
+                            "type": "text",
+                            "text": "\n\n".join(injection_strings),
+                        }],
+                    })
 
-            # Mark proposal statuses as reported (deferred until
-            # after LLM success so they re-inject on retry)
-            if proposal_to_mark:
-                _mark_status_reported(proposal_to_mark)
+                    current_node = continuation
+                    rounds_done += 1
 
-            llm_node.llm_task_status = 'completed'
-            llm_node.llm_task_progress = 100
-            db.session.commit()
+                    self.update_state(state='PROGRESS', meta={
+                        'progress': 40,
+                        'status': 'Retrieving and continuing'})
+                    # Continuation call: plain call (no PromptTooLong retry).
+                    # The base messages already had any export reduction
+                    # applied on the first call; the injection adds only an
+                    # artifact body, which is small relative to the export.
+                    response = LLMProvider.get_completion(
+                        model_id, messages, api_keys,
+                        tools=agentic_tools,
+                    )
+                    continue
 
-            logger.info(f"LLM completion successful, updated node {llm_node.id}")
-
-            result = {
-                'parent_node_id': parent_node_id,
-                'llm_node_id': llm_node.id,
-                'status': 'completed',
-                'total_tokens': total_tokens,
-            }
-            if tool_meta:
-                result['tool_calls_meta'] = tool_meta
-            return result
+                # FINAL answer: no retrieval (or budget exhausted).
+                return _finalize(current_node, response)
 
         except Exception as e:
             error_message = str(e)

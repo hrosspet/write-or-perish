@@ -2,11 +2,13 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import MarkdownBody from '../components/MarkdownBody';
 import api from '../api';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
+import ArtifactsNav from '../components/ArtifactsNav';
 import SpeakerIcon from '../components/SpeakerIcon';
 import RegenerateTtsDialog from '../components/RegenerateTtsDialog';
 import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
 import { useUser } from '../contexts/UserContext';
 import useSubmitShortcut from '../hooks/useSubmitShortcut';
+import useEscapeKey from '../hooks/useEscapeKey';
 import { formatDate } from '../utils/date';
 
 export default function ProfilePage() {
@@ -160,17 +162,20 @@ export default function ProfilePage() {
 
   // Cmd+Return / Ctrl+Enter saves the profile while editing (#129).
   useSubmitShortcut(editTextareaRef, () => handleSave(), editing && !saving && !!editContent.trim());
+  // Esc cancels the edit (matches the Cancel button).
+  useEscapeKey(() => setEditing(false), editing && !saving);
 
   if (loading) {
     return (
       <div style={{ padding: '60px 24px', maxWidth: '800px', margin: '0 auto' }}>
-        <p style={{ color: 'var(--text-muted)' }}>Loading...</p>
+        <ArtifactsNav />
       </div>
     );
   }
 
   return (
     <div style={{ padding: '60px 24px', maxWidth: '800px', margin: '0 auto' }}>
+      <ArtifactsNav />
       {/* Header */}
       <div style={{ marginBottom: '8px', display: 'flex', alignItems: 'baseline', gap: '16px', flexWrap: 'wrap' }}>
         <h1 style={{

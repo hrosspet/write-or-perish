@@ -28,10 +28,13 @@ def _strip_heading_sections(text):
     """Extract spoken parts from a structured Voice response.
 
     Voice tool-use responses follow a fixed structure: an intro
-    sentence, then ### Completed / ### New Tasks / ### Priority Order /
-    ### Note sections. TTS should read the intro (text before the first
-    ### heading) and the ### Note section. The structured task lists
-    are displayed visually but not spoken.
+    sentence, then proposal sections (### Completed / ### New Tasks /
+    ### Priority Order / ### Note for todo, ### Issue Title / ### Description /
+    ### Category for issues, ### Feedback / ### Feedback category for feedback).
+    TTS reads the prose — the intro (before the first ### heading), the ### Note
+    body, and any trailing commentary the model appends below the structured
+    block (after a single-line Category / Feedback category value). The
+    structured lists/values are shown visually but not spoken.
     """
     import re
     # Extract intro text before the first ### heading
@@ -45,7 +48,15 @@ def _strip_heading_sections(text):
     )
     note = note_match.group(1).strip() if note_match else ""
 
-    parts = [p for p in [intro, note] if p]
+    # Extract trailing commentary the model appends after the structured block,
+    # below a single-line (Feedback) Category value, up to the next ### or EOF.
+    trailing_match = re.search(
+        r'^###\s+(?:feedback\s+)?category\s*\n[^\n]*(.*?)(?=^###\s|\Z)',
+        text, flags=re.MULTILINE | re.DOTALL | re.IGNORECASE
+    )
+    trailing = trailing_match.group(1).strip() if trailing_match else ""
+
+    parts = [p for p in [intro, note, trailing] if p]
     if parts:
         return "\n\n".join(parts)
     # Fallback: return full text if no structure detected
@@ -335,16 +346,19 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str,
                     'skipped': True,
                 }
 
-            # For Voice tool-use responses: strip structured ### sections
-            # only for todo proposals (TTS reads just the note).
-            # GitHub issue proposals should be read in full.
+            # For Voice tool-use responses: strip the structured ### sections
+            # (shown visually in the proposal card) so TTS speaks only the prose
+            # — intro, ### Note, and trailing commentary. Applies to every
+            # proposal type that renders a card (todo / issue / feedback);
+            # otherwise the heading words get read aloud.
             if node.tool_calls_meta:
                 try:
                     _meta = json.loads(node.tool_calls_meta)
                     _tool_names = {m.get('name') for m in _meta}
                 except (json.JSONDecodeError, TypeError):
                     _tool_names = set()
-                if _tool_names & {'propose_todo', 'propose_github_issue'}:
+                if _tool_names & {'propose_todo', 'propose_github_issue',
+                                  'propose_feedback'}:
                     text = _strip_heading_sections(text)
                 if not text.strip():
                     logger.debug(f"No conversational text after stripping sections for node {node_id}, skipping TTS")

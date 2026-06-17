@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { useParams, useNavigate, useSearchParams } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams, Link } from "react-router-dom";
 import { FaThumbtack, FaMicrophone } from "react-icons/fa";
 import NodeFooter from "./NodeFooter";
 import SpeakerIcon from "./SpeakerIcon";
 import DownloadAudioIcon from "./DownloadAudioIcon";
 import ModelSelector from "./ModelSelector";
 import NodeForm from "./NodeForm";
-import ProposalInline, { hasProposalSections, stripProposalSections } from "./ProposalInline";
+import ProposalInline, { hasProposalSections, splitProposalText } from "./ProposalInline";
 import { useUser } from "../contexts/UserContext";
 import { useToast } from "../contexts/ToastContext";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
@@ -200,6 +200,21 @@ function NodeDetail() {
       // Prefer the id of the node returned in payload; fall back to the
       // polled node id (llmTaskNodeId).
       const completedId = llmData.node?.id || llmTaskNodeId;
+      // Within-turn retrieval (#158): an interim node carries a
+      // continuation_node_id pointing at the node that holds (or will hold)
+      // the answer. Follow the chain — view the continuation and keep polling
+      // it — so the interim retrieval step renders as its own bubble and the
+      // final answer arrives in the next. Repeats for each retrieval round.
+      if (llmData.continuation_node_id) {
+        const contId = llmData.continuation_node_id;
+        // Navigate WITH ?awaitLlm so polling re-establishes on the
+        // continuation node — NodeDetail remounts on :id change, so bare
+        // llmTaskNodeId state would be lost (this matches WritePage's
+        // handoff). The awaitLlm effect picks it up after the remount.
+        setLlmTaskNodeId(null);
+        navigate(`/node/${contId}?awaitLlm=${contId}`);
+        return;
+      }
       if (completedId && String(completedId) === String(id)) {
         // We're already viewing the pending LLM node — patch its state
         // in place so the rendered content switches from "Thinking…" to
@@ -566,7 +581,11 @@ function NodeDetail() {
   );
   const showProposal = isLlmNode && !isLlmPending && node.content
     && hasProposalSections(node.content);
-  const displayContent = showProposal ? stripProposalSections(node.content) : node.content;
+  // When a proposal is present, the lead-in renders above the card and any
+  // trailing commentary below it (proposalAfter). Otherwise show full content.
+  const proposalSplit = showProposal ? splitProposalText(node.content) : null;
+  const displayContent = showProposal ? proposalSplit.before : node.content;
+  const proposalAfter = showProposal ? proposalSplit.after : '';
   // Inline input is always available to any viewer (reply + branch from
   // someone else's public node → new thread owned by the replier). The
   // only way to add a child text node since "Add Text" was removed. On
@@ -731,14 +750,16 @@ function NodeDetail() {
             `}</style>
           </div>
         ) : (
-          <QuotedContent
-            content={displayContent}
-            quotes={quotes}
-            contextArtifacts={node.context_artifacts || null}
-            onQuoteClick={handleBubbleClick}
-            onCheckboxToggle={isOwner ? handleCheckboxToggle : undefined}
-            onAddTask={isOwner ? handleTaskInsert : undefined}
-          />
+          (!showProposal || displayContent) && (
+            <QuotedContent
+              content={displayContent}
+              quotes={quotes}
+              contextArtifacts={node.context_artifacts || null}
+              onQuoteClick={handleBubbleClick}
+              onCheckboxToggle={isOwner ? handleCheckboxToggle : undefined}
+              onAddTask={isOwner ? handleTaskInsert : undefined}
+            />
+          )
         )}
         {showProposal && (
           <ProposalInline
@@ -748,8 +769,26 @@ function NodeDetail() {
             onContentChange={isOwner
               ? (newContent) => setNode(prev => prev ? { ...prev, content: newContent } : prev)
               : undefined}
+            onApplied={(toolName, updates) => setNode(prev => {
+              if (!prev || !Array.isArray(prev.tool_calls_meta)) return prev;
+              return {
+                ...prev,
+                tool_calls_meta: prev.tool_calls_meta.map(tc =>
+                  tc.name === toolName ? { ...tc, ...updates } : tc),
+              };
+            })}
             onError={(msg) => addToast(msg)}
           />
+        )}
+        {showProposal && proposalAfter && (
+          <div style={{ marginTop: '20px' }}>
+            <QuotedContent
+              content={proposalAfter}
+              quotes={quotes}
+              contextArtifacts={node.context_artifacts || null}
+              onQuoteClick={handleBubbleClick}
+            />
+          </div>
         )}
         {(() => {
           const visibleTools = (node.tool_calls_meta || [])
@@ -783,6 +822,9 @@ function NodeDetail() {
                     {tc.name === 'propose_github_issue' && (
                       <>Issue proposed{tc.apply_status === 'completed' && ' (created)'}{tc.apply_status === 'failed' && ' (failed)'}</>
                     )}
+                    {tc.name === 'propose_feedback' && (
+                      <>Feedback proposed{tc.apply_status === 'completed' && ' (sent)'}{tc.apply_status === 'failed' && ' (failed)'}</>
+                    )}
                     {tc.name === 'apply_todo_changes' && (
                       tc.status !== 'success' ? 'Todo apply failed'
                         : tc.apply_status === 'completed' ? 'Todo changes applied'
@@ -792,8 +834,17 @@ function NodeDetail() {
                     {tc.name === 'apply_github_issue' && (
                       tc.status === 'success' ? 'Issue creation confirmed' : 'Issue creation failed'
                     )}
+                    {tc.name === 'apply_feedback' && (
+                      tc.status === 'success' ? 'Feedback sent' : 'Feedback send failed'
+                    )}
                     {tc.name === 'update_ai_preferences' && 'Preferences updated'}
-                    {!['propose_todo', 'propose_github_issue', 'apply_todo_changes', 'apply_github_issue', 'update_ai_preferences'].includes(tc.name) && tc.name}
+                    {tc.name === 'update_artifact' && (
+                      <>{tc.created ? 'Created' : 'Updated'} artifact{tc.kind ? <> <Link to={`/artifacts/${tc.kind}`} style={{ color: 'var(--accent)', textDecoration: 'none' }}><code style={{ fontSize: '0.95em' }}>{tc.kind}</code></Link></> : ''}</>
+                    )}
+                    {tc.name === 'read_artifact' && (
+                      <>Read artifact{tc.kind ? <> <Link to={`/artifacts/${tc.kind}`} style={{ color: 'var(--accent)', textDecoration: 'none' }}><code style={{ fontSize: '0.95em' }}>{tc.kind}</code></Link></> : ''}</>
+                    )}
+                    {!['propose_todo', 'propose_github_issue', 'propose_feedback', 'apply_todo_changes', 'apply_github_issue', 'apply_feedback', 'update_ai_preferences', 'update_artifact', 'read_artifact'].includes(tc.name) && tc.name}
                     {tc.error && <span style={{ color: 'var(--accent)', marginLeft: '8px' }}> — {tc.error}</span>}
                   </div>
                 ))}

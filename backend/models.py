@@ -243,6 +243,15 @@ class Node(db.Model):
     # Tool call metadata for LLM nodes (JSON list of tool call logs)
     tool_calls_meta = db.Column(db.Text, nullable=True)
 
+    # Within-turn retrieval chaining (#158): when a text-mode LLM node makes
+    # a retrieval tool call, it is finalized as an interim node and a
+    # continuation node is created to hold the answer. This self-FK links the
+    # interim node to its continuation so callers can follow the chain to the
+    # final answer within a single turn.
+    continuation_node_id = db.Column(
+        db.Integer, db.ForeignKey("node.id"), nullable=True
+    )
+
     # Pin-to-profile: surfaces any node on Dashboard & Feed
     pinned_at = db.Column(db.DateTime, nullable=True)
     pinned_by = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
@@ -296,6 +305,21 @@ class Node(db.Model):
     def has_artifact(self, artifact_type):
         return self.get_artifact_row(artifact_type) is not None
 
+    def get_user_artifacts(self):
+        """Load pinned UserArtifact instances ({kind: artifact}).
+
+        Multiple "user_artifact" rows may exist per node (one per kind,
+        pinned at session start — #191).
+        """
+        result = {}
+        for a in self.context_artifacts:
+            if a.artifact_type != "user_artifact":
+                continue
+            row = UserArtifact.query.get(a.artifact_id)
+            if row is not None:
+                result[row.kind] = row
+        return result
+
     def get_artifact(self, artifact_type):
         """Load and return the actual model instance for *artifact_type*."""
         row = self.get_artifact_row(artifact_type)
@@ -309,8 +333,8 @@ class Node(db.Model):
             return UserTodo.query.get(row.artifact_id)
         if artifact_type == "recent_context":
             return UserRecentContext.query.get(row.artifact_id)
-        if artifact_type == "ai_preferences":
-            return UserAIPreferences.query.get(row.artifact_id)
+        # ai_preferences is a UserArtifact now (#158 Slice 5), resolved via
+        # get_user_artifacts() like other artifact kinds — not here.
         return None
 
     # ----- Content ---------------------------------------------------------
@@ -353,10 +377,16 @@ class NodeContextArtifact(db.Model):
         single_parent=True,
     )
 
+    # artifact_id is part of the key because "user_artifact" is a multi-row
+    # type (#158) — one pinned row per artifact kind on the same node. A
+    # (node_id, artifact_type) unique constraint wrongly forbade that and
+    # 500'd attach_context_artifacts whenever a user had 2+ artifact kinds.
+    # Including artifact_id still prevents exact-duplicate pins while allowing
+    # the per-kind rows (single-row types pin one artifact_id, so unaffected).
     __table_args__ = (
         db.UniqueConstraint(
-            'node_id', 'artifact_type',
-            name='uq_node_artifact_type',
+            'node_id', 'artifact_type', 'artifact_id',
+            name='uq_node_artifact_type_id',
         ),
     )
 
@@ -564,6 +594,104 @@ class UserAIPreferences(db.Model):
     ai_usage = db.Column(db.String(16), nullable=False, default="chat")
 
     user = db.relationship("User", backref="ai_preferences")
+
+    def set_content(self, plaintext):
+        self.content = encrypt_content(plaintext)
+
+    def get_content(self):
+        return decrypt_content(self.content)
+
+
+class UserArtifact(db.Model):
+    """Generic named user artifact (issue #158): "memory", "scratchpad",
+    and user/LLM-created artifacts.
+
+    Append-only versioning like UserAIPreferences — each update inserts a
+    new row; the latest row per (user_id, kind) is current. Content is
+    encrypted at rest and included in data exports as a default Loore
+    artifact.
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    # Slug identifying the artifact across versions, e.g. "memory".
+    kind = db.Column(db.String(48), nullable=False, index=True)
+    title = db.Column(db.String(128), nullable=False)
+    # One-line summary of what this artifact is for / contains. Powers the
+    # agentic artifacts index (so the AI can judge what to read) and the nav
+    # dropdown subtitle. Carried forward across versions like title.
+    description = db.Column(db.String(255), nullable=True)
+    content = db.Column(db.Text, nullable=False)
+    generated_by = db.Column(db.String(64), nullable=False)
+    tokens_used = db.Column(db.Integer, nullable=False, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    privacy_level = db.Column(db.String(16), nullable=False, default="private")
+    # Artifacts are LLM working memory — must be AI-readable to function.
+    ai_usage = db.Column(db.String(16), nullable=False, default="chat")
+
+    user = db.relationship("User", backref="artifacts")
+
+    # Default artifacts every user has (created lazily on first write).
+    # "predictions" is surfaced in the UI as an empty editable artifact, but
+    # has no dedicated agentic-prompt wiring yet (no {user_predictions}
+    # placeholder) — it behaves like any custom artifact until written.
+    DEFAULT_KINDS = {
+        "memory": "Memory",
+        "scratchpad": "Scratchpad",
+        "predictions": "Predictions",
+        # AI interaction preferences folded into the artifact model (#158
+        # Slice 5). Always-inline (its own {user_ai_preferences} placeholder),
+        # so it's excluded from the agentic index — see ALWAYS_INLINE_KINDS.
+        "ai_preferences": "AI Interaction Preferences",
+    }
+
+    # Pre-filled one-line descriptions for the built-in kinds. Custom kinds
+    # get their description from whoever creates them (the AI sets it when it
+    # creates a new kind; the user can set it in the create modal).
+    # "{name}" is substituted with the user's username when served/rendered.
+    DEFAULT_DESCRIPTIONS = {
+        "memory": "Durable facts about {name}, remembered across sessions.",
+        "scratchpad": "Working notes for ongoing threads — where we left off, open questions.",
+        "predictions": "Predictions you want to record and revisit over time.",
+        "ai_preferences": "How {name} wants the AI to interact with them — tone, style, boundaries.",
+    }
+
+    def set_content(self, plaintext):
+        self.content = encrypt_content(plaintext)
+
+    def get_content(self):
+        return decrypt_content(self.content)
+
+    @classmethod
+    def latest_for(cls, user_id, kind):
+        return cls.query.filter_by(user_id=user_id, kind=kind).order_by(
+            cls.created_at.desc(), cls.id.desc()).first()
+
+    @classmethod
+    def latest_per_kind(cls, user_id):
+        """Latest version of every artifact kind the user has, as a dict."""
+        rows = cls.query.filter_by(user_id=user_id).order_by(
+            cls.created_at.asc(), cls.id.asc()).all()
+        latest = {}
+        for row in rows:
+            latest[row.kind] = row  # later rows overwrite earlier
+        return latest
+
+
+class UserFeedback(db.Model):
+    """User feedback proposed by the AI (under a ### Feedback heading) and
+    sent only after the user confirms — via the Send button
+    (/api/feedback/submit) or the apply_feedback tool (#158). For batch
+    triage by the creators."""
+    __tablename__ = "user_feedback"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    category = db.Column(db.String(32), nullable=False, default="general")
+    source = db.Column(db.String(16), nullable=False, default="llm")
+    status = db.Column(db.String(16), nullable=False, default="new")
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+
+    user = db.relationship("User", backref="feedback_items")
 
     def set_content(self, plaintext):
         self.content = encrypt_content(plaintext)

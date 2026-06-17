@@ -2,7 +2,7 @@ from flask import Blueprint, request, jsonify, current_app
 from flask_login import login_required, current_user
 from backend.models import (
     Node, NodeVersion, UserPrompt, UserProfile, UserTodo,
-    UserRecentContext, UserAIPreferences,
+    UserRecentContext, UserArtifact,
 )
 from backend.extensions import db
 from backend.utils.timefmt import iso_utc
@@ -387,16 +387,22 @@ def _context_artifact_fields(n):
                     "id": rc.id,
                     "content": rc.get_content(),
                 }
-        elif row.artifact_type == "ai_preferences":
-            prefs = UserAIPreferences.query.get(row.artifact_id)
-            if prefs:
+        elif row.artifact_type == "user_artifact":
+            # ai_preferences is folded into UserArtifact (#158 Slice 5) and
+            # pinned as a user_artifact row — surface it under the
+            # "ai_preferences" key so the {user_ai_preferences} inline section
+            # resolves. Other kinds (memory/scratchpad/...) have no inline
+            # placeholder in QuotedContent, so they're skipped here.
+            art = UserArtifact.query.get(row.artifact_id)
+            if art and art.kind == "ai_preferences":
                 artifacts["ai_preferences"] = {
-                    "id": prefs.id,
-                    "version_number": UserAIPreferences.query.filter(
-                        UserAIPreferences.user_id == prefs.user_id,
-                        UserAIPreferences.created_at <= prefs.created_at,
+                    "id": art.id,
+                    "version_number": UserArtifact.query.filter(
+                        UserArtifact.user_id == art.user_id,
+                        UserArtifact.kind == "ai_preferences",
+                        UserArtifact.created_at <= art.created_at,
                     ).count(),
-                    "content": prefs.get_content(),
+                    "content": art.get_content(),
                 }
     # If this is a system prompt node with {user_recent_raw}, compute
     # the raw data date range (lightweight SQL, no decryption).
@@ -1591,7 +1597,11 @@ def get_llm_status(node_id):
         "status": node.llm_task_status,
         "progress": node.llm_task_progress or 0,
         "error": node.llm_task_error,
-        "task_info": task_info
+        "task_info": task_info,
+        # Within-turn retrieval chaining (#158): non-null when this node was
+        # finalized as an interim retrieval step and the answer lives on the
+        # linked continuation node.
+        "continuation_node_id": node.continuation_node_id,
     }
 
     # Include content when completed (needed by VoicePage polling)

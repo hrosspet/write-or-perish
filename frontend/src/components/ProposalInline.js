@@ -47,7 +47,13 @@ export function parseOrientResponse(text) {
     else if (heading.includes('note')) sections.note = stripProposalTag(body);
     else if (heading.includes('issue title') || heading === 'title') sections.issueTitle = stripProposalTag(body).trim();
     else if (heading === 'description') sections.issueDescription = stripProposalTag(body).trim();
-    else if (heading === 'category') sections.issueCategory = stripProposalTag(body).trim().toLowerCase();
+    // Category badges take the first line only — the model sometimes adds a
+    // closing remark after the category value, which would otherwise leak into
+    // the badge. The backend parsers (parse_github_issue / parse_feedback)
+    // already take line one, so this just matches the display to the data.
+    else if (heading === 'category') sections.issueCategory = stripProposalTag(body).split('\n')[0].trim().toLowerCase();
+    else if (heading === 'feedback') sections.feedback = stripProposalTag(body).trim();
+    else if (heading === 'feedback category') sections.feedbackCategory = stripProposalTag(body).split('\n')[0].trim().toLowerCase();
   }
   return sections;
 }
@@ -59,7 +65,8 @@ export function hasProposalSections(text) {
   const hasTodo = headings.some(h => taskKeywords.some(kw => h.includes(kw)));
   const hasIssue = headings.some(h => h.includes('issue title') || h === 'title') &&
                    headings.some(h => h.includes('description'));
-  return hasTodo || hasIssue;
+  const hasFeedback = headings.some(h => h === 'feedback');
+  return hasTodo || hasIssue || hasFeedback;
 }
 
 /**
@@ -129,29 +136,71 @@ export function moveProposalItem(content, itemText, fromSection, toSection, { pr
   return lines.join('\n');
 }
 
-export function stripProposalSections(text) {
-  if (!text) return text;
+// Split a response that carries a proposal into the prose around it:
+//   before — the lead-in shown above the proposal card,
+//   after  — trailing commentary the model appended below the structured
+//            block (it likes to sign off after the proposal).
+// The structured sections themselves (lists / single values) are rendered in
+// the card and excluded from both. Single-line-value sections (Category /
+// Feedback category) consume only their one value line, so a following
+// non-empty line is treated as the start of the trailing commentary. Todo
+// dodges all this via its ### Note section, which renders inside the card.
+export function splitProposalText(text) {
+  if (!text) return { before: '', after: '' };
   const lines = text.split('\n');
-  const result = [];
+  const before = [];
+  const after = [];
   let inProposal = false;
+  let valueSection = false;
+  let valueConsumed = false;
+  let seenProposal = false;
   const proposalHeadings = ['completed', 'new task', 'new tasks', 'priority', 'priority order',
-    'note', 'issue title', 'title', 'description', 'category'];
+    'note', 'issue title', 'title', 'description', 'category', 'feedback'];
+  const isValueHeading = (h) => h === 'category' || h === 'feedback category';
+  const keep = (line) => (seenProposal ? after : before).push(line);
   for (const line of lines) {
     const headingMatch = line.match(/^###\s+(.+)/);
     if (headingMatch) {
       const h = headingMatch[1].trim().toLowerCase();
       if (proposalHeadings.some(kw => h.includes(kw) || h === kw)) {
         inProposal = true;
+        valueSection = isValueHeading(h);
+        valueConsumed = false;
+        seenProposal = true;
         continue;
       } else {
         inProposal = false;
+        valueSection = false;
       }
     }
+    if (inProposal && valueSection) {
+      if (line.trim() === '') {
+        continue;  // drop blank lines around the value
+      }
+      if (!valueConsumed) {
+        valueConsumed = true;
+        continue;  // drop the single value line itself
+      }
+      // First non-empty line after the value = trailing commentary.
+      inProposal = false;
+      valueSection = false;
+      keep(line);
+      continue;
+    }
     if (!inProposal) {
-      result.push(line);
+      keep(line);
     }
   }
-  return result.join('\n').trim();
+  return {
+    before: before.join('\n').trim(),
+    after: after.join('\n').trim(),
+  };
+}
+
+export function stripProposalSections(text) {
+  if (!text) return text;
+  const { before, after } = splitProposalText(text);
+  return [before, after].filter(Boolean).join('\n\n');
 }
 
 // Decorative pulsing dot rendered next to section labels in the roomy
@@ -410,12 +459,14 @@ export default function ProposalInline({
   nodeId,
   toolCallsMeta,
   onContentChange,
+  onApplied,
   onError,
   size = 'compact',
 }) {
   const parsed = parseOrientResponse(content || '');
   const hasTodo = parsed.completed || parsed.newTasks || parsed.priority || parsed.note;
   const hasIssue = parsed.issueTitle && parsed.issueDescription;
+  const hasFeedback = !!parsed.feedback;
   const [applyStatus, setApplyStatus] = useState(null);
   // Which row (if any) currently has its inline add-input open. Lifted here so
   // opening one row's "+" closes any other — and clicking a second "+" switches
@@ -425,6 +476,8 @@ export default function ProposalInline({
   const [issueApplyStatus, setIssueApplyStatus] = useState(null);
   const [issueApplyError, setIssueApplyError] = useState(null);
   const [issueResult, setIssueResult] = useState(null);
+  const [feedbackApplyStatus, setFeedbackApplyStatus] = useState(null);
+  const [feedbackApplyError, setFeedbackApplyError] = useState(null);
   const mergePollingRef = useRef(null);
   const styles = sizeStyles(size);
   const toggleable = typeof onContentChange === 'function'
@@ -490,6 +543,13 @@ export default function ProposalInline({
       setIssueApplyStatus('completed');
       setIssueResult({ issue_url: applyIssueCall.issue_url, issue_number: applyIssueCall.issue_number });
     }
+    const feedbackEntry = toolCallsMeta.find(tc => tc.name === 'propose_feedback');
+    const applyFeedbackCall = toolCallsMeta.find(tc => tc.name === 'apply_feedback');
+    if (feedbackEntry && feedbackEntry.apply_status === 'completed') {
+      setFeedbackApplyStatus('completed');
+    } else if (applyFeedbackCall && applyFeedbackCall.status === 'success') {
+      setFeedbackApplyStatus('completed');
+    }
   }, [toolCallsMeta]);
 
   useEffect(() => {
@@ -508,15 +568,20 @@ export default function ProposalInline({
           if (todoEntry?.apply_status === 'completed') {
             clearInterval(mergePollingRef.current);
             setApplyStatus('completed');
+            onApplied?.('propose_todo', { apply_status: 'completed' });
           } else if (todoEntry?.apply_status === 'failed') {
             clearInterval(mergePollingRef.current);
             setApplyStatus('error');
             setApplyError(todoEntry.apply_error || 'Todo merge failed');
+            onApplied?.('propose_todo', {
+              apply_status: 'failed',
+              apply_error: todoEntry.apply_error || 'Todo merge failed',
+            });
           }
         }
       } catch { /* keep polling */ }
     }, 2000);
-  }, []);
+  }, [onApplied]);
 
   const handleApplyTodo = useCallback(async () => {
     if (!nodeId) return;
@@ -538,20 +603,41 @@ export default function ProposalInline({
       const res = await api.post('/github/create-issue', { llm_node_id: nodeId });
       setIssueApplyStatus('completed');
       setIssueResult(res.data);
+      onApplied?.('propose_github_issue', {
+        apply_status: 'completed',
+        issue_url: res.data?.issue_url,
+        issue_number: res.data?.issue_number,
+      });
     } catch (err) {
       const msg = err?.response?.data?.error || 'Issue creation failed';
       setIssueApplyStatus('error');
       setIssueApplyError(msg);
     }
-  }, [nodeId]);
+  }, [nodeId, onApplied]);
+
+  const handleSendFeedback = useCallback(async () => {
+    if (!nodeId) return;
+    setFeedbackApplyStatus('started');
+    try {
+      const res = await api.post('/feedback/submit', { llm_node_id: nodeId });
+      setFeedbackApplyStatus('completed');
+      onApplied?.('propose_feedback', {
+        apply_status: 'completed', feedback_id: res.data?.feedback_id });
+    } catch (err) {
+      const msg = err?.response?.data?.error || 'Feedback send failed';
+      setFeedbackApplyStatus('error');
+      setFeedbackApplyError(msg);
+    }
+  }, [nodeId, onApplied]);
 
   const hasTodoUpdate = hasTodo || toolCallsMeta?.some(tc => tc.name === 'propose_todo');
   const hasGithubIssue = hasIssue || toolCallsMeta?.some(tc => tc.name === 'propose_github_issue');
+  const hasFeedbackProposal = hasFeedback || toolCallsMeta?.some(tc => tc.name === 'propose_feedback');
   const hasPrefsUpdate = toolCallsMeta?.some(
     tc => tc.name === 'update_ai_preferences' && tc.status === 'success'
   );
 
-  if (!hasTodoUpdate && !hasGithubIssue && !hasPrefsUpdate) return null;
+  if (!hasTodoUpdate && !hasGithubIssue && !hasFeedbackProposal && !hasPrefsUpdate) return null;
 
   const StatusTag = styles.statusTag;
   const sectionLabel = (text) => (
@@ -695,6 +781,45 @@ export default function ProposalInline({
             {issueApplyStatus === 'error' && (
               <StatusTag style={{ ...styles.statusText, color: 'var(--accent)' }}>
                 {issueApplyError || 'Issue creation failed'}
+              </StatusTag>
+            )}
+          </div>
+        </div>
+      )}
+
+      {hasFeedbackProposal && parsed.feedback && (
+        <div style={styles.issueWrapper}>
+          {sectionLabel(styles.roomy ? 'Feedback for the Team' : 'Feedback')}
+          <div style={styles.issueCard}>
+            <MarkdownBody
+              style={styles.issueDescStyle}
+              paragraphMargin={styles.roomy ? '0 0 8px 0' : '0 0 6px 0'}
+            >
+              {parsed.feedback}
+            </MarkdownBody>
+            {parsed.feedbackCategory && (
+              <span style={styles.issueCategory}>{parsed.feedbackCategory}</span>
+            )}
+          </div>
+          <div style={styles.issueButtonWrapper}>
+            {!feedbackApplyStatus && (
+              <button onClick={handleSendFeedback} style={styles.button}>
+                {styles.roomy ? 'Send feedback to the team' : 'Send feedback'}
+              </button>
+            )}
+            {feedbackApplyStatus === 'started' && (
+              <StatusTag style={{ ...styles.statusText, color: 'var(--text-muted)' }}>
+                Sending…
+              </StatusTag>
+            )}
+            {feedbackApplyStatus === 'completed' && (
+              <StatusTag style={{ ...styles.statusText, color: 'var(--success)' }}>
+                Feedback sent — thank you
+              </StatusTag>
+            )}
+            {feedbackApplyStatus === 'error' && (
+              <StatusTag style={{ ...styles.statusText, color: 'var(--accent)' }}>
+                {feedbackApplyError || 'Feedback send failed'}
               </StatusTag>
             )}
           </div>

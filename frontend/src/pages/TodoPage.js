@@ -3,7 +3,9 @@ import api from '../api';
 import { useCheckboxToggle, useTaskInsert, appendItemToSection } from '../utils/markdown';
 import { formatDate } from '../utils/date';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
+import ArtifactsNav from '../components/ArtifactsNav';
 import useSubmitShortcut from '../hooks/useSubmitShortcut';
+import useEscapeKey from '../hooks/useEscapeKey';
 
 /**
  * Parse markdown checklist into sections with nested items.
@@ -369,6 +371,9 @@ export default function TodoPage() {
   // textarea; the quick-add input handles plain Enter itself.
   useSubmitShortcut(editTextareaRef, () => handleSave(), editing && !saving && !!editContent.trim());
   useSubmitShortcut(quickAddInputRef, () => handleQuickAdd(), quickAddOpen && !quickAddSaving && !!quickAddText.trim());
+  // Esc cancels the edit (matches the Cancel button). The quick-add input
+  // handles its own Esc inline.
+  useEscapeKey(() => { setEditing(false); if (todo) setEditContent(todo.content); }, editing && !saving);
 
   const generatedByLabel = (g) => {
     if (g === 'user' || g === 'manual') return 'edited manually';
@@ -384,13 +389,14 @@ export default function TodoPage() {
   if (loading) {
     return (
       <div style={{ padding: '60px 24px', maxWidth: '800px', margin: '0 auto' }}>
-        <p style={{ color: 'var(--text-muted)' }}>Loading...</p>
+        <ArtifactsNav />
       </div>
     );
   }
 
   return (
     <div style={{ padding: '60px 24px', maxWidth: '800px', margin: '0 auto' }}>
+      <ArtifactsNav />
       {/* Header */}
       <div style={{ marginBottom: '8px', display: 'flex', alignItems: 'baseline', gap: '16px', flexWrap: 'wrap' }}>
         <h1 style={{
