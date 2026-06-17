@@ -317,7 +317,7 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
               ref={modalNameRef}
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
-              placeholder="Name"
+              placeholder="artifact-name (lowercase, dashes)"
               autoFocus
               style={{
                 width: "100%",
