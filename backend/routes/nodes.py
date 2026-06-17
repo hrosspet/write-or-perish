@@ -2,7 +2,7 @@ from flask import Blueprint, request, jsonify, current_app
 from flask_login import login_required, current_user
 from backend.models import (
     Node, NodeVersion, UserPrompt, UserProfile, UserTodo,
-    UserRecentContext, UserAIPreferences, UserArtifact,
+    UserRecentContext, UserArtifact,
 )
 from backend.extensions import db
 from backend.utils.timefmt import iso_utc
@@ -387,24 +387,12 @@ def _context_artifact_fields(n):
                     "id": rc.id,
                     "content": rc.get_content(),
                 }
-        elif row.artifact_type == "ai_preferences":
-            # Legacy pin type (pre-#158 Slice 5 nodes).
-            prefs = UserAIPreferences.query.get(row.artifact_id)
-            if prefs:
-                artifacts["ai_preferences"] = {
-                    "id": prefs.id,
-                    "version_number": UserAIPreferences.query.filter(
-                        UserAIPreferences.user_id == prefs.user_id,
-                        UserAIPreferences.created_at <= prefs.created_at,
-                    ).count(),
-                    "content": prefs.get_content(),
-                }
         elif row.artifact_type == "user_artifact":
-            # Since Slice 5, ai_preferences is folded into UserArtifact and
+            # ai_preferences is folded into UserArtifact (#158 Slice 5) and
             # pinned as a user_artifact row — surface it under the
             # "ai_preferences" key so the {user_ai_preferences} inline section
-            # still resolves. Other kinds (memory/scratchpad/...) have no
-            # inline placeholder in QuotedContent, so they're skipped here.
+            # resolves. Other kinds (memory/scratchpad/...) have no inline
+            # placeholder in QuotedContent, so they're skipped here.
             art = UserArtifact.query.get(row.artifact_id)
             if art and art.kind == "ai_preferences":
                 artifacts["ai_preferences"] = {

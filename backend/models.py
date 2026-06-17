@@ -333,8 +333,8 @@ class Node(db.Model):
             return UserTodo.query.get(row.artifact_id)
         if artifact_type == "recent_context":
             return UserRecentContext.query.get(row.artifact_id)
-        if artifact_type == "ai_preferences":
-            return UserAIPreferences.query.get(row.artifact_id)
+        # ai_preferences is a UserArtifact now (#158 Slice 5), resolved via
+        # get_user_artifacts() like other artifact kinds — not here.
         return None
 
     # ----- Content ---------------------------------------------------------

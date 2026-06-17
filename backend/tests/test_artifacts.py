@@ -578,19 +578,20 @@ def test_index_excludes_ai_preferences(app):
         assert "ai_preferences" not in index
 
 
-def test_ai_preferences_content_prefers_artifact(app):
-    """get_user_ai_preferences_content reads the folded UserArtifact; it falls
-    back to the legacy UserAIPreferences only when no artifact exists."""
+def test_ai_preferences_content_reads_artifact_only(app):
+    """get_user_ai_preferences_content reads the folded UserArtifact only —
+    the legacy UserAIPreferences fallback was dropped (the table goes in
+    #219), so a bare legacy row is no longer surfaced."""
     with app.app_context():
         uid = User.query.first().id
-        # Legacy fallback when no artifact yet.
+        # A legacy UserAIPreferences row is NOT a fallback anymore.
         legacy = UserAIPreferences(user_id=uid, generated_by="test")
         legacy.set_content("legacy prefs")
         _db.session.add(legacy)
         _db.session.commit()
-        assert get_user_ai_preferences_content(uid) == "legacy prefs"
+        assert get_user_ai_preferences_content(uid) is None
 
-        # Once a UserArtifact exists, it wins over the legacy row.
+        # The UserArtifact is the source of truth.
         _mk_artifact(uid, "ai_preferences", "folded prefs",
                      title="AI Interaction Preferences")
         assert get_user_ai_preferences_content(uid) == "folded prefs"

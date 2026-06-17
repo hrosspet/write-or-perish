@@ -2,7 +2,7 @@ from flask import Blueprint, jsonify, Response, request, current_app
 from flask_login import login_required, current_user
 from backend.models import (
     Node, NodeVersion, UserProfile, UserPrompt, UserTodo,
-    UserAIPreferences, UserArtifact,
+    UserArtifact,
 )
 from backend.extensions import db
 from backend.utils.tokens import approximate_token_count, get_model_context_window
@@ -156,15 +156,8 @@ def _artifact_ref_lines(node):
         ).count()
         lines.append(f"[User TODO v{todo_ver} (ref #{todo.id})]")
 
-    ai_prefs = node.get_artifact("ai_preferences")
-    if ai_prefs is not None:
-        ai_prefs_ver = UserAIPreferences.query.filter(
-            UserAIPreferences.user_id == ai_prefs.user_id,
-            UserAIPreferences.created_at <= ai_prefs.created_at,
-        ).count()
-        lines.append(
-            f"[AI Preferences v{ai_prefs_ver} (ref #{ai_prefs.id})]")
-
+    # ai_preferences is a UserArtifact (#158 Slice 5) → it flows through the
+    # user_artifact loop below as [Artifact 'ai_preferences' vN].
     for kind, artifact in sorted(node.get_user_artifacts().items()):
         artifact_ver = UserArtifact.query.filter(
             UserArtifact.user_id == artifact.user_id,
@@ -1143,7 +1136,6 @@ def build_user_export_content(
         prompt_versions = {}
         profile_versions = {}
         todo_versions = {}
-        ai_prefs_versions = {}
         artifact_versions = {}
         for top_node in top_level_nodes:
             tree_nodes = _collect_all_nodes_in_tree(
@@ -1186,18 +1178,8 @@ def build_user_export_content(
                         "version": tver,
                         "content": todo.get_content(),
                     }
-                # AI preferences artifacts
-                ai_prefs = n.get_artifact("ai_preferences")
-                if ai_prefs is not None and ai_prefs.id not in ai_prefs_versions:
-                    aver = UserAIPreferences.query.filter(
-                        UserAIPreferences.user_id == ai_prefs.user_id,
-                        UserAIPreferences.created_at <= ai_prefs.created_at,
-                    ).count()
-                    ai_prefs_versions[ai_prefs.id] = {
-                        "version": aver,
-                        "content": ai_prefs.get_content(),
-                    }
-                # User artifacts (memory, scratchpad, predictions, custom):
+                # User artifacts (memory, scratchpad, predictions,
+                # ai_preferences, custom):
                 # one entry per referenced version, full content.
                 for kind, artifact in sorted(n.get_user_artifacts().items()):
                     if artifact.id in artifact_versions:
@@ -1216,7 +1198,7 @@ def build_user_export_content(
 
         has_any_preamble = (
             prompt_versions or profile_versions or todo_versions
-            or ai_prefs_versions or artifact_versions
+            or artifact_versions
         )
         if prompt_versions:
             export_lines.append("## System Prompts Referenced\n")
@@ -1258,23 +1240,8 @@ def build_user_export_content(
                 export_lines.append("")
                 if i < len(sorted_tids) - 1:
                     export_lines.append("===\n")
-        if ai_prefs_versions:
-            if prompt_versions or profile_versions or todo_versions:
-                export_lines.append("===\n")
-            export_lines.append("## AI Preferences Referenced\n")
-            sorted_aids = sorted(ai_prefs_versions)
-            for i, aid in enumerate(sorted_aids):
-                av = ai_prefs_versions[aid]
-                export_lines.append(
-                    f"### AI Preferences v{av['version']} (ref #{aid})\n"
-                )
-                export_lines.append(av["content"])
-                export_lines.append("")
-                if i < len(sorted_aids) - 1:
-                    export_lines.append("===\n")
         if artifact_versions:
-            if (prompt_versions or profile_versions or todo_versions
-                    or ai_prefs_versions):
+            if prompt_versions or profile_versions or todo_versions:
                 export_lines.append("===\n")
             export_lines.append("## Artifacts Referenced\n")
             sorted_artids = sorted(artifact_versions)

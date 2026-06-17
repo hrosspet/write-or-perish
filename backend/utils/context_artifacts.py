@@ -4,17 +4,18 @@ import re
 from backend.extensions import db
 from backend.models import (
     NodeContextArtifact, UserProfile, UserRecentContext, UserTodo,
-    UserAIPreferences, UserArtifact,
+    UserArtifact,
 )
 from backend.utils.privacy import AI_ALLOWED
 
-# Mapping from placeholder name to artifact_type in NodeContextArtifact
+# Mapping from placeholder name to artifact_type in NodeContextArtifact.
+# ai_preferences folded into the UserArtifact model (#158 Slice 5), so its
+# placeholder pins the multi-row user_artifact type like memory/scratchpad.
 PLACEHOLDER_TO_ARTIFACT = {
     'user_profile': 'profile',
     'user_todo': 'todo',
     'user_recent': 'recent_context',
-    'user_ai_preferences': 'ai_preferences',
-    # All three artifact placeholders pin the same multi-row type (#158)
+    'user_ai_preferences': 'user_artifact',
     'user_memory': 'user_artifact',
     'user_scratchpad': 'user_artifact',
     'user_artifacts_index': 'user_artifact',
@@ -193,14 +194,8 @@ def _resolve_latest_artifact(artifact_type, user_id):
         else:
             q = q.filter(UserRecentContext.profile_id.is_(None))
         row = q.order_by(UserRecentContext.created_at.desc()).first()
-    elif artifact_type == 'ai_preferences':
-        row = (
-            UserAIPreferences.query
-            .filter_by(user_id=user_id)
-            .filter(UserAIPreferences.ai_usage.in_(AI_ALLOWED))
-            .order_by(UserAIPreferences.created_at.desc())
-            .first()
-        )
     else:
+        # ai_preferences is a user_artifact now (#158 Slice 5), handled by the
+        # user_artifact branch in sync_context_artifacts, not here.
         return None
     return row.id if row else None

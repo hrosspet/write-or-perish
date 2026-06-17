@@ -70,7 +70,7 @@ from flask import Flask  # noqa: E402
 
 from backend.extensions import db  # noqa: E402
 from backend.models import (  # noqa: E402
-    User, UserProfile, UserRecentContext, UserTodo, UserAIPreferences,
+    User, UserProfile, UserRecentContext, UserTodo, UserArtifact,
     Node, NodeContextArtifact,
 )
 from backend.tasks.llm_completion import (  # noqa: E402
@@ -159,14 +159,16 @@ def _todo(user_id, created_at, content, ai_usage="chat"):
 
 
 def _prefs(user_id, created_at, content, ai_usage="chat"):
-    p = UserAIPreferences(
-        user_id=user_id, generated_by="voice_session",
+    # ai_preferences is a UserArtifact since #158 Slice 5.
+    a = UserArtifact(
+        user_id=user_id, kind="ai_preferences",
+        title="AI Interaction Preferences", generated_by="voice_session",
         created_at=created_at, ai_usage=ai_usage,
     )
-    p.set_content(content)
-    db.session.add(p)
+    a.set_content(content)
+    db.session.add(a)
     db.session.flush()
-    return p
+    return a
 
 
 def _recent(user_id, created_at, content, profile_id, ai_usage="chat"):
@@ -266,7 +268,7 @@ class TestAIPreferencesPinning:
         old = _prefs(u.id, T_OLD, "be terse")
         _prefs(u.id, T_NEW, "be verbose")
         node = _node(u.id)
-        _bind(node, "ai_preferences", old.id)
+        _bind(node, "user_artifact", old.id)
         db.session.commit()
 
         assert get_user_ai_preferences_content(
@@ -291,7 +293,7 @@ class TestAIPreferencesPinning:
         u = _user()
         p = _prefs(u.id, T_OLD, "train me", ai_usage="train")
         node = _node(u.id)
-        _bind(node, "ai_preferences", p.id)
+        _bind(node, "user_artifact", p.id)
         db.session.commit()
 
         assert get_user_ai_preferences_content(
@@ -301,7 +303,7 @@ class TestAIPreferencesPinning:
         u = _user()
         p = _prefs(u.id, T_OLD, "be terse")
         node = _node(u.id)
-        _bind(node, "ai_preferences", p.id)
+        _bind(node, "user_artifact", p.id)
         db.session.commit()
 
         assert get_user_ai_preferences_content(
