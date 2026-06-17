@@ -416,9 +416,7 @@ def test_textmode_retrieval_budget_caps_at_max_rounds(app):
     rt = {"id": "t", "name": "read_artifact", "input": {"kind": "reading-list"}}
     # Always asks for retrieval; loop must still terminate and finalize.
     _ScriptedProvider.reset([
-        _resp("looking 1", tool_calls=[rt]),
-        _resp("looking 2", tool_calls=[rt]),
-        _resp("looking 3", tool_calls=[rt]),
+        _resp(f"looking {i}", tool_calls=[rt]) for i in range(1, 8)
     ])
 
     result = generate_llm_response(
@@ -426,20 +424,61 @@ def test_textmode_retrieval_budget_caps_at_max_rounds(app):
         source_mode="textmode",
     )
 
-    # MAX_RETRIEVAL_ROUNDS (2) interim calls + 1 finalizing call = 3 calls.
-    assert _llm_task_mod.MAX_RETRIEVAL_ROUNDS == 2
-    assert len(_ScriptedProvider.calls) == 3
-    # Chain: placeholder -> interim2 -> final. Two continuation links exist.
-    interim1 = _fresh(llm_node.id)
-    assert interim1.continuation_node_id is not None
-    interim2 = Node.query.get(interim1.continuation_node_id)
-    assert interim2.continuation_node_id is not None
-    final = Node.query.get(interim2.continuation_node_id)
-    # Final node finalized with the 3rd response's content (budget exhausted,
+    # MAX_RETRIEVAL_ROUNDS (5) interim calls + 1 finalizing call = 6 calls.
+    assert _llm_task_mod.MAX_RETRIEVAL_ROUNDS == 5
+    assert len(_ScriptedProvider.calls) == 6
+    # Walk the 5 interim continuations down to the final node.
+    node = _fresh(llm_node.id)
+    for _ in range(5):
+        assert node.continuation_node_id is not None
+        node = Node.query.get(node.continuation_node_id)
+    final = node
+    assert final.continuation_node_id is None
+    # Final node finalized with the 6th response's content (budget exhausted,
     # so its retrieval tool call is executed as a normal final tool call).
-    assert final.get_content() == "looking 3"
+    assert final.get_content() == "looking 6"
     assert result["llm_node_id"] == final.id
-    assert APICostLog.query.count() == 3
+    assert APICostLog.query.count() == 6
+
+
+def test_quote_pull_resolves_full_content_and_continues(app):
+    """A {quote:ID} the model emits for an out-of-context node triggers a
+    within-turn resolution + continuation (no retrieval tool call needed):
+    the full node content is injected and the model answers with it, while the
+    {quote:ID} stays in the interim node's text (renders for the user +
+    flows to exports)."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    # An archive node that is NOT part of the conversation chain.
+    archive = Node(user_id=alice.id, human_owner_id=alice.id,
+                   node_type="text", privacy_level="private", ai_usage="chat")
+    archive.set_content("THE FULL ARCHIVE ENTRY about leaving my job.")
+    _db.session.add(archive)
+    _db.session.commit()
+    aid = archive.id
+
+    _ScriptedProvider.reset([
+        _resp("Let me pull that up. {quote:%d}" % aid),
+        _resp("Based on that entry, here's my read."),
+    ])
+
+    result = generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+
+    # Quote pull (interim) + continuation = 2 calls.
+    assert len(_ScriptedProvider.calls) == 2
+    interim = _fresh(llm_node.id)
+    assert interim.continuation_node_id is not None
+    # The {quote:ID} reference stays in the interim node's content.
+    assert ("{quote:%d}" % aid) in interim.get_content()
+    # The full node content was injected into the continuation call.
+    cont_msgs = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[1]["messages"])
+    assert "THE FULL ARCHIVE ENTRY" in cont_msgs
+    final = Node.query.get(interim.continuation_node_id)
+    assert final.get_content() == "Based on that entry, here's my read."
+    assert result["llm_node_id"] == final.id
 
 
 def test_voice_mode_runs_loop(app):

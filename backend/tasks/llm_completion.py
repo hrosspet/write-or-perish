@@ -18,7 +18,7 @@ from backend.llm_providers import LLMProvider, PromptTooLongError
 from backend.utils.tokens import (
     approximate_token_count, reduce_export_tokens, format_date_metadata,
 )
-from backend.utils.quotes import resolve_quotes, has_quotes
+from backend.utils.quotes import resolve_quotes, has_quotes, find_quote_ids
 from backend.utils.timefmt import local_stamp
 from backend.utils.api_keys import determine_api_key_type, get_api_keys_for_usage
 from backend.utils.cost import calculate_llm_cost_microdollars
@@ -59,7 +59,10 @@ USER_ARTIFACTS_INDEX_PLACEHOLDER = "{user_artifacts_index}"
 # pulls relevant snippets from the user's own archive by meaning (#155).
 RETRIEVAL_TOOLS = {"read_artifact", "read_todo", "semantic_search"}
 # Max number of interim retrieval round-trips before the model must answer.
-MAX_RETRIEVAL_ROUNDS = 2
+MAX_RETRIEVAL_ROUNDS = 5
+# Max new {quote:ID} pulls resolved per loop round (a 1h sharing can be huge;
+# this bounds how much full-node content the model can inject in one step).
+MAX_QUOTE_PULLS_PER_ROUND = 5
 
 # ── Voice tool definitions ──────────────────────────────────────────────
 
@@ -204,11 +207,15 @@ VOICE_TOOLS = [
             "before but that isn't in your current context, so you can "
             "ground your response in what they've actually said rather than "
             "guessing. Pass a focused natural-language query describing what "
-            "to look for. The most relevant entries are injected back into "
-            "your context within the same turn and you answer with them, so "
-            "tell the user you're checking their archive. Don't use it for "
-            "things already in your context. Always produce a text response "
-            "alongside the call."
+            "to look for. You get back short PREVIEWS of the top matches (with "
+            "node ids), same turn — these are for triage, not the full text. "
+            "To read a match in full, reference it as {quote:<id>} in your "
+            "reply; the full entry comes back the next step (and the quote "
+            "shows the user which entry you pulled). You can refine and search "
+            "again if the previews miss, and you can search and quote in the "
+            "same step. Tell the user you're checking their archive; don't "
+            "search for things already in your context. Always produce a text "
+            "response alongside the call."
         ),
         "input_schema": {
             "type": "object",
@@ -501,7 +508,9 @@ def _retrieval_injection_text(tr):
         return f"[Your current todo list:\n{todo.get_content()}]"
     if name == "semantic_search":
         # Re-resolve each matched node from its id (content never stored in
-        # meta); re-check ai_usage + soft-delete at injection time.
+        # meta); re-check ai_usage + soft-delete at injection time. These are
+        # PREVIEWS for triage — to read one in full, the model references it as
+        # {quote:<id>} (resolved by the loop's quote step).
         matches = tr.get("matches") or []
         lines = []
         for m in matches:
@@ -512,16 +521,18 @@ def _retrieval_injection_text(tr):
             text = (node.get_content() or "").strip()
             if not text:
                 continue
-            snippet = text[:400] + ("…" if len(text) > 400 else "")
+            snippet = text[:800] + ("…" if len(text) > 800 else "")
             stamp = (node.created_at.strftime("%Y-%m-%d")
                      if node.created_at else "?")
-            lines.append(f"- {stamp} (node {node.id}): {snippet}")
+            score = m.get("score")
+            pct = f" · {round(score * 100)}%" if score is not None else ""
+            lines.append(f"- node {node.id} · {stamp}{pct}: {snippet}")
         if not lines:
             return None
         return (
-            "[Relevant entries from the user's own archive, retrieved by "
-            "semantic search for "
-            f"\"{tr.get('query', '')}\" — use only if actually relevant:\n"
+            "[Semantic search results for "
+            f"\"{tr.get('query', '')}\" — previews only; to read one in full, "
+            "reference it as {quote:<id>}. Use only if actually relevant:\n"
             + "\n".join(lines) + "]")
     return None
 
@@ -1841,12 +1852,26 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # content in the same turn.
             rounds_done = 0
             current_node = llm_node
+            # Quote pulls already grounded this turn, and nodes already in the
+            # thread (their content is in `messages`) — neither should trigger
+            # a re-loop when the model references them.
+            resolved_quote_ids = set()
+            chain_ids_set = {n.id for n in node_chain}
             while True:
                 response_tool_calls = response.get("tool_calls", [])
                 retrieval_calls = [
                     tc for tc in response_tool_calls
                     if tc["name"] in RETRIEVAL_TOOLS
                 ]
+                # New {quote:ID} the model emitted to pull a node in full this
+                # turn (e.g. a semantic_search hit). A search call and quote
+                # pulls can coexist in one round — both get fulfilled and the
+                # model sees everything next round. Capped per round.
+                resp_text = response.get("content") or ""
+                new_quote_ids = [
+                    q for q in find_quote_ids(resp_text)
+                    if q not in resolved_quote_ids and q not in chain_ids_set
+                ][:MAX_QUOTE_PULLS_PER_ROUND]
 
                 # Race B guard on the node we're about to write to.
                 db.session.refresh(current_node)
@@ -1865,9 +1890,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         'reason': 'target_soft_deleted',
                     }
 
-                # INTERIM step: retrieval requested and budget remaining.
-                if retrieval_calls and rounds_done < MAX_RETRIEVAL_ROUNDS:
-                    interim_text = response.get("content") or ""
+                # INTERIM step: a retrieval tool call and/or a full-node quote
+                # pull was requested, and budget remains.
+                if (retrieval_calls or new_quote_ids) and \
+                        rounds_done < MAX_RETRIEVAL_ROUNDS:
+                    interim_text = resp_text
                     interim_truncated = response.get("truncated", False)
 
                     # Cost for THIS model call (every call costs).
@@ -1912,6 +1939,26 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             injection_strings.append(
                                 f"[{tr.get('name')} failed — "
                                 f"{tr.get('error', 'unknown error')}]")
+
+                    # Resolve newly-referenced {quote:ID} to full content via
+                    # the existing quote machinery (permission + ai_usage='none'
+                    # checks built in). The {quote:ID} stays in the interim
+                    # node's text → renders for the user + flows to exports.
+                    if new_quote_ids:
+                        placeholder = "\n".join(
+                            "{quote:%d}" % q for q in new_quote_ids)
+                        q_text, _ = resolve_quotes(
+                            placeholder, user_id, for_llm=True)
+                        if q_text and q_text.strip():
+                            label = ("entries" if len(new_quote_ids) > 1
+                                     else "entry")
+                            injection_strings.append(
+                                f"[Full content of the {label} you pulled "
+                                f"up:\n{q_text}]")
+                        resolved_quote_ids.update(new_quote_ids)
+                    if not injection_strings:
+                        injection_strings.append(
+                            "[The requested items were unavailable.]")
 
                     # Finalize the interim node (NO _mode, NO proposal
                     # auto-detect — that belongs to the final answer only).
