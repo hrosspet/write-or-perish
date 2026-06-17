@@ -49,7 +49,9 @@ export function parseOrientResponse(text) {
     else if (heading === 'description') sections.issueDescription = stripProposalTag(body).trim();
     else if (heading === 'category') sections.issueCategory = stripProposalTag(body).trim().toLowerCase();
     else if (heading === 'feedback') sections.feedback = stripProposalTag(body).trim();
-    else if (heading === 'feedback category') sections.feedbackCategory = stripProposalTag(body).trim().toLowerCase();
+    // First line only — the model sometimes adds a closing remark after the
+    // category value, and the backend parse_feedback already takes line one.
+    else if (heading === 'feedback category') sections.feedbackCategory = stripProposalTag(body).split('\n')[0].trim().toLowerCase();
   }
   return sections;
 }
