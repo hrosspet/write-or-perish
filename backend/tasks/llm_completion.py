@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from backend.celery_app import celery, flask_app
 from backend.models import (
     Node, User, UserProfile, UserRecentContext, UserTodo, APICostLog,
-    UserArtifact, UserFeedback, Draft,
+    UserArtifact, Draft,
     NodeContextArtifact,
 )
 from backend.extensions import db
@@ -195,35 +195,23 @@ VOICE_TOOLS = [
         },
     },
     {
-        "name": "submit_feedback",
+        "name": "apply_feedback",
         "description": (
-            "Submit feedback about Loore itself to its creators on the "
-            "user's behalf. Call this when the user expresses feedback "
-            "about the product — praise, frustration, confusion, ideas — "
-            "and either asks you to pass it on or agrees when you offer. "
-            "For concrete bugs or feature requests prefer proposing a "
-            "GitHub issue instead; feedback is for everything that "
-            "doesn't fit an issue. Quote or faithfully summarize the "
-            "user's own words. Always produce a text response alongside "
-            "the call."
+            "Send the previously proposed feedback to the Loore team. Call "
+            "this ONLY when the user explicitly confirms they want it sent "
+            "(e.g. 'yes send it', 'go ahead', 'pass that on'). Do not call "
+            "proactively. Do not call if the feedback was already sent "
+            "(check the context notes for apply status). To PROPOSE feedback "
+            "in the first place, write it under a `### Feedback` heading "
+            "instead (see the submit-feedback guidance) — that shows the user "
+            "what you'd send and gives them a Send button. "
+            "Always produce a text response — the user needs to hear what "
+            "happened as they are interacting via voice."
         ),
         "input_schema": {
             "type": "object",
-            "properties": {
-                "content": {
-                    "type": "string",
-                    "description": (
-                        "The feedback text, faithful to what the user "
-                        "expressed."
-                    ),
-                },
-                "category": {
-                    "type": "string",
-                    "enum": ["praise", "frustration", "idea", "other"],
-                    "description": "Best-fit category.",
-                },
-            },
-            "required": ["content"],
+            "properties": {},
+            "required": [],
         },
     },
 ]
@@ -405,6 +393,19 @@ def _find_pending_github_issue_draft(node_chain, user_id):
     return None
 
 
+def _find_pending_feedback_draft(node_chain, user_id):
+    """Walk the node chain to find a pending feedback draft."""
+    for node in reversed(node_chain):
+        draft = Draft.query.filter_by(
+            parent_id=node.id,
+            user_id=user_id,
+            label='feedback_pending',
+        ).first()
+        if draft:
+            return draft
+    return None
+
+
 def _detect_todo_proposal(text):
     """Check if LLM text contains todo proposal headings.
 
@@ -431,6 +432,19 @@ def _detect_github_issue_proposal(text):
         'issue title' in h or h.strip() == 'title' for h in headings)
     has_desc = any('description' in h for h in headings)
     return has_title and has_desc
+
+
+def _detect_feedback_proposal(text):
+    """Check if LLM text contains a feedback proposal heading.
+
+    A single exact ``### Feedback`` heading marks the block the AI proposes to
+    send to the team. Exact match (not substring) keeps it from firing on
+    incidental prose like '### Feedback I've heard'."""
+    if not text:
+        return False
+    headings = [h.strip().lower() for h in re.findall(
+        r'^###\s+(.+)', text, re.MULTILINE)]
+    return any(h == 'feedback' for h in headings)
 
 
 def _retrieval_injection_text(tr):
@@ -491,10 +505,14 @@ def _scan_proposal_statuses(node_chain):
             name = entry.get("name")
             reported = entry.get("status_reported")
 
-            if name in ("propose_todo", "propose_github_issue"):
+            if name in ("propose_todo", "propose_github_issue",
+                        "propose_feedback"):
                 status = entry.get("apply_status")
-                tag = ("todo-proposal" if name == "propose_todo"
-                       else "issue-proposal")
+                tag = {
+                    "propose_todo": "todo-proposal",
+                    "propose_github_issue": "issue-proposal",
+                    "propose_feedback": "feedback-proposal",
+                }[name]
                 if status == "started":
                     notes.append(
                         f"[{tag}:{node.id}: merge in progress.]"
@@ -533,12 +551,6 @@ def _scan_proposal_statuses(node_chain):
                 else:
                     err = entry.get("error", "unknown error")
                     notes.append(f"[{name} failed — {err}]")
-                to_mark.append((node, name))
-
-            elif name == "submit_feedback" and not reported:
-                if entry.get("status") == "success":
-                    notes.append(
-                        "[Feedback was submitted to the Loore team.]")
                 to_mark.append((node, name))
 
     return notes, to_mark
@@ -647,7 +659,56 @@ def _auto_create_drafts(llm_text, llm_node, node_chain, user_id):
                 "apply_status": "pending_approval",
             })
 
+    if _detect_feedback_proposal(llm_text):
+        already = Draft.query.filter_by(
+            parent_id=llm_node.id, user_id=user_id,
+            label='feedback_pending',
+        ).first()
+        if not already:
+            existing = _find_pending_feedback_draft(node_chain, user_id)
+            draft = Draft(
+                user_id=user_id,
+                parent_id=llm_node.id,
+                label='feedback_pending',
+            )
+            draft.set_content("")
+            db.session.add(draft)
+            db.session.flush()
+            if existing:
+                db.session.delete(existing)
+                db.session.flush()
+            # Supersede old pending_approval feedback proposals
+            _supersede_old_proposals(
+                node_chain, "propose_feedback", llm_node.id)
+            results.append({
+                "name": "propose_feedback",
+                "status": "success",
+                "draft_id": draft.id,
+                "apply_status": "pending_approval",
+            })
+
     return results
+
+
+# Tool-input keys that carry free-text user content. These are stripped
+# before the input is persisted to the plaintext ``tool_calls_meta`` column:
+# the content is already stored encrypted in its own row (UserArtifact /
+# UserFeedback / Draft), and a plaintext copy on the node would defeat
+# encryption-at-rest. Nothing reads ``input`` back out of tool_calls_meta
+# (the cross-turn scan, the frontend, and exports all key on other fields),
+# so redaction is lossless for every consumer.
+_REDACTED_INPUT_KEYS = {"content", "updated_content"}
+
+
+def _redact_tool_input(inp):
+    """Return a copy of a tool-call input with free-text content removed,
+    safe to persist to the plaintext tool_calls_meta column."""
+    if not isinstance(inp, dict):
+        return inp
+    return {
+        k: ("[redacted]" if k in _REDACTED_INPUT_KEYS else v)
+        for k, v in inp.items()
+    }
 
 
 def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
@@ -657,7 +718,9 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
     for tc in tool_calls:
         name = tc["name"]
         inp = tc.get("input", {})
-        result = {"name": name, "input": inp}
+        # Persisted to plaintext tool_calls_meta — redact free-text content
+        # (handlers below read the live ``inp``, which keeps the real values).
+        result = {"name": name, "input": _redact_tool_input(inp)}
 
         try:
             if name == "apply_todo_changes":
@@ -816,20 +879,43 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
                     result["status"] = "success"
                     result["todo_id"] = todo.id
 
-            elif name == "submit_feedback":
-                category = inp.get("category") or "other"
-                if category not in ("praise", "frustration", "idea", "other"):
-                    category = "other"
-                feedback = UserFeedback(
-                    user_id=user_id,
-                    category=category,
-                    source="llm",
-                )
-                feedback.set_content(inp["content"])
-                db.session.add(feedback)
-                db.session.flush()
-                result["status"] = "success"
-                result["feedback_id"] = feedback.id
+            elif name == "apply_feedback":
+                # Send the feedback the AI proposed under a ### Feedback
+                # heading — mirrors apply_github_issue. Gated on a pending
+                # draft, so it can't self-confirm in the same turn it
+                # proposed (the draft is auto-created after tool execution).
+                draft = _find_pending_feedback_draft(node_chain, user_id)
+                if not draft:
+                    result["status"] = "error"
+                    result["error"] = "No pending feedback found"
+                else:
+                    origin_node = Node.query.get(draft.parent_id)
+                    if not origin_node:
+                        result["status"] = "error"
+                        result["error"] = "Origin node not found"
+                    else:
+                        from backend.utils.feedback import (
+                            submit_feedback_from_node,
+                        )
+                        feedback, err = submit_feedback_from_node(
+                            origin_node, user_id
+                        )
+                        if err:
+                            result["status"] = "error"
+                            result["error"] = err
+                        else:
+                            db.session.delete(draft)
+                            db.session.flush()
+                            update_tool_meta(
+                                origin_node,
+                                "propose_feedback",
+                                {
+                                    "apply_status": "completed",
+                                    "feedback_id": feedback.id,
+                                },
+                            )
+                            result["status"] = "success"
+                            result["feedback_id"] = feedback.id
 
             elif name in ("propose_todo", "propose_github_issue"):
                 # These are no longer tools — proposals are auto-detected
@@ -1339,6 +1425,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                     elif ename == "propose_github_issue":
                                         message_text += (
                                             f"\n\n[issue-proposal:"
+                                            f"{node.id}]"
+                                        )
+                                    elif ename == "propose_feedback":
+                                        message_text += (
+                                            f"\n\n[feedback-proposal:"
                                             f"{node.id}]"
                                         )
                             except (json.JSONDecodeError, TypeError):

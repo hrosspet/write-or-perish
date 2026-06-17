@@ -150,6 +150,9 @@ def create_app():
     from backend.routes.github_issues import github_bp
     app.register_blueprint(github_bp, url_prefix="/api/github")
 
+    from backend.routes.feedback import feedback_bp
+    app.register_blueprint(feedback_bp, url_prefix="/api/feedback")
+
     # AI preferences folded into the artifact model (#158 Slice 5): managed via
     # the generic /api/artifacts CRUD (kind="ai_preferences"); the dedicated
     # /api/ai-preferences blueprint was removed.

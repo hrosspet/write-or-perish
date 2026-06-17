@@ -678,8 +678,10 @@ class UserArtifact(db.Model):
 
 
 class UserFeedback(db.Model):
-    """User feedback captured via the LLM submit_feedback tool (#158),
-    for batch triage by the creators."""
+    """User feedback proposed by the AI (under a ### Feedback heading) and
+    sent only after the user confirms — via the Send button
+    (/api/feedback/submit) or the apply_feedback tool (#158). For batch
+    triage by the creators."""
     __tablename__ = "user_feedback"
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)

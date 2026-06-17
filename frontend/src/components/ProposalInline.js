@@ -48,6 +48,8 @@ export function parseOrientResponse(text) {
     else if (heading.includes('issue title') || heading === 'title') sections.issueTitle = stripProposalTag(body).trim();
     else if (heading === 'description') sections.issueDescription = stripProposalTag(body).trim();
     else if (heading === 'category') sections.issueCategory = stripProposalTag(body).trim().toLowerCase();
+    else if (heading === 'feedback') sections.feedback = stripProposalTag(body).trim();
+    else if (heading === 'feedback category') sections.feedbackCategory = stripProposalTag(body).trim().toLowerCase();
   }
   return sections;
 }
@@ -59,7 +61,8 @@ export function hasProposalSections(text) {
   const hasTodo = headings.some(h => taskKeywords.some(kw => h.includes(kw)));
   const hasIssue = headings.some(h => h.includes('issue title') || h === 'title') &&
                    headings.some(h => h.includes('description'));
-  return hasTodo || hasIssue;
+  const hasFeedback = headings.some(h => h === 'feedback');
+  return hasTodo || hasIssue || hasFeedback;
 }
 
 /**
@@ -135,7 +138,7 @@ export function stripProposalSections(text) {
   const result = [];
   let inProposal = false;
   const proposalHeadings = ['completed', 'new task', 'new tasks', 'priority', 'priority order',
-    'note', 'issue title', 'title', 'description', 'category'];
+    'note', 'issue title', 'title', 'description', 'category', 'feedback'];
   for (const line of lines) {
     const headingMatch = line.match(/^###\s+(.+)/);
     if (headingMatch) {
@@ -416,6 +419,7 @@ export default function ProposalInline({
   const parsed = parseOrientResponse(content || '');
   const hasTodo = parsed.completed || parsed.newTasks || parsed.priority || parsed.note;
   const hasIssue = parsed.issueTitle && parsed.issueDescription;
+  const hasFeedback = !!parsed.feedback;
   const [applyStatus, setApplyStatus] = useState(null);
   // Which row (if any) currently has its inline add-input open. Lifted here so
   // opening one row's "+" closes any other — and clicking a second "+" switches
@@ -425,6 +429,8 @@ export default function ProposalInline({
   const [issueApplyStatus, setIssueApplyStatus] = useState(null);
   const [issueApplyError, setIssueApplyError] = useState(null);
   const [issueResult, setIssueResult] = useState(null);
+  const [feedbackApplyStatus, setFeedbackApplyStatus] = useState(null);
+  const [feedbackApplyError, setFeedbackApplyError] = useState(null);
   const mergePollingRef = useRef(null);
   const styles = sizeStyles(size);
   const toggleable = typeof onContentChange === 'function'
@@ -490,6 +496,13 @@ export default function ProposalInline({
       setIssueApplyStatus('completed');
       setIssueResult({ issue_url: applyIssueCall.issue_url, issue_number: applyIssueCall.issue_number });
     }
+    const feedbackEntry = toolCallsMeta.find(tc => tc.name === 'propose_feedback');
+    const applyFeedbackCall = toolCallsMeta.find(tc => tc.name === 'apply_feedback');
+    if (feedbackEntry && feedbackEntry.apply_status === 'completed') {
+      setFeedbackApplyStatus('completed');
+    } else if (applyFeedbackCall && applyFeedbackCall.status === 'success') {
+      setFeedbackApplyStatus('completed');
+    }
   }, [toolCallsMeta]);
 
   useEffect(() => {
@@ -545,13 +558,27 @@ export default function ProposalInline({
     }
   }, [nodeId]);
 
+  const handleSendFeedback = useCallback(async () => {
+    if (!nodeId) return;
+    setFeedbackApplyStatus('started');
+    try {
+      await api.post('/feedback/submit', { llm_node_id: nodeId });
+      setFeedbackApplyStatus('completed');
+    } catch (err) {
+      const msg = err?.response?.data?.error || 'Feedback send failed';
+      setFeedbackApplyStatus('error');
+      setFeedbackApplyError(msg);
+    }
+  }, [nodeId]);
+
   const hasTodoUpdate = hasTodo || toolCallsMeta?.some(tc => tc.name === 'propose_todo');
   const hasGithubIssue = hasIssue || toolCallsMeta?.some(tc => tc.name === 'propose_github_issue');
+  const hasFeedbackProposal = hasFeedback || toolCallsMeta?.some(tc => tc.name === 'propose_feedback');
   const hasPrefsUpdate = toolCallsMeta?.some(
     tc => tc.name === 'update_ai_preferences' && tc.status === 'success'
   );
 
-  if (!hasTodoUpdate && !hasGithubIssue && !hasPrefsUpdate) return null;
+  if (!hasTodoUpdate && !hasGithubIssue && !hasFeedbackProposal && !hasPrefsUpdate) return null;
 
   const StatusTag = styles.statusTag;
   const sectionLabel = (text) => (
@@ -695,6 +722,45 @@ export default function ProposalInline({
             {issueApplyStatus === 'error' && (
               <StatusTag style={{ ...styles.statusText, color: 'var(--accent)' }}>
                 {issueApplyError || 'Issue creation failed'}
+              </StatusTag>
+            )}
+          </div>
+        </div>
+      )}
+
+      {hasFeedbackProposal && parsed.feedback && (
+        <div style={styles.issueWrapper}>
+          {sectionLabel(styles.roomy ? 'Feedback for the Team' : 'Feedback')}
+          <div style={styles.issueCard}>
+            <MarkdownBody
+              style={styles.issueDescStyle}
+              paragraphMargin={styles.roomy ? '0 0 8px 0' : '0 0 6px 0'}
+            >
+              {parsed.feedback}
+            </MarkdownBody>
+            {parsed.feedbackCategory && (
+              <span style={styles.issueCategory}>{parsed.feedbackCategory}</span>
+            )}
+          </div>
+          <div style={styles.issueButtonWrapper}>
+            {!feedbackApplyStatus && (
+              <button onClick={handleSendFeedback} style={styles.button}>
+                {styles.roomy ? 'Send feedback to the team' : 'Send feedback'}
+              </button>
+            )}
+            {feedbackApplyStatus === 'started' && (
+              <StatusTag style={{ ...styles.statusText, color: 'var(--text-muted)' }}>
+                Sending…
+              </StatusTag>
+            )}
+            {feedbackApplyStatus === 'completed' && (
+              <StatusTag style={{ ...styles.statusText, color: 'var(--success)' }}>
+                Feedback sent — thank you
+              </StatusTag>
+            )}
+            {feedbackApplyStatus === 'error' && (
+              <StatusTag style={{ ...styles.statusText, color: 'var(--accent)' }}>
+                {feedbackApplyError || 'Feedback send failed'}
               </StatusTag>
             )}
           </div>

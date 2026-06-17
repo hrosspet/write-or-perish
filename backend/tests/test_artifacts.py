@@ -2,7 +2,8 @@
 
 Covers: model versioning, latest_per_kind, REST routes (list/get/put/
 versions), tool executor handlers (update_artifact, read_artifact,
-submit_feedback), status-note injection, and session pinning.
+apply_feedback), the feedback propose→confirm flow, tool_calls_meta content
+redaction, status-note injection, and session pinning.
 
 Patterned after test_tts_invalidation.py: sqlite in-memory, minimal
 Flask app, ENCRYPTION_DISABLED.
@@ -34,7 +35,7 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
 from backend.extensions import db as _db  # noqa: E402
 from backend.models import (  # noqa: E402
     User, Node, NodeContextArtifact, UserArtifact, UserFeedback, UserTodo,
-    UserAIPreferences,
+    UserAIPreferences, Draft,
 )
 
 # ── Import the real llm_completion against stub glue ─────────────────────
@@ -49,6 +50,7 @@ sys.modules.pop("backend.tasks.llm_completion", None)
 
 from backend.tasks.llm_completion import (  # noqa: E402
     _execute_tool_calls, _scan_proposal_statuses, _mark_status_reported,
+    _auto_create_drafts, _detect_feedback_proposal, _redact_tool_input,
     get_user_artifacts_context, get_user_ai_preferences_content,
 )
 
@@ -76,6 +78,8 @@ def _make_app():
 
     from backend.routes.artifacts import artifacts_bp
     app.register_blueprint(artifacts_bp, url_prefix="/api/artifacts")
+    from backend.routes.feedback import feedback_bp
+    app.register_blueprint(feedback_bp, url_prefix="/api/feedback")
     return app
 
 
@@ -396,17 +400,128 @@ def test_scan_statuses_delivers_todo_content(app):
         assert notes2 == []
 
 
-def test_submit_feedback_tool(app):
+# ── Feedback propose → confirm flow ──────────────────────────────────────
+
+FEEDBACK_TEXT = (
+    "### Feedback\nThe voice mode feels magical.\n### Feedback category\npraise"
+)
+
+
+def _mk_llm_node(uid, content):
+    node = Node(user_id=uid, node_type="llm", llm_model="test-model")
+    node.set_content(content)
+    _db.session.add(node)
+    _db.session.commit()
+    return node
+
+
+def test_detect_feedback_proposal():
+    assert _detect_feedback_proposal("### Feedback\nlove it") is True
+    assert _detect_feedback_proposal("no headings here") is False
+    # Exact match only — incidental prose headings don't trigger.
+    assert _detect_feedback_proposal("### Feedback I've heard\nblah") is False
+
+
+def test_auto_create_drafts_creates_feedback_draft(app):
     with app.app_context():
         uid = User.query.first().id
-        r = _run_tool(app, "submit_feedback",
-                      {"content": "love the voice mode", "category": "praise"},
-                      uid)
+        node = _mk_llm_node(uid, FEEDBACK_TEXT)
+        results = _auto_create_drafts(FEEDBACK_TEXT, node, [node], uid)
+        names = {r["name"]: r for r in results}
+        assert "propose_feedback" in names
+        assert names["propose_feedback"]["apply_status"] == "pending_approval"
+        draft = Draft.query.filter_by(
+            parent_id=node.id, label="feedback_pending").first()
+        assert draft is not None
+
+
+def test_apply_feedback_tool_submits(app):
+    with app.app_context():
+        uid = User.query.first().id
+        origin = _mk_llm_node(uid, FEEDBACK_TEXT)
+        draft = Draft(user_id=uid, parent_id=origin.id,
+                      label="feedback_pending")
+        draft.set_content("")
+        _db.session.add(draft)
+        _db.session.commit()
+
+        results = _execute_tool_calls(
+            [{"name": "apply_feedback", "input": {}}], origin, [origin], uid)
+        r = results[0]
         assert r["status"] == "success"
         row = UserFeedback.query.get(r["feedback_id"])
-        assert row.get_content() == "love the voice mode"
+        assert row.get_content() == "The voice mode feels magical."
         assert row.category == "praise"
         assert row.status == "new"
+        # Draft consumed; origin meta marked completed.
+        assert Draft.query.filter_by(id=draft.id).first() is None
+
+
+def test_apply_feedback_without_pending_draft_errors(app):
+    with app.app_context():
+        uid = User.query.first().id
+        origin = _mk_llm_node(uid, FEEDBACK_TEXT)
+        results = _execute_tool_calls(
+            [{"name": "apply_feedback", "input": {}}], origin, [origin], uid)
+        assert results[0]["status"] == "error"
+        assert UserFeedback.query.count() == 0
+
+
+def test_feedback_submit_route(app, client):
+    with app.app_context():
+        uid = User.query.first().id
+        origin = _mk_llm_node(uid, FEEDBACK_TEXT)
+        draft = Draft(user_id=uid, parent_id=origin.id,
+                      label="feedback_pending")
+        draft.set_content("")
+        _db.session.add(draft)
+        _db.session.commit()
+        origin_id = origin.id
+
+    resp = client.post("/api/feedback/submit",
+                       json={"llm_node_id": origin_id})
+    assert resp.status_code == 200
+    with app.app_context():
+        row = UserFeedback.query.first()
+        assert row.get_content() == "The voice mode feels magical."
+        assert row.category == "praise"
+
+
+def test_feedback_submit_route_no_pending(app, client):
+    with app.app_context():
+        uid = User.query.first().id
+        origin = _mk_llm_node(uid, FEEDBACK_TEXT)
+        origin_id = origin.id
+    resp = client.post("/api/feedback/submit",
+                       json={"llm_node_id": origin_id})
+    assert resp.status_code == 404
+
+
+# ── tool_calls_meta content redaction (privacy) ──────────────────────────
+
+def test_redact_tool_input_strips_content():
+    redacted = _redact_tool_input(
+        {"kind": "memory", "updated_content": "secret notes",
+         "content": "private", "title": "T"})
+    assert redacted["updated_content"] == "[redacted]"
+    assert redacted["content"] == "[redacted]"
+    # Structural fields survive.
+    assert redacted["kind"] == "memory"
+    assert redacted["title"] == "T"
+
+
+def test_update_artifact_does_not_persist_content_in_meta(app):
+    with app.app_context():
+        uid = User.query.first().id
+        r = _run_tool(app, "update_artifact",
+                      {"kind": "memory", "updated_content": "secret fact"},
+                      uid)
+        assert r["status"] == "success"
+        # The plaintext-bound meta input must not carry the content.
+        assert r["input"]["updated_content"] == "[redacted]"
+        # But the encrypted row has the real content.
+        assert UserArtifact.latest_for(
+            uid, "memory").get_content() == "secret fact"
 
 
 # ── Status notes ─────────────────────────────────────────────────────────
@@ -429,14 +544,14 @@ def test_scan_statuses_reports_artifact_tools_once(app):
              "kind": "memory", "created": False},
             {"name": "read_artifact", "status": "success",
              "kind": "reading-list", "artifact_id": artifact.id},
-            {"name": "submit_feedback", "status": "success",
-             "feedback_id": 1},
+            {"name": "propose_feedback", "status": "success",
+             "apply_status": "completed"},
         ])
         notes, to_mark = _scan_proposal_statuses([node])
         joined = "\n".join(notes)
         assert "Artifact 'memory' was updated." in joined
         assert "the actual books" in joined  # read_artifact content delivery
-        assert "Feedback was submitted" in joined
+        assert "feedback-proposal" in joined  # applied-successfully note
         assert len(to_mark) == 3
 
         _mark_status_reported(to_mark)

@@ -38,3 +38,28 @@ def parse_github_issue(content):
             first_line = body.split('\n')[0].strip().lower()
             result['category'] = first_line
     return result
+
+
+def parse_feedback(content):
+    """Parse ### Feedback and ### Feedback category from LLM text.
+
+    Mirrors parse_github_issue: the feedback the AI proposes to send lives in
+    the visible node content (so the user reads it before confirming) rather
+    than in a hidden tool input. Returns {'content', 'category'} — category
+    defaults blank if absent (the submit path falls back to 'other')."""
+    result = {}
+    parts = content.split('### ')
+    for part in parts:
+        if not part.strip():
+            continue
+        first_newline = part.find('\n')
+        if first_newline < 0:
+            continue
+        heading = part[:first_newline].strip().lower()
+        body = part[first_newline + 1:].strip()
+        if heading == 'feedback':
+            result['content'] = body
+        elif heading == 'feedback category':
+            first_line = body.split('\n')[0].strip().lower()
+            result['category'] = first_line
+    return result
