@@ -250,3 +250,76 @@ def semantic_search():
         "total": len(results),
         "mode": "semantic",
     }), 200
+
+
+@search_bp.route("/search/neighbors", methods=["GET"])
+@login_required
+def semantic_neighbors():
+    """The most semantically similar nodes to a given node — the node's own
+    embedding used as the query vector (no re-embed, no LLM guess). This is
+    the 'source zero' guess-free neighborhood, surfaced for inspecting what
+    semantic retrieval returns from a given point in the archive (#155/#197).
+
+    Scoped to the requesting user's own archive (own + AI replies they own).
+    Returns [] if the node isn't embedded yet (e.g. ai_usage='none', or the
+    sweep hasn't reached it).
+    """
+    from backend.models import NodeEmbedding
+    from backend.utils.embeddings import top_k_similar, unpack_vector
+
+    node_id = request.args.get("node_id", type=int)
+    limit = min(request.args.get("limit", 5, type=int), 20)
+    if not node_id:
+        return jsonify({"error": "Provide a node_id."}), 400
+
+    node = Node.query.get(node_id)
+    if node is None or node.deleted_at is not None:
+        return jsonify({"error": "Node not found."}), 404
+    if (node.user_id != current_user.id
+            and node.human_owner_id != current_user.id):
+        return jsonify({"error": "Not authorized."}), 403
+
+    src = NodeEmbedding.query.filter_by(node_id=node_id).first()
+    if src is None:
+        # Not embedded yet — no neighborhood to show.
+        return jsonify({"results": [], "total": 0, "mode": "neighbors"}), 200
+
+    query_vector = unpack_vector(src.vector)
+    rows = db.session.query(
+        NodeEmbedding.node_id, NodeEmbedding.vector
+    ).filter(
+        NodeEmbedding.user_id == current_user.id,
+        NodeEmbedding.node_id != node_id,
+    ).all()
+
+    ranked = top_k_similar(query_vector, rows, k=limit, min_score=0.0)
+    nodes_by_id = {
+        n.id: n for n in Node.query.filter(
+            Node.id.in_([nid for nid, _ in ranked]),
+            Node.deleted_at.is_(None),
+        ).all()
+    } if ranked else {}
+
+    results = []
+    for nid, score in ranked:
+        n = nodes_by_id.get(nid)
+        if n is None:
+            continue
+        if (n.user_id != current_user.id
+                and n.human_owner_id != current_user.id):
+            continue
+        content = n.get_content() or ""
+        results.append({
+            "id": n.id,
+            "preview": content[:160] + ("..." if len(content) > 160 else ""),
+            "node_type": n.node_type,
+            "created_at": iso_utc(n.created_at),
+            "username": n.user.username if n.user else "Unknown",
+            "score": round(score, 4),
+        })
+
+    return jsonify({
+        "results": results,
+        "total": len(results),
+        "mode": "neighbors",
+    }), 200

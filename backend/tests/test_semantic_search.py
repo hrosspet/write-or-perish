@@ -235,3 +235,45 @@ def test_retrieve_relevant_snippets_excludes_chain(app, monkeypatch):
         # Snippet is truncated with ellipsis
         assert results[0][2].endswith("…")
         assert len(results[0][2]) <= 101
+
+
+# ── /search/neighbors (admin inspector — node's own embedding as query) ───
+
+def test_neighbors_ranks_excluding_self(app, client):
+    with app.app_context():
+        uid = User.query.first().id
+        focal = _mk_node(uid, "thinking about leaving my job")
+        near = _mk_node(uid, "career change reflections")
+        far = _mk_node(uid, "what to cook for dinner")
+        _mk_embedding(focal, [1.0, 0.0, 0.0])
+        _mk_embedding(near, [0.9, 0.1, 0.0])
+        _mk_embedding(far, [0.0, 0.0, 1.0])
+        focal_id, near_id = focal.id, near.id
+
+    res = client.get(f"/api/search/neighbors?node_id={focal_id}")
+    assert res.status_code == 200
+    data = res.get_json()
+    ids = [r["id"] for r in data["results"]]
+    assert focal_id not in ids          # never returns itself
+    assert ids[0] == near_id            # nearest first
+    top = data["results"][0]
+    assert {"username", "created_at", "score", "preview"} <= set(top)
+
+
+def test_neighbors_unembedded_node_returns_empty(app, client):
+    with app.app_context():
+        uid = User.query.first().id
+        nid = _mk_node(uid, "no embedding here").id
+    res = client.get(f"/api/search/neighbors?node_id={nid}")
+    assert res.status_code == 200
+    assert res.get_json()["results"] == []
+
+
+def test_neighbors_other_users_node_forbidden(app, client):
+    with app.app_context():
+        other = User(username="other")
+        _db.session.add(other)
+        _db.session.commit()
+        nid = _mk_node(other.id, "someone else's node").id
+    res = client.get(f"/api/search/neighbors?node_id={nid}")
+    assert res.status_code == 403
