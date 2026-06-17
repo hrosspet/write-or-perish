@@ -39,48 +39,64 @@ TITLE = UserArtifact.DEFAULT_KINDS[KIND]
 DESCRIPTION = UserArtifact.DEFAULT_DESCRIPTIONS.get(KIND)
 
 
-def _repoint_node_pins(execute):
+def _resolve_new_artifact_id(pin, legacy_to_new):
+    """Target UserArtifact id for a legacy 'ai_preferences' pin.
+
+    Primary: the exact source→target linkage captured while backfilling rows
+    THIS run (legacy_to_new[UserAIPreferences.id] → UserArtifact.id) — no
+    reliance on timestamps. Fallback (e.g. a re-run where the row was created
+    in a prior run): match the backfilled artifact by (user_id, created_at),
+    which the row backfill preserves exactly. UserAIPreferences is append-only
+    (a new row per edit), so created_at is a unique per-version timestamp.
+    """
+    new_id = legacy_to_new.get(pin.artifact_id)
+    if new_id is not None:
+        return new_id
+    legacy = UserAIPreferences.query.get(pin.artifact_id)
+    if legacy is None:
+        return None
+    art = UserArtifact.query.filter_by(
+        user_id=legacy.user_id, kind=KIND, created_at=legacy.created_at,
+    ).order_by(UserArtifact.id.asc()).first()
+    return art.id if art else None
+
+
+def _repoint_node_pins(execute, legacy_to_new):
     """Migrate the node *references*: each legacy NodeContextArtifact pin of
-    type 'ai_preferences' (→ a UserAIPreferences row) is repointed to the
-    backfilled UserArtifact, matched by (user_id, created_at) — which the row
-    backfill preserves exactly, so the match is unambiguous. After this, no
-    node references ai_preferences via the legacy pin type, so the legacy code
-    paths become dead and can be dropped (#219) as the migration's
-    verification. Non-destructive: the UserAIPreferences rows are kept (the
-    pin pointer is updated, reversible by the same created_at match). An
+    type 'ai_preferences' is repointed to the backfilled UserArtifact (see
+    _resolve_new_artifact_id). After this, no node references ai_preferences
+    via the legacy pin type, so the legacy code paths become dead and can be
+    dropped (#219) as the migration's verification. Non-destructive: the
+    UserAIPreferences rows are kept (only the pin pointer changes). An
     already-repointed pin is no longer 'ai_preferences' type, so re-runs are
-    idempotent. Returns (repointed, unmatched)."""
+    idempotent. Returns repointed count."""
     pins = NodeContextArtifact.query.filter_by(
         artifact_type="ai_preferences").all()
     if not execute:
         # Dry run: the target UserArtifact rows aren't created yet (the row
-        # pass is also dry), so a created_at match would find nothing. Report
-        # the legacy-pin count as the would-repoint magnitude instead.
+        # pass is also dry), so report the legacy-pin count as the
+        # would-repoint magnitude.
         print(f"would repoint: {len(pins)} legacy ai_preferences node pins "
               f"-> user_artifact (matched on execute, once rows exist)")
-        return len(pins), 0
+        return len(pins)
     repointed = 0
     unmatched = 0
     for pin in pins:
-        legacy = UserAIPreferences.query.get(pin.artifact_id)
-        art = None
-        if legacy is not None:
-            art = UserArtifact.query.filter_by(
-                user_id=legacy.user_id, kind=KIND,
-                created_at=legacy.created_at,
-            ).order_by(UserArtifact.id.asc()).first()
-        if art is None:
+        new_id = _resolve_new_artifact_id(pin, legacy_to_new)
+        if new_id is None:
             unmatched += 1
             continue
         repointed += 1
         pin.artifact_type = "user_artifact"
-        pin.artifact_id = art.id
+        pin.artifact_id = new_id
     db.session.commit()
     print(f"repointed: {repointed} legacy ai_preferences node pins -> "
           f"user_artifact"
-          + (f"; {unmatched} unmatched (no backfilled artifact)"
+          + (f"; {unmatched} UNMATCHED — their user was likely skipped "
+             f"(already had an artifact); run the backfill before any new "
+             f"ai_preferences edits to avoid this"
              if unmatched else ""))
-    return repointed, unmatched
+    return repointed
 
 
 def run_backfill(execute):
@@ -103,6 +119,7 @@ def run_backfill(execute):
 
     total_rows = 0
     decrypt_failures = 0
+    legacy_to_new = {}  # UserAIPreferences.id -> new UserArtifact.id (this run)
     for uid in to_migrate:
         prefs = (UserAIPreferences.query.filter_by(user_id=uid)
                  .order_by(UserAIPreferences.created_at.asc(),
@@ -128,6 +145,8 @@ def run_backfill(execute):
                 )
                 art.set_content(content)
                 db.session.add(art)
+                db.session.flush()  # assign art.id for the pin linkage
+                legacy_to_new[p.id] = art.id
         if execute:
             db.session.commit()  # atomic per user
 
@@ -137,9 +156,9 @@ def run_backfill(execute):
         print(f"WARNING: {decrypt_failures} pref rows failed to decrypt "
               f"(skipped)")
 
-    # Migrate the node references too (must run after the rows exist so the
-    # created_at match finds them).
-    repointed, _ = _repoint_node_pins(execute)
+    # Migrate the node references too (after the rows exist, using the exact
+    # linkage captured above).
+    repointed = _repoint_node_pins(execute, legacy_to_new)
 
     if not execute:
         print("\nDry run — re-run with --execute to apply.")
