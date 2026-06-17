@@ -2,10 +2,14 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../api';
 import { formatDate } from '../utils/date';
+import { useUser } from '../contexts/UserContext';
 
 function SearchModal({ onClose }) {
+  const { user } = useUser();
+  const isAdmin = !!(user && user.is_admin);
   const [query, setQuery] = useState('');
-  const [mode, setMode] = useState('keyword'); // 'keyword' | 'semantic'
+  // Semantic is the default for everyone; the Keyword toggle is admin-only.
+  const [mode, setMode] = useState('semantic'); // 'keyword' | 'semantic'
   const [showDateFilter, setShowDateFilter] = useState(false);
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
@@ -184,25 +188,27 @@ function SearchModal({ onClose }) {
               fontFamily: 'var(--sans)',
             }}
           />
-          <button
-            onClick={() => setMode(mode === 'keyword' ? 'semantic' : 'keyword')}
-            title={mode === 'semantic'
-              ? 'Semantic: ranked by meaning. Click for exact keyword match.'
-              : 'Keyword: exact match. Click for semantic (by meaning).'}
-            style={{
-              background: mode === 'semantic' ? 'var(--accent-subtle)' : 'transparent',
-              border: '1px solid ' + (mode === 'semantic' ? 'var(--accent-dim)' : 'var(--border)'),
-              borderRadius: '6px',
-              padding: '4px 10px',
-              fontSize: '12px',
-              color: mode === 'semantic' ? 'var(--accent)' : 'var(--text-muted)',
-              cursor: 'pointer',
-              flexShrink: 0,
-              fontFamily: 'var(--sans)',
-            }}
-          >
-            {mode === 'semantic' ? 'Semantic' : 'Keyword'}
-          </button>
+          {isAdmin && (
+            <button
+              onClick={() => setMode(mode === 'keyword' ? 'semantic' : 'keyword')}
+              title={mode === 'semantic'
+                ? 'Semantic: ranked by meaning. Click for exact keyword match.'
+                : 'Keyword: exact match. Click for semantic (by meaning).'}
+              style={{
+                background: mode === 'semantic' ? 'var(--accent-subtle)' : 'transparent',
+                border: '1px solid ' + (mode === 'semantic' ? 'var(--accent-dim)' : 'var(--border)'),
+                borderRadius: '6px',
+                padding: '4px 10px',
+                fontSize: '12px',
+                color: mode === 'semantic' ? 'var(--accent)' : 'var(--text-muted)',
+                cursor: 'pointer',
+                flexShrink: 0,
+                fontFamily: 'var(--sans)',
+              }}
+            >
+              {mode === 'semantic' ? 'Semantic' : 'Keyword'}
+            </button>
+          )}
           <button
             onClick={() => setShowDateFilter(!showDateFilter)}
             style={{

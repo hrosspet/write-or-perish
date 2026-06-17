@@ -55,8 +55,9 @@ USER_ARTIFACTS_INDEX_PLACEHOLDER = "{user_artifacts_index}"
 # stream and the model is re-called so it answers WITH the content in the same
 # turn — instead of the cross-turn injection done by _scan_proposal_statuses.
 # read_artifact pulls a UserArtifact by kind; read_todo pulls the user's todo
-# list (its own model, no longer shown inline — #158 Slice 3).
-RETRIEVAL_TOOLS = {"read_artifact", "read_todo"}
+# list (its own model, no longer shown inline — #158 Slice 3); semantic_search
+# pulls relevant snippets from the user's own archive by meaning (#155).
+RETRIEVAL_TOOLS = {"read_artifact", "read_todo", "semantic_search"}
 # Max number of interim retrieval round-trips before the model must answer.
 MAX_RETRIEVAL_ROUNDS = 2
 
@@ -192,6 +193,38 @@ VOICE_TOOLS = [
             "type": "object",
             "properties": {},
             "required": [],
+        },
+    },
+    {
+        "name": "semantic_search",
+        "description": (
+            "Search the user's own archive — all their past entries plus "
+            "your past replies — by meaning, not keywords. Use it when the "
+            "conversation touches something they've likely written about "
+            "before but that isn't in your current context, so you can "
+            "ground your response in what they've actually said rather than "
+            "guessing. Pass a focused natural-language query describing what "
+            "to look for. The most relevant entries are injected back into "
+            "your context within the same turn and you answer with them, so "
+            "tell the user you're checking their archive. Don't use it for "
+            "things already in your context. Always produce a text response "
+            "alongside the call."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "What to look for — the meaning you're after, "
+                        "phrased like a sentence the user might have written "
+                        "about it (this is semantic similarity, not keyword "
+                        "match, so describe the idea, not search terms). "
+                        "Search one topic at a time."
+                    ),
+                },
+            },
+            "required": ["query"],
         },
     },
     {
@@ -449,10 +482,10 @@ def _detect_feedback_proposal(text):
 
 def _retrieval_injection_text(tr):
     """Build the context-injection string for a successful retrieval tool
-    result (read_artifact / read_todo), re-resolving the content fresh from
-    the encrypted row — content is never stored in tool_calls_meta. Re-checks
-    ai_usage so a mid-session opt-out is honored. Returns None if the
-    artifact is gone or no longer AI-readable.
+    result (read_artifact / read_todo / semantic_search), re-resolving the
+    content fresh from the source row — content is never stored in
+    tool_calls_meta. Re-checks ai_usage so a mid-session opt-out is honored.
+    Returns None if nothing is (still) available.
     """
     name = tr.get("name")
     if name == "read_artifact":
@@ -466,6 +499,30 @@ def _retrieval_injection_text(tr):
         if todo is None or todo.ai_usage not in AI_ALLOWED:
             return None
         return f"[Your current todo list:\n{todo.get_content()}]"
+    if name == "semantic_search":
+        # Re-resolve each matched node from its id (content never stored in
+        # meta); re-check ai_usage + soft-delete at injection time.
+        matches = tr.get("matches") or []
+        lines = []
+        for m in matches:
+            node = Node.query.get(m.get("node_id"))
+            if (node is None or node.deleted_at is not None
+                    or node.ai_usage not in AI_ALLOWED):
+                continue
+            text = (node.get_content() or "").strip()
+            if not text:
+                continue
+            snippet = text[:400] + ("…" if len(text) > 400 else "")
+            stamp = (node.created_at.strftime("%Y-%m-%d")
+                     if node.created_at else "?")
+            lines.append(f"- {stamp} (node {node.id}): {snippet}")
+        if not lines:
+            return None
+        return (
+            "[Relevant entries from the user's own archive, retrieved by "
+            "semantic search for "
+            f"\"{tr.get('query', '')}\" — use only if actually relevant:\n"
+            + "\n".join(lines) + "]")
     return None
 
 
@@ -878,6 +935,41 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
                     # time; only the row id sits in tool meta.
                     result["status"] = "success"
                     result["todo_id"] = todo.id
+
+            elif name == "semantic_search":
+                # Search the user's own archive by meaning (#155). Embeds the
+                # model's query, ranks NodeEmbedding rows (excluding nodes
+                # already in this thread), and stores only matched node ids +
+                # scores — snippet content is re-resolved at injection time
+                # (never in plaintext tool_calls_meta), like read_artifact.
+                query = (inp.get("query") or "").strip()
+                if not query:
+                    result["status"] = "error"
+                    result["error"] = "semantic_search needs a query."
+                else:
+                    from backend.utils.api_keys import get_openai_chat_key
+                    from backend.utils.embeddings import (
+                        retrieve_relevant_snippets,
+                    )
+                    rag_key = get_openai_chat_key(flask_app.config)
+                    if not rag_key:
+                        result["status"] = "error"
+                        result["error"] = (
+                            "Semantic search is unavailable right now.")
+                    else:
+                        chain_ids = [n.id for n in node_chain]
+                        snippets = retrieve_relevant_snippets(
+                            user_id, query[:4000], chain_ids, rag_key,
+                            k=flask_app.config.get("RAG_TOP_K", 4),
+                            min_score=flask_app.config.get(
+                                "RAG_MIN_SCORE", 0.35),
+                        )
+                        result["status"] = "success"
+                        result["query"] = query
+                        result["matches"] = [
+                            {"node_id": nid, "score": round(score, 4)}
+                            for nid, _created, _snip, score in snippets
+                        ]
 
             elif name == "apply_feedback":
                 # Send the feedback the AI proposed under a ### Feedback
@@ -1550,53 +1642,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         mode_note = mode_labels.get(source_mode)
                         if mode_note:
                             agentic_notes.append(mode_note)
-                # Semantic retrieval (#155): surface relevant archive
-                # snippets for the latest user message via the notes
-                # channel (after the stable prefix — cache-friendly).
-                # Failures never break a completion.
-                if is_agentic and flask_app.config.get(
-                        "RAG_AGENTIC_INJECTION", True):
-                    try:
-                        from backend.utils.api_keys import (
-                            get_openai_chat_key,
-                        )
-                        from backend.utils.embeddings import (
-                            retrieve_relevant_snippets,
-                        )
-                        latest_user_node = next(
-                            (n for n in reversed(node_chain)
-                             if n.node_type != "llm"
-                             and n.llm_model is None
-                             and n.deleted_at is None), None)
-                        rag_key = get_openai_chat_key(flask_app.config)
-                        query_text = (latest_user_node.get_content() or ""
-                                      ).strip() if latest_user_node else ""
-                        if rag_key and len(query_text) >= 20:
-                            chain_ids = [n.id for n in node_chain]
-                            snippets = retrieve_relevant_snippets(
-                                user_id, query_text[-4000:], chain_ids,
-                                rag_key,
-                                k=flask_app.config.get("RAG_TOP_K", 4),
-                                min_score=flask_app.config.get(
-                                    "RAG_MIN_SCORE", 0.35),
-                            )
-                            if snippets:
-                                lines = [
-                                    "[Possibly relevant entries from the "
-                                    "user's archive (retrieved by semantic "
-                                    "similarity to their latest message — "
-                                    "use only if actually relevant):"
-                                ]
-                                for nid, created, snip, score in snippets:
-                                    stamp = local_stamp(created, user_tz)
-                                    lines.append(
-                                        f"- {stamp} (node {nid}): {snip}")
-                                lines.append("]")
-                                agentic_notes.append("\n".join(lines))
-                    except Exception:
-                        logger.warning(
-                            "Semantic retrieval failed; continuing "
-                            "without it", exc_info=True)
+                # Semantic archive retrieval is now a within-turn loop tool
+                # (`semantic_search`, see RETRIEVAL_TOOLS) the model calls when
+                # it judges the archive is relevant — replacing the old
+                # always-on proactive notes-channel injection (#155 → #196
+                # loop). Nothing to inject here.
 
                 if is_agentic and agentic_notes:
                     # Synthetic system-side note injected after the latest real
