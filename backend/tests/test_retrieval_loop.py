@@ -41,6 +41,7 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
 from backend.extensions import db as _db  # noqa: E402
 from backend.models import (  # noqa: E402
     User, Node, UserArtifact, UserPrompt, NodeContextArtifact, APICostLog,
+    UserTodo,
 )
 
 
@@ -208,6 +209,14 @@ def _mk_artifact(user_id, kind, content, title=None, ai_usage="chat"):
     return a
 
 
+def _mk_todo(user_id, content, ai_usage="chat"):
+    t = UserTodo(user_id=user_id, generated_by="test", ai_usage=ai_usage)
+    t.set_content(content)
+    _db.session.add(t)
+    _db.session.flush()
+    return t
+
+
 def _build_chain(source_mode="textmode"):
     """Build an agentic conversation chain:
         system(prompt artifact) -> user message -> llm placeholder.
@@ -325,6 +334,52 @@ def test_textmode_retrieval_loop_injects_and_continues(app):
     pins = NodeContextArtifact.query.filter_by(
         node_id=interim.id, artifact_type="user_artifact").all()
     assert len(pins) == 1
+
+
+def test_textmode_retrieval_loop_read_todo(app):
+    """read_todo rides the same within-turn loop: the model's first call
+    requests the todo, the loop injects it, and the continuation answers
+    with it. The exact todo version read is pinned to the interim node."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    todo = _mk_todo(alice.id, "1. ship slice 3\n2. water the plants")
+    _db.session.commit()
+
+    _ScriptedProvider.reset([
+        _resp("Let me pull up your todo.", tool_calls=[{
+            "id": "t1", "name": "read_todo", "input": {},
+        }]),
+        _resp("Start with shipping slice 3."),
+    ])
+
+    result = generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+
+    # Interim + continuation calls.
+    assert len(_ScriptedProvider.calls) == 2
+
+    interim = _fresh(llm_node.id)
+    assert interim.continuation_node_id is not None
+    meta = json.loads(interim.tool_calls_meta)
+    assert any(e.get("name") == "read_todo" for e in meta)
+
+    final = Node.query.get(interim.continuation_node_id)
+    assert final.get_content() == "Start with shipping slice 3."
+    assert result["llm_node_id"] == final.id
+
+    # The second call's messages carried the injected todo content.
+    second_texts = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[1]["messages"])
+    assert "current todo list" in second_texts
+    assert "ship slice 3" in second_texts
+
+    # The exact todo version is pinned to the interim node (artifact_type
+    # "todo", not "user_artifact") for a faithful export.
+    pins = NodeContextArtifact.query.filter_by(
+        node_id=interim.id, artifact_type="todo").all()
+    assert len(pins) == 1
+    assert pins[0].artifact_id == todo.id
 
 
 def test_textmode_no_retrieval_single_node(app):

@@ -33,7 +33,7 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
 
 from backend.extensions import db as _db  # noqa: E402
 from backend.models import (  # noqa: E402
-    User, Node, NodeContextArtifact, UserArtifact, UserFeedback,
+    User, Node, NodeContextArtifact, UserArtifact, UserFeedback, UserTodo,
 )
 
 # ── Import the real llm_completion against stub glue ─────────────────────
@@ -111,6 +111,14 @@ def _mk_artifact(user_id, kind, content, title=None, description=None):
     _db.session.add(artifact)
     _db.session.commit()
     return artifact
+
+
+def _mk_todo(user_id, content, ai_usage="chat"):
+    todo = UserTodo(user_id=user_id, generated_by="test", ai_usage=ai_usage)
+    todo.set_content(content)
+    _db.session.add(todo)
+    _db.session.commit()
+    return todo
 
 
 # ── Model ────────────────────────────────────────────────────────────────
@@ -259,6 +267,53 @@ def test_read_artifact_tool_unknown_kind(app):
         assert r["status"] == "error"
 
 
+def test_read_todo_tool_returns_ref_not_content(app):
+    with app.app_context():
+        uid = User.query.first().id
+        todo = _mk_todo(uid, "buy milk\nfinish slice 3")
+        r = _run_tool(app, "read_todo", {}, uid)
+        assert r["status"] == "success"
+        assert r["todo_id"] == todo.id
+        # Content must never sit in tool meta (plaintext column)
+        assert "buy milk" not in json.dumps(r)
+
+
+def test_read_todo_tool_no_todo(app):
+    with app.app_context():
+        uid = User.query.first().id
+        r = _run_tool(app, "read_todo", {}, uid)
+        assert r["status"] == "error"
+
+
+def test_read_todo_tool_ai_blocked(app):
+    with app.app_context():
+        uid = User.query.first().id
+        _mk_todo(uid, "private tasks", ai_usage="none")
+        r = _run_tool(app, "read_todo", {}, uid)
+        assert r["status"] == "error"
+
+
+def test_scan_statuses_delivers_todo_content(app):
+    """Cross-turn (voice/single-shot) read_todo delivery injects the content
+    once, re-resolved from the row, then stops on the next scan."""
+    with app.app_context():
+        uid = User.query.first().id
+        todo = _mk_todo(uid, "the actual tasks")
+        node = _node_with_meta(uid, [
+            {"name": "read_todo", "status": "success", "todo_id": todo.id},
+        ])
+        notes, to_mark = _scan_proposal_statuses([node])
+        joined = "\n".join(notes)
+        assert "the actual tasks" in joined
+        assert "current todo list" in joined
+        assert len(to_mark) == 1
+
+        _mark_status_reported(to_mark)
+        _db.session.commit()
+        notes2, to_mark2 = _scan_proposal_statuses([node])
+        assert notes2 == []
+
+
 def test_submit_feedback_tool(app):
     with app.app_context():
         uid = User.query.first().id
@@ -393,3 +448,36 @@ def test_index_includes_description(app):
         _, _, index = get_user_artifacts_context(uid)
         assert "reading-list" in index
         assert "Books to read" in index
+
+
+# ── Todo in the index (#158 Slice 3) ──────────────────────────────────────
+
+def test_index_includes_todo_with_content(app):
+    with app.app_context():
+        uid = User.query.first().id
+        _mk_todo(uid, "task one\ntask two")
+        _, _, index = get_user_artifacts_context(uid)
+        assert "todo" in index
+        assert "read_todo" in index
+        # No raw todo content leaks into the index line.
+        assert "task one" not in index
+        # A non-empty todo reports a token estimate, not "(empty)".
+        assert "tokens)" in index.split("\n")[0]
+
+
+def test_index_lists_empty_todo(app):
+    """A user with no todo row still sees the surface listed as empty."""
+    with app.app_context():
+        uid = User.query.first().id
+        _, _, index = get_user_artifacts_context(uid)
+        assert "todo" in index
+        assert "(empty)" in index
+
+
+def test_index_omits_ai_blocked_todo(app):
+    """A todo the user opted out of AI access is not listed at all."""
+    with app.app_context():
+        uid = User.query.first().id
+        _mk_todo(uid, "private tasks", ai_usage="none")
+        _, _, index = get_user_artifacts_context(uid)
+        assert "read_todo" not in index

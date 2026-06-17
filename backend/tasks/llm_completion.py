@@ -54,7 +54,9 @@ USER_ARTIFACTS_INDEX_PLACEHOLDER = "{user_artifacts_index}"
 # of these tools, the retrieved content is injected back into the message
 # stream and the model is re-called so it answers WITH the content in the same
 # turn — instead of the cross-turn injection done by _scan_proposal_statuses.
-RETRIEVAL_TOOLS = {"read_artifact"}
+# read_artifact pulls a UserArtifact by kind; read_todo pulls the user's todo
+# list (its own model, no longer shown inline — #158 Slice 3).
+RETRIEVAL_TOOLS = {"read_artifact", "read_todo"}
 # Max number of interim retrieval round-trips before the model must answer.
 MAX_RETRIEVAL_ROUNDS = 2
 
@@ -193,6 +195,25 @@ VOICE_TOOLS = [
         },
     },
     {
+        "name": "read_todo",
+        "description": (
+            "Pull the user's current todo list into context. The todo "
+            "list is listed in the artifacts index (as 'todo') rather than "
+            "shown inline, so read it on demand whenever the conversation "
+            "turns to their tasks, plans, or priorities — and before "
+            "proposing todo changes, so your proposal builds on what's "
+            "actually there. Like read_artifact, the content is injected "
+            "back into your context within the same turn and you answer "
+            "with it, so tell the user you're pulling it up. Always produce "
+            "a text response alongside the call."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
         "name": "submit_feedback",
         "description": (
             "Submit feedback about Loore itself to its creators on the "
@@ -230,12 +251,40 @@ VOICE_TOOLS = [
 _ARTIFACT_KIND_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,47}$')
 
 
+def _todo_index_line(user_id, pinned_node=None):
+    """Index line for the user's todo list, or None if it's AI-blocked.
+
+    Todo is its own model (not a UserArtifact) and since #158 Slice 3 is no
+    longer shown inline — it appears in the index and is pulled on demand via
+    read_todo. Resolved from the session's pinned snapshot, falling back to
+    latest. A todo the user opted out of AI access is omitted entirely; an
+    absent or empty todo is still listed (as ``(empty)``) so the model knows
+    the surface exists. No open/priority counts (noise).
+    """
+    todo = pinned_node.get_artifact("todo") if pinned_node else None
+    if todo is None:
+        todo = UserTodo.query.filter_by(user_id=user_id).order_by(
+            UserTodo.created_at.desc()
+        ).first()
+    if todo is not None and todo.ai_usage not in AI_ALLOWED:
+        return None  # privacy: user opted this todo out of AI access
+    content = (todo.get_content() if todo else "") or ""
+    if content.strip():
+        suffix = f"(~{approximate_token_count(content)} tokens)"
+    else:
+        suffix = "(empty)"
+    return (f"- todo — the user's running task list; pull it with "
+            f"read_todo {suffix}")
+
+
 def get_user_artifacts_context(user_id, pinned_node=None):
     """Resolve user artifacts for the agentic prompt (#158).
 
     Returns (memory_content, scratchpad_content, index_text). Pinned to the
     per-session snapshot recorded on *pinned_node* (#191 semantics), falling
     back to latest for legacy nodes. ai_usage is re-checked on resolved rows.
+    The todo list (its own model) is listed in the index too, pulled via
+    read_todo (#158 Slice 3).
     """
     artifacts = pinned_node.get_user_artifacts() if pinned_node else {}
     if not artifacts:
@@ -251,6 +300,10 @@ def get_user_artifacts_context(user_id, pinned_node=None):
     scratchpad_content = scratchpad.get_content() if scratchpad else ""
 
     index_lines = []
+    # Todo first — it's a curated logistics surface, not a freeform artifact.
+    todo_line = _todo_index_line(user_id, pinned_node=pinned_node)
+    if todo_line is not None:
+        index_lines.append(todo_line)
     present = set()
     for kind, artifact in sorted(artifacts.items()):
         if kind in ("memory", "scratchpad"):
@@ -379,6 +432,39 @@ def _detect_github_issue_proposal(text):
     return has_title and has_desc
 
 
+def _retrieval_injection_text(tr):
+    """Build the context-injection string for a successful retrieval tool
+    result (read_artifact / read_todo), re-resolving the content fresh from
+    the encrypted row — content is never stored in tool_calls_meta. Re-checks
+    ai_usage so a mid-session opt-out is honored. Returns None if the
+    artifact is gone or no longer AI-readable.
+    """
+    name = tr.get("name")
+    if name == "read_artifact":
+        artifact = UserArtifact.query.get(tr.get("artifact_id"))
+        if artifact is None or artifact.ai_usage not in AI_ALLOWED:
+            return None
+        return (f"[Contents of artifact '{tr.get('kind', '?')}' you "
+                f"requested:\n{artifact.get_content()}]")
+    if name == "read_todo":
+        todo = UserTodo.query.get(tr.get("todo_id"))
+        if todo is None or todo.ai_usage not in AI_ALLOWED:
+            return None
+        return f"[Your current todo list:\n{todo.get_content()}]"
+    return None
+
+
+def _retrieval_pin(tr):
+    """(artifact_type, artifact_id) to pin on the interim node for a
+    successful retrieval result, so the export references the exact version
+    read. Returns (None, None) for unrecognized/unpinnable results."""
+    if tr.get("name") == "read_artifact":
+        return ("user_artifact", tr.get("artifact_id"))
+    if tr.get("name") == "read_todo":
+        return ("todo", tr.get("todo_id"))
+    return (None, None)
+
+
 def _scan_proposal_statuses(node_chain):
     """Walk all nodes and collect proposal/tool status notes to inject.
 
@@ -439,21 +525,20 @@ def _scan_proposal_statuses(node_chain):
                     notes.append(f"[Artifact '{kind}' was {verb}.]")
                 to_mark.append((node, name))
 
-            elif name == "read_artifact" and not reported:
+            elif name in RETRIEVAL_TOOLS and not reported:
+                # Cross-turn delivery (voice / single-shot): the retrieval
+                # ran last turn; inject the content now. Text mode resolves
+                # these within the same turn (the loop marks them reported),
+                # so this path only fires for the single-shot modes.
                 if entry.get("status") == "success":
-                    artifact = UserArtifact.query.get(
-                        entry.get("artifact_id"))
-                    if artifact is not None:
-                        # Resolved fresh from the encrypted row — content
-                        # is never stored in tool_calls_meta.
-                        notes.append(
-                            f"[Contents of artifact "
-                            f"'{entry.get('kind', '?')}' you requested:\n"
-                            f"{artifact.get_content()}]"
-                        )
+                    # Re-resolved fresh from the encrypted row — content is
+                    # never stored in tool_calls_meta.
+                    text = _retrieval_injection_text(entry)
+                    if text is not None:
+                        notes.append(text)
                 else:
                     err = entry.get("error", "unknown error")
-                    notes.append(f"[read_artifact failed — {err}]")
+                    notes.append(f"[{name} failed — {err}]")
                 to_mark.append((node, name))
 
             elif name == "submit_feedback" and not reported:
@@ -718,11 +803,26 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
                     result["error"] = f"No readable artifact of kind {kind!r}"
                 else:
                     # Content is NOT stored in tool meta (plaintext column)
-                    # — _scan_proposal_statuses re-resolves it from the
-                    # encrypted row and injects it next turn.
+                    # — the retrieval loop / _scan_proposal_statuses
+                    # re-resolves it from the encrypted row and injects it.
                     result["status"] = "success"
                     result["artifact_id"] = artifact.id
                     result["kind"] = kind
+
+            elif name == "read_todo":
+                # Todo is its own model (not a UserArtifact), pulled on
+                # demand since it's no longer shown inline (#158 Slice 3).
+                todo = UserTodo.query.filter_by(user_id=user_id).order_by(
+                    UserTodo.created_at.desc()
+                ).first()
+                if todo is None or todo.ai_usage not in AI_ALLOWED:
+                    result["status"] = "error"
+                    result["error"] = "The todo list is empty or unavailable."
+                else:
+                    # Content re-resolved from the encrypted row at injection
+                    # time; only the row id sits in tool meta.
+                    result["status"] = "success"
+                    result["todo_id"] = todo.id
 
             elif name == "submit_feedback":
                 category = inp.get("category") or "other"
@@ -1602,31 +1702,36 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         for tr in tool_results:
                             tr["response_truncated"] = True
 
-                    # Build the injection text for each successful
-                    # read_artifact, re-checking ai_usage, pinning the
-                    # artifact to the interim node, and marking the result
-                    # reported so the cross-turn scan won't double-inject.
+                    # Build the injection text for each retrieval call,
+                    # re-resolving content from the encrypted row, pinning the
+                    # exact version read to the interim node (faithful export),
+                    # and marking each handled here so the cross-turn scan
+                    # won't double-inject. Errors and vanished artifacts are
+                    # surfaced too, so the model isn't re-called blind.
                     injection_strings = []
                     for tr in tool_results:
-                        if (tr.get("name") not in RETRIEVAL_TOOLS
-                                or tr.get("status") != "success"):
+                        if tr.get("name") not in RETRIEVAL_TOOLS:
                             continue
-                        artifact = UserArtifact.query.get(
-                            tr.get("artifact_id"))
-                        if (artifact is None
-                                or artifact.ai_usage not in AI_ALLOWED):
-                            continue
-                        injection_strings.append(
-                            f"[Contents of artifact "
-                            f"'{tr.get('kind', '?')}' you requested:\n"
-                            f"{artifact.get_content()}]"
-                        )
                         tr["status_reported"] = True
-                        db.session.add(NodeContextArtifact(
-                            node_id=current_node.id,
-                            artifact_type="user_artifact",
-                            artifact_id=tr.get("artifact_id"),
-                        ))
+                        if tr.get("status") == "success":
+                            text = _retrieval_injection_text(tr)
+                            if text is not None:
+                                injection_strings.append(text)
+                                a_type, a_id = _retrieval_pin(tr)
+                                if a_type and a_id:
+                                    db.session.add(NodeContextArtifact(
+                                        node_id=current_node.id,
+                                        artifact_type=a_type,
+                                        artifact_id=a_id,
+                                    ))
+                            else:
+                                injection_strings.append(
+                                    f"[{tr.get('name')}: the requested item "
+                                    f"is no longer available.]")
+                        else:
+                            injection_strings.append(
+                                f"[{tr.get('name')} failed — "
+                                f"{tr.get('error', 'unknown error')}]")
 
                     # Finalize the interim node (NO _mode, NO proposal
                     # auto-detect — that belongs to the final answer only).
