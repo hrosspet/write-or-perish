@@ -442,43 +442,10 @@ def test_textmode_retrieval_budget_caps_at_max_rounds(app):
     assert APICostLog.query.count() == 3
 
 
-def test_voice_mode_single_shot_no_continuation(app):
-    """Non-textmode (voice) keeps single-shot behavior: one node, no
-    continuation, even if the model calls read_artifact."""
-    alice, system, user_node, llm_node = _build_chain("voice")
-    _mk_artifact(alice.id, "reading-list", "secret books", title="Reading List")
-
-    _ScriptedProvider.reset([
-        _resp("Pulling it up, talk next turn.", tool_calls=[{
-            "id": "t1", "name": "read_artifact",
-            "input": {"kind": "reading-list"},
-        }]),
-    ])
-
-    result = generate_llm_response(
-        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
-        source_mode="voice",
-    )
-
-    # Exactly one model call — no within-turn re-call.
-    assert len(_ScriptedProvider.calls) == 1
-    node = _fresh(llm_node.id)
-    assert node.continuation_node_id is None
-    assert result["llm_node_id"] == llm_node.id
-    # read_artifact executed but content NOT injected this turn (cross-turn).
-    meta = json.loads(node.tool_calls_meta)
-    assert any(e.get("name") == "read_artifact" for e in meta)
-    # The single voice call must not contain injected artifact content.
-    only_call = "\n".join(m["text"] for m in _ScriptedProvider.calls[0]["messages"])
-    assert "[Contents of artifact 'reading-list'" not in only_call
-    assert APICostLog.query.count() == 1
-
-
-def test_voice_mode_runs_loop_when_flag_enabled(app):
-    """Slice 4: with VOICE_RETRIEVAL_LOOP enabled, voice runs the SAME
-    within-turn loop as text mode — interim node + continuation, content
-    injected and answered same turn. Default-off is covered by
-    test_voice_mode_single_shot_no_continuation above."""
+def test_voice_mode_runs_loop(app):
+    """Voice runs the SAME within-turn loop as text mode (Slice 4): interim
+    node + continuation, content injected and answered same turn. The _mode
+    marker lands on the final node, not the interim."""
     alice, system, user_node, llm_node = _build_chain("voice")
     _mk_artifact(alice.id, "reading-list", "Dune; Gravity's Rainbow",
                  title="Reading List")
@@ -491,15 +458,10 @@ def test_voice_mode_runs_loop_when_flag_enabled(app):
         _resp("Start with Dune."),
     ])
 
-    saved = _app.config.get("VOICE_RETRIEVAL_LOOP")
-    _app.config["VOICE_RETRIEVAL_LOOP"] = True
-    try:
-        result = generate_llm_response(
-            _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
-            source_mode="voice",
-        )
-    finally:
-        _app.config["VOICE_RETRIEVAL_LOOP"] = saved
+    result = generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="voice",
+    )
 
     # Two model calls — the loop ran for voice just like text mode.
     assert len(_ScriptedProvider.calls) == 2
@@ -518,34 +480,32 @@ def test_voice_mode_runs_loop_when_flag_enabled(app):
                    for e in json.loads(interim.tool_calls_meta))
 
 
-def test_voice_loop_canary_allowlist(app):
-    """A user in VOICE_RETRIEVAL_LOOP_USER_IDS runs the loop even with the
-    global switch off (mirrors PROFILE_USE_BATCH canary semantics)."""
+def test_non_agentic_mode_single_shot(app):
+    """Only the agentic modes (textmode/voice) run the loop. A non-agentic
+    caller (source_mode=None) stays single-shot — one node, no continuation,
+    even if the model emits a retrieval tool call (delivered cross-turn)."""
     alice, system, user_node, llm_node = _build_chain("voice")
-    _mk_artifact(alice.id, "reading-list", "books", title="Reading List")
+    _mk_artifact(alice.id, "reading-list", "secret books", title="Reading List")
 
     _ScriptedProvider.reset([
-        _resp("Pulling it up.", tool_calls=[{
+        _resp("Pulling it up, talk next turn.", tool_calls=[{
             "id": "t1", "name": "read_artifact",
             "input": {"kind": "reading-list"},
         }]),
-        _resp("Here it is."),
     ])
 
-    saved_flag = _app.config.get("VOICE_RETRIEVAL_LOOP")
-    saved_ids = _app.config.get("VOICE_RETRIEVAL_LOOP_USER_IDS")
-    _app.config["VOICE_RETRIEVAL_LOOP"] = False
-    _app.config["VOICE_RETRIEVAL_LOOP_USER_IDS"] = {alice.id}
-    try:
-        result = generate_llm_response(
-            _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
-            source_mode="voice",
-        )
-    finally:
-        _app.config["VOICE_RETRIEVAL_LOOP"] = saved_flag
-        _app.config["VOICE_RETRIEVAL_LOOP_USER_IDS"] = saved_ids
+    result = generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode=None,
+    )
 
-    assert len(_ScriptedProvider.calls) == 2
-    interim = _fresh(llm_node.id)
-    assert interim.continuation_node_id is not None
-    assert result["llm_node_id"] == interim.continuation_node_id
+    # Exactly one model call — no within-turn re-call.
+    assert len(_ScriptedProvider.calls) == 1
+    node = _fresh(llm_node.id)
+    assert node.continuation_node_id is None
+    assert result["llm_node_id"] == llm_node.id
+    meta = json.loads(node.tool_calls_meta)
+    assert any(e.get("name") == "read_artifact" for e in meta)
+    only_call = "\n".join(m["text"] for m in _ScriptedProvider.calls[0]["messages"])
+    assert "[Contents of artifact 'reading-list'" not in only_call
+    assert APICostLog.query.count() == 1
