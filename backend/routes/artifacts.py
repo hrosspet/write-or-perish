@@ -31,7 +31,13 @@ def _serialize(artifact, version_number=None, include_content=True):
         "id": artifact.id,
         "kind": artifact.kind,
         "title": artifact.title,
-        "description": _render_desc(artifact.description),
+        # Fall back to the built-in default for a kind whose row has no
+        # description (e.g. an AI write via update_artifact, which didn't set
+        # one) so default kinds always present their description — and the
+        # edit form prefills it instead of coming up blank.
+        "description": _render_desc(
+            artifact.description
+            or UserArtifact.DEFAULT_DESCRIPTIONS.get(artifact.kind)),
         "generated_by": artifact.generated_by,
         "created_at": iso_utc(artifact.created_at),
         "privacy_level": artifact.privacy_level,

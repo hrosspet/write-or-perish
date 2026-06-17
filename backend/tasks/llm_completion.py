@@ -140,6 +140,15 @@ VOICE_TOOLS = [
                         "custom artifact."
                     ),
                 },
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "One-line summary of what this artifact is for, "
+                        "shown in the index/nav. Set it when creating a new "
+                        "kind; for built-in kinds and updates you can omit "
+                        "it (the existing/default description is kept)."
+                    ),
+                },
             },
             "required": ["kind", "updated_content"],
         },
@@ -764,10 +773,21 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
                             else UserArtifact.DEFAULT_KINDS.get(
                                 kind, kind.replace("-", " ").title())
                         )
+                    # Description: explicit value wins; else carry forward the
+                    # previous version's; else the built-in default for the
+                    # kind. Mirrors the REST route so AI writes don't leave a
+                    # null description (which blocked editing in the UI).
+                    description = (inp.get("description") or "").strip()
+                    if not description:
+                        description = (
+                            previous.description if previous
+                            else UserArtifact.DEFAULT_DESCRIPTIONS.get(kind)
+                        )
                     artifact = UserArtifact(
                         user_id=user_id,
                         kind=kind,
                         title=title[:128],
+                        description=description,
                         generated_by=llm_node.llm_model or "agentic_session",
                         tokens_used=0,
                     )

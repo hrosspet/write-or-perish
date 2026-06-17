@@ -285,6 +285,52 @@ def test_update_artifact_writes_ai_preferences(app):
             == "Be concise. Don't bring up family."
 
 
+def test_update_artifact_tool_fills_description(app):
+    """The agentic update_artifact tool must set a description (it didn't
+    before — AI writes left it null, which blanked the edit form and tripped
+    the mandatory-description check). Built-in kind → built-in default;
+    explicit value wins; an update with none carries the previous forward."""
+    with app.app_context():
+        uid = User.query.first().id
+        # Built-in kind, no description given → built-in default.
+        r = _run_tool(app, "update_artifact",
+                      {"kind": "predictions",
+                       "updated_content": "AGI by 2030."}, uid)
+        assert r["status"] == "success"
+        assert UserArtifact.latest_for(uid, "predictions").description == \
+            UserArtifact.DEFAULT_DESCRIPTIONS["predictions"]
+
+        # New custom kind with an explicit description.
+        _run_tool(app, "update_artifact",
+                  {"kind": "reading-list", "updated_content": "Dune",
+                   "description": "Books to read"}, uid)
+        assert UserArtifact.latest_for(uid, "reading-list").description == \
+            "Books to read"
+        # Update with no description carries the previous one forward.
+        _run_tool(app, "update_artifact",
+                  {"kind": "reading-list", "updated_content": "Dune; Piranesi"},
+                  uid)
+        assert UserArtifact.latest_for(uid, "reading-list").description == \
+            "Books to read"
+
+
+def test_get_default_kind_null_description_serves_default(app, client):
+    """A default-kind row with a null description (e.g. an older AI write)
+    serves the built-in default, so the edit form prefills it rather than
+    coming up blank."""
+    with app.app_context():
+        uid = User.query.first().id
+        a = UserArtifact(user_id=uid, kind="predictions", title="Predictions",
+                         generated_by="claude")  # no description
+        a.set_content("AGI by 2030.")
+        _db.session.add(a)
+        _db.session.commit()
+    res = client.get("/api/artifacts/predictions")
+    assert res.status_code == 200
+    assert res.get_json()["artifact"]["description"] == \
+        UserArtifact.DEFAULT_DESCRIPTIONS["predictions"]
+
+
 def test_read_artifact_tool_returns_ref_not_content(app):
     with app.app_context():
         uid = User.query.first().id
