@@ -47,10 +47,12 @@ export function parseOrientResponse(text) {
     else if (heading.includes('note')) sections.note = stripProposalTag(body);
     else if (heading.includes('issue title') || heading === 'title') sections.issueTitle = stripProposalTag(body).trim();
     else if (heading === 'description') sections.issueDescription = stripProposalTag(body).trim();
-    else if (heading === 'category') sections.issueCategory = stripProposalTag(body).trim().toLowerCase();
+    // Category badges take the first line only — the model sometimes adds a
+    // closing remark after the category value, which would otherwise leak into
+    // the badge. The backend parsers (parse_github_issue / parse_feedback)
+    // already take line one, so this just matches the display to the data.
+    else if (heading === 'category') sections.issueCategory = stripProposalTag(body).split('\n')[0].trim().toLowerCase();
     else if (heading === 'feedback') sections.feedback = stripProposalTag(body).trim();
-    // First line only — the model sometimes adds a closing remark after the
-    // category value, and the backend parse_feedback already takes line one.
     else if (heading === 'feedback category') sections.feedbackCategory = stripProposalTag(body).split('\n')[0].trim().toLowerCase();
   }
   return sections;
