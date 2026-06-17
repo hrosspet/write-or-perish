@@ -64,6 +64,22 @@ class Config:
     PROFILE_UPDATES_PAUSED = os.environ.get(
         "PROFILE_UPDATES_PAUSED", "false").lower() in ("1", "true", "yes")
 
+    # --- Voice within-turn retrieval loop (#158 Slice 4) ---
+    # Flip the within-turn retrieval loop ON for voice sessions (it always
+    # runs for text mode). Ships DARK: default off, so voice keeps its
+    # single-shot behavior (read_artifact/read_todo deliver on the NEXT turn
+    # via the cross-turn scan) until the frontend audio auto-advance is
+    # verified on a real device. A user runs the loop if the global switch is
+    # on OR their id is in the canary allowlist (mirrors PROFILE_USE_BATCH).
+    VOICE_RETRIEVAL_LOOP = os.environ.get(
+        "VOICE_RETRIEVAL_LOOP", "false").lower() in ("1", "true", "yes")
+    VOICE_RETRIEVAL_LOOP_USER_IDS = {
+        int(x) for x in
+        os.environ.get("VOICE_RETRIEVAL_LOOP_USER_IDS", "")
+        .replace(" ", "").split(",")
+        if x
+    }
+
     # Safety factor for prompt-too-long retries (0.99 = aim for 99% of the limit)
     RETRY_SAFETY_FACTOR = 0.99
 

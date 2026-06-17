@@ -1647,13 +1647,24 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     f_result['tool_calls_meta'] = f_tool_meta
                 return f_result
 
-            # ── Non-textmode: EXACT existing single-shot behavior ──────────
-            # Voice and all other modes keep their byte-for-byte behavior:
-            # one model call, one node, no within-turn retrieval loop.
-            if source_mode != "textmode":
+            # ── Within-turn retrieval loop gating (#158) ───────────────────
+            # Text mode always runs the bounded within-turn retrieval loop.
+            # Voice runs it only when enabled (Slice 4 ships dark via the
+            # VOICE_RETRIEVAL_LOOP flag / canary allowlist — default off, so
+            # voice keeps its single-shot behavior and read_artifact/read_todo
+            # deliver on the NEXT turn via the cross-turn scan, until the
+            # frontend audio auto-advance is device-verified). All other modes
+            # stay single-shot.
+            _cfg = flask_app.config
+            _voice_loop_on = source_mode == "voice" and (
+                _cfg.get("VOICE_RETRIEVAL_LOOP")
+                or user_id in _cfg.get("VOICE_RETRIEVAL_LOOP_USER_IDS", set())
+            )
+            if source_mode != "textmode" and not _voice_loop_on:
+                # Single-shot: one model call, one node, no within-turn loop.
                 return _finalize(llm_node, response)
 
-            # ── Text mode: bounded within-turn retrieval loop (#158) ───────
+            # ── Bounded within-turn retrieval loop (#158) ──────────────────
             # When the model calls a retrieval tool, execute it, inject the
             # retrieved content back into `messages` as a plain user message,
             # finalize the current node as an interim step, create a

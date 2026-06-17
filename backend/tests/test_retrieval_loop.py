@@ -472,3 +472,80 @@ def test_voice_mode_single_shot_no_continuation(app):
     only_call = "\n".join(m["text"] for m in _ScriptedProvider.calls[0]["messages"])
     assert "[Contents of artifact 'reading-list'" not in only_call
     assert APICostLog.query.count() == 1
+
+
+def test_voice_mode_runs_loop_when_flag_enabled(app):
+    """Slice 4: with VOICE_RETRIEVAL_LOOP enabled, voice runs the SAME
+    within-turn loop as text mode — interim node + continuation, content
+    injected and answered same turn. Default-off is covered by
+    test_voice_mode_single_shot_no_continuation above."""
+    alice, system, user_node, llm_node = _build_chain("voice")
+    _mk_artifact(alice.id, "reading-list", "Dune; Gravity's Rainbow",
+                 title="Reading List")
+
+    _ScriptedProvider.reset([
+        _resp("Let me pull that up.", tool_calls=[{
+            "id": "t1", "name": "read_artifact",
+            "input": {"kind": "reading-list"},
+        }]),
+        _resp("Start with Dune."),
+    ])
+
+    saved = _app.config.get("VOICE_RETRIEVAL_LOOP")
+    _app.config["VOICE_RETRIEVAL_LOOP"] = True
+    try:
+        result = generate_llm_response(
+            _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+            source_mode="voice",
+        )
+    finally:
+        _app.config["VOICE_RETRIEVAL_LOOP"] = saved
+
+    # Two model calls — the loop ran for voice just like text mode.
+    assert len(_ScriptedProvider.calls) == 2
+    interim = _fresh(llm_node.id)
+    assert interim.continuation_node_id is not None
+    final = Node.query.get(interim.continuation_node_id)
+    assert final.get_content() == "Start with Dune."
+    assert result["llm_node_id"] == final.id
+    # The continuation call carried the injected artifact content.
+    second = "\n".join(m["text"] for m in _ScriptedProvider.calls[1]["messages"])
+    assert "[Contents of artifact 'reading-list'" in second
+    # _mode marker (voice) lands on the FINAL node, not the interim.
+    assert any(e.get("name") == "_mode" and e.get("source_mode") == "voice"
+               for e in json.loads(final.tool_calls_meta))
+    assert not any(e.get("name") == "_mode"
+                   for e in json.loads(interim.tool_calls_meta))
+
+
+def test_voice_loop_canary_allowlist(app):
+    """A user in VOICE_RETRIEVAL_LOOP_USER_IDS runs the loop even with the
+    global switch off (mirrors PROFILE_USE_BATCH canary semantics)."""
+    alice, system, user_node, llm_node = _build_chain("voice")
+    _mk_artifact(alice.id, "reading-list", "books", title="Reading List")
+
+    _ScriptedProvider.reset([
+        _resp("Pulling it up.", tool_calls=[{
+            "id": "t1", "name": "read_artifact",
+            "input": {"kind": "reading-list"},
+        }]),
+        _resp("Here it is."),
+    ])
+
+    saved_flag = _app.config.get("VOICE_RETRIEVAL_LOOP")
+    saved_ids = _app.config.get("VOICE_RETRIEVAL_LOOP_USER_IDS")
+    _app.config["VOICE_RETRIEVAL_LOOP"] = False
+    _app.config["VOICE_RETRIEVAL_LOOP_USER_IDS"] = {alice.id}
+    try:
+        result = generate_llm_response(
+            _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+            source_mode="voice",
+        )
+    finally:
+        _app.config["VOICE_RETRIEVAL_LOOP"] = saved_flag
+        _app.config["VOICE_RETRIEVAL_LOOP_USER_IDS"] = saved_ids
+
+    assert len(_ScriptedProvider.calls) == 2
+    interim = _fresh(llm_node.id)
+    assert interim.continuation_node_id is not None
+    assert result["llm_node_id"] == interim.continuation_node_id
