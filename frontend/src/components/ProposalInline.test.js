@@ -4,7 +4,7 @@
 jest.mock('./MarkdownBody', () => () => null);
 jest.mock('../api', () => ({}));
 
-import { parseOrientResponse } from './ProposalInline';
+import { parseOrientResponse, stripProposalSections } from './ProposalInline';
 
 // Regression: the category badges (issue + feedback) must take only the first
 // line of their heading section. The model sometimes appends a closing remark
@@ -39,4 +39,47 @@ test('issue category takes the first line only', () => {
   ].join('\n');
   const parsed = parseOrientResponse(text);
   expect(parsed.issueCategory).toBe('enhancement');
+});
+
+// Regression: trailing commentary the model appends below the structured block
+// (after a single-line category value, with no following heading) must survive
+// stripping so it stays visible in the message body.
+test('strip keeps intro + trailing commentary after feedback category', () => {
+  const text = [
+    "That's great to hear — I'll draft that for you now.",
+    '',
+    '### Feedback',
+    'The voice mode feels genuinely magical.',
+    '',
+    '### Feedback category',
+    'praise',
+    '',
+    'Let me know if that captures it.',
+  ].join('\n');
+  const body = stripProposalSections(text);
+  expect(body).toContain("That's great to hear");
+  expect(body).toContain('Let me know if that captures it.');
+  // Structured parts are rendered in the card, not the body.
+  expect(body).not.toContain('### Feedback');
+  expect(body).not.toContain('genuinely magical');
+  expect(body).not.toMatch(/(^|\n)praise(\n|$)/);
+});
+
+test('strip keeps trailing commentary after issue category', () => {
+  const text = [
+    'Here is the issue I drafted.',
+    '### Issue Title',
+    'Add dark mode',
+    '### Description',
+    'Users want dark mode.',
+    '### Category',
+    'enhancement',
+    '',
+    'Sound right?',
+  ].join('\n');
+  const body = stripProposalSections(text);
+  expect(body).toContain('Here is the issue I drafted.');
+  expect(body).toContain('Sound right?');
+  expect(body).not.toContain('### Category');
+  expect(body).not.toContain('Add dark mode');
 });

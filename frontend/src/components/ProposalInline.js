@@ -141,18 +141,43 @@ export function stripProposalSections(text) {
   const lines = text.split('\n');
   const result = [];
   let inProposal = false;
+  // Single-line-value sections: the heading is followed by one value line
+  // (e.g. "praise"). Anything after that line is trailing commentary the model
+  // appended below the structured block — keep it in the body (the model likes
+  // to sign off after the proposal). Todo dodges this via its ### Note section.
+  let valueSection = false;
+  let valueConsumed = false;
   const proposalHeadings = ['completed', 'new task', 'new tasks', 'priority', 'priority order',
     'note', 'issue title', 'title', 'description', 'category', 'feedback'];
+  const isValueHeading = (h) => h === 'category' || h === 'feedback category';
   for (const line of lines) {
     const headingMatch = line.match(/^###\s+(.+)/);
     if (headingMatch) {
       const h = headingMatch[1].trim().toLowerCase();
       if (proposalHeadings.some(kw => h.includes(kw) || h === kw)) {
         inProposal = true;
+        valueSection = isValueHeading(h);
+        valueConsumed = false;
         continue;
       } else {
         inProposal = false;
+        valueSection = false;
       }
+    }
+    if (inProposal && valueSection) {
+      if (line.trim() === '') {
+        continue;  // drop blank lines around the value
+      }
+      if (!valueConsumed) {
+        valueConsumed = true;
+        continue;  // drop the single value line itself
+      }
+      // First non-empty line after the value = trailing commentary. Stop
+      // stripping and keep it (and everything after, until the next heading).
+      inProposal = false;
+      valueSection = false;
+      result.push(line);
+      continue;
     }
     if (!inProposal) {
       result.push(line);
