@@ -14,6 +14,30 @@ from backend.utils.webm_utils import persist_init_segment
 
 drafts_bp = Blueprint("drafts_bp", __name__)
 
+# Proposal-pending drafts (created by the agentic loop's _auto_create_drafts,
+# consumed by apply_* / the proposal REST routes) live in the same Draft table
+# but are NOT composing/input drafts. They are keyed on the proposal node's id
+# via parent_id — which collides with the input draft a user composes when
+# replying under that same node. The input-draft endpoints (get/save/delete)
+# must therefore exclude these labels, or composing a text reply under a
+# proposal node would hijack and then delete the pending proposal draft
+# (breaking "yes, send it" / "apply those changes" text confirmation). #158.
+_PROPOSAL_DRAFT_LABELS = (
+    "todo_pending", "github_issue_pending", "feedback_pending",
+)
+
+
+def _exclude_proposal_drafts(query):
+    """Restrict an input-draft query so it never matches proposal-pending
+    drafts that happen to share the same (parent_id, node_id)."""
+    return query.filter(
+        db.or_(
+            Draft.label.is_(None),
+            Draft.label.notin_(_PROPOSAL_DRAFT_LABELS),
+        )
+    )
+
+
 # Audio storage root - same as in nodes.py
 AUDIO_STORAGE_ROOT = pathlib.Path(
     os.environ.get("AUDIO_STORAGE_PATH", "data/audio")
@@ -75,6 +99,8 @@ def get_draft():
 
     # Build query for the user's draft matching the context
     query = Draft.query.filter_by(user_id=current_user.id)
+    # Never surface proposal-pending drafts as the composing/input draft.
+    query = _exclude_proposal_drafts(query)
 
     # Exclude drafts already processed by server-side LLM chain
     # (Reflect/Orient workflows create nodes automatically but leave
@@ -266,8 +292,10 @@ def save_draft():
         if parent.deleted_at is not None:
             return jsonify({"error": "Parent node has been deleted"}), 410
 
-    # Find existing draft for this context
+    # Find existing draft for this context (never an agentic proposal draft —
+    # those share parent_id with the composing draft under a proposal node).
     query = Draft.query.filter_by(user_id=current_user.id)
+    query = _exclude_proposal_drafts(query)
 
     if node_id:
         query = query.filter_by(node_id=node_id)
@@ -333,8 +361,11 @@ def delete_draft():
         if not can_user_edit_node(node):
             return jsonify({"error": "Not authorized to delete drafts for this node"}), 403
 
-    # Build query for the user's draft matching the context
+    # Build query for the user's draft matching the context. Exclude proposal
+    # drafts so deleting the composing draft under a proposal node can't take
+    # the pending proposal with it.
     query = Draft.query.filter_by(user_id=current_user.id)
+    query = _exclude_proposal_drafts(query)
 
     if node_id:
         query = query.filter_by(node_id=node_id)

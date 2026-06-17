@@ -80,6 +80,8 @@ def _make_app():
     app.register_blueprint(artifacts_bp, url_prefix="/api/artifacts")
     from backend.routes.feedback import feedback_bp
     app.register_blueprint(feedback_bp, url_prefix="/api/feedback")
+    from backend.routes.drafts import drafts_bp
+    app.register_blueprint(drafts_bp, url_prefix="/api/drafts")
     return app
 
 
@@ -495,6 +497,49 @@ def test_feedback_submit_route_no_pending(app, client):
     resp = client.post("/api/feedback/submit",
                        json={"llm_node_id": origin_id})
     assert resp.status_code == 404
+
+
+def test_composing_reply_under_proposal_does_not_clobber_draft(app, client):
+    """Regression: confirming a proposal via TEXT must work. Composing a reply
+    under the proposal node saves/deletes a composing draft sharing the same
+    parent_id; that must not hijack or delete the feedback_pending proposal
+    draft (which broke 'yes, send it' text confirmation — the button worked
+    only because it never composes a reply)."""
+    with app.app_context():
+        uid = User.query.first().id
+        proposal = _mk_llm_node(uid, FEEDBACK_TEXT)
+        fb = Draft(user_id=uid, parent_id=proposal.id,
+                   label="feedback_pending")
+        fb.set_content("")
+        _db.session.add(fb)
+        _db.session.commit()
+        proposal_id, fb_id = proposal.id, fb.id
+
+    # 1) Composing a reply saves an input draft — a NEW row, not the proposal.
+    r = client.post("/api/drafts/",
+                    json={"parent_id": proposal_id, "content": "yes, send it"})
+    assert r.status_code == 200
+    assert r.get_json()["id"] != fb_id
+    with app.app_context():
+        fb_after = Draft.query.get(fb_id)
+        assert fb_after is not None and fb_after.label == "feedback_pending"
+        assert fb_after.get_content() == ""  # not overwritten by the reply
+
+    # 2) Sending the reply deletes the input draft, not the proposal draft.
+    d = client.delete(f"/api/drafts/?parent_id={proposal_id}")
+    assert d.status_code == 200
+    with app.app_context():
+        assert Draft.query.get(fb_id) is not None
+
+    # 3) apply_feedback (the text-confirm path) now finds the draft + submits.
+    with app.app_context():
+        uid = User.query.first().id
+        proposal = Node.query.get(proposal_id)
+        results = _execute_tool_calls(
+            [{"name": "apply_feedback", "input": {}}],
+            proposal, [proposal], uid)
+        assert results[0]["status"] == "success"
+        assert UserFeedback.query.count() == 1
 
 
 # ── tool_calls_meta content redaction (privacy) ──────────────────────────
