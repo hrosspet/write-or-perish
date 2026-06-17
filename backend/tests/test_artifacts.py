@@ -598,8 +598,9 @@ def test_ai_preferences_content_prefers_artifact(app):
 
 def test_backfill_ai_preferences_script(app):
     """The standalone backfill (expand-contract, #219) copies each
-    UserAIPreferences version into an ai_preferences UserArtifact, preserving
-    order + content, and is idempotent on re-run."""
+    UserAIPreferences version into an ai_preferences UserArtifact (preserving
+    order + content) AND repoints the legacy node pins to user_artifact so
+    the legacy code paths become removable. Non-destructive + idempotent."""
     import importlib.util
     from datetime import datetime, timedelta
 
@@ -612,30 +613,49 @@ def test_backfill_ai_preferences_script(app):
     with app.app_context():
         uid = User.query.first().id
         base = datetime(2026, 1, 1)
+        prefs = []
         for i, text in enumerate(["v1 prefs", "v2 prefs"]):
             p = UserAIPreferences(user_id=uid, generated_by="test",
                                   created_at=base + timedelta(days=i))
             p.set_content(text)
             _db.session.add(p)
+            prefs.append(p)
+        _db.session.flush()
+        # An old-style system node pinning the v2 prefs via the legacy type.
+        node = Node(user_id=uid, node_type="system")
+        node.set_content("{user_ai_preferences}")
+        _db.session.add(node)
+        _db.session.flush()
+        pin = NodeContextArtifact(
+            node_id=node.id, artifact_type="ai_preferences",
+            artifact_id=prefs[1].id)
+        v2_created_at = prefs[1].created_at
+        _db.session.add(pin)
         _db.session.commit()
 
-        # Dry run touches nothing.
-        users, rows = mod.run_backfill(execute=False)
-        assert (users, rows) == (1, 2)
+        # Dry run touches nothing (reports rows + the legacy-pin count).
+        assert mod.run_backfill(execute=False) == (1, 2, 1)
         assert UserArtifact.query.filter_by(
             user_id=uid, kind="ai_preferences").count() == 0
+        assert pin.artifact_type == "ai_preferences"
 
-        # Execute: both versions copied, order preserved.
-        users, rows = mod.run_backfill(execute=True)
-        assert (users, rows) == (1, 2)
+        # Execute: both versions copied (order preserved) + pin repointed.
+        assert mod.run_backfill(execute=True) == (1, 2, 1)
         arts = UserArtifact.query.filter_by(
             user_id=uid, kind="ai_preferences").order_by(
             UserArtifact.created_at.asc()).all()
         assert [a.get_content() for a in arts] == ["v1 prefs", "v2 prefs"]
-        assert UserArtifact.latest_for(
-            uid, "ai_preferences").get_content() == "v2 prefs"
+        # The pin now points at the backfilled v2 artifact (matched by
+        # created_at), as a user_artifact.
+        v2_art = UserArtifact.query.filter_by(
+            user_id=uid, kind="ai_preferences",
+            created_at=v2_created_at).first()
+        assert pin.artifact_type == "user_artifact"
+        assert pin.artifact_id == v2_art.id
+        # Non-destructive: the legacy rows are untouched.
+        assert UserAIPreferences.query.filter_by(user_id=uid).count() == 2
 
-        # Idempotent: re-running migrates nobody (user already has artifacts).
-        assert mod.run_backfill(execute=True) == (0, 0)
+        # Idempotent: re-running migrates nobody and finds no legacy pins.
+        assert mod.run_backfill(execute=True) == (0, 0, 0)
         assert UserArtifact.query.filter_by(
             user_id=uid, kind="ai_preferences").count() == 2
