@@ -23,7 +23,9 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from backend.extensions import db
-from backend.models import Node, User
+from backend.models import (
+    Node, User, UserProfile, UserTodo, UserArtifact,
+)
 from backend.utils.privacy import AI_ALLOWED
 
 DEFAULT_USERNAME = "hrosspet"
@@ -131,10 +133,41 @@ def run_export(n, out_path):
             "content_hash": chash,
         })
 
+    # The user's current profile / todo / AI preferences, so the agentic
+    # context on staging is faithful (latest version of each; not full
+    # history — that's not needed for the eval).
+    def _doc(row, extra=None):
+        if row is None:
+            return None
+        d = {
+            "content": row.get_content(),
+            "generated_by": getattr(row, "generated_by", "import"),
+            "ai_usage": getattr(row, "ai_usage", "chat"),
+            "privacy_level": getattr(row, "privacy_level", "private"),
+        }
+        if extra:
+            d.update(extra)
+        return d
+
+    profile = (UserProfile.query.filter_by(user_id=user.id)
+               .order_by(UserProfile.created_at.desc()).first())
+    todo = (UserTodo.query.filter_by(user_id=user.id)
+            .order_by(UserTodo.created_at.desc()).first())
+    ai_prefs = UserArtifact.latest_for(user.id, "ai_preferences")
+    docs = {
+        "profile": _doc(profile),
+        "todo": _doc(todo),
+        "ai_preferences": _doc(ai_prefs, {
+            "title": ai_prefs.title, "description": ai_prefs.description,
+        }) if ai_prefs else None,
+    }
+    print("Also exporting: "
+          + ", ".join(k for k, v in docs.items() if v) or "(none)")
+
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     with open(out_path, "w") as f:
         json.dump({"n": n, "owner_username": user.username,
-                   "nodes": out_nodes}, f)
+                   "nodes": out_nodes, "docs": docs}, f)
     print(f"Wrote {len(out_nodes)} nodes ({len(emb)} embedded) → {out_path}")
 
 

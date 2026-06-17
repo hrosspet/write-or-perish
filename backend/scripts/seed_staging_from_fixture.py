@@ -28,7 +28,9 @@ from datetime import datetime
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from backend.extensions import db
-from backend.models import Node, NodeEmbedding, User
+from backend.models import (
+    Node, NodeEmbedding, User, UserProfile, UserTodo, UserArtifact,
+)
 
 
 def _user_id(username, owner_id, cache):
@@ -115,8 +117,46 @@ def run_seed(in_path):
         emb_count += 1
     db.session.commit()
 
+    # Current profile / todo / AI preferences → the staging owner, so the
+    # agentic context is faithful. Re-encrypted with the staging key.
+    docs = fixture.get("docs") or {}
+    seeded_docs = []
+    pf = docs.get("profile")
+    if pf:
+        row = UserProfile(
+            user_id=owner.id, generated_by=pf.get("generated_by", "import"),
+            ai_usage=pf.get("ai_usage", "chat"),
+            privacy_level=pf.get("privacy_level", "private"))
+        row.set_content(pf.get("content") or "")
+        db.session.add(row)
+        seeded_docs.append("profile")
+    td = docs.get("todo")
+    if td:
+        row = UserTodo(
+            user_id=owner.id, generated_by=td.get("generated_by", "import"),
+            ai_usage=td.get("ai_usage", "chat"),
+            privacy_level=td.get("privacy_level", "private"))
+        row.set_content(td.get("content") or "")
+        db.session.add(row)
+        seeded_docs.append("todo")
+    ap = docs.get("ai_preferences")
+    if ap:
+        row = UserArtifact(
+            user_id=owner.id, kind="ai_preferences",
+            title=ap.get("title") or "AI Interaction Preferences",
+            description=ap.get("description"),
+            generated_by=ap.get("generated_by", "import"),
+            ai_usage=ap.get("ai_usage", "chat"),
+            privacy_level=ap.get("privacy_level", "private"))
+        row.set_content(ap.get("content") or "")
+        db.session.add(row)
+        seeded_docs.append("ai_preferences")
+    db.session.commit()
+
     print(f"Seeded {len(nodes)} nodes + {emb_count} embeddings for "
-          f"'{fixture['owner_username']}'.")
+          f"'{fixture['owner_username']}'"
+          + (f"; docs: {', '.join(seeded_docs)}" if seeded_docs else "")
+          + ".")
 
 
 def main():
