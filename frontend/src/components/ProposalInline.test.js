@@ -4,7 +4,7 @@
 jest.mock('./MarkdownBody', () => () => null);
 jest.mock('../api', () => ({}));
 
-import { parseOrientResponse, stripProposalSections } from './ProposalInline';
+import { parseOrientResponse, stripProposalSections, splitProposalText } from './ProposalInline';
 
 // Regression: the category badges (issue + feedback) must take only the first
 // line of their heading section. The model sometimes appends a closing remark
@@ -82,4 +82,35 @@ test('strip keeps trailing commentary after issue category', () => {
   expect(body).toContain('Sound right?');
   expect(body).not.toContain('### Category');
   expect(body).not.toContain('Add dark mode');
+});
+
+// The lead-in renders above the card; trailing commentary renders below it.
+test('split separates lead-in (before) from trailing commentary (after)', () => {
+  const text = [
+    "Glad you're enjoying it.",
+    '',
+    '### Feedback',
+    'Love the voice mode.',
+    '',
+    '### Feedback category',
+    'praise',
+    '',
+    'Thanks for building this!',
+  ].join('\n');
+  const { before, after } = splitProposalText(text);
+  expect(before).toBe("Glad you're enjoying it.");
+  expect(after).toBe('Thanks for building this!');
+});
+
+test('split returns empty after when there is no trailing commentary', () => {
+  const text = [
+    'Here is the issue.',
+    '### Issue Title',
+    'Add dark mode',
+    '### Category',
+    'enhancement',
+  ].join('\n');
+  const { before, after } = splitProposalText(text);
+  expect(before).toBe('Here is the issue.');
+  expect(after).toBe('');
 });

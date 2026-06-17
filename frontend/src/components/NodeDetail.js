@@ -6,7 +6,7 @@ import SpeakerIcon from "./SpeakerIcon";
 import DownloadAudioIcon from "./DownloadAudioIcon";
 import ModelSelector from "./ModelSelector";
 import NodeForm from "./NodeForm";
-import ProposalInline, { hasProposalSections, stripProposalSections } from "./ProposalInline";
+import ProposalInline, { hasProposalSections, splitProposalText } from "./ProposalInline";
 import { useUser } from "../contexts/UserContext";
 import { useToast } from "../contexts/ToastContext";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
@@ -581,7 +581,11 @@ function NodeDetail() {
   );
   const showProposal = isLlmNode && !isLlmPending && node.content
     && hasProposalSections(node.content);
-  const displayContent = showProposal ? stripProposalSections(node.content) : node.content;
+  // When a proposal is present, the lead-in renders above the card and any
+  // trailing commentary below it (proposalAfter). Otherwise show full content.
+  const proposalSplit = showProposal ? splitProposalText(node.content) : null;
+  const displayContent = showProposal ? proposalSplit.before : node.content;
+  const proposalAfter = showProposal ? proposalSplit.after : '';
   // Inline input is always available to any viewer (reply + branch from
   // someone else's public node → new thread owned by the replier). The
   // only way to add a child text node since "Add Text" was removed. On
@@ -746,14 +750,16 @@ function NodeDetail() {
             `}</style>
           </div>
         ) : (
-          <QuotedContent
-            content={displayContent}
-            quotes={quotes}
-            contextArtifacts={node.context_artifacts || null}
-            onQuoteClick={handleBubbleClick}
-            onCheckboxToggle={isOwner ? handleCheckboxToggle : undefined}
-            onAddTask={isOwner ? handleTaskInsert : undefined}
-          />
+          (!showProposal || displayContent) && (
+            <QuotedContent
+              content={displayContent}
+              quotes={quotes}
+              contextArtifacts={node.context_artifacts || null}
+              onQuoteClick={handleBubbleClick}
+              onCheckboxToggle={isOwner ? handleCheckboxToggle : undefined}
+              onAddTask={isOwner ? handleTaskInsert : undefined}
+            />
+          )
         )}
         {showProposal && (
           <ProposalInline
@@ -772,6 +778,14 @@ function NodeDetail() {
               };
             })}
             onError={(msg) => addToast(msg)}
+          />
+        )}
+        {showProposal && proposalAfter && (
+          <QuotedContent
+            content={proposalAfter}
+            quotes={quotes}
+            contextArtifacts={node.context_artifacts || null}
+            onQuoteClick={handleBubbleClick}
           />
         )}
         {(() => {

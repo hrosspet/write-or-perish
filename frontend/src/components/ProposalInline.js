@@ -136,20 +136,28 @@ export function moveProposalItem(content, itemText, fromSection, toSection, { pr
   return lines.join('\n');
 }
 
-export function stripProposalSections(text) {
-  if (!text) return text;
+// Split a response that carries a proposal into the prose around it:
+//   before — the lead-in shown above the proposal card,
+//   after  — trailing commentary the model appended below the structured
+//            block (it likes to sign off after the proposal).
+// The structured sections themselves (lists / single values) are rendered in
+// the card and excluded from both. Single-line-value sections (Category /
+// Feedback category) consume only their one value line, so a following
+// non-empty line is treated as the start of the trailing commentary. Todo
+// dodges all this via its ### Note section, which renders inside the card.
+export function splitProposalText(text) {
+  if (!text) return { before: '', after: '' };
   const lines = text.split('\n');
-  const result = [];
+  const before = [];
+  const after = [];
   let inProposal = false;
-  // Single-line-value sections: the heading is followed by one value line
-  // (e.g. "praise"). Anything after that line is trailing commentary the model
-  // appended below the structured block — keep it in the body (the model likes
-  // to sign off after the proposal). Todo dodges this via its ### Note section.
   let valueSection = false;
   let valueConsumed = false;
+  let seenProposal = false;
   const proposalHeadings = ['completed', 'new task', 'new tasks', 'priority', 'priority order',
     'note', 'issue title', 'title', 'description', 'category', 'feedback'];
   const isValueHeading = (h) => h === 'category' || h === 'feedback category';
+  const keep = (line) => (seenProposal ? after : before).push(line);
   for (const line of lines) {
     const headingMatch = line.match(/^###\s+(.+)/);
     if (headingMatch) {
@@ -158,6 +166,7 @@ export function stripProposalSections(text) {
         inProposal = true;
         valueSection = isValueHeading(h);
         valueConsumed = false;
+        seenProposal = true;
         continue;
       } else {
         inProposal = false;
@@ -172,18 +181,26 @@ export function stripProposalSections(text) {
         valueConsumed = true;
         continue;  // drop the single value line itself
       }
-      // First non-empty line after the value = trailing commentary. Stop
-      // stripping and keep it (and everything after, until the next heading).
+      // First non-empty line after the value = trailing commentary.
       inProposal = false;
       valueSection = false;
-      result.push(line);
+      keep(line);
       continue;
     }
     if (!inProposal) {
-      result.push(line);
+      keep(line);
     }
   }
-  return result.join('\n').trim();
+  return {
+    before: before.join('\n').trim(),
+    after: after.join('\n').trim(),
+  };
+}
+
+export function stripProposalSections(text) {
+  if (!text) return text;
+  const { before, after } = splitProposalText(text);
+  return [before, after].filter(Boolean).join('\n\n');
 }
 
 // Decorative pulsing dot rendered next to section labels in the roomy
