@@ -58,3 +58,5 @@ logs/
 
 # Experiment-specific prompts (vary per run)
 experiments/prompt_rct/eval_prompts/
+# Staging-eval fixture (real content; never commit) — #155/#197
+staging_fixture*.json
