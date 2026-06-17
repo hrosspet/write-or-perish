@@ -90,8 +90,13 @@ def attach_context_artifacts(node_id, user_id, prompt_record=None):
             artifact_id=todo.id,
         ))
 
-    # Latest version of every user artifact (memory, scratchpad, custom)
-    # the AI is allowed to see — one row per kind (#158).
+    # Latest version of every user artifact the AI is allowed to see — one
+    # row per kind (#158). Since Slice 5 this includes 'ai_preferences'
+    # (folded into the UserArtifact model), so it's pinned here too. There's
+    # no dedicated ai_preferences pin anymore — that would double-pin once the
+    # artifact exists. Pre-backfill (no artifact yet),
+    # get_user_ai_preferences_content falls back to the legacy
+    # UserAIPreferences row (#219).
     for artifact in UserArtifact.latest_per_kind(user_id).values():
         if artifact.ai_usage in AI_ALLOWED:
             db.session.add(NodeContextArtifact(
@@ -99,21 +104,6 @@ def attach_context_artifacts(node_id, user_id, prompt_record=None):
                 artifact_type="user_artifact",
                 artifact_id=artifact.id,
             ))
-
-    # Latest AI preferences that the AI is allowed to see
-    ai_prefs = (
-        UserAIPreferences.query
-        .filter_by(user_id=user_id)
-        .filter(UserAIPreferences.ai_usage.in_(AI_ALLOWED))
-        .order_by(UserAIPreferences.created_at.desc())
-        .first()
-    )
-    if ai_prefs is not None:
-        db.session.add(NodeContextArtifact(
-            node_id=node_id,
-            artifact_type="ai_preferences",
-            artifact_id=ai_prefs.id,
-        ))
 
 
 def sync_context_artifacts(node_id, user_id, content):

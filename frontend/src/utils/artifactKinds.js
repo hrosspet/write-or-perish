@@ -1,15 +1,18 @@
 // Canonical order of the built-in (default) artifact kinds. These are the
 // out-of-the-box artifacts the AI maintains; they're pinned above the divider
-// in the nav dropdown (between Todo and AI Interaction Preferences) and listed
-// first (in this order) on the Artifacts page. User/AI-created custom kinds
-// follow, alphabetically. `intentions` is added by #202 and slots in
-// automatically once that kind exists.
-// Full dropdown order: Profile, Todo, [these], AI Interaction Preferences.
+// in the nav dropdown (after Profile/Todo) and listed first (in this order)
+// on the Artifacts page. User/AI-created custom kinds follow, alphabetically.
+// `intentions` is added by #202 and slots in automatically once that kind
+// exists. `ai_preferences` was folded into the artifact model in #158 Slice 5
+// (it used to be a hardcoded dropdown link to /ai-preferences); kept last to
+// preserve its prior position at the end of the curated group.
+// Full dropdown order: Profile, Todo, [these].
 export const BUILTIN_KIND_ORDER = [
   'intentions',
   'predictions',
   'memory',
   'scratchpad',
+  'ai_preferences',
 ];
 
 export const isBuiltinKind = (kind) => BUILTIN_KIND_ORDER.includes(kind);

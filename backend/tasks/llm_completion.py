@@ -99,34 +99,6 @@ VOICE_TOOLS = [
         },
     },
     {
-        "name": "update_ai_preferences",
-        "description": (
-            "Update the user's AI interaction preferences. Call this when "
-            "the user expresses how they want AI to interact with them — "
-            "tone, style, boundaries, topics to avoid, interaction "
-            "patterns. Examples: 'don't bring up family unless I do', "
-            "'be more direct', 'keep todo updates concise'. The "
-            "updated_preferences should be the FULL updated text (not "
-            "just the diff), incorporating the new preference into the "
-            "existing ones. Always produce a text response — the user "
-            "needs to hear what happened as they are interacting via voice."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "updated_preferences": {
-                    "type": "string",
-                    "description": (
-                        "The complete updated AI interaction preferences "
-                        "as markdown text. Incorporate the new preference "
-                        "into the existing text. Keep it concise."
-                    ),
-                },
-            },
-            "required": ["updated_preferences"],
-        },
-    },
-    {
         "name": "update_artifact",
         "description": (
             "Create or update one of the user's artifacts — persistent "
@@ -250,12 +222,20 @@ VOICE_TOOLS = [
 
 _ARTIFACT_KIND_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,47}$')
 
+# UserArtifact kinds that are injected INLINE in the agentic prompt (each has
+# its own placeholder/tag) and therefore must be EXCLUDED from the artifacts
+# index — otherwise they'd appear both inline and in the index. Single source
+# of truth for both index-exclusion spots in get_user_artifacts_context.
+# (#202 intentions joins this when it lands — it has an ambient
+# {user_intentions} placeholder too.)
+ALWAYS_INLINE_KINDS = ("memory", "scratchpad", "ai_preferences")
+
 # Kinds that are NOT UserArtifacts — they're separate single-row models or
 # system-managed, so update_artifact must refuse them. Without this guard the
 # model could create a UserArtifact named e.g. "todo" that shadows and
 # silently diverges from the real UserTodo. Each value is a message pointing
-# the model at the correct path. (ai_preferences leaves this set in Slice 5,
-# when it folds into the UserArtifact model and becomes writable here.)
+# the model at the correct path. (ai_preferences is NOT here — Slice 5 folded
+# it into the UserArtifact model, so it's a normal writable artifact now.)
 RESERVED_ARTIFACT_KINDS = {
     "todo": ("Todo changes go through proposals — put them under the "
              "### Completed / ### New Tasks / ### Priority Order headings in "
@@ -263,8 +243,6 @@ RESERVED_ARTIFACT_KINDS = {
     "profile": ("The profile is system-generated and read-only — there is no "
                 "tool to edit it."),
     "recent_context": "Recent context is system-generated and can't be edited.",
-    "ai_preferences": ("Use update_ai_preferences for AI interaction "
-                       "preferences, not update_artifact."),
 }
 
 
@@ -323,7 +301,7 @@ def get_user_artifacts_context(user_id, pinned_node=None):
         index_lines.append(todo_line)
     present = set()
     for kind, artifact in sorted(artifacts.items()):
-        if kind in ("memory", "scratchpad"):
+        if kind in ALWAYS_INLINE_KINDS:
             continue
         present.add(kind)
         tokens = approximate_token_count(artifact.get_content() or "")
@@ -335,7 +313,7 @@ def get_user_artifacts_context(user_id, pinned_node=None):
     # the model knows they exist and writes to them (e.g. predictions)
     # rather than creating a duplicate custom artifact.
     for kind, title in UserArtifact.DEFAULT_KINDS.items():
-        if kind in ("memory", "scratchpad") or kind in present:
+        if kind in ALWAYS_INLINE_KINDS or kind in present:
             continue
         desc = (UserArtifact.DEFAULT_DESCRIPTIONS.get(kind) or "").strip()
         desc_part = f": {desc}" if desc else ""
@@ -347,16 +325,25 @@ def get_user_artifacts_context(user_id, pinned_node=None):
 def get_user_ai_preferences_content(user_id, pinned_node=None):
     """Resolve the AI preferences for an LLM prompt.
 
-    If *pinned_node* carries a recorded version (NodeContextArtifact, written
-    by ``attach_context_artifacts`` when the session's system node was
-    created — see #191), that exact version is used: the same one the data
-    export references, so the session sees one coherent point-in-time
-    snapshot instead of re-fetching "latest now" each turn. Falls back to the
-    latest when the node has no binding (e.g. legacy nodes). ai_usage is
-    re-checked on the resolved row (AI_ALLOWED — 'chat' or 'train', matching
-    attach_context_artifacts and the other artifacts) so a mid-session
-    opt-out is honored.
+    Since #158 Slice 5, AI preferences are a ``UserArtifact`` kind
+    ('ai_preferences') — they're pinned as a ``user_artifact`` row and read
+    from there (pinned snapshot via *pinned_node*, else latest; #191).
+
+    During the expand-contract transition, this falls back to the legacy
+    ``UserAIPreferences`` model when no artifact exists yet (before the prod
+    backfill runs) — both the pinned legacy binding and the latest row. The
+    fallback is removed in #219. ai_usage is re-checked on the resolved row
+    so a mid-session opt-out is honored.
     """
+    art = None
+    if pinned_node is not None:
+        art = pinned_node.get_user_artifacts().get("ai_preferences")
+    if art is None:
+        art = UserArtifact.latest_for(user_id, "ai_preferences")
+    if art is not None and art.ai_usage in AI_ALLOWED:
+        return art.get_content()
+
+    # Legacy fallback (pre-fold UserAIPreferences) — removed in #219.
     prefs = pinned_node.get_artifact("ai_preferences") if pinned_node else None
     if prefs is None:
         prefs = UserAIPreferences.query.filter_by(user_id=user_id).order_by(
@@ -489,9 +476,6 @@ def _scan_proposal_statuses(node_chain):
     tool_calls_meta asynchronously). Returns (notes_list, nodes_to_mark)
     where nodes_to_mark is a list of (node, tool_name) tuples whose
     status_reported flag should be set after a successful LLM call.
-
-    Also handles update_ai_preferences with the same status_reported
-    pattern so the LLM is told about preference updates exactly once.
     """
     notes = []
     to_mark = []
@@ -529,10 +513,6 @@ def _scan_proposal_statuses(node_chain):
                         f"[{tag}:{node.id}: failed — {err}.]"
                     )
                     to_mark.append((node, name))
-
-            elif name == "update_ai_preferences" and not reported:
-                notes.append("[AI preferences were updated.]")
-                to_mark.append((node, name))
 
             elif name == "update_artifact" and not reported:
                 if entry.get("status") == "success":
@@ -763,22 +743,6 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
                             result["status"] = "success"
                             result["issue_url"] = gh_result["url"]
                             result["issue_number"] = gh_result["number"]
-
-            elif name == "update_ai_preferences":
-                pref_user = User.query.get(user_id)
-                prefs = UserAIPreferences(
-                    user_id=user_id,
-                    generated_by=llm_node.llm_model or "voice_session",
-                    tokens_used=0,
-                    # ai_usage follows the user's global default (#191).
-                    ai_usage=(pref_user.default_ai_usage
-                              if pref_user else "chat"),
-                )
-                prefs.set_content(inp["updated_preferences"])
-                db.session.add(prefs)
-                db.session.flush()
-                result["status"] = "success"
-                result["preferences_id"] = prefs.id
 
             elif name == "update_artifact":
                 kind = (inp.get("kind") or "").strip().lower()
@@ -1242,9 +1206,6 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 proposal_notes, proposal_to_mark = (
                     _scan_proposal_statuses(node_chain)
                 )
-
-            # (ai_preferences status is now handled by
-            # _scan_proposal_statuses above)
 
             if needs_export:
                 # Defense-in-depth log only: validate_user_export_placeholders

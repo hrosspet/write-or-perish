@@ -305,7 +305,7 @@ export default function AccountPage() {
       <div style={rowStyle}>
         <div style={labelStyle}>AI Preferences</div>
         <button
-          onClick={() => navigate("/ai-preferences")}
+          onClick={() => navigate("/artifacts/ai_preferences")}
           style={{
             ...inputStyle,
             cursor: "pointer",

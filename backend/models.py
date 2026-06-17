@@ -638,6 +638,10 @@ class UserArtifact(db.Model):
         "memory": "Memory",
         "scratchpad": "Scratchpad",
         "predictions": "Predictions",
+        # AI interaction preferences folded into the artifact model (#158
+        # Slice 5). Always-inline (its own {user_ai_preferences} placeholder),
+        # so it's excluded from the agentic index — see ALWAYS_INLINE_KINDS.
+        "ai_preferences": "AI Interaction Preferences",
     }
 
     # Pre-filled one-line descriptions for the built-in kinds. Custom kinds
@@ -648,6 +652,7 @@ class UserArtifact(db.Model):
         "memory": "Durable facts about {name}, remembered across sessions.",
         "scratchpad": "Working notes for ongoing threads — where we left off, open questions.",
         "predictions": "Predictions you want to record and revisit over time.",
+        "ai_preferences": "How {name} wants the AI to interact with them — tone, style, boundaries.",
     }
 
     def set_content(self, plaintext):

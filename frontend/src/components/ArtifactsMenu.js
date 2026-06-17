@@ -91,8 +91,7 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
   const isMenuActive =
     currentPath.startsWith("/artifacts") ||
     currentPath === "/profile" ||
-    currentPath === "/todo" ||
-    currentPath === "/ai-preferences";
+    currentPath === "/todo";
 
   const openCreateModal = () => {
     // Leave the dropdown open behind the modal (modal zIndex 2000 > dropdown
@@ -189,8 +188,8 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
           <Link to="/todo" style={itemStyle(currentPath === "/todo")}>
             Todo
           </Link>
-          {/* Built-in artifacts (intentions, predictions, memory, scratchpad)
-              pinned here in canonical order */}
+          {/* Built-in artifacts (intentions, predictions, memory, scratchpad,
+              ai_preferences) pinned here in canonical order */}
           {pinnedArtifacts.map((a) => (
             <Link
               key={a.kind}
@@ -201,12 +200,6 @@ function ArtifactsMenu({ dropdownStyle, dropdownItemStyle }) {
               {a.title || titleFromKind(a.kind)}
             </Link>
           ))}
-          <Link
-            to="/ai-preferences"
-            style={itemStyle(currentPath === "/ai-preferences")}
-          >
-            AI interaction preferences
-          </Link>
 
           <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
 

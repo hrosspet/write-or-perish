@@ -34,6 +34,7 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
 from backend.extensions import db as _db  # noqa: E402
 from backend.models import (  # noqa: E402
     User, Node, NodeContextArtifact, UserArtifact, UserFeedback, UserTodo,
+    UserAIPreferences,
 )
 
 # ── Import the real llm_completion against stub glue ─────────────────────
@@ -48,7 +49,7 @@ sys.modules.pop("backend.tasks.llm_completion", None)
 
 from backend.tasks.llm_completion import (  # noqa: E402
     _execute_tool_calls, _scan_proposal_statuses, _mark_status_reported,
-    get_user_artifacts_context,
+    get_user_artifacts_context, get_user_ai_preferences_content,
 )
 
 for _k, _v in _saved_glue.items():
@@ -251,11 +252,12 @@ def test_update_artifact_tool_rejects_bad_kind(app):
 
 def test_update_artifact_tool_rejects_reserved_kinds(app):
     """update_artifact must refuse non-UserArtifact kinds (todo / profile /
-    recent_context / ai_preferences) so it can't create a shadow artifact
-    that diverges from the real single-row model."""
+    recent_context) so it can't create a shadow artifact that diverges from
+    the real single-row model. ai_preferences is NOT reserved since Slice 5
+    folded it into the artifact model (see the positive test below)."""
     with app.app_context():
         uid = User.query.first().id
-        for kind in ("todo", "profile", "recent_context", "ai_preferences"):
+        for kind in ("todo", "profile", "recent_context"):
             r = _run_tool(app, "update_artifact",
                           {"kind": kind, "updated_content": "x"}, uid)
             assert r["status"] == "error", kind
@@ -266,6 +268,21 @@ def test_update_artifact_tool_rejects_reserved_kinds(app):
         r = _run_tool(app, "update_artifact",
                       {"kind": "todo", "updated_content": "x"}, uid)
         assert "proposal" in r["error"].lower()
+
+
+def test_update_artifact_writes_ai_preferences(app):
+    """Slice 5: ai_preferences is a normal writable UserArtifact kind — the AI
+    edits it via update_artifact (no dedicated update_ai_preferences tool)."""
+    with app.app_context():
+        uid = User.query.first().id
+        r = _run_tool(app, "update_artifact",
+                      {"kind": "ai_preferences",
+                       "updated_content": "Be concise. Don't bring up family."},
+                      uid)
+        assert r["status"] == "success"
+        assert r["kind"] == "ai_preferences"
+        assert UserArtifact.latest_for(uid, "ai_preferences").get_content() \
+            == "Be concise. Don't bring up family."
 
 
 def test_read_artifact_tool_returns_ref_not_content(app):
@@ -500,3 +517,79 @@ def test_index_omits_ai_blocked_todo(app):
         _mk_todo(uid, "private tasks", ai_usage="none")
         _, _, index = get_user_artifacts_context(uid)
         assert "read_todo" not in index
+
+
+# ── AI preferences folded into the artifact model (#158 Slice 5) ───────────
+
+def test_index_excludes_ai_preferences(app):
+    """ai_preferences is always-inline (its own {user_ai_preferences} tag), so
+    it must NOT appear in the artifacts index — even with content."""
+    with app.app_context():
+        uid = User.query.first().id
+        _mk_artifact(uid, "ai_preferences", "be concise",
+                     title="AI Interaction Preferences")
+        _, _, index = get_user_artifacts_context(uid)
+        assert "ai_preferences" not in index
+
+
+def test_ai_preferences_content_prefers_artifact(app):
+    """get_user_ai_preferences_content reads the folded UserArtifact; it falls
+    back to the legacy UserAIPreferences only when no artifact exists."""
+    with app.app_context():
+        uid = User.query.first().id
+        # Legacy fallback when no artifact yet.
+        legacy = UserAIPreferences(user_id=uid, generated_by="test")
+        legacy.set_content("legacy prefs")
+        _db.session.add(legacy)
+        _db.session.commit()
+        assert get_user_ai_preferences_content(uid) == "legacy prefs"
+
+        # Once a UserArtifact exists, it wins over the legacy row.
+        _mk_artifact(uid, "ai_preferences", "folded prefs",
+                     title="AI Interaction Preferences")
+        assert get_user_ai_preferences_content(uid) == "folded prefs"
+
+
+def test_backfill_ai_preferences_script(app):
+    """The standalone backfill (expand-contract, #219) copies each
+    UserAIPreferences version into an ai_preferences UserArtifact, preserving
+    order + content, and is idempotent on re-run."""
+    import importlib.util
+    from datetime import datetime, timedelta
+
+    path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                        "scripts", "backfill_ai_preferences_artifacts.py")
+    spec = importlib.util.spec_from_file_location("_bf_aiprefs", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    with app.app_context():
+        uid = User.query.first().id
+        base = datetime(2026, 1, 1)
+        for i, text in enumerate(["v1 prefs", "v2 prefs"]):
+            p = UserAIPreferences(user_id=uid, generated_by="test",
+                                  created_at=base + timedelta(days=i))
+            p.set_content(text)
+            _db.session.add(p)
+        _db.session.commit()
+
+        # Dry run touches nothing.
+        users, rows = mod.run_backfill(execute=False)
+        assert (users, rows) == (1, 2)
+        assert UserArtifact.query.filter_by(
+            user_id=uid, kind="ai_preferences").count() == 0
+
+        # Execute: both versions copied, order preserved.
+        users, rows = mod.run_backfill(execute=True)
+        assert (users, rows) == (1, 2)
+        arts = UserArtifact.query.filter_by(
+            user_id=uid, kind="ai_preferences").order_by(
+            UserArtifact.created_at.asc()).all()
+        assert [a.get_content() for a in arts] == ["v1 prefs", "v2 prefs"]
+        assert UserArtifact.latest_for(
+            uid, "ai_preferences").get_content() == "v2 prefs"
+
+        # Idempotent: re-running migrates nobody (user already has artifacts).
+        assert mod.run_backfill(execute=True) == (0, 0)
+        assert UserArtifact.query.filter_by(
+            user_id=uid, kind="ai_preferences").count() == 2
