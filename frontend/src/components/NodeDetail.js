@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { useParams, useNavigate, useSearchParams } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams, Link } from "react-router-dom";
 import { FaThumbtack, FaMicrophone } from "react-icons/fa";
 import NodeFooter from "./NodeFooter";
 import SpeakerIcon from "./SpeakerIcon";
@@ -809,10 +809,10 @@ function NodeDetail() {
                     )}
                     {tc.name === 'update_ai_preferences' && 'Preferences updated'}
                     {tc.name === 'update_artifact' && (
-                      <>{tc.created ? 'Created' : 'Updated'} artifact{tc.kind ? <> <code style={{ fontSize: '0.95em' }}>{tc.kind}</code></> : ''}</>
+                      <>{tc.created ? 'Created' : 'Updated'} artifact{tc.kind ? <> <Link to={`/artifacts/${tc.kind}`} style={{ color: 'var(--accent)', textDecoration: 'none' }}><code style={{ fontSize: '0.95em' }}>{tc.kind}</code></Link></> : ''}</>
                     )}
                     {tc.name === 'read_artifact' && (
-                      <>Read artifact{tc.kind ? <> <code style={{ fontSize: '0.95em' }}>{tc.kind}</code></> : ''}</>
+                      <>Read artifact{tc.kind ? <> <Link to={`/artifacts/${tc.kind}`} style={{ color: 'var(--accent)', textDecoration: 'none' }}><code style={{ fontSize: '0.95em' }}>{tc.kind}</code></Link></> : ''}</>
                     )}
                     {tc.name === 'submit_feedback' && 'Feedback submitted'}
                     {!['propose_todo', 'propose_github_issue', 'apply_todo_changes', 'apply_github_issue', 'update_ai_preferences', 'update_artifact', 'read_artifact', 'submit_feedback'].includes(tc.name) && tc.name}
