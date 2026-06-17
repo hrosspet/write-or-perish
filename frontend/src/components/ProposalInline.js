@@ -417,6 +417,7 @@ export default function ProposalInline({
   nodeId,
   toolCallsMeta,
   onContentChange,
+  onApplied,
   onError,
   size = 'compact',
 }) {
@@ -525,15 +526,20 @@ export default function ProposalInline({
           if (todoEntry?.apply_status === 'completed') {
             clearInterval(mergePollingRef.current);
             setApplyStatus('completed');
+            onApplied?.('propose_todo', { apply_status: 'completed' });
           } else if (todoEntry?.apply_status === 'failed') {
             clearInterval(mergePollingRef.current);
             setApplyStatus('error');
             setApplyError(todoEntry.apply_error || 'Todo merge failed');
+            onApplied?.('propose_todo', {
+              apply_status: 'failed',
+              apply_error: todoEntry.apply_error || 'Todo merge failed',
+            });
           }
         }
       } catch { /* keep polling */ }
     }, 2000);
-  }, []);
+  }, [onApplied]);
 
   const handleApplyTodo = useCallback(async () => {
     if (!nodeId) return;
@@ -555,25 +561,32 @@ export default function ProposalInline({
       const res = await api.post('/github/create-issue', { llm_node_id: nodeId });
       setIssueApplyStatus('completed');
       setIssueResult(res.data);
+      onApplied?.('propose_github_issue', {
+        apply_status: 'completed',
+        issue_url: res.data?.issue_url,
+        issue_number: res.data?.issue_number,
+      });
     } catch (err) {
       const msg = err?.response?.data?.error || 'Issue creation failed';
       setIssueApplyStatus('error');
       setIssueApplyError(msg);
     }
-  }, [nodeId]);
+  }, [nodeId, onApplied]);
 
   const handleSendFeedback = useCallback(async () => {
     if (!nodeId) return;
     setFeedbackApplyStatus('started');
     try {
-      await api.post('/feedback/submit', { llm_node_id: nodeId });
+      const res = await api.post('/feedback/submit', { llm_node_id: nodeId });
       setFeedbackApplyStatus('completed');
+      onApplied?.('propose_feedback', {
+        apply_status: 'completed', feedback_id: res.data?.feedback_id });
     } catch (err) {
       const msg = err?.response?.data?.error || 'Feedback send failed';
       setFeedbackApplyStatus('error');
       setFeedbackApplyError(msg);
     }
-  }, [nodeId]);
+  }, [nodeId, onApplied]);
 
   const hasTodoUpdate = hasTodo || toolCallsMeta?.some(tc => tc.name === 'propose_todo');
   const hasGithubIssue = hasIssue || toolCallsMeta?.some(tc => tc.name === 'propose_github_issue');

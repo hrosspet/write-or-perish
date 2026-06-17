@@ -763,6 +763,14 @@ function NodeDetail() {
             onContentChange={isOwner
               ? (newContent) => setNode(prev => prev ? { ...prev, content: newContent } : prev)
               : undefined}
+            onApplied={(toolName, updates) => setNode(prev => {
+              if (!prev || !Array.isArray(prev.tool_calls_meta)) return prev;
+              return {
+                ...prev,
+                tool_calls_meta: prev.tool_calls_meta.map(tc =>
+                  tc.name === toolName ? { ...tc, ...updates } : tc),
+              };
+            })}
             onError={(msg) => addToast(msg)}
           />
         )}
