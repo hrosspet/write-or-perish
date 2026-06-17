@@ -335,29 +335,33 @@ def get_user_ai_preferences_content(user_id, pinned_node=None):
     """Resolve the AI preferences for an LLM prompt.
 
     Since #158 Slice 5, AI preferences are a ``UserArtifact`` kind
-    ('ai_preferences') — they're pinned as a ``user_artifact`` row and read
-    from there (pinned snapshot via *pinned_node*, else latest; #191).
+    ('ai_preferences'). Resolution prefers the node's pinned snapshot (#191),
+    then the latest, with a legacy ``UserAIPreferences`` fallback for the
+    expand-contract transition (removed in #219). ai_usage is re-checked on
+    the resolved row so a mid-session opt-out is honored. Order:
 
-    During the expand-contract transition, this falls back to the legacy
-    ``UserAIPreferences`` model when no artifact exists yet (before the prod
-    backfill runs) — both the pinned legacy binding and the latest row. The
-    fallback is removed in #219. ai_usage is re-checked on the resolved row
-    so a mid-session opt-out is honored.
+      1. the node's pinned user_artifact (new nodes) — its snapshot;
+      2. the node's legacy ai_preferences pin (pre-Slice-5 nodes) — its
+         snapshot, so a continued old thread keeps its pinned version
+         instead of drifting to latest (matches the export/inline display);
+      3. the latest UserArtifact (a node with no ai_preferences pin);
+      4. the latest legacy UserAIPreferences (pre-backfill / unpinned).
     """
-    art = None
     if pinned_node is not None:
         art = pinned_node.get_user_artifacts().get("ai_preferences")
-    if art is None:
-        art = UserArtifact.latest_for(user_id, "ai_preferences")
+        if art is not None and art.ai_usage in AI_ALLOWED:
+            return art.get_content()
+        prefs = pinned_node.get_artifact("ai_preferences")
+        if prefs is not None and prefs.ai_usage in AI_ALLOWED:
+            return prefs.get_content()
+
+    art = UserArtifact.latest_for(user_id, "ai_preferences")
     if art is not None and art.ai_usage in AI_ALLOWED:
         return art.get_content()
 
-    # Legacy fallback (pre-fold UserAIPreferences) — removed in #219.
-    prefs = pinned_node.get_artifact("ai_preferences") if pinned_node else None
-    if prefs is None:
-        prefs = UserAIPreferences.query.filter_by(user_id=user_id).order_by(
-            UserAIPreferences.created_at.desc()
-        ).first()
+    prefs = UserAIPreferences.query.filter_by(user_id=user_id).order_by(
+        UserAIPreferences.created_at.desc()
+    ).first()
     if prefs and prefs.ai_usage in AI_ALLOWED:
         return prefs.get_content()
     return None
