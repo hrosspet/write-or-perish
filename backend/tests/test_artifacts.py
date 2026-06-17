@@ -249,6 +249,25 @@ def test_update_artifact_tool_rejects_bad_kind(app):
         assert r["status"] == "error"
 
 
+def test_update_artifact_tool_rejects_reserved_kinds(app):
+    """update_artifact must refuse non-UserArtifact kinds (todo / profile /
+    recent_context / ai_preferences) so it can't create a shadow artifact
+    that diverges from the real single-row model."""
+    with app.app_context():
+        uid = User.query.first().id
+        for kind in ("todo", "profile", "recent_context", "ai_preferences"):
+            r = _run_tool(app, "update_artifact",
+                          {"kind": kind, "updated_content": "x"}, uid)
+            assert r["status"] == "error", kind
+            # No shadow UserArtifact row was created.
+            assert UserArtifact.query.filter_by(
+                user_id=uid, kind=kind).count() == 0, kind
+        # The todo error points the model at the proposal path.
+        r = _run_tool(app, "update_artifact",
+                      {"kind": "todo", "updated_content": "x"}, uid)
+        assert "proposal" in r["error"].lower()
+
+
 def test_read_artifact_tool_returns_ref_not_content(app):
     with app.app_context():
         uid = User.query.first().id

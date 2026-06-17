@@ -250,6 +250,23 @@ VOICE_TOOLS = [
 
 _ARTIFACT_KIND_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,47}$')
 
+# Kinds that are NOT UserArtifacts — they're separate single-row models or
+# system-managed, so update_artifact must refuse them. Without this guard the
+# model could create a UserArtifact named e.g. "todo" that shadows and
+# silently diverges from the real UserTodo. Each value is a message pointing
+# the model at the correct path. (ai_preferences leaves this set in Slice 5,
+# when it folds into the UserArtifact model and becomes writable here.)
+RESERVED_ARTIFACT_KINDS = {
+    "todo": ("Todo changes go through proposals — put them under the "
+             "### Completed / ### New Tasks / ### Priority Order headings in "
+             "your reply; don't write the todo with update_artifact."),
+    "profile": ("The profile is system-generated and read-only — there is no "
+                "tool to edit it."),
+    "recent_context": "Recent context is system-generated and can't be edited.",
+    "ai_preferences": ("Use update_ai_preferences for AI interaction "
+                       "preferences, not update_artifact."),
+}
+
 
 def _todo_index_line(user_id, pinned_node=None):
     """Index line for the user's todo list, or None if it's AI-blocked.
@@ -765,7 +782,10 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
 
             elif name == "update_artifact":
                 kind = (inp.get("kind") or "").strip().lower()
-                if not _ARTIFACT_KIND_RE.match(kind):
+                if kind in RESERVED_ARTIFACT_KINDS:
+                    result["status"] = "error"
+                    result["error"] = RESERVED_ARTIFACT_KINDS[kind]
+                elif not _ARTIFACT_KIND_RE.match(kind):
                     result["status"] = "error"
                     result["error"] = (
                         f"Invalid artifact kind: {kind!r}. Use a short "
