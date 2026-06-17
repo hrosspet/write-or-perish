@@ -781,12 +781,14 @@ function NodeDetail() {
           />
         )}
         {showProposal && proposalAfter && (
-          <QuotedContent
-            content={proposalAfter}
-            quotes={quotes}
-            contextArtifacts={node.context_artifacts || null}
-            onQuoteClick={handleBubbleClick}
-          />
+          <div style={{ marginTop: '20px' }}>
+            <QuotedContent
+              content={proposalAfter}
+              quotes={quotes}
+              contextArtifacts={node.context_artifacts || null}
+              onQuoteClick={handleBubbleClick}
+            />
+          </div>
         )}
         {(() => {
           const visibleTools = (node.tool_calls_meta || [])
