@@ -357,6 +357,18 @@ function SearchModal({ onClose }) {
                     {r.child_count} {r.child_count === 1 ? 'reply' : 'replies'}
                   </span>
                 )}
+                {mode === 'semantic' && r.score != null && (
+                  <span style={{
+                    marginLeft: 'auto',
+                    fontSize: '11px',
+                    color: 'var(--accent)',
+                    background: 'var(--accent-subtle)',
+                    padding: '1px 6px',
+                    borderRadius: '3px',
+                  }} title="semantic relevance">
+                    {Math.round(r.score * 100)}%
+                  </span>
+                )}
               </div>
               <div
                 style={{

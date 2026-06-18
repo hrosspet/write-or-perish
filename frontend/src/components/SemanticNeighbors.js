@@ -16,6 +16,10 @@ export default function SemanticNeighbors({ nodeId }) {
   const isAdmin = !!(user && user.is_admin);
   const [neighbors, setNeighbors] = useState([]);
   const [loaded, setLoaded] = useState(false);
+  // The panel is a fixed right rail; below this width it would overlap the
+  // thread column, so hide it on narrow viewports.
+  const [wide, setWide] = useState(
+    typeof window !== 'undefined' ? window.innerWidth >= 1200 : true);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -32,12 +36,28 @@ export default function SemanticNeighbors({ nodeId }) {
     return () => { cancelled = true; };
   }, [nodeId, isAdmin]);
 
-  if (!isAdmin || !loaded || neighbors.length === 0) return null;
+  useEffect(() => {
+    const onResize = () => setWide(window.innerWidth >= 1200);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  // cmd/ctrl-click opens the node in a new tab (matches Cmd+K search results);
+  // a plain click navigates in place.
+  const openNode = (e, id) => {
+    if (e.metaKey || e.ctrlKey) {
+      window.open(`/node/${id}`, '_blank', 'noopener');
+    } else {
+      navigate(`/node/${id}`);
+    }
+  };
+
+  if (!isAdmin || !loaded || neighbors.length === 0 || !wide) return null;
 
   return (
     <div style={{
       position: 'fixed',
-      top: '96px',
+      top: '120px',
       right: '24px',
       width: '260px',
       maxHeight: 'calc(100vh - 140px)',
@@ -61,7 +81,7 @@ export default function SemanticNeighbors({ nodeId }) {
       {neighbors.map((n) => (
         <button
           key={n.id}
-          onClick={() => navigate(`/node/${n.id}`)}
+          onClick={(e) => openNode(e, n.id)}
           style={{
             textAlign: 'left',
             background: 'var(--bg-card)',
