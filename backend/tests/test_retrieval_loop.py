@@ -74,7 +74,12 @@ class _ScriptedProvider:
             ],
             "tools": tools,
         })
-        return cls.responses.pop(0)
+        nxt = cls.responses.pop(0)
+        # A queued Exception is raised (e.g. to drive a PromptTooLong on the
+        # continuation call); a dict is returned as a normal response.
+        if isinstance(nxt, Exception):
+            raise nxt
+        return nxt
 
 
 class _PromptTooLongError(Exception):
@@ -479,6 +484,87 @@ def test_quote_pull_resolves_full_content_and_continues(app):
     final = Node.query.get(interim.continuation_node_id)
     assert final.get_content() == "Based on that entry, here's my read."
     assert result["llm_node_id"] == final.id
+
+
+def test_quote_pull_is_depth_1_no_recursive_expansion(app):
+    """A loop quote-pull resolves the pulled node's OWN content only; a
+    {quote:ID} nested INSIDE it stays as a placeholder rather than being
+    recursively inlined. This is the guard against the combinatorial blowup
+    that produced a 2.77M-token continuation prompt — depth-3 resolution
+    inlined cross-quoted nodes once per path."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    nested = Node(user_id=alice.id, human_owner_id=alice.id,
+                  node_type="text", privacy_level="private", ai_usage="chat")
+    nested.set_content("NESTED SECRET about my childhood.")
+    _db.session.add(nested)
+    _db.session.flush()
+    outer = Node(user_id=alice.id, human_owner_id=alice.id,
+                 node_type="text", privacy_level="private", ai_usage="chat")
+    outer.set_content("OUTER ENTRY about leaving my job. {quote:%d}" % nested.id)
+    _db.session.add(outer)
+    _db.session.commit()
+    outer_id, nested_id = outer.id, nested.id
+
+    _ScriptedProvider.reset([
+        _resp("Let me pull that up. {quote:%d}" % outer_id),
+        _resp("Here's my read."),
+    ])
+
+    generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+
+    assert len(_ScriptedProvider.calls) == 2
+    cont_msgs = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[1]["messages"])
+    # The pulled node's own content is injected...
+    assert "OUTER ENTRY" in cont_msgs
+    # ...with the nested reference left as a placeholder (model can pull it
+    # next round)...
+    assert ("{quote:%d}" % nested_id) in cont_msgs
+    # ...but the nested node's content is NOT recursively expanded.
+    assert "NESTED SECRET" not in cont_msgs
+
+
+def test_continuation_prompt_too_long_degrades_gracefully(app):
+    """If the continuation call overflows the context window, the loop drops
+    that round's injection and answers with what it has — rather than failing
+    the whole turn with a raw multi-million-token PromptTooLong (the bug)."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    archive = Node(user_id=alice.id, human_owner_id=alice.id,
+                   node_type="text", privacy_level="private", ai_usage="chat")
+    archive.set_content("THE FULL ARCHIVE ENTRY about leaving my job.")
+    _db.session.add(archive)
+    _db.session.commit()
+    aid = archive.id
+
+    _ScriptedProvider.reset([
+        _resp("Let me pull that up. {quote:%d}" % aid),
+        _PromptTooLongError(2769518, 1000000),  # continuation overflows
+        _resp("Here's a partial read."),         # retry after dropping inject
+    ])
+
+    result = generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+
+    # interim + overflowing continuation + retry continuation = 3 calls.
+    assert len(_ScriptedProvider.calls) == 3
+    interim = _fresh(llm_node.id)
+    final = Node.query.get(interim.continuation_node_id)
+    # The turn completed (did NOT fail) with the retry's answer.
+    assert final.llm_task_status == "completed"
+    assert final.get_content() == "Here's a partial read."
+    assert result["status"] == "completed"
+    assert result["llm_node_id"] == final.id
+    # The retry dropped the oversized injection and swapped in the fallback
+    # note; the archive content is no longer in the final call.
+    retry_msgs = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[2]["messages"])
+    assert "too large to fit in context" in retry_msgs
+    assert "THE FULL ARCHIVE ENTRY" not in retry_msgs
 
 
 def test_voice_mode_runs_loop(app):

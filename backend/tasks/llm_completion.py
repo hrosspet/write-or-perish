@@ -63,6 +63,19 @@ MAX_RETRIEVAL_ROUNDS = 5
 # Max new {quote:ID} pulls resolved per loop round (a 1h sharing can be huge;
 # this bounds how much full-node content the model can inject in one step).
 MAX_QUOTE_PULLS_PER_ROUND = 5
+# Depth for resolving loop-pulled {quote:ID}. 1 = the pulled node's OWN content
+# only; any {quote:ID} nested inside it stays as a placeholder the model can
+# pull explicitly next round. Recursive resolution (the default depth 3) inlines
+# cross-quoted nodes once PER PATH, which for a densely cross-referenced archive
+# blows the context up combinatorially (saw a 2.77M-token prompt). The model
+# already saw previews and chose specific nodes; give it exactly those.
+QUOTE_PULL_DEPTH = 1
+# Hard char caps so a single huge node or a pathological pull can never overflow
+# the window on the (otherwise unguarded) continuation call. ~4 chars/token, so
+# 120k ≈ 30k tokens for the pulled content and ~200k ≈ 50k tokens for the whole
+# per-round injection.
+MAX_QUOTE_PULL_CHARS = 120000
+MAX_RETRIEVAL_INJECTION_CHARS = 200000
 
 # ── Voice tool definitions ──────────────────────────────────────────────
 
@@ -1947,8 +1960,17 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     if new_quote_ids:
                         placeholder = "\n".join(
                             "{quote:%d}" % q for q in new_quote_ids)
+                        # Depth 1: the pulled nodes' own content only — nested
+                        # {quote:ID} stay as placeholders the model can pull
+                        # next round. Prevents the combinatorial expansion that
+                        # produced a 2.77M-token prompt.
                         q_text, _ = resolve_quotes(
-                            placeholder, user_id, for_llm=True)
+                            placeholder, user_id, for_llm=True,
+                            max_depth=QUOTE_PULL_DEPTH)
+                        if len(q_text) > MAX_QUOTE_PULL_CHARS:
+                            q_text = (q_text[:MAX_QUOTE_PULL_CHARS]
+                                      + "\n[…pulled content truncated to fit "
+                                      "the context window…]")
                         if q_text and q_text.strip():
                             label = ("entries" if len(new_quote_ids) > 1
                                      else "entry")
@@ -1994,6 +2016,15 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
                     # Inject the assistant turn + retrieved content into the
                     # message stream and re-call so the model answers WITH it.
+                    injection_text = "\n\n".join(injection_strings)
+                    # Final defense: even with per-pull caps, several pulls plus
+                    # the previews could grow large. Cap the whole round's
+                    # injection so the continuation call can't overflow.
+                    if len(injection_text) > MAX_RETRIEVAL_INJECTION_CHARS:
+                        injection_text = (
+                            injection_text[:MAX_RETRIEVAL_INJECTION_CHARS]
+                            + "\n[…retrieved content truncated to fit the "
+                            "context window…]")
                     messages.append({
                         "role": "assistant",
                         "content": [{
@@ -2005,7 +2036,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         "role": "user",
                         "content": [{
                             "type": "text",
-                            "text": "\n\n".join(injection_strings),
+                            "text": injection_text,
                         }],
                     })
 
@@ -2015,14 +2046,40 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     self.update_state(state='PROGRESS', meta={
                         'progress': 40,
                         'status': 'Retrieving and continuing'})
-                    # Continuation call: plain call (no PromptTooLong retry).
-                    # The base messages already had any export reduction
-                    # applied on the first call; the injection adds only an
-                    # artifact body, which is small relative to the export.
-                    response = LLMProvider.get_completion(
-                        model_id, messages, api_keys,
-                        tools=agentic_tools,
-                    )
+                    # Continuation call. The base messages already had export
+                    # reduction applied on the first call, and the injection is
+                    # char-capped above — but accumulated rounds plus a near-full
+                    # base can still tip over the window. Rather than fail the
+                    # whole turn (the old behavior — a raw multi-million-token
+                    # PromptTooLong surfaced to the user), drop this round's
+                    # injection and let the model answer with what it has.
+                    try:
+                        response = LLMProvider.get_completion(
+                            model_id, messages, api_keys,
+                            tools=agentic_tools,
+                        )
+                    except PromptTooLongError:
+                        logger.warning(
+                            "Continuation prompt too long after retrieval "
+                            "round %d; dropping the injection and answering "
+                            "without it", rounds_done,
+                        )
+                        messages[-1] = {
+                            "role": "user",
+                            "content": [{
+                                "type": "text",
+                                "text": (
+                                    "[The retrieved content was too large to "
+                                    "fit in context. Answer with what you "
+                                    "already have, and let the user know you "
+                                    "could only partially load the entries "
+                                    "you referenced.]"),
+                            }],
+                        }
+                        response = LLMProvider.get_completion(
+                            model_id, messages, api_keys,
+                            tools=agentic_tools,
+                        )
                     continue
 
                 # FINAL answer: no retrieval (or budget exhausted).
