@@ -19,6 +19,7 @@ from backend.utils.tokens import (
     approximate_token_count, reduce_export_tokens, format_date_metadata,
 )
 from backend.utils.quotes import resolve_quotes, has_quotes, find_quote_ids
+from backend.utils.node_split import NODE_CHAR_CAP
 from backend.utils.timefmt import local_stamp
 from backend.utils.api_keys import determine_api_key_type, get_api_keys_for_usage
 from backend.utils.cost import calculate_llm_cost_microdollars
@@ -71,11 +72,14 @@ MAX_QUOTE_PULLS_PER_ROUND = 5
 # already saw previews and chose specific nodes; give it exactly those.
 QUOTE_PULL_DEPTH = 1
 # Hard char caps so a single huge node or a pathological pull can never overflow
-# the window on the (otherwise unguarded) continuation call. ~4 chars/token, so
-# 120k ≈ 30k tokens for the pulled content and ~200k ≈ 50k tokens for the whole
-# per-round injection.
-MAX_QUOTE_PULL_CHARS = 120000
-MAX_RETRIEVAL_INJECTION_CHARS = 200000
+# the window on the (otherwise unguarded) continuation call. Tied to the
+# per-node content cap the app already enforces on writes
+# (NODE_CHAR_CAP = 100k): the combined pulled content is bounded to one node's
+# worth (legacy/imported nodes can exceed the write cap, so this still bites),
+# and the whole per-round injection — quote pulls + search previews + an
+# artifact/todo read — to twice that. ~4 chars/token → ~25k / ~50k tokens.
+MAX_QUOTE_PULL_CHARS = NODE_CHAR_CAP
+MAX_RETRIEVAL_INJECTION_CHARS = NODE_CHAR_CAP * 2
 
 # ── Voice tool definitions ──────────────────────────────────────────────
 
