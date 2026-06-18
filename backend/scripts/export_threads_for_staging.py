@@ -128,6 +128,10 @@ def run_export(n, out_path):
             "created_at": nd.created_at.isoformat() if nd.created_at else None,
             "tool_calls_meta": nd.tool_calls_meta,
             "content": nd.get_content(),
+            # Carry the real prod token_count: the export builder's budget
+            # windowing (e.g. {user_recent_raw}'s 10k cap) sums it, so a
+            # zero/missing value makes recent-context pull the WHOLE archive.
+            "token_count": nd.token_count,
             "embedding": vec_b64,
             "embedding_model": EMBEDDING_MODEL if vec_b64 else None,
             "content_hash": chash,

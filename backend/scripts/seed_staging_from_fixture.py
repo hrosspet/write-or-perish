@@ -31,6 +31,7 @@ from backend.extensions import db
 from backend.models import (
     Node, NodeEmbedding, User, UserProfile, UserTodo, UserArtifact,
 )
+from backend.utils.tokens import approximate_token_count
 
 
 def _user_id(username, owner_id, cache):
@@ -72,6 +73,16 @@ def run_seed(in_path):
     id_map = {}
     created = {}
     for nd in nodes:
+        content = nd.get("content") or ""
+        # token_count MUST be populated: build_user_export_content's budget
+        # windowing (the 10k cap behind {user_recent_raw}, etc.) sums it, so
+        # zero-everywhere makes recent context pull the entire archive and
+        # blow the context window. Prefer the faithful prod value; recompute
+        # for older fixtures that predate the export carrying it (chars/4 is
+        # deterministic, so this matches what prod stored).
+        token_count = nd.get("token_count")
+        if token_count is None:
+            token_count = approximate_token_count(content)
         new = Node(
             user_id=_user_id(nd.get("author_username"), owner.id, user_cache),
             human_owner_id=owner.id,
@@ -80,8 +91,9 @@ def run_seed(in_path):
             ai_usage=nd.get("ai_usage", "chat"),
             privacy_level=nd.get("privacy_level", "private"),
             tool_calls_meta=nd.get("tool_calls_meta"),
+            token_count=token_count,
         )
-        new.set_content(nd.get("content") or "")
+        new.set_content(content)
         if nd.get("created_at"):
             try:
                 new.created_at = datetime.fromisoformat(nd["created_at"])
