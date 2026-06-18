@@ -19,8 +19,16 @@ logger = logging.getLogger(__name__)
 
 EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_PRICE_PER_MTOK = 0.02
-# text-embedding-3-small accepts 8191 tokens; stay safely under it.
-MAX_EMBED_CHARS = 30000
+# text-embedding-3-small hard-caps each input at 8191 tokens. We cap by
+# chars (no tokenizer dependency). Prose runs ~4 chars/token in English but
+# can be ~2.2 in Czech and lower still for code/CJK, so 30000 chars routinely
+# blew past 8191 tokens and 400'd the whole batch. 16000 keeps typical
+# token-dense prose under the limit; embed_texts halves-and-retries for any
+# outlier that still trips it.
+MAX_EMBED_CHARS = 16000
+# Don't keep halving forever — 2000 chars is well under 8191 tokens for any
+# realistic content, so if that still 400s we surface the error.
+MIN_EMBED_CHARS = 2000
 
 
 def content_hash(text):
@@ -59,8 +67,25 @@ def embed_texts(texts, api_key, user_id=None, request_type="embedding"):
     from openai import OpenAI
 
     client = OpenAI(api_key=api_key)
-    inputs = [(t or "")[:MAX_EMBED_CHARS] for t in texts]
-    response = client.embeddings.create(model=EMBEDDING_MODEL, input=inputs)
+    # Cap by chars, then halve-and-retry if a token-dense input still exceeds
+    # the 8191-token limit. Halving re-truncates the whole batch, but only
+    # inputs longer than the new cap are actually shortened, and we only embed
+    # a prefix anyway (the head of a node is representative for retrieval).
+    cap = MAX_EMBED_CHARS
+    while True:
+        inputs = [(t or "")[:cap] for t in texts]
+        try:
+            response = client.embeddings.create(
+                model=EMBEDDING_MODEL, input=inputs)
+            break
+        except Exception as e:  # noqa: BLE001 — only the token-limit 400 retries
+            if "maximum input length" in str(e) and cap > MIN_EMBED_CHARS:
+                logger.warning(
+                    "embed_texts: input over 8191 tokens at %d chars; "
+                    "retrying at %d chars", cap, cap // 2)
+                cap //= 2
+                continue
+            raise
 
     tokens = response.usage.total_tokens if response.usage else 0
     if user_id is not None:
