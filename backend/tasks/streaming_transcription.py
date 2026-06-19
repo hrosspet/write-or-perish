@@ -573,7 +573,19 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
 
         draft = Draft.query.filter_by(session_id=session_id).first()
         if not draft:
-            raise ValueError(f"Draft not found for session {session_id}")
+            # The session was discarded/cleaned up before this batch ran
+            # (DELETE /streaming/<id>/discard). Nothing left to transcribe —
+            # return quietly instead of raising, which would trip on_failure
+            # and surface a spurious "Batch transcription failed" alert.
+            logger.info(
+                f"Draft not found for session {session_id} "
+                f"(likely discarded); skipping batch transcription."
+            )
+            return {
+                'session_id': session_id,
+                'chunk_indices': chunk_indices,
+                'status': 'draft_deleted',
+            }
 
         from backend.utils.spend import user_is_capped
         if user_is_capped(draft.user_id):
@@ -787,22 +799,53 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
             }
 
         except Exception as e:
+            # Reset the session first: if the failure happened during a
+            # flush/commit (e.g. the draft or chunk rows were deleted by a
+            # concurrent discard), the session is in a rollback-pending state
+            # and any further query/commit would raise PendingRollbackError,
+            # masking the real error.
+            db.session.rollback()
+
+            # If the draft was deleted mid-batch (user discarded the session
+            # while we were transcribing), there's nothing left to fail —
+            # return quietly rather than raising, which would otherwise
+            # surface a spurious "Batch transcription failed" Sentry alert.
+            if Draft.query.filter_by(session_id=session_id).first() is None:
+                logger.info(
+                    f"Draft for session {session_id} was deleted during "
+                    f"batch transcription (likely discarded); skipping. "
+                    f"Underlying error: {e}"
+                )
+                return {
+                    'session_id': session_id,
+                    'chunk_indices': chunk_indices,
+                    'status': 'draft_deleted',
+                }
+
             logger.error(
                 f"Batch transcription error for session {session_id}, "
                 f"chunks {chunk_indices}: {e}",
                 exc_info=True
             )
-            # Mark all chunks in batch as failed
-            for idx in chunk_indices:
-                chunk_record = NodeTranscriptChunk.query.filter_by(
-                    session_id=session_id,
-                    chunk_index=idx
-                ).first()
-                if chunk_record and chunk_record.status != 'completed':
-                    chunk_record.status = 'failed'
-                    chunk_record.error = str(e)[:500]
-                    chunk_record.completed_at = datetime.utcnow()
-            db.session.commit()
+            # Mark all chunks in batch as failed (best-effort; rows may
+            # already be gone if the session was discarded).
+            try:
+                for idx in chunk_indices:
+                    chunk_record = NodeTranscriptChunk.query.filter_by(
+                        session_id=session_id,
+                        chunk_index=idx
+                    ).first()
+                    if chunk_record and chunk_record.status != 'completed':
+                        chunk_record.status = 'failed'
+                        chunk_record.error = str(e)[:500]
+                        chunk_record.completed_at = datetime.utcnow()
+                db.session.commit()
+            except Exception as cleanup_err:
+                logger.warning(
+                    f"Failed to mark chunks failed for session "
+                    f"{session_id}: {cleanup_err}"
+                )
+                db.session.rollback()
             raise
 
         finally:
@@ -930,6 +973,22 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
             logger.info(
                 f"Session {session_id}: All chunks processed in {elapsed}s"
             )
+
+        # The draft instance was expired by db.session.expire_all() in the
+        # polling loop above. Re-fetch it now: if the user discarded the
+        # session (DELETE /streaming/<id>/discard) or it was cleaned up
+        # while we polled, the row is gone — bail out cleanly here instead
+        # of raising ObjectDeletedError on the next attribute access.
+        draft = Draft.query.filter_by(session_id=session_id).first()
+        if not draft:
+            logger.info(
+                f"Session {session_id}: draft was deleted during "
+                f"finalization (likely discarded); skipping finalize."
+            )
+            return {
+                'session_id': session_id,
+                'status': 'draft_deleted',
+            }
 
         # Get final chunk status
         chunks = NodeTranscriptChunk.query.filter_by(session_id=session_id).order_by(
