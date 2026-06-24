@@ -30,11 +30,25 @@ def create_app():
     sentry_dsn = os.environ.get("SENTRY_DSN")
     if sentry_dsn:
         import sentry_sdk
+
+        def _before_send(event, hint):
+            # embed_texts (backend/utils/embeddings.py) intentionally trips the
+            # 8191-token limit on token-dense nodes, catches the 400, and
+            # retries at a smaller char cap. Sentry's auto OpenAI integration
+            # records that transient, handled 400 anyway — drop it so an
+            # expected condition doesn't page us. Real OpenAI errors (auth,
+            # rate limits, chat failures) still report.
+            exc = (hint.get("exc_info") or (None, None, None))[1]
+            if exc and "maximum input length" in str(exc):
+                return None
+            return event
+
         sentry_sdk.init(
             dsn=sentry_dsn,
             environment=os.environ.get("SENTRY_ENVIRONMENT", "production"),
             send_default_pii=False,   # never attach user content/PII
             traces_sample_rate=0.0,   # errors only, no perf tracing
+            before_send=_before_send,
         )
 
     app = Flask(__name__)
