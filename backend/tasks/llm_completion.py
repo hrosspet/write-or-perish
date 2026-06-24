@@ -1386,6 +1386,19 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # Detect if this is an agentic session (enables tools)
             is_agentic = _is_agentic_prompt(node_chain)
             agentic_tools = VOICE_TOOLS if is_agentic else None
+            # semantic_search ships DARK (#155): unless enabled for this
+            # environment, drop it from the exposed tool list so the model
+            # never sees it. (Manual Cmd+K search is unaffected — it's a
+            # separate HTTP endpoint, not this tool.) Gating the tool, not just
+            # the prompt, is what actually disables it: models call tools from
+            # the schema array, independent of the system prompt.
+            agentic_search_on = flask_app.config.get(
+                "SEMANTIC_SEARCH_AGENTIC", False)
+            if agentic_tools and not agentic_search_on:
+                agentic_tools = [
+                    t for t in agentic_tools
+                    if t.get("name") != "semantic_search"
+                ]
 
             # Check for pending drafts and inject context notes
             pending_draft_note = None
@@ -1885,10 +1898,15 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # pulls can coexist in one round — both get fulfilled and the
                 # model sees everything next round. Capped per round.
                 resp_text = response.get("content") or ""
+                # The within-turn {quote:ID} pull-in-full is the second half of
+                # agentic semantic search, so it's gated with it (#155 dark).
+                # Without it, a model-emitted {quote:ID} for an out-of-chain
+                # node is left as-is (resolved at chain build like on main),
+                # not pulled mid-turn — keeping prod behavior unchanged.
                 new_quote_ids = [
                     q for q in find_quote_ids(resp_text)
                     if q not in resolved_quote_ids and q not in chain_ids_set
-                ][:MAX_QUOTE_PULLS_PER_ROUND]
+                ][:MAX_QUOTE_PULLS_PER_ROUND] if agentic_search_on else []
 
                 # Race B guard on the node we're about to write to.
                 db.session.refresh(current_node)

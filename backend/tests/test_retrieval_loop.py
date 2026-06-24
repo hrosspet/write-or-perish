@@ -101,6 +101,10 @@ def _make_app():
     }
     app.config["OPENAI_API_KEY"] = "sk-test"
     app.config["ANTHROPIC_API_KEY"] = "sk-ant-test"
+    # Agentic semantic_search ships dark behind this flag (#155); enable it so
+    # the loop's semantic_search / quote-pull behavior is exercised. The dark
+    # (flag-off) path has its own dedicated test that toggles it back off.
+    app.config["SEMANTIC_SEARCH_AGENTIC"] = True
     _db.init_app(app)
     return app
 
@@ -565,6 +569,45 @@ def test_continuation_prompt_too_long_degrades_gracefully(app):
         m["text"] for m in _ScriptedProvider.calls[2]["messages"])
     assert "too large to fit in context" in retry_msgs
     assert "THE FULL ARCHIVE ENTRY" not in retry_msgs
+
+
+def test_semantic_search_gated_dark_by_default(app):
+    """With SEMANTIC_SEARCH_AGENTIC off (#155 ships dark), the semantic_search
+    tool is dropped from the exposed tool list — the model never sees it — and
+    a model-emitted {quote:ID} for an out-of-chain node is NOT pulled mid-turn.
+    The other retrieval tools (read_artifact/read_todo) are unaffected, and
+    manual Cmd+K search is a separate endpoint, also unaffected."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    archive = Node(user_id=alice.id, human_owner_id=alice.id,
+                   node_type="text", privacy_level="private", ai_usage="chat")
+    archive.set_content("AN OUT-OF-CHAIN ENTRY.")
+    _db.session.add(archive)
+    _db.session.commit()
+    aid = archive.id
+
+    saved = _app.config.get("SEMANTIC_SEARCH_AGENTIC")
+    _app.config["SEMANTIC_SEARCH_AGENTIC"] = False
+    try:
+        _ScriptedProvider.reset([
+            _resp("Here's my take. {quote:%d}" % aid),
+        ])
+        generate_llm_response(
+            _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+            source_mode="textmode",
+        )
+    finally:
+        _app.config["SEMANTIC_SEARCH_AGENTIC"] = saved
+
+    # Tool list excludes semantic_search but keeps the other retrieval tools.
+    tool_names = [t["name"] for t in (_ScriptedProvider.calls[0]["tools"] or [])]
+    assert "semantic_search" not in tool_names
+    assert "read_artifact" in tool_names
+    # The {quote:ID} did NOT trigger a within-turn pull: one call, no
+    # continuation node, the placeholder stays in the answer for the frontend
+    # to resolve at render time (matches main's behavior).
+    assert len(_ScriptedProvider.calls) == 1
+    node = _fresh(llm_node.id)
+    assert node.continuation_node_id is None
 
 
 def test_voice_mode_runs_loop(app):
