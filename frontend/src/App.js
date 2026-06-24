@@ -133,7 +133,7 @@ function App() {
           <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
           <Route path="/todo" element={<ProtectedRoute><TodoPage /></ProtectedRoute>} />
           {/* Log (renamed from feed) */}
-          <Route path="/log" element={<ProtectedRoute><Feed /></ProtectedRoute>} />
+          <Route path="/log" element={<ProtectedRoute><Feed onSearchClick={() => setShowSearch(true)} /></ProtectedRoute>} />
           {/* Backward compatibility redirects */}
           <Route path="/feed" element={<Navigate to="/log" replace />} />
           <Route path="/dashboard" element={<Navigate to="/profile" replace />} />

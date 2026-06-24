@@ -5,7 +5,7 @@ import Bubble from "./Bubble";
 import DeleteConfirmDialog from "./DeleteConfirmDialog";
 import { useToast } from "../contexts/ToastContext";
 
-function Feed() {
+function Feed({ onSearchClick }) {
   const [feedNodes, setFeedNodes] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -109,15 +109,51 @@ function Feed() {
   return (
     <div style={{ padding: "3rem 2rem 4rem", maxWidth: "720px", margin: "0 auto" }}>
       <div style={{ marginBottom: "2.5rem" }}>
-        <h2 style={{
-          color: "var(--text-primary)",
-          fontFamily: "var(--serif)",
-          fontWeight: 300,
-          fontSize: "2rem",
+        <div style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
           marginBottom: "0.8rem",
         }}>
-          Log
-        </h2>
+          <h2 style={{
+            color: "var(--text-primary)",
+            fontFamily: "var(--serif)",
+            fontWeight: 300,
+            fontSize: "2rem",
+            margin: 0,
+          }}>
+            Log
+          </h2>
+          {onSearchClick && (
+            <button
+              type="button"
+              onClick={onSearchClick}
+              aria-label="Search your entries"
+              title="Search your entries (⌘K)"
+              style={{
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                color: "var(--text-muted)",
+                // Larger tap target for mobile without shifting the layout.
+                padding: "8px",
+                margin: "-8px",
+                display: "flex",
+                alignItems: "center",
+                transition: "color 0.15s ease",
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.color = "var(--accent)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"
+                strokeLinejoin="round" aria-hidden="true">
+                <circle cx="11" cy="11" r="7" />
+                <line x1="20" y1="20" x2="16.05" y2="16.05" />
+              </svg>
+            </button>
+          )}
+        </div>
         <div style={{
           width: "40px",
           height: "1px",
