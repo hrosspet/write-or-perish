@@ -64,6 +64,15 @@ class Config:
     PROFILE_UPDATES_PAUSED = os.environ.get(
         "PROFILE_UPDATES_PAUSED", "false").lower() in ("1", "true", "yes")
 
+    # --- Agentic semantic search (#155) ---
+    # Manual Cmd+K semantic search is always on. Exposing semantic_search as a
+    # within-turn LLM tool (and the {quote:ID} pull-in-full it drives) ships
+    # DARK: gated off by default so it can be enabled per-environment (on in
+    # staging) and validated before prod. Off → the tool is dropped from the
+    # agentic tool list and the model never sees it.
+    SEMANTIC_SEARCH_AGENTIC = os.environ.get(
+        "SEMANTIC_SEARCH_AGENTIC", "false").lower() in ("1", "true", "yes")
+
     # Safety factor for prompt-too-long retries (0.99 = aim for 99% of the limit)
     RETRY_SAFETY_FACTOR = 0.99
 

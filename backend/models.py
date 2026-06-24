@@ -809,6 +809,33 @@ class SpendAlert(db.Model):
     )
 
 
+class NodeEmbedding(db.Model):
+    """Vector embedding of a node's content for semantic search (#155).
+
+    One row per node (latest content only — re-embedded when content_hash
+    changes). Vectors are packed float32 (struct) — no pgvector dependency;
+    similarity is brute-force cosine in Python, fine at alpha scale.
+    Only nodes with ai_usage in AI_ALLOWED are embedded (embedding sends
+    content to OpenAI, so 'none' nodes are never submitted).
+    """
+    __tablename__ = "node_embedding"
+    id = db.Column(db.Integer, primary_key=True)
+    node_id = db.Column(
+        db.Integer,
+        db.ForeignKey("node.id", ondelete="CASCADE"),
+        nullable=False, unique=True, index=True,
+    )
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    model = db.Column(db.String(64), nullable=False)
+    content_hash = db.Column(db.String(64), nullable=False)
+    vector = db.Column(db.LargeBinary, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    node = db.relationship("Node", backref=db.backref(
+        "embedding", uselist=False, cascade="all, delete-orphan"))
+
+
 class TTSChunk(db.Model):
     """
     Stores individual TTS audio chunk URLs for streaming TTS playback.

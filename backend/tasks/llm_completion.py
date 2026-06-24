@@ -18,7 +18,8 @@ from backend.llm_providers import LLMProvider, PromptTooLongError
 from backend.utils.tokens import (
     approximate_token_count, reduce_export_tokens, format_date_metadata,
 )
-from backend.utils.quotes import resolve_quotes, has_quotes
+from backend.utils.quotes import resolve_quotes, has_quotes, find_quote_ids
+from backend.utils.node_split import NODE_CHAR_CAP
 from backend.utils.timefmt import local_stamp
 from backend.utils.api_keys import determine_api_key_type, get_api_keys_for_usage
 from backend.utils.cost import calculate_llm_cost_microdollars
@@ -55,10 +56,30 @@ USER_ARTIFACTS_INDEX_PLACEHOLDER = "{user_artifacts_index}"
 # stream and the model is re-called so it answers WITH the content in the same
 # turn — instead of the cross-turn injection done by _scan_proposal_statuses.
 # read_artifact pulls a UserArtifact by kind; read_todo pulls the user's todo
-# list (its own model, no longer shown inline — #158 Slice 3).
-RETRIEVAL_TOOLS = {"read_artifact", "read_todo"}
+# list (its own model, no longer shown inline — #158 Slice 3); semantic_search
+# pulls relevant snippets from the user's own archive by meaning (#155).
+RETRIEVAL_TOOLS = {"read_artifact", "read_todo", "semantic_search"}
 # Max number of interim retrieval round-trips before the model must answer.
-MAX_RETRIEVAL_ROUNDS = 2
+MAX_RETRIEVAL_ROUNDS = 5
+# Max new {quote:ID} pulls resolved per loop round (a 1h sharing can be huge;
+# this bounds how much full-node content the model can inject in one step).
+MAX_QUOTE_PULLS_PER_ROUND = 5
+# Depth for resolving loop-pulled {quote:ID}. 1 = the pulled node's OWN content
+# only; any {quote:ID} nested inside it stays as a placeholder the model can
+# pull explicitly next round. Recursive resolution (the default depth 3) inlines
+# cross-quoted nodes once PER PATH, which for a densely cross-referenced archive
+# blows the context up combinatorially (saw a 2.77M-token prompt). The model
+# already saw previews and chose specific nodes; give it exactly those.
+QUOTE_PULL_DEPTH = 1
+# Hard char caps so a single huge node or a pathological pull can never overflow
+# the window on the (otherwise unguarded) continuation call. Tied to the
+# per-node content cap the app already enforces on writes
+# (NODE_CHAR_CAP = 100k): the combined pulled content is bounded to one node's
+# worth (legacy/imported nodes can exceed the write cap, so this still bites),
+# and the whole per-round injection — quote pulls + search previews + an
+# artifact/todo read — to twice that. ~4 chars/token → ~25k / ~50k tokens.
+MAX_QUOTE_PULL_CHARS = NODE_CHAR_CAP
+MAX_RETRIEVAL_INJECTION_CHARS = NODE_CHAR_CAP * 2
 
 # ── Voice tool definitions ──────────────────────────────────────────────
 
@@ -192,6 +213,42 @@ VOICE_TOOLS = [
             "type": "object",
             "properties": {},
             "required": [],
+        },
+    },
+    {
+        "name": "semantic_search",
+        "description": (
+            "Search the user's own archive — all their past entries plus "
+            "your past replies — by meaning, not keywords. Use it when the "
+            "conversation touches something they've likely written about "
+            "before but that isn't in your current context, so you can "
+            "ground your response in what they've actually said rather than "
+            "guessing. Pass a focused natural-language query describing what "
+            "to look for. You get back short PREVIEWS of the top matches (with "
+            "node ids), same turn — these are for triage, not the full text. "
+            "To read a match in full, reference it as {quote:<id>} in your "
+            "reply; the full entry comes back the next step (and the quote "
+            "shows the user which entry you pulled). You can refine and search "
+            "again if the previews miss, and you can search and quote in the "
+            "same step. Tell the user you're checking their archive; don't "
+            "search for things already in your context. Always produce a text "
+            "response alongside the call."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "What to look for — the meaning you're after, "
+                        "phrased like a sentence the user might have written "
+                        "about it (this is semantic similarity, not keyword "
+                        "match, so describe the idea, not search terms). "
+                        "Search one topic at a time."
+                    ),
+                },
+            },
+            "required": ["query"],
         },
     },
     {
@@ -449,10 +506,10 @@ def _detect_feedback_proposal(text):
 
 def _retrieval_injection_text(tr):
     """Build the context-injection string for a successful retrieval tool
-    result (read_artifact / read_todo), re-resolving the content fresh from
-    the encrypted row — content is never stored in tool_calls_meta. Re-checks
-    ai_usage so a mid-session opt-out is honored. Returns None if the
-    artifact is gone or no longer AI-readable.
+    result (read_artifact / read_todo / semantic_search), re-resolving the
+    content fresh from the source row — content is never stored in
+    tool_calls_meta. Re-checks ai_usage so a mid-session opt-out is honored.
+    Returns None if nothing is (still) available.
     """
     name = tr.get("name")
     if name == "read_artifact":
@@ -466,6 +523,34 @@ def _retrieval_injection_text(tr):
         if todo is None or todo.ai_usage not in AI_ALLOWED:
             return None
         return f"[Your current todo list:\n{todo.get_content()}]"
+    if name == "semantic_search":
+        # Re-resolve each matched node from its id (content never stored in
+        # meta); re-check ai_usage + soft-delete at injection time. These are
+        # PREVIEWS for triage — to read one in full, the model references it as
+        # {quote:<id>} (resolved by the loop's quote step).
+        matches = tr.get("matches") or []
+        lines = []
+        for m in matches:
+            node = Node.query.get(m.get("node_id"))
+            if (node is None or node.deleted_at is not None
+                    or node.ai_usage not in AI_ALLOWED):
+                continue
+            text = (node.get_content() or "").strip()
+            if not text:
+                continue
+            snippet = text[:800] + ("…" if len(text) > 800 else "")
+            stamp = (node.created_at.strftime("%Y-%m-%d")
+                     if node.created_at else "?")
+            score = m.get("score")
+            pct = f" · {round(score * 100)}%" if score is not None else ""
+            lines.append(f"- node {node.id} · {stamp}{pct}: {snippet}")
+        if not lines:
+            return None
+        return (
+            "[Semantic search results for "
+            f"\"{tr.get('query', '')}\" — previews only; to read one in full, "
+            "reference it as {quote:<id>}. Use only if actually relevant:\n"
+            + "\n".join(lines) + "]")
     return None
 
 
@@ -879,6 +964,41 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
                     result["status"] = "success"
                     result["todo_id"] = todo.id
 
+            elif name == "semantic_search":
+                # Search the user's own archive by meaning (#155). Embeds the
+                # model's query, ranks NodeEmbedding rows (excluding nodes
+                # already in this thread), and stores only matched node ids +
+                # scores — snippet content is re-resolved at injection time
+                # (never in plaintext tool_calls_meta), like read_artifact.
+                query = (inp.get("query") or "").strip()
+                if not query:
+                    result["status"] = "error"
+                    result["error"] = "semantic_search needs a query."
+                else:
+                    from backend.utils.api_keys import get_openai_chat_key
+                    from backend.utils.embeddings import (
+                        retrieve_relevant_snippets,
+                    )
+                    rag_key = get_openai_chat_key(flask_app.config)
+                    if not rag_key:
+                        result["status"] = "error"
+                        result["error"] = (
+                            "Semantic search is unavailable right now.")
+                    else:
+                        chain_ids = [n.id for n in node_chain]
+                        snippets = retrieve_relevant_snippets(
+                            user_id, query[:4000], chain_ids, rag_key,
+                            k=flask_app.config.get("RAG_TOP_K", 4),
+                            min_score=flask_app.config.get(
+                                "RAG_MIN_SCORE", 0.35),
+                        )
+                        result["status"] = "success"
+                        result["query"] = query
+                        result["matches"] = [
+                            {"node_id": nid, "score": round(score, 4)}
+                            for nid, _created, _snip, score in snippets
+                        ]
+
             elif name == "apply_feedback":
                 # Send the feedback the AI proposed under a ### Feedback
                 # heading — mirrors apply_github_issue. Gated on a pending
@@ -1266,6 +1386,19 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # Detect if this is an agentic session (enables tools)
             is_agentic = _is_agentic_prompt(node_chain)
             agentic_tools = VOICE_TOOLS if is_agentic else None
+            # semantic_search ships DARK (#155): unless enabled for this
+            # environment, drop it from the exposed tool list so the model
+            # never sees it. (Manual Cmd+K search is unaffected — it's a
+            # separate HTTP endpoint, not this tool.) Gating the tool, not just
+            # the prompt, is what actually disables it: models call tools from
+            # the schema array, independent of the system prompt.
+            agentic_search_on = flask_app.config.get(
+                "SEMANTIC_SEARCH_AGENTIC", False)
+            if agentic_tools and not agentic_search_on:
+                agentic_tools = [
+                    t for t in agentic_tools
+                    if t.get("name") != "semantic_search"
+                ]
 
             # Check for pending drafts and inject context notes
             pending_draft_note = None
@@ -1550,6 +1683,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         mode_note = mode_labels.get(source_mode)
                         if mode_note:
                             agentic_notes.append(mode_note)
+                # Semantic archive retrieval is now a within-turn loop tool
+                # (`semantic_search`, see RETRIEVAL_TOOLS) the model calls when
+                # it judges the archive is relevant — replacing the old
+                # always-on proactive notes-channel injection (#155 → #196
+                # loop). Nothing to inject here.
+
                 if is_agentic and agentic_notes:
                     # Synthetic system-side note injected after the latest real
                     # message; stamp it with "now" so the model's most-recent
@@ -1743,12 +1882,31 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # content in the same turn.
             rounds_done = 0
             current_node = llm_node
+            # Quote pulls already grounded this turn, and nodes already in the
+            # thread (their content is in `messages`) — neither should trigger
+            # a re-loop when the model references them.
+            resolved_quote_ids = set()
+            chain_ids_set = {n.id for n in node_chain}
             while True:
                 response_tool_calls = response.get("tool_calls", [])
                 retrieval_calls = [
                     tc for tc in response_tool_calls
                     if tc["name"] in RETRIEVAL_TOOLS
                 ]
+                # New {quote:ID} the model emitted to pull a node in full this
+                # turn (e.g. a semantic_search hit). A search call and quote
+                # pulls can coexist in one round — both get fulfilled and the
+                # model sees everything next round. Capped per round.
+                resp_text = response.get("content") or ""
+                # The within-turn {quote:ID} pull-in-full is the second half of
+                # agentic semantic search, so it's gated with it (#155 dark).
+                # Without it, a model-emitted {quote:ID} for an out-of-chain
+                # node is left as-is (resolved at chain build like on main),
+                # not pulled mid-turn — keeping prod behavior unchanged.
+                new_quote_ids = [
+                    q for q in find_quote_ids(resp_text)
+                    if q not in resolved_quote_ids and q not in chain_ids_set
+                ][:MAX_QUOTE_PULLS_PER_ROUND] if agentic_search_on else []
 
                 # Race B guard on the node we're about to write to.
                 db.session.refresh(current_node)
@@ -1767,9 +1925,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         'reason': 'target_soft_deleted',
                     }
 
-                # INTERIM step: retrieval requested and budget remaining.
-                if retrieval_calls and rounds_done < MAX_RETRIEVAL_ROUNDS:
-                    interim_text = response.get("content") or ""
+                # INTERIM step: a retrieval tool call and/or a full-node quote
+                # pull was requested, and budget remains.
+                if (retrieval_calls or new_quote_ids) and \
+                        rounds_done < MAX_RETRIEVAL_ROUNDS:
+                    interim_text = resp_text
                     interim_truncated = response.get("truncated", False)
 
                     # Cost for THIS model call (every call costs).
@@ -1815,6 +1975,35 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 f"[{tr.get('name')} failed — "
                                 f"{tr.get('error', 'unknown error')}]")
 
+                    # Resolve newly-referenced {quote:ID} to full content via
+                    # the existing quote machinery (permission + ai_usage='none'
+                    # checks built in). The {quote:ID} stays in the interim
+                    # node's text → renders for the user + flows to exports.
+                    if new_quote_ids:
+                        placeholder = "\n".join(
+                            "{quote:%d}" % q for q in new_quote_ids)
+                        # Depth 1: the pulled nodes' own content only — nested
+                        # {quote:ID} stay as placeholders the model can pull
+                        # next round. Prevents the combinatorial expansion that
+                        # produced a 2.77M-token prompt.
+                        q_text, _ = resolve_quotes(
+                            placeholder, user_id, for_llm=True,
+                            max_depth=QUOTE_PULL_DEPTH)
+                        if len(q_text) > MAX_QUOTE_PULL_CHARS:
+                            q_text = (q_text[:MAX_QUOTE_PULL_CHARS]
+                                      + "\n[…pulled content truncated to fit "
+                                      "the context window…]")
+                        if q_text and q_text.strip():
+                            label = ("entries" if len(new_quote_ids) > 1
+                                     else "entry")
+                            injection_strings.append(
+                                f"[Full content of the {label} you pulled "
+                                f"up:\n{q_text}]")
+                        resolved_quote_ids.update(new_quote_ids)
+                    if not injection_strings:
+                        injection_strings.append(
+                            "[The requested items were unavailable.]")
+
                     # Finalize the interim node (NO _mode, NO proposal
                     # auto-detect — that belongs to the final answer only).
                     current_node.set_content(
@@ -1849,6 +2038,15 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
                     # Inject the assistant turn + retrieved content into the
                     # message stream and re-call so the model answers WITH it.
+                    injection_text = "\n\n".join(injection_strings)
+                    # Final defense: even with per-pull caps, several pulls plus
+                    # the previews could grow large. Cap the whole round's
+                    # injection so the continuation call can't overflow.
+                    if len(injection_text) > MAX_RETRIEVAL_INJECTION_CHARS:
+                        injection_text = (
+                            injection_text[:MAX_RETRIEVAL_INJECTION_CHARS]
+                            + "\n[…retrieved content truncated to fit the "
+                            "context window…]")
                     messages.append({
                         "role": "assistant",
                         "content": [{
@@ -1860,7 +2058,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         "role": "user",
                         "content": [{
                             "type": "text",
-                            "text": "\n\n".join(injection_strings),
+                            "text": injection_text,
                         }],
                     })
 
@@ -1870,14 +2068,40 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     self.update_state(state='PROGRESS', meta={
                         'progress': 40,
                         'status': 'Retrieving and continuing'})
-                    # Continuation call: plain call (no PromptTooLong retry).
-                    # The base messages already had any export reduction
-                    # applied on the first call; the injection adds only an
-                    # artifact body, which is small relative to the export.
-                    response = LLMProvider.get_completion(
-                        model_id, messages, api_keys,
-                        tools=agentic_tools,
-                    )
+                    # Continuation call. The base messages already had export
+                    # reduction applied on the first call, and the injection is
+                    # char-capped above — but accumulated rounds plus a near-full
+                    # base can still tip over the window. Rather than fail the
+                    # whole turn (the old behavior — a raw multi-million-token
+                    # PromptTooLong surfaced to the user), drop this round's
+                    # injection and let the model answer with what it has.
+                    try:
+                        response = LLMProvider.get_completion(
+                            model_id, messages, api_keys,
+                            tools=agentic_tools,
+                        )
+                    except PromptTooLongError:
+                        logger.warning(
+                            "Continuation prompt too long after retrieval "
+                            "round %d; dropping the injection and answering "
+                            "without it", rounds_done,
+                        )
+                        messages[-1] = {
+                            "role": "user",
+                            "content": [{
+                                "type": "text",
+                                "text": (
+                                    "[The retrieved content was too large to "
+                                    "fit in context. Answer with what you "
+                                    "already have, and let the user know you "
+                                    "could only partially load the entries "
+                                    "you referenced.]"),
+                            }],
+                        }
+                        response = LLMProvider.get_completion(
+                            model_id, messages, api_keys,
+                            tools=agentic_tools,
+                        )
                     continue
 
                 # FINAL answer: no retrieval (or budget exhausted).

@@ -7,6 +7,7 @@ import DownloadAudioIcon from "./DownloadAudioIcon";
 import ModelSelector from "./ModelSelector";
 import NodeForm from "./NodeForm";
 import ProposalInline, { hasProposalSections, splitProposalText } from "./ProposalInline";
+import SemanticNeighbors from "./SemanticNeighbors";
 import { useUser } from "../contexts/UserContext";
 import { useToast } from "../contexts/ToastContext";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
@@ -974,6 +975,7 @@ function NodeDetail() {
         }}>Thread</h2>
         {topRightControls}
       </div>
+      <SemanticNeighbors nodeId={node.id} />
       {ancestorsSection}
       {highlightedNodeSection}
       {childrenSection}

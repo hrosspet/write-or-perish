@@ -74,7 +74,12 @@ class _ScriptedProvider:
             ],
             "tools": tools,
         })
-        return cls.responses.pop(0)
+        nxt = cls.responses.pop(0)
+        # A queued Exception is raised (e.g. to drive a PromptTooLong on the
+        # continuation call); a dict is returned as a normal response.
+        if isinstance(nxt, Exception):
+            raise nxt
+        return nxt
 
 
 class _PromptTooLongError(Exception):
@@ -96,6 +101,10 @@ def _make_app():
     }
     app.config["OPENAI_API_KEY"] = "sk-test"
     app.config["ANTHROPIC_API_KEY"] = "sk-ant-test"
+    # Agentic semantic_search ships dark behind this flag (#155); enable it so
+    # the loop's semantic_search / quote-pull behavior is exercised. The dark
+    # (flag-off) path has its own dedicated test that toggles it back off.
+    app.config["SEMANTIC_SEARCH_AGENTIC"] = True
     _db.init_app(app)
     return app
 
@@ -416,9 +425,7 @@ def test_textmode_retrieval_budget_caps_at_max_rounds(app):
     rt = {"id": "t", "name": "read_artifact", "input": {"kind": "reading-list"}}
     # Always asks for retrieval; loop must still terminate and finalize.
     _ScriptedProvider.reset([
-        _resp("looking 1", tool_calls=[rt]),
-        _resp("looking 2", tool_calls=[rt]),
-        _resp("looking 3", tool_calls=[rt]),
+        _resp(f"looking {i}", tool_calls=[rt]) for i in range(1, 8)
     ])
 
     result = generate_llm_response(
@@ -426,20 +433,181 @@ def test_textmode_retrieval_budget_caps_at_max_rounds(app):
         source_mode="textmode",
     )
 
-    # MAX_RETRIEVAL_ROUNDS (2) interim calls + 1 finalizing call = 3 calls.
-    assert _llm_task_mod.MAX_RETRIEVAL_ROUNDS == 2
-    assert len(_ScriptedProvider.calls) == 3
-    # Chain: placeholder -> interim2 -> final. Two continuation links exist.
-    interim1 = _fresh(llm_node.id)
-    assert interim1.continuation_node_id is not None
-    interim2 = Node.query.get(interim1.continuation_node_id)
-    assert interim2.continuation_node_id is not None
-    final = Node.query.get(interim2.continuation_node_id)
-    # Final node finalized with the 3rd response's content (budget exhausted,
+    # MAX_RETRIEVAL_ROUNDS (5) interim calls + 1 finalizing call = 6 calls.
+    assert _llm_task_mod.MAX_RETRIEVAL_ROUNDS == 5
+    assert len(_ScriptedProvider.calls) == 6
+    # Walk the 5 interim continuations down to the final node.
+    node = _fresh(llm_node.id)
+    for _ in range(5):
+        assert node.continuation_node_id is not None
+        node = Node.query.get(node.continuation_node_id)
+    final = node
+    assert final.continuation_node_id is None
+    # Final node finalized with the 6th response's content (budget exhausted,
     # so its retrieval tool call is executed as a normal final tool call).
-    assert final.get_content() == "looking 3"
+    assert final.get_content() == "looking 6"
     assert result["llm_node_id"] == final.id
-    assert APICostLog.query.count() == 3
+    assert APICostLog.query.count() == 6
+
+
+def test_quote_pull_resolves_full_content_and_continues(app):
+    """A {quote:ID} the model emits for an out-of-context node triggers a
+    within-turn resolution + continuation (no retrieval tool call needed):
+    the full node content is injected and the model answers with it, while the
+    {quote:ID} stays in the interim node's text (renders for the user +
+    flows to exports)."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    # An archive node that is NOT part of the conversation chain.
+    archive = Node(user_id=alice.id, human_owner_id=alice.id,
+                   node_type="text", privacy_level="private", ai_usage="chat")
+    archive.set_content("THE FULL ARCHIVE ENTRY about leaving my job.")
+    _db.session.add(archive)
+    _db.session.commit()
+    aid = archive.id
+
+    _ScriptedProvider.reset([
+        _resp("Let me pull that up. {quote:%d}" % aid),
+        _resp("Based on that entry, here's my read."),
+    ])
+
+    result = generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+
+    # Quote pull (interim) + continuation = 2 calls.
+    assert len(_ScriptedProvider.calls) == 2
+    interim = _fresh(llm_node.id)
+    assert interim.continuation_node_id is not None
+    # The {quote:ID} reference stays in the interim node's content.
+    assert ("{quote:%d}" % aid) in interim.get_content()
+    # The full node content was injected into the continuation call.
+    cont_msgs = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[1]["messages"])
+    assert "THE FULL ARCHIVE ENTRY" in cont_msgs
+    final = Node.query.get(interim.continuation_node_id)
+    assert final.get_content() == "Based on that entry, here's my read."
+    assert result["llm_node_id"] == final.id
+
+
+def test_quote_pull_is_depth_1_no_recursive_expansion(app):
+    """A loop quote-pull resolves the pulled node's OWN content only; a
+    {quote:ID} nested INSIDE it stays as a placeholder rather than being
+    recursively inlined. This is the guard against the combinatorial blowup
+    that produced a 2.77M-token continuation prompt — depth-3 resolution
+    inlined cross-quoted nodes once per path."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    nested = Node(user_id=alice.id, human_owner_id=alice.id,
+                  node_type="text", privacy_level="private", ai_usage="chat")
+    nested.set_content("NESTED SECRET about my childhood.")
+    _db.session.add(nested)
+    _db.session.flush()
+    outer = Node(user_id=alice.id, human_owner_id=alice.id,
+                 node_type="text", privacy_level="private", ai_usage="chat")
+    outer.set_content("OUTER ENTRY about leaving my job. {quote:%d}" % nested.id)
+    _db.session.add(outer)
+    _db.session.commit()
+    outer_id, nested_id = outer.id, nested.id
+
+    _ScriptedProvider.reset([
+        _resp("Let me pull that up. {quote:%d}" % outer_id),
+        _resp("Here's my read."),
+    ])
+
+    generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+
+    assert len(_ScriptedProvider.calls) == 2
+    cont_msgs = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[1]["messages"])
+    # The pulled node's own content is injected...
+    assert "OUTER ENTRY" in cont_msgs
+    # ...with the nested reference left as a placeholder (model can pull it
+    # next round)...
+    assert ("{quote:%d}" % nested_id) in cont_msgs
+    # ...but the nested node's content is NOT recursively expanded.
+    assert "NESTED SECRET" not in cont_msgs
+
+
+def test_continuation_prompt_too_long_degrades_gracefully(app):
+    """If the continuation call overflows the context window, the loop drops
+    that round's injection and answers with what it has — rather than failing
+    the whole turn with a raw multi-million-token PromptTooLong (the bug)."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    archive = Node(user_id=alice.id, human_owner_id=alice.id,
+                   node_type="text", privacy_level="private", ai_usage="chat")
+    archive.set_content("THE FULL ARCHIVE ENTRY about leaving my job.")
+    _db.session.add(archive)
+    _db.session.commit()
+    aid = archive.id
+
+    _ScriptedProvider.reset([
+        _resp("Let me pull that up. {quote:%d}" % aid),
+        _PromptTooLongError(2769518, 1000000),  # continuation overflows
+        _resp("Here's a partial read."),         # retry after dropping inject
+    ])
+
+    result = generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+
+    # interim + overflowing continuation + retry continuation = 3 calls.
+    assert len(_ScriptedProvider.calls) == 3
+    interim = _fresh(llm_node.id)
+    final = Node.query.get(interim.continuation_node_id)
+    # The turn completed (did NOT fail) with the retry's answer.
+    assert final.llm_task_status == "completed"
+    assert final.get_content() == "Here's a partial read."
+    assert result["status"] == "completed"
+    assert result["llm_node_id"] == final.id
+    # The retry dropped the oversized injection and swapped in the fallback
+    # note; the archive content is no longer in the final call.
+    retry_msgs = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[2]["messages"])
+    assert "too large to fit in context" in retry_msgs
+    assert "THE FULL ARCHIVE ENTRY" not in retry_msgs
+
+
+def test_semantic_search_gated_dark_by_default(app):
+    """With SEMANTIC_SEARCH_AGENTIC off (#155 ships dark), the semantic_search
+    tool is dropped from the exposed tool list — the model never sees it — and
+    a model-emitted {quote:ID} for an out-of-chain node is NOT pulled mid-turn.
+    The other retrieval tools (read_artifact/read_todo) are unaffected, and
+    manual Cmd+K search is a separate endpoint, also unaffected."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    archive = Node(user_id=alice.id, human_owner_id=alice.id,
+                   node_type="text", privacy_level="private", ai_usage="chat")
+    archive.set_content("AN OUT-OF-CHAIN ENTRY.")
+    _db.session.add(archive)
+    _db.session.commit()
+    aid = archive.id
+
+    saved = _app.config.get("SEMANTIC_SEARCH_AGENTIC")
+    _app.config["SEMANTIC_SEARCH_AGENTIC"] = False
+    try:
+        _ScriptedProvider.reset([
+            _resp("Here's my take. {quote:%d}" % aid),
+        ])
+        generate_llm_response(
+            _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+            source_mode="textmode",
+        )
+    finally:
+        _app.config["SEMANTIC_SEARCH_AGENTIC"] = saved
+
+    # Tool list excludes semantic_search but keeps the other retrieval tools.
+    tool_names = [t["name"] for t in (_ScriptedProvider.calls[0]["tools"] or [])]
+    assert "semantic_search" not in tool_names
+    assert "read_artifact" in tool_names
+    # The {quote:ID} did NOT trigger a within-turn pull: one call, no
+    # continuation node, the placeholder stays in the answer for the frontend
+    # to resolve at render time (matches main's behavior).
+    assert len(_ScriptedProvider.calls) == 1
+    node = _fresh(llm_node.id)
+    assert node.continuation_node_id is None
 
 
 def test_voice_mode_runs_loop(app):

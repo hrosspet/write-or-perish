@@ -51,6 +51,7 @@ sys.modules.pop("backend.tasks.llm_completion", None)
 from backend.tasks.llm_completion import (  # noqa: E402
     _execute_tool_calls, _scan_proposal_statuses, _mark_status_reported,
     _auto_create_drafts, _detect_feedback_proposal, _redact_tool_input,
+    _retrieval_injection_text,
     get_user_artifacts_context, get_user_ai_preferences_content,
 )
 
@@ -400,6 +401,69 @@ def test_scan_statuses_delivers_todo_content(app):
         _db.session.commit()
         notes2, to_mark2 = _scan_proposal_statuses([node])
         assert notes2 == []
+
+
+# ── semantic_search retrieval tool (#155 → #196 loop) ────────────────────
+
+def test_semantic_search_tool_returns_refs_and_reresolves(app, monkeypatch):
+    """The tool stores only node ids + scores (no snippet content in meta);
+    _retrieval_injection_text re-resolves the snippets from the nodes."""
+    with app.app_context():
+        uid = User.query.first().id
+        n1 = Node(user_id=uid, node_type="llm", llm_model="m",
+                  ai_usage="chat")
+        n1.set_content("I keep thinking about leaving my job for a startup.")
+        n2 = Node(user_id=uid, node_type="user", ai_usage="chat")
+        n2.set_content("More reflections on a possible career change.")
+        _db.session.add_all([n1, n2])
+        _db.session.commit()
+        n1_id, n2_id = n1.id, n2.id
+
+        import backend.utils.api_keys as _ak
+        import backend.utils.embeddings as _emb
+        monkeypatch.setattr(_ak, "get_openai_chat_key", lambda cfg: "key")
+        captured = {}
+
+        def fake_retrieve(user_id, query, exclude, key, k=4,
+                          min_score=0.35, **kw):
+            captured.update(query=query, exclude=exclude)
+            return [(n1_id, n1.created_at, "RAW_SNIPPET", 0.81),
+                    (n2_id, n2.created_at, "RAW_SNIPPET", 0.62)]
+        monkeypatch.setattr(_emb, "retrieve_relevant_snippets", fake_retrieve)
+
+        r = _run_tool(app, "semantic_search",
+                      {"query": "doubts about my career"}, uid)
+        assert r["status"] == "success"
+        assert r["query"] == "doubts about my career"
+        assert [m["node_id"] for m in r["matches"]] == [n1_id, n2_id]
+        assert r["matches"][0]["score"] == 0.81
+        # The raw snippet text must NOT be persisted in tool meta.
+        assert "RAW_SNIPPET" not in json.dumps(r)
+        # Injection re-resolves the actual node content fresh.
+        text = _retrieval_injection_text(r)
+        assert "leaving my job" in text
+        assert "career change" in text
+
+
+def test_semantic_search_tool_requires_query(app):
+    with app.app_context():
+        uid = User.query.first().id
+        r = _run_tool(app, "semantic_search", {"query": "   "}, uid)
+        assert r["status"] == "error"
+
+
+def test_semantic_search_injection_skips_opted_out_node(app, monkeypatch):
+    """A match whose node was opted out of AI access since the search is
+    dropped at injection (privacy re-check)."""
+    with app.app_context():
+        uid = User.query.first().id
+        node = Node(user_id=uid, node_type="user", ai_usage="none")
+        node.set_content("private musings")
+        _db.session.add(node)
+        _db.session.commit()
+        r = {"name": "semantic_search", "status": "success", "query": "x",
+             "matches": [{"node_id": node.id, "score": 0.9}]}
+        assert _retrieval_injection_text(r) is None
 
 
 # ── Feedback propose → confirm flow ──────────────────────────────────────
