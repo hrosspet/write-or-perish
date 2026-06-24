@@ -154,6 +154,51 @@ def get_user_month_spend_microdollars(user_id, now=None):
     return int(q.scalar() or 0)
 
 
+def get_user_spend_limit_usd(user, config):
+    """Effective monthly spend cap for a user, in USD.
+
+    The per-user override (User.monthly_spend_limit_usd) wins when set — note a
+    stored 0 means "uncapped" for that user, distinct from NULL ("use default").
+    NULL falls back to the global PER_USER_MONTHLY_LIMIT_USD. A return of 0 (or
+    less) means no cap is in force for this user.
+    """
+    override = getattr(user, "monthly_spend_limit_usd", None)
+    if override is not None:
+        return override
+    return config.get("PER_USER_MONTHLY_LIMIT_USD") or 0
+
+
+def reconcile_user_spend_block(user, config, now=None):
+    """Set or clear the user's block flag to match their *current* month-to-date
+    spend vs their effective limit — the source of truth for the admin limit
+    editor. Raising a user's limit above their spend unblocks them immediately;
+    lowering it at/below their spend blocks them. Does NOT commit (the caller
+    owns the transaction). Returns a summary dict.
+    """
+    now = now or datetime.utcnow()
+    month = current_month(now)
+    limit_usd = get_user_spend_limit_usd(user, config)
+    spend_usd = get_user_month_spend_microdollars(user.id, now=now) / 1_000_000
+
+    if limit_usd > 0 and spend_usd >= limit_usd:
+        user.spend_blocked_month = month
+        blocked = True
+    else:
+        # Clear only a current-month block; leave anything else untouched (in
+        # practice the flag is always either the current month or already
+        # auto-expired, but this keeps the operation strictly scoped).
+        if user.spend_blocked_month == month:
+            user.spend_blocked_month = None
+        blocked = False
+
+    return {
+        "blocked": blocked,
+        "spend_usd": round(spend_usd, 4),
+        "limit_usd": limit_usd,
+        "month": month,
+    }
+
+
 def user_is_capped(user, now=None):
     """Cheap, query-light check of whether a user is currently spend-blocked.
 
@@ -180,15 +225,17 @@ def enforce_user_spend_cap(user_id, config, now=None, send_email=None):
     `send_email` is injectable for tests; defaults to the real sender.
     """
     from backend.models import User
-    limit_usd = config.get("PER_USER_MONTHLY_LIMIT_USD") or 0
-    if limit_usd <= 0:
-        return {"status": "disabled"}
-
     now = now or datetime.utcnow()
     month = current_month(now)
     user = db.session.get(User, user_id)
     if user is None:
         return {"status": "no_user", "user_id": user_id}
+
+    # Per-user override wins over the global default (and 0 = uncapped).
+    limit_usd = get_user_spend_limit_usd(user, config)
+    if limit_usd <= 0:
+        return {"status": "disabled", "user_id": user_id}
+
     if user.spend_blocked_month == month:
         return {"status": "already_blocked", "user_id": user_id, "month": month}
 

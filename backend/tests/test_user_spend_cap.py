@@ -36,7 +36,8 @@ from backend.extensions import db as _db  # noqa: E402
 from backend.models import User, APICostLog  # noqa: E402
 from backend.utils.spend import (  # noqa: E402
     current_month, enforce_user_spend_cap,
-    get_user_month_spend_microdollars, require_spend_headroom, user_is_capped,
+    get_user_month_spend_microdollars, get_user_spend_limit_usd,
+    reconcile_user_spend_block, require_spend_headroom, user_is_capped,
 )
 
 NOW = datetime(2026, 6, 10, 3, 0, 0)
@@ -166,6 +167,69 @@ def test_create_llm_placeholder_blocked_when_capped(app):
         create_llm_placeholder(parent.id, "claude-opus-4.6", u.id, enqueue=False)
     # No orphan placeholder node created.
     assert Node.query.count() == before
+
+
+def test_get_user_spend_limit_override_wins(app):
+    u = User.query.filter_by(username="tester").first()
+    cfg = _config(limit=50)
+    # NULL override → global default.
+    assert get_user_spend_limit_usd(u, cfg) == 50
+    # Stored override wins…
+    u.monthly_spend_limit_usd = 100.0
+    assert get_user_spend_limit_usd(u, cfg) == 100.0
+    # …including a stored 0 ("uncapped"), which is distinct from NULL.
+    u.monthly_spend_limit_usd = 0.0
+    assert get_user_spend_limit_usd(u, cfg) == 0.0
+
+
+def test_enforce_respects_per_user_override(app):
+    u = User.query.filter_by(username="tester").first()
+    _log_cost(u.id, "claude-opus-4.6", 52.0)   # over the $50 default…
+    u.monthly_spend_limit_usd = 100.0          # …but under this user's override
+    _db.session.commit()
+    send = MagicMock()
+    result = enforce_user_spend_cap(u.id, _config(limit=50), now=NOW,
+                                    send_email=send)
+    assert result["status"] == "ok"
+    assert result["blocked"] is False
+    assert result["limit_usd"] == 100.0
+    send.assert_not_called()
+    assert u.spend_blocked_month is None
+
+
+def test_reconcile_raise_limit_unblocks(app):
+    u = User.query.filter_by(username="tester").first()
+    _log_cost(u.id, "claude-opus-4.6", 52.0)
+    u.spend_blocked_month = current_month(NOW)   # already blocked at $50 default
+    _db.session.commit()
+    # Admin raises the cap above their spend → unblocked immediately.
+    u.monthly_spend_limit_usd = 100.0
+    state = reconcile_user_spend_block(u, _config(limit=50), now=NOW)
+    assert state["blocked"] is False
+    assert u.spend_blocked_month is None
+    assert user_is_capped(u, now=NOW) is False
+
+
+def test_reconcile_lower_limit_blocks(app):
+    u = User.query.filter_by(username="tester").first()
+    _log_cost(u.id, "claude-opus-4.6", 30.0)     # under the $50 default → unblocked
+    assert u.spend_blocked_month is None
+    # Admin lowers the cap below their month-to-date spend → blocked.
+    u.monthly_spend_limit_usd = 20.0
+    state = reconcile_user_spend_block(u, _config(limit=50), now=NOW)
+    assert state["blocked"] is True
+    assert u.spend_blocked_month == current_month(NOW)
+    assert user_is_capped(u, now=NOW) is True
+
+
+def test_reconcile_zero_limit_is_uncapped(app):
+    u = User.query.filter_by(username="tester").first()
+    _log_cost(u.id, "claude-opus-4.6", 999.0)
+    u.spend_blocked_month = current_month(NOW)
+    u.monthly_spend_limit_usd = 0.0              # 0 = uncapped for this user
+    state = reconcile_user_spend_block(u, _config(limit=50), now=NOW)
+    assert state["blocked"] is False
+    assert u.spend_blocked_month is None
 
 
 def test_require_spend_headroom_decorator(app, monkeypatch):

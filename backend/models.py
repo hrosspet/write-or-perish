@@ -53,6 +53,13 @@ class User(db.Model, UserMixin):
     # actions; it auto-clears at month rollover (stored month no longer matches).
     spend_blocked_month = db.Column(db.String(7), nullable=True)
 
+    # Per-user override for the monthly spend cap (USD). NULL means "use the
+    # global PER_USER_MONTHLY_LIMIT_USD default"; a stored value (incl. 0 for
+    # "uncapped") takes precedence. Admin-editable from the dashboard so a
+    # single user can be granted more (or less) headroom without touching the
+    # global env var. See backend/utils/spend.get_user_spend_limit_usd.
+    monthly_spend_limit_usd = db.Column(db.Float, nullable=True)
+
     # Per-user defaults for new nodes (overridable per-node)
     default_privacy_level = db.Column(
         db.String(16), nullable=False, default="private",

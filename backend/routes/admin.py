@@ -31,18 +31,33 @@ def admin_required(func):
 @login_required
 @admin_required
 def list_users():
+    from backend.utils.spend import (
+        get_user_spend_limit_usd, month_start, user_is_capped,
+    )
+
+    config = current_app.config
+    now = datetime.utcnow()
     users = User.query.order_by(User.created_at.desc()).all()
 
-    # Aggregate total spending per user in a single query
+    # Aggregate total (all-time) spending per user in a single query
     spending_rows = db.session.query(
         APICostLog.user_id,
         func.sum(APICostLog.cost_microdollars).label("total_microdollars")
     ).group_by(APICostLog.user_id).all()
     spending_map = {row.user_id: row.total_microdollars for row in spending_rows}
 
+    # Month-to-date spending per user (drives the cap UI), one extra query
+    month_rows = db.session.query(
+        APICostLog.user_id,
+        func.sum(APICostLog.cost_microdollars).label("month_microdollars")
+    ).filter(APICostLog.created_at >= month_start(now)).group_by(
+        APICostLog.user_id).all()
+    month_map = {row.user_id: row.month_microdollars for row in month_rows}
+
     user_list = []
     for user in users:
         total_microdollars = spending_map.get(user.id, 0) or 0
+        month_microdollars = month_map.get(user.id, 0) or 0
         user_list.append({
             "id": user.id,
             "twitter_id": user.twitter_id,
@@ -55,10 +70,19 @@ def list_users():
             "plan": user.plan,
             "deactivated_at": iso_utc(user.deactivated_at),
             "total_spending_usd": total_microdollars / 1_000_000,
+            "current_month_spending_usd": month_microdollars / 1_000_000,
+            # Effective cap (per-user override if set, else the global default),
+            # pre-fills the editable input. `spend_limit_is_override` lets the UI
+            # distinguish a custom value from the inherited default.
+            "spend_limit_usd": get_user_spend_limit_usd(user, config),
+            "spend_limit_is_override": user.monthly_spend_limit_usd is not None,
+            "spend_blocked": user_is_capped(user, now),
         })
     return jsonify({
         "users": user_list,
-        "allowed_plans": sorted(User.ALLOWED_PLANS)
+        "allowed_plans": sorted(User.ALLOWED_PLANS),
+        "per_user_limit_default_usd": config.get(
+            "PER_USER_MONTHLY_LIMIT_USD") or 0,
     }), 200
 
 @admin_bp.route("/users/<int:user_id>/toggle", methods=["POST"])
@@ -98,6 +122,36 @@ def update_user_plan(user_id):
     user.plan = plan
     db.session.commit()
     return jsonify({"message": "Plan updated", "plan": user.plan}), 200
+
+@admin_bp.route("/users/<int:user_id>/update_spend_limit", methods=["PUT"])
+@login_required
+@admin_required
+def update_user_spend_limit(user_id):
+    """Set a user's per-user monthly spend cap (USD) and immediately reconcile
+    their block flag against current month-to-date spend: raising the limit
+    above their spend unblocks them; lowering it at/below their spend blocks
+    them. 0 = uncapped for this user."""
+    from backend.utils.spend import reconcile_user_spend_block
+
+    data = request.get_json() or {}
+    raw = data.get("limit_usd")
+    try:
+        limit = float(raw)
+    except (TypeError, ValueError):
+        return jsonify({"error": "limit_usd must be a number."}), 400
+    if limit < 0:
+        return jsonify({"error": "limit_usd must be >= 0."}), 400
+
+    user = User.query.get_or_404(user_id)
+    user.monthly_spend_limit_usd = limit
+    state = reconcile_user_spend_block(user, current_app.config)
+    db.session.commit()
+    return jsonify({
+        "message": "Spend limit updated",
+        "limit_usd": user.monthly_spend_limit_usd,
+        "spend_blocked": state["blocked"],
+        "current_month_spending_usd": state["spend_usd"],
+    }), 200
 
 # New endpoint: Whitelist a user by handle.
 @admin_bp.route("/whitelist", methods=["POST"])
