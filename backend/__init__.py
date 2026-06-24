@@ -41,6 +41,14 @@ def create_app():
             exc = (hint.get("exc_info") or (None, None, None))[1]
             if exc and "maximum input length" in str(exc):
                 return None
+            # Celery/billiard logs a worker pool child getting SIGTERM'd
+            # (graceful shutdown) on every service restart — i.e. every
+            # deploy — at ERROR level. Drop that expected lifecycle noise.
+            # SIGKILL (signal 9: OOM / crash) is a different message and
+            # still reports, so real worker failures aren't masked.
+            rec = hint.get("log_record")
+            if rec is not None and "signal 15 (SIGTERM)" in rec.getMessage():
+                return None
             return event
 
         sentry_sdk.init(
