@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { FaTimesCircle } from "react-icons/fa";
 import api from "../api";
 
 function AdminPanel() {
@@ -66,24 +67,32 @@ function AdminPanel() {
     }
   };
 
-  const updateSpendLimit = async (userId) => {
+  // Auto-save the limit input on Enter / Cmd|Ctrl+Enter / blur — but only when
+  // the value actually changed from the user's last-saved limit. Invalid input
+  // reverts to the saved value. Block/unblock feedback shows via the row's
+  // red-cross icon after the refresh (no modal — keeps auto-save seamless).
+  const maybeSaveLimit = (userId) => {
+    const user = users.find((u) => u.id === userId);
+    if (!user) return;
     const raw = limitEdits[userId];
-    if (raw === undefined || raw === "" || isNaN(parseFloat(raw))) {
-      setError("Spend limit must be a number.");
+    const original = user.spend_limit_usd ?? null;
+    const parsed = parseFloat(raw);
+    if (raw === undefined || raw === "" || isNaN(parsed) || parsed < 0) {
+      // Revert the input to the last saved value.
+      setLimitEdits((prev) => ({ ...prev, [userId]: String(original ?? "") }));
       return;
     }
+    if (parsed === original) return; // unchanged — nothing to save
+    saveSpendLimit(userId, parsed);
+  };
+
+  const saveSpendLimit = async (userId, value) => {
     try {
-      const response = await api.put(
-        `/admin/users/${userId}/update_spend_limit`,
-        { limit_usd: parseFloat(raw) }
-      );
+      await api.put(`/admin/users/${userId}/update_spend_limit`, {
+        limit_usd: value,
+      });
       setError("");
-      const blocked = response.data.spend_blocked;
-      alert(
-        `Spend limit set to $${parseFloat(raw).toFixed(2)}. User is now ` +
-          `${blocked ? "BLOCKED" : "unblocked"} for this month.`
-      );
-      fetchUsers();
+      fetchUsers(); // refreshes the row (incl. the blocked icon)
     } catch (err) {
       console.error(err);
       setError(err.response?.data?.error || "Error updating spend limit.");
@@ -147,9 +156,9 @@ function AdminPanel() {
             <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Approved</th>
             <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Plan</th>
             <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Email</th>
-            <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Spent</th>
-            <th style={{ border: "1px solid var(--border)", padding: "8px" }}>This Month</th>
-            <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Limit ($)</th>
+            <th style={{ border: "1px solid var(--border)", padding: "8px", width: "90px" }}>Spent</th>
+            <th style={{ border: "1px solid var(--border)", padding: "8px", width: "90px" }}>This Month</th>
+            <th style={{ border: "1px solid var(--border)", padding: "8px", width: "64px" }}>Limit ($)</th>
             <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Actions</th>
           </tr>
         </thead>
@@ -174,18 +183,20 @@ function AdminPanel() {
               <td style={{ border: "1px solid var(--border)", padding: "8px" }}>
                 {u.email || "None"}
               </td>
-              <td style={{ border: "1px solid var(--border)", padding: "8px" }}>
+              <td style={{ border: "1px solid var(--border)", padding: "8px", width: "90px" }}>
                 ${(u.total_spending_usd || 0).toFixed(2)}
               </td>
-              <td style={{ border: "1px solid var(--border)", padding: "8px" }}>
+              <td style={{ border: "1px solid var(--border)", padding: "8px", width: "90px", whiteSpace: "nowrap" }}>
                 ${(u.current_month_spending_usd || 0).toFixed(2)}
                 {u.spend_blocked && (
-                  <span style={{ color: "var(--error)", fontWeight: 600, marginLeft: "6px" }}>
-                    blocked
-                  </span>
+                  <FaTimesCircle
+                    title="Blocked this month"
+                    aria-label="Blocked this month"
+                    style={{ color: "var(--error)", marginLeft: "6px", verticalAlign: "middle" }}
+                  />
                 )}
               </td>
-              <td style={{ border: "1px solid var(--border)", padding: "8px", whiteSpace: "nowrap" }}>
+              <td style={{ border: "1px solid var(--border)", padding: "8px", width: "64px" }}>
                 <input
                   type="number"
                   min="0"
@@ -195,16 +206,17 @@ function AdminPanel() {
                     setLimitEdits((prev) => ({ ...prev, [u.id]: e.target.value }))
                   }
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") updateSpendLimit(u.id);
+                    // Enter and Cmd/Ctrl+Enter both fire with key === "Enter".
+                    if (e.key === "Enter") e.currentTarget.blur();
                   }}
-                  style={{ width: "70px", padding: "4px", marginRight: "6px" }}
+                  onBlur={() => maybeSaveLimit(u.id)}
+                  style={{ width: "48px", padding: "4px" }}
                   title={
                     u.spend_limit_is_override
                       ? "Custom per-user limit"
                       : "Inherited from the global default"
                   }
                 />
-                <button onClick={() => updateSpendLimit(u.id)}>Save</button>
                 {!u.spend_limit_is_override && (
                   <div style={{ fontSize: "0.75em", color: "var(--text-muted)" }}>
                     default
