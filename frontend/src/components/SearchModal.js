@@ -180,6 +180,10 @@ function SearchModal({ onClose }) {
             onChange={(e) => setQuery(e.target.value)}
             style={{
               flex: 1,
+              // Allow the input to shrink below its placeholder width so the
+              // toggle buttons stay on-screen on narrow (mobile) viewports
+              // instead of being pushed off the right edge.
+              minWidth: 0,
               background: 'transparent',
               border: 'none',
               outline: 'none',
@@ -225,16 +229,6 @@ function SearchModal({ onClose }) {
           >
             Dates
           </button>
-          <span style={{
-            fontSize: '11px',
-            color: 'var(--text-muted)',
-            padding: '2px 6px',
-            border: '1px solid var(--border)',
-            borderRadius: '4px',
-            flexShrink: 0,
-          }}>
-            ESC
-          </span>
         </div>
 
         {/* Date filter row */}
