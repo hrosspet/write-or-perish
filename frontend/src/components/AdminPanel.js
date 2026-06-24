@@ -1,6 +1,33 @@
 import React, { useState, useEffect } from "react";
-import { FaTimesCircle } from "react-icons/fa";
+import { FaTimesCircle, FaFilter } from "react-icons/fa";
 import api from "../api";
+
+// Small header toggle that hides rows with $0 in its column.
+function ZeroFilterToggle({ active, onToggle, label }) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      title={
+        active
+          ? `Showing only rows with ${label} > $0 — click to show all`
+          : `Hide rows with ${label} = $0`
+      }
+      style={{
+        marginLeft: "4px",
+        padding: 0,
+        background: "none",
+        border: "none",
+        cursor: "pointer",
+        verticalAlign: "middle",
+        fontSize: "0.8em",
+        color: active ? "var(--accent)" : "var(--text-muted)",
+      }}
+    >
+      <FaFilter />
+    </button>
+  );
+}
 
 function AdminPanel() {
   const [users, setUsers] = useState([]);
@@ -10,6 +37,9 @@ function AdminPanel() {
   const [newHandleError, setNewHandleError] = useState("");
   // Per-user spend-limit input values, keyed by user id (controlled inputs).
   const [limitEdits, setLimitEdits] = useState({});
+  // Column filters: hide rows with $0 in Spent / This Month (independent).
+  const [hideZeroSpent, setHideZeroSpent] = useState(false);
+  const [hideZeroMonth, setHideZeroMonth] = useState(false);
 
   const fetchUsers = async () => {
     try {
@@ -156,14 +186,31 @@ function AdminPanel() {
             <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Approved</th>
             <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Plan</th>
             <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Email</th>
-            <th style={{ border: "1px solid var(--border)", padding: "8px", width: "90px" }}>Spent</th>
-            <th style={{ border: "1px solid var(--border)", padding: "8px", width: "90px" }}>This<br />Month</th>
+            <th style={{ border: "1px solid var(--border)", padding: "8px", width: "90px" }}>
+              Spent
+              <ZeroFilterToggle
+                active={hideZeroSpent}
+                onToggle={() => setHideZeroSpent((v) => !v)}
+                label="Spent"
+              />
+            </th>
+            <th style={{ border: "1px solid var(--border)", padding: "8px", width: "90px" }}>
+              This<br />Month
+              <ZeroFilterToggle
+                active={hideZeroMonth}
+                onToggle={() => setHideZeroMonth((v) => !v)}
+                label="This Month"
+              />
+            </th>
             <th style={{ border: "1px solid var(--border)", padding: "8px", width: "64px" }}>Limit ($)</th>
             <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Actions</th>
           </tr>
         </thead>
         <tbody>
-          {users.map((u) => (
+          {users
+            .filter((u) => !hideZeroSpent || (u.total_spending_usd || 0) > 0)
+            .filter((u) => !hideZeroMonth || (u.current_month_spending_usd || 0) > 0)
+            .map((u) => (
             <tr key={u.id}>
               <td style={{ border: "1px solid var(--border)", padding: "8px" }}>{u.id}</td>
               <td style={{ border: "1px solid var(--border)", padding: "8px" }}>{u.username}</td>
