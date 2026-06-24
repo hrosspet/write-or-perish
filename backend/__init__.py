@@ -32,22 +32,27 @@ def create_app():
         import sentry_sdk
 
         def _before_send(event, hint):
-            # embed_texts (backend/utils/embeddings.py) intentionally trips the
-            # 8191-token limit on token-dense nodes, catches the 400, and
-            # retries at a smaller char cap. Sentry's auto OpenAI integration
-            # records that transient, handled 400 anyway — drop it so an
-            # expected condition doesn't page us. Real OpenAI errors (auth,
-            # rate limits, chat failures) still report.
+            # Drop known, expected noise. Match against BOTH the exception text
+            # and the log-record message so it's caught regardless of which
+            # Sentry path captured it (OpenAI integration, logging, or the
+            # Celery task-failure hook).
             exc = (hint.get("exc_info") or (None, None, None))[1]
-            if exc and "maximum input length" in str(exc):
-                return None
-            # Celery/billiard logs a worker pool child getting SIGTERM'd
-            # (graceful shutdown) on every service restart — i.e. every
-            # deploy — at ERROR level. Drop that expected lifecycle noise.
-            # SIGKILL (signal 9: OOM / crash) is a different message and
-            # still reports, so real worker failures aren't masked.
             rec = hint.get("log_record")
-            if rec is not None and "signal 15 (SIGTERM)" in rec.getMessage():
+            text = " ".join(filter(None, [
+                str(exc) if exc else "",
+                rec.getMessage() if rec is not None else "",
+            ]))
+            # 1) embed_texts intentionally trips the 8191-token limit on
+            #    token-dense nodes, catches the 400, and retries at a smaller
+            #    char cap — a handled, transient condition.
+            if "maximum input length" in text:
+                return None
+            # 2) Every service restart (i.e. every deploy) SIGTERMs the Celery
+            #    worker's pool children — graceful shutdown. Billiard logs it,
+            #    and an in-flight task raises WorkerLostError("…signal 15
+            #    (SIGTERM)…"). Expected lifecycle noise. SIGKILL (signal 9:
+            #    OOM / crash) is a different string and still reports.
+            if "signal 15 (SIGTERM)" in text:
                 return None
             return event
 
