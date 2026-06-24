@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { FaTimesCircle, FaFilter } from "react-icons/fa";
+import { FaTimesCircle, FaFilter, FaCaretDown, FaCaretUp } from "react-icons/fa";
 import api from "../api";
 
 // Small header toggle that hides rows with $0 in its column.
@@ -29,6 +29,37 @@ function ZeroFilterToggle({ active, onToggle, label }) {
   );
 }
 
+// Small header toggle that sorts by its column. `dir` is 'desc' | 'asc' when
+// this is the active sort column, else null (shown as a muted down triangle).
+function SortToggle({ dir, onToggle, label }) {
+  const Icon = dir === "asc" ? FaCaretUp : FaCaretDown;
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      title={
+        dir === "asc"
+          ? `Sorted by ${label}, smallest first — click for largest first`
+          : dir === "desc"
+          ? `Sorted by ${label}, largest first — click for smallest first`
+          : `Sort by ${label}, largest first`
+      }
+      style={{
+        marginLeft: "4px",
+        padding: 0,
+        background: "none",
+        border: "none",
+        cursor: "pointer",
+        verticalAlign: "middle",
+        fontSize: "0.9em",
+        color: dir ? "var(--accent)" : "var(--text-muted)",
+      }}
+    >
+      <Icon />
+    </button>
+  );
+}
+
 function AdminPanel() {
   const [users, setUsers] = useState([]);
   const [allowedPlans, setAllowedPlans] = useState([]);
@@ -40,6 +71,18 @@ function AdminPanel() {
   // Column filters: hide rows with $0 in Spent / This Month (independent).
   const [hideZeroSpent, setHideZeroSpent] = useState(false);
   const [hideZeroMonth, setHideZeroMonth] = useState(false);
+  // Column sort: one of Spent / This Month at a time, toggling desc <-> asc.
+  const [sortColumn, setSortColumn] = useState(null); // 'spent' | 'month' | null
+  const [sortDir, setSortDir] = useState("desc");
+
+  const toggleSort = (column) => {
+    if (sortColumn !== column) {
+      setSortColumn(column);
+      setSortDir("desc");
+    } else {
+      setSortDir((d) => (d === "desc" ? "asc" : "desc"));
+    }
+  };
 
   const fetchUsers = async () => {
     try {
@@ -159,6 +202,21 @@ function AdminPanel() {
     }
   };
 
+  let displayedUsers = users
+    .filter((u) => !hideZeroSpent || (u.total_spending_usd || 0) > 0)
+    .filter((u) => !hideZeroMonth || (u.current_month_spending_usd || 0) > 0);
+  if (sortColumn) {
+    const key =
+      sortColumn === "spent"
+        ? "total_spending_usd"
+        : "current_month_spending_usd";
+    displayedUsers = [...displayedUsers].sort((a, b) => {
+      const av = a[key] || 0;
+      const bv = b[key] || 0;
+      return sortDir === "desc" ? bv - av : av - bv;
+    });
+  }
+
   return (
     <div style={{ padding: "20px" }}>
       <h1>Admin Panel</h1>
@@ -186,31 +244,38 @@ function AdminPanel() {
             <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Approved</th>
             <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Plan</th>
             <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Email</th>
-            <th style={{ border: "1px solid var(--border)", padding: "8px", width: "90px" }}>
+            <th style={{ border: "1px solid var(--border)", padding: "8px", width: "110px", whiteSpace: "nowrap" }}>
               Spent
               <ZeroFilterToggle
                 active={hideZeroSpent}
                 onToggle={() => setHideZeroSpent((v) => !v)}
                 label="Spent"
               />
+              <SortToggle
+                dir={sortColumn === "spent" ? sortDir : null}
+                onToggle={() => toggleSort("spent")}
+                label="Spent"
+              />
             </th>
-            <th style={{ border: "1px solid var(--border)", padding: "8px", width: "90px" }}>
-              This<br />Month
+            <th style={{ border: "1px solid var(--border)", padding: "8px", width: "140px", whiteSpace: "nowrap" }}>
+              This Month
               <ZeroFilterToggle
                 active={hideZeroMonth}
                 onToggle={() => setHideZeroMonth((v) => !v)}
                 label="This Month"
               />
+              <SortToggle
+                dir={sortColumn === "month" ? sortDir : null}
+                onToggle={() => toggleSort("month")}
+                label="This Month"
+              />
             </th>
-            <th style={{ border: "1px solid var(--border)", padding: "8px", width: "64px" }}>Limit ($)</th>
+            <th style={{ border: "1px solid var(--border)", padding: "8px", width: "85px", whiteSpace: "nowrap" }}>Limit ($)</th>
             <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Actions</th>
           </tr>
         </thead>
         <tbody>
-          {users
-            .filter((u) => !hideZeroSpent || (u.total_spending_usd || 0) > 0)
-            .filter((u) => !hideZeroMonth || (u.current_month_spending_usd || 0) > 0)
-            .map((u) => (
+          {displayedUsers.map((u) => (
             <tr key={u.id}>
               <td style={{ border: "1px solid var(--border)", padding: "8px" }}>{u.id}</td>
               <td style={{ border: "1px solid var(--border)", padding: "8px" }}>{u.username}</td>
@@ -230,10 +295,10 @@ function AdminPanel() {
               <td style={{ border: "1px solid var(--border)", padding: "8px" }}>
                 {u.email || "None"}
               </td>
-              <td style={{ border: "1px solid var(--border)", padding: "8px", width: "90px" }}>
+              <td style={{ border: "1px solid var(--border)", padding: "8px", width: "110px" }}>
                 ${(u.total_spending_usd || 0).toFixed(2)}
               </td>
-              <td style={{ border: "1px solid var(--border)", padding: "8px", width: "90px", whiteSpace: "nowrap" }}>
+              <td style={{ border: "1px solid var(--border)", padding: "8px", width: "140px", whiteSpace: "nowrap" }}>
                 ${(u.current_month_spending_usd || 0).toFixed(2)}
                 {u.spend_blocked && (
                   <FaTimesCircle
@@ -243,7 +308,7 @@ function AdminPanel() {
                   />
                 )}
               </td>
-              <td style={{ border: "1px solid var(--border)", padding: "8px", width: "64px" }}>
+              <td style={{ border: "1px solid var(--border)", padding: "8px", width: "85px" }}>
                 <input
                   type="number"
                   min="0"
