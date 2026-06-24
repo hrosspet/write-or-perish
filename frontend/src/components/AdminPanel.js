@@ -157,7 +157,7 @@ function AdminPanel() {
             <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Plan</th>
             <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Email</th>
             <th style={{ border: "1px solid var(--border)", padding: "8px", width: "90px" }}>Spent</th>
-            <th style={{ border: "1px solid var(--border)", padding: "8px", width: "90px" }}>This Month</th>
+            <th style={{ border: "1px solid var(--border)", padding: "8px", width: "90px" }}>This<br />Month</th>
             <th style={{ border: "1px solid var(--border)", padding: "8px", width: "64px" }}>Limit ($)</th>
             <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Actions</th>
           </tr>
@@ -210,18 +210,13 @@ function AdminPanel() {
                     if (e.key === "Enter") e.currentTarget.blur();
                   }}
                   onBlur={() => maybeSaveLimit(u.id)}
-                  style={{ width: "48px", padding: "4px" }}
+                  style={{ width: "48px", padding: "8px 4px", boxSizing: "border-box" }}
                   title={
                     u.spend_limit_is_override
                       ? "Custom per-user limit"
                       : "Inherited from the global default"
                   }
                 />
-                {!u.spend_limit_is_override && (
-                  <div style={{ fontSize: "0.75em", color: "var(--text-muted)" }}>
-                    default
-                  </div>
-                )}
               </td>
               <td style={{ border: "1px solid var(--border)", padding: "8px" }}>
                 {!u.approved && u.email ? (
