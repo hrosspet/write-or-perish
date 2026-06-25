@@ -40,7 +40,9 @@ _saved_glue = {k: sys.modules.get(k) for k in _GLUE}
 sys.modules["backend.celery_app"] = MagicMock()
 sys.modules["backend.llm_providers"] = MagicMock()
 sys.modules.pop("backend.tasks.llm_completion", None)
-from backend.tasks.llm_completion import render_system_message  # noqa: E402
+from backend.tasks.llm_completion import (  # noqa: E402
+    render_system_message, gated_voice_tools, VOICE_TOOLS,
+)
 for _k, _v in _saved_glue.items():
     if _v is None:
         sys.modules.pop(_k, None)
@@ -95,6 +97,23 @@ def test_cost_cache_multipliers(app):
             cache_read_tokens=900_000, cache_write_tokens=50_000)
         assert mixed == (round(100_000 * 5 + 10_000 * 25
                                + 900_000 * 5 * 0.1 + 50_000 * 5 * 1.25))
+
+
+def test_gated_voice_tools_warm_matches_generation():
+    # The pre-warm and generation BOTH build their tool list via
+    # gated_voice_tools, so the cached tool prefix is byte-identical. A
+    # divergence here (warm keeping semantic_search while generation drops it)
+    # silently busts the whole cache — that was the read=0 bug.
+    names = lambda ts: [t["name"] for t in ts]  # noqa: E731
+    off = gated_voice_tools({"SEMANTIC_SEARCH_AGENTIC": False})
+    on = gated_voice_tools({"SEMANTIC_SEARCH_AGENTIC": True})
+    assert "semantic_search" not in names(off)        # dark (prod default)
+    assert "semantic_search" in names(on)             # enabled (staging)
+    assert names(on) == names(VOICE_TOOLS)
+    assert names(gated_voice_tools({})) == names(off)  # unset == dark
+    # Identical config -> identical list for both call sites (the invariant).
+    cfg = {"SEMANTIC_SEARCH_AGENTIC": False}
+    assert gated_voice_tools(cfg) == gated_voice_tools(cfg)
 
 
 def test_api_cost_log_persists_cache_breakdown(app):

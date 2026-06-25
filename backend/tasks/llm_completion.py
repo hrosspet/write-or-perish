@@ -274,6 +274,21 @@ VOICE_TOOLS = [
 ]
 
 
+def gated_voice_tools(config):
+    """The agentic voice tool list, with ``semantic_search`` filtered out
+    unless ``SEMANTIC_SEARCH_AGENTIC`` is enabled for this environment
+    (#155 dark-ship).
+
+    Shared by BOTH generation and the #187 pre-warm so their tool prefix is
+    byte-identical: tools sit at the front of the Anthropic cache prefix, so
+    any divergence here silently busts the whole cache — the warm writes a
+    tool set generation never reads (observed as read=0 with the warm
+    keeping semantic_search while generation dropped it)."""
+    if config.get("SEMANTIC_SEARCH_AGENTIC", False):
+        return VOICE_TOOLS
+    return [t for t in VOICE_TOOLS if t.get("name") != "semantic_search"]
+
+
 _ARTIFACT_KIND_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,47}$')
 
 # UserArtifact kinds that are injected INLINE in the agentic prompt (each has
@@ -1332,7 +1347,9 @@ def prewarm_anthropic_cache(system_node_id, user_id, model_id,
                 warm_messages,
                 api_keys["anthropic"],
                 max_tokens=1,
-                tools=VOICE_TOOLS,
+                # SAME gated tool list generation uses, or the cached tool
+                # prefix won't match and generation can't read the warm (#187).
+                tools=gated_voice_tools(flask_app.config),
             )
             cache_write = response.get("cache_creation_input_tokens", 0)
             cost = calculate_llm_cost_microdollars(
@@ -1578,20 +1595,16 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             # Detect if this is an agentic session (enables tools)
             is_agentic = _is_agentic_prompt(node_chain)
-            agentic_tools = VOICE_TOOLS if is_agentic else None
             # semantic_search ships DARK (#155): unless enabled for this
-            # environment, drop it from the exposed tool list so the model
-            # never sees it. (Manual Cmd+K search is unaffected — it's a
-            # separate HTTP endpoint, not this tool.) Gating the tool, not just
-            # the prompt, is what actually disables it: models call tools from
-            # the schema array, independent of the system prompt.
+            # environment, gated_voice_tools drops it from the exposed tool
+            # list so the model never sees it. (Manual Cmd+K search is
+            # unaffected — separate HTTP endpoint.) The pre-warm uses the SAME
+            # helper so the cached tool prefix matches (#187). agentic_search_on
+            # also gates the within-turn {quote:ID} pull-in-full below.
             agentic_search_on = flask_app.config.get(
                 "SEMANTIC_SEARCH_AGENTIC", False)
-            if agentic_tools and not agentic_search_on:
-                agentic_tools = [
-                    t for t in agentic_tools
-                    if t.get("name") != "semantic_search"
-                ]
+            agentic_tools = (
+                gated_voice_tools(flask_app.config) if is_agentic else None)
 
             # Check for pending drafts and inject context notes
             pending_draft_note = None
