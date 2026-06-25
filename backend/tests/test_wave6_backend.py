@@ -1,9 +1,12 @@
-"""Tests for Wave-6 backend leftovers (#110, #104, #139).
+"""Tests for Wave-6 backend leftovers (#110, #104).
 
 #110 — export preselection includes the user's replies inside other
 users' threads. #104 — _call_llm_with_retries forwards max_tokens to the
-provider. #139 — covered here at the unit level for the dedup stub text;
-the loop wiring mirrors the long-standing profile dedup.
+provider + every generation helper accepts max_output_tokens.
+
+#139 (the {user_export} first-occurrence dedup) lives in the
+generate_llm_response message-build loop, so its test rides that harness:
+see test_retrieval_loop.py::test_user_export_deduped_to_first_occurrence.
 """
 import os
 import sys

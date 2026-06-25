@@ -678,3 +678,67 @@ def test_non_agentic_mode_single_shot(app):
     only_call = "\n".join(m["text"] for m in _ScriptedProvider.calls[0]["messages"])
     assert "[Contents of artifact 'reading-list'" not in only_call
     assert APICostLog.query.count() == 1
+
+
+def test_user_export_deduped_to_first_occurrence(app, monkeypatch):
+    """#139: the heavy {user_export} archive is injected in FULL only on its
+    FIRST occurrence across the whole prompt — repeats (same message OR a
+    later one) become a '(see archive above)' stub, so the ~10k archive isn't
+    duplicated. The dedup flag persists across messages (per-conversation)."""
+    MARKER = "<<WAVE6_ARCHIVE_MARKER>>"
+    # Resolve {user_export} to a known marker so we can count occurrences.
+    monkeypatch.setattr(_llm_task_mod, "build_user_export_content",
+                        lambda *a, **k: MARKER)
+
+    alice = _mk_user("alice", approved=True, plan="alpha")
+    llm_user = _mk_user("gpt-5", twitter_id="llm-gpt-5")
+    prompt = UserPrompt(user_id=alice.id, prompt_key="textmode", title="P",
+                        generated_by="default")
+    prompt.set_content("system prompt body")
+    _db.session.add(prompt)
+    _db.session.flush()
+    system = Node(user_id=alice.id, human_owner_id=alice.id,
+                  node_type="system", privacy_level="private", ai_usage="chat")
+    system.set_content("(system)")
+    _db.session.add(system)
+    _db.session.flush()
+    _db.session.add(NodeContextArtifact(
+        node_id=system.id, artifact_type="prompt", artifact_id=prompt.id))
+
+    def _user(parent_id, content):
+        n = Node(user_id=alice.id, human_owner_id=alice.id, parent_id=parent_id,
+                 node_type="user", privacy_level="private", ai_usage="chat")
+        n.set_content(content)
+        _db.session.add(n)
+        _db.session.flush()
+        return n
+
+    # First user turn references the archive TWICE (within-message dedup)...
+    user1 = _user(system.id, "first {user_export} and again {user_export}")
+    llm1 = Node(user_id=llm_user.id, human_owner_id=alice.id,
+                parent_id=user1.id, node_type="llm", llm_model="gpt-5",
+                llm_task_status="completed", privacy_level="private",
+                ai_usage="chat")
+    llm1.set_content("prior answer")
+    _db.session.add(llm1)
+    _db.session.flush()
+    # ...and a LATER turn references it once more (cross-message dedup).
+    user2 = _user(llm1.id, "later: {user_export}")
+    placeholder = Node(user_id=llm_user.id, human_owner_id=alice.id,
+                       parent_id=user2.id, node_type="llm", llm_model="gpt-5",
+                       llm_task_status="pending", privacy_level="private",
+                       ai_usage="chat")
+    placeholder.set_content("[pending]")
+    _db.session.add(placeholder)
+    _db.session.commit()
+
+    _ScriptedProvider.reset([_resp("final answer")])
+    generate_llm_response(_FakeSelf(), user2.id, placeholder.id, "gpt-5",
+                          alice.id, source_mode="textmode")
+
+    text = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[0]["messages"])
+    # The archive is injected exactly ONCE across the whole prompt...
+    assert text.count(MARKER) == 1
+    # ...and the other three occurrences (1 in user1, 1 in user2) are stubs.
+    assert text.count("(see archive above)") == 2
