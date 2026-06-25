@@ -1984,9 +1984,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 logger.info(f"Calling LLM API: model_id={model_id}, api_model={api_model}, provider={provider}, key_type={key_type}, estimated_tokens={estimated_tokens}, total_chars={len(total_content)}")
 
                 try:
+                    # #189: stable per-thread key improves OpenAI's
+                    # automatic prefix-cache routing.
+                    thread_root_id = (node_chain[0].id if node_chain
+                                      else parent_node_id)
                     response = LLMProvider.get_completion(
                         model_id, messages, api_keys,
                         tools=agentic_tools,
+                        prompt_cache_key=f"loore-t{thread_root_id}",
                     )
                     break  # Success
                 except PromptTooLongError as e:
@@ -2010,29 +2015,47 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 Cache-aware (#187): cache reads price at 0.1x and writes at
                 1.25x; the logged input_tokens is the full prompt size
                 (uncached + cached reads + cache writes) for visibility, while
-                pricing is already accounted in the cost above."""
+                pricing is already accounted in the cost above.
+
+                OpenAI (#189): cached_tokens is the cached SUBSET of
+                input_tokens (auto prefix-cache) — billed at the model's
+                cached_input_multiplier, fixing the prior full-price
+                over-count."""
                 in_toks = resp.get("input_tokens", 0)
                 out_toks = resp.get("output_tokens", 0)
                 cache_read_toks = resp.get("cache_read_input_tokens", 0)
                 cache_write_toks = resp.get(
                     "cache_creation_input_tokens", 0)
+                cached_input_toks = resp.get("cached_tokens", 0)
                 cost = calculate_llm_cost_microdollars(
                     model_id, in_toks, out_toks,
                     cache_read_tokens=cache_read_toks,
                     cache_write_tokens=cache_write_toks,
+                    cached_input_tokens=cached_input_toks,
                 )
                 if cache_read_toks or cache_write_toks:
                     logger.info(
                         "Prompt cache usage: read=%d write=%d uncached=%d",
                         cache_read_toks, cache_write_toks, in_toks)
+                if cached_input_toks:
+                    logger.info(
+                        "OpenAI prompt cache: %d/%d input tokens cached",
+                        cached_input_toks, in_toks)
                 db.session.add(APICostLog(
                     user_id=user_id,
                     model_id=model_id,
                     request_type="conversation",
+                    # input_tokens = full prompt size. For Anthropic, in_toks
+                    # is the uncached portion so read+write complete it; for
+                    # OpenAI in_toks is already the full prompt (read/write 0).
                     input_tokens=(in_toks + cache_read_toks
                                   + cache_write_toks),
                     output_tokens=out_toks,
-                    cache_read_tokens=cache_read_toks,
+                    # cache_read_tokens = input SERVED from cache, unified
+                    # across providers: Anthropic cache reads + OpenAI
+                    # cached_tokens (one of the two is always 0). Drives the
+                    # admin hit-rate (served / full prompt input).
+                    cache_read_tokens=(cache_read_toks + cached_input_toks),
                     cache_write_tokens=cache_write_toks,
                     cost_microdollars=cost,
                 ))
@@ -2367,6 +2390,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         response = LLMProvider.get_completion(
                             model_id, messages, api_keys,
                             tools=agentic_tools,
+                            # #189: same per-thread key as the first call so
+                            # loop continuations route to the same OpenAI cache.
+                            prompt_cache_key=f"loore-t{thread_root_id}",
                         )
                     except PromptTooLongError:
                         logger.warning(
@@ -2389,6 +2415,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         response = LLMProvider.get_completion(
                             model_id, messages, api_keys,
                             tools=agentic_tools,
+                            # #189: same per-thread key as the first call so
+                            # loop continuations route to the same OpenAI cache.
+                            prompt_cache_key=f"loore-t{thread_root_id}",
                         )
                     continue
 
