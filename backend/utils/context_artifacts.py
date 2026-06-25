@@ -18,6 +18,7 @@ PLACEHOLDER_TO_ARTIFACT = {
     'user_ai_preferences': 'user_artifact',
     'user_memory': 'user_artifact',
     'user_scratchpad': 'user_artifact',
+    'user_intentions': 'user_artifact',
     'user_artifacts_index': 'user_artifact',
 }
 

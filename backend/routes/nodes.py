@@ -388,18 +388,19 @@ def _context_artifact_fields(n):
                     "content": rc.get_content(),
                 }
         elif row.artifact_type == "user_artifact":
-            # ai_preferences is folded into UserArtifact (#158 Slice 5) and
-            # pinned as a user_artifact row — surface it under the
-            # "ai_preferences" key so the {user_ai_preferences} inline section
-            # resolves. Other kinds (memory/scratchpad/...) have no inline
-            # placeholder in QuotedContent, so they're skipped here.
+            # Inline UserArtifact kinds (memory/scratchpad/ai_preferences/
+            # intentions — UserArtifact.INLINE_KINDS) each have a
+            # {user_<kind>} placeholder in the agentic prompt, so surface the
+            # pinned content under the kind key for QuotedContent to resolve.
+            # Non-inline kinds reach the model via the artifacts index / tools
+            # and have no inline placeholder, so they're skipped here.
             art = UserArtifact.query.get(row.artifact_id)
-            if art and art.kind == "ai_preferences":
-                artifacts["ai_preferences"] = {
+            if art and art.kind in UserArtifact.INLINE_KINDS:
+                artifacts[art.kind] = {
                     "id": art.id,
                     "version_number": UserArtifact.query.filter(
                         UserArtifact.user_id == art.user_id,
-                        UserArtifact.kind == "ai_preferences",
+                        UserArtifact.kind == art.kind,
                         UserArtifact.created_at <= art.created_at,
                     ).count(),
                     "content": art.get_content(),

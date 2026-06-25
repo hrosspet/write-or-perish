@@ -717,6 +717,32 @@ def test_attach_pins_multiple_artifact_kinds(app):
             "memory", "scratchpad", "reading-list"}
 
 
+def test_inline_kinds_surface_in_node_display(app):
+    # Regression (#202): every INLINE_KIND has a {user_<kind>} placeholder in
+    # the agentic prompt, so each must surface in the node's context_artifacts
+    # for the UI to render it. The display path used to special-case
+    # ai_preferences only, leaving {user_intentions} (and memory/scratchpad)
+    # pinned + sent to the LLM but shown unrendered in the system-prompt UI.
+    from backend.utils.context_artifacts import attach_context_artifacts
+    from backend.routes.nodes import _context_artifact_fields
+    with app.app_context():
+        uid = User.query.first().id
+        for kind in UserArtifact.INLINE_KINDS:
+            _mk_artifact(uid, kind, f"{kind}-body")
+        node = Node(user_id=uid, node_type="system")
+        node.set_content(
+            "".join("{user_%s}" % k for k in UserArtifact.INLINE_KINDS))
+        _db.session.add(node)
+        _db.session.flush()
+        attach_context_artifacts(node.id, uid)
+        _db.session.commit()
+
+        fields = _context_artifact_fields(node)
+        for kind in UserArtifact.INLINE_KINDS:
+            assert kind in fields, f"{kind} missing from display fields"
+            assert fields[kind]["content"] == f"{kind}-body"
+
+
 def test_artifacts_context_resolution_pinned_vs_latest(app):
     with app.app_context():
         uid = User.query.first().id

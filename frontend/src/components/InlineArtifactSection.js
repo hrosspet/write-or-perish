@@ -9,6 +9,7 @@ import MarkdownBody from './MarkdownBody';
  *
  * Props:
  *   type: "profile" | "todo" | "recent" | "recent_raw" | "ai_preferences"
+ *         | "memory" | "scratchpad" | "intentions"
  *   artifact: { id, version_number, content, source_tokens, covers_start, covers_end } or null
  */
 
@@ -28,6 +29,9 @@ const InlineArtifactSection = ({ type, artifact }) => {
     recent: 'Recent Context Summary',
     ai_preferences: 'AI Preferences',
     recent_raw: 'Recent Context Raw',
+    memory: 'Memory',
+    scratchpad: 'Scratchpad',
+    intentions: 'Intentions',
   };
   const label = LABELS[type] || type;
 

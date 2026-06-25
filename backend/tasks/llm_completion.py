@@ -301,7 +301,7 @@ _ARTIFACT_KIND_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,47}$')
 # of truth for both index-exclusion spots in get_user_artifacts_context.
 # intentions (#150/#202) has an ambient {user_intentions} placeholder, so it
 # belongs here too.
-ALWAYS_INLINE_KINDS = ("memory", "scratchpad", "ai_preferences", "intentions")
+ALWAYS_INLINE_KINDS = UserArtifact.INLINE_KINDS
 
 # Kinds that are NOT UserArtifacts — they're separate single-row models or
 # system-managed, so update_artifact must refuse them. Without this guard the
