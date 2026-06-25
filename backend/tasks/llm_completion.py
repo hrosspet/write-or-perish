@@ -1337,6 +1337,8 @@ def prewarm_anthropic_cache(system_node_id, user_id, model_id,
                 request_type="cache_warm",
                 input_tokens=response.get("input_tokens", 0) + cache_write,
                 output_tokens=response.get("output_tokens", 0),
+                cache_read_tokens=response.get("cache_read_input_tokens", 0),
+                cache_write_tokens=cache_write,
                 cost_microdollars=cost,
             ))
             db.session.commit()
@@ -2006,6 +2008,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     input_tokens=(in_toks + cache_read_toks
                                   + cache_write_toks),
                     output_tokens=out_toks,
+                    cache_read_tokens=cache_read_toks,
+                    cache_write_tokens=cache_write_toks,
                     cost_microdollars=cost,
                 ))
 

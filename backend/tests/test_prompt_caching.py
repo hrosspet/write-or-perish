@@ -29,7 +29,7 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
 
 from backend.extensions import db as _db  # noqa: E402
 from backend.models import (  # noqa: E402
-    User, Node, NodeContextArtifact, UserTodo,
+    User, Node, NodeContextArtifact, UserTodo, APICostLog,
 )
 import backend.utils.prompt_cache as prompt_cache  # noqa: E402
 from backend.utils.cost import calculate_llm_cost_microdollars  # noqa: E402
@@ -95,6 +95,38 @@ def test_cost_cache_multipliers(app):
             cache_read_tokens=900_000, cache_write_tokens=50_000)
         assert mixed == (round(100_000 * 5 + 10_000 * 25
                                + 900_000 * 5 * 0.1 + 50_000 * 5 * 1.25))
+
+
+def test_api_cost_log_persists_cache_breakdown(app):
+    # The cache read/write split is recorded as its own columns (#187
+    # observability) so cache hit-rate is queryable from the DB, not only
+    # the logs. input_tokens stays the full prompt size.
+    with app.app_context():
+        uid = User.query.first().id
+        row = APICostLog(
+            user_id=uid,
+            model_id="claude-opus-4.6",
+            request_type="conversation",
+            input_tokens=950_000,        # uncached 50k + read 900k + write 0
+            output_tokens=1_000,
+            cache_read_tokens=900_000,
+            cache_write_tokens=0,
+            cost_microdollars=123,
+        )
+        _db.session.add(row)
+        _db.session.commit()
+        fetched = APICostLog.query.get(row.id)
+        assert fetched.cache_read_tokens == 900_000
+        assert fetched.cache_write_tokens == 0
+        # Columns default to 0 when a non-cached call omits them.
+        plain = APICostLog(
+            user_id=uid, model_id="gpt-4o-transcribe",
+            request_type="transcription", cost_microdollars=5,
+        )
+        _db.session.add(plain)
+        _db.session.commit()
+        assert APICostLog.query.get(plain.id).cache_read_tokens == 0
+        assert APICostLog.query.get(plain.id).cache_write_tokens == 0
 
 
 # ── Backend render cache (#192) ──────────────────────────────────────────

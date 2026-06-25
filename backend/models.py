@@ -789,6 +789,12 @@ class APICostLog(db.Model):
     request_type = db.Column(db.String(32), nullable=False)
     input_tokens = db.Column(db.Integer, nullable=True)
     output_tokens = db.Column(db.Integer, nullable=True)
+    # Prompt-cache breakdown (#187). The split of cached vs. fresh input that
+    # input_tokens (the full prompt size) folds together — read = served from
+    # cache (0.1x), write = written into cache this call (1.25x). 0 for
+    # non-cached calls; lets us query cache hit-rate over time from the DB.
+    cache_read_tokens = db.Column(db.Integer, nullable=True, default=0)
+    cache_write_tokens = db.Column(db.Integer, nullable=True, default=0)
     audio_duration_seconds = db.Column(db.Float, nullable=True)
     cost_microdollars = db.Column(db.Integer, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
