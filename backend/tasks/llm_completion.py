@@ -20,7 +20,7 @@ from backend.utils.tokens import (
 )
 from backend.utils.quotes import resolve_quotes, has_quotes, find_quote_ids
 from backend.utils.node_split import NODE_CHAR_CAP
-from backend.utils.timefmt import local_stamp
+from backend.utils.timefmt import local_stamp, strip_edge_timestamps
 from backend.utils.api_keys import determine_api_key_type, get_api_keys_for_usage
 from backend.utils.cost import calculate_llm_cost_microdollars
 from backend.utils.tool_meta import update_tool_meta, parse_github_issue
@@ -1713,6 +1713,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 replaced_profile = False
                 replaced_recent = False
                 replaced_recent_raw = False
+                replaced_export = False  # #139: first occurrence only
 
                 # Temporal grounding (#130): every message is prefixed with an
                 # absolute local-time stamp derived from the node's updated_at
@@ -1792,12 +1793,22 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         message_text = (
                             f"{time_prefix} author {author}: {node_content}"
                         )
-                        # Replace {user_export} placeholder if present
+                        # Replace {user_export} — first occurrence gets
+                        # the archive, repeats get a stub (#139): the
+                        # export is the heaviest placeholder and
+                        # duplicating it doubles prompt cost.
                         if user_export_content and export_placeholder_match:
-                            message_text = message_text.replace(
-                                export_placeholder_match,
-                                user_export_content
-                            )
+                            if export_placeholder_match in message_text:
+                                if not replaced_export:
+                                    message_text = message_text.replace(
+                                        export_placeholder_match,
+                                        user_export_content, 1
+                                    )
+                                    replaced_export = True
+                                message_text = message_text.replace(
+                                    export_placeholder_match,
+                                    "(see archive above)"
+                                )
                         # Replace {user_profile} — first occurrence
                         # gets content, subsequent get emptied (dedup)
                         if USER_PROFILE_PLACEHOLDER in message_text:
@@ -2070,6 +2081,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 soft-deleted mid-generation.
                 """
                 f_llm_text = resp["content"]
+                # #179: strip hallucinated context-timestamp echoes from the
+                # response edges before anything stores or speaks the text.
+                f_scrubbed = strip_edge_timestamps(f_llm_text)
+                if f_scrubbed != f_llm_text:
+                    logger.info(
+                        "Stripped edge timestamp(s) from LLM response "
+                        "(model=%s, node=%s)", model_id, target_node.id)
+                    f_llm_text = f_scrubbed
                 f_total_tokens = resp["total_tokens"]
                 f_tool_calls = resp.get("tool_calls", [])
                 f_truncated = resp.get("truncated", False)
@@ -2240,7 +2259,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # pull was requested, and budget remains.
                 if (retrieval_calls or new_quote_ids) and \
                         rounds_done < MAX_RETRIEVAL_ROUNDS:
-                    interim_text = resp_text
+                    # #179: scrub timestamp echoes from interim text too —
+                    # it's stored on the interim node and spoken in voice.
+                    interim_text = strip_edge_timestamps(resp_text)
                     interim_truncated = response.get("truncated", False)
 
                     # Cost for THIS model call (every call costs).

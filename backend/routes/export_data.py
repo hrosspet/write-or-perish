@@ -519,10 +519,14 @@ def _preselect_node_ids(user_id, budget, filter_ai_usage=False,
     node IDs ordered by created_at (direction controlled by
     chronological_order).  No nodes are loaded or decrypted.
     """
-    # Recursive CTE: all node IDs in the user's thread trees
+    # Recursive CTE: all node IDs in the user's thread trees. Seeded
+    # from EVERY node the user authored — not just their top-level
+    # threads — so replies they wrote inside other users' threads (and
+    # the sub-threads under them) are included too (#110). Overlapping
+    # subtrees are harmless: membership is checked with IN. Visibility/
+    # privacy is enforced below by _export_visible_filter.
     base = db.session.query(Node.id).filter(
         Node.user_id == user_id,
-        Node.parent_id.is_(None),
     ).cte(name="thread_nodes", recursive=True)
 
     thread_child = db.aliased(Node, flat=True)
