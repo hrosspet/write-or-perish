@@ -28,7 +28,9 @@ function StatusDot({ state }) {
     fontSize: '0.55rem', fontWeight: 700, color: 'var(--bg-deep)',
   };
   if (state === 'fulfilled') {
-    return <span style={{ ...base, background: 'var(--success)' }}>✓</span>;
+    // Achieved — the brightest, fully-resolved amber, marked done (the app's
+    // checked-item vocabulary). Reads as "active, brightened into completion".
+    return <span style={{ ...base, background: 'var(--accent)' }}>✓</span>;
   }
   if (state === 'released') {
     return <span style={{ ...base, border: '1.5px solid var(--border-hover)', opacity: 0.5 }} />;
@@ -36,7 +38,7 @@ function StatusDot({ state }) {
   if (state === 'inferred') {
     return <span style={{ ...base, border: '1.5px dashed var(--border-hover)' }} />;
   }
-  // active — a held, living intention
+  // active — a held, living intention (dim amber, no marker)
   return <span style={{ ...base, background: 'var(--accent-dim)' }} />;
 }
 
@@ -108,15 +110,15 @@ export default function IntentionsView({ content }) {
         <div key={i} style={{ marginBottom: '2.5rem' }}>
           {section.title && (
             <div style={{
-              fontFamily: 'var(--sans)', fontSize: '0.68rem', fontWeight: 500,
-              letterSpacing: '0.18em', textTransform: 'uppercase',
-              color: 'var(--accent)', opacity: 0.6, marginBottom: '0.9rem',
-              display: 'flex', alignItems: 'center', gap: '8px',
+              fontFamily: 'var(--sans)', fontSize: '0.86rem', fontWeight: 600,
+              letterSpacing: '0.16em', textTransform: 'uppercase',
+              color: 'var(--accent)', opacity: 0.82, marginBottom: '1.1rem',
+              display: 'flex', alignItems: 'center', gap: '10px',
             }}>
               <span>{section.title}</span>
               <span style={{
                 color: 'var(--text-muted)', fontWeight: 300,
-                fontSize: '0.65rem', letterSpacing: '0.05em', textTransform: 'none',
+                fontSize: '0.74rem', letterSpacing: '0.05em', textTransform: 'none',
               }}>
                 {section.entries.length}
               </span>
