@@ -18,6 +18,42 @@ const KIND_BLURBS = {
 const titleFromKind = (k) =>
   k.replace(/[-_]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 
+// The intentions artifact is a structured list (# Endorsed / # Inferred
+// sections, each "## <name>" an entry with a status line + dated notes).
+// MarkdownBody renders h1/h2 as large serif display headings, which turns the
+// list into a wall of giant headings. Scope smaller, list-friendly heading
+// sizes to this artifact only — sections become quiet uppercase dividers,
+// names become readable serif lines. !important is required because
+// MarkdownBody sets heading sizes as inline styles. The markdown structure is
+// unchanged (stays clean for the AI to maintain and readable in raw/edit view).
+const INTENTIONS_STYLE = `
+.loore-intentions h1 {
+  font-family: var(--sans) !important;
+  font-size: 0.78rem !important;
+  font-weight: 600 !important;
+  line-height: 1.4 !important;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted) !important;
+  margin: 2.2em 0 0.9em !important;
+  padding-bottom: 0.4em;
+  border-bottom: 1px solid var(--border);
+}
+.loore-intentions h1:first-child { margin-top: 0.2em !important; }
+.loore-intentions h2 {
+  font-family: var(--serif) !important;
+  font-size: 1.08rem !important;
+  font-weight: 600 !important;
+  line-height: 1.35 !important;
+  color: var(--text-primary) !important;
+  margin: 1.4em 0 0.15em !important;
+}
+.loore-intentions h2 + p { margin-top: 0.15em; }
+.loore-intentions p { margin: 0.3em 0; }
+.loore-intentions ul { margin: 0.35em 0 0.2em; padding-left: 1.2em; }
+.loore-intentions li { margin: 0.15em 0; font-size: 0.88rem; color: var(--text-muted); }
+`;
+
 export default function ArtifactsPage() {
   const { kind: kindParam } = useParams();
   const navigate = useNavigate();
@@ -361,10 +397,14 @@ export default function ArtifactsPage() {
       {/* Rendered content */}
       {active && !editing && (
         active.content ? (
-          <div className="loore-profile" style={{
-            fontFamily: 'var(--sans)', fontSize: '0.92rem', fontWeight: 300,
-            color: 'var(--text-secondary)', lineHeight: 1.7,
-          }}>
+          <div
+            className={`loore-profile${active.kind === 'intentions' ? ' loore-intentions' : ''}`}
+            style={{
+              fontFamily: 'var(--sans)', fontSize: '0.92rem', fontWeight: 300,
+              color: 'var(--text-secondary)', lineHeight: 1.7,
+            }}
+          >
+            {active.kind === 'intentions' && <style>{INTENTIONS_STYLE}</style>}
             <MarkdownBody>{active.content}</MarkdownBody>
           </div>
         ) : (
