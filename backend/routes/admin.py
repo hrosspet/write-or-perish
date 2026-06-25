@@ -54,10 +54,28 @@ def list_users():
         APICostLog.user_id).all()
     month_map = {row.user_id: row.month_microdollars for row in month_rows}
 
+    # Prompt-cache read/write totals per user (#187). Hit-rate = reads /
+    # (reads + writes): reads are the stable prefix served from cache, writes
+    # are the misses that populated it (first turn / after the 5-min TTL).
+    # Non-cached calls contribute 0. NULLs (pre-#187 rows) are ignored by SUM.
+    cache_rows = db.session.query(
+        APICostLog.user_id,
+        func.sum(APICostLog.cache_read_tokens).label("reads"),
+        func.sum(APICostLog.cache_write_tokens).label("writes"),
+    ).group_by(APICostLog.user_id).all()
+    cache_map = {
+        row.user_id: (row.reads or 0, row.writes or 0) for row in cache_rows
+    }
+
     user_list = []
     for user in users:
         total_microdollars = spending_map.get(user.id, 0) or 0
         month_microdollars = month_map.get(user.id, 0) or 0
+        cache_read, cache_write = cache_map.get(user.id, (0, 0))
+        cache_cacheable = cache_read + cache_write
+        cache_hit_rate = (
+            cache_read / cache_cacheable if cache_cacheable > 0 else None
+        )
         user_list.append({
             "id": user.id,
             "twitter_id": user.twitter_id,
@@ -71,6 +89,12 @@ def list_users():
             "deactivated_at": iso_utc(user.deactivated_at),
             "total_spending_usd": total_microdollars / 1_000_000,
             "current_month_spending_usd": month_microdollars / 1_000_000,
+            # Prompt-cache hit-rate (all-time): null when the user has no
+            # cacheable Anthropic traffic yet. Raw token sums included so the
+            # UI can show the breakdown on hover.
+            "cache_hit_rate": cache_hit_rate,
+            "cache_read_tokens": cache_read,
+            "cache_write_tokens": cache_write,
             # Effective cap (per-user override if set, else the global default),
             # pre-fills the editable input. `spend_limit_is_override` lets the UI
             # distinguish a custom value from the inherited default.

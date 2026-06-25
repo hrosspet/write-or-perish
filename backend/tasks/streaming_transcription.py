@@ -25,6 +25,25 @@ from backend.utils.cost import calculate_audio_cost_microdollars
 
 logger = get_task_logger(__name__)
 
+# #187: a recording longer than Anthropic's 5-min cache TTL means any prior
+# turn's prompt cache has lapsed *during* this recording (no LLM calls run
+# while recording), so the prefix is cold at generation — warm it. Tied to
+# the provider TTL; tune together.
+PREWARM_ONGOING_MIN_SECONDS = 300
+
+
+def _find_thread_system_node(parent_id):
+    """Walk up from *parent_id* to the thread's system node — the ancestor
+    carrying the 'prompt' artifact (created at thread start). Returns the
+    Node or None. Mirrors the node-chain walk + system-node lookup in
+    generate_llm_response."""
+    current = Node.query.get(parent_id)
+    while current is not None:
+        if current.deleted_at is None and current.has_artifact("prompt"):
+            return current
+        current = current.parent
+    return None
+
 
 class StreamingTranscriptionTask(Task):
     """Custom task class with error handling for chunk transcription."""
@@ -910,6 +929,58 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         if not draft:
             raise ValueError(f"Draft not found for session {session_id}")
 
+        # #187: pre-warm the Anthropic prompt cache while the trailing
+        # chunks transcribe. Fresh Voice threads only (for an ongoing
+        # thread the prior turn's cache is usually still warm). The
+        # system node is created early — here instead of in the chain
+        # start — so the warm renders against real pinned artifacts and
+        # the cached bytes (#192) are exactly what generation reuses.
+        cache_split_offset = None
+        if user_id and model and label == 'Voice':
+            try:
+                model_cfg = flask_app.config["SUPPORTED_MODELS"].get(model)
+                is_anthropic = bool(
+                    model_cfg and model_cfg["provider"] == "anthropic")
+                from backend.tasks.llm_completion import (
+                    prewarm_anthropic_cache,
+                )
+                if is_anthropic and parent_id is None:
+                    # Fresh thread: warm [system][transcript-so-far] as two
+                    # blocks; generation reads both and prefills only the
+                    # trailing batch (the cache_split_offset two-block split).
+                    transcript_so_far = draft.get_content() or ""
+                    if len(transcript_so_far) >= 500:
+                        parent_id = _create_system_node_early(
+                            user_id, label.lower(), draft)
+                        cache_split_offset = len(transcript_so_far)
+                        prewarm_anthropic_cache.delay(
+                            parent_id, user_id, model, transcript_so_far,
+                            (draft.created_at
+                             or datetime.utcnow()).isoformat(),
+                        )
+                elif is_anthropic and parent_id is not None:
+                    # Ongoing thread + long recording: the prior turn's cache
+                    # has lapsed during this >5-min recording, so the prefix is
+                    # cold at generation. Warm the SYSTEM block only — the
+                    # prior conversation sits between system and the transcript
+                    # so the two-block transcript warm doesn't transfer (full
+                    # solution: #224). No cache_split_offset (no transcript
+                    # warm); generation reads system at 0.1x, prefills the rest.
+                    recording_secs = (
+                        datetime.utcnow()
+                        - (draft.created_at or datetime.utcnow())
+                    ).total_seconds()
+                    if recording_secs > PREWARM_ONGOING_MIN_SECONDS:
+                        sys_node = _find_thread_system_node(parent_id)
+                        if sys_node is not None:
+                            prewarm_anthropic_cache.delay(
+                                sys_node.id, user_id, model)
+            except Exception:
+                logger.warning(
+                    "Cache pre-warm setup failed; continuing without it",
+                    exc_info=True)
+                cache_split_offset = None
+
         # Trigger transcription of any remaining stored chunks (< 20, so
         # they didn't hit the batch threshold during recording). This is a
         # synchronous call to the batch task so we can wait for completion.
@@ -1049,6 +1120,7 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
                 _start_server_side_llm_chain(
                     draft, session_id, full_transcript,
                     user_id, parent_id, model, label,
+                    cache_split_offset=cache_split_offset,
                 )
             except Exception as e:
                 logger.error(
@@ -1077,8 +1149,38 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         }
 
 
+def _create_system_node_early(user_id, prompt_key, draft):
+    """Create the thread's system node at finalize START (#187) so the
+    cache pre-warm renders against real pinned artifacts. Returns its id.
+
+    Mirrors the fresh-thread branch of _start_server_side_llm_chain,
+    which then simply receives this node as parent_id.
+    """
+    from backend.models import Node
+    from backend.utils.prompts import get_user_prompt_record
+    from backend.utils.context_artifacts import attach_context_artifacts
+
+    prompt_record = get_user_prompt_record(user_id, prompt_key)
+    system_node = Node(
+        user_id=user_id,
+        human_owner_id=user_id,
+        parent_id=None,
+        node_type="user",
+        privacy_level="private",
+        ai_usage=draft.ai_usage or "none",
+    )
+    db.session.add(system_node)
+    db.session.flush()
+    attach_context_artifacts(
+        system_node.id, user_id, prompt_record=prompt_record,
+    )
+    db.session.commit()
+    return system_node.id
+
+
 def _start_server_side_llm_chain(draft, session_id, transcript,
-                                 user_id, parent_id, model, label):
+                                 user_id, parent_id, model, label,
+                                 cache_split_offset=None):
     """
     Create nodes and kick off LLM + TTS generation server-side.
 
@@ -1139,6 +1241,11 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
         token_count=approximate_token_count(transcript),
     )
     user_node.set_content(transcript)
+    # #187: stamp the voice node at recording START (constant for the
+    # whole recording) so the message time-prefix is byte-identical
+    # between the finalize pre-warm and the generation.
+    if draft.created_at:
+        user_node.created_at = draft.created_at
     db.session.add(user_node)
     db.session.flush()
 
@@ -1215,6 +1322,7 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
         generate_llm_response.si(
             tip_node.id, llm_node.id, model, user_id,
             source_mode='voice',
+            cache_split_offset=cache_split_offset,
         ),
         generate_tts_audio.si(
             llm_node.id, str(audio_storage_root),

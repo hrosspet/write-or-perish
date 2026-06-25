@@ -271,6 +271,12 @@ function AdminPanel() {
               />
             </th>
             <th style={{ border: "1px solid var(--border)", padding: "8px", width: "85px", whiteSpace: "nowrap" }}>Limit ($)</th>
+            <th
+              style={{ border: "1px solid var(--border)", padding: "8px", width: "85px", whiteSpace: "nowrap" }}
+              title="Prompt-cache hit-rate (all-time): cache reads ÷ (reads + writes). Higher = more of the stable prefix served from cache."
+            >
+              Cache
+            </th>
             <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Actions</th>
           </tr>
         </thead>
@@ -329,6 +335,18 @@ function AdminPanel() {
                       : "Inherited from the global default"
                   }
                 />
+              </td>
+              <td
+                style={{ border: "1px solid var(--border)", padding: "8px", width: "85px", whiteSpace: "nowrap" }}
+                title={
+                  u.cache_hit_rate == null
+                    ? "No cacheable Anthropic traffic yet"
+                    : `reads ${(u.cache_read_tokens || 0).toLocaleString()} · writes ${(u.cache_write_tokens || 0).toLocaleString()} tokens`
+                }
+              >
+                {u.cache_hit_rate == null
+                  ? "—"
+                  : `${(u.cache_hit_rate * 100).toFixed(0)}%`}
               </td>
               <td style={{ border: "1px solid var(--border)", padding: "8px" }}>
                 {!u.approved && u.email ? (

@@ -36,7 +36,7 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
 
 import flask_login as _real_flask_login  # noqa: E402
 from backend.extensions import db as _db  # noqa: E402
-from backend.models import User  # noqa: E402
+from backend.models import User, APICostLog  # noqa: E402
 import backend.models as _real_backend_models  # noqa: E402
 
 
@@ -129,3 +129,35 @@ class TestAdminRequired:
         resp = client.get("/api/admin/users")
         # login_required fires first; unauthenticated is 401 by default
         assert resp.status_code in (401, 403)
+
+
+class TestCacheHitRate:
+    """#187: /admin/users reports a per-user prompt-cache hit-rate
+    (reads / (reads + writes)) plus the raw token sums."""
+
+    def test_hit_rate_computed_from_cache_tokens(self, app, users):
+        admin = users["renamed_admin"]
+        other = users["impostor"]
+        with app.app_context():
+            # 900k reads + 100k writes → 90% hit-rate.
+            _db.session.add_all([
+                APICostLog(user_id=admin.id, model_id="claude-opus-4.6",
+                           request_type="conversation", input_tokens=1_000_000,
+                           cache_read_tokens=900_000, cache_write_tokens=100_000,
+                           cost_microdollars=1),
+                # A non-cached row contributes 0/0, not noise.
+                APICostLog(user_id=admin.id, model_id="gpt-4o-transcribe",
+                           request_type="transcription", cost_microdollars=1),
+            ])
+            _db.session.commit()
+
+        client = app.test_client()
+        _login(client, admin.id)
+        rows = {u["id"]: u for u in client.get("/api/admin/users").get_json()["users"]}
+
+        assert rows[admin.id]["cache_hit_rate"] == 0.9
+        assert rows[admin.id]["cache_read_tokens"] == 900_000
+        assert rows[admin.id]["cache_write_tokens"] == 100_000
+        # No cacheable traffic → null (UI renders "—"), not 0 (which would
+        # read as a real 0% hit-rate).
+        assert rows[other.id]["cache_hit_rate"] is None
