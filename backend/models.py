@@ -123,21 +123,29 @@ class User(db.Model, UserMixin):
           keeps opted-out *content* out of the input, but this stops the
           generation from running at all for opted-out accounts.
 
-        * The placeholder exclusion MUST keep users whose ``twitter_id`` is
-          NULL (email / magic-link signups). A bare ``~twitter_id.like('llm-%')``
-          silently drops them: in SQL ``NULL NOT LIKE x`` evaluates to NULL —
-          not TRUE — so the row fails the WHERE clause. That bug starved
-          every non-Twitter signup of automatic profile updates.
+        * The synthetic LLM placeholder accounts are excluded by their
+          canonical signal — they author ``node_type == "llm"`` nodes —
+          NOT by a ``twitter_id`` prefix. The prefix is unreliable: the
+          convention has drifted across vintages (bare ``"llm"``,
+          ``"llm-<model>"``), so ``~twitter_id.like('llm-%')`` silently let
+          older accounts (e.g. ``twitter_id='llm'``) through and treated them
+          as real users — eligible for profile gen, which mis-attributed cost
+          to a placeholder account. Node authorship catches every vintage and
+          still KEEPS email / magic-link humans (``twitter_id`` NULL), who
+          never author LLM nodes.
 
         Shared helper (not an inline filter) so the profile and
         recent-context tasks can't drift apart again.
         """
         from backend.utils.privacy import AI_ALLOWED
+        llm_authors = db.session.query(Node.user_id).filter(
+            Node.node_type == "llm", Node.user_id.isnot(None)
+        ).distinct()
         return cls.query.filter(
             cls.approved.is_(True),
             cls.plan.in_(list(cls.VOICE_MODE_PLANS)),
             cls.default_ai_usage.in_(list(AI_ALLOWED)),
-            or_(cls.twitter_id.is_(None), ~cls.twitter_id.like("llm-%")),
+            ~cls.id.in_(llm_authors),
         )
 
 

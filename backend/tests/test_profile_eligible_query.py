@@ -34,8 +34,8 @@ for _mod in ["backend.models", "backend.extensions"]:
     if _mod in sys.modules and isinstance(sys.modules[_mod], MagicMock):
         del sys.modules[_mod]
 
-from backend.extensions import db  # noqa: E402
-from backend.models import User    # noqa: E402
+from backend.extensions import db        # noqa: E402
+from backend.models import User, Node     # noqa: E402
 
 
 @pytest.fixture
@@ -61,6 +61,18 @@ def _make_user(username, plan, twitter_id, approved=True,
     return u
 
 
+def _make_llm_bot(model_id, twitter_id, human):
+    """A synthetic LLM placeholder account, identified the way the real
+    factory does: it authors a node_type='llm' node (owned by a human).
+    twitter_id varies by vintage ('llm', 'llm-<model>') — the exclusion
+    must not depend on it."""
+    bot = _make_user(model_id, "alpha", twitter_id)
+    db.session.add(Node(user_id=bot.id, node_type="llm",
+                        human_owner_id=human.id, llm_model=model_id))
+    db.session.flush()
+    return bot
+
+
 def test_null_twitter_id_voice_user_is_included(app):
     """The core regression: an alpha user with no twitter_id (email
     signup) must be eligible — this is exactly what was being dropped."""
@@ -72,10 +84,14 @@ def test_null_twitter_id_voice_user_is_included(app):
 
 
 def test_filter_includes_and_excludes_the_right_cohorts(app):
+    human = _make_user("owner", "alpha", "999")
     email_alpha = _make_user("email_alpha", "alpha", None)      # NULL -> in
     email_pro = _make_user("email_pro", "pro", None)            # NULL -> in
     twitter_alpha = _make_user("tw_alpha", "alpha", "12345")    # real -> in
-    llm_bot = _make_user("gpt-5", "alpha", "llm-gpt-5")         # bot  -> out
+    # Placeholder bots are excluded by LLM-node authorship, regardless of
+    # which twitter_id vintage they carry.
+    llm_bot = _make_llm_bot("gpt-5", "llm-gpt-5", human)        # bot  -> out
+    legacy_bot = _make_llm_bot("gpt-4.5-preview", "llm", human)  # bot -> out
     free_email = _make_user("free_email", "free", None)         # free -> out
     db.session.commit()
 
@@ -85,6 +101,9 @@ def test_filter_includes_and_excludes_the_right_cohorts(app):
     assert email_pro.id in eligible
     assert twitter_alpha.id in eligible
     assert llm_bot.id not in eligible      # placeholder bots stay excluded
+    # The regression: bare twitter_id='llm' slipped the old ~like('llm-%')
+    # check and got treated as a real user (mis-attributed profile cost).
+    assert legacy_bot.id not in eligible
     assert free_email.id not in eligible   # free plan is not Voice-Mode
 
 
