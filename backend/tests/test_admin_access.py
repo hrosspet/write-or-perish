@@ -132,22 +132,28 @@ class TestAdminRequired:
 
 
 class TestCacheHitRate:
-    """#187: /admin/users reports a per-user prompt-cache hit-rate
-    (reads / (reads + writes)) plus the raw token sums."""
+    """#187/#189: /admin/users reports a per-user prompt-cache hit-rate over
+    conversation turns — input served from cache / total prompt input —
+    unified across Anthropic (cache reads) and OpenAI (cached_tokens)."""
 
-    def test_hit_rate_computed_from_cache_tokens(self, app, users):
+    def test_hit_rate_served_over_prompt_input(self, app, users):
         admin = users["renamed_admin"]
         other = users["impostor"]
         with app.app_context():
-            # 900k reads + 100k writes → 90% hit-rate.
             _db.session.add_all([
+                # Anthropic: input_tokens is the full prompt; cache_read_tokens
+                # holds the served portion. 900k of 1M served → 90%.
                 APICostLog(user_id=admin.id, model_id="claude-opus-4.6",
                            request_type="conversation", input_tokens=1_000_000,
                            cache_read_tokens=900_000, cache_write_tokens=100_000,
                            cost_microdollars=1),
-                # A non-cached row contributes 0/0, not noise.
+                # Non-conversation rows must NOT dilute the denominator.
                 APICostLog(user_id=admin.id, model_id="gpt-4o-transcribe",
-                           request_type="transcription", cost_microdollars=1),
+                           request_type="transcription", input_tokens=500_000,
+                           cost_microdollars=1),
+                APICostLog(user_id=admin.id, model_id="text-embedding-3-small",
+                           request_type="embedding", input_tokens=2_000_000,
+                           cost_microdollars=1),
             ])
             _db.session.commit()
 
@@ -155,9 +161,25 @@ class TestCacheHitRate:
         _login(client, admin.id)
         rows = {u["id"]: u for u in client.get("/api/admin/users").get_json()["users"]}
 
-        assert rows[admin.id]["cache_hit_rate"] == 0.9
-        assert rows[admin.id]["cache_read_tokens"] == 900_000
-        assert rows[admin.id]["cache_write_tokens"] == 100_000
-        # No cacheable traffic → null (UI renders "—"), not 0 (which would
-        # read as a real 0% hit-rate).
+        assert rows[admin.id]["cache_hit_rate"] == 0.9   # 900k / 1M, not diluted
+        assert rows[admin.id]["cache_served_tokens"] == 900_000
+        assert rows[admin.id]["cache_input_tokens"] == 1_000_000
+        # No conversation prompt input → null (UI renders "—").
         assert rows[other.id]["cache_hit_rate"] is None
+
+    def test_openai_cached_counts_as_served(self, app, users):
+        # OpenAI: cached_tokens is recorded in cache_read_tokens (served), with
+        # input_tokens the FULL prompt (incl. cached). 7808 of 7993 → ~97.7%.
+        admin = users["renamed_admin"]
+        with app.app_context():
+            _db.session.add(APICostLog(
+                user_id=admin.id, model_id="gpt-5.5",
+                request_type="conversation", input_tokens=7_993,
+                cache_read_tokens=7_808, cache_write_tokens=0,
+                cost_microdollars=1))
+            _db.session.commit()
+
+        client = app.test_client()
+        _login(client, admin.id)
+        rows = {u["id"]: u for u in client.get("/api/admin/users").get_json()["users"]}
+        assert abs(rows[admin.id]["cache_hit_rate"] - 7_808 / 7_993) < 1e-9

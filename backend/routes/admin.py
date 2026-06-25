@@ -54,27 +54,32 @@ def list_users():
         APICostLog.user_id).all()
     month_map = {row.user_id: row.month_microdollars for row in month_rows}
 
-    # Prompt-cache read/write totals per user (#187). Hit-rate = reads /
-    # (reads + writes): reads are the stable prefix served from cache, writes
-    # are the misses that populated it (first turn / after the 5-min TTL).
-    # Non-cached calls contribute 0. NULLs (pre-#187 rows) are ignored by SUM.
+    # Prompt-cache hit-rate per user, over conversation turns (#187/#189).
+    # Unified across providers: cache_read_tokens holds the input SERVED from
+    # cache — Anthropic cache reads AND OpenAI cached_tokens — and input_tokens
+    # is the full prompt size, so hit-rate = served / total prompt input works
+    # for both (OpenAI has no separate "write" concept). Scoped to
+    # request_type='conversation' so embeddings/transcription/profile/warm
+    # don't dilute the denominator. NULLs are ignored by SUM.
     cache_rows = db.session.query(
         APICostLog.user_id,
-        func.sum(APICostLog.cache_read_tokens).label("reads"),
-        func.sum(APICostLog.cache_write_tokens).label("writes"),
+        func.sum(APICostLog.cache_read_tokens).label("served"),
+        func.sum(APICostLog.input_tokens).label("prompt_input"),
+    ).filter(
+        APICostLog.request_type == "conversation"
     ).group_by(APICostLog.user_id).all()
     cache_map = {
-        row.user_id: (row.reads or 0, row.writes or 0) for row in cache_rows
+        row.user_id: (row.served or 0, row.prompt_input or 0)
+        for row in cache_rows
     }
 
     user_list = []
     for user in users:
         total_microdollars = spending_map.get(user.id, 0) or 0
         month_microdollars = month_map.get(user.id, 0) or 0
-        cache_read, cache_write = cache_map.get(user.id, (0, 0))
-        cache_cacheable = cache_read + cache_write
+        cache_served, prompt_input = cache_map.get(user.id, (0, 0))
         cache_hit_rate = (
-            cache_read / cache_cacheable if cache_cacheable > 0 else None
+            cache_served / prompt_input if prompt_input > 0 else None
         )
         user_list.append({
             "id": user.id,
@@ -89,12 +94,12 @@ def list_users():
             "deactivated_at": iso_utc(user.deactivated_at),
             "total_spending_usd": total_microdollars / 1_000_000,
             "current_month_spending_usd": month_microdollars / 1_000_000,
-            # Prompt-cache hit-rate (all-time): null when the user has no
-            # cacheable Anthropic traffic yet. Raw token sums included so the
-            # UI can show the breakdown on hover.
+            # Prompt-cache hit-rate over conversation turns (all-time): null
+            # when the user has no conversation prompt input yet. Raw sums
+            # included so the UI can show the breakdown on hover.
             "cache_hit_rate": cache_hit_rate,
-            "cache_read_tokens": cache_read,
-            "cache_write_tokens": cache_write,
+            "cache_served_tokens": cache_served,
+            "cache_input_tokens": prompt_input,
             # Effective cap (per-user override if set, else the global default),
             # pre-fills the editable input. `spend_limit_is_override` lets the UI
             # distinguish a custom value from the inherited default.

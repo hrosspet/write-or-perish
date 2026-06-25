@@ -2045,10 +2045,17 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     user_id=user_id,
                     model_id=model_id,
                     request_type="conversation",
+                    # input_tokens = full prompt size. For Anthropic, in_toks
+                    # is the uncached portion so read+write complete it; for
+                    # OpenAI in_toks is already the full prompt (read/write 0).
                     input_tokens=(in_toks + cache_read_toks
                                   + cache_write_toks),
                     output_tokens=out_toks,
-                    cache_read_tokens=cache_read_toks,
+                    # cache_read_tokens = input SERVED from cache, unified
+                    # across providers: Anthropic cache reads + OpenAI
+                    # cached_tokens (one of the two is always 0). Drives the
+                    # admin hit-rate (served / full prompt input).
+                    cache_read_tokens=(cache_read_toks + cached_input_toks),
                     cache_write_tokens=cache_write_toks,
                     cost_microdollars=cost,
                 ))
