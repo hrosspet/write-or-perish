@@ -5,7 +5,6 @@ import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
 import ArtifactsNav from '../components/ArtifactsNav';
 import SpeakerIcon from '../components/SpeakerIcon';
 import RegenerateTtsDialog from '../components/RegenerateTtsDialog';
-import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
 import { useUser } from '../contexts/UserContext';
 import useSubmitShortcut from '../hooks/useSubmitShortcut';
 import useEscapeKey from '../hooks/useEscapeKey';
@@ -55,29 +54,10 @@ export default function ProfilePage() {
     return () => window.removeEventListener('loore_profile_started', handler);
   }, []);
 
-  const pollingEndpoint = generationTaskId
-    ? `/export/profile-status/${generationTaskId}` : null;
-
-  const { status: genStatus, progress: genProgress, data: genData } = useAsyncTaskPolling(
-    pollingEndpoint,
-    { interval: 3000, enabled: !!generationTaskId }
-  );
-
-  // React to polling status changes
-  useEffect(() => {
-    if (genStatus === 'completed') {
-      localStorage.removeItem('loore_profile_task_id');
-      setGenerationTaskId(null);
-      window.dispatchEvent(new Event('loore_profile_done'));
-      fetchProfile();
-    } else if (genStatus === 'failed') {
-      localStorage.removeItem('loore_profile_task_id');
-      setGenerationTaskId(null);
-      window.dispatchEvent(new Event('loore_profile_done'));
-      setFailMessage('Generation failed');
-      setTimeout(() => setFailMessage(''), 5000);
-    }
-  }, [genStatus]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Progress + completion arrive from the app-wide
+  // ProfileGenerationWatcher (#131) — this page no longer polls.
+  const [genProgress, setGenProgress] = useState(0);
+  const [genData, setGenData] = useState(null);
 
   const fetchProfile = useCallback(async () => {
     try {
@@ -93,6 +73,29 @@ export default function ProfilePage() {
       setLoading(false);
     }
   }, []);
+
+  useEffect(() => {
+    const onProgress = (e) => {
+      setGenProgress(e.detail?.progress || 0);
+      setGenData(e.detail?.message ? { message: e.detail.message } : null);
+      if (e.detail?.status === 'failed') {
+        setFailMessage('Generation failed');
+        setTimeout(() => setFailMessage(''), 5000);
+      }
+    };
+    const onDone = () => {
+      setGenerationTaskId(null);
+      setGenProgress(0);
+      setGenData(null);
+      fetchProfile();
+    };
+    window.addEventListener('loore_profile_progress', onProgress);
+    window.addEventListener('loore_profile_done', onDone);
+    return () => {
+      window.removeEventListener('loore_profile_progress', onProgress);
+      window.removeEventListener('loore_profile_done', onDone);
+    };
+  }, [fetchProfile]);
 
   useEffect(() => {
     fetchProfile();

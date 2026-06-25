@@ -25,6 +25,7 @@ import TodoPage from "./pages/TodoPage";
 import ImportPage from "./pages/ImportPage";
 import AccountPage from "./pages/AccountPage";
 import ArtifactsPage from "./pages/ArtifactsPage";
+import ProfileGenerationWatcher from "./components/ProfileGenerationWatcher";
 import PromptsPage from "./pages/PromptsPage";
 import PromptDetailPage from "./pages/PromptDetailPage";
 import SearchModal from "./components/SearchModal";
@@ -113,6 +114,7 @@ function App() {
         />
       )}
 
+        <ProfileGenerationWatcher />
         <Routes>
           <Route path="/" element={<RootRoute />} />
           <Route path="/landing" element={<LandingPage />} />
