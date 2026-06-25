@@ -1259,15 +1259,22 @@ def render_system_message(system_node, user_id):
 
 @celery.task(name='backend.tasks.llm_completion.prewarm_anthropic_cache')
 def prewarm_anthropic_cache(system_node_id, user_id, model_id,
-                            transcript_so_far, recording_stamp_iso):
+                            transcript_so_far=None, recording_stamp_iso=None):
     """Pre-warm the Anthropic prompt cache during voice finalize (#187).
 
-    Fired at the START of finalize for fresh voice threads, overlapping
-    the trailing-batch transcription. Renders the system prefix (storing
-    it in the #192 cache so generation reuses the exact bytes), then
-    sends a max_tokens=1 request with cache breakpoints on the system
-    block and the transcript-so-far block. Generation then reads those
-    entries at 0.1x and prefills only the final batch.
+    Fired at the START of finalize, overlapping the trailing-batch
+    transcription. Renders the system prefix (storing it in the #192 cache
+    so generation reuses the exact bytes), then sends a max_tokens=1 request
+    with cache breakpoints. Generation reads the warmed entries at 0.1x.
+
+    Two modes:
+    * **Fresh thread** (``transcript_so_far`` given) — warms the system
+      block AND the transcript-so-far block; generation prefills only the
+      final batch.
+    * **Ongoing thread, >5-min recording** (``transcript_so_far`` omitted) —
+      warms the **system block only**. The prior conversation sits between
+      system and the transcript, so the two-block transcript warm doesn't
+      transfer; the full-prefix warm is tracked in #224.
 
     Every failure path is silent — a missed warm just means today's
     uncached behavior.
@@ -1293,32 +1300,36 @@ def prewarm_anthropic_cache(system_node_id, user_id, model_id,
                 sys_text = render_system_message(system_node, user_id)
                 store_render(flask_app.config, system_node, sys_text)
 
-            owner = User.query.get(user_id)
-            user_tz = (owner.timezone if owner and owner.timezone
-                       else "UTC")
-            author = owner.username if owner else "Unknown"
-            stamp = local_stamp(
-                datetime.fromisoformat(recording_stamp_iso), user_tz)
-            transcript_block = (
-                f"{stamp} author {author}: {transcript_so_far}")
-
             key_type = determine_api_key_type([system_node], logger=logger)
             api_keys = get_api_keys_for_usage(flask_app.config, key_type)
             if not api_keys.get("anthropic"):
                 return {"status": "skipped", "reason": "no_key"}
 
+            # Always warm the system block (the big stable prefix). On a fresh
+            # thread also warm the transcript-so-far as a second block; on an
+            # ongoing thread warm system-only (#224).
+            warm_messages = [
+                {"role": "user", "content": [
+                    {"type": "text", "text": sys_text,
+                     "cache_control": {"type": "ephemeral"}},
+                ]},
+            ]
+            if transcript_so_far and recording_stamp_iso:
+                owner = User.query.get(user_id)
+                user_tz = (owner.timezone if owner and owner.timezone
+                           else "UTC")
+                author = owner.username if owner else "Unknown"
+                stamp = local_stamp(
+                    datetime.fromisoformat(recording_stamp_iso), user_tz)
+                warm_messages.append({"role": "user", "content": [
+                    {"type": "text",
+                     "text": f"{stamp} author {author}: {transcript_so_far}",
+                     "cache_control": {"type": "ephemeral"}},
+                ]})
+
             response = LLMProvider._call_anthropic(
                 model_config["api_model"],
-                [
-                    {"role": "user", "content": [
-                        {"type": "text", "text": sys_text,
-                         "cache_control": {"type": "ephemeral"}},
-                    ]},
-                    {"role": "user", "content": [
-                        {"type": "text", "text": transcript_block,
-                         "cache_control": {"type": "ephemeral"}},
-                    ]},
-                ],
+                warm_messages,
                 api_keys["anthropic"],
                 max_tokens=1,
                 tools=VOICE_TOOLS,

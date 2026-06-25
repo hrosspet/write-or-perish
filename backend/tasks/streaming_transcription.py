@@ -25,6 +25,25 @@ from backend.utils.cost import calculate_audio_cost_microdollars
 
 logger = get_task_logger(__name__)
 
+# #187: a recording longer than Anthropic's 5-min cache TTL means any prior
+# turn's prompt cache has lapsed *during* this recording (no LLM calls run
+# while recording), so the prefix is cold at generation — warm it. Tied to
+# the provider TTL; tune together.
+PREWARM_ONGOING_MIN_SECONDS = 300
+
+
+def _find_thread_system_node(parent_id):
+    """Walk up from *parent_id* to the thread's system node — the ancestor
+    carrying the 'prompt' artifact (created at thread start). Returns the
+    Node or None. Mirrors the node-chain walk + system-node lookup in
+    generate_llm_response."""
+    current = Node.query.get(parent_id)
+    while current is not None:
+        if current.deleted_at is None and current.has_artifact("prompt"):
+            return current
+        current = current.parent
+    return None
+
 
 class StreamingTranscriptionTask(Task):
     """Custom task class with error handling for chunk transcription."""
@@ -917,23 +936,45 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         # start — so the warm renders against real pinned artifacts and
         # the cached bytes (#192) are exactly what generation reuses.
         cache_split_offset = None
-        if (parent_id is None and user_id and model
-                and label == 'Voice'):
+        if user_id and model and label == 'Voice':
             try:
-                transcript_so_far = draft.get_content() or ""
                 model_cfg = flask_app.config["SUPPORTED_MODELS"].get(model)
-                if (len(transcript_so_far) >= 500 and model_cfg
-                        and model_cfg["provider"] == "anthropic"):
-                    parent_id = _create_system_node_early(
-                        user_id, label.lower(), draft)
-                    cache_split_offset = len(transcript_so_far)
-                    from backend.tasks.llm_completion import (
-                        prewarm_anthropic_cache,
-                    )
-                    prewarm_anthropic_cache.delay(
-                        parent_id, user_id, model, transcript_so_far,
-                        (draft.created_at or datetime.utcnow()).isoformat(),
-                    )
+                is_anthropic = bool(
+                    model_cfg and model_cfg["provider"] == "anthropic")
+                from backend.tasks.llm_completion import (
+                    prewarm_anthropic_cache,
+                )
+                if is_anthropic and parent_id is None:
+                    # Fresh thread: warm [system][transcript-so-far] as two
+                    # blocks; generation reads both and prefills only the
+                    # trailing batch (the cache_split_offset two-block split).
+                    transcript_so_far = draft.get_content() or ""
+                    if len(transcript_so_far) >= 500:
+                        parent_id = _create_system_node_early(
+                            user_id, label.lower(), draft)
+                        cache_split_offset = len(transcript_so_far)
+                        prewarm_anthropic_cache.delay(
+                            parent_id, user_id, model, transcript_so_far,
+                            (draft.created_at
+                             or datetime.utcnow()).isoformat(),
+                        )
+                elif is_anthropic and parent_id is not None:
+                    # Ongoing thread + long recording: the prior turn's cache
+                    # has lapsed during this >5-min recording, so the prefix is
+                    # cold at generation. Warm the SYSTEM block only — the
+                    # prior conversation sits between system and the transcript
+                    # so the two-block transcript warm doesn't transfer (full
+                    # solution: #224). No cache_split_offset (no transcript
+                    # warm); generation reads system at 0.1x, prefills the rest.
+                    recording_secs = (
+                        datetime.utcnow()
+                        - (draft.created_at or datetime.utcnow())
+                    ).total_seconds()
+                    if recording_secs > PREWARM_ONGOING_MIN_SECONDS:
+                        sys_node = _find_thread_system_node(parent_id)
+                        if sys_node is not None:
+                            prewarm_anthropic_cache.delay(
+                                sys_node.id, user_id, model)
             except Exception:
                 logger.warning(
                     "Cache pre-warm setup failed; continuing without it",
