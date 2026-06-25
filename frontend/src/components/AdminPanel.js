@@ -202,14 +202,9 @@ function AdminPanel() {
     }
   };
 
-  // Hide rows that *display* as $0.00, not just exact-zero ones. The column
-  // rounds to 2 decimals (toFixed(2)), so a sub-cent spend (0 < x < $0.005 —
-  // e.g. a tiny embedding or cache-warm cost) renders "$0.00" yet is > 0.
-  // Filtering on the same rounding keeps "hide $0 rows" matching what's shown.
-  const showsNonZero = (v) => (v || 0).toFixed(2) !== "0.00";
   let displayedUsers = users
-    .filter((u) => !hideZeroSpent || showsNonZero(u.total_spending_usd))
-    .filter((u) => !hideZeroMonth || showsNonZero(u.current_month_spending_usd));
+    .filter((u) => !hideZeroSpent || (u.total_spending_usd || 0) > 0)
+    .filter((u) => !hideZeroMonth || (u.current_month_spending_usd || 0) > 0);
   if (sortColumn) {
     const key =
       sortColumn === "spent"
