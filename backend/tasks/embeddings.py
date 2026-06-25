@@ -27,6 +27,16 @@ SWEEP_BATCH_SIZE = 100
 EMBED_API_BATCH = 32
 
 
+def _embedding_owner_id(node):
+    """The *human* who owns a node's embedding — and pays for it.
+
+    For AI replies ``node.user_id`` is the synthetic ``llm-<model>`` author;
+    ``human_owner_id`` points at the real owner. Both the NodeEmbedding row
+    and the embedding cost must use this same resolution, or cost lands on a
+    placeholder account that should never spend (the original #155 bug)."""
+    return node.human_owner_id or node.user_id
+
+
 def _candidate_nodes(limit):
     """Nodes needing (re-)embedding: AI-readable, alive, with content,
     and either missing an embedding row or carrying a stale hash."""
@@ -84,19 +94,19 @@ def sweep_embeddings(limit=SWEEP_BATCH_SIZE):
         for start in range(0, len(candidates), EMBED_API_BATCH):
             batch = candidates[start:start + EMBED_API_BATCH]
             texts = [text for _, _, text, _ in batch]
-            # Cost attribution: each node's owner pays for their content;
-            # one log row per batch under the first node's owner keeps it
-            # simple (alpha: typically a single-user sweep anyway).
+            # Cost attribution: the *human* owner pays, not the synthetic
+            # llm-<model> author of AI replies. One log row per batch under the
+            # first node's human owner keeps it simple (alpha scale).
             vectors = embed_texts(
-                texts, api_key, user_id=batch[0][0].user_id)
+                texts, api_key, user_id=_embedding_owner_id(batch[0][0]))
             for (node, emb, _text, digest), vector in zip(batch, vectors):
                 if emb is None:
                     emb = NodeEmbedding(
                         node_id=node.id,
-                        user_id=node.human_owner_id or node.user_id,
+                        user_id=_embedding_owner_id(node),
                     )
                     db.session.add(emb)
-                emb.user_id = node.human_owner_id or node.user_id
+                emb.user_id = _embedding_owner_id(node)
                 emb.model = EMBEDDING_MODEL
                 emb.content_hash = digest
                 emb.vector = pack_vector(vector)

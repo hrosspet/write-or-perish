@@ -39,7 +39,9 @@ _GLUE = ("backend.celery_app", "backend.tasks.embeddings")
 _saved_glue = {k: sys.modules.get(k) for k in _GLUE}
 sys.modules["backend.celery_app"] = MagicMock()
 sys.modules.pop("backend.tasks.embeddings", None)
-from backend.tasks.embeddings import _candidate_nodes  # noqa: E402
+from backend.tasks.embeddings import (  # noqa: E402
+    _candidate_nodes, _embedding_owner_id,
+)
 for _k, _v in _saved_glue.items():
     if _v is None:
         sys.modules.pop(_k, None)
@@ -159,6 +161,24 @@ def test_candidates_respect_privacy_and_staleness(app):
         assert stale.id in ids       # hash mismatch → candidate
         assert private.id not in ids  # ai_usage none → never embedded
         assert current.id not in ids  # up to date → skipped
+
+
+def test_embedding_owner_is_human_not_llm_author(app):
+    # AI-reply nodes are authored by the synthetic llm-<model> account but
+    # owned by the human (human_owner_id). Embedding cost + the row must both
+    # bill the human, never the placeholder account.
+    with app.app_context():
+        human = User.query.first()
+        llm = User(username="llm-claude", twitter_id="llm-claude-opus-4.6")
+        _db.session.add(llm)
+        _db.session.commit()
+        ai_node = Node(user_id=llm.id, human_owner_id=human.id,
+                       node_type="llm", ai_usage="chat")
+        own_node = Node(user_id=human.id, human_owner_id=human.id,
+                        node_type="text", ai_usage="chat")
+        assert _embedding_owner_id(ai_node) == human.id
+        assert _embedding_owner_id(own_node) == human.id
+        assert _embedding_owner_id(ai_node) != llm.id
 
 
 # ── Semantic endpoint ────────────────────────────────────────────────────
