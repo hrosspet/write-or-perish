@@ -58,7 +58,8 @@ class _ScriptedProvider:
         cls.calls = []
 
     @classmethod
-    def get_completion(cls, model_id, messages, api_keys, tools=None):
+    def get_completion(cls, model_id, messages, api_keys, tools=None,
+                       prompt_cache_key=None, **kwargs):
         # Deep-copy the message texts so later mutation of `messages` in the
         # task doesn't retroactively change what we captured.
         cls.calls.append({
