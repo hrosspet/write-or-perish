@@ -1,0 +1,55 @@
+You are reading one person's personal archive — their journal entries, reflections, voice notes, and conversations — to surface the **intentions** running underneath it.
+
+# What an intention is
+
+An intention is one of the person's longer-running aspirations — the communication layer between their conscious goals and their subconscious orientation. Intentions are **directional, not specific**. They work *precisely because* they're vague enough for the sub-symbolic mind — the part that shapes perception and filters reality — to metabolize. Too specific and an intention collapses into a goal or a task the body can't act on; too vague and it loses its steering power. A well-calibrated intention quietly shapes the lens through which the person perceives reality — which opportunities they notice and reach for; a misaligned or incoherent one literally prevents them from seeing what would help them fulfill it.
+
+Intentions are **aspirations, not appetites** — directions of becoming, not passing wants. Look for:
+- a direction they keep gravitating toward
+- a way of being they reach for
+- who they seem to be growing into
+- a value their choices keep orienting around
+- a tension between how they're living and how they sense they want to be living
+
+These are NOT intentions:
+- concrete goals, tasks, or todos ("finish the renovation", "reply to X") — too specific
+- momentary moods, complaints, or one-off desires — not directional
+- isolated events with no through-line across the archive
+
+# Your job
+
+Read the whole archive and identify the person's load-bearing intentions — the directions their life and writing keep circling. Sort each into one of two groups:
+
+- **Endorsed** — intentions the person has **articulated themselves** in their own words: a first-person statement of what they want to become, what they're committed to, or what they're orienting their life toward — *"I want to…"*, *"I'm committed to…"*, *"what I'm orienting toward is…"* — that you can point to and quote. Default to Endorsed whenever such a quote exists; reserve Inferred for directions with no such self-articulation, and do not under-file a quotable self-stated aspiration even if it conflicts with another.
+- **Inferred** — the directions their writing keeps circling that they have **not** explicitly named as intentions. Your honest read from patterns, recurring concerns, and through-lines. Hypotheses, never presented as confirmed.
+
+Be selective overall. Surface the genuinely durable, recurring ones — typically 6–14 across both groups — not every passing theme. Each must be:
+- **distinct** — no two that are the same intention reworded
+- **grounded** — real, recurring evidence across the archive, not a single passage
+- **in or near their own language** — use their words, metaphors, and frames; never impose generic self-help phrasing
+- **calibrated** — a direction of becoming, not a task; a living orientation, not a slogan
+
+Do not fabricate or pad. If the archive is thin on a theme, leave it out. Where an intention shows tension or ambivalence, say so plainly — that ambivalence is often the signal. Ambivalence does not demote an intention to Inferred: an intention can be Endorsed *and* conflicted — name the conflict inside the Endorsed block.
+
+# Output format
+
+Output **only** the text below — no preamble, no commentary, no code fences. It will be saved verbatim as the person's Intentions artifact.
+
+# Endorsed
+## <short name, in their own words/frame, ~3–8 words>
+*active* / *fulfilled*
+<1–3 sentences stating the intention directionally, in their own language>
+- in their words: <a short quote or close paraphrase of where they explicitly articulated this as their own intention or aspiration>
+
+# Inferred
+## <short name, in their own words/frame, ~3–8 words>
+*inferred, unconfirmed*
+<1–3 sentences stating the intention tentatively and directionally, grounded in what you actually observed>
+- noticed from <the specific, recurring evidence across the archive: the themes, repeated concerns, and through-line>
+
+Repeat the `## …` block for each intention under the correct header. Use each header (`# Endorsed`, `# Inferred`) at most once, Endorsed first.
+
+# The archive
+<user_archive>
+{user_export?keep=newest&max_export_tokens=1000000}
+</user_archive>

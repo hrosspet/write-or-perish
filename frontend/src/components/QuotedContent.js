@@ -3,11 +3,12 @@ import MarkdownBody from './MarkdownBody';
 import InlineQuoteBubble from './InlineQuoteBubble';
 import InlineArtifactSection from './InlineArtifactSection';
 
-// Pattern to match {user_profile}, {user_todo}, {user_recent}, {user_recent_raw}, {user_ai_preferences} placeholders
+// Pattern to match {user_profile}, {user_todo}, {user_recent}, {user_recent_raw},
+// {user_ai_preferences}, {user_memory}, {user_scratchpad}, {user_intentions} placeholders
 // NOTE: recent_raw must come before recent in the alternation to avoid partial matching
-const ARTIFACT_PATTERN = /\{user_(profile|todo|recent_raw|recent|ai_preferences)\}/g;
+const ARTIFACT_PATTERN = /\{user_(profile|todo|recent_raw|recent|ai_preferences|memory|scratchpad|intentions)\}/g;
 // Combined pattern for splitting (quotes + artifacts)
-const COMBINED_PATTERN = /(\{quote:\d+\}|\{user_(?:profile|todo|recent_raw|recent|ai_preferences)\})/g;
+const COMBINED_PATTERN = /(\{quote:\d+\}|\{user_(?:profile|todo|recent_raw|recent|ai_preferences|memory|scratchpad|intentions)\})/g;
 
 /**
  * QuotedContent - Renders content with inline quote previews.
@@ -53,7 +54,7 @@ const QuotedContent = ({ content, quotes, contextArtifacts, onQuoteClick, onChec
     }
 
     // Check if this part is an artifact placeholder
-    const artifactMatch = part.match(/^\{user_(profile|todo|recent_raw|recent|ai_preferences)\}$/);
+    const artifactMatch = part.match(/^\{user_(profile|todo|recent_raw|recent|ai_preferences|memory|scratchpad|intentions)\}$/);
     if (artifactMatch) {
       segments.push({ type: 'artifact', artifactType: artifactMatch[1] });
       continue;

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import MarkdownBody from '../components/MarkdownBody';
+import IntentionsView from '../components/IntentionsView';
 import api from '../api';
 import ArtifactsNav from '../components/ArtifactsNav';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
@@ -12,6 +13,7 @@ import { formatDate } from '../utils/date';
 const KIND_BLURBS = {
   memory: "Durable facts the AI remembers about you across sessions. It updates this on its own as you talk.",
   scratchpad: "The AI's working notes for ongoing threads — where it left off, open questions.",
+  intentions: "Your longer-running aspirations — noticed, clarified, and tracked together with the AI. Fulfilled or consciously released, both count.",
 };
 
 const titleFromKind = (k) =>
@@ -364,7 +366,9 @@ export default function ArtifactsPage() {
             fontFamily: 'var(--sans)', fontSize: '0.92rem', fontWeight: 300,
             color: 'var(--text-secondary)', lineHeight: 1.7,
           }}>
-            <MarkdownBody>{active.content}</MarkdownBody>
+            {active.kind === 'intentions'
+              ? <IntentionsView content={active.content} />
+              : <MarkdownBody>{active.content}</MarkdownBody>}
           </div>
         ) : (
           <div style={{ textAlign: 'center', padding: '40px 0' }}>
