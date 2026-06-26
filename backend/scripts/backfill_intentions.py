@@ -358,8 +358,13 @@ def run_batch(app, users, template, model_override, dry_run,
               "skipped, or failed).")
         return
 
-    print(f"Submitted {len(pending)} batch(es). Polling every {poll_interval}s "
-          f"(up to {max_wait // 60} min)...")
+    # Print the full batch-id list up front (before any polling) so it's never
+    # lost — even if the script is killed mid-poll, the batches still complete
+    # provider-side and can be collected later from these ids.
+    print(f"Submitted {len(pending)} batch(es):")
+    for uid, info in pending.items():
+        print(f"    user {uid}: {info['batch_id']} ({info['provider_key']})")
+    print(f"Polling every {poll_interval}s (up to {max_wait // 60} min)...")
     waited = 0
     while pending and waited < max_wait:
         time.sleep(poll_interval)
