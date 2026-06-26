@@ -54,6 +54,11 @@ function IntentionEntry({ entry }) {
         <div style={{
           fontFamily: 'var(--serif)', fontSize: '1.16rem', fontWeight: 600,
           lineHeight: 1.3, color: 'var(--text-primary)',
+          // Cormorant is a high-contrast display serif; at this small size the
+          // app's global grayscale font-smoothing thins its hairlines on the
+          // dark bg. A same-color hairline shadow fattens the strokes just
+          // enough to render crisply without changing the letterforms.
+          textShadow: '0 0 0.45px currentColor',
           opacity: state === 'released' ? 0.6 : 1,
         }}>
           {entry.name}
