@@ -94,14 +94,10 @@ PROMPT_FILE = "intentions_detection.txt"
 KIND = "intentions"
 MAX_RETRIES = 3
 BATCH_OUTPUT_TOKENS = 8192  # output cap — ample for a ~14-item intentions list
-# Extra margin applied to the probe-calibrated batch budget: the batch can't
-# retry on overflow, so leave headroom for any non-linearity between the
-# calibration budget and the rebuilt export's real token count.
-BATCH_SAFETY = 0.92
 # In --batch mode, only spend a sync calibration probe on users whose cheap DB
 # token estimate exceeds this; smaller users are likely to fit the context at
 # the full cap, so we submit their batch directly and report if one overflows.
-PROBE_THRESHOLD_TOKENS = 600_000
+PROBE_THRESHOLD_TOKENS = 560_000
 
 
 def _resolve_model(app, user, override):
@@ -318,10 +314,11 @@ def _dispatch_batch_user(app, user, template, model_id, probe_budget,
     try:
         result = LLMProvider.get_completion(model_id, messages, api_keys)
     except PromptTooLongError as e:
-        # Free 400 — calibrate the batch export to the real token count.
-        calibrated = reduce_export_tokens(
+        # Free 400 — calibrate the batch export to the real token count, exactly
+        # as the sync path's shrink does (no extra margin). A rare overflow is
+        # reported and recoverable via --collect / a sync re-run.
+        batch_budget = reduce_export_tokens(
             probe_budget, e.actual_tokens, e.max_tokens, export_content=export)
-        batch_budget = max(1, int(calibrated * BATCH_SAFETY))
         print(f"  user {user.id}: probe real={e.actual_tokens} > {e.max_tokens} "
               f"max (db_est={db_tokens}) — batch budget={batch_budget}")
         _submit_batch_for(app, user, template, model_id, batch_budget,
