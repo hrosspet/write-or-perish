@@ -34,6 +34,12 @@ Two modes:
 Non-destructive: each run creates a new artifact version; prior content stays
 in the artifact's history.
 
+Recovery: in --batch mode each retrieved result is saved immediately, so a
+crash/timeout only leaves the not-yet-retrieved batches unsaved. Their ids
+(with user ids) are printed up front and the provider keeps the results
+(Anthropic ~29 days), so `--collect <batch_id ...>` fetches and saves them
+later.
+
 Privacy: any selected user who has globally opted out of AI usage
 (default_ai_usage='none') is skipped entirely — their data is never sent to an
 LLM (the gate runs before any export is built, in both modes).
@@ -49,6 +55,7 @@ Usage:
     python backend/scripts/backfill_intentions.py --batch 46 27 1 33 50 31 42 45   # ~50% cheaper
     python backend/scripts/backfill_intentions.py --model claude-opus-4.8 1 27
     python backend/scripts/backfill_intentions.py --dry-run 1       # build export, skip LLM + save
+    python backend/scripts/backfill_intentions.py --collect msgbatch_a msgbatch_b   # recover a crashed/timed-out --batch run
 """
 import argparse
 import os
@@ -412,7 +419,71 @@ def run_batch(app, users, template, model_override, dry_run,
               f"still processing (<=24h SLA — they'll finish). Batch IDs:")
         for uid, info in pending.items():
             print(f"  user {uid}: {info['batch_id']} ({info['provider_key']})")
-        print("Raise --max-wait, or collect & save them later.")
+        print("Raise --max-wait, or collect them later with --collect <ids>.")
+
+
+# ── Collect (recover a crashed/timed-out --batch run) ──────────────────────
+
+def _provider_key_for_batch_id(batch_id):
+    """Infer the batch_check_and_collect provider key from a batch id's prefix
+    (Anthropic ids start with 'msgbatch_', OpenAI with 'batch_')."""
+    if batch_id.startswith("msgbatch_"):
+        return "anthropic"
+    if batch_id.startswith("batch_"):
+        return "openai:collect"  # only the 'openai:' prefix matters to the helper
+    return None
+
+
+def collect_batches(app, batch_ids, model_override):
+    """Fetch already-submitted batches by id and save their results — recovers
+    a --batch run that crashed or timed out before retrieving them. The user
+    is read from each result's custom_id ('int-u<id>'); the model is re-resolved
+    per user (pass --model to force one). Batches already saved before the
+    crash are independent — re-collecting one just writes another version."""
+    keys = apply_batch_key_override(
+        get_api_keys_for_usage(app.config, "chat"), app.config)
+    for batch_id in batch_ids:
+        provider_key = _provider_key_for_batch_id(batch_id)
+        if provider_key is None:
+            print(f"  ! batch {batch_id}: unrecognized id format, skipping")
+            continue
+        try:
+            results, still, _ = batch_check_and_collect(
+                {provider_key: batch_id}, keys)
+        except Exception as e:  # noqa: BLE001
+            print(f"  ! batch {batch_id}: fetch error ({type(e).__name__}: {e})")
+            continue
+        if still:
+            print(f"  - batch {batch_id}: still processing — try again later")
+            continue
+        if not results:
+            print(f"  ✗ batch {batch_id}: ended with no usable results "
+                  f"(every item errored?)")
+            continue
+        for cid, r in results.items():
+            m = re.match(r"int-u(\d+)$", cid)
+            if not m:
+                print(f"  ! batch {batch_id}: unrecognized custom_id '{cid}', "
+                      f"skipping")
+                continue
+            uid = int(m.group(1))
+            user = User.query.get(uid)
+            if not user:
+                print(f"  ! batch {batch_id}: user {uid} not found, skipping")
+                continue
+            model_id = _resolve_model(app, user, model_override)
+            try:
+                in_t, out_t = r["input_tokens"], r["output_tokens"]
+                version, cost, total = _save_intentions(
+                    user, model_id, r["content"], in_t, out_t,
+                    in_t + out_t, batch=True)
+                print(f"  ✓ batch {batch_id} user {uid}: saved intentions "
+                      f"v{version} ({len(r['content'])} chars, model={model_id}, "
+                      f"llm_tokens={total}, cost=${cost / 1e6:.4f}, batch 50%)")
+            except Exception as e:  # noqa: BLE001
+                db.session.rollback()
+                print(f"  ✗ batch {batch_id} user {uid}: save FAILED — "
+                      f"{type(e).__name__}: {e}")
 
 
 def main():
@@ -437,14 +508,23 @@ def main():
                          "users whose cheap DB token estimate exceeds this; "
                          "smaller users batch directly at the full cap "
                          f"(default {PROBE_THRESHOLD_TOKENS}).")
+    ap.add_argument("--collect", nargs="+", metavar="BATCH_ID", default=None,
+                    help="Recover a crashed/timed-out --batch run: fetch these "
+                         "batch ids and save their results (user read from each "
+                         "result's custom_id). Ignores user_ids/other flags "
+                         "except --model.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Build the export and stop before the LLM call + save.")
     args = ap.parse_args()
 
-    user_ids = args.user_ids or [1]
-
     app = create_app()
     with app.app_context():
+        if args.collect:
+            print(f"Collecting {len(args.collect)} batch(es)...")
+            collect_batches(app, args.collect, args.model)
+            return
+
+        user_ids = args.user_ids or [1]
         template = _load_template(app)
         mode = "batch (~50%)" if args.batch else "sync"
         print(f"Backfilling intentions ({mode}) for users: {user_ids}"
