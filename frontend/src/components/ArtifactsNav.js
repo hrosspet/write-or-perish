@@ -15,6 +15,8 @@ import { BUILTIN_KIND_ORDER, isBuiltinKind } from '../utils/artifactKinds';
 let _artifactsCache = [];
 
 const bubbleStyle = (active) => ({
+  display: 'inline-flex',
+  alignItems: 'center',
   padding: '6px 14px',
   background: active ? 'var(--bg-card)' : 'none',
   border: '1px solid',
@@ -24,8 +26,16 @@ const bubbleStyle = (active) => ({
   fontFamily: 'var(--sans)',
   fontSize: '0.8rem',
   fontWeight: 300,
+  textDecoration: 'none',
   cursor: 'pointer',
 });
+
+// Let cmd/ctrl/shift/alt-click (and native middle-click on the <a>) fall
+// through to the browser so bubbles open in a new tab/window; intercept only
+// plain left-clicks for in-app SPA navigation (which also respects the host
+// page's unsaved-edits guard via `go`).
+const isModifiedClick = (e) =>
+  e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button === 1;
 
 export default function ArtifactsNav({ activeKind, onNavigate, creating, children }) {
   const location = useLocation();
@@ -67,10 +77,21 @@ export default function ArtifactsNav({ activeKind, onNavigate, creating, childre
     .slice()
     .sort((a, b) => (a.title || a.kind).localeCompare(b.title || b.kind));
 
+  const onBubbleClick = (e, to) => {
+    if (isModifiedClick(e)) return; // browser handles new-tab/window
+    e.preventDefault();
+    go(to);
+  };
+
   const navBubble = (label, to) => (
-    <button key={to} onClick={() => go(to)} style={bubbleStyle(path === to)}>
+    <a
+      key={to}
+      href={to}
+      onClick={(e) => onBubbleClick(e, to)}
+      style={bubbleStyle(path === to)}
+    >
       {label}
-    </button>
+    </a>
   );
 
   const artBubble = (a) => {
@@ -80,14 +101,15 @@ export default function ArtifactsNav({ activeKind, onNavigate, creating, childre
     const active = !creating
       && (path === to || (!!activeKind && a.kind === activeKind));
     return (
-      <button
+      <a
         key={a.kind}
-        onClick={() => go(to)}
+        href={to}
+        onClick={(e) => onBubbleClick(e, to)}
         title={a.description || undefined}
         style={bubbleStyle(active)}
       >
         {a.title || a.kind}
-      </button>
+      </a>
     );
   };
 
@@ -97,21 +119,24 @@ export default function ArtifactsNav({ activeKind, onNavigate, creating, childre
       {navBubble('Todo', '/todo')}
       {pinned.map(artBubble)}
       {custom.map(artBubble)}
-      <button
-        onClick={() => go('/artifacts?create=1')}
+      <a
+        href="/artifacts?create=1"
+        onClick={(e) => onBubbleClick(e, '/artifacts?create=1')}
         title="Create a new artifact"
         style={{
+          display: 'inline-flex', alignItems: 'center',
           padding: '6px 14px',
           background: creating ? 'var(--bg-card)' : 'none',
           border: '1px solid',
           borderColor: creating ? 'var(--accent)' : 'var(--border)',
           borderRadius: '16px',
           color: creating ? 'var(--text-primary)' : 'var(--text-muted)',
-          fontFamily: 'var(--sans)', fontSize: '0.8rem', cursor: 'pointer',
+          fontFamily: 'var(--sans)', fontSize: '0.8rem',
+          textDecoration: 'none', cursor: 'pointer',
         }}
       >
         +
-      </button>
+      </a>
       {children}
     </div>
   );

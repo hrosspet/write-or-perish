@@ -52,8 +52,8 @@ function IntentionEntry({ entry }) {
       <StatusDot state={state} />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{
-          fontFamily: 'var(--serif)', fontSize: '1.06rem', fontWeight: 500,
-          lineHeight: 1.35, color: 'var(--text-primary)',
+          fontFamily: 'var(--serif)', fontSize: '1.16rem', fontWeight: 600,
+          lineHeight: 1.3, color: 'var(--text-primary)',
           opacity: state === 'released' ? 0.6 : 1,
         }}>
           {entry.name}
