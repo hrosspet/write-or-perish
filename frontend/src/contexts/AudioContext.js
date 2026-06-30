@@ -805,6 +805,20 @@ export const AudioProvider = ({ children }) => {
     }).catch(() => {});
   }, []);
 
+  // Replace the chapter list on the currently-loaded audio (#145). Used
+  // after TTS generation completes to swap the chapters fetched mid-stream
+  // (their start times were computed from not-yet-generated chunk durations,
+  // so later chapters clustered together) for the final, correctly-spaced
+  // ones. Guarded on id/type so a different audio that started meanwhile is
+  // not clobbered.
+  const updateChapters = useCallback((id, type, chapters) => {
+    setCurrentAudio((prev) =>
+      prev && prev.id === id && prev.type === type
+        ? { ...prev, chapters }
+        : prev
+    );
+  }, []);
+
   const value = {
     currentAudio,
     isPlaying,
@@ -822,6 +836,7 @@ export const AudioProvider = ({ children }) => {
     setGeneratingTTS,
     loadAudio,
     loadAudioQueue,
+    updateChapters,
     appendChunkToQueue,
     play,
     pause,

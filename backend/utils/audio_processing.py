@@ -4,6 +4,7 @@ Extracted from routes/nodes.py to be shared between API and Celery tasks.
 """
 import os
 import pathlib
+import re
 import tempfile
 import ffmpeg
 from pydub import AudioSegment
@@ -304,3 +305,132 @@ def adaptive_chunk_text(text: str, first_chunk_gen_secs: float = 3.0) -> list:
         remaining = remaining[split_point:].strip()
 
     return chunks
+
+
+# Streaming TTS pipeline model (#140). Generation rate is the OpenAI API
+# streaming rate; overhead is the per-chunk fixed cost AROUND the API call:
+# pydub decode of the returned MP3, section-end silence re-export, DB
+# status commits, encryption, and the SSE poll interval. Calibrated from
+# live staging timings 2026-06-10 (solved from chunk-ready wall times:
+# rate ≈ 104 chars/s, fixed ≈ 7.3s — the old 2.0s only modeled the API).
+TTS_GEN_CHARS_PER_SEC = 106.0
+TTS_AUDIO_SECS_PER_CHAR = 0.062
+TTS_CHUNK_OVERHEAD_SECS = 7.0
+
+# Minimum sensible first chunk (#140): a tiny first sentence ("Okay.")
+# produces a sub-second clip — an audible stitch artifact and a wasted
+# API round-trip. Below this size we split word-aware at the target
+# instead of at the sentence boundary.
+MIN_FIRST_CHUNK_CHARS = 80
+
+_CHAPTER_HEADING_RE = re.compile(r'^(#{1,2})\s+(.+?)\s*$', re.MULTILINE)
+
+
+def split_sections(text):
+    """Split markdown into chapter sections at h1/h2 headings (#145).
+
+    Returns [(title_or_None, body)]. Content before the first heading
+    becomes a section with title None. Heading lines themselves are NOT
+    part of the body (v0 decision: chapter titles are visual labels, not
+    read aloud). h3+ headings stay inside their section's body.
+    """
+    matches = list(_CHAPTER_HEADING_RE.finditer(text or ""))
+    if not matches:
+        return [(None, (text or "").strip())] if (text or "").strip() else []
+
+    sections = []
+    preamble = text[:matches[0].start()].strip()
+    if preamble:
+        sections.append((None, preamble))
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        body = text[m.end():end].strip()
+        sections.append((m.group(2).strip(), body))
+    return sections
+
+
+def section_aware_chunk_text(text, first_chunk_gen_secs: float = 3.0):
+    """Chunk text for streaming TTS without crossing chapter boundaries.
+
+    Returns [(chunk_text, section_title, section_index)]. The adaptive
+    size schedule (small first chunk → medium second → full-size rest)
+    applies GLOBALLY across sections so playback still starts fast, while
+    every chunk belongs to exactly one section — the prerequisite for
+    chapter-accurate jumping in the player (#145).
+
+    Section titles ARE spoken (maintainer decision, v2 of #145): each
+    section's text starts with the bare title (no markdown markers,
+    sentence-terminated) separated from the body by a blank line, which
+    gives the TTS voice an audible chapter pause. Chapter start_times
+    stay exact — the title audio belongs to its own section's first
+    chunk.
+
+    Sections whose body is empty (e.g. a heading directly followed by
+    another heading) are skipped — they'd produce zero-length audio.
+    """
+    gen_chars_per_sec = TTS_GEN_CHARS_PER_SEC
+    audio_secs_per_char = TTS_AUDIO_SECS_PER_CHAR
+    overhead_secs = TTS_CHUNK_OVERHEAD_SECS
+
+    first_chunk_chars = min(
+        int(first_chunk_gen_secs * gen_chars_per_sec), TTS_MAX_CHARS)
+
+    # Gapless-pipeline budgets (#140 v2): chunk N must finish generating
+    # before playback reaches it. With playback starting when chunk 1 is
+    # ready, that means gen-time of chunks 2..N must fit inside the
+    # playback time of chunks 1..N-1. Budgets therefore derive from the
+    # ACTUAL emitted chunks — a short first chunk (sentence or section
+    # boundary) gets a proportionally smaller second chunk (~40-50s of
+    # audio instead of the old static ~2min, which stalled playback).
+    emitted_playback_secs = [0.0]   # cumulative playback of chunks 1..N
+    committed_gen_secs = [0.0]      # cumulative gen time of chunks 2..N
+
+    def _budget():
+        if not out:
+            return first_chunk_chars
+        window = (emitted_playback_secs[0] - committed_gen_secs[0]
+                  - overhead_secs)
+        return max(min(int(max(window, 2.0) * gen_chars_per_sec),
+                       TTS_MAX_CHARS), 1)
+
+    def _account(chunk_len):
+        if out:  # chunks 2..N consume the generation window
+            committed_gen_secs[0] += (chunk_len / gen_chars_per_sec
+                                      + overhead_secs)
+        emitted_playback_secs[0] += chunk_len * audio_secs_per_char
+
+    out = []
+    for section_index, (title, body) in enumerate(split_sections(text)):
+        if title and body:
+            spoken = title if title[-1] in '.!?' else f"{title}."
+            remaining = f"{spoken}\n\n{body}"
+        else:
+            remaining = body
+        while remaining:
+            budget = _budget()
+            if len(remaining) <= budget:
+                _account(len(remaining))
+                out.append((remaining, title, section_index))
+                break
+            split_point = _split_at_sentence(remaining, budget)
+            # #140: a tiny first chunk (short opening sentence) falls
+            # back to a word-aware split at the full budget.
+            if len(out) == 0 and split_point < MIN_FIRST_CHUNK_CHARS:
+                split_point = _split_at_word(remaining, budget)
+            chunk = remaining[:split_point].strip()
+            if chunk:
+                _account(len(chunk))
+                out.append((chunk, title, section_index))
+            remaining = remaining[split_point:].strip()
+    return out
+
+
+def _split_at_word(text, max_chars):
+    """Last word boundary within max_chars (never mid-word)."""
+    if len(text) <= max_chars:
+        return len(text)
+    chunk = text[:max_chars]
+    best = chunk.rfind(' ')
+    for sep in ('\n', '\t'):
+        best = max(best, chunk.rfind(sep))
+    return best + 1 if best > 0 else max_chars

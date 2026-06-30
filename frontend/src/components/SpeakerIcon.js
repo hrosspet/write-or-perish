@@ -29,7 +29,7 @@ const extractMarkdownHeader = (content) => {
  */
 const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGenerated }) => {
   const { user } = useUser();
-  const { loadAudio, loadAudioQueue, appendChunkToQueue, setGeneratingTTS, currentAudio, isPlaying, warmup } = useAudio();
+  const { loadAudio, loadAudioQueue, updateChapters, appendChunkToQueue, setGeneratingTTS, currentAudio, isPlaying, warmup } = useAudio();
   const [loading, setLoading] = useState(false);
   const [audioSrc, setAudioSrc] = useState(null);
   const [audioChunks, setAudioChunks] = useState(null); // For chunked playback
@@ -37,15 +37,38 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
   const [ttsTaskActive, setTtsTaskActive] = useState(false);
   const [sseActive, setSseActive] = useState(false);
   const sseChunkCountRef = useRef(0);
+  // Chapters determined for the currently-cached audio (#145). Held in a
+  // ref so the in-session replay short-circuits below (cached audioSrc /
+  // audioChunks) reuse the same chapter list the player was first loaded
+  // with, instead of dropping the dropdown on a second click. Empty for
+  // recorded-original or unstructured audio.
+  const chaptersRef = useRef([]);
+  // Last section_index seen on the SSE stream — used to refresh chapter
+  // start times once per chapter as streaming crosses section boundaries.
+  const lastSectionRef = useRef(null);
 
   const isNode = nodeId != null;
   const id = isNode ? nodeId : profileId;
   const baseUrl = isNode ? `/nodes/${id}` : `/profile/${id}`;
 
-  // Extract header from content if available
+  // Extract header from content if available. The "Node N" form is a
+  // fallback only — when the content has a title, show just the title.
   const header = extractMarkdownHeader(content);
   const baseTitle = isNode ? `Node ${id}` : `Profile ${id}`;
-  const fullTitle = header ? `${baseTitle}: ${header}` : baseTitle;
+  const fullTitle = header || baseTitle;
+
+  // Chapter list for TTS playback (#145) — empty for unstructured text.
+  const fetchChapters = useCallback(async () => {
+    if (!isNode) return [];
+    try {
+      const res = await api.get(`/nodes/${id}/tts-chapters`, {
+        validateStatus: (s) => s === 200 || s === 404,
+      });
+      return res.status === 200 ? (res.data.chapters || []) : [];
+    } catch (e) {
+      return [];
+    }
+  }, [id, isNode]);
 
   // SSE streaming for TTS chunks
   const handleChunkReady = useCallback((data) => {
@@ -55,20 +78,38 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
     const chunkDuration = data.duration != null ? data.duration : null;
 
     sseChunkCountRef.current += 1;
+    const section = data.section_index != null ? data.section_index : null;
 
     if (sseChunkCountRef.current === 1) {
       // First chunk: start playback immediately via loadAudioQueue
       setLoading(false);
-      loadAudioQueue(
-        [chunkUrl],
-        { title: fullTitle, id, type: isNode ? 'node' : 'profile' },
-        chunkDuration != null ? [chunkDuration] : null
-      );
+      lastSectionRef.current = section;
+      fetchChapters().then((chapters) => {
+        chaptersRef.current = chapters;
+        loadAudioQueue(
+          [chunkUrl],
+          { title: fullTitle, id, type: isNode ? 'node' : 'profile', chapters },
+          chunkDuration != null ? [chunkDuration] : null
+        );
+      });
     } else {
       // Subsequent chunks: append to the active queue
       appendChunkToQueue(chunkUrl, chunkDuration);
+      // When a chunk from a NEW section arrives, every earlier chunk is
+      // already generated — so that chapter's cumulative start time is now
+      // final. Refresh the chapter list so the indicator/seek are correct
+      // progressively during streaming, one chapter at a time, rather than
+      // only at completion (#145). The completion handler re-fetches once
+      // more as a final backstop.
+      if (section != null && section !== lastSectionRef.current) {
+        lastSectionRef.current = section;
+        fetchChapters().then((chapters) => {
+          chaptersRef.current = chapters;
+          updateChapters(id, isNode ? 'node' : 'profile', chapters);
+        });
+      }
     }
-  }, [fullTitle, id, isNode, loadAudioQueue, appendChunkToQueue]);
+  }, [fullTitle, id, isNode, loadAudioQueue, appendChunkToQueue, fetchChapters, updateChapters]);
 
   const handleAllComplete = useCallback((data) => {
     setSseActive(false);
@@ -82,12 +123,21 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
         : `${process.env.REACT_APP_BACKEND_URL}${data.tts_url}`;
       setAudioSrc(finalUrl);
     }
+    // The chapters fetched on the first streamed chunk were computed from
+    // chunk durations that weren't all generated yet, so later chapters'
+    // start times clustered together (wrong indicator + wrong seek). Now
+    // that every chunk is generated, re-fetch the final chapters and swap
+    // them into both the live player and the replay cache (#145).
+    fetchChapters().then((chapters) => {
+      chaptersRef.current = chapters;
+      updateChapters(id, isNode ? 'node' : 'profile', chapters);
+    });
     // Fresh generation completes via this SSE path (the tts-status poll is
     // only a fallback), so tell the parent the entry now has TTS — this is
     // what makes the edit "regenerate audio?" prompt (#66) fire without a
     // page refresh.
     if (onTtsGenerated) onTtsGenerated();
-  }, [setGeneratingTTS, onTtsGenerated]);
+  }, [setGeneratingTTS, onTtsGenerated, fetchChapters, updateChapters, id, isNode]);
 
   const { disconnect: disconnectSSE } = useTTSStreamSSE(id, {
     enabled: sseActive,
@@ -120,6 +170,8 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
     setTtsTaskActive(false);
     setSseActive(false);
     sseChunkCountRef.current = 0;
+    chaptersRef.current = [];
+    lastSectionRef.current = null;
   }, [nodeId, profileId, content]);
 
   // Clean up SSE on unmount
@@ -173,15 +225,18 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
     warmup(); // Unlock audio on Safari during user gesture
 
     try {
-      // If we already have audio chunks cached, play them
+      // If we already have audio chunks cached, play them (carry the
+      // chapters from the first load so a same-session replay keeps the
+      // dropdown — #145)
       if (audioChunks && audioChunks.length > 0) {
-        await loadAudioQueue(audioChunks, { title: fullTitle, id, type: isNode ? 'node' : 'profile' }, audioChunkDurations);
+        await loadAudioQueue(audioChunks, { title: fullTitle, id, type: isNode ? 'node' : 'profile', chapters: chaptersRef.current }, audioChunkDurations);
         return;
       }
 
-      // If we already have a single audio source, play it
+      // If we already have a single audio source, play it (same: preserve
+      // the cached chapters on replay — #145)
       if (audioSrc) {
-        await loadAudio({ url: audioSrc, title: fullTitle, id, type: isNode ? 'node' : 'profile' });
+        await loadAudio({ url: audioSrc, title: fullTitle, id, type: isNode ? 'node' : 'profile', chapters: chaptersRef.current });
         return;
       }
 
@@ -285,8 +340,11 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
         : `${process.env.REACT_APP_BACKEND_URL}${urlPath}`;
       setAudioSrc(srcUrl);
 
-      // Load audio into global player
-      await loadAudio({ url: srcUrl, title: fullTitle, id, type: isNode ? 'node' : 'profile' });
+      // Load audio into global player (chapters only for TTS audio —
+      // recorded-original playback has no section structure, #145)
+      const chapters = (!original_url && tts_url) ? await fetchChapters() : [];
+      chaptersRef.current = chapters;
+      await loadAudio({ url: srcUrl, title: fullTitle, id, type: isNode ? 'node' : 'profile', chapters });
       setLoading(false);
     } catch (err) {
       console.error('Error playing audio:', err);
