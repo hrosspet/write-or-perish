@@ -29,7 +29,7 @@ const extractMarkdownHeader = (content) => {
  */
 const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGenerated }) => {
   const { user } = useUser();
-  const { loadAudio, loadAudioQueue, appendChunkToQueue, setGeneratingTTS, currentAudio, isPlaying, warmup } = useAudio();
+  const { loadAudio, loadAudioQueue, updateChapters, appendChunkToQueue, setGeneratingTTS, currentAudio, isPlaying, warmup } = useAudio();
   const [loading, setLoading] = useState(false);
   const [audioSrc, setAudioSrc] = useState(null);
   const [audioChunks, setAudioChunks] = useState(null); // For chunked playback
@@ -43,6 +43,9 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
   // with, instead of dropping the dropdown on a second click. Empty for
   // recorded-original or unstructured audio.
   const chaptersRef = useRef([]);
+  // Last section_index seen on the SSE stream — used to refresh chapter
+  // start times once per chapter as streaming crosses section boundaries.
+  const lastSectionRef = useRef(null);
 
   const isNode = nodeId != null;
   const id = isNode ? nodeId : profileId;
@@ -75,10 +78,12 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
     const chunkDuration = data.duration != null ? data.duration : null;
 
     sseChunkCountRef.current += 1;
+    const section = data.section_index != null ? data.section_index : null;
 
     if (sseChunkCountRef.current === 1) {
       // First chunk: start playback immediately via loadAudioQueue
       setLoading(false);
+      lastSectionRef.current = section;
       fetchChapters().then((chapters) => {
         chaptersRef.current = chapters;
         loadAudioQueue(
@@ -90,8 +95,21 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
     } else {
       // Subsequent chunks: append to the active queue
       appendChunkToQueue(chunkUrl, chunkDuration);
+      // When a chunk from a NEW section arrives, every earlier chunk is
+      // already generated — so that chapter's cumulative start time is now
+      // final. Refresh the chapter list so the indicator/seek are correct
+      // progressively during streaming, one chapter at a time, rather than
+      // only at completion (#145). The completion handler re-fetches once
+      // more as a final backstop.
+      if (section != null && section !== lastSectionRef.current) {
+        lastSectionRef.current = section;
+        fetchChapters().then((chapters) => {
+          chaptersRef.current = chapters;
+          updateChapters(id, isNode ? 'node' : 'profile', chapters);
+        });
+      }
     }
-  }, [fullTitle, id, isNode, loadAudioQueue, appendChunkToQueue, fetchChapters]);
+  }, [fullTitle, id, isNode, loadAudioQueue, appendChunkToQueue, fetchChapters, updateChapters]);
 
   const handleAllComplete = useCallback((data) => {
     setSseActive(false);
@@ -105,12 +123,21 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
         : `${process.env.REACT_APP_BACKEND_URL}${data.tts_url}`;
       setAudioSrc(finalUrl);
     }
+    // The chapters fetched on the first streamed chunk were computed from
+    // chunk durations that weren't all generated yet, so later chapters'
+    // start times clustered together (wrong indicator + wrong seek). Now
+    // that every chunk is generated, re-fetch the final chapters and swap
+    // them into both the live player and the replay cache (#145).
+    fetchChapters().then((chapters) => {
+      chaptersRef.current = chapters;
+      updateChapters(id, isNode ? 'node' : 'profile', chapters);
+    });
     // Fresh generation completes via this SSE path (the tts-status poll is
     // only a fallback), so tell the parent the entry now has TTS — this is
     // what makes the edit "regenerate audio?" prompt (#66) fire without a
     // page refresh.
     if (onTtsGenerated) onTtsGenerated();
-  }, [setGeneratingTTS, onTtsGenerated]);
+  }, [setGeneratingTTS, onTtsGenerated, fetchChapters, updateChapters, id, isNode]);
 
   const { disconnect: disconnectSSE } = useTTSStreamSSE(id, {
     enabled: sseActive,
@@ -144,6 +171,7 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
     setSseActive(false);
     sseChunkCountRef.current = 0;
     chaptersRef.current = [];
+    lastSectionRef.current = null;
   }, [nodeId, profileId, content]);
 
   // Clean up SSE on unmount
