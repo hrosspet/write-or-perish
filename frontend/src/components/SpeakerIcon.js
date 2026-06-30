@@ -37,6 +37,12 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
   const [ttsTaskActive, setTtsTaskActive] = useState(false);
   const [sseActive, setSseActive] = useState(false);
   const sseChunkCountRef = useRef(0);
+  // Chapters determined for the currently-cached audio (#145). Held in a
+  // ref so the in-session replay short-circuits below (cached audioSrc /
+  // audioChunks) reuse the same chapter list the player was first loaded
+  // with, instead of dropping the dropdown on a second click. Empty for
+  // recorded-original or unstructured audio.
+  const chaptersRef = useRef([]);
 
   const isNode = nodeId != null;
   const id = isNode ? nodeId : profileId;
@@ -73,11 +79,14 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
     if (sseChunkCountRef.current === 1) {
       // First chunk: start playback immediately via loadAudioQueue
       setLoading(false);
-      fetchChapters().then((chapters) => loadAudioQueue(
-        [chunkUrl],
-        { title: fullTitle, id, type: isNode ? 'node' : 'profile', chapters },
-        chunkDuration != null ? [chunkDuration] : null
-      ));
+      fetchChapters().then((chapters) => {
+        chaptersRef.current = chapters;
+        loadAudioQueue(
+          [chunkUrl],
+          { title: fullTitle, id, type: isNode ? 'node' : 'profile', chapters },
+          chunkDuration != null ? [chunkDuration] : null
+        );
+      });
     } else {
       // Subsequent chunks: append to the active queue
       appendChunkToQueue(chunkUrl, chunkDuration);
@@ -134,6 +143,7 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
     setTtsTaskActive(false);
     setSseActive(false);
     sseChunkCountRef.current = 0;
+    chaptersRef.current = [];
   }, [nodeId, profileId, content]);
 
   // Clean up SSE on unmount
@@ -187,15 +197,18 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
     warmup(); // Unlock audio on Safari during user gesture
 
     try {
-      // If we already have audio chunks cached, play them
+      // If we already have audio chunks cached, play them (carry the
+      // chapters from the first load so a same-session replay keeps the
+      // dropdown — #145)
       if (audioChunks && audioChunks.length > 0) {
-        await loadAudioQueue(audioChunks, { title: fullTitle, id, type: isNode ? 'node' : 'profile' }, audioChunkDurations);
+        await loadAudioQueue(audioChunks, { title: fullTitle, id, type: isNode ? 'node' : 'profile', chapters: chaptersRef.current }, audioChunkDurations);
         return;
       }
 
-      // If we already have a single audio source, play it
+      // If we already have a single audio source, play it (same: preserve
+      // the cached chapters on replay — #145)
       if (audioSrc) {
-        await loadAudio({ url: audioSrc, title: fullTitle, id, type: isNode ? 'node' : 'profile' });
+        await loadAudio({ url: audioSrc, title: fullTitle, id, type: isNode ? 'node' : 'profile', chapters: chaptersRef.current });
         return;
       }
 
@@ -302,6 +315,7 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
       // Load audio into global player (chapters only for TTS audio —
       // recorded-original playback has no section structure, #145)
       const chapters = (!original_url && tts_url) ? await fetchChapters() : [];
+      chaptersRef.current = chapters;
       await loadAudio({ url: srcUrl, title: fullTitle, id, type: isNode ? 'node' : 'profile', chapters });
       setLoading(false);
     } catch (err) {
