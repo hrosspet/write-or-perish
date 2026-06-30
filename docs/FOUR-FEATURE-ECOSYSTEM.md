@@ -35,7 +35,7 @@ Write or Perish evolves from journaling app to **distributed intelligence networ
 - ✅ **AI-generated user profile** — Automatic analysis of your full writing archive, kept fresh as you add new entries
 - ✅ **Todo management** — AI-proposed actionable tasks with collapsible nested lists, arising naturally from voice and text conversations
 - ✅ **Global search (Cmd+K)** — Search across all entries with date filtering
-- ✅ **Text-to-speech** — Listen to any entry or your AI profile read aloud
+- ✅ **Text-to-speech** — Listen to any entry or your AI profile read aloud, with section-aware chapters: markdown headings become navigable chapters with a live now-playing indicator and a jump-to-chapter dropdown
 - ✅ **Audio download** — Download voice sessions as mp3
 - ✅ **Customizable AI prompts** — View and edit the system prompts that guide AI behavior, with per-thread overrides
 - ✅ **Data import** — Import conversation history from Claude

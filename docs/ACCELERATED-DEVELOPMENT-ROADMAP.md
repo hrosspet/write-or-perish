@@ -29,7 +29,7 @@ Feature 1 (Journaling) is production-ready and significantly expanded — see FO
 | Privacy & encryption | Two-column privacy system + GCP KMS envelope encryption for all content and audio at rest |
 | Authentication | Magic link email login, user plan tiers (free/alpha/pro), terms of service |
 | Branding & UX | Rebrand to Loore (loore.org), full UI redesign, welcome & onboarding flow |
-| Voice workflow | Unified agentic Voice mode with AI tool use, resilient recording, todo management |
+| Voice workflow | Unified agentic Voice mode with AI tool use, resilient recording, todo management, section-aware TTS chapters with in-player navigation |
 | AI features | Iterative profile generation, hierarchical context freshness, customizable system prompts |
 | Search & navigation | Cmd+K global search, pin-to-profile, data import from Claude |
 | DevOps | CI/CD pipeline, Docker Compose local dev + staging, automated deployment |

@@ -41,7 +41,7 @@ These technical capabilities are production-ready and form the foundation:
 - **Version history tracking** - Edit history for nodes with timestamps for audit trails
 - **Chunked file upload** - Handle large audio files (>10MB) by splitting into chunks and server-side assembly
 - **Audio transcription pipeline** - Convert speech to text with file compression and chunk splitting for large files
-- **TTS with SSE streaming** - Text-to-speech via Server-Sent Events instead of polling (#67), with correct cost attribution to requesting user
+- **TTS with SSE streaming** - Text-to-speech via Server-Sent Events instead of polling (#67), with correct cost attribution to requesting user. Section-aware chapters: markdown h1/h2 headings become navigable chapters with an in-player dropdown (live now-playing indicator that advances during playback + jump-to-chapter seek) and gapless tiny-first-chunk fast start (#145, #140)
 - **Claude data export import** - Import conversation history from Claude export files (#64)
 - **Dollar-cost tracking** - Per-user API cost tracking via APICostLog model, replacing token-based tracking (#61)
 - **Pin-to-profile** - Pin selected nodes to user profile page (#60)
