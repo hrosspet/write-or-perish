@@ -276,6 +276,14 @@ function NavBar({ onNewEntryClick }) {
           </Link>
         )}
 
+        {/* Share (Upload v1) — dark behind SHARE_V1, surfaced per-user via
+            the dashboard payload flag. */}
+        {user && user.approved && user.share_v1_enabled && (
+          <Link to="/share" style={linkStyle("/share")}>
+            Share
+          </Link>
+        )}
+
         {!user && (
           <Link
             to="/login?returnUrl=%2F"

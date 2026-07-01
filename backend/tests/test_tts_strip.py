@@ -77,3 +77,15 @@ def test_trailing_commentary_after_issue_category_spoken():
 def test_plain_text_passes_through():
     text = "Just a normal spoken reply with no proposal."
     assert _strip_heading_sections(text) == text
+
+
+def test_trailing_commentary_after_share_type_spoken():
+    text = ("Happy to make that shareable.\n\n### Share\nLooking for a "
+            "thinking partner on consciousness.\n\n### Share type\nneed\n\n"
+            "Saved it as a draft when you confirm.")
+    out = _strip_heading_sections(text)
+    assert "Happy to make that shareable." in out
+    assert "Saved it as a draft when you confirm." in out
+    # Structured parts are shown in the card, never spoken.
+    assert "thinking partner" not in out
+    assert "need" not in out
