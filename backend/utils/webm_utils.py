@@ -113,12 +113,45 @@ def _ebml_read_vint(data: bytes, offset: int, keep_marker: bool):
     return value, length, is_unknown
 
 
+WEBM_MAGIC = b'\x1aE\xdf\xa3'  # EBML header
+
+
+def chunk_is_init_bearing(chunk_path: pathlib.Path) -> bool:
+    """True if the chunk starts its own media stream (#124).
+
+    A chunk N>0 that begins with an fMP4 `ftyp` box or a WebM EBML
+    header came from a fresh MediaRecorder instance — i.e. the user
+    resumed a recovered recording. Such chunks open a new "subsession"
+    that must be transcribed separately from the chunks before it.
+    """
+    try:
+        with open(chunk_path, 'rb') as f:
+            head = f.read(8)
+    except OSError:
+        return False
+    if len(head) < 8:
+        return False
+    return head[4:8] == b'ftyp' or head[:4] == WEBM_MAGIC
+
+
+def init_segment_name(ext: str, index: int = None) -> str:
+    """Filename for a persisted init segment.
+
+    Chunk 0's init keeps the legacy name `init{ext}`; a resumed
+    subsession starting at chunk N persists as `init.{N}{ext}` (#124).
+    """
+    return f"init{ext}" if index is None else f"init.{index}{ext}"
+
+
 def persist_init_segment(
     chunk_path: pathlib.Path, chunk_dir: pathlib.Path,
+    index: int = None,
 ) -> None:
-    """Extract the init segment from a chunk-0 file on disk and persist it
-    at `chunk_dir/init{ext}.enc` (or `init{ext}` if encryption is disabled),
-    where `ext` matches the chunk's file extension (`.webm` or `.mp4`).
+    """Extract the init segment from an init-bearing chunk on disk and
+    persist it at `chunk_dir/init{ext}.enc` (chunk 0) or
+    `chunk_dir/init.{index}{ext}.enc` (a resumed subsession's first chunk,
+    #124) — without `.enc` when encryption is disabled. `ext` matches the
+    chunk's file extension (`.webm` or `.mp4`).
 
     Dispatches on the chunk's suffix: WebM goes through the EBML walker,
     MP4 through the ISOBMFF box walker. Both raise ValueError on malformed
@@ -141,7 +174,7 @@ def persist_init_segment(
     else:
         raise ValueError(f"Unsupported chunk extension: {ext}")
 
-    init_path = chunk_dir / ("init" + ext)
+    init_path = chunk_dir / init_segment_name(ext, index)
     with open(init_path, 'wb') as f:
         f.write(init_bytes)
     try:
