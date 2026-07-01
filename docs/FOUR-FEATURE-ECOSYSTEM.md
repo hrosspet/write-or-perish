@@ -29,7 +29,7 @@ Write or Perish evolves from journaling app to **distributed intelligence networ
 **Purpose:** Capture thoughts with zero friction.
 
 **Current State:**
-- ✅ **Text + voice journaling** — Write or speak your thoughts, with resilient voice recording that survives interruptions and tab closures
+- ✅ **Text + voice journaling** — Write or speak your thoughts, with resilient voice recording that survives interruptions and tab closures without dropping the pre-interruption audio
 - ✅ **Tree-structured conversations with AI** — Hierarchical threads with multiple LLM models (GPT-5.4, Claude 4.6 Sonnet/Opus) and up to 1M context windows
 - ✅ **Agentic Voice workflow** — Single voice-first mode where AI actively helps during conversation: creates and manages todos, proposes changes, creates GitHub issues — all hands-free
 - ✅ **AI-generated user profile** — Automatic analysis of your full writing archive, kept fresh as you add new entries
