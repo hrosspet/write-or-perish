@@ -879,6 +879,99 @@ class SpendAlert(db.Model):
     )
 
 
+class ExternalItem(db.Model):
+    """External content imported into Loore (#155 component 2 / Download).
+
+    References the user consumes — Community Archive tweets, Twitter/X
+    bookmarks — kept SEPARATE from authored Nodes so profile generation,
+    exports, and the lore concept stay about the user's own words.
+    Content is encrypted at rest like all user data.
+    """
+    __tablename__ = "external_item"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    # 'community_archive' | 'twitter_bookmark'
+    source = db.Column(db.String(32), nullable=False)
+    # Stable per-source identifier (tweet id) for dedupe
+    external_id = db.Column(db.String(64), nullable=False)
+    author_handle = db.Column(db.String(64), nullable=True)
+    content = db.Column(db.Text, nullable=False)
+    url = db.Column(db.String(512), nullable=True)
+    posted_at = db.Column(db.DateTime, nullable=True)
+    fetched_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    user = db.relationship("User", backref="external_items")
+
+    __table_args__ = (
+        db.UniqueConstraint("user_id", "source", "external_id",
+                            name="uq_external_item_user_source_ext"),
+    )
+
+    def set_content(self, plaintext):
+        self.content = encrypt_content(plaintext)
+
+    def get_content(self):
+        return decrypt_content(self.content)
+
+
+class ExternalAccount(db.Model):
+    """A connected external account (OAuth), e.g. X for bookmark sync.
+
+    Tokens are encrypted at rest. One row per (user, provider).
+    """
+    __tablename__ = "external_account"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    provider = db.Column(db.String(32), nullable=False)  # 'twitter'
+    external_user_id = db.Column(db.String(64), nullable=True)
+    handle = db.Column(db.String(64), nullable=True)
+    access_token = db.Column(db.Text, nullable=True)
+    refresh_token = db.Column(db.Text, nullable=True)
+    token_expires_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    last_synced_at = db.Column(db.DateTime, nullable=True)
+
+    user = db.relationship("User", backref="external_accounts")
+
+    __table_args__ = (
+        db.UniqueConstraint("user_id", "provider",
+                            name="uq_external_account_user_provider"),
+    )
+
+    def set_tokens(self, access_token, refresh_token=None):
+        self.access_token = encrypt_content(access_token or "")
+        if refresh_token is not None:
+            self.refresh_token = encrypt_content(refresh_token)
+
+    def get_access_token(self):
+        return decrypt_content(self.access_token) if self.access_token else None
+
+    def get_refresh_token(self):
+        return decrypt_content(self.refresh_token) if self.refresh_token else None
+
+
+class ExternalItemEmbedding(db.Model):
+    """Embedding for an ExternalItem (mirrors NodeEmbedding, #155)."""
+    __tablename__ = "external_item_embedding"
+    id = db.Column(db.Integer, primary_key=True)
+    item_id = db.Column(
+        db.Integer,
+        db.ForeignKey("external_item.id", ondelete="CASCADE"),
+        nullable=False, unique=True, index=True,
+    )
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    model = db.Column(db.String(64), nullable=False)
+    content_hash = db.Column(db.String(64), nullable=False)
+    vector = db.Column(db.LargeBinary, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    item = db.relationship("ExternalItem", backref=db.backref(
+        "embedding", uselist=False, cascade="all, delete-orphan"))
+
+
 class NodeEmbedding(db.Model):
     """Vector embedding of a node's content for semantic search (#155).
 

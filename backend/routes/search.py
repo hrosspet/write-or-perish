@@ -215,6 +215,41 @@ def semantic_search():
     ).filter(NodeEmbedding.user_id == current_user.id).all()
 
     ranked = top_k_similar(query_vector, rows, k=limit, min_score=min_score)
+
+    # External references (#155 component 2) — included unless opted out
+    include_external = request.args.get(
+        "include_external", "1") not in ("0", "false")
+    external_results = []
+    if include_external:
+        from backend.models import ExternalItem, ExternalItemEmbedding
+        ext_rows = db.session.query(
+            ExternalItemEmbedding.item_id, ExternalItemEmbedding.vector
+        ).filter(ExternalItemEmbedding.user_id == current_user.id).all()
+        ext_ranked = top_k_similar(
+            query_vector, ext_rows, k=limit, min_score=min_score)
+        items_by_id = {
+            i.id: i for i in ExternalItem.query.filter(
+                ExternalItem.id.in_([iid for iid, _ in ext_ranked]),
+                ExternalItem.user_id == current_user.id,
+            ).all()
+        } if ext_ranked else {}
+        for item_id, score in ext_ranked:
+            item = items_by_id.get(item_id)
+            if item is None:
+                continue
+            content = item.get_content() or ""
+            external_results.append({
+                "id": item.id,
+                "kind": "external",
+                "source": item.source,
+                "author_handle": item.author_handle,
+                "external_url": item.url,
+                "preview": content[:200] + ("..." if len(content) > 200
+                                            else ""),
+                "snippet": None,
+                "created_at": iso_utc(item.posted_at or item.fetched_at),
+                "score": round(score, 4),
+            })
     nodes_by_id = {
         n.id: n for n in Node.query.filter(
             Node.id.in_([node_id for node_id, _ in ranked]),
@@ -245,9 +280,15 @@ def semantic_search():
             "score": round(score, 4),
         })
 
+    # Merge node + external results by score
+    merged = sorted(
+        results + external_results,
+        key=lambda r: r["score"], reverse=True,
+    )[:limit]
+
     return jsonify({
-        "results": results,
-        "total": len(results),
+        "results": merged,
+        "total": len(merged),
         "mode": "semantic",
     }), 200
 

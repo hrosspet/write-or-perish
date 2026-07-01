@@ -1,0 +1,1598 @@
+===== ISSUE #160: Voice recording silently fails when browser mic permission isn't granted (Android, DuckDuckGo) =====
+LABELS: bug
+CREATED: 2026-05-28T16:53:25Z
+
+## Symptom (reported)
+
+User on Android using the DuckDuckGo browser:
+
+1. Started a voice entry recording. DuckDuckGo asked for microphone permission; user chose **"Ask every time"**.
+2. On the next voice-entry attempt, the browser **did not re-prompt** for permission — but recording also silently failed (nothing was captured).
+3. The user only diagnosed it by going into the Android app settings for DuckDuckGo and switching the OS-level mic permission from "Ask every time" to "While using the app".
+
+## Problems
+
+**Bug:** When the browser denies / fails to grant mic access at recording start, Loore doesn't surface any error. The user sees the UI behave normally but no audio is captured — same data-loss class as #88 / #127 (silent drop), just with a different root cause.
+
+**Friction:** User comment — "It's annoying to have to grant whole-browser mic permission just to occasionally record a voice memo." That's a platform-level constraint Loore can't directly remove, but we can at least handle it gracefully and tell the user what's happening.
+
+## Proposed fix
+
+Two parts:
+
+### 1. Detect mic permission at recording start
+
+Before / during `MediaRecorder` start, check `navigator.permissions.query({ name: 'microphone' })` where supported. If the state is `denied` or the `getUserMedia` call fails with `NotAllowedError` / `PermissionDeniedError`:
+
+- Stop the recording attempt immediately (don't enter the "recording" visual state).
+- Show a clear, actionable error toast/modal explaining:
+  - Mic permission was not granted.
+  - On Android, the user may need to update the browser's app-level mic permission in OS settings (link or short instructions).
+  - On iOS / desktop, the user can re-request via the browser's site-permissions UI.
+
+### 2. Distinguish "permission denied" from "no audio captured" in the recovery path
+
+The voice-recovery banner currently helps when a recording was interrupted, but it can't help when nothing was ever recorded. Make sure the permission-denied path leaves no orphaned draft / stuck "recording…" UI.
+
+## Reproduction
+
+Android + DuckDuckGo browser (likely reproducible on other mobile browsers that default to "ask every time" — Firefox, Brave, Samsung Internet):
+
+1. Revoke mic permission in browser app settings.
+2. Try to start a voice entry in Loore.
+3. Expected: clear error explaining the situation.
+4. Actual: silent failure — UI looks fine, no audio captured.
+
+## Related
+
+- #103 — Android Chrome voice recording broken (different root cause: rooted device).
+- #88, #127 — Other silent-drop voice bugs (data-loss class).
+
+
+===== ISSUE #159: [Exploration] Voice-driven development pipeline =====
+LABELS: enhancement
+CREATED: 2026-05-28T16:42:58Z
+
+## Concept
+
+A development workflow optimized for voice input — describe features/bugs while walking outside, have the system create issues, prioritize them, draft PRs, and let the developer review via voice.
+
+## Pipeline
+
+1. **Voice feature/bug capture** — describe features/bugs via voice on phone (outdoors / in nature); Loore creates GitHub issues. *Already partly working — the workflow used in this session is roughly this loop, just manually orchestrated.*
+
+2. **Encourage alpha users to use this loop** — get bug reports filed via Loore → GitHub directly, reducing the back-and-forth.
+
+3. **Automated prioritization** — system fetches all GitHub issues, sorts them according to product vision/roadmap.
+
+4. **PR drafting** — Claude Code drafts PRs for top-priority issues automatically.
+
+5. **Voice PR review** — developer reviews PRs via voice chat with Claude Code. CC summarizes problem and solution; developer drills into details only where needed.
+
+6. **Plan review by independent CC** — copy plan to a second Claude Code instance for independent review. Let the two instances iterate on the plan together until both are satisfied.
+
+7. **Implementation** — the first instance implements from the refined plan.
+
+8. **PR review by the reviewer instance** — the reviewer instance (which already has plan context) reviews the implementation against the agreed plan.
+
+9. **Automated UI testing via Chrome extension** — may need desktop access for this step.
+
+10. **Manual UI testing as final check** — still needed, but reduced in scope.
+
+11. **Notification to developer** — push notification or email when the prioritized issue list is ready for review.
+
+## Status
+
+Exploratory. Some pieces (step 1) are already working organically; others (3, 6, 9) are net-new. Worth scoping piece by piece rather than committing to the whole pipeline.
+
+## Related
+
+- #158 — LLM tool use (GitHub issue submission is one of the underlying capabilities).
+- #157 — Claude Code integration (the CC-as-harness piece).
+
+
+
+===== ISSUE #158: Add tool use to the LLM — artifacts, GitHub issues, feedback submission =====
+LABELS: feature
+CREATED: 2026-05-28T16:42:45Z
+
+## Concept
+
+Extend the LLM in Loore with tool-use capabilities — the LLM stops being a pure text-in/text-out function and starts taking concrete actions on the user's behalf.
+
+## Tools to add
+
+### 1. Artifact management
+
+- List all artifacts the user has.
+- Read a specific artifact.
+- Edit (update) an artifact.
+
+Possible artifact types: memory, scratchpad, user-created artifacts. These should be included in data export as default Loore artifacts.
+
+### 2. GitHub issues
+
+- Submit a new issue on the user's behalf.
+- List existing issues.
+- Check for duplicates before submitting (search by keywords).
+
+Could optionally be set up as a separate bot account so it's clear what was LLM-generated.
+
+### 3. Feedback submission
+
+- Let users submit feedback through the LLM in a way that the creators can see and process in bulk (e.g. all feedback collected and run through a batch LLM pass for triage).
+
+## Implementation
+
+Use the Anthropic SDK's tool-use API. Each tool is a typed function exposed to the LLM with a JSON schema. Server-side handlers translate tool calls to actual operations + return results.
+
+## Related
+
+- #157 — Claude Code integration (the CC-as-harness path benefits from a shared tool-use foundation).
+- #159 — Voice-driven dev pipeline (GitHub issue submission is one of the underlying capabilities).
+
+
+
+===== ISSUE #157: [Exploration] Claude Code integration — skill + harness + persistent context =====
+LABELS: enhancement
+CREATED: 2026-05-28T16:42:36Z
+
+## Umbrella issue for Claude Code <-> Loore integration
+
+Several related ideas for connecting Loore with Claude Code:
+
+### 1. Loore skill for Claude Code
+
+Build a custom Claude Code skill that lets CC interact with Loore programmatically: create nodes, query the archive, read profiles, etc. Lowest-friction path for technical users.
+
+### 2. Loore as advanced harness for Claude Code
+
+Run a Claude Code instance on the production server with a Loore-specific skill — acting on behalf of the user (communicate, suggest, take feedback). Effectively makes Loore a *frontend* for CC. If too complex to integrate CC directly, implement a Loore-native agent with similar capabilities.
+
+### 3. Alpha → beta transition
+
+Connect Loore with internal Claude Code instances; persist app context in a text node so CC has continuity across sessions.
+
+## Decisions to make
+
+- Client-side integration vs. server-side?
+- Auth model (how does CC authenticate as a specific user)?
+- CC directly vs. Loore-native agent — which gets us further faster?
+
+## Status
+
+Exploratory. Sub-feature of the broader "make Loore more agentic" direction.
+
+
+===== ISSUE #156: [Exploration] Chat-with-archive as one-time corpus submission to OpenAI =====
+LABELS: enhancement
+CREATED: 2026-05-28T16:42:27Z
+
+## Concept
+
+When a user invokes "chat with archive", the user's corpus is submitted to OpenAI as part of the request payload. For users who have opted into OpenAI's training-data sharing, this is effectively a *one-time opportunity to influence training data* with their own writing.
+
+This is currently a side-effect of existing behavior — but it could be made an explicit, opt-in framing surfaced to users who want it.
+
+## Considerations
+
+- Only meaningful for users who have *explicitly* opted into OpenAI training-data sharing. Need to be very clear about what this means and not bury it.
+- Different from the chat behavior; this is a deliberate "submit my corpus" action, not a side effect.
+- May want a dedicated UI affordance rather than reusing chat-with-archive.
+- Privacy implications need careful thinking — once submitted, it's submitted.
+
+## Status
+
+Exploratory framing. Not a near-term build — flagged so it's tracked.
+
+
+===== ISSUE #155: [Exploration] RAG / semantic search across user + community archives =====
+LABELS: enhancement
+CREATED: 2026-05-28T16:42:21Z
+
+## Umbrella issue for RAG / semantic-search capabilities
+
+Currently Loore selects context by recency + hierarchical summarization. RAG would let it select context by *relevance* to the current conversation, dramatically expanding what's available without context bloat.
+
+## Components
+
+1. **Semantic search over user's own archive** — vector embeddings of all user nodes. "Chat with archive" becomes "chat with the *relevant parts* of your archive" via retrieval.
+
+2. **Extend to the Community Archive** — include opted-in CA content in the same vector DB. Enables conversations grounded in shared knowledge across the alpha community.
+
+3. **Agentic search** — instead of a single retrieval pass, let the LLM generate multiple search terms from the journal/conversation summary and iteratively retrieve. Better recall on multi-faceted queries.
+
+4. **"Chat with relevant parts of your & other people's archive"** — combine 1 + 2 with appropriate access control (only opted-in CA content; user's own data always accessible).
+
+## Priority
+
+Next big initiative after current friction-removal work completes (per roadmap).
+
+## Related
+
+- #149 — Keyword UX (chat-with-archive would benefit from clearer affordances).
+- #154 — Karpathy-style topic pages. Different approach to the same general problem (relevance-based context selection).
+
+
+
+===== ISSUE #154: [Exploration] Topic-page LLM knowledge base (Karpathy-style personal wiki) =====
+LABELS: enhancement
+CREATED: 2026-05-28T16:42:09Z
+
+## Concept
+
+Andrej Karpathy described a vision of an LLM that builds and maintains a *personal Wikipedia* — arbitrary-depth topic pages on the user's life/interests, retrieved on-demand into session context.
+
+## Comparison with Loore's current architecture
+
+Loore already has many of the building blocks:
+- **Profile generation** — produces a summary, but at fixed scope/depth.
+- **Artifacts** — user-editable structured content (preferences, todos, intentions).
+- **Hierarchical context** — recent + summarized older content.
+
+The new piece would be:
+- **Arbitrary-depth topic pages** generated from the user's archive (e.g. "Career goals", "Health", "Relationship with X", "Project Y").
+- **Agentic retrieval** that pulls relevant topic pages into session context dynamically — overview unconditionally, depth pages only when the discussion requires them.
+
+## Why explore this
+
+Loore's current profile is a fixed-length document that has to compress everything. Topic pages would let the LLM go deeper on the area being discussed without paying the context cost on every session.
+
+## Next step
+
+Walk through the implementation against the existing profile/archive/context infrastructure — likely a Plan-mode session with Claude Code. Identify where this differs from #25 (RAG over raw nodes) and how the two could coexist.
+
+
+===== ISSUE #153: [Exploration] Real-time voice conversation mode (record while playing response) =====
+LABELS: enhancement
+CREATED: 2026-05-28T16:41:59Z
+
+## Concept
+
+A "futuristic" voice mode where the conversation is genuinely real-time: the user can be recording while the LLM response is playing, with interruption detection and continuation regeneration.
+
+## Design challenges
+
+- **Echo cancellation** — TTS output bleeding into the microphone input. Needs either browser AEC (WebRTC) or content-aware suppression on the server.
+- **Interruption detection** — VAD or energy threshold to detect when the user starts speaking while TTS is mid-playback.
+- **Mid-response regeneration** — if the user interrupts, the LLM needs to know how much of its response the user actually *heard* (not how much was generated), and regenerate the continuation accordingly. This requires tracking playback position at interrupt time.
+- **Latency budget** — voice-to-voice loop needs to feel conversational (sub-second response). Streaming TTS, streaming transcription, partial LLM responses all in play.
+
+## Scope
+
+Exploratory — large rewrite of the voice/transcription/TTS pipeline. Worth scoping a phased plan rather than estimating the whole thing.
+
+
+
+===== ISSUE #152: Profile generation policy for new users — more frequent + recalculate from scratch =====
+LABELS: enhancement
+CREATED: 2026-05-28T16:41:36Z
+
+## Observation
+
+Anecdotal data points from early alpha users suggest the generated profile is useful and accurate at corpus sizes much smaller than the current 100k-token threshold suggests. Several users had high-quality profiles at substantially smaller corpora.
+
+## Proposal
+
+Separate the policy for new vs. mature users:
+
+- **New users (corpus < 100k tokens)**:
+  - Regenerate profile from scratch each time (no incremental update). Cheap at small corpus sizes; avoids early drift.
+  - Update profile more frequently — e.g. each session, each new node, or on a sub-100k cadence (exact trigger TBD).
+- **Mature users (corpus ≥ 100k tokens)**:
+  - Switch to incremental updates as in #32.
+
+## Open questions
+
+- Update trigger for new users — every session? Every N nodes? Time-based?
+- Threshold exact value (is 100k the right boundary or should it be lower/higher?)
+- Should the user see the profile evolve, or is that noisy?
+
+## Related
+
+- #32 — Incremental profile generation with context window management. This issue's "mature users" path is exactly #32.
+- #65 — Profile generation fails for >200k-token users (related: this issue is about the *small* end of the corpus distribution).
+
+
+===== ISSUE #151: [Exploration] Overnight personalized morning briefing from Community Archive =====
+LABELS: feature
+CREATED: 2026-05-28T16:41:28Z
+
+## Concept
+
+Generate a personalized morning briefing for the user from Community Archive content, produced overnight and ready by morning. Designed for TTS playback as the user's first interaction of the day.
+
+## Design
+
+- **Filter by followed users** — only content from people the user follows in the CA.
+- **Curated newsletter structure** — quoted content + editorial commentary tying it together (think Zvi-style aggregation pieces: pull quote, then commentary, then next pull quote).
+- **TTS playback with chapter navigation** — uses the heading-based playlist (#145).
+
+## Pre-validation needed
+
+Confirm there's enough overlap between:
+- Users who have opted into the Community Archive
+- The current user's information sources / followed accounts
+
+If overlap is too small, the briefing won't have anything to draw from. Validate the data side before committing to the build.
+
+## Open questions
+
+- Where do "followed users" actually live in the data model today? (May need to be added.)
+- How long is the daily briefing — 5 min? 20 min? User-configurable?
+- Push notification when ready?
+
+
+===== ISSUE #150: Intentions feature — track and clarify aspirations (parallel workflow to todos) =====
+LABELS: feature
+CREATED: 2026-05-28T16:41:21Z
+
+## Concept
+
+A workflow for forming *intentions* — analogous to todos, but for less tangible, longer-running aspirations rather than concrete tasks.
+
+## How it differs from todos
+
+- Todos are concrete, well-defined tasks. Intentions are vaguer, directional, longer-running aspirations.
+- The key workflow difference: the LLM **helps the user clarify** their intentions. It detects possible subconscious or non-verbalized intentions surfacing in the user's writing, brings them up, inquires, helps the user verbalize them.
+- Intentions are tracked over time. Loore helps the user be more conscious of them — and the explicit possible outcomes are either *follow up* on them, or *consciously abandon* them. Both are valid.
+
+## Implementation approach
+
+Similar to the Orient + todos pipeline, but with a different prompt focus (clarification & detection vs. concrete task extraction).
+
+## Validation
+
+Worth prototyping the conversational pattern with ChatGPT first (cheap test of whether the LLM is actually good at this clarification workflow) before building it as a Loore-native feature.
+
+
+===== ISSUE #149: Improve keyword UX: explainer + editor exposure + NodeForm insert buttons =====
+LABELS: enhancement
+CREATED: 2026-05-28T16:41:10Z
+
+## Problem
+
+The `user_profile`, `user_archive` (formerly `user_export`), and `quote` keywords are powerful but undiscoverable. New users have no way to learn about them; existing users can't remember the exact names. They're effectively a hidden feature.
+
+## Proposal (three connected improvements)
+
+### 1. Explainer in the UI
+
+Add a short explainer somewhere visible (settings? help drawer? inline in the editor?) that describes each keyword: what it does, when to use it, and what content it injects.
+
+### 2. Expose keywords in the markdown editor
+
+Make `user_profile`, `user_archive`, and `quote` visible as first-class affordances inside the editor — autocomplete, slash-command, or a small palette — so users discover them while typing.
+
+### 3. Insert buttons in NodeForm
+
+Add buttons in NodeForm to insert each keyword (profile / archive / quote) with one click. Lowest-friction surface for users who don't want to memorize syntax.
+
+## Bonus: naming consistency
+
+Consider renaming `user_export` → `user_archive` everywhere for consistency (the codebase has both terms — pick one). The keyword itself, the data-export filename, the explainer copy, etc.
+
+
+===== ISSUE #148: Perform a security and privacy audit =====
+LABELS: enhancement
+CREATED: 2026-05-28T16:41:03Z
+
+## Goal
+
+Conduct a structured security and privacy audit of the app before expanding alpha. Should produce a punch list of concrete findings + remediations.
+
+## Scope
+
+- **Authentication & sessions** — token lifetimes, refresh, session fixation, brute-force protection on the email-link flow.
+- **Authorization** — cross-user data access (especially in the export, feed, and community-archive paths; #110 is in this family).
+- **Input handling** — XSS in markdown rendering / TTS / displayed user content, SQL injection (mostly mitigated by SQLAlchemy but worth a sweep), file-upload validation (audio, archives).
+- **Secret management** — env-var hygiene, key rotation policy, presence of secrets in logs.
+- **Data at rest** — what's encrypted vs. plaintext (audio chunks, nodes, profiles); decide what should be.
+- **Data in transit** — TLS config (cipher suites, HSTS).
+- **Privacy** — data export completeness, account-deletion flow, AI-usage flag enforcement (does the train/chat choice actually gate what we send to OpenAI/Anthropic?), audit log of admin access.
+- **Logging** — what we log vs. what we shouldn't (no node content in logs, no audio paths in plaintext logs, etc.).
+- **Third-party API key handling** — OpenAI, Anthropic, ElevenLabs.
+- **Server hardening** — header info leaks (#142 — Server header), rate limiting on auth endpoints, fail2ban-equivalent at the edge.
+
+## Deliverable
+
+A finding-by-finding writeup that becomes its own batch of focused follow-up issues. Severity-ranked, with concrete remediation suggestions per finding.
+
+Consider running `/security-review` as a starting pass.
+
+
+===== ISSUE #147: First-login onboarding flow =====
+LABELS: feature
+CREATED: 2026-05-28T16:40:53Z
+
+## Problem
+
+New users land in the app with no guided introduction. The core mental model (privacy/AI-usage choices, Craft vs. simple modes, how to give feedback) needs explanation that the UI alone doesn't deliver. This becomes more important as we expand the alpha.
+
+## Proposal
+
+Design and implement a first-login onboarding flow:
+
+1. **After license/terms acceptance**, walk the user through privacy & AI usage settings (chat vs. train, explain the trade-offs explicitly rather than leaving the user to discover them in settings).
+
+2. **Guided walkthrough of core Loore UX** — highlighted UI elements with pop-up bubbles. Ideally narrated by TTS, so the onboarding doubles as a TTS demo.
+
+3. **Explain Craft mode** as an advanced/low-level option (so users don't stumble into it unprepared and bounce).
+
+4. **Show how to submit feedback / report bugs** — close the loop early so the alpha users actually use the channel.
+
+## Sub-task: review all default settings
+
+Audit every default the app picks for a new user. For each default, decide:
+- Keep the default and don't surface it (clearly the right choice for everyone).
+- Surface it during onboarding as an explicit choice.
+- Change the default.
+
+Examples of choices worth reviewing: default AI-usage mode, default voice vs. text mode, default model, default TTS voice, default theme.
+
+
+===== ISSUE #146: Update About pages to reflect current Loore capabilities (pre-alpha-expansion) =====
+LABELS: enhancement
+CREATED: 2026-05-28T16:40:45Z
+
+## Problem
+
+The About pages predate several major features (voice mode, profile generation, todos, the keyword system, etc.). The current copy and screenshots don't reflect what Loore actually does today.
+
+Before inviting more alpha users (~10 new), the About pages need a refresh so new visitors land on accurate, current content rather than stale messaging.
+
+## Scope
+
+- Audit all About / marketing pages (landing page, About, any feature explainer pages).
+- Update copy to describe current capabilities.
+- Refresh screenshots / illustrations.
+- Sanity-check links (any pointing to features that have changed names or been removed).
+
+Related to the alpha-expansion blockers: #91 (protected usernames) and pre-scale safety cluster more broadly.
+
+
+===== ISSUE #145: Section-aware TTS playlist (use headings as playlist items) =====
+LABELS: feature
+CREATED: 2026-05-28T16:40:39Z
+
+## Proposal
+
+For long-form nodes with markdown headings, render TTS playback as a playlist where each heading section is its own playlist item. Enables skip-forward, skip-back, and easy navigation through long pieces (essays, summaries, briefings).
+
+## Behavior
+
+- Parse the node's markdown for headings (h1/h2, possibly h3).
+- Treat each heading + its following body content as one playlist item.
+- Player UI shows the section titles as chapter markers; user can tap to jump.
+- Falls back to single-track playback for nodes with no headings.
+
+## Open questions
+
+- Should the heading itself be read aloud as part of the section, or just used as a label?
+- What level of heading depth is included as a chapter (h1+h2 only, or also h3)?
+
+## Related
+
+- Pairs naturally with the Community Archive morning briefing (separate issue) — chapter navigation is the natural UX for a multi-item briefing.
+
+
+===== ISSUE #144: Add 'Today's priorities' section to todo list + update agentic prompt =====
+LABELS: feature
+CREATED: 2026-05-28T16:40:34Z
+
+## Proposal
+
+Add a dedicated "Today's priorities" section at the top of the todo list, with the unified agentic prompt updated to actively populate it.
+
+## Behavior
+
+- A pinned section at the top of the todo list named "Today's priorities" (or similar).
+- During a Voice/Text-mode session, the agentic prompt asks the LLM to:
+  - Look at the user's current todos, recent context, and intentions.
+  - Select / rank a small number of items (3–5) into the priorities section.
+  - Justify the prioritization briefly.
+- Items in the priorities section are still the same underlying todos — completing one there completes it everywhere.
+
+## Implementation notes
+
+- The standalone Orient page/route was removed (commit `dd66947`). Voice and Text modes both now run through the unified agentic prompt at `backend/prompts/agentic.txt` — that's the prompt to extend, not the legacy `orient.txt` (which is no longer wired up to any active flow).
+- The todo-merge step still uses `backend/prompts/orient_apply_todo.txt` (called from `backend/tasks/voice_todo_merge.py`). The priority-section concept may need a small extension there too, so the merge respects / preserves the priority annotations rather than reshuffling them out.
+
+## Open questions
+
+- How does the user override or pin items into the section manually?
+- Does the section reset each day, or only when the user / the next agentic session explicitly updates it?
+- Interplay with the "Next steps" section that currently lives on top of the todo (origin of that section is unclear — separate question I had on the todo list).
+
+
+
+===== ISSUE #143: Reconcile AI interaction preferences (user profile vs. dedicated artifact) =====
+LABELS: enhancement
+CREATED: 2026-05-28T16:40:17Z
+
+## Problem
+
+"AI interaction preferences" now live in two places:
+
+1. As part of the generated user profile (where they originally landed when profile generation started capturing them).
+2. As a standalone special artifact (recently added in response to user feedback wanting more direct control).
+
+This is duplication. They will drift out of sync as the profile is regenerated, and it's unclear which one the LLM actually consults during a session.
+
+## Decision needed
+
+- Are preferences canonically stored in the artifact, with profile-gen excluding them?
+- Or in the profile, with the artifact being an editable surface that re-syncs?
+- Or both, with an explicit precedence rule (artifact wins on conflict)?
+
+The artifact was the immediate fix based on user feedback; longer-term reconciliation is still open. Affects:
+- Profile-generation prompt (should it look at the artifact?)
+- Editing UX (where does the user go to change preferences?)
+- Data export (which one — or both — gets exported?)
+
+
+===== ISSUE #142: Strip Server header from nginx responses (info leak) =====
+LABELS: enhancement
+CREATED: 2026-05-28T16:40:11Z
+
+## Problem
+
+Server responses include a `Server` header like `nginx/1.18.0 (Ubuntu)`. This unnecessarily exposes the web server version and underlying OS, which is the kind of information disclosure that helps attackers narrow down targeted CVEs. It serves no functional purpose for the user.
+
+## Proposed fix
+
+Configure nginx to strip or generalize the Server header. Standard options:
+
+- `server_tokens off;` in the nginx config — hides the version but still emits `Server: nginx`.
+- Use the `headers-more-nginx-module` and `more_clear_headers Server;` to remove the header entirely.
+
+The nginx config lives on the prod VM (and the staging VM's nginx-alpine container). Both should be updated.
+
+Verification: `curl -I https://loore.org` after deploy — `Server` header should be absent or `nginx` only.
+
+
+===== ISSUE #141: Voice transcription drops chunks on highly repetitive content (e.g. singing) =====
+LABELS: bug
+CREATED: 2026-05-28T16:40:07Z
+
+## Symptom
+
+`gpt-4o-transcribe` drops chunks of audio when the input is highly repetitive — singing, repeated phrases, mantras, etc. This is a known failure mode of large transcription models (they collapse into "I've already transcribed this" mode and emit nothing).
+
+## Proposed fix
+
+Keep / validate the local-model fallback for these cases. Specifically:
+- Detect "suspiciously empty" transcription output relative to audio duration (e.g. <1 word per 5s for a chunk that clearly has audio energy).
+- Retry the chunk through a local transcription model (e.g. faster-whisper or whisper.cpp) that doesn't have the repetition-collapse issue.
+- Surface a small UI indicator if a chunk used the fallback path, so the user knows transcription quality may be slightly lower there.
+
+This needs the local-model fallback path to be wired up and tested end-to-end on a singing/mantra recording.
+
+
+===== ISSUE #140: Sentence-aware TTS chunking — fall back to word-aware for tiny first chunks =====
+LABELS: enhancement
+CREATED: 2026-05-28T16:40:01Z
+
+## Problem
+
+Current TTS chunking can produce very short first chunks (e.g. 4 seconds of audio) followed by a long wait before the next chunk lands. This happens for nodes whose first "sentence" is a short line followed by a long bullet list — the sentence-boundary heuristic isolates the short line and forces the listener to wait for the rest.
+
+## Proposed fix
+
+Add a minimum chunk-size / minimum-audio-length rule. When the first sentence chunk would fall below the threshold:
+
+- Fall back to word-aware chunking, OR
+- Merge the short first sentence with the next content until the threshold is met
+
+The threshold value is empirical — start with something like "min 8–10 seconds of audio" and tune.
+
+
+===== ISSUE #139: chat-with-archive keyword: replace only the first occurrence per message =====
+LABELS: bug
+CREATED: 2026-05-28T16:39:56Z
+
+## Problem
+
+When the `chat-with-archive` keyword appears more than once in a single message, every occurrence currently expands into the archive context. The archive should only be inserted once per message — subsequent occurrences should be treated as literal text.
+
+## Proposed fix
+
+In the keyword-substitution code, change the replacement from a `replace_all`-style operation to a "first occurrence only" replacement. Leave the rest as literal text so users can still refer to the keyword name in writing without triggering another expansion.
+
+Apply the same rule consistently to `user_profile`, `user_archive`, and `quote` keywords if the same multi-occurrence issue exists there.
+
+
+===== ISSUE #138: Improve markdown rendering to match standard markdown expectations =====
+LABELS: enhancement
+CREATED: 2026-05-28T16:39:52Z
+
+## Problem
+
+Current markdown rendering diverges from what users expect from standard Markdown. The result feels slightly off — not in a "branded" way but in a "is this rendering correctly?" way.
+
+## Proposed fix
+
+Make rendered output closer to canonical Markdown rendering, with these intentional deviations:
+- Custom base font (Outfit body, per the design system)
+- Custom heading font/sizing (Cormorant Garamond, per the design system)
+- Custom spacing/color tokens
+
+Use a representative set of long-form nodes (e.g. pinned posts with mixed prose, lists, code blocks, blockquotes) as the test corpus.
+
+Likely changes in the rehype/remark pipeline / current Markdown component config — exact location to be confirmed during implementation.
+
+
+===== ISSUE #137: Claude import: handle oversized zip files (port the ChatGPT-import fix) =====
+LABELS: bug
+CREATED: 2026-05-28T16:39:47Z
+
+## Problem
+
+The Claude archive import currently uploads the full zip file to the backend, which fails (or risks OOM) on large archives — same problem the ChatGPT import had before commit `f6d329e`.
+
+`frontend/src/components/ImportData.js:179` (`handleClaudeImportFile`) — POSTs the raw zip to `/import/claude/analyze` as `multipart/form-data`. The backend then has to hold and parse the whole archive. Subject to the 200MB nginx upload limit and to server memory pressure for users with large Claude exports.
+
+## Solution: port the ChatGPT fix
+
+Apply the same client-side extraction pattern shipped for ChatGPT in commit **`f6d329e`** ("Extract conversations.json client-side for ChatGPT import"). That fix established the pattern:
+
+1. **Frontend (`ImportData.js`)** — use `JSZip.loadAsync(file)` to open the zip in the browser, find the conversations JSON entry, extract it as a blob, and POST only the blob to the backend. Reference: `handleChatGPTImportFile` in `frontend/src/components/ImportData.js:236-279`.
+
+2. **Backend (`import_data.py`)** — change the `/import/claude/analyze` endpoint to read a JSON file field directly (no zip handling). The ChatGPT path already does this; mirror it for Claude.
+
+3. **Tests** — add coverage along the lines of `backend/tests/test_chatgpt_import.py` (request shape, JSON parsing errors, empty conversations, happy path, login required).
+
+### What to extract from a Claude export
+
+Confirm at implementation time which file inside Claude's zip carries the conversations (likely `conversations.json` — same name as ChatGPT — but verify against a real Claude export before wiring the entry-name match).
+
+## Benefits (same as the ChatGPT fix)
+
+- Sidesteps the 200MB nginx upload limit — only the conversations JSON (typically a few MB) gets uploaded, not the full zip with attachments/images.
+- Avoids holding the zip in server memory.
+- Faster for the user too (no server-side unzip step).
+
+## Files to touch
+
+- `frontend/src/components/ImportData.js` — replace `handleClaudeImportFile` with a JSZip-based extraction, mirroring `handleChatGPTImportFile`.
+- `backend/routes/import_data.py` — `/import/claude/analyze` endpoint: drop zip handling, accept the JSON blob directly.
+- `backend/tests/` — add Claude equivalent of `test_chatgpt_import.py`.
+
+
+
+===== ISSUE #136: Deduplicate imported data (re-imports + snapshot overlap) =====
+LABELS: bug
+CREATED: 2026-05-28T16:39:40Z
+
+## Problem
+
+Re-importing the same archive currently creates duplicate nodes. Expected behavior:
+
+- **Same archive imported twice** → no-op (no new nodes).
+- **Two snapshots in time** (e.g. a January export and a March export from the same source, where March includes everything in January plus new content) → no duplicates; only the new content from the later snapshot is added.
+
+## Implementation notes
+
+Need a deduplication key per imported item. Options:
+- Source-message ID from the source archive (if stable and present in the export format)
+- Hash of (content, timestamp, author) as a fallback when no stable ID is present
+
+Decision needed: dedupe at the node level only, or also at the conversation/thread level (a re-imported conversation should match against an existing one even if a few new messages were added).
+
+
+===== ISSUE #135: Show progress indicator during data imports =====
+LABELS: enhancement
+CREATED: 2026-05-28T16:39:34Z
+
+## Problem
+
+When a user imports data (ChatGPT or Claude archive), there is no feedback that anything is happening — the UI appears stuck for what can be a long time depending on archive size. Users either think it's broken and refresh (losing the import) or just give up.
+
+## Proposed fix
+
+Add a progress indicator for import operations:
+- Loading bar or spinner while the import is running
+- Ideally show what stage the import is in (parsing → deduping → writing nodes → done)
+- Useful even as a coarse "processing X of Y messages" counter
+
+Related: #29 (TTS has no progress indicator either) — same gap, different surface.
+
+
+===== ISSUE #134: Text mode auto-generates first response even when auto-generate is off =====
+LABELS: bug
+CREATED: 2026-05-28T16:39:30Z
+
+## Symptom
+
+User reported: entering text mode triggers an automatic first AI response even when the user has auto-generate turned off. Should respect the setting from the very first turn.
+
+## Proposed fix
+
+Apply the same approach used in the "Write new entry" flow, which correctly gates first-turn generation on the auto-generate setting. Identify the difference between the text-mode entry path and the Write-new-entry path and align them.
+
+
+===== ISSUE #132: [iPhone Chrome] Todo edits sometimes can't be saved =====
+LABELS: bug
+CREATED: 2026-05-28T16:39:23Z
+
+## Symptom
+
+On iPhone Chrome, sometimes editing a todo and hitting save doesn't persist the change — the edit appears lost.
+
+Reproduction is intermittent. Needs investigation into:
+- Whether the save request is firing at all (DevTools network)
+- Whether the response is succeeding but the UI isn't refreshing
+- Whether iOS-specific keyboard / blur behavior is interfering with the save trigger
+
+Possibly related to #106 (iPhone Safari zoom-on-focus on todo form) — both touch the same input flow on iOS.
+
+
+===== ISSUE #131: Notify user when profile generation completes =====
+LABELS: bug
+CREATED: 2026-05-28T16:39:19Z
+
+## Problem
+
+Profile generation is a long-running async task (analyzes large token volumes), but there's no notification when it finishes. The user has to manually re-check the profile page to know whether it's ready. Users frequently miss that it completed.
+
+## Proposed fix
+
+Show a notification — toast, banner, or in-app indicator — when the generated profile is ready. Should work whether or not the user is on the profile page when generation completes.
+
+Related: #29 (no progress indicator during TTS generation) — same family of "background work, no user feedback" gap.
+
+
+===== ISSUE #130: LLM has no temporal grounding — confabulates relative times (e.g. "2 days ago" for same-morning event) =====
+LABELS: bug
+CREATED: 2026-05-28T16:27:48Z
+
+## Symptom
+
+User report:
+
+> Loore doesn't seem to be able to track time. Like I talked to it about something this morning, then later I started a new conversation and it referenced that thing \"you were just talking about X 2 days ago\", and I've seen similar time wonkiness before.
+
+## Root cause
+
+The LLM is given **no per-message timestamp information** and **no current-date anchor** in any prompt. From the model's perspective every message appears to be happening \"now\" with no chronological ordering.
+
+**Audit findings:**
+
+- `backend/tasks/llm_completion.py:922` — each node going into chat context is rendered as just `\"author <username>: <content>\"`. `created_at` is never attached.
+- `backend/prompts/agentic.txt` and other system prompts — no \"today is …\" / current-time injection anywhere.
+- The only place time appears is in the `{user_recent_raw}` block (`backend/utils/tokens.py:48–62`) as coarse range headers like `[Covers 2026-03-10 to 2026-03-28]` wrapping bulk text — not per-message annotations.
+- Where dates do appear, they're naive UTC (see #128). A message written at 11pm CEST shows up as the next day's date, which alone could plausibly drift the model's \"how long ago\" sense across midnight UTC.
+
+With no temporal grounding, the model is left to reconstruct \"when\" from content alone and confabulates phrases like \"2 days ago.\"
+
+## Fix
+
+Annotate **every message** sent to the LLM (user messages, assistant messages, system messages, retrieved context — all of them) with a uniform absolute-time prefix in the **user's local timezone**.
+
+### Design constraints (from the bug-report discussion)
+
+- **Don't single out the system prompt.** No \"Today is X\" anchor injected separately — treat every message the same way. The model derives \"now\" from the most recent message's timestamp like any other temporal information.
+- **User's local timezone, not UTC.** UTC stamps require the model to know the user's offset, which it doesn't.
+- **Absolute times only — no relative phrasing** like \"yesterday\" / \"3 days ago\". Reason: a stored message that was \"3 days ago\" at write-time will be re-served later as context for a new conversation, and the relative phrase will then be wrong/misleading. Absolute timestamps stay correct forever.
+
+### Suggested format
+
+Each message prefixed with an ISO-ish local stamp, e.g.:
+
+```
+[2026-05-28 09:14 CEST] author hrosspet: I'm going to focus on the timestamps bug today.
+[2026-05-28 14:32 CEST] assistant: Sounds good — want me to start with …
+```
+
+Day-of-week could be added if it helps disambiguate (`[2026-05-28 Thu 09:14 CEST]`) — that's still absolute, just more readable.
+
+## Open sub-question: where does the user's timezone come from?
+
+There is **no `User.timezone` field** today (`grep` of `backend/models.py` and routes returns nothing). Two options:
+
+1. **Add `User.timezone` column.** Capture from `Intl.DateTimeFormat().resolvedOptions().timeZone` in the frontend on signup / first session and on user-initiated change. Standard, persists, lets the backend format independently of any single request.
+2. **Pass timezone on every LLM-triggering request.** Frontend includes `Intl.DateTimeFormat().resolvedOptions().timeZone` as a header or body field on each chat/voice submission. No schema change, but every entry point needs to thread it through.
+
+Option 1 is cleaner long-term. Either works for fixing the bug.
+
+## Related
+
+- #128 — UTC timestamp display in UI. Same underlying \"we don't track user-local time anywhere\" gap. Both issues should likely be solved by the same `User.timezone` plumbing.
+
+
+===== ISSUE #129: Cmd+Return / Ctrl+Enter keyboard shortcut for primary submit across the app =====
+LABELS: enhancement
+CREATED: 2026-05-28T16:18:57Z
+
+## Problem
+
+There is no keyboard shortcut to submit forms across the app. Users have to lift their hands from the keyboard, reach for the mouse, and click the primary button — even for actions they perform dozens of times a day (creating a node, saving a todo, etc.). This is a standard expectation for any modern text-driven app (Slack, Linear, Notion, Claude.ai, ChatGPT, GitHub PR comments, etc.).
+
+## Proposal
+
+Add **Cmd+Return** (Mac) / **Ctrl+Enter** (Windows/Linux) as the primary-submit shortcut everywhere the user has a focused text input/textarea with a clear primary action.
+
+Plain `Enter` should continue to insert a newline in multi-line textareas (today's behavior) — only the modified chord submits.
+
+## Affected surfaces
+
+Found by auditing `frontend/src/components/` and `frontend/src/pages/`:
+
+- **Write / new-node dialog** — `frontend/src/components/NodeForm.js:723` (the primary one; highest-impact)
+- **Profile edit** — `frontend/src/pages/ProfilePage.js:296`
+- **Prompt edit** — `frontend/src/pages/PromptDetailPage.js:335`
+- **Todo edit** — `frontend/src/pages/TodoPage.js:420`
+- **Login email form** — `frontend/src/components/LoginPage.js:365`
+- **Account username field** — `frontend/src/pages/AccountPage.js:155` (already handles plain Enter on a single-line input; add Cmd+Return for consistency)
+- **Future: Todo quick-add** — when #108 lands, the new quick-add input should ship with the shortcut wired up
+
+Search modal (`SearchModal.js`) is intentionally excluded — it auto-filters on keystroke and has no discrete submit step.
+
+Grep confirms **no existing `metaKey` / `ctrlKey` Enter handlers** anywhere in the components — this is a greenfield change.
+
+## Implementation notes
+
+Worth doing as a tiny shared hook so the behavior stays consistent:
+
+```js
+// frontend/src/hooks/useSubmitShortcut.js
+export function useSubmitShortcut(ref, onSubmit, enabled = true) {
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || !enabled) return;
+    const handler = (e) => {
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        onSubmit();
+      }
+    };
+    el.addEventListener('keydown', handler);
+    return () => el.removeEventListener('keydown', handler);
+  }, [ref, onSubmit, enabled]);
+}
+```
+
+Each surface attaches it to its textarea ref + calls the same handler the submit button calls. Disable when the submit button would be disabled (e.g. empty content, in-flight request).
+
+## Optional polish
+
+- Show the shortcut hint in the submit button tooltip / placeholder text (e.g. \"Send (⌘↵)\") so the affordance is discoverable. Detect platform via `navigator.platform` to show ⌘ vs Ctrl.
+
+
+===== ISSUE #128: Timestamps display in UTC instead of user's local timezone (backend emits naive ISO strings) =====
+LABELS: bug
+CREATED: 2026-05-28T16:14:27Z
+
+## Problem
+
+User-facing timestamps across the app are effectively shown in UTC even though most components call `toLocaleString()` / `toLocaleDateString()`. A user in CEST (UTC+2) sees a node created at 14:32 UTC rendered as `5/28/2026, 2:32 PM` instead of `5/28/2026, 4:32 PM`.
+
+## Root cause
+
+The bug is on the **backend serialization side**, not the frontend.
+
+- `backend/models.py` stores timestamps via `datetime.utcnow()` (naive datetimes, no `tzinfo`) into `db.DateTime` columns that don't have `timezone=True`.
+- All serializers call `.isoformat()` on those naive datetimes, producing strings like `"2026-05-28T14:32:00.123456"` — **no `Z` suffix and no UTC offset**.
+- Per ECMA-262, when JavaScript's `new Date(...)` parses an ISO string *without* a timezone indicator, it interprets it as **local time**, not UTC.
+- The frontend then formats that (incorrectly parsed) `Date` with `toLocaleString()`. Result: UTC values displayed as if they were already local time → systematically off by the user's timezone offset.
+
+Example: a CEST user sees the raw UTC value, which looks identical to a "UTC timestamp leaking into the UI."
+
+## Affected surfaces
+
+Pretty much everywhere a timestamp is shown. Quick audit:
+
+- `frontend/src/components/NodeFooter.js:18` — node creation time (Feed, node detail, lists)
+- `frontend/src/components/Dashboard.js:349` — \"Generated on\" line on profile
+- `frontend/src/components/VersionHistoryDrawer.js:36` — version history dates
+- `frontend/src/components/SearchModal.js:127` — search result dates
+- `frontend/src/pages/AiPreferencesPage.js:132,159` — AI preferences versions
+- `frontend/src/pages/ProfilePage.js:193` — profile version dates
+- `frontend/src/pages/TodoPage.js:338,365` — todo/checklist versions
+- `frontend/src/pages/PromptDetailPage.js:206,232` — prompt versions
+- `frontend/src/pages/PromptsPage.js:114` — prompts list
+
+(Backend export filenames like `write-or-perish-export-<ISO>.txt` also encode UTC, but that's intentional and not user-facing in the same way.)
+
+## Proposed fix
+
+Pick one of these — backend is cleaner because it fixes the bug at the source:
+
+**Option A — Backend (preferred):** Emit ISO strings with explicit UTC marker so `new Date()` parses them as UTC.
+
+- Cheapest patch: append `\"Z\"` (or use `.isoformat() + \"Z\"`) in serializers — touches `backend/utils/serialization.py`, `backend/routes/feed.py`, `backend/routes/ai_preferences.py`, `backend/routes/export_data.py`, `backend/utils/quotes.py`, `backend/routes/terms.py`, `backend/routes/import_data.py`, `backend/tasks/recent_context.py`, and any other `.isoformat()` call sites on timestamp columns.
+- Cleaner long-term: switch `datetime.utcnow()` → `datetime.now(timezone.utc)` and (optionally) migrate `db.DateTime` columns to `timezone=True`. Then `.isoformat()` naturally produces `\"2026-05-28T14:32:00+00:00\"`.
+
+**Option B — Frontend workaround:** Centralize date formatting in a single util (`frontend/src/utils/date.js`) that appends `\"Z\"` before parsing if the string has no timezone marker. There's currently **no shared date util** — ~7 components each define their own `formatDate()` helper, so consolidating is worth doing regardless of the timezone fix.
+
+Recommend doing **both**: Option A for correctness, plus the consolidation from Option B to kill the duplicated `formatDate()` helpers and standardize the relative-time UX (\"today\"/\"yesterday\" is only implemented in one of the seven copies).
+
+## Verification
+
+After the fix, set the browser to a non-UTC timezone (e.g. via DevTools → Sensors → Location → Timezone override), create a node, and confirm the displayed creation time matches the wall clock in that timezone.
+
+
+===== ISSUE #127: Voice recording silently drops content after 60-minute mark =====
+LABELS: bug, loore, loore:hrosspet
+CREATED: 2026-05-26T15:07:43Z
+
+**Bug:** Voice recordings that exceed ~60 minutes silently drop all content after the 1-hour mark. The user recorded 62 minutes but only 59:44 was captured. The final 15-second chunk at the 1-hour boundary wasn't processed, and everything after that was lost entirely.
+
+**Key details:**
+- Recording shows 59:44 duration (suggesting the process was killed after exactly 1 hour)
+- The last 15-second chunk from the 1-hour mark was not processed
+- Remaining ~2 minutes of audio were dropped silently — no error, no warning
+- Voice recovery did not detect any uploaded chunks after this mark
+- User cannot recover the lost content
+
+**Expected behavior:**
+- Either: no hard limit on recording duration
+- Or: if there must be a limit, warn the user *before* reaching it (e.g. at 55 min) and gracefully stop recording rather than silently dropping chunks
+- Recovery mechanism should be able to detect and retrieve any chunks that were uploaded but not processed
+
+**Impact:** User lost the concluding portion of a 62-minute reflection session — likely the most synthesized part of the session, given it was a ritual with progressive deepening.
+
+
+===== ISSUE #126: Run legacy-chunk backfill on production (~183 nodes, ~2 GB) =====
+LABELS: 
+CREATED: 2026-05-07T17:01:02Z
+
+## Background
+
+PR #119 (voice replay multi-batch fix) shipped a stale-WebM-offset removal in `AudioContext.js`. That fix is correct for modern (post-#117) batches, but **183 nodes (~2 GB) on prod still have legacy phase-2 `chunk_*.webm[.enc]` files** with continuous Matroska cluster timestamps. Under the new player they no longer replay correctly — first chunk plays fine, then the second chunk's audio jumps to wrong elapsed time / skips the middle.
+
+Affected window: recordings created roughly 2026-01-28 → 2026-03-21, before the ffmpeg-remux batching pipeline landed. Heavily concentrated in two user accounts (mostly user 1 + user 27).
+
+PR #119 includes a dedicated backfill script that's been validated end-to-end on staging against a sample of these legacy nodes, but the actual prod run was deferred to avoid running a CPU-intensive migration unattended.
+
+## What to run
+
+On the prod VM, with the prod env active and from the repo root:
+
+```bash
+# 1. Dry-run, no writes — confirms the count and per-node feasibility
+python -m backend.scripts.backfill_legacy_chunks
+
+# 2. Commit on a single small node first, verify replay in the browser
+python -m backend.scripts.backfill_legacy_chunks --commit --node 5168
+# (open node 5168 in the app, replay, confirm full-length audible playback)
+
+# 3. Full run with full-decode verification
+python -m backend.scripts.backfill_legacy_chunks --commit --verify-decode
+```
+
+## Expected behavior
+
+- ~183 nodes processed; status `ok` for each
+- For each node, `N` legacy `chunk_*.webm[.enc]` files become `N` modern `batch_NNNN-NNNN.webm[.enc]` files (one batch per input chunk, preserving the ~5-min granularity)
+- Original chunks are renamed to `chunk_*.webm[.enc].legacy_backup` — kept as a recovery escape hatch
+- CPU usage spikes to 100–150% during ffmpeg remux; expect intermittent peaks for ~30–60 min total wall time. Best run during a low-traffic window.
+
+## Safety / rollback
+
+The script is idempotent and crash-safe — rerun completes any partial work. Per-node rollback recipe is in the script's docstring (delete `batch_*`, rename `*.legacy_backup` → original).
+
+## Cleanup (later)
+
+After 1–2 weeks of no replay complaints, decide whether to keep the `.legacy_backup` files (~2 GB) or write a separate purge script. Not urgent.
+
+## Reference
+
+- PR #119 — voice replay multi-batch fix
+- Issue #118 — original symptom report
+- Script: `backend/scripts/backfill_legacy_chunks.py`
+
+
+
+===== ISSUE #124: Recovery flow: resumed recordings drop pre-resume audio at finalize merge =====
+LABELS: 
+CREATED: 2026-05-06T22:03:41Z
+
+## Symptoms
+
+When a recording is interrupted (page refresh) and the user clicks "Continue" on the recovery banner, the resumed session correctly continues incrementing the timer, but the final transcribed message contains **only the post-resume audio**. Pre-resume audio is lost from the transcript despite those chunks being safely uploaded to the server.
+
+## Reproduction
+
+On staging or local:
+
+1. Start a voice recording (any URL — both `?force_mime=mp4` and `?force_mime=webm` reproduce, as does the default WebM negotiation).
+2. Record for ~40s so at least one timeslice chunk uploads (chunks 0 and 1 land at 15s and 30s).
+3. Refresh the page mid-recording.
+4. On the recovery banner, click "Continue recording". Timer correctly resumes from ~30s.
+5. Record additional audio.
+6. Stop.
+
+**Expected:** final node's transcript contains both pre- and post-resume audio.
+
+**Actual:** transcript contains only the post-resume portion. Pre-resume chunks (0 and 1 in the example) are stored on disk but their content is missing from the final draft/node.
+
+Confirmed on staging for **both** `?force_mime=mp4` and `?force_mime=webm` on macOS Safari (#123 testing). Pre-existing — not introduced by #123, which only made the bug more visible by exposing the MP4 codepath.
+
+## Root cause
+
+When the user clicks "Continue", the frontend constructs a **fresh `MediaRecorder` instance** with a new mic stream (`useStreamingTranscription.resumeStreaming` → `useStreamingMediaRecorder.startRecording`). That recorder produces its own complete media stream from scratch:
+
+- For fMP4: the first emission from the resumed recorder starts with its own `ftyp` + `moov`, followed by `moof` + `mdat` fragments.
+- For WebM: the first emission starts with its own EBML header + Segment + Tracks, followed by Cluster fragments.
+
+The original chunks 0..N-1 belong to a **different** MediaRecorder instance with a different `moov` / different track UIDs / different timestamp epoch. They're not byte-concat-compatible with the resumed chunks.
+
+At finalize time, `concat_fragmented_media` binary-appends the cached init segment + all chunks in order (`backend/utils/webm_utils.py:concat_fragmented_media`, `backend/tasks/streaming_transcription.py:transcribe_chunk_batch`). For a resumed session this produces:
+
+```
+[init.{ext}] + [chunk_0 (orig stream)] + [chunk_1 (orig stream)] +
+[chunk_2 (RESUMED stream w/ own ftyp+moov / EBML)] + [chunk_3 (resumed stream)] + ...
+```
+
+The merged file has two unrelated init segments mid-stream. ffmpeg's remuxer reads the second one and outputs only what it describes, so the pre-resume audio is silently dropped during the `-c copy` remux.
+
+WebM appears more tolerant in some cases because Matroska's demuxer permits concatenated Segments, but the underlying architectural problem is identical for both formats — confirmed empirically.
+
+## Proposed fix
+
+Treat each `MediaRecorder` instance as a "subsession" and transcribe subsessions independently, concatenating their transcripts into `draft.content`.
+
+**Backend changes (~50 lines):**
+
+1. **Detect init-bearing chunks at upload** (`backend/routes/drafts.py:upload_streaming_chunk`). For chunks N>0, peek at the first 8 bytes:
+   - MP4: `ftyp` at offset 4 → init-bearing (subsession boundary)
+   - WebM: `0x1A45DFA3` at offset 0 → init-bearing
+   
+   If init-bearing, call `persist_init_segment` with an index suffix so it writes `init.{N}.{ext}` (instead of overwriting `init.{ext}`). Chunk 0 keeps writing `init.{ext}` for backward compat.
+
+2. **Track subsession boundaries** when batching (`transcribe_chunk_batch`). For a batch with chunk indices `[a, b, c, ...]`, find all `init.{X}.{ext}` files where `X` ∈ batch indices. Each X is a subsession boundary. Split the batch into sub-batches at those boundaries.
+
+3. **Transcribe each sub-batch independently** with its own init prefix (`init.{X}.{ext}` or `init.{ext}` for the chunk-0 subsession). Concatenate transcripts into `draft.content` in chunk-index order — the existing per-chunk text storage already handles ordering.
+
+**Frontend changes:** none. The recovery flow's resume signature is correct as-is — the backend handles the split.
+
+## Scope
+
+- Out of scope for #123, which addresses the iOS-Safari-no-WebM bug. That PR has been validated end-to-end (7-min Safari MP4 recording + 25s regression on multiple browsers) and should ship to unblock affected users.
+- This recovery bug is pre-existing and affects all formats. Fix can be a focused follow-up PR with its own tests (subsession-boundary detection on real fMP4 + WebM resumed-chunk samples, batch partitioning correctness).
+
+## Affected files (for the future fix)
+
+- `backend/routes/drafts.py` — `upload_streaming_chunk` (init detection + suffixed persistence)
+- `backend/utils/webm_utils.py` — `persist_init_segment` (accept optional index suffix)
+- `backend/tasks/streaming_transcription.py` — `transcribe_chunk_batch` (sub-batch partitioning + per-subsession merge)
+- `backend/utils/audio_storage.py` — broaden init filter to handle `init.{N}.{ext}` variants (already handles `init.*`)
+
+
+
+===== ISSUE #113: Background music interferes with voice input =====
+LABELS: bug, loore, loore:hrosspet
+CREATED: 2026-04-17T07:23:19Z
+
+When recording voice notes, background music playing on the device gets picked up, potentially affecting transcription quality and the listening experience. The app should either:
+- Suppress or duck background audio during voice recording
+- Or provide guidance/handling for this scenario
+
+Reported via voice session.
+
+
+===== ISSUE #110: Raw context export excludes user's replies in other users' threads =====
+LABELS: 
+CREATED: 2026-04-16T13:02:28Z
+
+## Problem
+
+The raw context export (`_preselect_node_ids` in `backend/routes/export_data.py`) uses a recursive CTE that starts from the user's own top-level nodes (`user_id == target_user AND parent_id IS NULL`). This means if the user replied in another user's thread, those replies (and any subtree below them) are not included in the export.
+
+## Context
+
+This was noted during the privacy/accessibility fix in `bb094f9`. Currently Loore is primarily used for journaling/reflection so this doesn't affect real usage yet, but it will matter once the public forum feature is live — users will be replying in each other's threads regularly.
+
+## Possible approach
+
+Expand the CTE base case to also seed from nodes where `user_id == target_user` regardless of `parent_id` (not just top-level nodes). This would pull in threads the user participated in. Need to consider:
+
+- Should the full thread context (ancestor nodes above the user's reply) also be included?
+- Token budget implications — including other users' threads could significantly increase the export size
+- Privacy: the same `accessible_nodes_filter` already handles access checks, so that part is covered
+
+
+===== ISSUE #108: Add quick-add task button to todo list view =====
+LABELS: loore, feature, loore:loore
+CREATED: 2026-04-15T13:48:36Z
+
+**Problem:**
+Currently, the only way to add new tasks to the todo list is through a Voice session — the user has to open voice mode, speak the task, wait for the AI to propose todo changes, and then confirm. This creates significant friction for small, quick tasks (e.g. "email this person", "buy milk") that don't need any AI processing.
+
+This friction discourages users from treating the Loore todo list as their primary task manager, leading them to use other tools or skip capturing tasks entirely.
+
+**Proposed solution:**
+Add a simple quick-add mechanism directly in the todo list UI:
+- A `+` button (or similar) visible on the todo list view
+- Tapping it opens a text input field
+- User types the task and hits enter/save
+- Task is added immediately to the list (no AI proposal/confirmation flow needed)
+
+**Why it matters:**
+- Reduces friction from ~30 seconds (open voice → speak → wait for proposal → confirm) to ~3 seconds
+- Makes the Loore todo list viable as a user's single, primary task list
+- Captures quick thoughts before they're forgotten
+
+
+===== ISSUE #107: Todo empty update ignored on smaller models (Sonnet) =====
+LABELS: 
+CREATED: 2026-04-06T20:53:03Z
+
+When the todo list is empty, Sonnet on staging doesn't update it — it says there is nothing to update, even when the proposed update contains new tasks.
+
+Needs testing on production with larger models to confirm if this is model-specific. May also be obsolete after merging the Orient branch that combines update and updated todo in one LLM response.
+
+
+===== ISSUE #106: [iPhone] Todo form zooms in unnaturally on focus =====
+LABELS: 
+CREATED: 2026-04-06T20:52:47Z
+
+On iPhone, when clicking into the form for editing todos, the view zooms in unnaturally.
+
+This is likely caused by the input font size being less than 16px — iOS Safari auto-zooms on inputs smaller than 16px. Fix by ensuring the todo input/textarea uses at least 16px font size.
+
+
+===== ISSUE #105: Proposal tag / note ID leaking into UI display =====
+LABELS: question
+CREATED: 2026-04-06T20:52:43Z
+
+Internal proposal tags or note IDs are visible in the UI where they shouldn't be. These are implementation details that should be stripped before rendering to the user.
+
+
+===== ISSUE #104: _call_llm_with_retries never passes max_tokens to LLM provider =====
+LABELS: 
+CREATED: 2026-04-06T20:52:41Z
+
+The \`_call_llm_with_retries\` function never passes \`max_tokens\` to the LLM provider API call.
+
+The \`max_output_tokens\` value is used for budget calculations (e.g. reserving space in the context window), but the actual API call doesn't receive it as a parameter. This means the LLM provider uses its own default, which may differ from what was budgeted.
+
+
+===== ISSUE #103: Voice recording not working on Android (Chrome 140, Sony Xperia) =====
+LABELS: 
+CREATED: 2026-04-06T20:52:40Z
+
+Voice recording doesn't work for a user on Chrome 140 on Android 15, running on a Sony Xperia 5 II (XQ-AT52).
+
+Note: the device is rooted, which may be a factor.
+
+Needs investigation — could be a MediaRecorder API compatibility issue or a permissions issue on rooted Android.
+
+
+===== ISSUE #102: [Safari] TTS chunks after first 4s not added to playback queue =====
+LABELS: 
+CREATED: 2026-04-06T20:52:25Z
+
+On Safari, after the first TTS chunk (~4s) plays, subsequent chunks are not added to the playback queue. Even refreshing the page didn't add them.
+
+**Workaround:** Go to the Log page and resume playback from there — chunks then appear correctly.
+
+**Expected:** All TTS chunks should stream and queue for continuous playback, same as in Chrome.
+
+
+===== ISSUE #101: Logo/favicon has square background in Chrome tab =====
+LABELS: 
+CREATED: 2026-04-06T20:52:15Z
+
+The favicon displayed in Chrome browser tabs has a square background around the heartbeat icon, which looks off.
+
+**Expected:** Transparent background for the favicon (specifically for browser tab use). The apple-touch icon with the filled background should stay as-is — only the favicon/tab icon needs the transparent treatment. Could also consider a round background with transparent outside the circle.
+
+
+===== ISSUE #99: Profile TTS speaker icon — unclear privacy/ai-usage handling =====
+LABELS: 
+CREATED: 2026-04-06T20:52:13Z
+
+Added a speaker icon to Profile for TTS, but the privacy/ai-usage handling is unclear.
+
+In the old UX there was an explicit selector and filtering on `ai_usage` chat or train. How is this managed now? Need to clarify the privacy model for profile TTS generation.
+
+
+===== ISSUE #98: Landing page arrow barely visible and off-screen on some viewports =====
+LABELS: 
+CREATED: 2026-04-06T20:52:06Z
+
+The blinking arrow on the landing page is almost not visible and is half off the screen on some devices.
+
+**Expected:** Arrow should always be visible as long as the text fits on screen.
+
+**Issues:**
+- On mobile, there is unnecessarily big margin above the text
+- No margin and no arrow visible on the bottom
+- Needs responsive calculation so it's always visible on different screen sizes
+
+
+===== ISSUE #97: Completed todo items are not removed when proposed for deletion =====
+LABELS: bug, loore, loore:Spytihnev
+CREATED: 2026-04-03T22:59:23Z
+
+When proposing removal of fully completed (`[x]`) items via the `
+
+
+===== ISSUE #94: Todo checkbox toggle has ~1 second delay — needs performance optimization =====
+LABELS: bug, loore, loore:loore
+CREATED: 2026-04-02T13:19:36Z
+
+When clicking a todo checkbox, there's approximately a 1-second delay before the visual state updates. This suggests an inefficient round-trip — likely waiting for a server response before updating the UI.
+
+**Expected behavior:** Checkbox should toggle instantly with an optimistic UI update, then sync to the server in the background.
+
+**Current behavior:** ~1 second lag between click and visual feedback, making todo management feel sluggish — especially when checking off multiple items.
+
+
+===== ISSUE #93: Todo checkbox hit target too small — clicking anywhere on the row should toggle =====
+LABELS: enhancement, loore, loore:loore
+CREATED: 2026-04-02T13:18:32Z
+
+Currently only the small checkbox icon itself is clickable to toggle a todo item. The hit target is too small, especially on mobile or when trying to quickly check off multiple items.
+
+**Expected behavior:** Clicking/tapping anywhere on the todo row should toggle the checkbox. At minimum, significantly increase the clickable area around the checkbox.
+
+**Current behavior:** Only the small checkbox element responds to clicks. Combined with the toggle delay, this makes managing todos feel painful.
+
+
+===== ISSUE #91: [Critical] Implement protected usernames list =====
+LABELS: enhancement, loore, loore:hrosspet
+CREATED: 2026-04-02T10:49:24Z
+
+**Priority: Critical — must be in place before expanding alpha to ~10 new users.**
+
+Create a set of protected/reserved usernames that cannot be claimed by new users (or renamed to by existing users).
+
+**Motivation:** Tonda unintentionally created the username "Lore" — brand-adjacent names should be blocked.
+
+**Proposed blocked categories:**
+
+**System/brand names:**
+- loore, lore, lor
+- admin, administrator, system, bot, ai
+- support, help, feedback, info, contact
+- official, team, staff, mod, moderator
+
+**Functional paths (route collision risk):**
+- profile, settings, login, logout, signup, register
+- node, thread, export, archive, feed, log
+- api, webhook, status, health, ping
+- about, terms, privacy, legal
+
+**Impersonation risks:**
+- hrosspet, peter, peta (founder namespace)
+- null, undefined, anonymous, guest, user, test, demo
+
+**Common squatting targets:**
+- root, superuser, sysadmin
+- god, owner, founder, creator
+
+**Open questions (resolve at implementation time):**
+- Case-insensitive matching? (e.g. "Loore", "LOORE", "loOre" all blocked)
+- Substring matching or exact only? (e.g. should "loore123" be blocked?)
+- Reserve names for planned future invitees, or only system-relevant names?
+- Where to store the list — hardcoded, config file, or DB-editable?
+- Behavior: silent rejection with suggestion, or error message explaining why?
+
+**Also:** Notify Tonda to change his username from "Lore" to something else.
+
+
+===== ISSUE #89: Make proposed todo changes interactive / editable before applying =====
+LABELS: loore, feature, loore:loore
+CREATED: 2026-04-01T19:43:11Z
+
+When the AI proposes todo changes (completed items, new tasks, priority reordering), the proposal currently renders as a read-only checklist. The user can only accept or reject the entire batch.
+
+**Requested behavior:** Make the proposed changes interactive so the user can:
+- Uncheck items they don't want marked as completed
+- Remove or edit proposed new tasks before applying
+- Adjust the proposal inline before confirming
+
+**Why it matters:** The AI often gets most of the changes right but not all of them. Currently the user has to either accept everything and manually fix it afterward, or reject and re-prompt. An editable proposal would make the flow much smoother.
+
+**Example scenario:** AI proposes 6 items as completed. 5 are correct, 1 isn't. User should be able to uncheck that 1 item and then apply the remaining 5.
+
+
+===== ISSUE #88: Voice recording silently drops last audio chunk when submitted from lock screen after phone call interruption =====
+LABELS: bug, loore, loore:hrosspet
+CREATED: 2026-04-01T09:39:17Z
+
+**Steps to reproduce:**
+1. Start a voice recording in voice mode
+2. Receive a phone call — recording correctly pauses
+3. After the phone call ends, hit submit from the lock screen
+4. The voice note is submitted but the last chunk of audio is silently dropped
+
+**Expected behavior:**
+- All recorded audio chunks up to the interruption should be included in the submission
+- If a chunk can't be submitted, the user should be warned about missing audio
+- Voice mode should suggest voice note recovery if incomplete submission is detected
+- Draft should be available as fallback
+
+**Actual behavior:**
+- Last chunk is silently dropped with no error or warning
+- Navigating to home page doesn't trigger recovery
+- Voice mode doesn't suggest recovery
+- Draft availability unclear (likely not saved)
+
+**Additional context:**
+- Internet connection was active throughout
+- The phone call interruption itself was handled correctly (recording paused)
+- The failure is specifically in the submit-from-lock-screen flow after resuming from the call
+- This is a data loss bug — user's spoken content is permanently lost with no indication
+
+
+===== ISSUE #85: Add Anthropic API spend monitoring and alert before spending limit is reached =====
+LABELS: enhancement, loore, loore:hrosspet
+CREATED: 2026-03-29T10:25:47Z
+
+**Problem:** Loore uses Anthropic's API with a spending limit set as a safety cap. When the limit is reached, LLM requests silently fail for users. There is currently no warning or notification before the cap is hit, so the admin only discovers it after users have already been affected.
+
+**Expected behavior:** The system should monitor cumulative API spend and notify the admin (e.g. via email or in-app alert) when spending approaches the configured limit — e.g. at 80% and 95% thresholds — so the limit can be increased proactively.
+
+**Possible approaches:**
+- Poll the Anthropic usage API (or track spend internally from logged token counts) on a schedule
+- Send a notification (email, Slack, or Loore system message) when thresholds are crossed
+- Optionally surface remaining budget in the admin dashboard
+
+
+===== ISSUE #78: Block SPA navigation during active recording (requires createBrowserRouter migration) =====
+LABELS: 
+CREATED: 2026-03-17T15:25:42Z
+
+## Problem
+
+When a user is actively recording on the Reflect or Orient page, clicking an in-app link (e.g. the Loore logo, nav items) navigates away without warning, losing the recording session.
+
+The `beforeunload` event only fires for browser-level actions (refresh, close tab, external URL). React Router SPA navigation bypasses it entirely.
+
+## What we tried
+
+- `useBlocker` from react-router-dom v6 — throws because it requires `createBrowserRouter` (data router API)
+- `unstable_usePrompt` — calls `useBlocker` internally, same error
+- Both are incompatible with `<BrowserRouter>` which the app currently uses
+
+## Current mitigation
+
+- `beforeunload` dialog covers browser refresh/close
+- Recovery banner on Reflect/Orient detects interrupted recordings and offers "Continue recording" / "Discard"
+- At most 15s of audio (one chunk interval) is lost
+
+## Suggested fix
+
+Migrate from `<BrowserRouter>` to `createBrowserRouter` + `<RouterProvider>`. This unlocks the data router API including `useBlocker`.
+
+### Scope
+
+- Convert ~30 route definitions in `App.js` from JSX `<Route>` elements to a `createBrowserRouter([...])` config array
+- Extract `<App>` wrapper logic (navbar, auth, modals) into a layout route component that renders `<Outlet />`
+- Replace `<BrowserRouter><App /></BrowserRouter>` in `index.js` with `<RouterProvider router={router} />`
+- `ProtectedRoute`, `Navigate` redirects, and `useNavigate` calls continue to work unchanged
+- Add `useBlocker` to `useVoiceSession` hook to block SPA navigation during recording
+
+### Effort
+
+Moderate — mostly mechanical refactoring of route definitions. Core app logic stays the same.
+
+
+
+===== ISSUE #66: Stale TTS audio persists after content edits =====
+LABELS: 
+CREATED: 2026-02-13T22:15:22Z
+
+## Description
+
+When a user edits the text content of a node or user profile after TTS audio has already been generated, the old audio remains and is still played back. The `audio_tts_url` is not cleared on content edits, so users hear outdated audio that doesn't match the current text.
+
+## Affected areas
+
+- **Text nodes**: Editing node content does not clear/regenerate TTS audio
+- **User profiles**: Editing profile content (PUT `/profile/{id}`) does not clear `audio_tts_url`
+
+## Expected behavior
+
+When content is edited, either:
+1. Clear `audio_tts_url` so the user must explicitly regenerate TTS, or
+2. Automatically regenerate TTS audio
+
+Option 1 is simpler and avoids unnecessary API costs.
+
+## Additional context
+
+Old audio files also remain on disk indefinitely (no cleanup of orphaned files).
+
+
+===== ISSUE #65: [Bug] Generating Profile: Prompt is too long =====
+LABELS: 
+CREATED: 2026-02-13T17:12:08Z
+
+To reproduce:
+
+1.  import ~ 700k tokens from Claude 
+2. Leave Opus 4.5 as the model
+3. Click generate profile (a promp saying that it will analyze ~100k tokens shows up)
+
+`
+Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'prompt is too long: 203565 tokens > 200000 maximum'}, 'request_id': 'req_011CY6S97q12BGjxxEx8VKBc'}`
+
+https://github.com/user-attachments/assets/deb98d63-362a-4ec6-a370-880b63cc3cfa
+
+
+===== ISSUE #63: [Idea] Remember AI Usage and Privacy Choices in Write dialog =====
+LABELS: 
+CREATED: 2026-02-13T14:57:41Z
+
+These don't get remembered along with the rest of the draft. Could imho be remembered across the board for user.
+You could say defaulting to the most private option is desireable, but I don't think I'd use for example the no AI option very often.
+https://github.com/user-attachments/assets/5e9c954a-8937-4a3e-a3b3-418c89237e89
+
+
+
+===== ISSUE #62: Add tooltip to disabled upload and record buttons =====
+LABELS: 
+CREATED: 2026-02-13T14:49:04Z
+
+Upload and record buttons in write dialog are disabled when No AI Access mode. 
+Would be nice to add a tooltip to the disabled buttons, as it took me a minute to work out why that is
+
+<img width="1284" height="834" alt="Image" src="https://github.com/user-attachments/assets/519b6350-ffae-4102-a989-4ec93cb3d7f1" />
+
+
+===== ISSUE #32: Feature: Incremental user profile generation with context window management =====
+LABELS: enhancement
+CREATED: 2025-12-03T12:26:37Z
+
+## Feature Request
+
+### Summary
+Improve user profile generation by making it incremental - using previously generated profiles as a base and updating them with new user data. This approach should be context-window-aware and handle users with data exceeding model limits.
+
+### Motivation
+Currently, profile generation likely processes all user data at once, which:
+1. Doesn't scale for users with large amounts of content
+2. Regenerates the entire profile from scratch each time
+3. May hit context window limits for users with extensive writing
+
+### Proposed Implementation
+
+#### Core Logic
+When generating a user profile:
+
+1. **Check for existing profile**
+   - If no profile exists → Initial generation mode
+   - If profile exists → Incremental update mode
+
+2. **Initial generation mode** (no existing profile)
+   - Take first [N tokens ~ given model's context window limit] of user data (minus buffer for prompt/output - use current estimation logic)
+   - Generate initial user profile
+   - Store profile in DB with metadata (timestamp, tokens_processed, last_node_id, etc.)
+   - If more data remains:
+     - Take next [N token] chunk
+     - Update profile based on new chunk + previous profile
+     - Store updated profile
+     - Repeat until all user data processed
+   - Store all intermediate profiles in DB for history/debugging
+
+3. **Incremental update mode** (profile exists)
+   - Load most recent profile
+   - Fetch only user data created since last profile generation (using timestamp/node_id)
+   - If new data fits in context window:
+     - Update profile with: previous profile + new data
+   - If new data exceeds context window:
+     - Process in chunks as in initial mode
+   - Store updated profile with new metadata
+
+#### Context Window Management
+- Make aware of selected model's context window limit (e.g., Opus 4.5: 200k tokens)
+- Use current token estimation logic with appropriate buffer (X tokens)
+- Calculate: `usable_tokens = context_window - prompt_overhead - buffer - output_reserve`
+- Chunk user data to fit within `usable_tokens`
+
+#### Database Schema Considerations
+Store profile metadata:
+- `user_id`: which user
+- `generated_at`: timestamp
+- `model_used`: which LLM model
+- `tokens_processed`: cumulative tokens used
+- `last_node_id` or `last_timestamp`: track data boundary
+- `profile_version`: incremental counter
+- `is_latest`: boolean flag for current profile
+- `profile_content`: the actual generated profile
+
+### Benefits
+1. **Scalability**: Handle users with 1M+ tokens of data
+2. **Efficiency**: Only process new data after initial generation
+3. **Workaround for limits**: Enable profile generation even when total data exceeds context window
+4. **History**: Keep intermediate profiles for debugging/analysis
+5. **Better profiles**: Iterative refinement should produce more coherent, comprehensive profiles
+
+### Example Scenario
+User with ~1M tokens of data, using Opus 4.5 (200k context):
+1. First generation: Process 5 chunks of ~180k tokens each (with buffer)
+2. Generate profile v1 from chunk 1
+3. Update to profile v2 using v1 + chunk 2
+4. Update to profile v3 using v2 + chunk 3
+5. Continue until profile v5 (all data processed)
+6. Two weeks later: User creates 20k tokens of new content
+7. Next generation: Update profile v5 with just the new 20k tokens → profile v6
+
+### Related Files
+- Profile generation prompt/logic (location TBD)
+- Database models for storing profiles and metadata
+- Token estimation utilities
+- User data fetching logic
+
+### Technical Considerations
+- How to order/prioritize user data for chunking (chronological? by node importance?)
+- Prompt design for "update this profile with new information" vs "generate initial profile"
+- Storage/retrieval of intermediate profiles
+- UI to show users which data has been included in their current profile
+
+
+===== ISSUE #29: No progress indicator for audio generation from text =====
+LABELS: enhancement
+CREATED: 2025-12-02T17:42:26Z
+
+**Description:**
+When generating audio from text (TTS), no progress indicator is shown.
+
+**Expected behavior:** Progress bar or spinner should indicate TTS generation status.
+
+**Actual behavior:** No visual feedback during audio generation.
+
+**Category:** UI, TTS
+
+
+===== ISSUE #28: Audio player not fully visible on mobile =====
+LABELS: bug
+CREATED: 2025-12-02T17:42:24Z
+
+**Description:**
+The audio player UI is not fully visible on mobile devices.
+
+**Expected behavior:** Audio player should be fully visible and usable on mobile screens.
+
+**Actual behavior:** Parts of the audio player are cut off or hidden on mobile.
+
+**Category:** Mobile, UI, Audio
+
+
+===== ISSUE #23: Voice note re-recording is broken =====
+LABELS: bug
+CREATED: 2025-12-02T17:42:15Z
+
+**Description:**
+Re-recording an existing voice note does not work.
+
+**Expected behavior:** Users should be able to replace a voice note with a new recording.
+
+**Actual behavior:** Re-recording functionality is broken.
+
+**Category:** Audio
+
+
+===== ISSUE #22: Voice mode doesn't work on locked phone in app =====
+LABELS: bug
+CREATED: 2025-12-02T17:42:13Z
+
+**Description:**
+Voice mode fails when the phone display is locked in the app, but works correctly on the website.
+
+**Expected behavior:** Voice mode should continue working when phone screen is locked, similar to website behavior.
+
+**Actual behavior:** Voice mode stops functioning when display locks in the mobile app.
+
+**Category:** Mobile, Audio
+
+
+===== ISSUE #18: Status bar shows unclear 40% initially =====
+LABELS: enhancement
+CREATED: 2025-12-02T17:42:07Z
+
+**Description:**
+The status bar initially displays 40%, but it's unclear what this percentage represents.
+
+**Expected behavior:** The status bar should clearly indicate what metric is being displayed, or start at a more intuitive value (0% or 100%).
+
+**Actual behavior:** Shows 40% with no context.
+
+**Category:** UI
+
+

@@ -29,6 +29,7 @@ services:
       - FRONTEND_URL=${FRONTEND_URL:-https://staging.loore.org}
       # Dark features live on staging by design.
       - SHARE_V1=true
+      - DOWNLOAD_V1=true
     volumes:
       # Mount migrations from repo root (not in Docker build context)
       - ./migrations:/app/migrations
@@ -43,6 +44,8 @@ services:
       # Dark features live on staging by design (must match the backend
       # service — the worker renders prompts and executes tools).
       - SHARE_V1=true
+      # Dark features live on staging by design (match the backend service).
+      - DOWNLOAD_V1=true
     deploy:
       resources:
         limits:

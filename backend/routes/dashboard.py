@@ -129,6 +129,10 @@ def get_dashboard():
             # (nav link, Share page) while off.
             "share_v1_enabled": bool(
                 current_app.config.get("SHARE_V1", False)),
+            # Download PoC dark flag — the frontend hides the
+            # recommendations panel while off.
+            "download_v1_enabled": bool(
+                current_app.config.get("DOWNLOAD_V1", False)),
         },
         "pinned_nodes": pinned_list,
         "nodes": nodes_list,
