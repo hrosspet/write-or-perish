@@ -8,6 +8,7 @@ import ModelSelector from "./ModelSelector";
 import NodeForm from "./NodeForm";
 import ProposalInline, { hasProposalSections, splitProposalText } from "./ProposalInline";
 import SemanticNeighbors from "./SemanticNeighbors";
+import RecommendationsPanel from "./RecommendationsPanel";
 import { useUser } from "../contexts/UserContext";
 import { useToast } from "../contexts/ToastContext";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
@@ -976,6 +977,7 @@ function NodeDetail() {
         {topRightControls}
       </div>
       <SemanticNeighbors nodeId={node.id} />
+      <RecommendationsPanel nodeId={node.id} />
       {ancestorsSection}
       {highlightedNodeSection}
       {childrenSection}

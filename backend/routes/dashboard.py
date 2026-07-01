@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node, User, UserProfile
 from backend.extensions import db
@@ -125,6 +125,10 @@ def get_dashboard():
             # Lets the client block cost actions (e.g. starting a long voice
             # recording) up front instead of after the fact (issue #85).
             "spend_blocked": user_is_capped(current_user),
+            # Download PoC dark flag — the frontend hides the
+            # recommendations panel while off.
+            "download_v1_enabled": bool(
+                current_app.config.get("DOWNLOAD_V1", False)),
         },
         "pinned_nodes": pinned_list,
         "nodes": nodes_list,

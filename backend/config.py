@@ -73,6 +73,15 @@ class Config:
     SEMANTIC_SEARCH_AGENTIC = os.environ.get(
         "SEMANTIC_SEARCH_AGENTIC", "false").lower() in ("1", "true", "yes")
 
+    # --- Download PoC (Feature 2) ---
+    # Context-aware resurfacing of imported external items. Ships DARK:
+    # off by default, on in staging. Off -> /api/external/recommendations
+    # 404s and the frontend panel is hidden (download_v1_enabled in the
+    # user payload). The substrate (import/fetch/search) is NOT gated.
+    DOWNLOAD_V1 = os.environ.get(
+        "DOWNLOAD_V1", "false").lower() in ("1", "true", "yes")
+    DOWNLOAD_TOP_K = int(os.environ.get("DOWNLOAD_TOP_K", "3"))
+
     # Safety factor for prompt-too-long retries (0.99 = aim for 99% of the limit)
     RETRY_SAFETY_FACTOR = 0.99
 
@@ -211,6 +220,15 @@ class Config:
         "gpt-4o-mini-tts": {"price_per_minute_usd": 0.015},
         "gpt-4o-transcribe": {"price_per_minute_usd": 0.006},
     }
+
+    # --- X (Twitter) API for bookmark sync (#155 / Download) ---
+    # Pay-per-use tier; OAuth2 PKCE app. Unset = feature env-gated off.
+    X_CLIENT_ID = os.environ.get("X_CLIENT_ID")
+    X_CLIENT_SECRET = os.environ.get("X_CLIENT_SECRET")
+    X_REDIRECT_URI = os.environ.get(
+        "X_REDIRECT_URI",
+        "https://loore.org/api/external/twitter/callback",
+    )
 
     # Magic link email authentication (SMTP)
     MAIL_SERVER = os.environ.get("MAIL_SERVER", "localhost")

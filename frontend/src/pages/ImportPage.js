@@ -1,5 +1,6 @@
 import React from "react";
 import ImportData from "../components/ImportData";
+import ExternalImport from "../components/ExternalImport";
 
 export default function ImportPage() {
   return (
@@ -18,6 +19,7 @@ export default function ImportPage() {
         Import Data
       </h2>
       <ImportData inline />
+      <ExternalImport />
     </div>
   );
 }

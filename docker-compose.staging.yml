@@ -27,6 +27,8 @@ services:
     environment:
       - FLASK_ENV=staging
       - FRONTEND_URL=${FRONTEND_URL:-https://staging.loore.org}
+      # Dark features live on staging by design.
+      - DOWNLOAD_V1=true
     volumes:
       # Mount migrations from repo root (not in Docker build context)
       - ./migrations:/app/migrations
@@ -37,6 +39,9 @@ services:
 
   celery:
     command: celery -A backend.celery_app.celery worker --loglevel=debug --concurrency=2
+    environment:
+      # Dark features live on staging by design (match the backend service).
+      - DOWNLOAD_V1=true
     deploy:
       resources:
         limits:
