@@ -180,6 +180,10 @@ def create_app():
     from backend.routes.feedback import feedback_bp
     app.register_blueprint(feedback_bp, url_prefix="/api/feedback")
 
+    # Upload v1 / Share (dark behind SHARE_V1; routes 404 while off).
+    from backend.routes.share import share_bp
+    app.register_blueprint(share_bp, url_prefix="/api/share")
+
     # AI preferences folded into the artifact model (#158 Slice 5): managed via
     # the generic /api/artifacts CRUD (kind="ai_preferences"); the dedicated
     # /api/ai-preferences blueprint was removed.

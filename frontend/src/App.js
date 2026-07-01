@@ -25,6 +25,8 @@ import TodoPage from "./pages/TodoPage";
 import ImportPage from "./pages/ImportPage";
 import AccountPage from "./pages/AccountPage";
 import ArtifactsPage from "./pages/ArtifactsPage";
+import SharePage from "./pages/SharePage";
+import PublicSharePage from "./pages/PublicSharePage";
 import ProfileGenerationWatcher from "./components/ProfileGenerationWatcher";
 import PromptsPage from "./pages/PromptsPage";
 import PromptDetailPage from "./pages/PromptDetailPage";
@@ -149,6 +151,8 @@ function App() {
           <Route path="/ai-preferences" element={<Navigate to="/artifacts/ai_preferences" replace />} />
           <Route path="/artifacts" element={<ProtectedRoute><ArtifactsPage /></ProtectedRoute>} />
           <Route path="/artifacts/:kind" element={<ProtectedRoute><ArtifactsPage /></ProtectedRoute>} />
+          <Route path="/share" element={<ProtectedRoute><SharePage /></ProtectedRoute>} />
+          <Route path="/share/u/:username" element={<PublicSharePage />} />
           <Route path="/account" element={<ProtectedRoute><AccountPage /></ProtectedRoute>} />
           <Route path="/node/:id" element={<ProtectedRoute><NodeDetailWrapper /></ProtectedRoute>} />
           <Route path="/admin" element={<ProtectedRoute><AdminPanel /></ProtectedRoute>} />
