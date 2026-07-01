@@ -73,6 +73,15 @@ class Config:
     SEMANTIC_SEARCH_AGENTIC = os.environ.get(
         "SEMANTIC_SEARCH_AGENTIC", "false").lower() in ("1", "true", "yes")
 
+    # --- Download PoC (Feature 2) ---
+    # Context-aware resurfacing of imported external items. Ships DARK:
+    # off by default, on in staging. Off -> /api/external/recommendations
+    # 404s and the frontend panel is hidden (download_v1_enabled in the
+    # user payload). The substrate (import/fetch/search) is NOT gated.
+    DOWNLOAD_V1 = os.environ.get(
+        "DOWNLOAD_V1", "false").lower() in ("1", "true", "yes")
+    DOWNLOAD_TOP_K = int(os.environ.get("DOWNLOAD_TOP_K", "3"))
+
     # Safety factor for prompt-too-long retries (0.99 = aim for 99% of the limit)
     RETRY_SAFETY_FACTOR = 0.99
 
