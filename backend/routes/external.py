@@ -255,3 +255,48 @@ def twitter_sync():
     from backend.tasks.external_sync import sync_twitter_bookmarks
     task = sync_twitter_bookmarks.delay(current_user.id)
     return jsonify({"task_id": task.id, "status": "pending"}), 202
+
+
+@external_bp.route("/recommendations", methods=["GET"])
+@login_required
+def recommendations():
+    """Top-3 external items relevant to the thread the user is writing in
+    (Download PoC — dark behind DOWNLOAD_V1).
+
+    The query is composed server-side from the node's thread tail + the
+    user's intentions + profile (AI-visible content only) and ranked by
+    semantic relevance over the user's imported items. Returns items only
+    for their owner; empty list when nothing clears the score floor.
+    """
+    if not current_app.config.get("DOWNLOAD_V1", False):
+        return jsonify({"error": "Not found"}), 404
+
+    node_id = request.args.get("node_id", type=int)
+    if not node_id:
+        return jsonify({"error": "node_id is required"}), 400
+
+    from backend.models import Node
+    node = Node.query.get(node_id)
+    # human_owner_id is null on legacy rows — fall back to user_id (same
+    # convention as the embedding-owner helper).
+    owner_id = (node.human_owner_id or node.user_id) if node else None
+    if not node or owner_id != current_user.id:
+        return jsonify({"error": "Not found"}), 404
+
+    from backend.utils.api_keys import get_openai_chat_key
+    api_key = get_openai_chat_key(current_app.config)
+    if not api_key:
+        return jsonify({"items": []}), 200
+
+    from backend.utils.recommendations import recommend_external_items
+    try:
+        items = recommend_external_items(
+            current_user.id, node, api_key,
+            k=current_app.config.get("DOWNLOAD_TOP_K", 3),
+        )
+        db.session.commit()  # persist the query-embed cost log
+    except Exception:  # noqa: BLE001 — recommendations must never break a page
+        current_app.logger.warning(
+            "external recommendations failed", exc_info=True)
+        return jsonify({"items": []}), 200
+    return jsonify({"items": items}), 200
