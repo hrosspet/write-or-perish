@@ -776,8 +776,9 @@ This roadmap prioritizes **privacy & encryption first** (Phase -1), then **found
 24. **NEXT:** Onboarding flow + About page updates for alpha expansion
 25. **NEXT:** Expand agentic tool use — intentions, feedback, memory/artifacts, long-running thread UX
 26. **NEXT:** RAG / semantic search — embeddings, chat with archive, community archive (Phase 1)
-27. **THEN:** Testing infrastructure (Phase 0) + legal compliance
-28. Iterate based on learnings at each phase
+27. **NEXT:** Alchemical Mode (spec'd 2026-07-01, see FOUR-FEATURE-ECOSYSTEM.md) — LLM readiness/safety checker over recent user data → opt-in with strong disclaimers → gated Alchemy home card with hidden source prompt (Meditationbook.page PoC first; Chapman corpus + Petr's book as pluggable sources later)
+28. **THEN:** Testing infrastructure (Phase 0) + legal compliance
+29. Iterate based on learnings at each phase
 
 This is ambitious but achievable. Each phase delivers value, and the foundation work (especially privacy) ensures sustainable velocity and user trust throughout.
 

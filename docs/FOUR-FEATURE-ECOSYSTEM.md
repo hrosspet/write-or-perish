@@ -971,6 +971,47 @@ Transparency builds trust and helps users understand market dynamics.
 
 ---
 
+### Alchemical Mode — Guided Depth Work (NEW, spec'd July 2026)
+
+**Purpose:** Let a user progress through deep transformative source material — at their own pace, in their own language, at the right time — with Loore as the translator and guide.
+
+**Not one of the four network features:** Alchemical Mode is a depth extension of Feature 1 (single-player, private). It exists because Loore holds something no book can use on its own: enough context on the user (profile, intentions, the full arc of their sharing) to know *what* in a source is relevant to them *right now*, and how to say it so they actually hear it.
+
+#### Core Concept
+
+Serious contemplative/meta-rational source material is famously hard to enter: the language is idiosyncratic, the relevant part depends on where the reader currently is, and reading it too early (or in the wrong frame) ranges from useless to destabilizing. Loore inverts the access problem — instead of the user going to the source, the source comes to the user, filtered for current relevance and translated into their vocabulary, keyed to what their recent sharing shows they're ready for.
+
+#### Sources (user selects one)
+
+1. **David Chapman's body of text** — Vividness, Meaningness, Buddhism for Vampires, … *(licensing/permission: open decision)*
+2. **Mark Lippmann's (meditationstuff) Meditationbook.page** — freely available; the PoC source
+3. **Petr's own book** — spirituality through a scientific lens
+
+Sources are pluggable per-source content + prompt packages; more can follow.
+
+#### Mechanics (authoritative spec, 2026-07-01)
+
+1. **Mode unlock (our-side pre-filter):** a separate LLM process checks the last couple of months of the user's data against a safety/readiness checklist. Only users identified as "ready" — based on the depth and content of their sharing — are ever shown the mode.
+2. **Offer + opt-in (user-side):** the mode is then *offered*, with strong disclaimers that this is experimental and at one's own risk. Nothing activates without explicit opt-in.
+3. **The Alchemy home card:** opting in enables a new home card — **Alchemy** — backed by a special *hidden* prompt carrying the selected source. The agent walks the user through the material: surfacing what's relevant to their current state, translating it into their language, pacing by what their ongoing sharings show.
+
+#### Design Notes
+
+- **Double gate is the safety model:** readiness pre-filter (system) AND informed opt-in (user). Neither alone suffices.
+- **The hidden prompt is deliberate:** the user meets the material through the guide, not as a text dump — that's the whole point of the mode.
+- **Readiness is continuous, not one-shot:** the same signal (current sharings) that unlocks the mode paces progression inside it.
+
+#### Open Decisions
+
+- Contents of the safety/readiness checklist (safety criteria are Petr's call)
+- Licensing/permission for third-party corpora (Chapman; Lippmann's page is freely available, used for the PoC)
+- Adverse-effects handling: pause/exit mechanics, whether the mode can self-suspend if sharings indicate destabilization
+- Discoverability: whether non-ready users ever learn the mode exists
+
+**Status:** 📋 Spec'd (July 2026), PoC in development — readiness checker + opt-in flow + Alchemy card, dark behind a flag; Meditationbook.page as first source
+
+---
+
 ## How The Four Features Work Together
 
 ### The Complete Flywheel

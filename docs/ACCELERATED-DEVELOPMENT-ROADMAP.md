@@ -534,8 +534,9 @@ Phase A (A.1–A.19) and B.1 are complete — see tables above for details.
 ### After alpha expansion
 7. **NEXT:** A.9 (License & legal compliance for beta)
 8. **NEXT:** RAG / semantic search — chat with archive, community archive via vector DB, agentic search
-9. **THEN:** Phase B remaining (B.2 backend tests + B.3 frontend tests) — can run parallel
-10. **THEN:** Phase C infrastructure, leading to Phase D parallelization
+9. **NEXT:** Alchemical Mode (spec'd 2026-07-01, authoritative spec in FOUR-FEATURE-ECOSYSTEM.md) — LLM readiness/safety checker over recent user data → opt-in with strong experimental disclaimers → gated Alchemy home card with hidden source prompt; sources pluggable (Meditationbook.page PoC first, Chapman corpus + Petr's book later). Note: Intention Market deferred until more users (maintainer decision 2026-07-01).
+10. **THEN:** Phase B remaining (B.2 backend tests + B.3 frontend tests) — can run parallel
+11. **THEN:** Phase C infrastructure, leading to Phase D parallelization
 
 ---
 
