@@ -155,12 +155,19 @@ const shareCard = {
   description: "Give something outward.",
   icon: (
     <svg width="42" height="42" viewBox="0 0 42 42" fill="none">
-      {/* An open vessel with an offering rising from it. */}
-      <path d="M10 25 C10 30.5 14.8 34 21 34 C27.2 34 32 30.5 32 25"
+      {/* Two cupped hands offering a cut gem, with small glints. */}
+      <path d="M15 11 L27 11 L31 16 L21 25 L11 16 Z"
+            stroke="var(--accent)" strokeWidth="1.4" fill="none" strokeLinejoin="round"/>
+      <path d="M11 16 L31 16 M17.5 11 L17 16 L21 25 M24.5 11 L25 16 L21 25"
+            stroke="var(--accent)" strokeWidth="1.1" fill="none" strokeLinejoin="round" opacity="0.75"/>
+      <path d="M5 27 C6.5 31.5 12 35 21 35 M9.5 28.5 C12 31.5 16 33 21 33"
             stroke="var(--accent)" strokeWidth="1.4" fill="none" strokeLinecap="round"/>
-      <circle cx="21" cy="19" r="2.6" stroke="var(--accent)" strokeWidth="1.4" fill="none"/>
-      <circle cx="26.5" cy="12.5" r="1.3" stroke="var(--accent)" strokeWidth="1.2" fill="none" opacity="0.65"/>
-      <circle cx="16.5" cy="10" r="0.9" stroke="var(--accent)" strokeWidth="1.1" fill="none" opacity="0.4"/>
+      <path d="M37 27 C35.5 31.5 30 35 21 35 M32.5 28.5 C30 31.5 26 33 21 33"
+            stroke="var(--accent)" strokeWidth="1.4" fill="none" strokeLinecap="round"/>
+      <path d="M34 6.5 V11 M31.75 8.75 H36.25"
+            stroke="var(--accent)" strokeWidth="1.2" strokeLinecap="round" opacity="0.7"/>
+      <path d="M8 6 V9 M6.5 7.5 H9.5"
+            stroke="var(--accent)" strokeWidth="1.1" strokeLinecap="round" opacity="0.45"/>
     </svg>
   ),
 };

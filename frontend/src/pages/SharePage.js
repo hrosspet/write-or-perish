@@ -247,7 +247,13 @@ export default function SharePage() {
                 color: 'var(--text-secondary)', marginBottom: '10px',
               }}>
                 Where should this go? Publishing to Loore puts it in the
-                Commons and on your public page at /share/u/{user?.username}.
+                Commons and on{' '}
+                <Link
+                  to={`/share/u/${user?.username}`}
+                  style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+                >
+                  your public page
+                </Link>.
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
                 <button
