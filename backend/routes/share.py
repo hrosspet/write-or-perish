@@ -334,9 +334,12 @@ def public_shares(username):
     items = []
     for node in nodes:
         share = share_by_node.get(node.id)
+        content = (node.get_content() or "").strip()
         items.append({
             "id": node.id,
-            "content": node.get_content(),
+            # Preview-capped like the Commons feed — the full text lives in
+            # the thread the card links to.
+            "content": content[:600] + ("…" if len(content) > 600 else ""),
             "share_type": share.share_type if share else None,
             "public_node_id": node.id,
             "permalink": (f"/u/{user.username}/{node.public_slug}"

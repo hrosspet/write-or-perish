@@ -273,6 +273,17 @@ def test_public_page_includes_direct_public_roots(app):
     assert direct["share_type"] is None
 
 
+def test_public_page_caps_content_to_preview(app):
+    """The public page shows Commons-style previews, not full nodes."""
+    client = _client_for(app, "author")
+    share = _mk_share_draft(content="x" * 2000)
+    client.post(f"/api/share/{share.id}/publish")
+    anon = app.test_client()
+    item = anon.get("/api/share/public/author").get_json()["shares"][0]
+    assert len(item["content"]) == 601  # 600 chars + ellipsis
+    assert item["content"].endswith("…")
+
+
 def test_pinned_share_leads_the_public_page(app):
     """Pinning a share's public node features it at the top of the public
     page regardless of publish order."""
