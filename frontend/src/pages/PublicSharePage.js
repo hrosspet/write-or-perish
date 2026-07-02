@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import api from '../api';
 import MarkdownBody from '../components/MarkdownBody';
 import { formatDate } from '../utils/date';
@@ -15,6 +15,7 @@ import { formatDate } from '../utils/date';
  */
 export default function PublicSharePage() {
   const { username } = useParams();
+  const navigate = useNavigate();
   // 'loading' | 'ok' | 'notfound'
   const [status, setStatus] = useState('loading');
   const [data, setData] = useState(null);
@@ -85,9 +86,21 @@ export default function PublicSharePage() {
       {data.shares.map((share) => (
         <div
           key={share.id}
+          onClick={(e) => {
+            if (!share.public_node_id) return;
+            if (e.metaKey || e.ctrlKey) {
+              window.open(`/node/${share.public_node_id}`, '_blank', 'noopener');
+            } else {
+              navigate(`/node/${share.public_node_id}`);
+            }
+          }}
+          onMouseEnter={(e) => { if (share.public_node_id) e.currentTarget.style.borderColor = 'var(--border-hover)'; }}
+          onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--border)'; }}
           style={{
             background: 'var(--bg-card)', border: '1px solid var(--border)',
             borderRadius: '12px', padding: '32px 36px', marginBottom: '24px',
+            cursor: share.public_node_id ? 'pointer' : 'default',
+            transition: 'border-color 0.15s ease',
           }}
         >
           <div style={{
@@ -104,27 +117,10 @@ export default function PublicSharePage() {
             <MarkdownBody>{share.content}</MarkdownBody>
           </div>
           <div style={{
-            display: 'flex', justifyContent: 'space-between',
-            alignItems: 'baseline', marginTop: '16px',
+            fontFamily: 'var(--sans)', fontSize: '0.7rem', fontWeight: 300,
+            color: 'var(--text-muted)', opacity: 0.7, marginTop: '16px',
           }}>
-            <span style={{
-              fontFamily: 'var(--sans)', fontSize: '0.7rem', fontWeight: 300,
-              color: 'var(--text-muted)', opacity: 0.7,
-            }}>
-              {formatDate(share.published_at, { relative: false })}
-            </span>
-            {share.public_node_id && (
-              <a
-                href={`/node/${share.public_node_id}`}
-                style={{
-                  fontFamily: 'var(--sans)', fontSize: '0.75rem',
-                  fontWeight: 300, color: 'var(--accent)',
-                  textDecoration: 'none', opacity: 0.85,
-                }}
-              >
-                open the conversation →
-              </a>
-            )}
+            {formatDate(share.published_at, { relative: false })}
           </div>
         </div>
       ))}
