@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useUser } from '../contexts/UserContext';
+import AlchemyOfferModal from '../components/AlchemyOfferModal';
 
 function useOnScreen(ref, threshold = 0.1) {
   const [isVisible, setIsVisible] = useState(false);
@@ -53,6 +55,20 @@ const cards = [
   },
 ];
 
+// Alembic / vessel icon for the gated Alchemy card — same 42px stroke
+// style as the Text card.
+const alchemyIcon = (
+  <svg width="42" height="42" viewBox="0 0 42 42" fill="none">
+    <path
+      d="M17 7 L25 7 M19 7 L19 16 C13.5 18.5 10 23.5 10 28 C10 32.5 14.5 35 21 35 C27.5 35 32 32.5 32 28 C32 23.5 28.5 18.5 23 16 L23 7"
+      stroke="var(--accent)" strokeWidth="1.4" fill="none"
+      strokeLinecap="round" strokeLinejoin="round"
+    />
+    <line x1="13.5" y1="27" x2="28.5" y2="27"
+          stroke="var(--accent)" strokeWidth="1.4" strokeLinecap="round" />
+  </svg>
+);
+
 function WorkflowCard({ card, delay }) {
   const ref = useRef(null);
   const isVisible = useOnScreen(ref);
@@ -72,7 +88,11 @@ function WorkflowCard({ card, delay }) {
   return (
     <div
       ref={ref}
-      onClick={() => !disabled && navigate(card.path)}
+      onClick={() => {
+        if (disabled) return;
+        if (card.onClick) card.onClick();
+        else navigate(card.path);
+      }}
       onMouseEnter={() => !disabled && setHovered(true)}
       onMouseLeave={() => !disabled && setHovered(false)}
       style={{
@@ -102,7 +122,9 @@ function WorkflowCard({ card, delay }) {
         right: 0,
         height: "1px",
         background: "linear-gradient(90deg, transparent, var(--accent), transparent)",
-        opacity: hovered ? 0.5 : 0,
+        // Cards flagged `offered` (Alchemy invitation) keep a faint
+        // permanent accent line as a subtle distinguishing touch.
+        opacity: hovered ? 0.5 : (card.offered ? 0.22 : 0),
         transition: "opacity 0.4s ease",
       }} />
 
@@ -152,6 +174,27 @@ export default function HomePage() {
   const questionRef = useRef(null);
   const greetingVisible = useOnScreen(greetingRef);
   const questionVisible = useOnScreen(questionRef);
+  const { user } = useUser();
+  const [showAlchemyOffer, setShowAlchemyOffer] = useState(false);
+
+  // Alchemical Mode card — only rendered once the readiness pre-filter has
+  // fired ('offered') or the user has opted in ('active'). Null → nothing.
+  const alchemyStatus = user?.alchemy_status;
+  const allCards = [...cards];
+  if (alchemyStatus === 'offered' || alchemyStatus === 'active') {
+    const offered = alchemyStatus === 'offered';
+    allCards.push({
+      key: 'alchemy',
+      path: '/alchemy',
+      title: 'Alchemy',
+      description: offered ? 'An invitation awaits.' : 'Continue the work.',
+      icon: alchemyIcon,
+      offered,
+      // While only offered, the card opens the opt-in modal instead of
+      // navigating.
+      onClick: offered ? () => setShowAlchemyOffer(true) : undefined,
+    });
+  }
 
   return (
     <div style={{
@@ -200,13 +243,17 @@ export default function HomePage() {
         gap: "1.5rem",
         flexWrap: "wrap",
         justifyContent: "center",
-        maxWidth: "580px",
+        maxWidth: allCards.length > 2 ? "880px" : "580px",
         width: "100%",
       }}>
-        {cards.map((card, i) => (
+        {allCards.map((card, i) => (
           <WorkflowCard key={card.key} card={card} delay={400 + i * 120} />
         ))}
       </div>
+
+      {showAlchemyOffer && (
+        <AlchemyOfferModal onClose={() => setShowAlchemyOffer(false)} />
+      )}
     </div>
   );
 }

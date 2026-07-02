@@ -32,6 +32,14 @@ PROMPT_DEFAULTS = {
         'title': 'Text Mode',
         'file': 'agentic.txt',
     },
+    # Alchemical Mode guide prompt. `hidden` keeps it off the Prompts page:
+    # the user meets the source through the guide (that's the mode's whole
+    # design), and the readiness gate shouldn't be self-editable.
+    'alchemy': {
+        'title': 'Alchemy',
+        'file': 'alchemy.txt',
+        'hidden': True,
+    },
 }
 
 PROMPTS_DIR = os.path.join(

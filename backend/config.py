@@ -73,6 +73,15 @@ class Config:
     SEMANTIC_SEARCH_AGENTIC = os.environ.get(
         "SEMANTIC_SEARCH_AGENTIC", "false").lower() in ("1", "true", "yes")
 
+    # --- Alchemical Mode (docs/FOUR-FEATURE-ECOSYSTEM.md) ---
+    # Guided depth work behind a DOUBLE gate (LLM readiness pre-filter +
+    # explicit user opt-in with disclaimers). Ships DARK: off by default,
+    # on in staging. Off -> alchemy routes 404, the read_source tool is
+    # dropped from the tool list, and alchemy_status is absent from the
+    # user payload (frontend shows nothing).
+    ALCHEMY_V1 = os.environ.get(
+        "ALCHEMY_V1", "false").lower() in ("1", "true", "yes")
+
     # Safety factor for prompt-too-long retries (0.99 = aim for 99% of the limit)
     RETRY_SAFETY_FACTOR = 0.99
 

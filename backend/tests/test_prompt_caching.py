@@ -109,7 +109,10 @@ def test_gated_voice_tools_warm_matches_generation():
     on = gated_voice_tools({"SEMANTIC_SEARCH_AGENTIC": True})
     assert "semantic_search" not in names(off)        # dark (prod default)
     assert "semantic_search" in names(on)             # enabled (staging)
-    assert names(on) == names(VOICE_TOOLS)
+    # With every dark flag enabled, the full tool list is exposed.
+    all_on = gated_voice_tools(
+        {"SEMANTIC_SEARCH_AGENTIC": True, "ALCHEMY_V1": True})
+    assert names(all_on) == names(VOICE_TOOLS)
     assert names(gated_voice_tools({})) == names(off)  # unset == dark
     # Identical config -> identical list for both call sites (the invariant).
     cfg = {"SEMANTIC_SEARCH_AGENTIC": False}

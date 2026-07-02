@@ -728,6 +728,86 @@ class UserFeedback(db.Model):
         return decrypt_content(self.content)
 
 
+class AlchemySource(db.Model):
+    """A body of source material for Alchemical Mode (docs/FOUR-FEATURE-
+    ECOSYSTEM.md "Alchemical Mode"). Public/licensed texts (not user data),
+    stored chunked + embedded so the alchemy guide can retrieve passages
+    relevant to where the user currently is."""
+    __tablename__ = "alchemy_source"
+    id = db.Column(db.Integer, primary_key=True)
+    slug = db.Column(db.String(48), nullable=False, unique=True, index=True)
+    title = db.Column(db.String(128), nullable=False)
+    description = db.Column(db.String(255), nullable=True)
+    origin_url = db.Column(db.String(512), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    @property
+    def available(self):
+        return bool(self.chunks and len(self.chunks) > 0)
+
+
+class AlchemySourceChunk(db.Model):
+    """One passage of an AlchemySource, with its embedding (packed float32,
+    same convention as NodeEmbedding). Plaintext — this is published text,
+    not user content."""
+    __tablename__ = "alchemy_source_chunk"
+    id = db.Column(db.Integer, primary_key=True)
+    source_id = db.Column(
+        db.Integer,
+        db.ForeignKey("alchemy_source.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    idx = db.Column(db.Integer, nullable=False)
+    heading = db.Column(db.String(255), nullable=True)
+    content = db.Column(db.Text, nullable=False)
+    vector = db.Column(db.LargeBinary, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    source = db.relationship("AlchemySource", backref=db.backref(
+        "chunks", cascade="all, delete-orphan", order_by="AlchemySourceChunk.idx"))
+
+
+class AlchemyState(db.Model):
+    """Per-user Alchemical Mode state — the double gate, made structural.
+
+    readiness_status is OUR side (a separate LLM process checking the last
+    couple of months of the user's data against a safety/readiness
+    checklist); opted_in_at + disclaimer acceptance is the USER's side.
+    The mode does nothing for a user unless BOTH gates are open."""
+    __tablename__ = "alchemy_state"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, unique=True, index=True)
+    # not_checked | ready | not_ready
+    readiness_status = db.Column(db.String(16), nullable=False,
+                                 default="not_checked")
+    readiness_rationale = db.Column(db.Text, nullable=True)  # encrypted
+    checked_at = db.Column(db.DateTime, nullable=True)
+    checked_by = db.Column(db.String(64), nullable=True)
+    opted_in_at = db.Column(db.DateTime, nullable=True)
+    source_slug = db.Column(db.String(48), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    user = db.relationship("User", backref=db.backref(
+        "alchemy_state", uselist=False))
+
+    def set_rationale(self, plaintext):
+        self.readiness_rationale = encrypt_content(plaintext or "")
+
+    def get_rationale(self):
+        return decrypt_content(self.readiness_rationale) \
+            if self.readiness_rationale else ""
+
+    @property
+    def status_for_user(self):
+        """What the frontend sees: None (nothing), "offered", "active"."""
+        if self.opted_in_at is not None:
+            return "active"
+        if self.readiness_status == "ready":
+            return "offered"
+        return None
+
+
 class UserPrompt(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
