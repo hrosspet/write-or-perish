@@ -7,10 +7,13 @@ import { formatDateTime } from '../utils/date';
 const NodeFooter = ({ username, createdAt, childrenCount, humanOwnerUsername, llmModel, onReplyClick, publicPage = false, children }) => {
   const { user } = useUser();
 
-  // "via" display: show "humanOwner via model" for LLM nodes,
-  // or just the model name when human owner is not provided
+  // LLM nodes: private threads show just the model — whose thread it is
+  // needs no announcing in your own diary. PUBLIC nodes attribute the
+  // human who generated it ("model · via human"), matching the Commons
+  // and the funnel.
   const displayUsername = llmModel
-    ? (humanOwnerUsername ? `${humanOwnerUsername} via ${llmModel}` : llmModel)
+    ? (publicPage && humanOwnerUsername
+        ? `${llmModel} · via ${humanOwnerUsername}` : llmModel)
     : username;
 
   // Link goes to human owner's dashboard for LLM nodes. On PUBLIC posts
