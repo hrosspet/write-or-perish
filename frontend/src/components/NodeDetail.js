@@ -358,7 +358,14 @@ function NodeDetail() {
             }
           }
         }
-        navigate("/log");
+        // No alive ancestor (deleted a root). Public roots live in the
+        // forum, so land back there; everything else goes to the Log.
+        if (node.privacy_level === "public"
+            && currentUser?.share_v1_enabled) {
+          navigate("/forum");
+        } else {
+          navigate("/log");
+        }
         return undefined;
       })
       .catch((err) => {
