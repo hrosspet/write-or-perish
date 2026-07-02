@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import api from '../api';
 import MarkdownBody from '../components/MarkdownBody';
 import useSubmitShortcut from '../hooks/useSubmitShortcut';
@@ -42,6 +42,7 @@ function TypeBadge({ type }) {
 
 export default function SharePage() {
   const { user } = useUser();
+  const navigate = useNavigate();
   const [shares, setShares] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -215,13 +216,26 @@ export default function SharePage() {
       : share.status === 'revoked'
         ? `revoked ${formatDate(share.revoked_at)}`
         : formatDate(share.created_at);
+    const linksToThread = share.status === 'published' && share.public_node_id;
     return (
       <div
         key={share.id}
+        onClick={(e) => {
+          if (!linksToThread) return;
+          if (e.metaKey || e.ctrlKey) {
+            window.open(`/node/${share.public_node_id}`, '_blank', 'noopener');
+          } else {
+            navigate(`/node/${share.public_node_id}`);
+          }
+        }}
+        onMouseEnter={(e) => { if (linksToThread) e.currentTarget.style.borderColor = 'var(--border-hover)'; }}
+        onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--border)'; }}
         style={{
           background: 'var(--bg-card)', border: '1px solid var(--border)',
           borderRadius: '12px', padding: '24px 28px', marginBottom: '16px',
           opacity: share.status === 'revoked' ? 0.7 : 1,
+          cursor: linksToThread ? 'pointer' : 'default',
+          transition: 'border-color 0.15s ease',
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
@@ -239,7 +253,7 @@ export default function SharePage() {
         }}>
           <MarkdownBody>{share.content}</MarkdownBody>
         </div>
-        <div style={{ marginTop: '14px' }}>
+        <div style={{ marginTop: '14px' }} onClick={(e) => e.stopPropagation()}>
           {confirmPublishId === share.id ? (
             <div>
               <div style={{
@@ -311,14 +325,6 @@ export default function SharePage() {
                 >
                   Publish
                 </button>
-              )}
-              {share.status === 'published' && share.public_node_id && (
-                <Link
-                  to={`/node/${share.public_node_id}`}
-                  style={{ ...quietAction, color: 'var(--accent)' }}
-                >
-                  View thread
-                </Link>
               )}
               {share.status === 'published' && (
                 <button onClick={() => handleRevoke(share.id)} style={quietAction}>Revoke</button>
