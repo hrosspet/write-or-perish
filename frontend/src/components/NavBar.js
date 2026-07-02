@@ -380,6 +380,18 @@ function NavBar({ onNewEntryClick }) {
                       Account
                     </Link>
 
+                    {/* The user's own public page (#228) — what visitors
+                        see at /share/u/<username>. */}
+                    {user.share_v1_enabled && user.username && (
+                      <Link
+                        to={`/share/u/${user.username}`}
+                        onClick={() => setOverflowOpen(false)}
+                        style={dropdownItemStyle}
+                      >
+                        My public page
+                      </Link>
+                    )}
+
                     {/* Craft mode toggle */}
                     <button
                       onClick={toggleCraftMode}

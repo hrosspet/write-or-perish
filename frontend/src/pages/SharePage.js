@@ -362,7 +362,6 @@ export default function SharePage() {
         }}>
           Share
         </h1>
-        <div style={{ flex: 1 }} />
         {editingId === null && (
           <button
             onClick={openNew}
@@ -384,6 +383,19 @@ export default function SharePage() {
             +
           </button>
         )}
+        <div style={{ flex: 1 }} />
+        <Link
+          to="/forum"
+          style={{
+            fontFamily: 'var(--sans)', fontSize: '0.78rem', fontWeight: 300,
+            color: 'var(--text-muted)', textDecoration: 'none',
+            transition: 'color 0.15s ease',
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--accent)'; }}
+          onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-muted)'; }}
+        >
+          Commons →
+        </Link>
       </div>
       <p style={{
         fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
@@ -393,27 +405,6 @@ export default function SharePage() {
         Pieces of your writing worth giving outward — nothing is visible to
         anyone until you publish it, and you can take anything back.
       </p>
-      {user?.username && (
-        <Link
-          to={`/share/u/${user.username}`}
-          style={{
-            fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
-            color: 'var(--text-muted)', textDecoration: 'underline',
-          }}
-        >
-          view your public page
-        </Link>
-      )}
-      <Link
-        to="/forum"
-        style={{
-          fontFamily: 'var(--sans)', fontSize: '0.78rem', fontWeight: 300,
-          color: 'var(--text-muted)', textDecoration: 'underline',
-          marginLeft: '16px',
-        }}
-      >
-        the Commons →
-      </Link>
 
       <div style={{ height: '1px', background: 'var(--accent-dim)', opacity: 0.3, margin: '24px 0' }} />
 

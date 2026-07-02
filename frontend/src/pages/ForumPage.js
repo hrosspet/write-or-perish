@@ -114,7 +114,7 @@ function ForumPage() {
             onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--accent)'; }}
             onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-muted)'; }}
           >
-            your shares →
+            Share →
           </Link>
         </div>
         <p style={{
