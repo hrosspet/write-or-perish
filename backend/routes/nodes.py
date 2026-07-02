@@ -2464,6 +2464,18 @@ def delete_node(node_id):
             # the locking re-fetch.
             db.session.rollback()
             return jsonify({"error": "Not found or not authorized"}), 404
+        # Deleting a published share's public node via the node UI must
+        # reconcile the ShareDraft — otherwise the Share page keeps saying
+        # "published" and links a tombstone (#228). Deleting IS revoking.
+        from backend.models import ShareDraft
+        from datetime import datetime as _dt
+        stale = ShareDraft.query.filter_by(
+            public_node_id=node_id, user_id=current_user.id,
+            status="published").all()
+        for share in stale:
+            share.status = "revoked"
+            share.revoked_at = _dt.utcnow()
+            share.public_node_id = None
         db.session.commit()
         return jsonify({
             "scheduled": flagged,

@@ -182,6 +182,21 @@ def test_delete_published_share_takes_node_down(app):
     assert Node.query.get(node_id).deleted_at is not None
 
 
+def test_deleting_public_node_via_node_ui_revokes_share(app):
+    """Deleting the public node directly (kebab menu) must reconcile the
+    ShareDraft — deleting IS revoking."""
+    client = _client_for(app, "author")
+    share = _mk_share_draft()
+    node_id = client.post(
+        f"/api/share/{share.id}/publish").get_json()["public_node_id"]
+    r = client.delete(f"/api/nodes/{node_id}")
+    assert r.status_code == 200
+    _db.session.expire_all()
+    reconciled = ShareDraft.query.get(share.id)
+    assert reconciled.status == "revoked"
+    assert reconciled.public_node_id is None
+
+
 # ── Feed ─────────────────────────────────────────────────────────────────
 
 def test_feed_lists_public_roots_only(app):
