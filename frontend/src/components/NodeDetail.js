@@ -102,7 +102,12 @@ function NodeDetail() {
   // remounts via localStorage. The toggle is only visible in Craft
   // mode, but the stored preference governs behavior in both modes so
   // the UI state always matches observed behavior.
-  const autoGenerateActive = autoGenerate;
+  //
+  // PUBLIC threads (#228) are the exception: generation there is always a
+  // deliberate act — auto-generate is forced off (and its toggle hidden),
+  // and the explicit LLM Response bar shows for the node's owner instead.
+  const isPublicThread = node?.privacy_level === 'public';
+  const autoGenerateActive = isPublicThread ? false : autoGenerate;
 
   // LLM completion polling - enabled automatically when llmTaskNodeId is set
   const {
@@ -602,7 +607,8 @@ function NodeDetail() {
   // via /voice/from-node), Craft-bar LLM Response + ModelSelector, and
   // the kebab Edit/Delete menu.
   const showInlineInput = !!currentUser;
-  const showCraftBar = isOwner && craftMode && !autoGenerate && node.ai_usage !== 'none';
+  const showCraftBar = isOwner && (craftMode || isPublicThread)
+    && !autoGenerateActive && node.ai_usage !== 'none';
 
   // Shared shell for the top-right controls. Voice Mode + Auto-generate
   // share padding/border/typography; Auto-generate uses `space-between`
@@ -630,7 +636,8 @@ function NodeDetail() {
   // same flex row as the Thread heading so they align vertically and
   // scroll away with content (no absolute positioning / viewport
   // anchoring).
-  const topRightControls = isOwner && node.ai_usage !== 'none' && (
+  const topRightControls = isOwner && node.ai_usage !== 'none'
+    && !isPublicThread && (
     <div style={{
       display: 'flex',
       flexDirection: 'column',

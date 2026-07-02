@@ -148,18 +148,19 @@ function WorkflowCard({ card, delay }) {
   );
 }
 
-const forumCard = {
-  key: "forum",
-  path: "/forum",
-  title: "Commons",
-  description: "What others have made public.",
+const shareCard = {
+  key: "share",
+  path: "/share",
+  title: "Share",
+  description: "Give something outward.",
   icon: (
     <svg width="42" height="42" viewBox="0 0 42 42" fill="none">
-      {/* Two overlapping speech forms — a conversation held in common. */}
-      <path d="M6 14 C6 11.8 7.8 10 10 10 L22 10 C24.2 10 26 11.8 26 14 L26 21 C26 23.2 24.2 25 22 25 L13 25 L8 29 L8 25 L10 25 C7.8 25 6 23.2 6 21 Z"
-            stroke="var(--accent)" strokeWidth="1.4" fill="none"/>
-      <path d="M30 17 L32 17 C34.2 17 36 18.8 36 21 L36 27 C36 29.2 34.2 31 32 31 L31 31 L31 34 L27 31 L22 31 C19.8 31 18 29.2 18 27 L18 26"
-            stroke="var(--accent)" strokeWidth="1.4" fill="none" opacity="0.7"/>
+      {/* An open vessel with an offering rising from it. */}
+      <path d="M10 25 C10 30.5 14.8 34 21 34 C27.2 34 32 30.5 32 25"
+            stroke="var(--accent)" strokeWidth="1.4" fill="none" strokeLinecap="round"/>
+      <circle cx="21" cy="19" r="2.6" stroke="var(--accent)" strokeWidth="1.4" fill="none"/>
+      <circle cx="26.5" cy="12.5" r="1.3" stroke="var(--accent)" strokeWidth="1.2" fill="none" opacity="0.65"/>
+      <circle cx="16.5" cy="10" r="0.9" stroke="var(--accent)" strokeWidth="1.1" fill="none" opacity="0.4"/>
     </svg>
   ),
 };
@@ -170,7 +171,7 @@ export default function HomePage() {
   const greetingVisible = useOnScreen(greetingRef);
   const questionVisible = useOnScreen(questionRef);
   const { user } = useUser();
-  const displayCards = user?.share_v1_enabled ? [...cards, forumCard] : cards;
+  const displayCards = user?.share_v1_enabled ? [...cards, shareCard] : cards;
 
   return (
     <div style={{

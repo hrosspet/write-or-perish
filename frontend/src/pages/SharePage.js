@@ -383,6 +383,16 @@ export default function SharePage() {
           view your public page
         </Link>
       )}
+      <Link
+        to="/forum"
+        style={{
+          fontFamily: 'var(--sans)', fontSize: '0.78rem', fontWeight: 300,
+          color: 'var(--text-muted)', textDecoration: 'underline',
+          marginLeft: '16px',
+        }}
+      >
+        the Commons →
+      </Link>
 
       <div style={{ height: '1px', background: 'var(--accent-dim)', opacity: 0.3, margin: '24px 0' }} />
 

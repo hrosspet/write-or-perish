@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import api from '../api';
 import MarkdownBody from '../components/MarkdownBody';
 import { formatDate } from '../utils/date';
@@ -85,15 +85,37 @@ function ForumPage() {
   return (
     <div style={{ padding: '3rem 2rem 4rem', maxWidth: '720px', margin: '0 auto' }}>
       <div style={{ marginBottom: '2.5rem' }}>
-        <h1 style={{
-          color: 'var(--text-primary)',
-          fontFamily: 'var(--serif)',
-          fontWeight: 300,
-          fontSize: '2rem',
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
           margin: '0 0 0.5rem 0',
         }}>
-          {PAGE_TITLE}
-        </h1>
+          <h2 style={{
+            color: 'var(--text-primary)',
+            fontFamily: 'var(--serif)',
+            fontWeight: 300,
+            fontSize: '2rem',
+            margin: 0,
+          }}>
+            {PAGE_TITLE}
+          </h2>
+          <Link
+            to="/share"
+            style={{
+              fontFamily: 'var(--sans)',
+              fontSize: '0.78rem',
+              fontWeight: 300,
+              color: 'var(--text-muted)',
+              textDecoration: 'none',
+              transition: 'color 0.15s ease',
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--accent)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-muted)'; }}
+          >
+            your shares →
+          </Link>
+        </div>
         <p style={{
           color: 'var(--text-muted)',
           fontFamily: 'var(--sans)',
