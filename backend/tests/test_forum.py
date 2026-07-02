@@ -224,6 +224,31 @@ def test_public_thread_serves_public_subtree_anonymously(app):
     assert "private aside" not in contents
 
 
+def test_llm_nodes_attribute_to_human_owner(app):
+    """The public thread shows 'model · via <human>' — the username field
+    for LLM nodes must be the HUMAN owner, not the synthetic model
+    account."""
+    pub = _mk_node("author", "root piece")
+    reply = _mk_node("visitor", "public reply", parent=pub)
+    llm_account = User(username="claude-opus-4.6")
+    _db.session.add(llm_account)
+    _db.session.commit()
+    visitor = User.query.filter_by(username="visitor").first()
+    llm = Node(user_id=llm_account.id, human_owner_id=visitor.id,
+               parent_id=reply.id, node_type="llm",
+               privacy_level="public", ai_usage="chat")
+    llm.llm_model = "claude-opus-4.6"
+    llm.set_content("a response")
+    _db.session.add(llm)
+    _db.session.commit()
+
+    anon = app.test_client()
+    thread = anon.get(f"/api/forum/node/{pub.id}").get_json()["thread"]
+    llm_ser = thread["children"][0]["children"][0]
+    assert llm_ser["node_type"] == "llm"
+    assert llm_ser["username"] == "visitor"  # the human, not the model
+
+
 def test_public_thread_deep_link_resolves_to_root(app):
     pub = _mk_node("author", "root piece")
     reply = _mk_node("visitor", "public reply", parent=pub)

@@ -35,6 +35,13 @@ def _public_alive(query):
 
 
 def _author_name(node):
+    """Display author. For LLM nodes the meaningful author is the HUMAN
+    who generated the response (human_owner), not the synthetic model
+    account — the frontend renders "model · via <human>"."""
+    if node.node_type == "llm":
+        owner_id = node.human_owner_id or node.user_id
+        owner = User.query.get(owner_id) if owner_id else None
+        return owner.username if owner else None
     return node.user.username if node.user else None
 
 

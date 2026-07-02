@@ -181,6 +181,16 @@ const NodeForm = forwardRef(
       }
     }, [parentId, editMode, initialPrivacyLevel, initialAiUsage]);
 
+    // Replies in a public thread are public (#228): pin the STATE, not just
+    // the display — a remembered 'private' from loore_last_privacy_level
+    // must never reach the submit path.
+    useEffect(() => {
+      if (!editMode && parentPrivacy === "public"
+          && privacyLevel !== "public") {
+        setPrivacyLevel("public");
+      }
+    }, [parentPrivacy, privacyLevel, editMode]);
+
     // Auto-populate form with draft when loaded
     useEffect(() => {
       if (isDraftLoaded && draft && draft.content) {
@@ -344,8 +354,8 @@ const NodeForm = forwardRef(
       }
 
       // Replying under a PUBLIC node: the reply is public (#228, enforced
-      // server-side too). Make the consent felt once — the dialog offers
-      // don't-show-again.
+      // server-side too; the state is pinned public by the effect above).
+      // Make the consent felt once — the dialog offers don't-show-again.
       if (
         !editMode && parentPrivacy === "public" && !publicConfirmed
         && localStorage.getItem(PUBLIC_REPLY_ACK_KEY) !== "true"
@@ -667,11 +677,13 @@ const NodeForm = forwardRef(
         {/* Privacy Settings */}
         {!hidePowerFeatures && (
           <PrivacySelector
-            privacyLevel={privacyLevel}
+            privacyLevel={parentPrivacy === "public" && !editMode
+              ? "public" : privacyLevel}
             aiUsage={aiUsage}
             onPrivacyChange={setPrivacyLevel}
             onAIUsageChange={setAiUsage}
             disabled={loading}
+            lockPrivacy={parentPrivacy === "public" && !editMode}
           />
         )}
 

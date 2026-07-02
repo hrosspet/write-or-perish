@@ -8,7 +8,10 @@ const PrivacySelector = ({
   aiUsage = "none",
   onPrivacyChange,
   onAIUsageChange,
-  disabled = false
+  disabled = false,
+  // Replies in public threads inherit the thread's privacy (#228) —
+  // render a quiet static note instead of the dropdown.
+  lockPrivacy = false,
 }) => {
   const labelStyle = {
     display: 'block',
@@ -51,6 +54,16 @@ const PrivacySelector = ({
       marginTop: '12px',
       marginBottom: '12px',
     }}>
+      {lockPrivacy ? (
+        <div style={{ marginBottom: '12px' }}>
+          <label style={labelStyle}>
+            Privacy Level
+          </label>
+          <div style={descStyle}>
+            Public — inherited from the thread.
+          </div>
+        </div>
+      ) : (
       <div style={{ marginBottom: '12px' }}>
         <label style={labelStyle}>
           Privacy Level
@@ -71,6 +84,7 @@ const PrivacySelector = ({
           {privacyLevel === 'public' && 'This note will be visible to all users.'}
         </div>
       </div>
+      )}
 
       <div>
         <label style={labelStyle}>

@@ -15,7 +15,7 @@ import { formatDate } from '../utils/date';
 function authorLine(node) {
   if (node.node_type === 'llm') {
     return node.username
-      ? `${node.username} · via ${node.llm_model}`
+      ? `${node.llm_model} · via ${node.username}`
       : `Loore AI · ${node.llm_model}`;
   }
   return node.username;
