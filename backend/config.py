@@ -15,11 +15,16 @@ class Config:
     # LLM API keys - separated by usage type for privacy
     # CHAT keys: used when content has ai_usage='chat' (responses only, no training)
     # TRAIN keys: used when content has ai_usage='train' (can be used for training)
+    OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
     OPENAI_API_KEY_CHAT = os.environ.get("OPENAI_API_KEY_CHAT")
     OPENAI_API_KEY_TRAIN = os.environ.get("OPENAI_API_KEY_TRAIN")
     OPENAI_API_KEY_BATCH = os.environ.get("OPENAI_API_KEY_BATCH")
     ANTHROPIC_API_KEY_CHAT = os.environ.get("ANTHROPIC_API_KEY_CHAT")
     ANTHROPIC_API_KEY_TRAIN = os.environ.get("ANTHROPIC_API_KEY_TRAIN")
+    # Legacy single key — the documented fallback in
+    # utils/api_keys.get_api_keys_for_usage was dead without it in Config
+    # (local dev sets only the base key and hit "not configured").
+    ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
     # Default model (for backward compatibility and fallback)
     DEFAULT_LLM_MODEL = os.environ.get("LLM_NAME", "claude-opus-4.6")
