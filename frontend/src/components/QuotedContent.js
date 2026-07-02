@@ -27,6 +27,11 @@ const QuotedContent = ({ content, quotes, contextArtifacts, onQuoteClick, onChec
     return null;
   }
 
+  // {share_guidance} is a render-time template marker (SHARE_V1): the LLM
+  // context substitutes it with the proposing-shares guidance (flag on) or
+  // "" (flag off). Either way it isn't user content — never display it.
+  content = content.replace(/\{share_guidance\}\n?/g, '');
+
   const hasQuotes = quotes && Object.keys(quotes).length > 0;
   const hasArtifacts = contextArtifacts && Object.keys(contextArtifacts).length > 0;
 

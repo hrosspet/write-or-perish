@@ -50,6 +50,18 @@ USER_AI_PREFERENCES_PLACEHOLDER = "{user_ai_preferences}"
 USER_MEMORY_PLACEHOLDER = "{user_memory}"
 USER_SCRATCHPAD_PLACEHOLDER = "{user_scratchpad}"
 USER_INTENTIONS_PLACEHOLDER = "{user_intentions}"
+# Flag-conditional guidance for Upload v1 (SHARE_V1). The default agentic
+# prompt carries a bare {share_guidance} placeholder; environments with the
+# flag ON render the proposing-shares section below, environments with it
+# OFF render "" — so the model never proposes shares where the Save flow
+# doesn't exist. Substituted identically in render_system_message AND the
+# generation loop (both paths must stay byte-identical for the prompt
+# cache; the flag is constant per environment, so each env's render is
+# stable).
+SHARE_GUIDANCE_PLACEHOLDER = "{share_guidance}"
+SHARE_GUIDANCE_TEXT = """## Proposing shares
+
+When the user expresses something worth giving outward — a need they want help with, an offering, an insight or learning, an open exploration, or an intention they want to be public about — and either asks you to make it shareable or agrees when you offer, propose it using these headings: ### Share (the shareable text, written to stand alone for readers who lack the conversation's context — faithful to the user's meaning and register, not corporate-polished), ### Share type (just the single type word: need, offering, insight, exploration, intention, or other — nothing else on that line or after it). The system auto-detects the headings and shows the user a "Save to shares" button. Confirming only saves a PRIVATE draft to their Share page — publication is a separate deliberate action there, so nothing becomes visible to anyone without the user explicitly publishing it. When the user confirms out loud (e.g. "yes save that"), call the apply_share tool. Put any lead-in or closing remark *before* the headings — text after them is treated as part of the proposal, not your message. Offer shares sparingly, when something genuinely reads as meant for others; never pressure sharing."""
 USER_ARTIFACTS_INDEX_PLACEHOLDER = "{user_artifacts_index}"
 
 # Within-turn retrieval loop (#158, text mode only). When the model calls one
@@ -275,22 +287,50 @@ VOICE_TOOLS = [
             "required": [],
         },
     },
+    {
+        "name": "apply_share",
+        "description": (
+            "Save the previously proposed share as a PRIVATE draft on the "
+            "user's Share page. Call this ONLY when the user explicitly "
+            "confirms they want it saved (e.g. 'yes save that', 'add it to "
+            "my shares'). Do not call proactively. Do not call if the share "
+            "was already saved (check the context notes for apply status). "
+            "Saving does NOT publish — the user publishes from their Share "
+            "page as a separate action. To PROPOSE a share in the first "
+            "place, write it under a `### Share` heading instead (see the "
+            "share guidance) — that shows the user exactly what would be "
+            "saved and gives them a Save button. Always produce a text "
+            "response — the user needs to hear what happened as they are "
+            "interacting via voice."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
 ]
 
 
 def gated_voice_tools(config):
-    """The agentic voice tool list, with ``semantic_search`` filtered out
-    unless ``SEMANTIC_SEARCH_AGENTIC`` is enabled for this environment
-    (#155 dark-ship).
+    """The agentic voice tool list, with dark-shipped tools filtered out
+    unless their flag is enabled for this environment: ``semantic_search``
+    behind ``SEMANTIC_SEARCH_AGENTIC`` (#155) and ``apply_share`` behind
+    ``SHARE_V1`` (Upload v1).
 
     Shared by BOTH generation and the #187 pre-warm so their tool prefix is
     byte-identical: tools sit at the front of the Anthropic cache prefix, so
     any divergence here silently busts the whole cache — the warm writes a
     tool set generation never reads (observed as read=0 with the warm
     keeping semantic_search while generation dropped it)."""
-    if config.get("SEMANTIC_SEARCH_AGENTIC", False):
+    dropped = set()
+    if not config.get("SEMANTIC_SEARCH_AGENTIC", False):
+        dropped.add("semantic_search")
+    if not config.get("SHARE_V1", False):
+        dropped.add("apply_share")
+    if not dropped:
         return VOICE_TOOLS
-    return [t for t in VOICE_TOOLS if t.get("name") != "semantic_search"]
+    return [t for t in VOICE_TOOLS if t.get("name") not in dropped]
 
 
 _ARTIFACT_KIND_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,47}$')
@@ -484,6 +524,19 @@ def _find_pending_feedback_draft(node_chain, user_id):
     return None
 
 
+def _find_pending_share_draft(node_chain, user_id):
+    """Walk the node chain to find a pending share draft (SHARE_V1)."""
+    for node in reversed(node_chain):
+        draft = Draft.query.filter_by(
+            parent_id=node.id,
+            user_id=user_id,
+            label='share_pending',
+        ).first()
+        if draft:
+            return draft
+    return None
+
+
 def _detect_todo_proposal(text):
     """Check if LLM text contains todo proposal headings.
 
@@ -523,6 +576,19 @@ def _detect_feedback_proposal(text):
     headings = [h.strip().lower() for h in re.findall(
         r'^###\s+(.+)', text, re.MULTILINE)]
     return any(h == 'feedback' for h in headings)
+
+
+def _detect_share_proposal(text):
+    """Check if LLM text contains a share proposal heading (SHARE_V1).
+
+    A single exact ``### Share`` heading marks the block the AI proposes to
+    save to the user's Share page. Exact match (not substring) keeps it from
+    firing on incidental prose like '### Shared context'."""
+    if not text:
+        return False
+    headings = [h.strip().lower() for h in re.findall(
+        r'^###\s+(.+)', text, re.MULTILINE)]
+    return any(h == 'share' for h in headings)
 
 
 def _retrieval_injection_text(tr):
@@ -612,12 +678,13 @@ def _scan_proposal_statuses(node_chain):
             reported = entry.get("status_reported")
 
             if name in ("propose_todo", "propose_github_issue",
-                        "propose_feedback"):
+                        "propose_feedback", "propose_share"):
                 status = entry.get("apply_status")
                 tag = {
                     "propose_todo": "todo-proposal",
                     "propose_github_issue": "issue-proposal",
                     "propose_feedback": "feedback-proposal",
+                    "propose_share": "share-proposal",
                 }[name]
                 if status == "started":
                     notes.append(
@@ -788,6 +855,38 @@ def _auto_create_drafts(llm_text, llm_node, node_chain, user_id):
                 node_chain, "propose_feedback", llm_node.id)
             results.append({
                 "name": "propose_feedback",
+                "status": "success",
+                "draft_id": draft.id,
+                "apply_status": "pending_approval",
+            })
+
+    # Share proposals only exist where SHARE_V1 is enabled — with the flag
+    # off the prompt guidance isn't injected either, so stray ### Share
+    # headings in prose must not grow a Save button that would 404.
+    if (flask_app.config.get("SHARE_V1", False)
+            and _detect_share_proposal(llm_text)):
+        already = Draft.query.filter_by(
+            parent_id=llm_node.id, user_id=user_id,
+            label='share_pending',
+        ).first()
+        if not already:
+            existing = _find_pending_share_draft(node_chain, user_id)
+            draft = Draft(
+                user_id=user_id,
+                parent_id=llm_node.id,
+                label='share_pending',
+            )
+            draft.set_content("")
+            db.session.add(draft)
+            db.session.flush()
+            if existing:
+                db.session.delete(existing)
+                db.session.flush()
+            # Supersede old pending_approval share proposals
+            _supersede_old_proposals(
+                node_chain, "propose_share", llm_node.id)
+            results.append({
+                "name": "propose_share",
                 "status": "success",
                 "draft_id": draft.id,
                 "apply_status": "pending_approval",
@@ -1058,6 +1157,45 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
                             result["status"] = "success"
                             result["feedback_id"] = feedback.id
 
+            elif name == "apply_share":
+                # Save the share the AI proposed under a ### Share heading
+                # as a PRIVATE draft — mirrors apply_feedback. Saving never
+                # publishes; publication is a separate action on the Share
+                # page. Gated on a pending draft, so it can't self-confirm
+                # in the same turn it proposed.
+                draft = _find_pending_share_draft(node_chain, user_id)
+                if not draft:
+                    result["status"] = "error"
+                    result["error"] = "No pending share found"
+                else:
+                    origin_node = Node.query.get(draft.parent_id)
+                    if not origin_node:
+                        result["status"] = "error"
+                        result["error"] = "Origin node not found"
+                    else:
+                        from backend.utils.share import (
+                            save_share_draft_from_node,
+                        )
+                        share, err = save_share_draft_from_node(
+                            origin_node, user_id
+                        )
+                        if err:
+                            result["status"] = "error"
+                            result["error"] = err
+                        else:
+                            db.session.delete(draft)
+                            db.session.flush()
+                            update_tool_meta(
+                                origin_node,
+                                "propose_share",
+                                {
+                                    "apply_status": "completed",
+                                    "share_id": share.id,
+                                },
+                            )
+                            result["status"] = "success"
+                            result["share_id"] = share.id
+
             elif name in ("propose_todo", "propose_github_issue"):
                 # These are no longer tools — proposals are auto-detected
                 # from headings. Ignore gracefully if LLM still calls them.
@@ -1277,6 +1415,11 @@ def render_system_message(system_node, user_id):
         text = text.replace(USER_INTENTIONS_PLACEHOLDER, intentions or "")
         text = text.replace(
             USER_ARTIFACTS_INDEX_PLACEHOLDER, index or "(none)")
+    if SHARE_GUIDANCE_PLACEHOLDER in text:
+        text = text.replace(
+            SHARE_GUIDANCE_PLACEHOLDER,
+            SHARE_GUIDANCE_TEXT
+            if flask_app.config.get("SHARE_V1", False) else "")
     return text
 
 
@@ -1797,6 +1940,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                             f"\n\n[feedback-proposal:"
                                             f"{node.id}]"
                                         )
+                                    elif ename == "propose_share":
+                                        message_text += (
+                                            f"\n\n[share-proposal:"
+                                            f"{node.id}]"
+                                        )
                             except (json.JSONDecodeError, TypeError):
                                 pass
                     else:
@@ -1892,6 +2040,15 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             message_text = message_text.replace(
                                 USER_ARTIFACTS_INDEX_PLACEHOLDER,
                                 user_artifacts_index or "(none)"
+                            )
+                        # Replace {share_guidance} — flag-conditional, must
+                        # mirror render_system_message byte-for-byte
+                        if SHARE_GUIDANCE_PLACEHOLDER in message_text:
+                            message_text = message_text.replace(
+                                SHARE_GUIDANCE_PLACEHOLDER,
+                                SHARE_GUIDANCE_TEXT
+                                if flask_app.config.get("SHARE_V1", False)
+                                else ""
                             )
                         # Resolve {quote:ID} placeholders if present
                         if needs_quotes and has_quotes(message_text):

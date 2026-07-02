@@ -26,6 +26,7 @@ drafts_bp = Blueprint("drafts_bp", __name__)
 # (breaking "yes, send it" / "apply those changes" text confirmation). #158.
 _PROPOSAL_DRAFT_LABELS = (
     "todo_pending", "github_issue_pending", "feedback_pending",
+    "share_pending",
 )
 
 

@@ -728,6 +728,49 @@ class UserFeedback(db.Model):
         return decrypt_content(self.content)
 
 
+class ShareDraft(db.Model):
+    """A shareable piece extracted from the user's writing (Feature 3 —
+    Upload/Share, dark behind SHARE_V1).
+
+    Two-stage consent, structurally enforced: the AI PROPOSES a share under
+    ### Share headings in conversation; confirming there (Save button or the
+    apply_share tool) only creates this row as a private draft. Publication
+    is a separate, deliberate action on the Share page — nothing is ever
+    visible to anyone else until status is "published", and publishing is
+    revocable. Content is encrypted at rest like all user content.
+    """
+    __tablename__ = "share_draft"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    # What kind of internal state this shares (FOUR-FEATURE-ECOSYSTEM 3.2):
+    # need / offering / insight / exploration / intention / other.
+    share_type = db.Column(db.String(16), nullable=False, default="other")
+    # draft -> published -> revoked; dismissed = user discarded the draft.
+    status = db.Column(db.String(16), nullable=False, default="draft",
+                       index=True)
+    # The LLM node whose proposal this draft came from (null for drafts the
+    # user creates by hand on the Share page).
+    source_node_id = db.Column(db.Integer, db.ForeignKey("node.id"),
+                               nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           onupdate=datetime.utcnow)
+    published_at = db.Column(db.DateTime, nullable=True)
+    revoked_at = db.Column(db.DateTime, nullable=True)
+
+    user = db.relationship("User", backref="share_drafts")
+
+    SHARE_TYPES = ("need", "offering", "insight", "exploration",
+                   "intention", "other")
+
+    def set_content(self, plaintext):
+        self.content = encrypt_content(plaintext)
+
+    def get_content(self):
+        return decrypt_content(self.content)
+
+
 class UserPrompt(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)

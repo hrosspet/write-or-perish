@@ -30,7 +30,8 @@ def _strip_heading_sections(text):
     Voice tool-use responses follow a fixed structure: an intro
     sentence, then proposal sections (### Completed / ### New Tasks /
     ### Priority Order / ### Note for todo, ### Issue Title / ### Description /
-    ### Category for issues, ### Feedback / ### Feedback category for feedback).
+    ### Category for issues, ### Feedback / ### Feedback category for feedback, ### Share /
+    ### Share type for shares).
     TTS reads the prose — the intro (before the first ### heading), the ### Note
     body, and any trailing commentary the model appends below the structured
     block (after a single-line Category / Feedback category value). The
@@ -51,7 +52,7 @@ def _strip_heading_sections(text):
     # Extract trailing commentary the model appends after the structured block,
     # below a single-line (Feedback) Category value, up to the next ### or EOF.
     trailing_match = re.search(
-        r'^###\s+(?:feedback\s+)?category\s*\n[^\n]*(.*?)(?=^###\s|\Z)',
+        r'^###\s+(?:(?:feedback\s+)?category|share\s+type)\s*\n[^\n]*(.*?)(?=^###\s|\Z)',
         text, flags=re.MULTILINE | re.DOTALL | re.IGNORECASE
     )
     trailing = trailing_match.group(1).strip() if trailing_match else ""
