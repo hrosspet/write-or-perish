@@ -49,7 +49,7 @@ function ThreadNode({ node, focusId, isRoot }) {
         }}>
           {node.username ? (
             <a
-              href={`/share/u/${node.username}`}
+              href={`/@${node.username}`}
               style={{ color: 'inherit', textDecoration: 'none' }}
               onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--accent)'; }}
               onMouseLeave={(e) => { e.currentTarget.style.color = 'inherit'; }}

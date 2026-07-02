@@ -39,9 +39,8 @@ import { AudioProvider } from "./contexts/AudioContext";
 // /u/:username/:slug — human-readable permalink (#228). Resolves the slug
 // to a node id; logged-out visitors keep the pretty URL and get the public
 // thread view, members continue to the canonical /node/<id> thread UI.
-function PermalinkRoute() {
+function PermalinkRoute({ username, slug }) {
   const { user, loading } = useUser();
-  const { username, slug } = useParams();
   const [nodeId, setNodeId] = useState(null);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
@@ -72,7 +71,21 @@ function NodeRoute() {
 // land on the user's public page — today's public identity surface.
 function DashboardRedirect() {
   const { username } = useParams();
-  return <Navigate to={`/share/u/${username}`} replace />;
+  return <Navigate to={`/@${username}`} replace />;
+}
+
+// /@username and /@username/slug — the public identity namespace (#228).
+// React Router segments can't mix a literal prefix with a param, so this
+// mounts as a root-level dynamic route (declared just above the catch-all;
+// all real routes rank ahead of it) and guards on the @.
+function AtRoute() {
+  const { atName, slug } = useParams();
+  if (!atName || !atName.startsWith('@') || atName.length < 2) {
+    return <Navigate to="/" replace />;
+  }
+  const username = atName.slice(1);
+  if (slug) return <PermalinkRoute username={username} slug={slug} />;
+  return <PublicSharePage usernameOverride={username} />;
 }
 
 function RootRoute() {
@@ -193,12 +206,12 @@ function App() {
           <Route path="/artifacts" element={<ProtectedRoute><ArtifactsPage /></ProtectedRoute>} />
           <Route path="/artifacts/:kind" element={<ProtectedRoute><ArtifactsPage /></ProtectedRoute>} />
           <Route path="/share" element={<ProtectedRoute><SharePage /></ProtectedRoute>} />
-          <Route path="/share/u/:username" element={<PublicSharePage />} />
-          <Route path="/u/:username/:slug" element={<PermalinkRoute />} />
           <Route path="/commons" element={<ProtectedRoute><CommonsPage /></ProtectedRoute>} />
           <Route path="/account" element={<ProtectedRoute><AccountPage /></ProtectedRoute>} />
           <Route path="/node/:id" element={<NodeRoute />} />
           <Route path="/admin" element={<ProtectedRoute><AdminPanel /></ProtectedRoute>} />
+          <Route path="/:atName" element={<AtRoute />} />
+          <Route path="/:atName/:slug" element={<AtRoute />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
         </div>

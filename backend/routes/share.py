@@ -32,13 +32,13 @@ def _share_enabled_for_me():
 
 
 def _permalink(share):
-    """/u/<username>/<slug> when published with a slug, else None."""
+    """/@<username>/<slug> when published with a slug, else None."""
     if not share.public_node_id:
         return None
     node = Node.query.get(share.public_node_id)
     if node is None or not node.public_slug:
         return None
-    return f"/u/{share.user.username}/{node.public_slug}"
+    return f"/@{share.user.username}/{node.public_slug}"
 
 
 def _serialize(share):
@@ -342,7 +342,7 @@ def public_shares(username):
             "content": content[:600] + ("…" if len(content) > 600 else ""),
             "share_type": share.share_type if share else None,
             "public_node_id": node.id,
-            "permalink": (f"/u/{user.username}/{node.public_slug}"
+            "permalink": (f"/@{user.username}/{node.public_slug}"
                           if node.public_slug else None),
             "pinned": node.pinned_at is not None,
             "published_at": iso_utc(

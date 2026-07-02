@@ -373,7 +373,7 @@ def test_publish_assigns_readable_slug_and_permalink(app):
     client = _client_for(app, "author")
     share = _mk_share_draft(content="Consent is the hard part of AI")
     body = client.post(f"/api/share/{share.id}/publish").get_json()
-    assert body["permalink"] == "/u/author/consent-is-the-hard-part-of-ai"
+    assert body["permalink"] == "/@author/consent-is-the-hard-part-of-ai"
     node = Node.query.get(body["public_node_id"])
     assert node.public_slug == "consent-is-the-hard-part-of-ai"
 
@@ -384,8 +384,8 @@ def test_slug_dedupes_per_owner(app):
     s2 = _mk_share_draft(content="same words")
     p1 = client.post(f"/api/share/{s1.id}/publish").get_json()["permalink"]
     p2 = client.post(f"/api/share/{s2.id}/publish").get_json()["permalink"]
-    assert p1 == "/u/author/same-words"
-    assert p2 == "/u/author/same-words-2"
+    assert p1 == "/@author/same-words"
+    assert p2 == "/@author/same-words-2"
 
 
 def test_permalink_resolver_and_404_parity(app):
@@ -415,7 +415,7 @@ def test_unchanged_republish_keeps_slug(app):
     client.post(f"/api/share/{share.id}/publish")
     client.post(f"/api/share/{share.id}/revoke")
     body = client.post(f"/api/share/{share.id}/publish").get_json()
-    assert body["permalink"] == "/u/author/stable-address"
+    assert body["permalink"] == "/@author/stable-address"
 
 
 # ── Feed ─────────────────────────────────────────────────────────────────

@@ -381,10 +381,10 @@ function NavBar({ onNewEntryClick }) {
                     </Link>
 
                     {/* The user's own public page (#228) — what visitors
-                        see at /share/u/<username>. */}
+                        see at /@<username>. */}
                     {user.share_v1_enabled && user.username && (
                       <Link
-                        to={`/share/u/${user.username}`}
+                        to={`/@${user.username}`}
                         onClick={() => setOverflowOpen(false)}
                         style={dropdownItemStyle}
                       >

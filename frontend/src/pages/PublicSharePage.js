@@ -6,7 +6,7 @@ import { FaThumbtack } from 'react-icons/fa';
 import { formatDate } from '../utils/date';
 
 /**
- * PublicSharePage — /share/u/:username
+ * PublicSharePage — /@:username
  *
  * The one outward-facing surface of Upload v1: a person's published shares,
  * readable without an account. Deliberately quiet — no app chrome required,
@@ -14,8 +14,9 @@ import { formatDate } from '../utils/date';
  * index.css, which load for logged-out visitors too (same as the landing
  * page).
  */
-export default function PublicSharePage() {
-  const { username } = useParams();
+export default function PublicSharePage({ usernameOverride }) {
+  const params = useParams();
+  const username = usernameOverride || params.username;
   const navigate = useNavigate();
   // 'loading' | 'ok' | 'notfound'
   const [status, setStatus] = useState('loading');

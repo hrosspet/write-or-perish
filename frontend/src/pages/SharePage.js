@@ -264,7 +264,7 @@ export default function SharePage() {
                 Where should this go? Publishing to Loore puts it in the
                 Commons and on{' '}
                 <Link
-                  to={`/share/u/${user?.username}`}
+                  to={`/@${user?.username}`}
                   style={{ color: 'var(--accent)', textDecoration: 'underline' }}
                 >
                   your public page

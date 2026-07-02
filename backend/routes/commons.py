@@ -68,7 +68,7 @@ def feed():
             "id": node.id,
             "username": _author_name(node),
             "permalink": (
-                f"/u/{node.user.username}/{node.public_slug}"
+                f"/@{node.user.username}/{node.public_slug}"
                 if node.public_slug and node.user else None),
             "content": content[:600] + ("…" if len(content) > 600 else ""),
             "created_at": iso_utc(node.created_at),
@@ -110,7 +110,7 @@ def _serialize_public_subtree(node, budget):
 @commons_bp.route("/permalink/<string:username>/<string:slug>",
                 methods=["GET"])
 def resolve_permalink(username, slug):
-    """/u/<username>/<slug> → node id. Unauthenticated; 404s identically
+    """/@<username>/<slug> → node id. Unauthenticated; 404s identically
     for unknown user/slug and anything non-public."""
     if not _enabled():
         return jsonify({"error": "Not found"}), 404

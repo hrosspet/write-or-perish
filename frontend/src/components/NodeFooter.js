@@ -22,7 +22,7 @@ const NodeFooter = ({ username, createdAt, childrenCount, humanOwnerUsername, ll
   // a login wall.
   const linkUsername = humanOwnerUsername || username;
   const linkUrl = publicPage
-    ? `/share/u/${linkUsername}`
+    ? `/@${linkUsername}`
     : (user && user.username === linkUsername ? '/dashboard' : `/dashboard/${linkUsername}`);
   const formattedDateTime = formatDateTime(createdAt);
 
