@@ -577,6 +577,17 @@ def create_node():
         if err is not None:
             return err
 
+        # Public threads stay fully public (#228) — see the text path.
+        if parent_id:
+            parent = Node.query.get(parent_id)
+            if (parent is not None
+                    and parent.privacy_level == PrivacyLevel.PUBLIC
+                    and privacy_level != PrivacyLevel.PUBLIC):
+                return jsonify({
+                    "error": "Replies under public posts are public.",
+                    "code": "public_reply_required",
+                }), 400
+
         # Placeholder content until transcription is ready.
         placeholder_text = "[Voice note – transcription pending]"
         from backend.utils.tokens import approximate_token_count as _atc2
@@ -657,6 +668,20 @@ def create_node():
     if err is not None:
         return err
 
+    # Public threads stay fully public (#228): a reply under a public node
+    # must itself be public — private interaction with public content goes
+    # through quoting it in your own threads instead. The frontend shows a
+    # consent dialog before sending; this is the structural backstop.
+    if parent_id:
+        parent = Node.query.get(parent_id)
+        if (parent is not None
+                and parent.privacy_level == PrivacyLevel.PUBLIC
+                and privacy_level != PrivacyLevel.PUBLIC):
+            return jsonify({
+                "error": "Replies under public posts are public.",
+                "code": "public_reply_required",
+            }), 400
+
     # Content above the per-node cap is auto-split into a serial chain
     # of nodes (first segment keeps this node's id). A single oversized
     # node stalls chunked profile generation — see utils/node_split.py.
@@ -705,6 +730,9 @@ def create_node():
         "created_at": iso_utc(node.created_at),
         "username": current_user.username,
         "privacy_level": node.privacy_level,
+        "permalink": (
+            f"/u/{node.user.username}/{node.public_slug}"
+            if node.public_slug and node.user else None),
         "ai_usage": node.ai_usage,
         "split_into": 1 + len(parts),
         "tip_id": parts[-1].id if parts else node.id
@@ -906,6 +934,9 @@ def get_node(node_id):
         ],
         "created_at": iso_utc(node.created_at),
         "updated_at": iso_utc(node.updated_at),
+        "permalink": (
+            f"/u/{node.user.username}/{node.public_slug}"
+            if node.public_slug and node.user else None),
         "user": {
             "id": node.user.id,
             "username": node.user.username,
@@ -1088,6 +1119,17 @@ def request_llm_response(node_id):
     from backend.llm_providers import LLMProvider
 
     parent_node = Node.query.get_or_404(node_id)
+
+    # Generation is allowed only on your OWN nodes (#228): on a public
+    # thread you respond first (a public reply of yours), then generate on
+    # your own branch — the completion is attributed and billed to you.
+    # (Also closes a latent gap: this route never checked ownership.)
+    owner_id = parent_node.human_owner_id or parent_node.user_id
+    if owner_id != current_user.id:
+        return jsonify({
+            "error": "You can only request an AI response on your own "
+                     "nodes. Reply first, then generate on your reply.",
+        }), 403
 
     # Get and validate the model from request body
     data = request.get_json() or {}
@@ -2428,6 +2470,19 @@ def delete_node(node_id):
             # the locking re-fetch.
             db.session.rollback()
             return jsonify({"error": "Not found or not authorized"}), 404
+        # Deleting a published share's public node via the node UI must
+        # reconcile the ShareDraft — otherwise the Share page keeps saying
+        # "published" and links a tombstone (#228). Deleting IS revoking.
+        from backend.models import ShareDraft
+        from datetime import datetime as _dt
+        stale = ShareDraft.query.filter_by(
+            public_node_id=node_id, user_id=current_user.id,
+            status="published").all()
+        for share in stale:
+            share.status = "revoked"
+            share.revoked_at = _dt.utcnow()
+            # Pointer kept: republishing unchanged content undeletes this
+            # node (identity follows content).
         db.session.commit()
         return jsonify({
             "scheduled": flagged,

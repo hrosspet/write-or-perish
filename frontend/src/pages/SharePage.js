@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import api from '../api';
 import MarkdownBody from '../components/MarkdownBody';
 import useSubmitShortcut from '../hooks/useSubmitShortcut';
@@ -42,6 +42,7 @@ function TypeBadge({ type }) {
 
 export default function SharePage() {
   const { user } = useUser();
+  const navigate = useNavigate();
   const [shares, setShares] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -215,13 +216,27 @@ export default function SharePage() {
       : share.status === 'revoked'
         ? `revoked ${formatDate(share.revoked_at)}`
         : formatDate(share.created_at);
+    const linksToThread = share.status === 'published' && share.public_node_id;
     return (
       <div
         key={share.id}
+        onClick={(e) => {
+          if (!linksToThread) return;
+          const target = share.permalink || `/node/${share.public_node_id}`;
+          if (e.metaKey || e.ctrlKey) {
+            window.open(target, '_blank', 'noopener');
+          } else {
+            navigate(target);
+          }
+        }}
+        onMouseEnter={(e) => { if (linksToThread) e.currentTarget.style.borderColor = 'var(--border-hover)'; }}
+        onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--border)'; }}
         style={{
           background: 'var(--bg-card)', border: '1px solid var(--border)',
           borderRadius: '12px', padding: '24px 28px', marginBottom: '16px',
           opacity: share.status === 'revoked' ? 0.7 : 1,
+          cursor: linksToThread ? 'pointer' : 'default',
+          transition: 'border-color 0.15s ease',
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
@@ -239,21 +254,50 @@ export default function SharePage() {
         }}>
           <MarkdownBody>{share.content}</MarkdownBody>
         </div>
-        <div style={{ marginTop: '14px' }}>
+        <div style={{ marginTop: '14px' }} onClick={(e) => e.stopPropagation()}>
           {confirmPublishId === share.id ? (
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: '14px', flexWrap: 'wrap' }}>
-              <span style={{
+            <div>
+              <div style={{
                 fontFamily: 'var(--sans)', fontSize: '0.8rem', fontWeight: 300,
-                color: 'var(--text-secondary)',
+                color: 'var(--text-secondary)', marginBottom: '10px',
               }}>
-                This will appear on your public share page at /share/u/{user?.username}. Publish?
-              </span>
-              <button onClick={() => handlePublish(share.id)} style={{ ...quietAction, color: 'var(--accent)' }}>
-                Publish
-              </button>
-              <button onClick={() => setConfirmPublishId(null)} style={quietAction}>
-                Cancel
-              </button>
+                Where should this go? Publishing to Loore puts it in the
+                Commons and on{' '}
+                <Link
+                  to={`/share/u/${user?.username}`}
+                  style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+                >
+                  your public page
+                </Link>.
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                <button
+                  onClick={() => handlePublish(share.id)}
+                  style={{
+                    fontFamily: 'var(--sans)', fontSize: '0.82rem', fontWeight: 400,
+                    padding: '7px 16px', borderRadius: '6px', cursor: 'pointer',
+                    background: 'var(--accent)', border: 'none', color: 'var(--bg-deep)',
+                  }}
+                >
+                  Publish to Loore
+                </button>
+                {['Twitter / X', 'Substack'].map((channel) => (
+                  <span
+                    key={channel}
+                    style={{
+                      fontFamily: 'var(--sans)', fontSize: '0.82rem', fontWeight: 300,
+                      padding: '7px 16px', borderRadius: '6px',
+                      border: '1px dashed var(--border)', color: 'var(--text-muted)',
+                      opacity: 0.6, cursor: 'default',
+                    }}
+                  >
+                    {channel} · coming soon
+                  </span>
+                ))}
+                <button onClick={() => setConfirmPublishId(null)} style={quietAction}>
+                  Cancel
+                </button>
+              </div>
             </div>
           ) : confirmDeleteId === share.id ? (
             <div style={{ display: 'flex', alignItems: 'baseline', gap: '14px', flexWrap: 'wrap' }}>
@@ -309,7 +353,7 @@ export default function SharePage() {
     <div style={{ padding: '60px 24px', maxWidth: '800px', margin: '0 auto' }}>
       {/* Header */}
       <div style={{
-        display: 'flex', alignItems: 'baseline', gap: '16px',
+        display: 'flex', alignItems: 'center', gap: '16px',
         flexWrap: 'wrap', marginBottom: '8px',
       }}>
         <h1 style={{
@@ -318,20 +362,40 @@ export default function SharePage() {
         }}>
           Share
         </h1>
-        <div style={{ flex: 1 }} />
         {editingId === null && (
           <button
             onClick={openNew}
+            title="Write a new share"
             style={{
-              padding: '8px 20px', background: 'var(--accent)', border: 'none',
-              borderRadius: '6px', color: 'var(--bg-deep)',
-              fontFamily: 'var(--sans)', fontSize: '0.85rem', fontWeight: 400,
+              display: 'inline-flex', alignItems: 'center',
+              padding: '6px 14px',
+              background: 'none',
+              border: '1px solid var(--border)',
+              borderRadius: '16px',
+              color: 'var(--text-muted)',
+              fontFamily: 'var(--sans)', fontSize: '0.8rem',
               cursor: 'pointer',
+              transition: 'border-color 0.15s ease, color 0.15s ease',
             }}
+            onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--accent)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text-muted)'; }}
           >
-            New share
+            +
           </button>
         )}
+        <div style={{ flex: 1 }} />
+        <Link
+          to="/commons"
+          style={{
+            fontFamily: 'var(--sans)', fontSize: '0.78rem', fontWeight: 300,
+            color: 'var(--text-muted)', textDecoration: 'none',
+            transition: 'color 0.15s ease',
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--accent)'; }}
+          onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-muted)'; }}
+        >
+          Commons →
+        </Link>
       </div>
       <p style={{
         fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
@@ -341,17 +405,6 @@ export default function SharePage() {
         Pieces of your writing worth giving outward — nothing is visible to
         anyone until you publish it, and you can take anything back.
       </p>
-      {user?.username && (
-        <Link
-          to={`/share/u/${user.username}`}
-          style={{
-            fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 300,
-            color: 'var(--text-muted)', textDecoration: 'underline',
-          }}
-        >
-          view your public page
-        </Link>
-      )}
 
       <div style={{ height: '1px', background: 'var(--accent-dim)', opacity: 0.3, margin: '24px 0' }} />
 
@@ -369,13 +422,20 @@ export default function SharePage() {
           <button
             onClick={openNew}
             style={{
-              padding: '10px 24px', background: 'var(--accent)', border: 'none',
-              borderRadius: '6px', color: 'var(--bg-deep)',
-              fontFamily: 'var(--sans)', fontSize: '0.85rem', fontWeight: 400,
+              display: 'inline-flex', alignItems: 'center', gap: '6px',
+              padding: '6px 16px',
+              background: 'none',
+              border: '1px solid var(--border)',
+              borderRadius: '16px',
+              color: 'var(--text-muted)',
+              fontFamily: 'var(--sans)', fontSize: '0.8rem',
               cursor: 'pointer',
+              transition: 'border-color 0.15s ease, color 0.15s ease',
             }}
+            onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--accent)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text-muted)'; }}
           >
-            New share
+            + <span>new share</span>
           </button>
         </div>
       )}

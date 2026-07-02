@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import api from '../api';
 import MarkdownBody from './MarkdownBody';
 import { insertItemAfter } from '../utils/markdown';
@@ -920,8 +921,12 @@ export default function ProposalInline({
               </StatusTag>
             )}
             {shareApplyStatus === 'completed' && (
-              <StatusTag style={{ ...styles.statusText, color: 'var(--success)' }}>
-                Saved as a private draft — publish from your Share page
+              <StatusTag style={{ ...styles.statusText, color: 'var(--text-muted)' }}>
+                <span style={{ color: 'var(--success)' }}>Saved as a private draft</span>
+                {' — publish from your '}
+                <Link to="/share" style={{ color: 'var(--accent)', textDecoration: 'none' }}>
+                  Share page
+                </Link>
               </StatusTag>
             )}
             {shareApplyStatus === 'error' && (

@@ -3,6 +3,7 @@ from flask_login import login_required, current_user
 from backend.models import Node, User
 from backend.extensions import db
 from backend.utils.privacy import (
+    PrivacyLevel,
     accessible_nodes_filter, accessible_nodes_filter_ignoring_deleted,
 )
 from backend.utils.timefmt import iso_utc
@@ -70,14 +71,23 @@ def get_feed():
             Node.human_owner_id == current_user.id,
         ),
         or_(
-            # Alive (any kind: alive root or alive pinned non-root).
-            Node.deleted_at.is_(None),
+            # Alive and NOT public (#228): the Log is the private diary —
+            # public writing lives on the public page and in the Commons,
+            # and public roots here would be duplicate echoes of the
+            # private threads they were extracted from.
+            and_(
+                Node.deleted_at.is_(None),
+                Node.privacy_level != PrivacyLevel.PUBLIC.value,
+            ),
             # §4a Case 2: soft-deleted thread root whose subtree still
-            # has an alive accessible descendant. Pinned non-roots that
-            # are soft-deleted stay hidden — this branch only relaxes
-            # the rule for thread roots.
+            # has an alive accessible descendant — ANY privacy, incl.
+            # public: a deleted public root leaves the Commons feed, so
+            # the Log is the owner's only entry point to what's still
+            # alive underneath. Pinned non-roots that are soft-deleted
+            # stay hidden — this branch only relaxes the rule for roots.
             and_(
                 Node.parent_id.is_(None),
+                Node.deleted_at.isnot(None),
                 Node.id.in_(db.session.query(alive_roots_subq)),
             ),
         ),

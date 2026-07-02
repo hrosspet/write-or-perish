@@ -15,6 +15,7 @@ from backend.extensions import db
 from backend.utils.share import save_share_draft_from_node
 from backend.utils.tool_meta import update_tool_meta
 from backend.utils.timefmt import iso_utc
+from backend.utils.privacy import PrivacyLevel, AIUsage
 from datetime import datetime
 
 share_bp = Blueprint("share", __name__)
@@ -24,13 +25,31 @@ def _share_enabled():
     return bool(current_app.config.get("SHARE_V1", False))
 
 
+def _share_enabled_for_me():
+    """Member surfaces need the env flag AND the user's own opt-in."""
+    return _share_enabled() and bool(
+        getattr(current_user, "public_sharing_enabled", False))
+
+
+def _permalink(share):
+    """/u/<username>/<slug> when published with a slug, else None."""
+    if not share.public_node_id:
+        return None
+    node = Node.query.get(share.public_node_id)
+    if node is None or not node.public_slug:
+        return None
+    return f"/u/{share.user.username}/{node.public_slug}"
+
+
 def _serialize(share):
     return {
+        "permalink": _permalink(share),
         "id": share.id,
         "content": share.get_content(),
         "share_type": share.share_type,
         "status": share.status,
         "source_node_id": share.source_node_id,
+        "public_node_id": share.public_node_id,
         "created_at": iso_utc(share.created_at),
         "updated_at": iso_utc(share.updated_at),
         "published_at": iso_utc(share.published_at),
@@ -49,7 +68,7 @@ def _get_own_share_or_404(share_id):
 @login_required
 def list_shares():
     """List the current user's share drafts + published items."""
-    if not _share_enabled():
+    if not _share_enabled_for_me():
         return jsonify({"error": "Not found"}), 404
     shares = ShareDraft.query.filter_by(user_id=current_user.id).order_by(
         ShareDraft.created_at.desc()).all()
@@ -60,7 +79,7 @@ def list_shares():
 @login_required
 def create_share():
     """Manually create a share draft from the Share page."""
-    if not _share_enabled():
+    if not _share_enabled_for_me():
         return jsonify({"error": "Not found"}), 404
     data = request.get_json() or {}
     content = (data.get("content") or "").strip()
@@ -82,7 +101,7 @@ def create_share():
 def update_share(share_id):
     """Edit a draft's content/type. Published items must be revoked first —
     what is public is always exactly what the user last approved."""
-    if not _share_enabled():
+    if not _share_enabled_for_me():
         return jsonify({"error": "Not found"}), 404
     share = _get_own_share_or_404(share_id)
     if not share:
@@ -111,11 +130,15 @@ def update_share(share_id):
 def delete_share(share_id):
     """Delete a share draft (any status — deleting a published item also
     removes it from the public page)."""
-    if not _share_enabled():
+    if not _share_enabled_for_me():
         return jsonify({"error": "Not found"}), 404
     share = _get_own_share_or_404(share_id)
     if not share:
         return jsonify({"error": "Not found"}), 404
+    if share.public_node_id:
+        from backend.utils.node_deletion import soft_delete_node
+        soft_delete_node(share.public_node_id, current_user.id,
+                         with_descendants=False)
     db.session.delete(share)
     db.session.commit()
     return jsonify({"status": "deleted"}), 200
@@ -125,13 +148,63 @@ def delete_share(share_id):
 @login_required
 def publish_share(share_id):
     """The one action that makes a share visible to others."""
-    if not _share_enabled():
+    if not _share_enabled_for_me():
         return jsonify({"error": "Not found"}), 404
     share = _get_own_share_or_404(share_id)
     if not share:
         return jsonify({"error": "Not found"}), 404
     if share.status == "published":
         return jsonify(_serialize(share)), 200
+
+    content = share.get_content()
+
+    # Identity follows content: republishing UNCHANGED content restores the
+    # same node (deleted_at cleared) so an existing discussion reattaches —
+    # it still refers to exactly what people replied to. Edited content (or
+    # a purged/wiped node) gets a NEW node and the old discussion stays
+    # correctly severed.
+    public_node = None
+    if share.public_node_id:
+        prior = Node.query.get(share.public_node_id)
+        if (prior is not None and prior.deleted_at is not None
+                and (prior.get_content() or "") == content):
+            prior.deleted_at = None
+            public_node = prior
+
+    if public_node is None:
+        # Publishing = extraction into the public forum (#228): a standalone
+        # public ROOT node (no system node — LLM calls on the thread assemble
+        # context purely from the visible chain). ai_usage follows the user's
+        # default so the author's AI preference travels with the content;
+        # 'none' means other users can read but not include it in completions.
+        ai_usage = current_user.default_ai_usage
+        if ai_usage not in (AIUsage.CHAT.value, AIUsage.TRAIN.value,
+                            AIUsage.NONE.value):
+            ai_usage = AIUsage.CHAT.value
+        from backend.utils.tokens import approximate_token_count
+        from backend.utils.slugs import generate_unique_public_slug
+        public_node = Node(
+            user_id=current_user.id,
+            human_owner_id=current_user.id,
+            parent_id=None,
+            node_type="user",
+            privacy_level=PrivacyLevel.PUBLIC.value,
+            ai_usage=ai_usage,
+            token_count=approximate_token_count(content),
+            public_slug=generate_unique_public_slug(
+                current_user.id, content),
+        )
+        public_node.set_content(content)
+        db.session.add(public_node)
+        db.session.flush()
+
+    share.public_node_id = public_node.id
+    # Back-link from the private proposal node to its public artifact.
+    if share.source_node_id:
+        origin = Node.query.get(share.source_node_id)
+        if origin is not None and origin.linked_node_id is None:
+            origin.linked_node_id = public_node.id
+
     share.status = "published"
     share.published_at = datetime.utcnow()
     share.revoked_at = None
@@ -143,13 +216,22 @@ def publish_share(share_id):
 @login_required
 def revoke_share(share_id):
     """Take a published share back off the public page."""
-    if not _share_enabled():
+    if not _share_enabled_for_me():
         return jsonify({"error": "Not found"}), 404
     share = _get_own_share_or_404(share_id)
     if not share:
         return jsonify({"error": "Not found"}), 404
     if share.status != "published":
         return jsonify({"error": "Only published shares can be revoked"}), 409
+    if share.public_node_id:
+        from backend.utils.node_deletion import soft_delete_node
+        # Your content comes down; public replies by others keep their own
+        # nodes (they'll render under a tombstone, like any deleted node).
+        # The pointer is KEPT: republishing unchanged content undeletes
+        # this same node so the discussion reattaches (identity follows
+        # content).
+        soft_delete_node(share.public_node_id, current_user.id,
+                         with_descendants=False)
     share.status = "revoked"
     share.revoked_at = datetime.utcnow()
     db.session.commit()
@@ -165,7 +247,7 @@ def save_proposal():
     content (under ### Share); this confirms + persists it only when the
     user clicks Save (or the equivalent apply_share tool). The result is a
     PRIVATE draft — publication is a separate action on the Share page."""
-    if not _share_enabled():
+    if not _share_enabled_for_me():
         return jsonify({"error": "Not found"}), 404
     data = request.get_json() or {}
     llm_node_id = data.get("llm_node_id")
@@ -228,15 +310,43 @@ def public_shares(username):
     user = User.query.filter_by(username=username).first()
     if not user:
         return jsonify({"error": "Not found"}), 404
-    shares = ShareDraft.query.filter_by(
-        user_id=user.id, status="published").order_by(
-        ShareDraft.published_at.desc()).all()
+    # ALL the user's living public roots — shares are enriched with their
+    # type/publish date; direct-created public roots (craft path) appear
+    # too, so everything public has a home page (#228).
+    nodes = Node.query.filter(
+        Node.parent_id.is_(None),
+        Node.deleted_at.is_(None),
+        Node.privacy_level == "public",
+        (Node.human_owner_id == user.id) | (Node.user_id == user.id),
+    ).all()
+    share_by_node = {
+        s.public_node_id: s
+        for s in ShareDraft.query.filter_by(
+            user_id=user.id, status="published").all()
+        if s.public_node_id
+    }
+    # Pinned pieces lead the page (newest pin first), then publish date.
+    nodes.sort(key=lambda n: (
+        n.pinned_at is None,
+        -(n.pinned_at.timestamp() if n.pinned_at else 0),
+        -(n.created_at.timestamp() if n.created_at else 0),
+    ))
+    items = []
+    for node in nodes:
+        share = share_by_node.get(node.id)
+        items.append({
+            "id": node.id,
+            "content": node.get_content(),
+            "share_type": share.share_type if share else None,
+            "public_node_id": node.id,
+            "permalink": (f"/u/{user.username}/{node.public_slug}"
+                          if node.public_slug else None),
+            "pinned": node.pinned_at is not None,
+            "published_at": iso_utc(
+                share.published_at if share and share.published_at
+                else node.created_at),
+        })
     return jsonify({
         "username": user.username,
-        "shares": [{
-            "id": s.id,
-            "content": s.get_content(),
-            "share_type": s.share_type,
-            "published_at": iso_utc(s.published_at),
-        } for s in shares],
+        "shares": items,
     }), 200

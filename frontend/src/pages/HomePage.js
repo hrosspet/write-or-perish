@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useUser } from '../contexts/UserContext';
 
 function useOnScreen(ref, threshold = 0.1) {
   const [isVisible, setIsVisible] = useState(false);
@@ -147,11 +148,37 @@ function WorkflowCard({ card, delay }) {
   );
 }
 
+const shareCard = {
+  key: "share",
+  path: "/share",
+  title: "Share",
+  description: "Give something outward.",
+  icon: (
+    <svg width="42" height="42" viewBox="0 0 42 42" fill="none">
+      {/* A shining gem received on an open hand (side view, after Petr's
+          reference: arm from lower-left, thumb arching over the palm,
+          fingers extending right). */}
+      <path d="M16 9 L26 9 L29.5 13.5 L21 21.5 L12.5 13.5 Z"
+            stroke="var(--accent)" strokeWidth="1.3" fill="none" strokeLinejoin="round"/>
+      <path d="M12.5 13.5 L29.5 13.5 M18.5 9 L18 13.5 L21 21.5 M23.5 9 L24 13.5 L21 21.5"
+            stroke="var(--accent)" strokeWidth="1" fill="none" strokeLinejoin="round" opacity="0.75"/>
+      <path d="M21 3.5 V6 M11 5 L13 7 M31 5 L29 7"
+            stroke="var(--accent)" strokeWidth="1.1" strokeLinecap="round" opacity="0.7"/>
+      <path d="M2.5 39 C5.5 37.5 8.5 36.2 10.5 34.4 C11.3 33.8 11.6 33 12.9 32.5 C15.5 31.4 19 31.2 24 30.9 C29 31.2 33.5 30 37.2 28.4 C38.3 27.9 38.3 26.7 37.2 26.5 C33 25.9 28 26.6 24.5 27.9 C24.2 27 24.9 26.1 24 25.7 C22.8 25.2 19.5 25.3 16.8 26.2 C14 27.1 11.8 28.5 10.3 30 C7.2 31.2 4.5 32.6 2.5 34"
+            stroke="var(--accent)" strokeWidth="1.4" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+      <path d="M24.5 27.9 C21.5 27.9 18.5 27.9 16.2 28.3"
+            stroke="var(--accent)" strokeWidth="1.4" strokeLinecap="round"/>
+    </svg>
+  ),
+};
+
 export default function HomePage() {
   const greetingRef = useRef(null);
   const questionRef = useRef(null);
   const greetingVisible = useOnScreen(greetingRef);
   const questionVisible = useOnScreen(questionRef);
+  const { user } = useUser();
+  const displayCards = user?.share_v1_enabled ? [...cards, shareCard] : cards;
 
   return (
     <div style={{
@@ -200,10 +227,10 @@ export default function HomePage() {
         gap: "1.5rem",
         flexWrap: "wrap",
         justifyContent: "center",
-        maxWidth: "580px",
+        maxWidth: displayCards.length > 2 ? "880px" : "580px",
         width: "100%",
       }}>
-        {cards.map((card, i) => (
+        {displayCards.map((card, i) => (
           <WorkflowCard key={card.key} card={card} delay={400 + i * 120} />
         ))}
       </div>

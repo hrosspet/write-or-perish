@@ -276,11 +276,13 @@ function NavBar({ onNewEntryClick }) {
           </Link>
         )}
 
-        {/* Share (Upload v1) — dark behind SHARE_V1, surfaced per-user via
-            the dashboard payload flag. */}
+        {/* Commons — the Log's public sibling (#228). Creating shares
+            lives on the Home page as the third mode; the nav holds the
+            two records: Log (private) and Commons (public). Dark behind
+            SHARE_V1 via the dashboard payload flag. */}
         {user && user.approved && user.share_v1_enabled && (
-          <Link to="/share" style={linkStyle("/share")}>
-            Share
+          <Link to="/commons" style={linkStyle("/commons")}>
+            Commons
           </Link>
         )}
 
@@ -377,6 +379,18 @@ function NavBar({ onNewEntryClick }) {
                     <Link to="/account" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
                       Account
                     </Link>
+
+                    {/* The user's own public page (#228) — what visitors
+                        see at /share/u/<username>. */}
+                    {user.share_v1_enabled && user.username && (
+                      <Link
+                        to={`/share/u/${user.username}`}
+                        onClick={() => setOverflowOpen(false)}
+                        style={dropdownItemStyle}
+                      >
+                        My public page
+                      </Link>
+                    )}
 
                     {/* Craft mode toggle */}
                     <button

@@ -184,6 +184,10 @@ def create_app():
     from backend.routes.share import share_bp
     app.register_blueprint(share_bp, url_prefix="/api/share")
 
+    # The Commons — public forum (#228, same dark flag as the Share family).
+    from backend.routes.commons import commons_bp
+    app.register_blueprint(commons_bp, url_prefix="/api/commons")
+
     # AI preferences folded into the artifact model (#158 Slice 5): managed via
     # the generic /api/artifacts CRUD (kind="ai_preferences"); the dedicated
     # /api/ai-preferences blueprint was removed.

@@ -167,7 +167,9 @@ class TestFeedPrivacy:
         assert resp.status_code == 200
         previews = [n["preview"] for n in resp.json["nodes"]]
 
-        assert "Alice public post" in previews
+        # #228: the Log is the private diary — own PUBLIC posts live on
+        # the public page / Commons, not here.
+        assert "Alice public post" not in previews
         assert "Alice private post" in previews
         assert "Bob public post" not in previews   # other user's node
         assert "Bob private post" not in previews   # other user's node
@@ -180,7 +182,7 @@ class TestFeedPrivacy:
         previews = [n["preview"] for n in resp.json["nodes"]]
 
         assert "Bob private post" in previews
-        assert "Bob public post" in previews
+        assert "Bob public post" not in previews  # #228: public ≠ Log
         assert "Alice public post" not in previews  # other user's node
 
     def test_feed_total_count_only_own_nodes(self, app, data):
@@ -189,8 +191,9 @@ class TestFeedPrivacy:
         _login(client, data["alice_id"])
 
         resp = client.get("/api/feed")
-        # Alice sees only her 2 nodes
-        assert resp.json["total"] == 2
+        # Alice sees only her private node (#228: her public one lives on
+        # the public page, not in the Log).
+        assert resp.json["total"] == 1
 
 
 # ── Public Dashboard ─────────────────────────────────────────────────────

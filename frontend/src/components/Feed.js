@@ -168,7 +168,7 @@ function Feed({ onSearchClick }) {
           fontSize: "0.95rem",
           lineHeight: 1.6,
         }}>
-          Your entries will appear here as you share thoughts with Loore.
+          Your private entries will appear here as you share thoughts with Loore.
         </p>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: "1rem"}}>

@@ -125,10 +125,16 @@ def get_dashboard():
             # Lets the client block cost actions (e.g. starting a long voice
             # recording) up front instead of after the fact (issue #85).
             "spend_blocked": user_is_capped(current_user),
-            # Upload v1 dark flag — the frontend hides all Share surfaces
-            # (nav link, Share page) while off.
+            # Public side (#228): enabled = deployed (env) AND the user's
+            # own opt-in — every frontend surface keys off this. available
+            # = deployed only; it decides whether Account shows the toggle.
             "share_v1_enabled": bool(
+                current_app.config.get("SHARE_V1", False)
+                and current_user.public_sharing_enabled),
+            "share_v1_available": bool(
                 current_app.config.get("SHARE_V1", False)),
+            "public_sharing_enabled": bool(
+                current_user.public_sharing_enabled),
         },
         "pinned_nodes": pinned_list,
         "nodes": nodes_list,
@@ -213,6 +219,10 @@ def update_user():
     if "craft_mode" in data:
         current_user.craft_mode = bool(data["craft_mode"])
 
+    if "public_sharing_enabled" in data:
+        current_user.public_sharing_enabled = bool(
+            data["public_sharing_enabled"])
+
     if "preferred_model" in data:
         current_user.preferred_model = data["preferred_model"]
 
@@ -251,6 +261,14 @@ def update_user():
                 "default_privacy_level": current_user.default_privacy_level,
                 "default_ai_usage": current_user.default_ai_usage,
                 "spend_blocked": user_is_capped(current_user),
+                "share_v1_enabled": bool(
+                    current_app.config.get("SHARE_V1", False)
+                    and current_user.public_sharing_enabled),
+                "share_v1_available": bool(
+                    current_app.config.get("SHARE_V1", False)),
+                "public_sharing_enabled": bool(
+                    current_user.public_sharing_enabled),
+                "timezone": current_user.timezone or "UTC",
             }
         }), 200
     except Exception as e:

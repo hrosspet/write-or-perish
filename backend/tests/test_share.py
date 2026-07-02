@@ -75,7 +75,7 @@ def app():
     app = _make_app()
     with app.app_context():
         _db.create_all()
-        user = User(username="tester")
+        user = User(username="tester", public_sharing_enabled=True)
         _db.session.add(user)
         _db.session.commit()
         yield app
@@ -345,11 +345,13 @@ def test_public_endpoint_serves_only_published(app, client):
     with app.app_context():
         uid = User.query.first().id
         _mk_share(uid, "private draft", status="draft")
-        published = _mk_share(uid, "published piece", status="published")
-        from datetime import datetime
-        published.published_at = datetime.utcnow()
+        to_publish = _mk_share(uid, "published piece", status="draft")
         _mk_share(uid, "taken back", status="revoked")
         _db.session.commit()
+        pid = to_publish.id
+    # Publish through the API — the public page serves public NODES, and
+    # publishing is what creates one.
+    assert client.post(f"/api/share/{pid}/publish").status_code == 200
 
     # Anonymous client — no session.
     anon = app.test_client()
@@ -372,7 +374,7 @@ def test_routes_404_when_flag_off():
     app = _make_app(share_v1=False)
     with app.app_context():
         _db.create_all()
-        user = User(username="tester")
+        user = User(username="tester", public_sharing_enabled=True)
         _db.session.add(user)
         _db.session.commit()
         client = app.test_client()

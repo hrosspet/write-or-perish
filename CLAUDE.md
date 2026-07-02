@@ -107,6 +107,14 @@ The dev stack runs:
 
 Source code is volume-mounted, so edits are reflected immediately without rebuilding.
 
+**Iterative development happens HERE, not on staging** (workflow decision 2026-07-02): staging deploys cost 6–15 min + a DB wipe, local is hot-reload. Use staging only for the final pre-review pass (real TLS/nginx topology, wiped-DB onboarding, deploy pipeline). Practical notes:
+- Dark feature flags (`SHARE_V1`, etc.) go in the local uncommitted `.env` — the compose files pass them through.
+- Schema drift after model changes: sync additively with `db.create_all()` in a container Python shell. Do NOT run `flask db migrate` locally — deploy auto-generates and commits migrations, and local ones collide.
+- Login without SMTP: mint a magic link inside the backend container (`generate_magic_link_token(email)`, set `user.magic_link_token_hash = hash_token(token)` + expiry, commit) and open `http://localhost:5010/auth/magic-link/verify?token=…`.
+- After `package.json` changes, the frontend's anonymous `node_modules` volume outlives image rebuilds: `docker compose up -d --force-recreate --renew-anon-volumes frontend`.
+- Unset env vars reach containers as EMPTY STRINGS (not absent) — guard numeric parses with `or "default"`, not a `get()` default.
+- Dev API calls are SAME-ORIGIN through the CRA proxy (`src/setupProxy.js`, target `PROXY_TARGET` — `http://backend:5010` in Docker). `frontend/.env.development` keeps `REACT_APP_API_URL`/`BACKEND_URL` EMPTY on purpose; absolute URLs there force CORS requests the backend doesn't serve.
+
 **Important Docker Compose notes**:
 - Ports are NOT defined in the base `docker-compose.yml` — they live only in the override files (`docker-compose.override.yml` for dev, `docker-compose.staging.yml` for staging). This prevents Docker Compose from concatenating port arrays across files.
 - Backend code is mounted at `/app/backend/` inside containers to match the project-root import layout (`from backend.X import Y`).

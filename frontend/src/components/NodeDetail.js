@@ -52,8 +52,11 @@ function RenderChildTree({ nodes, onBubbleClick, buildActions }) {
   );
 }
 
-function NodeDetail() {
-  const { id } = useParams();
+function NodeDetail({ nodeIdOverride }) {
+  const { id: paramId } = useParams();
+  // Under /u/:username/:slug the id arrives resolved; under /node/:id it
+  // comes from params. Everything downstream just uses `id`.
+  const id = nodeIdOverride || paramId;
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { user: currentUser } = useUser();
@@ -102,7 +105,12 @@ function NodeDetail() {
   // remounts via localStorage. The toggle is only visible in Craft
   // mode, but the stored preference governs behavior in both modes so
   // the UI state always matches observed behavior.
-  const autoGenerateActive = autoGenerate;
+  //
+  // PUBLIC threads (#228) are the exception: generation there is always a
+  // deliberate act — auto-generate is forced off (and its toggle hidden),
+  // and the explicit LLM Response bar shows for the node's owner instead.
+  const isPublicThread = node?.privacy_level === 'public';
+  const autoGenerateActive = isPublicThread ? false : autoGenerate;
 
   // LLM completion polling - enabled automatically when llmTaskNodeId is set
   const {
@@ -124,6 +132,14 @@ function NodeDetail() {
       .then((response) => {
         setNode(response.data);
         setLoading(false);
+        // Human-readable address (#228): when the node has a permalink and
+        // we arrived via /node/<id>, show the pretty URL instead. Display
+        // only — router state is untouched, and revisiting the pretty URL
+        // resolves through the permalink route.
+        if (response.data.permalink
+            && window.location.pathname === `/node/${id}`) {
+          window.history.replaceState(null, '', response.data.permalink);
+        }
       })
       .catch((err) => {
         console.error(err);
@@ -358,7 +374,14 @@ function NodeDetail() {
             }
           }
         }
-        navigate("/log");
+        // No alive ancestor (deleted a root). Public roots live in the
+        // Commons, so land back there; everything else goes to the Log.
+        if (node.privacy_level === "public"
+            && currentUser?.share_v1_enabled) {
+          navigate("/commons");
+        } else {
+          navigate("/log");
+        }
         return undefined;
       })
       .catch((err) => {
@@ -595,7 +618,8 @@ function NodeDetail() {
   // via /voice/from-node), Craft-bar LLM Response + ModelSelector, and
   // the kebab Edit/Delete menu.
   const showInlineInput = !!currentUser;
-  const showCraftBar = isOwner && craftMode && !autoGenerate && node.ai_usage !== 'none';
+  const showCraftBar = isOwner && (craftMode || isPublicThread)
+    && !autoGenerateActive && node.ai_usage !== 'none';
 
   // Shared shell for the top-right controls. Voice Mode + Auto-generate
   // share padding/border/typography; Auto-generate uses `space-between`
@@ -623,7 +647,8 @@ function NodeDetail() {
   // same flex row as the Thread heading so they align vertically and
   // scroll away with content (no absolute positioning / viewport
   // anchoring).
-  const topRightControls = isOwner && node.ai_usage !== 'none' && (
+  const topRightControls = isOwner && node.ai_usage !== 'none'
+    && !isPublicThread && (
     <div style={{
       display: 'flex',
       flexDirection: 'column',
@@ -870,6 +895,7 @@ function NodeDetail() {
           childrenCount={highlightedChildrenCount}
           humanOwnerUsername={humanOwnerUsername}
           llmModel={node.llm_model}
+          publicPage={node.privacy_level === 'public'}
         >
           <button
             onClick={canPin ? handlePin : undefined}
@@ -877,8 +903,8 @@ function NodeDetail() {
             title={
               !isOwner ? "Only the owner can pin"
               : node.privacy_level === "private" ? "Cannot pin a private node"
-              : isPinned ? "Unpin from profile"
-              : "Pin to profile"
+              : isPinned ? "Unpin from your public page"
+              : "Pin to the top of your public page"
             }
             style={{
               background: "none",

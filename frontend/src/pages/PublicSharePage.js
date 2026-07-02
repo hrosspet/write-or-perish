@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import api from '../api';
 import MarkdownBody from '../components/MarkdownBody';
+import { FaThumbtack } from 'react-icons/fa';
 import { formatDate } from '../utils/date';
 
 /**
@@ -15,6 +16,7 @@ import { formatDate } from '../utils/date';
  */
 export default function PublicSharePage() {
   const { username } = useParams();
+  const navigate = useNavigate();
   // 'loading' | 'ok' | 'notfound'
   const [status, setStatus] = useState('loading');
   const [data, setData] = useState(null);
@@ -78,25 +80,40 @@ export default function PublicSharePage() {
           textAlign: 'center', color: 'var(--text-muted)',
           fontSize: '0.9rem', fontWeight: 300,
         }}>
-          Nothing here yet.
+          {data.username}'s public entries will appear here as they share thoughts with Loore.
         </p>
       )}
 
       {data.shares.map((share) => (
         <div
-          key={share.id}
+          key={share.public_node_id || share.id}
+          onClick={(e) => {
+            if (!share.public_node_id) return;
+            const target = share.permalink || `/node/${share.public_node_id}`;
+            if (e.metaKey || e.ctrlKey) {
+              window.open(target, '_blank', 'noopener');
+            } else {
+              navigate(target);
+            }
+          }}
+          onMouseEnter={(e) => { if (share.public_node_id) e.currentTarget.style.borderColor = 'var(--border-hover)'; }}
+          onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--border)'; }}
           style={{
             background: 'var(--bg-card)', border: '1px solid var(--border)',
             borderRadius: '12px', padding: '32px 36px', marginBottom: '24px',
+            cursor: share.public_node_id ? 'pointer' : 'default',
+            transition: 'border-color 0.15s ease',
           }}
         >
-          <div style={{
-            fontFamily: 'var(--sans)', fontSize: '0.65rem', fontWeight: 300,
-            letterSpacing: '0.14em', textTransform: 'uppercase',
-            color: 'var(--text-muted)', marginBottom: '12px',
-          }}>
-            {share.share_type}
-          </div>
+          {share.share_type && (
+            <div style={{
+              fontFamily: 'var(--sans)', fontSize: '0.65rem', fontWeight: 300,
+              letterSpacing: '0.14em', textTransform: 'uppercase',
+              color: 'var(--text-muted)', marginBottom: '12px',
+            }}>
+              {share.share_type}
+            </div>
+          )}
           <div style={{
             fontFamily: 'var(--sans)', fontSize: '0.95rem', fontWeight: 300,
             color: 'var(--text-secondary)', lineHeight: 1.75,
@@ -106,8 +123,15 @@ export default function PublicSharePage() {
           <div style={{
             fontFamily: 'var(--sans)', fontSize: '0.7rem', fontWeight: 300,
             color: 'var(--text-muted)', opacity: 0.7, marginTop: '16px',
+            display: 'flex', alignItems: 'center', gap: '8px',
           }}>
-            {formatDate(share.published_at, { relative: false })}
+            <span>{formatDate(share.published_at, { relative: false })}</span>
+            {share.pinned && (
+              <FaThumbtack
+                title="Pinned"
+                style={{ color: 'var(--accent)', opacity: 0.8, fontSize: '0.7rem' }}
+              />
+            )}
           </div>
         </div>
       ))}

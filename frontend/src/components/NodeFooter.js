@@ -4,18 +4,26 @@ import { FaRegCommentDots } from 'react-icons/fa';
 import { useUser } from '../contexts/UserContext';
 import { formatDateTime } from '../utils/date';
 
-const NodeFooter = ({ username, createdAt, childrenCount, humanOwnerUsername, llmModel, onReplyClick, children }) => {
+const NodeFooter = ({ username, createdAt, childrenCount, humanOwnerUsername, llmModel, onReplyClick, publicPage = false, children }) => {
   const { user } = useUser();
 
-  // "via" display: show "humanOwner via model" for LLM nodes,
-  // or just the model name when human owner is not provided
+  // LLM nodes: private threads show just the model — whose thread it is
+  // needs no announcing in your own diary. PUBLIC nodes attribute the
+  // human who generated it ("model · via human"), matching the Commons
+  // and the funnel.
   const displayUsername = llmModel
-    ? (humanOwnerUsername ? `${humanOwnerUsername} via ${llmModel}` : llmModel)
+    ? (publicPage && humanOwnerUsername
+        ? `${llmModel} · via ${humanOwnerUsername}` : llmModel)
     : username;
 
-  // Link goes to human owner's dashboard for LLM nodes
+  // Link goes to human owner's dashboard for LLM nodes. On PUBLIC posts
+  // (#228) the handle links to the author's public page instead — the
+  // profile isn't public, and a visitor-facing surface shouldn't point at
+  // a login wall.
   const linkUsername = humanOwnerUsername || username;
-  const linkUrl = user && user.username === linkUsername ? '/dashboard' : `/dashboard/${linkUsername}`;
+  const linkUrl = publicPage
+    ? `/share/u/${linkUsername}`
+    : (user && user.username === linkUsername ? '/dashboard' : `/dashboard/${linkUsername}`);
   const formattedDateTime = formatDateTime(createdAt);
 
   const replyIcon = (

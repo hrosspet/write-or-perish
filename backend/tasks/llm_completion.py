@@ -59,6 +59,16 @@ USER_INTENTIONS_PLACEHOLDER = "{user_intentions}"
 # cache; the flag is constant per environment, so each env's render is
 # stable).
 SHARE_GUIDANCE_PLACEHOLDER = "{share_guidance}"
+
+
+def _share_enabled_for_user(user_id):
+    """Env flag AND the user's own opt-in (#228 dark ship). Constant per
+    user per environment, so both prompt-render paths stay byte-identical
+    between the pre-warm and generation."""
+    if not flask_app.config.get("SHARE_V1", False):
+        return False
+    owner = User.query.get(user_id)
+    return bool(owner and owner.public_sharing_enabled)
 SHARE_GUIDANCE_TEXT = """## Proposing shares
 
 When the user expresses something worth giving outward — a need they want help with, an offering, an insight or learning, an open exploration, or an intention they want to be public about — and either asks you to make it shareable or agrees when you offer, propose it using these headings: ### Share (the shareable text, written to stand alone for readers who lack the conversation's context — faithful to the user's meaning and register, not corporate-polished), ### Share type (just the single type word: need, offering, insight, exploration, intention, or other — nothing else on that line or after it). The system auto-detects the headings and shows the user a "Save to shares" button. Confirming only saves a PRIVATE draft to their Share page — publication is a separate deliberate action there, so nothing becomes visible to anyone without the user explicitly publishing it. When the user confirms out loud (e.g. "yes save that"), call the apply_share tool. Put any lead-in or closing remark *before* the headings — text after them is treated as part of the proposal, not your message. Offer shares proactively whenever something in the user's writing strikes you as genuinely novel, or likely to be helpful to others. If unsure, briefly note that what they said might be worth sharing — with your reasons why — and ask whether they'd like Loore to draft a shareable piece from it."""
@@ -863,7 +873,7 @@ def _auto_create_drafts(llm_text, llm_node, node_chain, user_id):
     # Share proposals only exist where SHARE_V1 is enabled — with the flag
     # off the prompt guidance isn't injected either, so stray ### Share
     # headings in prose must not grow a Save button that would 404.
-    if (flask_app.config.get("SHARE_V1", False)
+    if (_share_enabled_for_user(user_id)
             and _detect_share_proposal(llm_text)):
         already = Draft.query.filter_by(
             parent_id=llm_node.id, user_id=user_id,
@@ -1419,7 +1429,7 @@ def render_system_message(system_node, user_id):
         text = text.replace(
             SHARE_GUIDANCE_PLACEHOLDER,
             SHARE_GUIDANCE_TEXT
-            if flask_app.config.get("SHARE_V1", False) else "")
+            if _share_enabled_for_user(user_id) else "")
     return text
 
 
@@ -2047,7 +2057,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             message_text = message_text.replace(
                                 SHARE_GUIDANCE_PLACEHOLDER,
                                 SHARE_GUIDANCE_TEXT
-                                if flask_app.config.get("SHARE_V1", False)
+                                if _share_enabled_for_user(user_id)
                                 else ""
                             )
                         # Resolve {quote:ID} placeholders if present
