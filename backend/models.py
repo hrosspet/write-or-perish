@@ -753,6 +753,11 @@ class ShareDraft(db.Model):
     # user creates by hand on the Share page).
     source_node_id = db.Column(db.Integer, db.ForeignKey("node.id"),
                                nullable=True)
+    # The standalone public root node created when this share is published
+    # (#228). Publishing = extraction into the public forum; revoking
+    # soft-deletes that node. Null while draft/revoked.
+    public_node_id = db.Column(db.Integer, db.ForeignKey("node.id"),
+                               nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow,
                            onupdate=datetime.utcnow)

@@ -283,6 +283,14 @@ export default function SharePage() {
                   Publish
                 </button>
               )}
+              {share.status === 'published' && share.public_node_id && (
+                <Link
+                  to={`/node/${share.public_node_id}`}
+                  style={{ ...quietAction, color: 'var(--accent)' }}
+                >
+                  View thread
+                </Link>
+              )}
               {share.status === 'published' && (
                 <button onClick={() => handleRevoke(share.id)} style={quietAction}>Revoke</button>
               )}

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useUser } from '../contexts/UserContext';
 
 function useOnScreen(ref, threshold = 0.1) {
   const [isVisible, setIsVisible] = useState(false);
@@ -147,11 +148,29 @@ function WorkflowCard({ card, delay }) {
   );
 }
 
+const forumCard = {
+  key: "forum",
+  path: "/forum",
+  title: "Commons",
+  description: "What others have made public.",
+  icon: (
+    <svg width="42" height="42" viewBox="0 0 42 42" fill="none">
+      {/* Two overlapping speech forms — a conversation held in common. */}
+      <path d="M6 14 C6 11.8 7.8 10 10 10 L22 10 C24.2 10 26 11.8 26 14 L26 21 C26 23.2 24.2 25 22 25 L13 25 L8 29 L8 25 L10 25 C7.8 25 6 23.2 6 21 Z"
+            stroke="var(--accent)" strokeWidth="1.4" fill="none"/>
+      <path d="M30 17 L32 17 C34.2 17 36 18.8 36 21 L36 27 C36 29.2 34.2 31 32 31 L31 31 L31 34 L27 31 L22 31 C19.8 31 18 29.2 18 27 L18 26"
+            stroke="var(--accent)" strokeWidth="1.4" fill="none" opacity="0.7"/>
+    </svg>
+  ),
+};
+
 export default function HomePage() {
   const greetingRef = useRef(null);
   const questionRef = useRef(null);
   const greetingVisible = useOnScreen(greetingRef);
   const questionVisible = useOnScreen(questionRef);
+  const { user } = useUser();
+  const displayCards = user?.share_v1_enabled ? [...cards, forumCard] : cards;
 
   return (
     <div style={{
@@ -200,10 +219,10 @@ export default function HomePage() {
         gap: "1.5rem",
         flexWrap: "wrap",
         justifyContent: "center",
-        maxWidth: "580px",
+        maxWidth: displayCards.length > 2 ? "880px" : "580px",
         width: "100%",
       }}>
-        {cards.map((card, i) => (
+        {displayCards.map((card, i) => (
           <WorkflowCard key={card.key} card={card} delay={400 + i * 120} />
         ))}
       </div>

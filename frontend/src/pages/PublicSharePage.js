@@ -104,10 +104,27 @@ export default function PublicSharePage() {
             <MarkdownBody>{share.content}</MarkdownBody>
           </div>
           <div style={{
-            fontFamily: 'var(--sans)', fontSize: '0.7rem', fontWeight: 300,
-            color: 'var(--text-muted)', opacity: 0.7, marginTop: '16px',
+            display: 'flex', justifyContent: 'space-between',
+            alignItems: 'baseline', marginTop: '16px',
           }}>
-            {formatDate(share.published_at, { relative: false })}
+            <span style={{
+              fontFamily: 'var(--sans)', fontSize: '0.7rem', fontWeight: 300,
+              color: 'var(--text-muted)', opacity: 0.7,
+            }}>
+              {formatDate(share.published_at, { relative: false })}
+            </span>
+            {share.public_node_id && (
+              <a
+                href={`/node/${share.public_node_id}`}
+                style={{
+                  fontFamily: 'var(--sans)', fontSize: '0.75rem',
+                  fontWeight: 300, color: 'var(--accent)',
+                  textDecoration: 'none', opacity: 0.85,
+                }}
+              >
+                open the conversation →
+              </a>
+            )}
           </div>
         </div>
       ))}

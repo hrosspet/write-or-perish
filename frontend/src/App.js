@@ -27,12 +27,23 @@ import AccountPage from "./pages/AccountPage";
 import ArtifactsPage from "./pages/ArtifactsPage";
 import SharePage from "./pages/SharePage";
 import PublicSharePage from "./pages/PublicSharePage";
+import ForumPage from "./pages/ForumPage";
+import PublicThreadPage from "./pages/PublicThreadPage";
 import ProfileGenerationWatcher from "./components/ProfileGenerationWatcher";
 import PromptsPage from "./pages/PromptsPage";
 import PromptDetailPage from "./pages/PromptDetailPage";
 import SearchModal from "./components/SearchModal";
 import { useUser } from "./contexts/UserContext";
 import { AudioProvider } from "./contexts/AudioContext";
+
+// /node/:id — members get the full thread UI; logged-out visitors get the
+// read-only public thread (the funnel, #228). PublicThreadPage 404s for
+// anything non-public, so nothing private is reachable without login.
+function NodeRoute() {
+  const { user, loading } = useUser();
+  if (loading) return null;
+  return user ? <NodeDetailWrapper /> : <PublicThreadPage />;
+}
 
 function RootRoute() {
   const { user, loading } = useUser();
@@ -153,8 +164,9 @@ function App() {
           <Route path="/artifacts/:kind" element={<ProtectedRoute><ArtifactsPage /></ProtectedRoute>} />
           <Route path="/share" element={<ProtectedRoute><SharePage /></ProtectedRoute>} />
           <Route path="/share/u/:username" element={<PublicSharePage />} />
+          <Route path="/forum" element={<ProtectedRoute><ForumPage /></ProtectedRoute>} />
           <Route path="/account" element={<ProtectedRoute><AccountPage /></ProtectedRoute>} />
-          <Route path="/node/:id" element={<ProtectedRoute><NodeDetailWrapper /></ProtectedRoute>} />
+          <Route path="/node/:id" element={<NodeRoute />} />
           <Route path="/admin" element={<ProtectedRoute><AdminPanel /></ProtectedRoute>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
