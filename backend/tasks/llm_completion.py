@@ -374,8 +374,11 @@ def _todo_index_line(user_id, pinned_node=None):
 
     Todo is its own model (not a UserArtifact) and since #158 Slice 3 is no
     longer shown inline — it appears in the index and is pulled on demand via
-    read_todo. Resolved from the session's pinned snapshot, falling back to
-    latest. A todo the user opted out of AI access is omitted entirely; an
+    read_todo, which pins the version it read to the fetching node. System
+    nodes therefore no longer pin a todo at session start; only legacy nodes
+    (or custom prompts embedding {user_todo}) carry one, and it's honored
+    when present, falling back to latest otherwise.
+    A todo the user opted out of AI access is omitted entirely; an
     absent or empty todo is still listed (as ``(empty)``) so the model knows
     the surface exists. No open/priority counts (noise).
     """

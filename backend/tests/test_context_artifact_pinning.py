@@ -401,3 +401,67 @@ class TestCallSiteWiring:
             any(kw.arg == "pinned_node" for kw in call.keywords)
             for call in calls
         ), f"{fn} must be called with a pinned_node= (per #191)"
+
+
+# ── attach pins only what the prompt embeds ────────────────────────────────
+
+def _prompt(user_id, content):
+    from backend.models import UserPrompt
+    p = UserPrompt(
+        user_id=user_id, prompt_key="textmode", title="Text Mode",
+        generated_by="default",
+    )
+    p.set_content(content)
+    db.session.add(p)
+    db.session.flush()
+    return p
+
+
+class TestAttachPinsOnlyReferencedTypes:
+    """attach_context_artifacts pins only artifact types the prompt content
+    actually embeds via placeholders. The agentic prompt stopped embedding
+    {user_todo} in #158 Slice 3 (the todo is pulled on demand via read_todo,
+    which pins the version read to the fetching node) — but attach kept
+    unconditionally pinning a todo version to the system node, wrongly
+    presenting it as in-context.
+    """
+
+    def test_prompt_without_todo_placeholder_pins_no_todo(self, app):
+        from backend.utils.context_artifacts import attach_context_artifacts
+        u = _user()
+        _profile(u.id, T_OLD, "profile")
+        _todo(u.id, T_OLD, "todo content")
+        prompt = _prompt(u.id, "{user_profile} {user_artifacts_index}")
+        node = Node(user_id=u.id, node_type="user")
+        db.session.add(node)
+        db.session.flush()
+
+        attach_context_artifacts(node.id, u.id, prompt_record=prompt)
+        db.session.flush()
+
+        types = {a.artifact_type for a in node.context_artifacts}
+        assert "todo" not in types
+        assert "prompt" in types
+        assert "profile" in types
+
+    def test_prompt_with_todo_placeholder_still_pins_todo(self, app):
+        # Legacy/custom prompts that embed {user_todo} keep #191 semantics.
+        from backend.utils.context_artifacts import attach_context_artifacts
+        u = _user()
+        t = _todo(u.id, T_OLD, "todo content")
+        prompt = _prompt(u.id, "{user_todo}")
+        node = Node(user_id=u.id, node_type="user")
+        db.session.add(node)
+        db.session.flush()
+
+        attach_context_artifacts(node.id, u.id, prompt_record=prompt)
+        db.session.flush()
+
+        assert node.get_artifact_id("todo") == t.id
+
+    def test_default_agentic_prompt_embeds_no_todo(self):
+        # Guard the shipped default: if {user_todo} ever returns to the
+        # agentic prompt, the pin above becomes required again.
+        from backend.utils.prompts import load_default_prompt
+        for key in ("textmode", "voice"):
+            assert "{user_todo}" not in load_default_prompt(key)

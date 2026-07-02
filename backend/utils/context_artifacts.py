@@ -3,7 +3,7 @@ import re
 
 from backend.extensions import db
 from backend.models import (
-    NodeContextArtifact, UserProfile, UserRecentContext, UserTodo,
+    Node, NodeContextArtifact, UserProfile, UserRecentContext, UserTodo,
     UserArtifact,
 )
 from backend.utils.privacy import AI_ALLOWED
@@ -28,12 +28,15 @@ _PLACEHOLDER_RE = re.compile(
 
 
 def attach_context_artifacts(node_id, user_id, prompt_record=None):
-    """Attach current context artifact versions to a system node.
+    """Attach context artifact versions referenced by a system node (#191).
 
-    Creates NodeContextArtifact rows for:
-      - prompt  (if *prompt_record* supplied)
-      - profile (latest with ai_usage in ('chat', 'train'))
-      - todo    (latest with ai_usage in ('chat', 'train'))
+    Pins the prompt row itself (if *prompt_record* supplied) plus one row
+    per artifact type the prompt content actually references via
+    placeholders — a pin means "this exact version is embedded in this
+    node's context". Types the agent pulls on demand are NOT pinned here:
+    the todo (read_todo, #158 Slice 3) and non-inline artifacts
+    (read_artifact) get pinned by the retrieval loop on the node whose
+    turn fetched them.
 
     Should be called right after the system node is flushed (so node_id
     is valid) and before the session is committed.
@@ -44,68 +47,12 @@ def attach_context_artifacts(node_id, user_id, prompt_record=None):
             artifact_type="prompt",
             artifact_id=prompt_record.id,
         ))
-
-    # Latest profile that the AI is allowed to see
-    profile = (
-        UserProfile.query
-        .filter_by(user_id=user_id)
-        .filter(UserProfile.ai_usage.in_(AI_ALLOWED))
-        .order_by(UserProfile.created_at.desc())
-        .first()
-    )
-    if profile is not None:
-        db.session.add(NodeContextArtifact(
-            node_id=node_id,
-            artifact_type="profile",
-            artifact_id=profile.id,
-        ))
-
-    # Latest recent context summary for the current profile
-    profile_id = profile.id if profile is not None else None
-    rc_query = UserRecentContext.query.filter_by(user_id=user_id)
-    if profile_id is not None:
-        rc_query = rc_query.filter_by(profile_id=profile_id)
+        content = prompt_record.get_content() or ""
     else:
-        rc_query = rc_query.filter(UserRecentContext.profile_id.is_(None))
-    recent_ctx = rc_query.order_by(
-        UserRecentContext.created_at.desc()
-    ).first()
-    if recent_ctx is not None:
-        db.session.add(NodeContextArtifact(
-            node_id=node_id,
-            artifact_type="recent_context",
-            artifact_id=recent_ctx.id,
-        ))
+        node = Node.query.get(node_id)
+        content = (node.get_content() or "") if node else ""
 
-    # Latest todo that the AI is allowed to see
-    todo = (
-        UserTodo.query
-        .filter_by(user_id=user_id)
-        .filter(UserTodo.ai_usage.in_(AI_ALLOWED))
-        .order_by(UserTodo.created_at.desc())
-        .first()
-    )
-    if todo is not None:
-        db.session.add(NodeContextArtifact(
-            node_id=node_id,
-            artifact_type="todo",
-            artifact_id=todo.id,
-        ))
-
-    # Latest version of every user artifact the AI is allowed to see — one
-    # row per kind (#158). Since Slice 5 this includes 'ai_preferences'
-    # (folded into the UserArtifact model), so it's pinned here too. There's
-    # no dedicated ai_preferences pin anymore — that would double-pin once the
-    # artifact exists. Pre-backfill (no artifact yet),
-    # get_user_ai_preferences_content falls back to the legacy
-    # UserAIPreferences row (#219).
-    for artifact in UserArtifact.latest_per_kind(user_id).values():
-        if artifact.ai_usage in AI_ALLOWED:
-            db.session.add(NodeContextArtifact(
-                node_id=node_id,
-                artifact_type="user_artifact",
-                artifact_id=artifact.id,
-            ))
+    sync_context_artifacts(node_id, user_id, content)
 
 
 def sync_context_artifacts(node_id, user_id, content):
