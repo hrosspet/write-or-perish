@@ -577,6 +577,17 @@ def create_node():
         if err is not None:
             return err
 
+        # Public threads stay fully public (#228) — see the text path.
+        if parent_id:
+            parent = Node.query.get(parent_id)
+            if (parent is not None
+                    and parent.privacy_level == PrivacyLevel.PUBLIC
+                    and privacy_level != PrivacyLevel.PUBLIC):
+                return jsonify({
+                    "error": "Replies under public posts are public.",
+                    "code": "public_reply_required",
+                }), 400
+
         # Placeholder content until transcription is ready.
         placeholder_text = "[Voice note – transcription pending]"
         from backend.utils.tokens import approximate_token_count as _atc2
@@ -656,6 +667,20 @@ def create_node():
     err = assert_parent_alive(parent_id)
     if err is not None:
         return err
+
+    # Public threads stay fully public (#228): a reply under a public node
+    # must itself be public — private interaction with public content goes
+    # through quoting it in your own threads instead. The frontend shows a
+    # consent dialog before sending; this is the structural backstop.
+    if parent_id:
+        parent = Node.query.get(parent_id)
+        if (parent is not None
+                and parent.privacy_level == PrivacyLevel.PUBLIC
+                and privacy_level != PrivacyLevel.PUBLIC):
+            return jsonify({
+                "error": "Replies under public posts are public.",
+                "code": "public_reply_required",
+            }), 400
 
     # Content above the per-node cap is auto-split into a serial chain
     # of nodes (first segment keeps this node's id). A single oversized
@@ -1088,6 +1113,17 @@ def request_llm_response(node_id):
     from backend.llm_providers import LLMProvider
 
     parent_node = Node.query.get_or_404(node_id)
+
+    # Generation is allowed only on your OWN nodes (#228): on a public
+    # thread you respond first (a public reply of yours), then generate on
+    # your own branch — the completion is attributed and billed to you.
+    # (Also closes a latent gap: this route never checked ownership.)
+    owner_id = parent_node.human_owner_id or parent_node.user_id
+    if owner_id != current_user.id:
+        return jsonify({
+            "error": "You can only request an AI response on your own "
+                     "nodes. Reply first, then generate on your reply.",
+        }), 403
 
     # Get and validate the model from request body
     data = request.get_json() or {}

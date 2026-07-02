@@ -15,6 +15,7 @@ from backend.extensions import db
 from backend.utils.share import save_share_draft_from_node
 from backend.utils.tool_meta import update_tool_meta
 from backend.utils.timefmt import iso_utc
+from backend.utils.privacy import PrivacyLevel, AIUsage
 from datetime import datetime
 
 share_bp = Blueprint("share", __name__)
@@ -31,6 +32,7 @@ def _serialize(share):
         "share_type": share.share_type,
         "status": share.status,
         "source_node_id": share.source_node_id,
+        "public_node_id": share.public_node_id,
         "created_at": iso_utc(share.created_at),
         "updated_at": iso_utc(share.updated_at),
         "published_at": iso_utc(share.published_at),
@@ -116,6 +118,10 @@ def delete_share(share_id):
     share = _get_own_share_or_404(share_id)
     if not share:
         return jsonify({"error": "Not found"}), 404
+    if share.public_node_id:
+        from backend.utils.node_deletion import soft_delete_node
+        soft_delete_node(share.public_node_id, current_user.id,
+                         with_descendants=False)
     db.session.delete(share)
     db.session.commit()
     return jsonify({"status": "deleted"}), 200
@@ -132,6 +138,38 @@ def publish_share(share_id):
         return jsonify({"error": "Not found"}), 404
     if share.status == "published":
         return jsonify(_serialize(share)), 200
+
+    # Publishing = extraction into the public forum (#228): a standalone
+    # public ROOT node (no system node — LLM calls on the thread assemble
+    # context purely from the visible chain). ai_usage follows the user's
+    # default so the author's AI preference travels with the content;
+    # 'none' means other users can read but not include it in completions.
+    ai_usage = current_user.default_ai_usage
+    if ai_usage not in (AIUsage.CHAT.value, AIUsage.TRAIN.value,
+                        AIUsage.NONE.value):
+        ai_usage = AIUsage.CHAT.value
+    content = share.get_content()
+    from backend.utils.tokens import approximate_token_count
+    public_node = Node(
+        user_id=current_user.id,
+        human_owner_id=current_user.id,
+        parent_id=None,
+        node_type="user",
+        privacy_level=PrivacyLevel.PUBLIC.value,
+        ai_usage=ai_usage,
+        token_count=approximate_token_count(content),
+    )
+    public_node.set_content(content)
+    db.session.add(public_node)
+    db.session.flush()
+
+    share.public_node_id = public_node.id
+    # Back-link from the private proposal node to its public artifact.
+    if share.source_node_id:
+        origin = Node.query.get(share.source_node_id)
+        if origin is not None and origin.linked_node_id is None:
+            origin.linked_node_id = public_node.id
+
     share.status = "published"
     share.published_at = datetime.utcnow()
     share.revoked_at = None
@@ -150,6 +188,13 @@ def revoke_share(share_id):
         return jsonify({"error": "Not found"}), 404
     if share.status != "published":
         return jsonify({"error": "Only published shares can be revoked"}), 409
+    if share.public_node_id:
+        from backend.utils.node_deletion import soft_delete_node
+        # Your content comes down; public replies by others keep their own
+        # nodes (they'll render under a tombstone, like any deleted node).
+        soft_delete_node(share.public_node_id, current_user.id,
+                         with_descendants=False)
+        share.public_node_id = None
     share.status = "revoked"
     share.revoked_at = datetime.utcnow()
     db.session.commit()
@@ -237,6 +282,7 @@ def public_shares(username):
             "id": s.id,
             "content": s.get_content(),
             "share_type": s.share_type,
+            "public_node_id": s.public_node_id,
             "published_at": iso_utc(s.published_at),
         } for s in shares],
     }), 200
