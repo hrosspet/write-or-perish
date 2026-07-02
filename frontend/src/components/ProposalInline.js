@@ -647,6 +647,15 @@ export default function ProposalInline({
     }
   }, [nodeId, onApplied]);
 
+  const [shareCopied, setShareCopied] = useState(false);
+  const handleCopyShare = useCallback(() => {
+    if (!parsed.share) return;
+    navigator.clipboard.writeText(parsed.share).then(() => {
+      setShareCopied(true);
+      setTimeout(() => setShareCopied(false), 1500);
+    }).catch(() => { /* clipboard unavailable — no toast needed */ });
+  }, [parsed.share]);
+
   const handleSaveShare = useCallback(async () => {
     if (!nodeId) return;
     setShareApplyStatus('started');
@@ -862,7 +871,33 @@ export default function ProposalInline({
       {hasShareProposal && parsed.share && (
         <div style={styles.issueWrapper}>
           {sectionLabel(styles.roomy ? 'Proposed Share' : 'Share')}
-          <div style={styles.issueCard}>
+          <div style={{ ...styles.issueCard, position: 'relative' }}>
+            {/* One-click copy for pasting the share elsewhere (e.g. X). */}
+            <button
+              onClick={handleCopyShare}
+              title="Copy share text"
+              style={{
+                position: 'absolute', top: '8px', right: '8px',
+                background: 'none', border: 'none', cursor: 'pointer',
+                padding: '4px', lineHeight: 0,
+                color: shareCopied ? 'var(--success)' : 'var(--text-muted)',
+                opacity: shareCopied ? 1 : 0.6,
+                transition: 'opacity 0.15s ease, color 0.15s ease',
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.opacity = 1; }}
+              onMouseLeave={(e) => { if (!shareCopied) e.currentTarget.style.opacity = 0.6; }}
+            >
+              {shareCopied ? (
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                  <path d="M3 8.5 L6.5 12 L13 4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              ) : (
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                  <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.2"/>
+                  <path d="M10.5 5.5 V4 A1.5 1.5 0 0 0 9 2.5 H4 A1.5 1.5 0 0 0 2.5 4 V9 A1.5 1.5 0 0 0 4 10.5 H5.5" stroke="currentColor" strokeWidth="1.2"/>
+                </svg>
+              )}
+            </button>
             <MarkdownBody
               style={styles.issueDescStyle}
               paragraphMargin={styles.roomy ? '0 0 8px 0' : '0 0 6px 0'}
