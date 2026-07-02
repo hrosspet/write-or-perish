@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../api';
 import MarkdownBody from '../components/MarkdownBody';
+import { FaThumbtack } from 'react-icons/fa';
 import { formatDate } from '../utils/date';
 
 /**
@@ -108,12 +109,8 @@ export default function PublicSharePage() {
             fontFamily: 'var(--sans)', fontSize: '0.65rem', fontWeight: 300,
             letterSpacing: '0.14em', textTransform: 'uppercase',
             color: 'var(--text-muted)', marginBottom: '12px',
-            display: 'flex', gap: '12px', alignItems: 'baseline',
           }}>
-            <span>{share.share_type}</span>
-            {share.pinned && (
-              <span style={{ color: 'var(--accent)', opacity: 0.8 }}>pinned</span>
-            )}
+            {share.share_type}
           </div>
           <div style={{
             fontFamily: 'var(--sans)', fontSize: '0.95rem', fontWeight: 300,
@@ -124,8 +121,15 @@ export default function PublicSharePage() {
           <div style={{
             fontFamily: 'var(--sans)', fontSize: '0.7rem', fontWeight: 300,
             color: 'var(--text-muted)', opacity: 0.7, marginTop: '16px',
+            display: 'flex', alignItems: 'center', gap: '8px',
           }}>
-            {formatDate(share.published_at, { relative: false })}
+            <span>{formatDate(share.published_at, { relative: false })}</span>
+            {share.pinned && (
+              <FaThumbtack
+                title="Pinned"
+                style={{ color: 'var(--accent)', opacity: 0.8, fontSize: '0.7rem' }}
+              />
+            )}
           </div>
         </div>
       ))}
