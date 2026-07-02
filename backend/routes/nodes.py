@@ -477,17 +477,24 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
         n.human_owner_id if n.node_type == "llm" else n.user_id
     )
     children_data = [
-        serialize_node_recursive(
-            child, user_id, parent_user_id=n_as_parent_user_id,
-        )
-        for child in sorted_children
+        serialized for serialized in (
+            serialize_node_recursive(
+                child, user_id, parent_user_id=n_as_parent_user_id,
+            )
+            for child in sorted_children
+        ) if serialized is not None
     ]
 
     if status is not None:
         # Tombstone — content already omitted by serialize_node_status.
+        # A tombstone only earns its place by anchoring LIVING descendants;
+        # with nothing visible underneath it's pruned entirely (returns
+        # None, filtered by the caller) instead of littering the thread.
+        if not children_data:
+            return None
         return {
             **status,
-            "child_count": len(visible_children),
+            "child_count": len(children_data),
             "descendant_count": n._descendant_count,
             "children": children_data,
         }
@@ -704,6 +711,13 @@ def create_node():
         ai_usage=ai_usage
     )
     node.set_content(first_content)
+    # Public ROOTS get a human-readable permalink slug at birth (#228) —
+    # the share pipeline does this at publish; this covers direct
+    # craft-mode public roots.
+    if privacy_level == PrivacyLevel.PUBLIC and parent_id is None:
+        from backend.utils.slugs import generate_unique_public_slug
+        node.public_slug = generate_unique_public_slug(
+            current_user.id, first_content)
     db.session.add(node)
     db.session.flush()
 
@@ -919,19 +933,24 @@ def get_node(node_id):
         node.human_owner_id if node.node_type == "llm" else node.user_id
     )
 
-    # Serialize the current node (its children are now sorted descending by descendant count).
+    # Serialize children first (pruned tombstones drop out) so child_count
+    # reflects what the viewer actually sees.
+    serialized_children = [
+        serialized for serialized in (
+            serialize_node_recursive(
+                child, current_user.id,
+                parent_user_id=focal_as_parent_user_id,
+            )
+            for child in sorted_children
+        ) if serialized is not None
+    ]
     node_data = {
         "id": node.id,
         "content": node.get_content(),
         "node_type": node.node_type,
-        "child_count": len(accessible_children),
+        "child_count": len(serialized_children),
         "ancestors": ancestors,
-        "children": [
-            serialize_node_recursive(
-                child, current_user.id, parent_user_id=focal_as_parent_user_id,
-            )
-            for child in sorted_children
-        ],
+        "children": serialized_children,
         "created_at": iso_utc(node.created_at),
         "updated_at": iso_utc(node.updated_at),
         "permalink": (

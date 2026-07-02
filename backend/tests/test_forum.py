@@ -256,6 +256,16 @@ def test_log_excludes_public_roots(app):
     assert not any("public root" in p for p in previews)
 
 
+def test_direct_public_root_gets_slug_at_creation(app):
+    client = _client_for(app, "author")
+    r = client.post("/api/nodes/",
+                    json={"content": "Straight to the commons",
+                          "privacy_level": "public", "ai_usage": "chat"})
+    assert r.status_code == 201
+    node = Node.query.get(r.get_json()["id"])
+    assert node.public_slug == "straight-to-the-commons"
+
+
 def test_public_page_includes_direct_public_roots(app):
     """Public roots created outside the share pipeline (craft path) still
     appear on the author's public page — everything public has a home."""
@@ -327,6 +337,30 @@ def test_member_surfaces_require_user_opt_in(app):
     author_client.post(f"/api/share/{share.id}/publish")
     anon = app.test_client()
     assert anon.get("/api/share/public/author").status_code == 200
+
+
+def test_childless_tombstones_are_pruned_from_threads(app):
+    """A deleted node with no living descendants disappears from the
+    thread entirely; one anchoring a living reply stays as a tombstone."""
+    author = _client_for(app, "author")
+    root = _mk_node("author", "root piece")
+    leaf = _mk_node("visitor", "soon deleted", parent=root)
+    anchor = _mk_node("visitor", "also deleted", parent=root)
+    keeper = _mk_node("author", "still alive", parent=anchor)
+    from datetime import datetime
+    leaf.deleted_at = datetime.utcnow()
+    anchor.deleted_at = datetime.utcnow()
+    _db.session.commit()
+
+    detail = author.get(f"/api/nodes/{root.id}").get_json()
+    kids = detail["children"]
+    # The childless tombstone is gone; the anchoring one remains with its
+    # living child inside.
+    assert len(kids) == 1
+    assert kids[0]["id"] == anchor.id
+    assert kids[0].get("deleted") or "[Node deleted]" in str(kids[0])
+    assert kids[0]["children"][0]["content"] == "still alive"
+    assert detail["child_count"] == 1
 
 
 # ── Permalinks (#228 slugs) ──────────────────────────────────────────────
