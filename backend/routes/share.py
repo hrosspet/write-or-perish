@@ -304,31 +304,43 @@ def public_shares(username):
     user = User.query.filter_by(username=username).first()
     if not user:
         return jsonify({"error": "Not found"}), 404
-    shares = ShareDraft.query.filter_by(
-        user_id=user.id, status="published").order_by(
-        ShareDraft.published_at.desc()).all()
-
-    def _pinned_at(share):
-        node = Node.query.get(share.public_node_id) \
-            if share.public_node_id else None
-        return node.pinned_at if node else None
-
-    # Pinned pieces lead the page (newest pin first), then the rest by
-    # publish date — pinning a public node IS featuring it here.
-    decorated = [(s, _pinned_at(s)) for s in shares]
-    decorated.sort(key=lambda pair: (
-        pair[1] is None,
-        -(pair[1].timestamp() if pair[1] else 0),
+    # ALL the user's living public roots — shares are enriched with their
+    # type/publish date; direct-created public roots (craft path) appear
+    # too, so everything public has a home page (#228).
+    nodes = Node.query.filter(
+        Node.parent_id.is_(None),
+        Node.deleted_at.is_(None),
+        Node.privacy_level == "public",
+        (Node.human_owner_id == user.id) | (Node.user_id == user.id),
+    ).all()
+    share_by_node = {
+        s.public_node_id: s
+        for s in ShareDraft.query.filter_by(
+            user_id=user.id, status="published").all()
+        if s.public_node_id
+    }
+    # Pinned pieces lead the page (newest pin first), then publish date.
+    nodes.sort(key=lambda n: (
+        n.pinned_at is None,
+        -(n.pinned_at.timestamp() if n.pinned_at else 0),
+        -(n.created_at.timestamp() if n.created_at else 0),
     ))
+    items = []
+    for node in nodes:
+        share = share_by_node.get(node.id)
+        items.append({
+            "id": node.id,
+            "content": node.get_content(),
+            "share_type": share.share_type if share else None,
+            "public_node_id": node.id,
+            "permalink": (f"/u/{user.username}/{node.public_slug}"
+                          if node.public_slug else None),
+            "pinned": node.pinned_at is not None,
+            "published_at": iso_utc(
+                share.published_at if share and share.published_at
+                else node.created_at),
+        })
     return jsonify({
         "username": user.username,
-        "shares": [{
-            "id": s.id,
-            "content": s.get_content(),
-            "share_type": s.share_type,
-            "public_node_id": s.public_node_id,
-            "permalink": _permalink(s),
-            "pinned": pinned is not None,
-            "published_at": iso_utc(s.published_at),
-        } for s, pinned in decorated],
+        "shares": items,
     }), 200

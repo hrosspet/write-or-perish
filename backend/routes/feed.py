@@ -3,6 +3,7 @@ from flask_login import login_required, current_user
 from backend.models import Node, User
 from backend.extensions import db
 from backend.utils.privacy import (
+    PrivacyLevel,
     accessible_nodes_filter, accessible_nodes_filter_ignoring_deleted,
 )
 from backend.utils.timefmt import iso_utc
@@ -65,6 +66,10 @@ def get_feed():
 
     query = Node.query.filter(
         or_(Node.parent_id.is_(None), Node.pinned_at.isnot(None)),
+        # The Log is the private diary (#228): public writing lives on the
+        # public page and in the Commons. Public roots here would be
+        # duplicate echoes of the private threads they were extracted from.
+        Node.privacy_level != PrivacyLevel.PUBLIC.value,
         or_(
             Node.user_id == current_user.id,
             Node.human_owner_id == current_user.id,

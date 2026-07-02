@@ -86,7 +86,7 @@ export default function PublicSharePage() {
 
       {data.shares.map((share) => (
         <div
-          key={share.id}
+          key={share.public_node_id || share.id}
           onClick={(e) => {
             if (!share.public_node_id) return;
             const target = share.permalink || `/node/${share.public_node_id}`;
@@ -105,13 +105,15 @@ export default function PublicSharePage() {
             transition: 'border-color 0.15s ease',
           }}
         >
-          <div style={{
-            fontFamily: 'var(--sans)', fontSize: '0.65rem', fontWeight: 300,
-            letterSpacing: '0.14em', textTransform: 'uppercase',
-            color: 'var(--text-muted)', marginBottom: '12px',
-          }}>
-            {share.share_type}
-          </div>
+          {share.share_type && (
+            <div style={{
+              fontFamily: 'var(--sans)', fontSize: '0.65rem', fontWeight: 300,
+              letterSpacing: '0.14em', textTransform: 'uppercase',
+              color: 'var(--text-muted)', marginBottom: '12px',
+            }}>
+              {share.share_type}
+            </div>
+          )}
           <div style={{
             fontFamily: 'var(--sans)', fontSize: '0.95rem', fontWeight: 300,
             color: 'var(--text-secondary)', lineHeight: 1.75,

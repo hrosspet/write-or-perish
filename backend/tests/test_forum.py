@@ -67,9 +67,11 @@ def _make_app():
     from backend.routes.share import share_bp
     from backend.routes.commons import commons_bp
     from backend.routes.nodes import nodes_bp
+    from backend.routes.feed import feed_bp
     app.register_blueprint(share_bp, url_prefix="/api/share")
     app.register_blueprint(commons_bp, url_prefix="/api/commons")
     app.register_blueprint(nodes_bp, url_prefix="/api/nodes")
+    app.register_blueprint(feed_bp, url_prefix="/api")
     return app
 
 
@@ -237,6 +239,36 @@ def test_republish_edited_creates_new_node(app):
     assert Node.query.get(old_node_id).deleted_at is not None  # stays down
     assert Node.query.get(new_node_id).get_content() == \
         "a public thought, sharpened"
+
+
+def test_log_excludes_public_roots(app):
+    """The Log is the private diary: public roots (extracted duplicates of
+    their private origins) don't echo there."""
+    client = _client_for(app, "author")
+    _mk_node("author", "private root", privacy="private")
+    _mk_node("author", "public root")
+    r = client.get("/api/feed?page=1&per_page=20")
+    assert r.status_code == 200
+    previews = [n["preview"] for n in r.get_json()["nodes"]]
+    assert any("private root" in p for p in previews)
+    assert not any("public root" in p for p in previews)
+
+
+def test_public_page_includes_direct_public_roots(app):
+    """Public roots created outside the share pipeline (craft path) still
+    appear on the author's public page — everything public has a home."""
+    client = _client_for(app, "author")
+    share = _mk_share_draft(content="via the pipeline")
+    client.post(f"/api/share/{share.id}/publish")
+    _mk_node("author", "direct public root")
+
+    anon = app.test_client()
+    body = anon.get("/api/share/public/author").get_json()["shares"]
+    contents = [x["content"] for x in body]
+    assert "via the pipeline" in contents
+    assert "direct public root" in contents
+    direct = next(x for x in body if x["content"] == "direct public root")
+    assert direct["share_type"] is None
 
 
 def test_pinned_share_leads_the_public_page(app):
