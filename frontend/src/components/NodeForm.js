@@ -6,6 +6,7 @@ import StreamingMicButton from "./StreamingMicButton";
 import PrivacySelector from "./PrivacySelector";
 import RegenerateTtsDialog from "./RegenerateTtsDialog";
 import SplitContentDialog, { NODE_CHAR_CAP } from "./SplitContentDialog";
+import PublicReplyDialog, { PUBLIC_REPLY_ACK_KEY } from "./PublicReplyDialog";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import api from "../api";
 import { uploadFileInChunks } from "../utils/chunkedUpload";
@@ -34,6 +35,10 @@ const NodeForm = forwardRef(
     // consent (paste or submit opens the dialog). pendingPaste holds
     // paste text awaiting that consent.
     const [showSplitDialog, setShowSplitDialog] = useState(false);
+    const [showPublicReplyDialog, setShowPublicReplyDialog] = useState(false);
+    // Parent's privacy, tracked whenever replying — drives the public-reply
+    // consent dialog (#228). Independent of the inherit-defaults effect.
+    const [parentPrivacy, setParentPrivacy] = useState(null);
     const [pendingPaste, setPendingPaste] = useState(null);
     const [splitAcknowledged, setSplitAcknowledged] = useState(false);
 
@@ -158,13 +163,16 @@ const NodeForm = forwardRef(
     useEffect(() => {
       // Only fetch parent if we have a parentId and we're not in edit mode
       // and we haven't explicitly provided initial privacy settings
-      if (parentId && !editMode && !initialPrivacyLevel && !initialAiUsage) {
+      if (parentId && !editMode) {
         api.get(`/nodes/${parentId}`)
           .then((response) => {
             const parent = response.data;
-            // Set privacy settings to match parent's settings
-            setPrivacyLevel(parent.privacy_level || "private");
-            setAiUsage(parent.ai_usage || "none");
+            setParentPrivacy(parent.privacy_level || "private");
+            if (!initialPrivacyLevel && !initialAiUsage) {
+              // Set privacy settings to match parent's settings
+              setPrivacyLevel(parent.privacy_level || "private");
+              setAiUsage(parent.ai_usage || "none");
+            }
           })
           .catch((err) => {
             console.error("Error fetching parent node:", err);
@@ -294,7 +302,7 @@ const NodeForm = forwardRef(
       setContent("");
     };
 
-    const handleSubmit = async (event, regenerateTts, splitConfirmed) => {
+    const handleSubmit = async (event, regenerateTts, splitConfirmed, publicConfirmed) => {
       event && event.preventDefault();
       // Validate: require content or audio
       if (!editMode && uploadedFile) {
@@ -333,6 +341,17 @@ const NodeForm = forwardRef(
           setShowSplitDialog(true);
           return;
         }
+      }
+
+      // Replying under a PUBLIC node: the reply is public (#228, enforced
+      // server-side too). Make the consent felt once — the dialog offers
+      // don't-show-again.
+      if (
+        !editMode && parentPrivacy === "public" && !publicConfirmed
+        && localStorage.getItem(PUBLIC_REPLY_ACK_KEY) !== "true"
+      ) {
+        setShowPublicReplyDialog(true);
+        return;
       }
 
       setLoading(true);
@@ -979,6 +998,15 @@ const NodeForm = forwardRef(
           setShowTtsDialog(false);
           // Resume the save with the user's choice (no event object).
           handleSubmit(null, regenerate);
+        }}
+      />
+      <PublicReplyDialog
+        open={showPublicReplyDialog}
+        onClose={() => setShowPublicReplyDialog(false)}
+        onConfirm={() => {
+          setShowPublicReplyDialog(false);
+          // Resume the send with public consent given (no event object).
+          handleSubmit(null, undefined, undefined, true);
         }}
       />
       <SplitContentDialog
