@@ -353,7 +353,7 @@ export default function SharePage() {
     <div style={{ padding: '60px 24px', maxWidth: '800px', margin: '0 auto' }}>
       {/* Header */}
       <div style={{
-        display: 'flex', alignItems: 'baseline', gap: '16px',
+        display: 'flex', alignItems: 'center', gap: '16px',
         flexWrap: 'wrap', marginBottom: '8px',
       }}>
         <h1 style={{
