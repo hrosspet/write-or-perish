@@ -59,7 +59,8 @@ USER_ARTIFACTS_INDEX_PLACEHOLDER = "{user_artifacts_index}"
 # read_artifact pulls a UserArtifact by kind; read_todo pulls the user's todo
 # list (its own model, no longer shown inline — #158 Slice 3); semantic_search
 # pulls relevant snippets from the user's own archive by meaning (#155).
-RETRIEVAL_TOOLS = {"read_artifact", "read_todo", "semantic_search"}
+RETRIEVAL_TOOLS = {"read_artifact", "read_todo", "semantic_search",
+                   "read_source"}
 # Max number of interim retrieval round-trips before the model must answer.
 MAX_RETRIEVAL_ROUNDS = 5
 # Max new {quote:ID} pulls resolved per loop round (a 1h sharing can be huge;
@@ -275,6 +276,31 @@ VOICE_TOOLS = [
             "required": [],
         },
     },
+    {
+        "name": "read_source",
+        "description": (
+            "Alchemy sessions only. Retrieve passages from the user's "
+            "selected source material relevant to a query — where the "
+            "source speaks to what the user is currently working with. "
+            "Returns the most relevant passages within the same turn. "
+            "Tell the user you're consulting the source. Do not call "
+            "this outside an alchemy session — it will error."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "What to look for in the source — a theme, "
+                        "question, or the user's current state, in plain "
+                        "language."
+                    ),
+                },
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 
@@ -288,9 +314,14 @@ def gated_voice_tools(config):
     any divergence here silently busts the whole cache — the warm writes a
     tool set generation never reads (observed as read=0 with the warm
     keeping semantic_search while generation dropped it)."""
-    if config.get("SEMANTIC_SEARCH_AGENTIC", False):
+    dropped = set()
+    if not config.get("SEMANTIC_SEARCH_AGENTIC", False):
+        dropped.add("semantic_search")
+    if not config.get("ALCHEMY_V1", False):
+        dropped.add("read_source")
+    if not dropped:
         return VOICE_TOOLS
-    return [t for t in VOICE_TOOLS if t.get("name") != "semantic_search"]
+    return [t for t in VOICE_TOOLS if t.get("name") not in dropped]
 
 
 _ARTIFACT_KIND_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,47}$')
@@ -572,6 +603,25 @@ def _retrieval_injection_text(tr):
             f"\"{tr.get('query', '')}\" — previews only; to read one in full, "
             "reference it as {quote:<id>}. Use only if actually relevant:\n"
             + "\n".join(lines) + "]")
+    if name == "read_source":
+        from backend.models import AlchemySourceChunk
+        chunks = tr.get("chunks") or []
+        parts = []
+        for c in chunks:
+            chunk = AlchemySourceChunk.query.get(c.get("chunk_id"))
+            if chunk is None:
+                continue
+            text = (chunk.content or "").strip()
+            if not text:
+                continue
+            heading = f" — {chunk.heading}" if chunk.heading else ""
+            parts.append(f"--- passage {chunk.idx}{heading} ---\n{text}")
+        if not parts:
+            return None
+        return (
+            f"[Source passages for \"{tr.get('query', '')}\" "
+            f"(from {tr.get('source_slug', 'the selected source')}):\n\n"
+            + "\n\n".join(parts) + "]")
     return None
 
 
@@ -1019,6 +1069,59 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
                             {"node_id": nid, "score": round(score, 4)}
                             for nid, _created, _snip, score in snippets
                         ]
+
+            elif name == "read_source":
+                # Alchemy: retrieve passages from the user's selected source
+                # (docs/FOUR-FEATURE-ECOSYSTEM.md, "Alchemical Mode"). Only
+                # chunk ids + scores are stored in meta; passage text is
+                # re-resolved at injection time like the other retrievals.
+                query = (inp.get("query") or "").strip()
+                from backend.models import AlchemyState, AlchemySource
+                alchemy_state = AlchemyState.query.filter_by(
+                    user_id=user_id).first()
+                if not query:
+                    result["status"] = "error"
+                    result["error"] = "read_source needs a query."
+                elif (alchemy_state is None
+                        or alchemy_state.opted_in_at is None
+                        or not alchemy_state.source_slug):
+                    result["status"] = "error"
+                    result["error"] = (
+                        "No alchemy source is active for this user — "
+                        "read_source only works in alchemy sessions.")
+                else:
+                    source = AlchemySource.query.filter_by(
+                        slug=alchemy_state.source_slug).first()
+                    if source is None or not source.available:
+                        result["status"] = "error"
+                        result["error"] = "The selected source is empty."
+                    else:
+                        from backend.utils.api_keys import (
+                            get_openai_chat_key,
+                        )
+                        from backend.utils.alchemy_sources import (
+                            search_source_chunks,
+                        )
+                        emb_key = get_openai_chat_key(flask_app.config)
+                        if not emb_key:
+                            result["status"] = "error"
+                            result["error"] = (
+                                "Source retrieval is unavailable right "
+                                "now.")
+                        else:
+                            matches = search_source_chunks(
+                                source.id, query[:4000], emb_key,
+                                user_id=user_id,
+                                k=flask_app.config.get(
+                                    "ALCHEMY_TOP_K", 3),
+                            )
+                            result["status"] = "success"
+                            result["query"] = query
+                            result["source_slug"] = source.slug
+                            result["chunks"] = [
+                                {"chunk_id": cid, "score": round(sc, 4)}
+                                for cid, sc in matches
+                            ]
 
             elif name == "apply_feedback":
                 # Send the feedback the AI proposed under a ### Feedback
