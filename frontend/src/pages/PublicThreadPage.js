@@ -47,7 +47,16 @@ function ThreadNode({ node, focusId, isRoot }) {
           color: 'var(--text-muted)',
           marginBottom: isRoot ? '14px' : '10px',
         }}>
-          {authorLine(node)}
+          {node.username ? (
+            <a
+              href={`/share/u/${node.username}`}
+              style={{ color: 'inherit', textDecoration: 'none' }}
+              onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--accent)'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.color = 'inherit'; }}
+            >
+              {authorLine(node)}
+            </a>
+          ) : authorLine(node)}
         </div>
         <div style={{
           fontFamily: 'var(--sans)',

@@ -205,6 +205,7 @@ const Bubble = ({
             childrenCount={childrenCount}
             humanOwnerUsername={node.human_owner_username}
             llmModel={node.llm_model}
+            publicPage={node.privacy_level === 'public'}
             onReplyClick={
               !isPlaceholder && Array.isArray(actions)
                 ? (actions.find((a) => a.kind === 'reply') || {}).action || null
