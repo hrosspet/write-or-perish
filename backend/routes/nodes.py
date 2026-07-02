@@ -2475,7 +2475,8 @@ def delete_node(node_id):
         for share in stale:
             share.status = "revoked"
             share.revoked_at = _dt.utcnow()
-            share.public_node_id = None
+            # Pointer kept: republishing unchanged content undeletes this
+            # node (identity follows content).
         db.session.commit()
         return jsonify({
             "scheduled": flagged,

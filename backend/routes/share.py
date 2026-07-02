@@ -139,29 +139,44 @@ def publish_share(share_id):
     if share.status == "published":
         return jsonify(_serialize(share)), 200
 
-    # Publishing = extraction into the public forum (#228): a standalone
-    # public ROOT node (no system node — LLM calls on the thread assemble
-    # context purely from the visible chain). ai_usage follows the user's
-    # default so the author's AI preference travels with the content;
-    # 'none' means other users can read but not include it in completions.
-    ai_usage = current_user.default_ai_usage
-    if ai_usage not in (AIUsage.CHAT.value, AIUsage.TRAIN.value,
-                        AIUsage.NONE.value):
-        ai_usage = AIUsage.CHAT.value
     content = share.get_content()
-    from backend.utils.tokens import approximate_token_count
-    public_node = Node(
-        user_id=current_user.id,
-        human_owner_id=current_user.id,
-        parent_id=None,
-        node_type="user",
-        privacy_level=PrivacyLevel.PUBLIC.value,
-        ai_usage=ai_usage,
-        token_count=approximate_token_count(content),
-    )
-    public_node.set_content(content)
-    db.session.add(public_node)
-    db.session.flush()
+
+    # Identity follows content: republishing UNCHANGED content restores the
+    # same node (deleted_at cleared) so an existing discussion reattaches —
+    # it still refers to exactly what people replied to. Edited content (or
+    # a purged/wiped node) gets a NEW node and the old discussion stays
+    # correctly severed.
+    public_node = None
+    if share.public_node_id:
+        prior = Node.query.get(share.public_node_id)
+        if (prior is not None and prior.deleted_at is not None
+                and (prior.get_content() or "") == content):
+            prior.deleted_at = None
+            public_node = prior
+
+    if public_node is None:
+        # Publishing = extraction into the public forum (#228): a standalone
+        # public ROOT node (no system node — LLM calls on the thread assemble
+        # context purely from the visible chain). ai_usage follows the user's
+        # default so the author's AI preference travels with the content;
+        # 'none' means other users can read but not include it in completions.
+        ai_usage = current_user.default_ai_usage
+        if ai_usage not in (AIUsage.CHAT.value, AIUsage.TRAIN.value,
+                            AIUsage.NONE.value):
+            ai_usage = AIUsage.CHAT.value
+        from backend.utils.tokens import approximate_token_count
+        public_node = Node(
+            user_id=current_user.id,
+            human_owner_id=current_user.id,
+            parent_id=None,
+            node_type="user",
+            privacy_level=PrivacyLevel.PUBLIC.value,
+            ai_usage=ai_usage,
+            token_count=approximate_token_count(content),
+        )
+        public_node.set_content(content)
+        db.session.add(public_node)
+        db.session.flush()
 
     share.public_node_id = public_node.id
     # Back-link from the private proposal node to its public artifact.
@@ -192,9 +207,11 @@ def revoke_share(share_id):
         from backend.utils.node_deletion import soft_delete_node
         # Your content comes down; public replies by others keep their own
         # nodes (they'll render under a tombstone, like any deleted node).
+        # The pointer is KEPT: republishing unchanged content undeletes
+        # this same node so the discussion reattaches (identity follows
+        # content).
         soft_delete_node(share.public_node_id, current_user.id,
                          with_descendants=False)
-        share.public_node_id = None
     share.status = "revoked"
     share.revoked_at = datetime.utcnow()
     db.session.commit()

@@ -241,19 +241,42 @@ export default function SharePage() {
         </div>
         <div style={{ marginTop: '14px' }}>
           {confirmPublishId === share.id ? (
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: '14px', flexWrap: 'wrap' }}>
-              <span style={{
+            <div>
+              <div style={{
                 fontFamily: 'var(--sans)', fontSize: '0.8rem', fontWeight: 300,
-                color: 'var(--text-secondary)',
+                color: 'var(--text-secondary)', marginBottom: '10px',
               }}>
-                This will appear on your public share page at /share/u/{user?.username}. Publish?
-              </span>
-              <button onClick={() => handlePublish(share.id)} style={{ ...quietAction, color: 'var(--accent)' }}>
-                Publish
-              </button>
-              <button onClick={() => setConfirmPublishId(null)} style={quietAction}>
-                Cancel
-              </button>
+                Where should this go? Publishing to Loore puts it in the
+                Commons and on your public page at /share/u/{user?.username}.
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                <button
+                  onClick={() => handlePublish(share.id)}
+                  style={{
+                    fontFamily: 'var(--sans)', fontSize: '0.82rem', fontWeight: 400,
+                    padding: '7px 16px', borderRadius: '6px', cursor: 'pointer',
+                    background: 'var(--accent)', border: 'none', color: 'var(--bg-deep)',
+                  }}
+                >
+                  Publish to Loore
+                </button>
+                {['Twitter / X', 'Substack'].map((channel) => (
+                  <span
+                    key={channel}
+                    style={{
+                      fontFamily: 'var(--sans)', fontSize: '0.82rem', fontWeight: 300,
+                      padding: '7px 16px', borderRadius: '6px',
+                      border: '1px dashed var(--border)', color: 'var(--text-muted)',
+                      opacity: 0.6, cursor: 'default',
+                    }}
+                  >
+                    {channel} · coming soon
+                  </span>
+                ))}
+                <button onClick={() => setConfirmPublishId(null)} style={quietAction}>
+                  Cancel
+                </button>
+              </div>
             </div>
           ) : confirmDeleteId === share.id ? (
             <div style={{ display: 'flex', alignItems: 'baseline', gap: '14px', flexWrap: 'wrap' }}>

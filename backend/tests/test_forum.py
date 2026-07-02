@@ -169,7 +169,8 @@ def test_revoke_soft_deletes_public_node(app):
         f"/api/share/{share.id}/publish").get_json()["public_node_id"]
     r = client.post(f"/api/share/{share.id}/revoke")
     assert r.status_code == 200
-    assert r.get_json()["public_node_id"] is None
+    # Pointer kept for identity-follows-content republish.
+    assert r.get_json()["public_node_id"] == node_id
     assert Node.query.get(node_id).deleted_at is not None
 
 
@@ -194,7 +195,48 @@ def test_deleting_public_node_via_node_ui_revokes_share(app):
     _db.session.expire_all()
     reconciled = ShareDraft.query.get(share.id)
     assert reconciled.status == "revoked"
-    assert reconciled.public_node_id is None
+    assert reconciled.public_node_id == node_id  # kept for republish
+
+
+def test_republish_unchanged_restores_same_node_and_discussion(app):
+    """Identity follows content: unchanged republish undeletes the SAME
+    node, so existing discussion reattaches."""
+    client = _client_for(app, "author")
+    share = _mk_share_draft()
+    node_id = client.post(
+        f"/api/share/{share.id}/publish").get_json()["public_node_id"]
+    reply = _mk_node("visitor", "a reply", parent=Node.query.get(node_id))
+    client.post(f"/api/share/{share.id}/revoke")
+    assert Node.query.get(node_id).deleted_at is not None
+
+    r = client.post(f"/api/share/{share.id}/publish")
+    assert r.status_code == 200
+    assert r.get_json()["public_node_id"] == node_id  # same node
+    assert Node.query.get(node_id).deleted_at is None  # restored
+
+    anon = app.test_client()
+    thread = anon.get(f"/api/forum/node/{node_id}").get_json()["thread"]
+    assert [c["id"] for c in thread["children"]] == [reply.id]
+
+
+def test_republish_edited_creates_new_node(app):
+    """Edited content severs the old discussion — replies referred to the
+    old text."""
+    client = _client_for(app, "author")
+    share = _mk_share_draft()
+    old_node_id = client.post(
+        f"/api/share/{share.id}/publish").get_json()["public_node_id"]
+    client.post(f"/api/share/{share.id}/revoke")
+    r = client.patch(f"/api/share/{share.id}",
+                     json={"content": "a public thought, sharpened"})
+    assert r.status_code == 200
+
+    r = client.post(f"/api/share/{share.id}/publish")
+    new_node_id = r.get_json()["public_node_id"]
+    assert new_node_id != old_node_id
+    assert Node.query.get(old_node_id).deleted_at is not None  # stays down
+    assert Node.query.get(new_node_id).get_content() == \
+        "a public thought, sharpened"
 
 
 # ── Feed ─────────────────────────────────────────────────────────────────
