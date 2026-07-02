@@ -50,28 +50,19 @@ USER_AI_PREFERENCES_PLACEHOLDER = "{user_ai_preferences}"
 USER_MEMORY_PLACEHOLDER = "{user_memory}"
 USER_SCRATCHPAD_PLACEHOLDER = "{user_scratchpad}"
 USER_INTENTIONS_PLACEHOLDER = "{user_intentions}"
-# Flag-conditional guidance for Upload v1 (SHARE_V1). The default agentic
-# prompt carries a bare {share_guidance} placeholder; environments with the
-# flag ON render the proposing-shares section below, environments with it
-# OFF render "" — so the model never proposes shares where the Save flow
-# doesn't exist. Substituted identically in render_system_message AND the
-# generation loop (both paths must stay byte-identical for the prompt
-# cache; the flag is constant per environment, so each env's render is
-# stable).
-SHARE_GUIDANCE_PLACEHOLDER = "{share_guidance}"
+# Flag-conditional guidance for Upload v1 (SHARE_V1) — placeholder, text,
+# and gate live in backend.utils.share_guidance so the node display can
+# mirror the substitution without importing this Celery module. Substituted
+# identically in render_system_message AND the generation loop (both paths
+# must stay byte-identical for the prompt cache; the gate is constant per
+# user per environment, so each render is stable).
+from backend.utils.share_guidance import (  # noqa: E402
+    SHARE_GUIDANCE_PLACEHOLDER, SHARE_GUIDANCE_TEXT, share_enabled_for_user,
+)
 
 
 def _share_enabled_for_user(user_id):
-    """Env flag AND the user's own opt-in (#228 dark ship). Constant per
-    user per environment, so both prompt-render paths stay byte-identical
-    between the pre-warm and generation."""
-    if not flask_app.config.get("SHARE_V1", False):
-        return False
-    owner = User.query.get(user_id)
-    return bool(owner and owner.public_sharing_enabled)
-SHARE_GUIDANCE_TEXT = """## Proposing shares
-
-When the user expresses something worth giving outward — a need they want help with, an offering, an insight or learning, an open exploration, or an intention they want to be public about — and either asks you to make it shareable or agrees when you offer, propose it using these headings: ### Share (the shareable text, written to stand alone for readers who lack the conversation's context — faithful to the user's meaning and register, not corporate-polished), ### Share type (just the single type word: need, offering, insight, exploration, intention, or other — nothing else on that line or after it). The system auto-detects the headings and shows the user a "Save to shares" button. Confirming only saves a PRIVATE draft to their Share page — publication is a separate deliberate action there, so nothing becomes visible to anyone without the user explicitly publishing it. When the user confirms out loud (e.g. "yes save that"), call the apply_share tool. Put any lead-in or closing remark *before* the headings — text after them is treated as part of the proposal, not your message. Offer shares proactively whenever something in the user's writing strikes you as genuinely novel, or likely to be helpful to others. If unsure, briefly note that what they said might be worth sharing — with your reasons why — and ask whether they'd like Loore to draft a shareable piece from it."""
+    return share_enabled_for_user(flask_app.config, user_id)
 USER_ARTIFACTS_INDEX_PLACEHOLDER = "{user_artifacts_index}"
 
 # Within-turn retrieval loop (#158, text mode only). When the model calls one

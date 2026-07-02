@@ -26,6 +26,9 @@ from backend.utils.privacy import (
     AIUsage
 )
 from backend.utils.quotes import find_quote_ids, get_quote_data, has_quotes
+from backend.utils.share_guidance import (
+    SHARE_GUIDANCE_PLACEHOLDER, SHARE_GUIDANCE_TEXT, share_enabled_for_user,
+)
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.spend import require_spend_headroom
 from backend.utils.webm_utils import get_webm_duration
@@ -409,6 +412,15 @@ def _context_artifact_fields(n):
     # the raw data date range (lightweight SQL, no decryption).
     if artifacts.get("prompt"):
         content = n.get_content()
+        if SHARE_GUIDANCE_PLACEHOLDER in content:
+            # Mirror the LLM-path substitution so the system-prompt view
+            # shows what the model actually received: the proposing-shares
+            # guidance for owners with sharing enabled, "" otherwise.
+            enabled = share_enabled_for_user(
+                current_app.config, n.human_owner_id or n.user_id)
+            artifacts["share_guidance"] = {
+                "content": SHARE_GUIDANCE_TEXT if enabled else "",
+            }
         if "{user_recent_raw}" in content:
             from backend.routes.export_data import get_raw_data_date_range
             earliest, latest, total_tokens = get_raw_data_date_range(

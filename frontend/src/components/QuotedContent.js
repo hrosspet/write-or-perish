@@ -27,10 +27,19 @@ const QuotedContent = ({ content, quotes, contextArtifacts, onQuoteClick, onChec
     return null;
   }
 
-  // {share_guidance} is a render-time template marker (SHARE_V1): the LLM
-  // context substitutes it with the proposing-shares guidance (flag on) or
-  // "" (flag off). Either way it isn't user content — never display it.
-  content = content.replace(/\{share_guidance\}\n?/g, '');
+  // {share_guidance} is a render-time template marker (SHARE_V1). The
+  // backend mirrors the LLM-path substitution in
+  // contextArtifacts.share_guidance: the proposing-shares guidance for
+  // owners with sharing enabled, "" otherwise — so the system-prompt view
+  // shows exactly what the model received. Without backend data (older
+  // payloads, non-prompt nodes), strip the bare marker.
+  const shareGuidance =
+    (contextArtifacts && contextArtifacts.share_guidance
+      && contextArtifacts.share_guidance.content) || '';
+  content = content.replace(
+    /\{share_guidance\}\n?/g,
+    shareGuidance ? `${shareGuidance}\n` : ''
+  );
 
   const hasQuotes = quotes && Object.keys(quotes).length > 0;
   const hasArtifacts = contextArtifacts && Object.keys(contextArtifacts).length > 0;

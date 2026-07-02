@@ -743,6 +743,44 @@ def test_inline_kinds_surface_in_node_display(app):
             assert fields[kind]["content"] == f"{kind}-body"
 
 
+def test_share_guidance_display_mirrors_llm_substitution(app):
+    # The system-prompt view shows the exact {share_guidance} substitution
+    # the model received (#226 follow-up): the proposing-shares text when
+    # the owner has sharing enabled, "" otherwise — never the bare marker.
+    from backend.models import UserPrompt
+    from backend.routes.nodes import _context_artifact_fields
+    from backend.utils.share_guidance import SHARE_GUIDANCE_TEXT
+    with app.app_context():
+        user = User.query.first()
+        prompt = UserPrompt(
+            user_id=user.id, prompt_key="textmode", title="Text Mode",
+            generated_by="default",
+        )
+        prompt.set_content("intro\n\n{share_guidance}\n\n## Proposal lifecycle")
+        _db.session.add(prompt)
+        _db.session.flush()
+        node = Node(user_id=user.id, human_owner_id=user.id, node_type="user")
+        _db.session.add(node)
+        _db.session.flush()
+        _db.session.add(NodeContextArtifact(
+            node_id=node.id, artifact_type="prompt", artifact_id=prompt.id))
+        _db.session.commit()
+
+        app.config["SHARE_V1"] = True
+        user.public_sharing_enabled = False
+        fields = _context_artifact_fields(node)
+        assert fields["share_guidance"]["content"] == ""
+
+        user.public_sharing_enabled = True
+        fields = _context_artifact_fields(node)
+        assert fields["share_guidance"]["content"] == SHARE_GUIDANCE_TEXT
+
+        # Killswitch off → same as user-disabled
+        app.config["SHARE_V1"] = False
+        fields = _context_artifact_fields(node)
+        assert fields["share_guidance"]["content"] == ""
+
+
 def test_artifacts_context_resolution_pinned_vs_latest(app):
     with app.app_context():
         uid = User.query.first().id
