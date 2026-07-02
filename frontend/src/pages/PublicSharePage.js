@@ -1,0 +1,116 @@
+import React, { useState, useEffect } from 'react';
+import { useParams } from 'react-router-dom';
+import api from '../api';
+import MarkdownBody from '../components/MarkdownBody';
+import { formatDate } from '../utils/date';
+
+/**
+ * PublicSharePage — /share/u/:username
+ *
+ * The one outward-facing surface of Upload v1: a person's published shares,
+ * readable without an account. Deliberately quiet — no app chrome required,
+ * no metrics, just the writing. Fonts and CSS vars come from index.html /
+ * index.css, which load for logged-out visitors too (same as the landing
+ * page).
+ */
+export default function PublicSharePage() {
+  const { username } = useParams();
+  // 'loading' | 'ok' | 'notfound'
+  const [status, setStatus] = useState('loading');
+  const [data, setData] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setStatus('loading');
+    api.get(`/share/public/${encodeURIComponent(username)}`)
+      .then((res) => {
+        if (cancelled) return;
+        setData(res.data);
+        setStatus('ok');
+      })
+      .catch(() => {
+        // 404 covers both "unknown user" and "feature off" — deliberately
+        // indistinguishable.
+        if (!cancelled) setStatus('notfound');
+      });
+    return () => { cancelled = true; };
+  }, [username]);
+
+  const shell = (children) => (
+    <div style={{
+      minHeight: '100vh', background: 'var(--bg-deep)',
+      color: 'var(--text-primary)', fontFamily: 'var(--sans)',
+    }}>
+      <div style={{ maxWidth: '640px', margin: '0 auto', padding: '96px 24px 120px' }}>
+        {children}
+      </div>
+    </div>
+  );
+
+  if (status === 'loading') {
+    return shell(null);
+  }
+
+  if (status === 'notfound') {
+    return shell(
+      <p style={{
+        textAlign: 'center', color: 'var(--text-muted)',
+        fontFamily: 'var(--sans)', fontSize: '0.9rem', fontWeight: 300,
+        marginTop: '20vh',
+      }}>
+        Nothing here.
+      </p>
+    );
+  }
+
+  return shell(
+    <>
+      <h1 style={{
+        fontFamily: 'var(--serif)', fontSize: '2.4rem', fontWeight: 300,
+        color: 'var(--text-primary)', margin: '0 0 40px 0',
+        textAlign: 'center',
+      }}>
+        {data.username}
+      </h1>
+
+      {data.shares.length === 0 && (
+        <p style={{
+          textAlign: 'center', color: 'var(--text-muted)',
+          fontSize: '0.9rem', fontWeight: 300,
+        }}>
+          Nothing here yet.
+        </p>
+      )}
+
+      {data.shares.map((share) => (
+        <div
+          key={share.id}
+          style={{
+            background: 'var(--bg-card)', border: '1px solid var(--border)',
+            borderRadius: '12px', padding: '32px 36px', marginBottom: '24px',
+          }}
+        >
+          <div style={{
+            fontFamily: 'var(--sans)', fontSize: '0.65rem', fontWeight: 300,
+            letterSpacing: '0.14em', textTransform: 'uppercase',
+            color: 'var(--text-muted)', marginBottom: '12px',
+          }}>
+            {share.share_type}
+          </div>
+          <div style={{
+            fontFamily: 'var(--sans)', fontSize: '0.95rem', fontWeight: 300,
+            color: 'var(--text-secondary)', lineHeight: 1.75,
+          }}>
+            <MarkdownBody>{share.content}</MarkdownBody>
+          </div>
+          <div style={{
+            fontFamily: 'var(--sans)', fontSize: '0.7rem', fontWeight: 300,
+            color: 'var(--text-muted)', opacity: 0.7, marginTop: '16px',
+          }}>
+            {formatDate(share.published_at, { relative: false })}
+          </div>
+        </div>
+      ))}
+    </>
+  );
+}

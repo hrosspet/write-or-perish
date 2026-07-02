@@ -63,3 +63,29 @@ def parse_feedback(content):
             first_line = body.split('\n')[0].strip().lower()
             result['category'] = first_line
     return result
+
+
+def parse_share(content):
+    """Parse ### Share and ### Share type from LLM text (SHARE_V1).
+
+    Mirrors parse_feedback: the shareable text the AI proposes lives in the
+    visible node content (so the user reads exactly what would be shared
+    before confirming), never in a hidden tool input. Returns {'content',
+    'share_type'} — share_type defaults blank if absent (the save path falls
+    back to 'other')."""
+    result = {}
+    parts = content.split('### ')
+    for part in parts:
+        if not part.strip():
+            continue
+        first_newline = part.find('\n')
+        if first_newline < 0:
+            continue
+        heading = part[:first_newline].strip().lower()
+        body = part[first_newline + 1:].strip()
+        if heading == 'share':
+            result['content'] = body
+        elif heading == 'share type':
+            first_line = body.split('\n')[0].strip().lower()
+            result['share_type'] = first_line
+    return result

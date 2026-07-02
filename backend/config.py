@@ -73,6 +73,16 @@ class Config:
     SEMANTIC_SEARCH_AGENTIC = os.environ.get(
         "SEMANTIC_SEARCH_AGENTIC", "false").lower() in ("1", "true", "yes")
 
+    # --- The public side of Loore (Share/Commons/public pages, #228) ---
+    # Deployed by default; the DARKNESS is per-user (User.
+    # public_sharing_enabled, default off — the Account toggle is the
+    # easter-egg opt-in until the #207 announcement). This env var is the
+    # emergency KILL SWITCH only: set SHARE_V1=false to remove the entire
+    # public surface (routes, funnel, prompt guidance, tools, the Account
+    # toggle itself) without a deploy.
+    SHARE_V1 = os.environ.get(
+        "SHARE_V1", "true").lower() in ("1", "true", "yes")
+
     # Safety factor for prompt-too-long retries (0.99 = aim for 99% of the limit)
     RETRY_SAFETY_FACTOR = 0.99
 

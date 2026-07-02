@@ -54,6 +54,8 @@ export function parseOrientResponse(text) {
     else if (heading === 'category') sections.issueCategory = stripProposalTag(body).split('\n')[0].trim().toLowerCase();
     else if (heading === 'feedback') sections.feedback = stripProposalTag(body).trim();
     else if (heading === 'feedback category') sections.feedbackCategory = stripProposalTag(body).split('\n')[0].trim().toLowerCase();
+    else if (heading === 'share') sections.share = stripProposalTag(body).trim();
+    else if (heading === 'share type') sections.shareType = stripProposalTag(body).split('\n')[0].trim().toLowerCase();
   }
   return sections;
 }
@@ -66,7 +68,8 @@ export function hasProposalSections(text) {
   const hasIssue = headings.some(h => h.includes('issue title') || h === 'title') &&
                    headings.some(h => h.includes('description'));
   const hasFeedback = headings.some(h => h === 'feedback');
-  return hasTodo || hasIssue || hasFeedback;
+  const hasShare = headings.some(h => h === 'share');
+  return hasTodo || hasIssue || hasFeedback || hasShare;
 }
 
 /**
@@ -156,13 +159,17 @@ export function splitProposalText(text) {
   let seenProposal = false;
   const proposalHeadings = ['completed', 'new task', 'new tasks', 'priority', 'priority order',
     'note', 'issue title', 'title', 'description', 'category', 'feedback'];
-  const isValueHeading = (h) => h === 'category' || h === 'feedback category';
+  // Share headings match EXACTLY ('share' / 'share type') — substring
+  // matching would swallow unrelated sections like '### Shared context'.
+  const exactProposalHeadings = ['share', 'share type'];
+  const isValueHeading = (h) => h === 'category' || h === 'feedback category' || h === 'share type';
   const keep = (line) => (seenProposal ? after : before).push(line);
   for (const line of lines) {
     const headingMatch = line.match(/^###\s+(.+)/);
     if (headingMatch) {
       const h = headingMatch[1].trim().toLowerCase();
-      if (proposalHeadings.some(kw => h.includes(kw) || h === kw)) {
+      if (proposalHeadings.some(kw => h.includes(kw) || h === kw)
+          || exactProposalHeadings.includes(h)) {
         inProposal = true;
         valueSection = isValueHeading(h);
         valueConsumed = false;
@@ -467,6 +474,7 @@ export default function ProposalInline({
   const hasTodo = parsed.completed || parsed.newTasks || parsed.priority || parsed.note;
   const hasIssue = parsed.issueTitle && parsed.issueDescription;
   const hasFeedback = !!parsed.feedback;
+  const hasShare = !!parsed.share;
   const [applyStatus, setApplyStatus] = useState(null);
   // Which row (if any) currently has its inline add-input open. Lifted here so
   // opening one row's "+" closes any other — and clicking a second "+" switches
@@ -478,6 +486,8 @@ export default function ProposalInline({
   const [issueResult, setIssueResult] = useState(null);
   const [feedbackApplyStatus, setFeedbackApplyStatus] = useState(null);
   const [feedbackApplyError, setFeedbackApplyError] = useState(null);
+  const [shareApplyStatus, setShareApplyStatus] = useState(null);
+  const [shareApplyError, setShareApplyError] = useState(null);
   const mergePollingRef = useRef(null);
   const styles = sizeStyles(size);
   const toggleable = typeof onContentChange === 'function'
@@ -549,6 +559,13 @@ export default function ProposalInline({
       setFeedbackApplyStatus('completed');
     } else if (applyFeedbackCall && applyFeedbackCall.status === 'success') {
       setFeedbackApplyStatus('completed');
+    }
+    const shareEntry = toolCallsMeta.find(tc => tc.name === 'propose_share');
+    const applyShareCall = toolCallsMeta.find(tc => tc.name === 'apply_share');
+    if (shareEntry && shareEntry.apply_status === 'completed') {
+      setShareApplyStatus('completed');
+    } else if (applyShareCall && applyShareCall.status === 'success') {
+      setShareApplyStatus('completed');
     }
   }, [toolCallsMeta]);
 
@@ -630,14 +647,39 @@ export default function ProposalInline({
     }
   }, [nodeId, onApplied]);
 
+  const [shareCopied, setShareCopied] = useState(false);
+  const handleCopyShare = useCallback(() => {
+    if (!parsed.share) return;
+    navigator.clipboard.writeText(parsed.share).then(() => {
+      setShareCopied(true);
+      setTimeout(() => setShareCopied(false), 1500);
+    }).catch(() => { /* clipboard unavailable — no toast needed */ });
+  }, [parsed.share]);
+
+  const handleSaveShare = useCallback(async () => {
+    if (!nodeId) return;
+    setShareApplyStatus('started');
+    try {
+      const res = await api.post('/share/save-proposal', { llm_node_id: nodeId });
+      setShareApplyStatus('completed');
+      onApplied?.('propose_share', {
+        apply_status: 'completed', share_id: res.data?.share?.id });
+    } catch (err) {
+      const msg = err?.response?.data?.error || 'Saving the share failed';
+      setShareApplyStatus('error');
+      setShareApplyError(msg);
+    }
+  }, [nodeId, onApplied]);
+
   const hasTodoUpdate = hasTodo || toolCallsMeta?.some(tc => tc.name === 'propose_todo');
   const hasGithubIssue = hasIssue || toolCallsMeta?.some(tc => tc.name === 'propose_github_issue');
   const hasFeedbackProposal = hasFeedback || toolCallsMeta?.some(tc => tc.name === 'propose_feedback');
+  const hasShareProposal = hasShare || toolCallsMeta?.some(tc => tc.name === 'propose_share');
   const hasPrefsUpdate = toolCallsMeta?.some(
     tc => tc.name === 'update_ai_preferences' && tc.status === 'success'
   );
 
-  if (!hasTodoUpdate && !hasGithubIssue && !hasFeedbackProposal && !hasPrefsUpdate) return null;
+  if (!hasTodoUpdate && !hasGithubIssue && !hasFeedbackProposal && !hasShareProposal && !hasPrefsUpdate) return null;
 
   const StatusTag = styles.statusTag;
   const sectionLabel = (text) => (
@@ -820,6 +862,71 @@ export default function ProposalInline({
             {feedbackApplyStatus === 'error' && (
               <StatusTag style={{ ...styles.statusText, color: 'var(--accent)' }}>
                 {feedbackApplyError || 'Feedback send failed'}
+              </StatusTag>
+            )}
+          </div>
+        </div>
+      )}
+
+      {hasShareProposal && parsed.share && (
+        <div style={styles.issueWrapper}>
+          {sectionLabel(styles.roomy ? 'Proposed Share' : 'Share')}
+          <div style={{ ...styles.issueCard, position: 'relative' }}>
+            {/* One-click copy for pasting the share elsewhere (e.g. X). */}
+            <button
+              onClick={handleCopyShare}
+              title="Copy share text"
+              style={{
+                position: 'absolute', top: '8px', right: '8px',
+                background: 'none', border: 'none', cursor: 'pointer',
+                padding: '4px', lineHeight: 0,
+                color: shareCopied ? 'var(--success)' : 'var(--text-muted)',
+                opacity: shareCopied ? 1 : 0.6,
+                transition: 'opacity 0.15s ease, color 0.15s ease',
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.opacity = 1; }}
+              onMouseLeave={(e) => { if (!shareCopied) e.currentTarget.style.opacity = 0.6; }}
+            >
+              {shareCopied ? (
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                  <path d="M3 8.5 L6.5 12 L13 4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              ) : (
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                  <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.2"/>
+                  <path d="M10.5 5.5 V4 A1.5 1.5 0 0 0 9 2.5 H4 A1.5 1.5 0 0 0 2.5 4 V9 A1.5 1.5 0 0 0 4 10.5 H5.5" stroke="currentColor" strokeWidth="1.2"/>
+                </svg>
+              )}
+            </button>
+            <MarkdownBody
+              style={styles.issueDescStyle}
+              paragraphMargin={styles.roomy ? '0 0 8px 0' : '0 0 6px 0'}
+            >
+              {parsed.share}
+            </MarkdownBody>
+            {parsed.shareType && (
+              <span style={styles.issueCategory}>{parsed.shareType}</span>
+            )}
+          </div>
+          <div style={styles.issueButtonWrapper}>
+            {!shareApplyStatus && (
+              <button onClick={handleSaveShare} style={styles.button}>
+                {styles.roomy ? 'Save to your shares' : 'Save to shares'}
+              </button>
+            )}
+            {shareApplyStatus === 'started' && (
+              <StatusTag style={{ ...styles.statusText, color: 'var(--text-muted)' }}>
+                Saving…
+              </StatusTag>
+            )}
+            {shareApplyStatus === 'completed' && (
+              <StatusTag style={{ ...styles.statusText, color: 'var(--success)' }}>
+                Saved as a private draft — publish from your Share page
+              </StatusTag>
+            )}
+            {shareApplyStatus === 'error' && (
+              <StatusTag style={{ ...styles.statusText, color: 'var(--accent)' }}>
+                {shareApplyError || 'Saving the share failed'}
               </StatusTag>
             )}
           </div>

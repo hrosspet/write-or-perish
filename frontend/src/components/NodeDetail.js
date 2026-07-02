@@ -826,6 +826,9 @@ function NodeDetail() {
                     {tc.name === 'propose_feedback' && (
                       <>Feedback proposed{tc.apply_status === 'completed' && ' (sent)'}{tc.apply_status === 'failed' && ' (failed)'}</>
                     )}
+                    {tc.name === 'propose_share' && (
+                      <>Share proposed{tc.apply_status === 'completed' && ' (saved as draft)'}{tc.apply_status === 'failed' && ' (failed)'}</>
+                    )}
                     {tc.name === 'apply_todo_changes' && (
                       tc.status !== 'success' ? 'Todo apply failed'
                         : tc.apply_status === 'completed' ? 'Todo changes applied'
@@ -838,6 +841,11 @@ function NodeDetail() {
                     {tc.name === 'apply_feedback' && (
                       tc.status === 'success' ? 'Feedback sent' : 'Feedback send failed'
                     )}
+                    {tc.name === 'apply_share' && (
+                      tc.status === 'success'
+                        ? <>Share saved as a draft — <Link to="/share" style={{ color: 'var(--accent)', textDecoration: 'none' }}>Share page</Link></>
+                        : 'Share save failed'
+                    )}
                     {tc.name === 'update_ai_preferences' && 'Preferences updated'}
                     {tc.name === 'update_artifact' && (
                       <>{tc.created ? 'Created' : 'Updated'} artifact{tc.kind ? <> <Link to={`/artifacts/${tc.kind}`} style={{ color: 'var(--accent)', textDecoration: 'none' }}><code style={{ fontSize: '0.95em' }}>{tc.kind}</code></Link></> : ''}</>
@@ -845,7 +853,7 @@ function NodeDetail() {
                     {tc.name === 'read_artifact' && (
                       <>Read artifact{tc.kind ? <> <Link to={`/artifacts/${tc.kind}`} style={{ color: 'var(--accent)', textDecoration: 'none' }}><code style={{ fontSize: '0.95em' }}>{tc.kind}</code></Link></> : ''}</>
                     )}
-                    {!['propose_todo', 'propose_github_issue', 'propose_feedback', 'apply_todo_changes', 'apply_github_issue', 'apply_feedback', 'update_ai_preferences', 'update_artifact', 'read_artifact'].includes(tc.name) && tc.name}
+                    {!['propose_todo', 'propose_github_issue', 'propose_feedback', 'propose_share', 'apply_todo_changes', 'apply_github_issue', 'apply_feedback', 'apply_share', 'update_ai_preferences', 'update_artifact', 'read_artifact'].includes(tc.name) && tc.name}
                     {tc.error && <span style={{ color: 'var(--accent)', marginLeft: '8px' }}> — {tc.error}</span>}
                   </div>
                 ))}
