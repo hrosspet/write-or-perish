@@ -113,6 +113,7 @@ Source code is volume-mounted, so edits are reflected immediately without rebuil
 - Login without SMTP: mint a magic link inside the backend container (`generate_magic_link_token(email)`, set `user.magic_link_token_hash = hash_token(token)` + expiry, commit) and open `http://localhost:5010/auth/magic-link/verify?token=…`.
 - After `package.json` changes, the frontend's anonymous `node_modules` volume outlives image rebuilds: `docker compose up -d --force-recreate --renew-anon-volumes frontend`.
 - Unset env vars reach containers as EMPTY STRINGS (not absent) — guard numeric parses with `or "default"`, not a `get()` default.
+- Dev API calls are SAME-ORIGIN through the CRA proxy (`src/setupProxy.js`, target `PROXY_TARGET` — `http://backend:5010` in Docker). `frontend/.env.development` keeps `REACT_APP_API_URL`/`BACKEND_URL` EMPTY on purpose; absolute URLs there force CORS requests the backend doesn't serve.
 
 **Important Docker Compose notes**:
 - Ports are NOT defined in the base `docker-compose.yml` — they live only in the override files (`docker-compose.override.yml` for dev, `docker-compose.staging.yml` for staging). This prevents Docker Compose from concatenating port arrays across files.

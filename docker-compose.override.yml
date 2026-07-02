@@ -49,6 +49,9 @@ services:
     environment:
       - CHOKIDAR_USEPOLLING=true
       - WATCHPACK_POLLING=true
+      # In-container proxy target (src/setupProxy.js): `localhost` here
+      # would be the frontend container itself.
+      - PROXY_TARGET=http://backend:5010
     ports:
       - "${FRONTEND_PORT:-3001}:3000"
     volumes:
