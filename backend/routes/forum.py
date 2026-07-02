@@ -66,6 +66,9 @@ def feed():
         items.append({
             "id": node.id,
             "username": _author_name(node),
+            "permalink": (
+                f"/u/{node.user.username}/{node.public_slug}"
+                if node.public_slug and node.user else None),
             "content": content[:600] + ("…" if len(content) > 600 else ""),
             "created_at": iso_utc(node.created_at),
             "reply_count": reply_count,

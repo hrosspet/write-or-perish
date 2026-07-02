@@ -730,6 +730,9 @@ def create_node():
         "created_at": iso_utc(node.created_at),
         "username": current_user.username,
         "privacy_level": node.privacy_level,
+        "permalink": (
+            f"/u/{node.user.username}/{node.public_slug}"
+            if node.public_slug and node.user else None),
         "ai_usage": node.ai_usage,
         "split_into": 1 + len(parts),
         "tip_id": parts[-1].id if parts else node.id
@@ -931,6 +934,9 @@ def get_node(node_id):
         ],
         "created_at": iso_utc(node.created_at),
         "updated_at": iso_utc(node.updated_at),
+        "permalink": (
+            f"/u/{node.user.username}/{node.public_slug}"
+            if node.public_slug and node.user else None),
         "user": {
             "id": node.user.id,
             "username": node.user.username,

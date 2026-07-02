@@ -56,7 +56,7 @@ function PermalinkRoute() {
   }, [username, slug]);
   if (loading || (!nodeId && !failed)) return null;
   if (failed) return <PublicThreadPage nodeIdOverride="missing" />;
-  if (user) return <Navigate to={`/node/${nodeId}`} replace />;
+  if (user) return <NodeDetailWrapper nodeIdOverride={nodeId} />;
   return <PublicThreadPage nodeIdOverride={nodeId} />;
 }
 

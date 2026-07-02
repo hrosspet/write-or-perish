@@ -55,11 +55,12 @@ function ForumPage() {
 
   // cmd/ctrl-click opens the thread in a new tab; a plain click navigates
   // in place (mirrors SemanticNeighbors / Cmd+K results).
-  const openNode = (e, id) => {
+  const openNode = (e, item) => {
+    const target = item.permalink || `/node/${item.id}`;
     if (e.metaKey || e.ctrlKey) {
-      window.open(`/node/${id}`, '_blank', 'noopener');
+      window.open(target, '_blank', 'noopener');
     } else {
-      navigate(`/node/${id}`);
+      navigate(target);
     }
   };
 
@@ -149,7 +150,7 @@ function ForumPage() {
           {items.map((item) => (
             <div
               key={item.id}
-              onClick={(e) => openNode(e, item.id)}
+              onClick={(e) => openNode(e, item)}
               style={{
                 background: 'var(--bg-card)',
                 border: '1px solid var(--border)',

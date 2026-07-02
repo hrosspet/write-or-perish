@@ -52,8 +52,11 @@ function RenderChildTree({ nodes, onBubbleClick, buildActions }) {
   );
 }
 
-function NodeDetail() {
-  const { id } = useParams();
+function NodeDetail({ nodeIdOverride }) {
+  const { id: paramId } = useParams();
+  // Under /u/:username/:slug the id arrives resolved; under /node/:id it
+  // comes from params. Everything downstream just uses `id`.
+  const id = nodeIdOverride || paramId;
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { user: currentUser } = useUser();
@@ -129,6 +132,14 @@ function NodeDetail() {
       .then((response) => {
         setNode(response.data);
         setLoading(false);
+        // Human-readable address (#228): when the node has a permalink and
+        // we arrived via /node/<id>, show the pretty URL instead. Display
+        // only — router state is untouched, and revisiting the pretty URL
+        // resolves through the permalink route.
+        if (response.data.permalink
+            && window.location.pathname === `/node/${id}`) {
+          window.history.replaceState(null, '', response.data.permalink);
+        }
       })
       .catch((err) => {
         console.error(err);

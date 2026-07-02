@@ -52,16 +52,6 @@ export default function SharePage() {
   const [editType, setEditType] = useState('other');
   const [saving, setSaving] = useState(false);
 
-  // Copy-permalink feedback (the X-paste use case).
-  const [copiedId, setCopiedId] = useState(null);
-  const handleCopyLink = (share) => {
-    const path = share.permalink || `/node/${share.public_node_id}`;
-    navigator.clipboard.writeText(`${window.location.origin}${path}`).then(() => {
-      setCopiedId(share.id);
-      setTimeout(() => setCopiedId(null), 1500);
-    }).catch(() => {});
-  };
-
   // Inline confirms — at most one open at a time.
   const [confirmPublishId, setConfirmPublishId] = useState(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
@@ -232,10 +222,11 @@ export default function SharePage() {
         key={share.id}
         onClick={(e) => {
           if (!linksToThread) return;
+          const target = share.permalink || `/node/${share.public_node_id}`;
           if (e.metaKey || e.ctrlKey) {
-            window.open(`/node/${share.public_node_id}`, '_blank', 'noopener');
+            window.open(target, '_blank', 'noopener');
           } else {
-            navigate(`/node/${share.public_node_id}`);
+            navigate(target);
           }
         }}
         onMouseEnter={(e) => { if (linksToThread) e.currentTarget.style.borderColor = 'var(--border-hover)'; }}
@@ -334,14 +325,6 @@ export default function SharePage() {
                   style={quietAction}
                 >
                   Publish
-                </button>
-              )}
-              {share.status === 'published' && (
-                <button
-                  onClick={() => handleCopyLink(share)}
-                  style={{ ...quietAction, color: copiedId === share.id ? 'var(--success)' : 'var(--accent)' }}
-                >
-                  {copiedId === share.id ? 'Copied' : 'Copy link'}
                 </button>
               )}
               {share.status === 'published' && (
