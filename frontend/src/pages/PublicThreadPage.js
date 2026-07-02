@@ -106,7 +106,7 @@ export default function PublicThreadPage({ nodeIdOverride }) {
   useEffect(() => {
     let cancelled = false;
     setStatus('loading');
-    api.get(`/forum/node/${id}`)
+    api.get(`/commons/node/${id}`)
       .then((res) => {
         if (cancelled) return;
         setData(res.data);

@@ -281,7 +281,7 @@ function NavBar({ onNewEntryClick }) {
             two records: Log (private) and Commons (public). Dark behind
             SHARE_V1 via the dashboard payload flag. */}
         {user && user.approved && user.share_v1_enabled && (
-          <Link to="/forum" style={linkStyle("/forum")}>
+          <Link to="/commons" style={linkStyle("/commons")}>
             Commons
           </Link>
         )}

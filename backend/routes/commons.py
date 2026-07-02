@@ -1,4 +1,4 @@
-"""Public Forum routes (#228, dark behind SHARE_V1 with the Share family).
+"""Commons routes (the public forum) (#228, dark behind SHARE_V1 with the Share family).
 
 - /feed (members): public root nodes by everyone, newest first — the
   Commons. Log's public sibling.
@@ -18,7 +18,7 @@ from backend.extensions import db
 from backend.utils.privacy import PrivacyLevel
 from backend.utils.timefmt import iso_utc
 
-forum_bp = Blueprint("forum", __name__)
+commons_bp = Blueprint("commons", __name__)
 
 MAX_THREAD_NODES = 500
 
@@ -45,7 +45,7 @@ def _author_name(node):
     return node.user.username if node.user else None
 
 
-@forum_bp.route("/feed", methods=["GET"])
+@commons_bp.route("/feed", methods=["GET"])
 @login_required
 def feed():
     """Public root nodes, everyone, newest first."""
@@ -106,7 +106,7 @@ def _serialize_public_subtree(node, budget):
     }
 
 
-@forum_bp.route("/permalink/<string:username>/<string:slug>",
+@commons_bp.route("/permalink/<string:username>/<string:slug>",
                 methods=["GET"])
 def resolve_permalink(username, slug):
     """/u/<username>/<slug> → node id. Unauthenticated; 404s identically
@@ -125,7 +125,7 @@ def resolve_permalink(username, slug):
     return jsonify({"node_id": node.id}), 200
 
 
-@forum_bp.route("/node/<int:node_id>", methods=["GET"])
+@commons_bp.route("/node/<int:node_id>", methods=["GET"])
 def public_thread(node_id):
     """A public node + its public discussion. Deliberately unauthenticated.
 

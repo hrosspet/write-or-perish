@@ -6,7 +6,7 @@ import { formatDate } from '../utils/date';
 import { useUser } from '../contexts/UserContext';
 
 /**
- * ForumPage — /forum (#228)
+ * CommonsPage — /commons (#228)
  *
  * The Commons: public root nodes by everyone, newest first. The Log's
  * public sibling — same calm card aesthetic, no vanity metrics. Reply
@@ -17,7 +17,7 @@ import { useUser } from '../contexts/UserContext';
 const PAGE_TITLE = 'Commons';
 const PAGE_SUBTITLE = 'What people here have chosen to make public.';
 
-function ForumPage() {
+function CommonsPage() {
   const { user } = useUser();
   const navigate = useNavigate();
   const [items, setItems] = useState([]);
@@ -32,7 +32,7 @@ function ForumPage() {
     if (isFirst) setLoading(true);
     else setLoadingMore(true);
 
-    api.get(`/forum/feed?page=${pageNum}`)
+    api.get(`/commons/feed?page=${pageNum}`)
       .then((response) => {
         const { items: newItems, has_more } = response.data;
         setItems((prev) => (isFirst ? newItems : [...prev, ...newItems]));
@@ -219,4 +219,4 @@ function ForumPage() {
   );
 }
 
-export default ForumPage;
+export default CommonsPage;

@@ -385,7 +385,7 @@ export default function SharePage() {
         )}
         <div style={{ flex: 1 }} />
         <Link
-          to="/forum"
+          to="/commons"
           style={{
             fontFamily: 'var(--sans)', fontSize: '0.78rem', fontWeight: 300,
             color: 'var(--text-muted)', textDecoration: 'none',

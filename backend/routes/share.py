@@ -307,6 +307,19 @@ def public_shares(username):
     shares = ShareDraft.query.filter_by(
         user_id=user.id, status="published").order_by(
         ShareDraft.published_at.desc()).all()
+
+    def _pinned_at(share):
+        node = Node.query.get(share.public_node_id) \
+            if share.public_node_id else None
+        return node.pinned_at if node else None
+
+    # Pinned pieces lead the page (newest pin first), then the rest by
+    # publish date — pinning a public node IS featuring it here.
+    decorated = [(s, _pinned_at(s)) for s in shares]
+    decorated.sort(key=lambda pair: (
+        pair[1] is None,
+        -(pair[1].timestamp() if pair[1] else 0),
+    ))
     return jsonify({
         "username": user.username,
         "shares": [{
@@ -315,6 +328,7 @@ def public_shares(username):
             "share_type": s.share_type,
             "public_node_id": s.public_node_id,
             "permalink": _permalink(s),
+            "pinned": pinned is not None,
             "published_at": iso_utc(s.published_at),
-        } for s in shares],
+        } for s, pinned in decorated],
     }), 200

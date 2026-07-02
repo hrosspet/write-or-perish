@@ -375,10 +375,10 @@ function NodeDetail({ nodeIdOverride }) {
           }
         }
         // No alive ancestor (deleted a root). Public roots live in the
-        // forum, so land back there; everything else goes to the Log.
+        // Commons, so land back there; everything else goes to the Log.
         if (node.privacy_level === "public"
             && currentUser?.share_v1_enabled) {
-          navigate("/forum");
+          navigate("/commons");
         } else {
           navigate("/log");
         }
@@ -903,8 +903,8 @@ function NodeDetail({ nodeIdOverride }) {
             title={
               !isOwner ? "Only the owner can pin"
               : node.privacy_level === "private" ? "Cannot pin a private node"
-              : isPinned ? "Unpin from profile"
-              : "Pin to profile"
+              : isPinned ? "Unpin from your public page"
+              : "Pin to the top of your public page"
             }
             style={{
               background: "none",

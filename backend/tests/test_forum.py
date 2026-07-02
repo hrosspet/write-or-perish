@@ -65,10 +65,10 @@ def _make_app():
         return User.query.get(int(user_id))
 
     from backend.routes.share import share_bp
-    from backend.routes.forum import forum_bp
+    from backend.routes.commons import commons_bp
     from backend.routes.nodes import nodes_bp
     app.register_blueprint(share_bp, url_prefix="/api/share")
-    app.register_blueprint(forum_bp, url_prefix="/api/forum")
+    app.register_blueprint(commons_bp, url_prefix="/api/commons")
     app.register_blueprint(nodes_bp, url_prefix="/api/nodes")
     return app
 
@@ -215,7 +215,7 @@ def test_republish_unchanged_restores_same_node_and_discussion(app):
     assert Node.query.get(node_id).deleted_at is None  # restored
 
     anon = app.test_client()
-    thread = anon.get(f"/api/forum/node/{node_id}").get_json()["thread"]
+    thread = anon.get(f"/api/commons/node/{node_id}").get_json()["thread"]
     assert [c["id"] for c in thread["children"]] == [reply.id]
 
 
@@ -237,6 +237,33 @@ def test_republish_edited_creates_new_node(app):
     assert Node.query.get(old_node_id).deleted_at is not None  # stays down
     assert Node.query.get(new_node_id).get_content() == \
         "a public thought, sharpened"
+
+
+def test_pinned_share_leads_the_public_page(app):
+    """Pinning a share's public node features it at the top of the public
+    page regardless of publish order."""
+    from datetime import datetime
+    client = _client_for(app, "author")
+    older = _mk_share_draft(content="older piece")
+    newer = _mk_share_draft(content="newer piece")
+    older_node = client.post(
+        f"/api/share/{older.id}/publish").get_json()["public_node_id"]
+    client.post(f"/api/share/{newer.id}/publish")
+
+    anon = app.test_client()
+    contents = [x["content"] for x in anon.get(
+        "/api/share/public/author").get_json()["shares"]]
+    assert contents == ["newer piece", "older piece"]
+
+    node = Node.query.get(older_node)
+    node.pinned_at = datetime.utcnow()
+    node.pinned_by = node.human_owner_id
+    _db.session.commit()
+
+    body = anon.get("/api/share/public/author").get_json()["shares"]
+    assert [x["content"] for x in body] == ["older piece", "newer piece"]
+    assert body[0]["pinned"] is True
+    assert body[1]["pinned"] is False
 
 
 # ── Permalinks (#228 slugs) ──────────────────────────────────────────────
@@ -271,18 +298,18 @@ def test_permalink_resolver_and_404_parity(app):
         f"/api/share/{share.id}/publish").get_json()["public_node_id"]
 
     anon = app.test_client()
-    r = anon.get("/api/forum/permalink/author/findable-piece")
+    r = anon.get("/api/commons/permalink/author/findable-piece")
     assert r.status_code == 200
     assert r.get_json()["node_id"] == node_id
 
     # Unknown slug / unknown user / revoked → identical 404s.
     assert anon.get(
-        "/api/forum/permalink/author/nope").status_code == 404
+        "/api/commons/permalink/author/nope").status_code == 404
     assert anon.get(
-        "/api/forum/permalink/ghost/findable-piece").status_code == 404
+        "/api/commons/permalink/ghost/findable-piece").status_code == 404
     client.post(f"/api/share/{share.id}/revoke")
     assert anon.get(
-        "/api/forum/permalink/author/findable-piece").status_code == 404
+        "/api/commons/permalink/author/findable-piece").status_code == 404
 
 
 def test_unchanged_republish_keeps_slug(app):
@@ -306,7 +333,7 @@ def test_feed_lists_public_roots_only(app):
     deleted.deleted_at = datetime.utcnow()
     _db.session.commit()
 
-    r = client.get("/api/forum/feed")
+    r = client.get("/api/commons/feed")
     assert r.status_code == 200
     items = r.get_json()["items"]
     assert [i["id"] for i in items] == [pub.id]
@@ -326,7 +353,7 @@ def test_public_thread_serves_public_subtree_anonymously(app):
     _db.session.commit()
 
     anon = app.test_client()
-    r = anon.get(f"/api/forum/node/{pub.id}")
+    r = anon.get(f"/api/commons/node/{pub.id}")
     assert r.status_code == 200
     thread = r.get_json()["thread"]
     assert thread["id"] == pub.id
@@ -355,7 +382,7 @@ def test_llm_nodes_attribute_to_human_owner(app):
     _db.session.commit()
 
     anon = app.test_client()
-    thread = anon.get(f"/api/forum/node/{pub.id}").get_json()["thread"]
+    thread = anon.get(f"/api/commons/node/{pub.id}").get_json()["thread"]
     llm_ser = thread["children"][0]["children"][0]
     assert llm_ser["node_type"] == "llm"
     assert llm_ser["username"] == "visitor"  # the human, not the model
@@ -365,7 +392,7 @@ def test_public_thread_deep_link_resolves_to_root(app):
     pub = _mk_node("author", "root piece")
     reply = _mk_node("visitor", "public reply", parent=pub)
     anon = app.test_client()
-    r = anon.get(f"/api/forum/node/{reply.id}")
+    r = anon.get(f"/api/commons/node/{reply.id}")
     assert r.status_code == 200
     body = r.get_json()
     assert body["thread"]["id"] == pub.id
@@ -380,7 +407,7 @@ def test_public_thread_404_parity(app):
     _db.session.commit()
     anon = app.test_client()
     for nid in (private.id, deleted.id, 999999):
-        assert anon.get(f"/api/forum/node/{nid}").status_code == 404
+        assert anon.get(f"/api/commons/node/{nid}").status_code == 404
 
 
 # ── Public-reply enforcement ─────────────────────────────────────────────

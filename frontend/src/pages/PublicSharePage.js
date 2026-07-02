@@ -108,8 +108,12 @@ export default function PublicSharePage() {
             fontFamily: 'var(--sans)', fontSize: '0.65rem', fontWeight: 300,
             letterSpacing: '0.14em', textTransform: 'uppercase',
             color: 'var(--text-muted)', marginBottom: '12px',
+            display: 'flex', gap: '12px', alignItems: 'baseline',
           }}>
-            {share.share_type}
+            <span>{share.share_type}</span>
+            {share.pinned && (
+              <span style={{ color: 'var(--accent)', opacity: 0.8 }}>pinned</span>
+            )}
           </div>
           <div style={{
             fontFamily: 'var(--sans)', fontSize: '0.95rem', fontWeight: 300,

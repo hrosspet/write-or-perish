@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Routes, Route, Navigate, useNavigate, useParams } from 'react-router-dom';
 import LandingPage from "./components/LandingPage";
-import Dashboard from "./components/Dashboard";
 import Feed from "./components/Feed";
 import NavBar from "./components/NavBar";
 import NodeFormModal from "./components/NodeFormModal";
@@ -27,7 +26,7 @@ import AccountPage from "./pages/AccountPage";
 import ArtifactsPage from "./pages/ArtifactsPage";
 import SharePage from "./pages/SharePage";
 import PublicSharePage from "./pages/PublicSharePage";
-import ForumPage from "./pages/ForumPage";
+import CommonsPage from "./pages/CommonsPage";
 import PublicThreadPage from "./pages/PublicThreadPage";
 import ProfileGenerationWatcher from "./components/ProfileGenerationWatcher";
 import PromptsPage from "./pages/PromptsPage";
@@ -49,7 +48,7 @@ function PermalinkRoute() {
     let cancelled = false;
     setNodeId(null);
     setFailed(false);
-    api.get(`/forum/permalink/${username}/${slug}`)
+    api.get(`/commons/permalink/${username}/${slug}`)
       .then((res) => { if (!cancelled) setNodeId(res.data.node_id); })
       .catch(() => { if (!cancelled) setFailed(true); });
     return () => { cancelled = true; };
@@ -67,6 +66,13 @@ function NodeRoute() {
   const { user, loading } = useUser();
   if (loading) return null;
   return user ? <NodeDetailWrapper /> : <PublicThreadPage />;
+}
+
+// Legacy /dashboard/<username> links (old public dashboard, now deleted)
+// land on the user's public page — today's public identity surface.
+function DashboardRedirect() {
+  const { username } = useParams();
+  return <Navigate to={`/share/u/${username}`} replace />;
 }
 
 function RootRoute() {
@@ -177,7 +183,7 @@ function App() {
           <Route path="/feed" element={<Navigate to="/log" replace />} />
           <Route path="/dashboard" element={<Navigate to="/profile" replace />} />
           {/* Public profile view */}
-          <Route path="/dashboard/:username" element={<Dashboard />} />
+          <Route path="/dashboard/:username" element={<DashboardRedirect />} />
           <Route path="/prompts" element={<ProtectedRoute><PromptsPage /></ProtectedRoute>} />
           <Route path="/prompts/:promptKey" element={<ProtectedRoute><PromptDetailPage /></ProtectedRoute>} />
           <Route path="/import" element={<ProtectedRoute><ImportPage /></ProtectedRoute>} />
@@ -189,7 +195,7 @@ function App() {
           <Route path="/share" element={<ProtectedRoute><SharePage /></ProtectedRoute>} />
           <Route path="/share/u/:username" element={<PublicSharePage />} />
           <Route path="/u/:username/:slug" element={<PermalinkRoute />} />
-          <Route path="/forum" element={<ProtectedRoute><ForumPage /></ProtectedRoute>} />
+          <Route path="/commons" element={<ProtectedRoute><CommonsPage /></ProtectedRoute>} />
           <Route path="/account" element={<ProtectedRoute><AccountPage /></ProtectedRoute>} />
           <Route path="/node/:id" element={<NodeRoute />} />
           <Route path="/admin" element={<ProtectedRoute><AdminPanel /></ProtectedRoute>} />
