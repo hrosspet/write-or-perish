@@ -25,6 +25,12 @@ def _share_enabled():
     return bool(current_app.config.get("SHARE_V1", False))
 
 
+def _share_enabled_for_me():
+    """Member surfaces need the env flag AND the user's own opt-in."""
+    return _share_enabled() and bool(
+        getattr(current_user, "public_sharing_enabled", False))
+
+
 def _permalink(share):
     """/u/<username>/<slug> when published with a slug, else None."""
     if not share.public_node_id:
@@ -62,7 +68,7 @@ def _get_own_share_or_404(share_id):
 @login_required
 def list_shares():
     """List the current user's share drafts + published items."""
-    if not _share_enabled():
+    if not _share_enabled_for_me():
         return jsonify({"error": "Not found"}), 404
     shares = ShareDraft.query.filter_by(user_id=current_user.id).order_by(
         ShareDraft.created_at.desc()).all()
@@ -73,7 +79,7 @@ def list_shares():
 @login_required
 def create_share():
     """Manually create a share draft from the Share page."""
-    if not _share_enabled():
+    if not _share_enabled_for_me():
         return jsonify({"error": "Not found"}), 404
     data = request.get_json() or {}
     content = (data.get("content") or "").strip()
@@ -95,7 +101,7 @@ def create_share():
 def update_share(share_id):
     """Edit a draft's content/type. Published items must be revoked first —
     what is public is always exactly what the user last approved."""
-    if not _share_enabled():
+    if not _share_enabled_for_me():
         return jsonify({"error": "Not found"}), 404
     share = _get_own_share_or_404(share_id)
     if not share:
@@ -124,7 +130,7 @@ def update_share(share_id):
 def delete_share(share_id):
     """Delete a share draft (any status — deleting a published item also
     removes it from the public page)."""
-    if not _share_enabled():
+    if not _share_enabled_for_me():
         return jsonify({"error": "Not found"}), 404
     share = _get_own_share_or_404(share_id)
     if not share:
@@ -142,7 +148,7 @@ def delete_share(share_id):
 @login_required
 def publish_share(share_id):
     """The one action that makes a share visible to others."""
-    if not _share_enabled():
+    if not _share_enabled_for_me():
         return jsonify({"error": "Not found"}), 404
     share = _get_own_share_or_404(share_id)
     if not share:
@@ -210,7 +216,7 @@ def publish_share(share_id):
 @login_required
 def revoke_share(share_id):
     """Take a published share back off the public page."""
-    if not _share_enabled():
+    if not _share_enabled_for_me():
         return jsonify({"error": "Not found"}), 404
     share = _get_own_share_or_404(share_id)
     if not share:
@@ -241,7 +247,7 @@ def save_proposal():
     content (under ### Share); this confirms + persists it only when the
     user clicks Save (or the equivalent apply_share tool). The result is a
     PRIVATE draft — publication is a separate action on the Share page."""
-    if not _share_enabled():
+    if not _share_enabled_for_me():
         return jsonify({"error": "Not found"}), 404
     data = request.get_json() or {}
     llm_node_id = data.get("llm_node_id")

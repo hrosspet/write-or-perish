@@ -75,7 +75,7 @@ def app():
     app = _make_app()
     with app.app_context():
         _db.create_all()
-        user = User(username="tester")
+        user = User(username="tester", public_sharing_enabled=True)
         _db.session.add(user)
         _db.session.commit()
         yield app
@@ -374,7 +374,7 @@ def test_routes_404_when_flag_off():
     app = _make_app(share_v1=False)
     with app.app_context():
         _db.create_all()
-        user = User(username="tester")
+        user = User(username="tester", public_sharing_enabled=True)
         _db.session.add(user)
         _db.session.commit()
         client = app.test_client()

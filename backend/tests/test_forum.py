@@ -92,8 +92,10 @@ def app():
     app = _make_app()
     with app.app_context():
         _db.create_all()
-        author = User(username="author", default_ai_usage="chat")
-        visitor = User(username="visitor", default_ai_usage="chat")
+        author = User(username="author", default_ai_usage="chat",
+                      public_sharing_enabled=True)
+        visitor = User(username="visitor", default_ai_usage="chat",
+                       public_sharing_enabled=True)
         _db.session.add_all([author, visitor])
         _db.session.commit()
         yield app
@@ -296,6 +298,24 @@ def test_pinned_share_leads_the_public_page(app):
     assert [x["content"] for x in body] == ["older piece", "newer piece"]
     assert body[0]["pinned"] is True
     assert body[1]["pinned"] is False
+
+
+def test_member_surfaces_require_user_opt_in(app):
+    """Dark ship (#228): env flag on, user opt-in OFF → member surfaces
+    404; the toggle state travels in the dashboard payload elsewhere."""
+    dark = User(username="darkuser", default_ai_usage="chat")
+    _db.session.add(dark)
+    _db.session.commit()
+    client = _client_for(app, "darkuser")
+    assert client.get("/api/commons/feed").status_code == 404
+    assert client.get("/api/share").status_code == 404
+    # Anonymous surfaces stay env-gated only — published content remains
+    # reachable regardless of any one viewer's toggle.
+    author_client = _client_for(app, "author")
+    share = _mk_share_draft(content="still public")
+    author_client.post(f"/api/share/{share.id}/publish")
+    anon = app.test_client()
+    assert anon.get("/api/share/public/author").status_code == 200
 
 
 # ── Permalinks (#228 slugs) ──────────────────────────────────────────────

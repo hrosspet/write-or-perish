@@ -19,6 +19,7 @@ export default function AccountPage() {
 
   // Privacy / AI usage defaults
   const [privacySaving, setPrivacySaving] = useState(false);
+  const [publicSideSaving, setPublicSideSaving] = useState(false);
   const [aiUsageSaving, setAiUsageSaving] = useState(false);
 
   const usernameValid = (val) => {
@@ -282,6 +283,28 @@ export default function AccountPage() {
           Default visibility for new entries.
         </div>
       </div>
+
+      {user.share_v1_available && (
+        <div style={rowStyle}>
+          <div style={labelStyle}>Public sharing</div>
+          <select
+            value={user.public_sharing_enabled ? "on" : "off"}
+            disabled={publicSideSaving}
+            onChange={(e) =>
+              saveField("public_sharing_enabled", e.target.value === "on",
+                setPublicSideSaving)
+            }
+            style={selectStyle}
+          >
+            <option value="off">Off</option>
+            <option value="on">On (experimental)</option>
+          </select>
+          <div style={helperStyle}>
+            The public side of Loore: publish shares to your public page
+            and the Commons, and respond in public threads. Experimental.
+          </div>
+        </div>
+      )}
 
       <div style={rowStyle}>
         <div style={labelStyle}>Default AI usage</div>

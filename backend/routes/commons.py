@@ -11,7 +11,7 @@ Trimmed serializers only: no emails, no privacy metadata beyond what the
 surface needs, private/deleted nodes structurally absent.
 """
 from flask import Blueprint, jsonify, request, current_app
-from flask_login import login_required
+from flask_login import login_required, current_user
 
 from backend.models import Node, User
 from backend.extensions import db
@@ -48,8 +48,9 @@ def _author_name(node):
 @commons_bp.route("/feed", methods=["GET"])
 @login_required
 def feed():
-    """Public root nodes, everyone, newest first."""
-    if not _enabled():
+    """Public root nodes, everyone, newest first. Members-only surface —
+    needs the user's own opt-in (#228 dark ship)."""
+    if not _enabled() or not current_user.public_sharing_enabled:
         return jsonify({"error": "Not found"}), 404
     page = request.args.get("page", 1, type=int)
     per_page = min(request.args.get("per_page", 20, type=int), 100)

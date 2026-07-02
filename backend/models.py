@@ -29,6 +29,14 @@ class User(db.Model, UserMixin):
     # to admins only.  (The column is kept optional for backward‑compatibility with
     # databases created before this change.)
     is_admin = db.Column(db.Boolean, default=False, nullable=False)
+    # Per-user opt-in to the public side (#228: Share/Commons/public page).
+    # Ships dark: default OFF for everyone; the Account toggle is visible
+    # wherever SHARE_V1 (env) is on, so early birds can enable it before
+    # any announcement. The planned promotion path is the dev-update
+    # channel (#207).
+    public_sharing_enabled = db.Column(
+        db.Boolean, nullable=False, default=False,
+        server_default=db.text("false"))
 
     # Craft mode toggle — shows power-user features in the nav overflow menu
     craft_mode = db.Column(db.Boolean, default=False, nullable=False)
