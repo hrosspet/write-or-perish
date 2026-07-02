@@ -10,6 +10,24 @@ from backend.routes.terms import CURRENT_TERMS_VERSION
 from backend.utils.reserved_usernames import validate_username
 from backend.utils.spend import user_is_capped
 
+
+def _alchemy_status_for(user):
+    from flask import current_app
+    if not current_app.config.get("ALCHEMY_V1", False):
+        return None
+    from backend.models import AlchemyState
+    state = AlchemyState.query.filter_by(user_id=user.id).first()
+    return state.status_for_user if state else None
+
+
+def _alchemy_source_for(user):
+    from flask import current_app
+    if not current_app.config.get("ALCHEMY_V1", False):
+        return None
+    from backend.models import AlchemyState
+    state = AlchemyState.query.filter_by(user_id=user.id).first()
+    return state.source_slug if state and state.opted_in_at else None
+
 dashboard_bp = Blueprint("dashboard_bp", __name__)
 
 
@@ -125,6 +143,10 @@ def get_dashboard():
             # Lets the client block cost actions (e.g. starting a long voice
             # recording) up front instead of after the fact (issue #85).
             "spend_blocked": user_is_capped(current_user),
+            # Alchemical Mode (dark behind ALCHEMY_V1): null = show nothing,
+            # "offered" = show the invitation card, "active" = mode is on.
+            "alchemy_status": _alchemy_status_for(current_user),
+            "alchemy_source": _alchemy_source_for(current_user),
         },
         "pinned_nodes": pinned_list,
         "nodes": nodes_list,

@@ -180,6 +180,10 @@ def create_app():
     from backend.routes.feedback import feedback_bp
     app.register_blueprint(feedback_bp, url_prefix="/api/feedback")
 
+    # Alchemical Mode (dark behind ALCHEMY_V1; routes 404 while off).
+    from backend.routes.alchemy import alchemy_bp
+    app.register_blueprint(alchemy_bp, url_prefix="/api/alchemy")
+
     # AI preferences folded into the artifact model (#158 Slice 5): managed via
     # the generic /api/artifacts CRUD (kind="ai_preferences"); the dedicated
     # /api/ai-preferences blueprint was removed.

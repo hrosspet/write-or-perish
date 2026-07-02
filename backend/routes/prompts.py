@@ -98,6 +98,11 @@ def get_prompt(prompt_key):
     """Get the active version of a specific prompt."""
     if prompt_key not in PROMPT_DEFAULTS:
         return jsonify({"error": "Unknown prompt key"}), 404
+    if PROMPT_DEFAULTS[prompt_key].get('hidden'):
+        # Hidden prompts (e.g. the Alchemy guide) are not user-readable or
+        # user-editable — the mode depends on the user meeting the material
+        # through the guide, and gates must not be self-editable.
+        return jsonify({"error": "Unknown prompt key"}), 404
 
     meta = PROMPT_DEFAULTS[prompt_key]
     latest = UserPrompt.query.filter_by(
@@ -129,6 +134,8 @@ def get_prompt(prompt_key):
 def update_prompt(prompt_key):
     """Save a new version of a prompt."""
     if prompt_key not in PROMPT_DEFAULTS:
+        return jsonify({"error": "Unknown prompt key"}), 404
+    if PROMPT_DEFAULTS[prompt_key].get('hidden'):
         return jsonify({"error": "Unknown prompt key"}), 404
 
     data = request.get_json() or {}
