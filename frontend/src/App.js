@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Routes, Route, Navigate, useNavigate } from 'react-router-dom';
+import { Routes, Route, Navigate, useNavigate, useParams } from 'react-router-dom';
 import LandingPage from "./components/LandingPage";
 import Dashboard from "./components/Dashboard";
 import Feed from "./components/Feed";
@@ -33,8 +33,32 @@ import ProfileGenerationWatcher from "./components/ProfileGenerationWatcher";
 import PromptsPage from "./pages/PromptsPage";
 import PromptDetailPage from "./pages/PromptDetailPage";
 import SearchModal from "./components/SearchModal";
+import api from "./api";
 import { useUser } from "./contexts/UserContext";
 import { AudioProvider } from "./contexts/AudioContext";
+
+// /u/:username/:slug — human-readable permalink (#228). Resolves the slug
+// to a node id; logged-out visitors keep the pretty URL and get the public
+// thread view, members continue to the canonical /node/<id> thread UI.
+function PermalinkRoute() {
+  const { user, loading } = useUser();
+  const { username, slug } = useParams();
+  const [nodeId, setNodeId] = useState(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    setNodeId(null);
+    setFailed(false);
+    api.get(`/forum/permalink/${username}/${slug}`)
+      .then((res) => { if (!cancelled) setNodeId(res.data.node_id); })
+      .catch(() => { if (!cancelled) setFailed(true); });
+    return () => { cancelled = true; };
+  }, [username, slug]);
+  if (loading || (!nodeId && !failed)) return null;
+  if (failed) return <PublicThreadPage nodeIdOverride="missing" />;
+  if (user) return <Navigate to={`/node/${nodeId}`} replace />;
+  return <PublicThreadPage nodeIdOverride={nodeId} />;
+}
 
 // /node/:id — members get the full thread UI; logged-out visitors get the
 // read-only public thread (the funnel, #228). PublicThreadPage 404s for
@@ -164,6 +188,7 @@ function App() {
           <Route path="/artifacts/:kind" element={<ProtectedRoute><ArtifactsPage /></ProtectedRoute>} />
           <Route path="/share" element={<ProtectedRoute><SharePage /></ProtectedRoute>} />
           <Route path="/share/u/:username" element={<PublicSharePage />} />
+          <Route path="/u/:username/:slug" element={<PermalinkRoute />} />
           <Route path="/forum" element={<ProtectedRoute><ForumPage /></ProtectedRoute>} />
           <Route path="/account" element={<ProtectedRoute><AccountPage /></ProtectedRoute>} />
           <Route path="/node/:id" element={<NodeRoute />} />

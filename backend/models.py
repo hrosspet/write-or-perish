@@ -183,6 +183,10 @@ class Node(db.Model):
     human_owner_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
     linked_node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True)
     node_type = db.Column(db.String(16), nullable=False, default="user")
+    # Human-readable permalink slug for PUBLIC nodes (#228): the permalink
+    # is /u/<owner username>/<public_slug>. Unique per human owner; null on
+    # everything that was never published with a slug.
+    public_slug = db.Column(db.String(80), nullable=True, index=True)
     # Model used to generate this node (only populated for node_type='llm')
     llm_model = db.Column(db.String(64), nullable=True)
     content = db.Column(db.Text, nullable=True)

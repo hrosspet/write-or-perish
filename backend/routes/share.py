@@ -25,8 +25,19 @@ def _share_enabled():
     return bool(current_app.config.get("SHARE_V1", False))
 
 
+def _permalink(share):
+    """/u/<username>/<slug> when published with a slug, else None."""
+    if not share.public_node_id:
+        return None
+    node = Node.query.get(share.public_node_id)
+    if node is None or not node.public_slug:
+        return None
+    return f"/u/{share.user.username}/{node.public_slug}"
+
+
 def _serialize(share):
     return {
+        "permalink": _permalink(share),
         "id": share.id,
         "content": share.get_content(),
         "share_type": share.share_type,
@@ -165,6 +176,7 @@ def publish_share(share_id):
                             AIUsage.NONE.value):
             ai_usage = AIUsage.CHAT.value
         from backend.utils.tokens import approximate_token_count
+        from backend.utils.slugs import generate_unique_public_slug
         public_node = Node(
             user_id=current_user.id,
             human_owner_id=current_user.id,
@@ -173,6 +185,8 @@ def publish_share(share_id):
             privacy_level=PrivacyLevel.PUBLIC.value,
             ai_usage=ai_usage,
             token_count=approximate_token_count(content),
+            public_slug=generate_unique_public_slug(
+                current_user.id, content),
         )
         public_node.set_content(content)
         db.session.add(public_node)
@@ -300,6 +314,7 @@ def public_shares(username):
             "content": s.get_content(),
             "share_type": s.share_type,
             "public_node_id": s.public_node_id,
+            "permalink": _permalink(s),
             "published_at": iso_utc(s.published_at),
         } for s in shares],
     }), 200

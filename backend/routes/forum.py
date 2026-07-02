@@ -103,6 +103,25 @@ def _serialize_public_subtree(node, budget):
     }
 
 
+@forum_bp.route("/permalink/<string:username>/<string:slug>",
+                methods=["GET"])
+def resolve_permalink(username, slug):
+    """/u/<username>/<slug> → node id. Unauthenticated; 404s identically
+    for unknown user/slug and anything non-public."""
+    if not _enabled():
+        return jsonify({"error": "Not found"}), 404
+    user = User.query.filter_by(username=username).first()
+    if user is None:
+        return jsonify({"error": "Not found"}), 404
+    node = _public_alive(Node.query.filter(
+        Node.human_owner_id == user.id,
+        Node.public_slug == slug,
+    )).first()
+    if node is None:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify({"node_id": node.id}), 200
+
+
 @forum_bp.route("/node/<int:node_id>", methods=["GET"])
 def public_thread(node_id):
     """A public node + its public discussion. Deliberately unauthenticated.

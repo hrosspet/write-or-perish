@@ -84,8 +84,11 @@ function ThreadNode({ node, focusId, isRoot }) {
   );
 }
 
-export default function PublicThreadPage() {
-  const { id } = useParams();
+export default function PublicThreadPage({ nodeIdOverride }) {
+  // Permalink route (/u/:username/:slug) resolves the id itself and
+  // passes it in; the plain /node/:id route reads params.
+  const params = useParams();
+  const id = nodeIdOverride || params.id;
   const navigate = useNavigate();
   // 'loading' | 'ok' | 'notfound'
   const [status, setStatus] = useState('loading');

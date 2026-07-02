@@ -88,10 +88,11 @@ export default function PublicSharePage() {
           key={share.id}
           onClick={(e) => {
             if (!share.public_node_id) return;
+            const target = share.permalink || `/node/${share.public_node_id}`;
             if (e.metaKey || e.ctrlKey) {
-              window.open(`/node/${share.public_node_id}`, '_blank', 'noopener');
+              window.open(target, '_blank', 'noopener');
             } else {
-              navigate(`/node/${share.public_node_id}`);
+              navigate(target);
             }
           }}
           onMouseEnter={(e) => { if (share.public_node_id) e.currentTarget.style.borderColor = 'var(--border-hover)'; }}
