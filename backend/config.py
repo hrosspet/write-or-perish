@@ -224,12 +224,14 @@ class Config:
 
     # Magic link email authentication (SMTP)
     MAIL_SERVER = os.environ.get("MAIL_SERVER", "localhost")
-    MAIL_PORT = int(os.environ.get("MAIL_PORT", "587"))
+    # `or "587"` (not just a get() default): docker compose injects UNSET
+    # vars as empty strings, and int('') crashes the app on local dev.
+    MAIL_PORT = int(os.environ.get("MAIL_PORT") or "587")
     MAIL_USE_TLS = os.environ.get("MAIL_USE_TLS", "true").lower() in ("true", "1", "yes")
     MAIL_USERNAME = os.environ.get("MAIL_USERNAME")
     MAIL_PASSWORD = os.environ.get("MAIL_PASSWORD")
     MAIL_DEFAULT_SENDER = os.environ.get("MAIL_DEFAULT_SENDER", "login@loore.org")
-    MAGIC_LINK_EXPIRY_SECONDS = int(os.environ.get("MAGIC_LINK_EXPIRY_SECONDS", "900"))
+    MAGIC_LINK_EXPIRY_SECONDS = int(os.environ.get("MAGIC_LINK_EXPIRY_SECONDS") or "900")
 
     FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 
