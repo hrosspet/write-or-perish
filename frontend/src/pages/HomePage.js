@@ -155,19 +155,19 @@ const shareCard = {
   description: "Give something outward.",
   icon: (
     <svg width="42" height="42" viewBox="0 0 42 42" fill="none">
-      {/* Two cupped hands offering a cut gem, with small glints. */}
-      <path d="M15 11 L27 11 L31 16 L21 25 L11 16 Z"
-            stroke="var(--accent)" strokeWidth="1.4" fill="none" strokeLinejoin="round"/>
-      <path d="M11 16 L31 16 M17.5 11 L17 16 L21 25 M24.5 11 L25 16 L21 25"
-            stroke="var(--accent)" strokeWidth="1.1" fill="none" strokeLinejoin="round" opacity="0.75"/>
-      <path d="M5 27 C6.5 31.5 12 35 21 35 M9.5 28.5 C12 31.5 16 33 21 33"
-            stroke="var(--accent)" strokeWidth="1.4" fill="none" strokeLinecap="round"/>
-      <path d="M37 27 C35.5 31.5 30 35 21 35 M32.5 28.5 C30 31.5 26 33 21 33"
-            stroke="var(--accent)" strokeWidth="1.4" fill="none" strokeLinecap="round"/>
-      <path d="M34 6.5 V11 M31.75 8.75 H36.25"
-            stroke="var(--accent)" strokeWidth="1.2" strokeLinecap="round" opacity="0.7"/>
-      <path d="M8 6 V9 M6.5 7.5 H9.5"
-            stroke="var(--accent)" strokeWidth="1.1" strokeLinecap="round" opacity="0.45"/>
+      {/* A shining gem received on an open hand (side view, after Petr's
+          reference: arm from lower-left, thumb arching over the palm,
+          fingers extending right). */}
+      <path d="M16 9 L26 9 L29.5 13.5 L21 21.5 L12.5 13.5 Z"
+            stroke="var(--accent)" strokeWidth="1.3" fill="none" strokeLinejoin="round"/>
+      <path d="M12.5 13.5 L29.5 13.5 M18.5 9 L18 13.5 L21 21.5 M23.5 9 L24 13.5 L21 21.5"
+            stroke="var(--accent)" strokeWidth="1" fill="none" strokeLinejoin="round" opacity="0.75"/>
+      <path d="M21 3.5 V6 M11 5 L13 7 M31 5 L29 7"
+            stroke="var(--accent)" strokeWidth="1.1" strokeLinecap="round" opacity="0.7"/>
+      <path d="M2.5 39 C5.5 37.5 8.5 36.2 10.5 34.4 C11.3 33.8 11.6 33 12.9 32.5 C15.5 31.4 19 31.2 24 30.9 C29 31.2 33.5 30 37.2 28.4 C38.3 27.9 38.3 26.7 37.2 26.5 C33 25.9 28 26.6 24.5 27.9 C24.2 27 24.9 26.1 24 25.7 C22.8 25.2 19.5 25.3 16.8 26.2 C14 27.1 11.8 28.5 10.3 30 C7.2 31.2 4.5 32.6 2.5 34"
+            stroke="var(--accent)" strokeWidth="1.4" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+      <path d="M24.5 27.9 C21.5 27.9 18.5 27.9 16.2 28.3"
+            stroke="var(--accent)" strokeWidth="1.4" strokeLinecap="round"/>
     </svg>
   ),
 };
