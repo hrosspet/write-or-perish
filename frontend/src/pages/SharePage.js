@@ -366,14 +366,22 @@ export default function SharePage() {
         {editingId === null && (
           <button
             onClick={openNew}
+            title="Write a new share"
             style={{
-              padding: '8px 20px', background: 'var(--accent)', border: 'none',
-              borderRadius: '6px', color: 'var(--bg-deep)',
-              fontFamily: 'var(--sans)', fontSize: '0.85rem', fontWeight: 400,
+              display: 'inline-flex', alignItems: 'center',
+              padding: '6px 14px',
+              background: 'none',
+              border: '1px solid var(--border)',
+              borderRadius: '16px',
+              color: 'var(--text-muted)',
+              fontFamily: 'var(--sans)', fontSize: '0.8rem',
               cursor: 'pointer',
+              transition: 'border-color 0.15s ease, color 0.15s ease',
             }}
+            onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--accent)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text-muted)'; }}
           >
-            New share
+            +
           </button>
         )}
       </div>
@@ -423,13 +431,20 @@ export default function SharePage() {
           <button
             onClick={openNew}
             style={{
-              padding: '10px 24px', background: 'var(--accent)', border: 'none',
-              borderRadius: '6px', color: 'var(--bg-deep)',
-              fontFamily: 'var(--sans)', fontSize: '0.85rem', fontWeight: 400,
+              display: 'inline-flex', alignItems: 'center', gap: '6px',
+              padding: '6px 16px',
+              background: 'none',
+              border: '1px solid var(--border)',
+              borderRadius: '16px',
+              color: 'var(--text-muted)',
+              fontFamily: 'var(--sans)', fontSize: '0.8rem',
               cursor: 'pointer',
+              transition: 'border-color 0.15s ease, color 0.15s ease',
             }}
+            onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--accent)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text-muted)'; }}
           >
-            New share
+            + <span>new share</span>
           </button>
         </div>
       )}
