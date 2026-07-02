@@ -80,7 +80,7 @@ export default function PublicSharePage() {
           textAlign: 'center', color: 'var(--text-muted)',
           fontSize: '0.9rem', fontWeight: 300,
         }}>
-          Nothing here yet.
+          {data.username}'s public entries will appear here as they share thoughts with Loore.
         </p>
       )}
 

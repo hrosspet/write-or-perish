@@ -345,11 +345,13 @@ def test_public_endpoint_serves_only_published(app, client):
     with app.app_context():
         uid = User.query.first().id
         _mk_share(uid, "private draft", status="draft")
-        published = _mk_share(uid, "published piece", status="published")
-        from datetime import datetime
-        published.published_at = datetime.utcnow()
+        to_publish = _mk_share(uid, "published piece", status="draft")
         _mk_share(uid, "taken back", status="revoked")
         _db.session.commit()
+        pid = to_publish.id
+    # Publish through the API — the public page serves public NODES, and
+    # publishing is what creates one.
+    assert client.post(f"/api/share/{pid}/publish").status_code == 200
 
     # Anonymous client — no session.
     anon = app.test_client()
