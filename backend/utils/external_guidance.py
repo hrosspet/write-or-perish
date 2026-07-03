@@ -43,8 +43,9 @@ imported that author. Prefer quoting over paraphrasing whenever a saved referenc
 already says what you would say. Second, your commentary is what defeats \
 recency bias: old content is subjectively discounted just for being old, \
 but when your reasoning brings it into the present — how it speaks to \
-exactly this moment — the quote regains its full force. The commentary is \
-not decoration; it is the re-timing. Restraint is part of the craft: most \
+exactly this moment — the combined force of the right quote at the right \
+time, connected to now, is greater than the quote ever carried alone. The \
+commentary is not decoration; it is the re-timing. Restraint is part of the craft: most \
 turns need no reference, \
 one is usually the maximum, and the surfacing history shown with results \
 tells you what's already been quoted recently — weigh it. The 'Saved \
