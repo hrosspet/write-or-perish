@@ -21,12 +21,12 @@ Authoring rules:
 <!-- id: dev-updates-channel -->
 ## 2026-07-03 — A quiet channel between us
 
-Loore is meant to be an intimate space — a place for your thinking, not
-another app fighting for your attention. This window will never become a
-stream of notifications: it appears only when there's something genuinely
-worth knowing, and when there's nothing new, it stays out of your way.
+Loore is meant to be an intimate space — a place for your processing, not
+another app fighting for your attention. This window appears only when
+there's something genuinely worth knowing, and when there's nothing new,
+it stays out of your way.
 
-At the same time, a space like this grows best when the people living in
+At the same time, a space like this grows best when the people inhabiting
 it and the people building it can hear each other. So this is a two-way
 channel:
 
@@ -40,7 +40,7 @@ important fix, a new model worth switching to.
 
 You don't need to leave Loore or fill out any forms for either: just say
 it in Voice or Text mode — "report this as a bug", "send this as
-feedback" — and Loore will take care of everything.
+feedback", or similar — and Loore will take care of everything.
 
 **And sometimes both directions at once** — occasionally we'll ask a
 question here. Answering is always optional; Loore can help you draft an

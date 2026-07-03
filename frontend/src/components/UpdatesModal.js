@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import api from "../api";
 import MarkdownBody from "./MarkdownBody";
+import { useIsMobile } from "../hooks/useIsMobile";
 
 /**
  * The dev-update channel surface (#207): shows unread changelog sections,
@@ -37,7 +38,7 @@ const cardStyle = {
 
 const headerStyle = {
   fontFamily: "var(--serif)",
-  fontSize: "1.5rem",
+  fontSize: "1.65rem",
   fontWeight: 400,
   color: "var(--text-primary)",
   margin: 0,
@@ -50,27 +51,32 @@ const itemStyle = {
   marginTop: "1.25rem",
 };
 
+// The serif title must outweigh the sans body (whose **bolds** render at
+// 700) — Cormorant asserts itself through size, not weight.
 const itemTitleStyle = {
   fontFamily: "var(--serif)",
-  fontSize: "1.15rem",
+  fontSize: "1.4rem",
   fontWeight: 400,
+  lineHeight: 1.3,
   color: "var(--text-primary)",
-  margin: 0,
+  margin: "0.4rem 0 0",
 };
 
 const dateStyle = {
   fontFamily: "var(--sans)",
-  fontSize: "0.75rem",
+  fontSize: "0.72rem",
   fontWeight: 300,
   color: "var(--text-muted)",
-  letterSpacing: "0.04em",
+  letterSpacing: "0.08em",
+  textTransform: "uppercase",
 };
 
 const buttonRowStyle = {
   display: "flex",
+  flexWrap: "wrap",
   gap: "10px",
   justifyContent: "flex-end",
-  marginTop: "0.75rem",
+  marginTop: "1rem",
 };
 
 const ghostButtonStyle = {
@@ -110,7 +116,11 @@ function ChangelogItem({ section, onDone }) {
     <div style={itemStyle}>
       {section.date && <div style={dateStyle}>{section.date}</div>}
       <h3 style={itemTitleStyle}>{section.title}</h3>
-      <MarkdownBody style={{ fontSize: "0.9rem" }}>
+      <MarkdownBody style={{
+        fontSize: "0.9rem",
+        color: "var(--text-secondary)",
+        marginTop: "0.9rem",
+      }}>
         {section.body}
       </MarkdownBody>
       <div style={buttonRowStyle}>
@@ -139,7 +149,7 @@ function NotificationItem({ notification, onDone }) {
         <p style={{
           fontFamily: "var(--sans)", fontSize: "0.9rem", fontWeight: 300,
           color: "var(--text-secondary)", lineHeight: 1.6,
-          margin: "0.5rem 0 0",
+          margin: "0.9rem 0 0",
         }}>
           {notification.body}
         </p>
@@ -251,7 +261,7 @@ function PollItem({ poll, onDone }) {
     <div style={itemStyle}>
       <div style={dateStyle}>A QUESTION FROM THE DEVELOPER</div>
       <h3 style={itemTitleStyle}>{poll.question}</h3>
-      <p style={{ ...mutedNoteStyle, margin: "0.5rem 0 0" }}>
+      <p style={{ ...mutedNoteStyle, margin: "0.9rem 0 0" }}>
         Answering is optional. If you ask for a draft, {draftModel} will
         read {draftSource} to write one for you to edit — and nothing is
         sent until you press Send.
@@ -333,6 +343,7 @@ function PollItem({ poll, onDone }) {
 }
 
 function UpdatesModal({ data, onClose }) {
+  const isMobile = useIsMobile();
   const [changelog, setChangelog] = useState(data.changelog || []);
   const [notifications, setNotifications] = useState(
     data.notifications || []);
@@ -357,9 +368,24 @@ function UpdatesModal({ data, onClose }) {
   const removeFrom = (setter) => (id, key) =>
     setter((items) => items.filter((item) => item[key] !== id));
 
+  // Most users only ever open Loore on a phone: give the card the full
+  // (padded) width there, trim the padding, and let the height breathe.
+  const responsiveCard = isMobile
+    ? {
+        ...cardStyle,
+        width: "100%",
+        maxWidth: "100%",
+        padding: "1.4rem 1.15rem",
+        maxHeight: "88vh",
+      }
+    : cardStyle;
+
   return (
-    <div style={overlayStyle} onClick={onClose}>
-      <div style={cardStyle} onClick={(e) => e.stopPropagation()}>
+    <div
+      style={{ ...overlayStyle, padding: "12px", boxSizing: "border-box" }}
+      onClick={onClose}
+    >
+      <div style={responsiveCard} onClick={(e) => e.stopPropagation()}>
         <h2 style={headerStyle}>While you were away</h2>
         <p style={{ ...mutedNoteStyle, margin: 0 }}>
           What's new in Loore since your last visit.
