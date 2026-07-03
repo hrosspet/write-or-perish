@@ -135,12 +135,19 @@ function ChangelogItem({ section, onDone }) {
   );
 }
 
-function NotificationItem({ notification, onDone }) {
+function NotificationItem({ notification, onDone, onCloseModal }) {
   const navigate = useNavigate();
   const mark = (action) => {
     api.post(`/updates/notifications/${notification.id}/${action}`)
       .catch(() => {});
     onDone();
+  };
+  // Following the link must close the WHOLE modal first — navigating
+  // under a still-open overlay looks like the click did nothing.
+  const takeALook = () => {
+    mark("read");
+    onCloseModal();
+    navigate(notification.link);
   };
   return (
     <div style={itemStyle}>
@@ -159,10 +166,7 @@ function NotificationItem({ notification, onDone }) {
           Later
         </button>
         {notification.link && (
-          <button
-            style={ghostButtonStyle}
-            onClick={() => { mark("read"); navigate(notification.link); }}
-          >
+          <button style={ghostButtonStyle} onClick={takeALook}>
             Take a look
           </button>
         )}
@@ -412,6 +416,7 @@ function UpdatesModal({ data, onClose }) {
             key={`n-${n.id}`}
             notification={n}
             onDone={() => removeFrom(setNotifications)(n.id, "id")}
+            onCloseModal={onClose}
           />
         ))}
 

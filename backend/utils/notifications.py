@@ -48,8 +48,7 @@ def notify_profile_ready(user_id):
     return notify_user(
         user_id,
         type="profile_ready",
-        title="Your profile has been updated",
-        body="Loore re-read your recent writing and refreshed your "
-             "profile. Take a look — and correct anything it got wrong.",
+        title="Profile updated",
+        body="Your user profile has been updated based on your new data.",
         link="/profile",
     )
