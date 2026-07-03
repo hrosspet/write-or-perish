@@ -67,6 +67,23 @@ const POLL_DATA_SOURCES = [
   { value: "recent_window", label: "Recent writing (context window)" },
 ];
 
+// Same select treatment as AccountPage's Settings (inputStyle+selectStyle
+// there) so admin controls don't render as bare browser widgets.
+const adminSelectStyle = {
+  padding: "10px 12px",
+  borderRadius: "6px",
+  border: "1px solid var(--border)",
+  backgroundColor: "var(--bg-input)",
+  color: "var(--text-primary)",
+  fontFamily: "var(--sans)",
+  fontWeight: 300,
+  fontSize: "0.95rem",
+  boxSizing: "border-box",
+  cursor: "pointer",
+  WebkitAppearance: "none",
+  appearance: "none",
+};
+
 function AdminPolls() {
   const [polls, setPolls] = useState([]);
   const [question, setQuestion] = useState("");
@@ -148,7 +165,7 @@ function AdminPolls() {
           value={modelId}
           onChange={(e) => setModelId(e.target.value)}
           title="Model that drafts answers"
-          style={{ padding: "8px" }}
+          style={adminSelectStyle}
         >
           <option value="">Default model</option>
           {models.map((m) => (
@@ -159,7 +176,7 @@ function AdminPolls() {
           value={dataSource}
           onChange={(e) => setDataSource(e.target.value)}
           title="What the draft may read (shown to users before opt-in)"
-          style={{ padding: "8px" }}
+          style={adminSelectStyle}
         >
           {POLL_DATA_SOURCES.map((s) => (
             <option key={s.value} value={s.value}>{s.label}</option>
@@ -452,6 +469,8 @@ function AdminPanel() {
                 <select
                   value={u.plan || "free"}
                   onChange={(e) => updatePlan(u.id, e.target.value)}
+                  style={{ ...adminSelectStyle,
+                           padding: "6px 10px", fontSize: "0.85rem" }}
                 >
                   {allowedPlans.map((p) => (
                     <option key={p} value={p}>{p}</option>
