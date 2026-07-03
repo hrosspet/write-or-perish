@@ -344,6 +344,16 @@ function PollItem({ poll, onDone }) {
 
 function UpdatesModal({ data, onClose }) {
   const isMobile = useIsMobile();
+  // Real visible height: iOS Safari's `vh` pretends the collapsing
+  // toolbars don't exist, so a vh-sized card overflows the screen and
+  // swallows its own buttons. innerHeight tracks the actual viewport.
+  const [viewHeight, setViewHeight] = useState(
+    () => (typeof window !== "undefined" ? window.innerHeight : 800));
+  useEffect(() => {
+    const onResize = () => setViewHeight(window.innerHeight);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
   const [changelog, setChangelog] = useState(data.changelog || []);
   const [notifications, setNotifications] = useState(
     data.notifications || []);
@@ -369,20 +379,26 @@ function UpdatesModal({ data, onClose }) {
     setter((items) => items.filter((item) => item[key] !== id));
 
   // Most users only ever open Loore on a phone: give the card the full
-  // (padded) width there, trim the padding, and let the height breathe.
+  // (padded) width there, trim the padding, and cap the height BELOW the
+  // visible viewport so the dimmed app stays visible above and below —
+  // the card must read as an overlay, not a page.
   const responsiveCard = isMobile
     ? {
         ...cardStyle,
         width: "100%",
         maxWidth: "100%",
         padding: "1.4rem 1.15rem",
-        maxHeight: "88vh",
+        maxHeight: `${Math.max(viewHeight - 72, 320)}px`,
       }
     : cardStyle;
 
   return (
     <div
-      style={{ ...overlayStyle, padding: "12px", boxSizing: "border-box" }}
+      style={{
+        ...overlayStyle,
+        padding: isMobile ? "36px 12px" : "12px",
+        boxSizing: "border-box",
+      }}
       onClick={onClose}
     >
       <div style={responsiveCard} onClick={(e) => e.stopPropagation()}>
