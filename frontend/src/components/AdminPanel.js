@@ -97,24 +97,39 @@ function AdminPolls() {
     try {
       const res = await api.get("/admin/polls");
       setPolls(res.data.polls);
+      return res.data.default_model_id;
     } catch (err) {
       setPollsError("Failed to fetch polls.");
+      return null;
     }
   };
 
   useEffect(() => {
-    fetchPolls();
-    api.get("/nodes/models")
-      .then((res) => setModels(res.data.models || []))
-      .catch(() => {});
+    // Preselect the app default as a concrete model — no ambiguous
+    // "default" option that resolves invisibly at creation time.
+    Promise.all([
+      fetchPolls(),
+      api.get("/nodes/models")
+        .then((res) => res.data.models || [])
+        .catch(() => []),
+    ]).then(([defaultModelId, fetchedModels]) => {
+      setModels(fetchedModels);
+      setModelId((current) => {
+        if (current) return current;
+        if (fetchedModels.some((m) => m.id === defaultModelId)) {
+          return defaultModelId;
+        }
+        return fetchedModels[0]?.id || "";
+      });
+    });
   }, []);
 
   const createPoll = async () => {
-    if (!question.trim()) return;
+    if (!question.trim() || !modelId) return;
     try {
       await api.post("/admin/polls", {
         question,
-        ...(modelId ? { model_id: modelId } : {}),
+        model_id: modelId,
         data_source: dataSource,
       });
       setQuestion("");
@@ -167,7 +182,6 @@ function AdminPolls() {
           title="Model that drafts answers"
           style={adminSelectStyle}
         >
-          <option value="">Default model</option>
           {models.map((m) => (
             <option key={m.id} value={m.id}>{m.name}</option>
           ))}

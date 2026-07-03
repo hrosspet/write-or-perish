@@ -409,7 +409,11 @@ def list_polls():
     for poll_id, status, n in rows:
         counts.setdefault(poll_id, {})[status] = n
 
-    return jsonify({"polls": [
+    return jsonify({
+        # The app-wide default, so the create-poll selector can preselect
+        # a CONCRETE model instead of an ambiguous "default" option.
+        "default_model_id": current_app.config.get("DEFAULT_LLM_MODEL"),
+        "polls": [
         {
             "id": p.id,
             "question": p.question,
