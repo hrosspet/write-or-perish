@@ -236,9 +236,13 @@ def save_response(poll_id):
     resp = _get_or_create_response(poll)
     if resp.status == "sent":
         return jsonify({"error": "Already sent."}), 409
+    # Keep AI provenance only when the text is the LLM draft verbatim —
+    # the send flow always PUTs before /send, so an unconditional clear
+    # here would strip the (AI-drafted) marker off every sent draft.
+    if not (resp.content and resp.get_content() == content):
+        resp.generated_by = None  # user-authored/edited now
     resp.set_content(content)
     resp.status = "draft"
-    resp.generated_by = None  # user-authored/edited now
     db.session.commit()
     return jsonify({"response": _serialize_response(resp)}), 200
 

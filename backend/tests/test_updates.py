@@ -364,6 +364,24 @@ class TestPolls:
         _db.session.refresh(resp)
         assert resp.generated_by is None
 
+    def test_sending_unedited_draft_keeps_provenance(self, app, client):
+        # The send flow PUTs the current text before /send; a verbatim
+        # AI draft must keep its (AI-drafted) marker for the admin.
+        poll = self._poll()
+        resp = PollResponse(poll_id=poll.id, status="draft",
+                            generated_by="claude-opus-4.6",
+                            user_id=User.query.filter_by(
+                                username="tester").first().id)
+        resp.set_content("AI draft")
+        _db.session.add(resp)
+        _db.session.commit()
+        client.put(f"/api/updates/polls/{poll.id}/response",
+                   json={"content": "AI draft"})
+        client.post(f"/api/updates/polls/{poll.id}/send")
+        _db.session.refresh(resp)
+        assert resp.status == "sent"
+        assert resp.generated_by == "claude-opus-4.6"
+
 
 class TestAdminPolls:
     def test_admin_required(self, client):
