@@ -116,7 +116,7 @@ function ChangelogItem({ section, onDone }) {
     <div style={itemStyle}>
       {section.date && <div style={dateStyle}>{section.date}</div>}
       <h3 style={itemTitleStyle}>{section.title}</h3>
-      <MarkdownBody style={{
+      <MarkdownBody flowText style={{
         fontSize: "0.9rem",
         color: "var(--text-secondary)",
         marginTop: "0.9rem",

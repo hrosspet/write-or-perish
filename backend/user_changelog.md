@@ -11,6 +11,8 @@ Authoring rules:
 - Give each section a stable id with an HTML comment on the line above the
   heading: `<!-- id: my-feature -->`. Without one, the slugified title is
   used — renaming the title then re-notifies everyone.
+- Write each paragraph as ONE line of text (no hard wrapping) — the UI
+  breaks lines to fit the screen.
 - Write for users, not developers: what's new, why it matters, how to try
   it. Markdown is fully supported.
 - PRs with user-facing changes add a section as part of the PR. Quick
@@ -21,28 +23,17 @@ Authoring rules:
 <!-- id: dev-updates-channel -->
 ## 2026-07-03 — A quiet channel between us
 
-Loore is meant to be an intimate space — a place for your processing, not
-another app fighting for your attention. This window appears only when
-there's something genuinely worth knowing, and when there's nothing new,
-it stays out of your way.
+Loore is meant to be an intimate space — a place for your processing, not another app fighting for your attention. This window appears only when there's something genuinely worth knowing, and when there's nothing new, it stays out of your way.
 
-At the same time, a space like this grows best when the people inhabiting
-it and the people building it can hear each other. So this is a two-way
-channel:
+At the same time, a space like this grows best when the people inhabiting it and the people building it can hear each other. So this is a two-way channel:
 
-**From us to you** — announcements like this one: a new feature, an
-important fix, a new model worth switching to.
+**From us to you** — announcements like this one: a new feature, an important fix, a new model worth switching to.
 
 **From you to us** — whenever you feel like it:
 
 - **A GitHub issue** for a bug report or an idea for improvement.
 - **Feedback** for anything looser — an impression, a frustration, a wish.
 
-You don't need to leave Loore or fill out any forms for either: just say
-it in Voice or Text mode — "report this as a bug", "send this as
-feedback", or similar — and Loore will take care of everything.
+You don't need to leave Loore or fill out any forms for either: just say it in Voice or Text mode — "report this as a bug", "send this as feedback", or similar — and Loore will take care of everything.
 
-**And sometimes both directions at once** — occasionally we'll ask a
-question here. Answering is always optional; Loore can help you draft an
-answer from your own context, and nothing leaves your account unless you
-explicitly press Send.
+**And sometimes both directions at once** — occasionally we'll ask a question here. Answering is always optional; Loore can help you draft an answer from your own context, and nothing leaves your account unless you explicitly press Send.
