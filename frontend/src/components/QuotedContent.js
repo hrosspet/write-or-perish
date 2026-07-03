@@ -1,14 +1,17 @@
 import React from 'react';
 import MarkdownBody from './MarkdownBody';
 import InlineQuoteBubble from './InlineQuoteBubble';
+import ExternalQuoteBubble from './ExternalQuoteBubble';
 import InlineArtifactSection from './InlineArtifactSection';
 
 // Pattern to match {user_profile}, {user_todo}, {user_recent}, {user_recent_raw},
 // {user_ai_preferences}, {user_memory}, {user_scratchpad}, {user_intentions} placeholders
 // NOTE: recent_raw must come before recent in the alternation to avoid partial matching
 const ARTIFACT_PATTERN = /\{user_(profile|todo|recent_raw|recent|ai_preferences|memory|scratchpad|intentions)\}/g;
-// Combined pattern for splitting (quotes + artifacts)
-const COMBINED_PATTERN = /(\{quote:\d+\}|\{user_(?:profile|todo|recent_raw|recent|ai_preferences|memory|scratchpad|intentions)\})/g;
+// Combined pattern for splitting (quotes + external-reference quotes + artifacts)
+// NOTE: quote_ext must come before quote in the alternation ({quote: won't
+// match {quote_ext: anyway, but keep the specific-first convention).
+const COMBINED_PATTERN = /(\{quote_ext:\d+\}|\{quote:\d+\}|\{user_(?:profile|todo|recent_raw|recent|ai_preferences|memory|scratchpad|intentions)\})/g;
 
 /**
  * QuotedContent - Renders content with inline quote previews.
@@ -22,7 +25,7 @@ const COMBINED_PATTERN = /(\{quote:\d+\}|\{user_(?:profile|todo|recent_raw|recen
  *   contextArtifacts: Object with "profile" and/or "todo" keys containing artifact data
  *   onQuoteClick: Callback when a quote is clicked (receives quote ID)
  */
-const QuotedContent = ({ content, quotes, contextArtifacts, onQuoteClick, onCheckboxToggle, onAddTask }) => {
+const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQuoteClick, onCheckboxToggle, onAddTask }) => {
   if (!content) {
     return null;
   }
@@ -42,10 +45,11 @@ const QuotedContent = ({ content, quotes, contextArtifacts, onQuoteClick, onChec
   );
 
   const hasQuotes = quotes && Object.keys(quotes).length > 0;
+  const hasExternalQuotes = externalQuotes && Object.keys(externalQuotes).length > 0;
   const hasArtifacts = contextArtifacts && Object.keys(contextArtifacts).length > 0;
 
   // If no special data provided, just render the content as-is with markdown
-  if (!hasQuotes && !hasArtifacts && !ARTIFACT_PATTERN.test(content)) {
+  if (!hasQuotes && !hasExternalQuotes && !hasArtifacts && !ARTIFACT_PATTERN.test(content)) {
     return (
       <MarkdownBody onCheckboxToggle={onCheckboxToggle} onAddTask={onAddTask}>
         {content}
@@ -59,6 +63,13 @@ const QuotedContent = ({ content, quotes, contextArtifacts, onQuoteClick, onChec
 
   for (const part of parts) {
     if (!part) continue;
+
+    // Check if this part is an external-reference quote placeholder
+    const extQuoteMatch = part.match(/^\{quote_ext:(\d+)\}$/);
+    if (extQuoteMatch) {
+      segments.push({ type: 'external_quote', quoteId: extQuoteMatch[1] });
+      continue;
+    }
 
     // Check if this part is a quote placeholder
     const quoteMatch = part.match(/^\{quote:(\d+)\}$/);
@@ -95,6 +106,14 @@ const QuotedContent = ({ content, quotes, contextArtifacts, onQuoteClick, onChec
               key={index}
               quote={quoteData}
               onClick={onQuoteClick}
+            />
+          );
+        } else if (segment.type === 'external_quote') {
+          const quoteData = externalQuotes ? externalQuotes[segment.quoteId] : null;
+          return (
+            <ExternalQuoteBubble
+              key={index}
+              quote={quoteData}
             />
           );
         } else if (segment.type === 'artifact') {

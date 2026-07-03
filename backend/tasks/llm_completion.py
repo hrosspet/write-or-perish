@@ -11,14 +11,17 @@ from backend.celery_app import celery, flask_app
 from backend.models import (
     Node, User, UserProfile, UserRecentContext, UserTodo, APICostLog,
     UserArtifact, Draft,
-    NodeContextArtifact,
+    NodeContextArtifact, ExternalItem,
 )
 from backend.extensions import db
 from backend.llm_providers import LLMProvider, PromptTooLongError
 from backend.utils.tokens import (
     approximate_token_count, reduce_export_tokens, format_date_metadata,
 )
-from backend.utils.quotes import resolve_quotes, has_quotes, find_quote_ids
+from backend.utils.quotes import (
+    resolve_quotes, has_quotes, find_quote_ids,
+    resolve_ext_quotes, has_ext_quotes, find_ext_quote_ids,
+)
 from backend.utils.node_split import NODE_CHAR_CAP
 from backend.utils.timefmt import local_stamp, strip_edge_timestamps
 from backend.utils.api_keys import determine_api_key_type, get_api_keys_for_usage
@@ -75,6 +78,63 @@ USER_ARTIFACTS_INDEX_PLACEHOLDER = "{user_artifacts_index}"
 RETRIEVAL_TOOLS = {"read_artifact", "read_todo", "semantic_search"}
 # Max number of interim retrieval round-trips before the model must answer.
 MAX_RETRIEVAL_ROUNDS = 5
+
+# ── Relative quote labels ────────────────────────────────────────────────
+# semantic_search previews tag each match with a short label ([A], [B], …)
+# and the model quotes by label ({quote:A}). The server canonicalizes
+# labels to absolute {quote:<node_id>} / {quote_ext:<item_id>} markers
+# BEFORE the text is stored or scanned for pulls — the stored lore is
+# self-contained, and the model never copies a multi-digit id (which it
+# reliably typos; labels it doesn't).
+_LABEL_QUOTE_RE = re.compile(r'\{quote:([A-Za-z]{1,2})\}')
+
+
+def _quote_label(n):
+    """0 → A, 1 → B, … 25 → Z, 26 → AA, 27 → AB, …"""
+    label = ""
+    n += 1
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        label = chr(ord("A") + rem) + label
+    return label
+
+
+def _canonicalize_quote_labels(text, quote_labels):
+    """Rewrite {quote:<label>} markers to absolute references using this
+    turn's label map ({label: ("node"|"external", id)}). Unknown labels are
+    left as-is (they render as literal text — visible, not wrong)."""
+    if not text or not quote_labels:
+        return text
+
+    def repl(match):
+        target = quote_labels.get(match.group(1).upper())
+        if target is None:
+            return match.group(0)
+        kind, ref_id = target
+        if kind == "external":
+            return "{quote_ext:%d}" % ref_id
+        return "{quote:%d}" % ref_id
+
+    return _LABEL_QUOTE_RE.sub(repl, text)
+
+
+def _bump_surfaced_references(text, user_id, already_bumped):
+    """Eagerly record surfacing history for every {quote_ext:ID} in *text*
+    (content is encrypted at rest, so this can't be derived later). Bumps
+    each item at most once per turn via *already_bumped*. Committed by the
+    caller's surrounding commit."""
+    ids = [i for i in find_ext_quote_ids(text) if i not in already_bumped]
+    if not ids:
+        return
+    items = ExternalItem.query.filter(
+        ExternalItem.id.in_(ids),
+        ExternalItem.user_id == user_id,
+    ).all()
+    now = datetime.utcnow()
+    for item in items:
+        item.surfaced_count = (item.surfaced_count or 0) + 1
+        item.last_surfaced_at = now
+        already_bumped.add(item.id)
 # Max new {quote:ID} pulls resolved per loop round (a 1h sharing can be huge;
 # this bounds how much full-node content the model can inject in one step).
 MAX_QUOTE_PULLS_PER_ROUND = 5
@@ -236,20 +296,28 @@ VOICE_TOOLS = [
         "name": "semantic_search",
         "description": (
             "Search the user's own archive — all their past entries plus "
-            "your past replies — by meaning, not keywords. Use it when the "
-            "conversation touches something they've likely written about "
-            "before but that isn't in your current context, so you can "
-            "ground your response in what they've actually said rather than "
-            "guessing. Pass a focused natural-language query describing what "
-            "to look for. You get back short PREVIEWS of the top matches (with "
-            "node ids), same turn — these are for triage, not the full text. "
-            "To read a match in full, reference it as {quote:<id>} in your "
-            "reply; the full entry comes back the next step (and the quote "
-            "shows the user which entry you pulled). You can refine and search "
-            "again if the previews miss, and you can search and quote in the "
-            "same step. Tell the user you're checking their archive; don't "
-            "search for things already in your context. Always produce a text "
-            "response alongside the call."
+            "your past replies — AND their saved external references "
+            "(imported tweets and bookmarks) by meaning, not keywords. Use "
+            "it when the conversation touches something they've likely "
+            "written about before, or when they ask about something they "
+            "saved ('I bookmarked something about this'), or when a saved "
+            "reference would genuinely serve the current thread. Pass a "
+            "focused natural-language query describing what to look for. "
+            "You get back short PREVIEWS of the top matches, each tagged "
+            "with a label like [A], same turn — these are for triage, not "
+            "the full text. To QUOTE a match in your reply, reference it by "
+            "its label, e.g. {quote:A} — the user sees the full quoted "
+            "entry or reference card (verbatim, with attribution), and you "
+            "get the full content back the next step. When you quote, say "
+            "in your own words why it's relevant to what the user is "
+            "saying right now — the quote plus your reasoning is the "
+            "response, not a link dump. Reference previews show how often "
+            "each was already surfaced; weigh that yourself — re-quoting "
+            "something recently shown needs a good reason. You can refine "
+            "and search again if the previews miss, and quoting nothing is "
+            "always fine. Tell the user you're checking their archive; "
+            "don't search for things already in your context. Always "
+            "produce a text response alongside the call."
         ),
         "input_schema": {
             "type": "object",
@@ -595,12 +663,17 @@ def _detect_share_proposal(text):
     return any(h == 'share' for h in headings)
 
 
-def _retrieval_injection_text(tr):
+def _retrieval_injection_text(tr, with_labels=False):
     """Build the context-injection string for a successful retrieval tool
     result (read_artifact / read_todo / semantic_search), re-resolving the
     content fresh from the source row — content is never stored in
     tool_calls_meta. Re-checks ai_usage so a mid-session opt-out is honored.
     Returns None if nothing is (still) available.
+
+    *with_labels* renders each search match's short quote label ([A], [B])
+    and tells the model to quote by label — only valid within the turn that
+    assigned the labels (the loop). Cross-turn re-injection passes False and
+    falls back to id-based quoting, since the label map died with its turn.
     """
     name = tr.get("name")
     if name == "read_artifact":
@@ -617,8 +690,8 @@ def _retrieval_injection_text(tr):
     if name == "semantic_search":
         # Re-resolve each matched node from its id (content never stored in
         # meta); re-check ai_usage + soft-delete at injection time. These are
-        # PREVIEWS for triage — to read one in full, the model references it as
-        # {quote:<id>} (resolved by the loop's quote step).
+        # PREVIEWS for triage — to read one in full, the model quotes it
+        # (resolved by the loop's quote step).
         matches = tr.get("matches") or []
         lines = []
         for m in matches:
@@ -634,13 +707,55 @@ def _retrieval_injection_text(tr):
                      if node.created_at else "?")
             score = m.get("score")
             pct = f" · {round(score * 100)}%" if score is not None else ""
-            lines.append(f"- node {node.id} · {stamp}{pct}: {snippet}")
+            tag = (f"[{m['label']}] " if with_labels and m.get("label")
+                   else "")
+            lines.append(
+                f"- {tag}entry {node.id} · {stamp}{pct}: {snippet}")
+        # Saved external references (imported tweets/bookmarks), with their
+        # surfacing history as visible metadata — the model weighs
+        # repetition itself; there is no hardcoded cooldown.
+        for m in (tr.get("ext_matches") or []):
+            item = ExternalItem.query.get(m.get("item_id"))
+            if item is None:
+                continue
+            text = (item.get_content() or "").strip()
+            if not text:
+                continue
+            snippet = text[:800] + ("…" if len(text) > 800 else "")
+            stamp = (item.posted_at.strftime("%Y-%m-%d")
+                     if item.posted_at else "?")
+            score = m.get("score")
+            pct = f" · {round(score * 100)}%" if score is not None else ""
+            surfaced = ""
+            if item.surfaced_count:
+                last = (item.last_surfaced_at.strftime("%Y-%m-%d")
+                        if item.last_surfaced_at else "?")
+                surfaced = (f" · already surfaced {item.surfaced_count}x"
+                            f" (last {last})")
+            tag = (f"[{m['label']}] " if with_labels and m.get("label")
+                   else f"reference {item.id} · ")
+            author = (f"@{item.author_handle}" if item.author_handle
+                      else item.source)
+            lines.append(
+                f"- {tag}saved reference by {author} · "
+                f"{stamp}{pct}{surfaced}: {snippet}")
         if not lines:
             return None
+        if with_labels:
+            hint = (
+                "previews only. To QUOTE one in your reply, reference it "
+                "by its label, e.g. {quote:A} — it renders for the user as "
+                "the full quoted entry or reference card, and you get the "
+                "full content back next step. Quote at most a couple, only "
+                "what's actually relevant — quoting nothing is fine")
+        else:
+            hint = (
+                "previews only; to read an entry in full, reference it as "
+                "{quote:<id>}, a saved reference as {quote_ext:<id>}. Use "
+                "only if actually relevant")
         return (
             "[Semantic search results for "
-            f"\"{tr.get('query', '')}\" — previews only; to read one in full, "
-            "reference it as {quote:<id>}. Use only if actually relevant:\n"
+            f"\"{tr.get('query', '')}\" — {hint}:\n"
             + "\n".join(lines) + "]")
     return None
 
@@ -1101,7 +1216,9 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
                 else:
                     from backend.utils.api_keys import get_openai_chat_key
                     from backend.utils.embeddings import (
+                        embed_texts,
                         retrieve_relevant_snippets,
+                        retrieve_relevant_references,
                     )
                     rag_key = get_openai_chat_key(flask_app.config)
                     if not rag_key:
@@ -1110,8 +1227,22 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
                             "Semantic search is unavailable right now.")
                     else:
                         chain_ids = [n.id for n in node_chain]
+                        query_vector = embed_texts(
+                            [query[:4000]], rag_key, user_id=user_id,
+                            request_type="embedding_query",
+                        )[0]
                         snippets = retrieve_relevant_snippets(
                             user_id, query[:4000], chain_ids, rag_key,
+                            k=flask_app.config.get("RAG_TOP_K", 4),
+                            min_score=flask_app.config.get(
+                                "RAG_MIN_SCORE", 0.35),
+                            query_vector=query_vector,
+                        )
+                        # Saved external references (tweets/bookmarks) rank
+                        # against the same query embedding — one embed call
+                        # covers both corpora.
+                        references = retrieve_relevant_references(
+                            user_id, query_vector,
                             k=flask_app.config.get("RAG_TOP_K", 4),
                             min_score=flask_app.config.get(
                                 "RAG_MIN_SCORE", 0.35),
@@ -1121,6 +1252,11 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
                         result["matches"] = [
                             {"node_id": nid, "score": round(score, 4)}
                             for nid, _created, _snip, score in snippets
+                        ]
+                        result["ext_matches"] = [
+                            {"item_id": r["item_id"],
+                             "score": round(r["score"], 4)}
+                            for r in references
                         ]
 
             elif name == "apply_feedback":
@@ -2059,6 +2195,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             message_text, resolved_ids = resolve_quotes(message_text, user_id, for_llm=True)
                             if resolved_ids:
                                 logger.info(f"Resolved quotes for node IDs: {resolved_ids}")
+                        # Resolve {quote_ext:ID} (saved references) inline —
+                        # small, non-recursive, owner-only.
+                        if has_ext_quotes(message_text):
+                            message_text, _ext_ids = resolve_ext_quotes(
+                                message_text, user_id, for_llm=True)
 
                     if (node.id == parent_node_id and not is_llm_node
                             and cache_split_offset
@@ -2248,6 +2389,16 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     cost_microdollars=cost,
                 ))
 
+            # Turn-scoped relative-quote state. quote_labels maps a short
+            # label ("A") to ("node"|"external", id) — assigned when search
+            # results are labeled, consumed by canonicalization wherever the
+            # model's text is stored. bumped_ext_ids guards the eager
+            # surfacing-history bump to once per item per turn. Initialized
+            # HERE (not in the loop) because _finalize also runs on the
+            # single-shot path that never enters the loop.
+            quote_labels = {}
+            bumped_ext_ids = set()
+
             def _finalize(target_node, resp):
                 """Write *resp* as the final answer on *target_node* using the
                 EXACT existing single-shot finalize behavior (cost log, Race B
@@ -2257,7 +2408,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 Returns the result dict, or a 'cancelled' dict if the node was
                 soft-deleted mid-generation.
                 """
-                f_llm_text = resp["content"]
+                # Canonicalize relative quote labels ({quote:A}) to absolute
+                # markers first — everything downstream (storage, exports,
+                # rendering, TTS) sees only absolute references.
+                f_llm_text = _canonicalize_quote_labels(
+                    resp["content"], quote_labels)
+                _bump_surfaced_references(
+                    f_llm_text, user_id, bumped_ext_ids)
                 # #179: strip hallucinated context-timestamp echoes from the
                 # response edges before anything stores or speaks the text.
                 f_scrubbed = strip_edge_timestamps(f_llm_text)
@@ -2393,6 +2550,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # thread (their content is in `messages`) — neither should trigger
             # a re-loop when the model references them.
             resolved_quote_ids = set()
+            resolved_ext_quote_ids = set()
             chain_ids_set = {n.id for n in node_chain}
             while True:
                 response_tool_calls = response.get("tool_calls", [])
@@ -2404,7 +2562,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # turn (e.g. a semantic_search hit). A search call and quote
                 # pulls can coexist in one round — both get fulfilled and the
                 # model sees everything next round. Capped per round.
-                resp_text = response.get("content") or ""
+                # Labels canonicalize FIRST, so a {quote:B} emitted against
+                # this turn's search results scans as its absolute id below.
+                resp_text = _canonicalize_quote_labels(
+                    response.get("content") or "", quote_labels)
                 # The within-turn {quote:ID} pull-in-full is the second half of
                 # agentic semantic search, so it's gated with it (#155 dark).
                 # Without it, a model-emitted {quote:ID} for an out-of-chain
@@ -2413,6 +2574,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 new_quote_ids = [
                     q for q in find_quote_ids(resp_text)
                     if q not in resolved_quote_ids and q not in chain_ids_set
+                ][:MAX_QUOTE_PULLS_PER_ROUND] if agentic_search_on else []
+                # Saved references quoted this round ({quote_ext:ID}) get
+                # pulled in full the same way — previews truncate at 800
+                # chars, and long-form bookmarks (note-tweets) exceed that.
+                new_ext_quote_ids = [
+                    q for q in find_ext_quote_ids(resp_text)
+                    if q not in resolved_ext_quote_ids
                 ][:MAX_QUOTE_PULLS_PER_ROUND] if agentic_search_on else []
 
                 # Race B guard on the node we're about to write to.
@@ -2434,12 +2602,16 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
                 # INTERIM step: a retrieval tool call and/or a full-node quote
                 # pull was requested, and budget remains.
-                if (retrieval_calls or new_quote_ids) and \
-                        rounds_done < MAX_RETRIEVAL_ROUNDS:
+                if (retrieval_calls or new_quote_ids or new_ext_quote_ids) \
+                        and rounds_done < MAX_RETRIEVAL_ROUNDS:
                     # #179: scrub timestamp echoes from interim text too —
                     # it's stored on the interim node and spoken in voice.
                     interim_text = strip_edge_timestamps(resp_text)
                     interim_truncated = response.get("truncated", False)
+                    # Interim text is stored (and rendered) — record any
+                    # references it already quotes.
+                    _bump_surfaced_references(
+                        interim_text, user_id, bumped_ext_ids)
 
                     # Cost for THIS model call (every call costs).
                     _log_api_cost(response)
@@ -2453,6 +2625,24 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         for tr in tool_results:
                             tr["response_truncated"] = True
 
+                    # Assign this turn's quote labels to fresh search results
+                    # BEFORE building injections — the previews render them
+                    # and canonicalization consumes them. Labels continue
+                    # across rounds (A..Z, AA..) so two searches in one turn
+                    # can't collide.
+                    for tr in tool_results:
+                        if (tr.get("name") != "semantic_search"
+                                or tr.get("status") != "success"):
+                            continue
+                        for m in tr.get("matches") or []:
+                            label = _quote_label(len(quote_labels))
+                            m["label"] = label
+                            quote_labels[label] = ("node", m["node_id"])
+                        for m in tr.get("ext_matches") or []:
+                            label = _quote_label(len(quote_labels))
+                            m["label"] = label
+                            quote_labels[label] = ("external", m["item_id"])
+
                     # Build the injection text for each retrieval call,
                     # re-resolving content from the encrypted row, pinning the
                     # exact version read to the interim node (faithful export),
@@ -2465,7 +2655,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             continue
                         tr["status_reported"] = True
                         if tr.get("status") == "success":
-                            text = _retrieval_injection_text(tr)
+                            text = _retrieval_injection_text(
+                                tr, with_labels=True)
                             if text is not None:
                                 injection_strings.append(text)
                                 a_type, a_id = _retrieval_pin(tr)
@@ -2509,6 +2700,26 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 f"[Full content of the {label} you pulled "
                                 f"up:\n{q_text}]")
                         resolved_quote_ids.update(new_quote_ids)
+                    # Same for freshly-quoted saved references — full text
+                    # (previews truncate; note-tweets and enriched imports
+                    # can be long). Non-recursive, owner-only.
+                    if new_ext_quote_ids:
+                        placeholder = "\n".join(
+                            "{quote_ext:%d}" % q for q in new_ext_quote_ids)
+                        q_text, _ = resolve_ext_quotes(
+                            placeholder, user_id, for_llm=True)
+                        if len(q_text) > MAX_QUOTE_PULL_CHARS:
+                            q_text = (q_text[:MAX_QUOTE_PULL_CHARS]
+                                      + "\n[…pulled content truncated to fit "
+                                      "the context window…]")
+                        if q_text and q_text.strip():
+                            label = ("references"
+                                     if len(new_ext_quote_ids) > 1
+                                     else "reference")
+                            injection_strings.append(
+                                f"[Full content of the saved {label} you "
+                                f"quoted:\n{q_text}]")
+                        resolved_ext_quote_ids.update(new_ext_quote_ids)
                     if not injection_strings:
                         injection_strings.append(
                             "[The requested items were unavailable.]")

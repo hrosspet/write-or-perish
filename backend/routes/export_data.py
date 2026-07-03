@@ -8,7 +8,8 @@ from backend.extensions import db
 from backend.utils.tokens import approximate_token_count, get_model_context_window
 from backend.utils.privacy import AI_ALLOWED, accessible_nodes_filter, can_user_access_node
 from backend.utils.quotes import (
-    resolve_quotes, has_quotes, ExportQuoteResolver, resolve_quotes_for_export
+    resolve_quotes, has_quotes, ExportQuoteResolver,
+    resolve_quotes_for_export, resolve_ext_quotes, has_ext_quotes
 )
 from backend.utils.timefmt import iso_utc
 from backend.utils.spend import require_spend_headroom
@@ -204,6 +205,10 @@ def _format_node_text(node, index_path, user_id, embedded_quotes,
         elif user_id:
             # Fallback to simple resolution (depth 1)
             content, _ = resolve_quotes(content, user_id, for_llm=False, max_depth=1)
+    # {quote_ext:ID} (saved references) resolve inline unconditionally —
+    # they're small and never nest, so no dedup machinery is needed.
+    if user_id and has_ext_quotes(content):
+        content, _ = resolve_ext_quotes(content, user_id, for_llm=False)
 
     result += content
     result += "\n\n"

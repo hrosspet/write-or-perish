@@ -41,8 +41,9 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
 from backend.extensions import db as _db  # noqa: E402
 from backend.models import (  # noqa: E402
     User, Node, UserArtifact, UserPrompt, NodeContextArtifact, APICostLog,
-    UserTodo,
+    UserTodo, ExternalItem, ExternalItemEmbedding, NodeEmbedding,
 )
+from backend.utils.embeddings import pack_vector  # noqa: E402
 
 
 # ── Scriptable LLM provider stub ─────────────────────────────────────────
@@ -742,3 +743,125 @@ def test_user_export_deduped_to_first_occurrence(app, monkeypatch):
     assert text.count(MARKER) == 1
     # ...and the other three occurrences (1 in user1, 1 in user2) are stubs.
     assert text.count("(see archive above)") == 2
+
+
+# ── Quote-as-response: labels, canonicalization, external references ────
+
+
+def _mk_external_item(user_id, content, vector, author="visa", source="twitter_bookmark"):
+    item = ExternalItem(
+        user_id=user_id, source=source, external_id=f"x{content[:8]}",
+        author_handle=author, url="https://twitter.com/i/status/1",
+    )
+    item.set_content(content)
+    _db.session.add(item)
+    _db.session.flush()
+    _db.session.add(ExternalItemEmbedding(
+        item_id=item.id, user_id=user_id, model="test",
+        content_hash="h", vector=pack_vector(vector),
+    ))
+    _db.session.flush()
+    return item
+
+
+def test_search_labels_canonicalize_and_bump_surfaced(app, monkeypatch):
+    """The full quote-as-response round-trip: semantic_search returns node
+    + external matches labeled [A]/[B]; the model quotes {quote:B}; the
+    stored content carries the canonical {quote_ext:<id>}; the reference's
+    surfacing history is bumped; the full reference text is injected into
+    the continuation call."""
+    import backend.utils.embeddings as emb_mod
+    monkeypatch.setattr(
+        emb_mod, "embed_texts", lambda texts, key, **kw: [[1.0, 0.0]])
+
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    # Archive node (out of chain) with an embedding -> match [A].
+    archive = Node(user_id=alice.id, human_owner_id=alice.id,
+                   node_type="text", privacy_level="private",
+                   ai_usage="chat")
+    archive.set_content("my old zen writing")
+    _db.session.add(archive)
+    _db.session.flush()
+    _db.session.add(NodeEmbedding(
+        node_id=archive.id, user_id=alice.id, model="test",
+        content_hash="h", vector=pack_vector([1.0, 0.0])))
+    # Saved reference with an embedding -> match [B].
+    item = _mk_external_item(
+        alice.id, "the perfect saved tweet about zen", [0.9, 0.1])
+    _db.session.commit()
+    item_id = item.id
+
+    _ScriptedProvider.reset([
+        _resp("Checking your archive.",
+              tool_calls=[{"id": "t1", "name": "semantic_search",
+                           "input": {"query": "zen"}}]),
+        _resp("Someone you saved said it better: {quote:B}"),
+        _resp("So, as that tweet shows, here's my answer."),
+    ])
+
+    result = generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+
+    assert len(_ScriptedProvider.calls) == 3
+    # Round 2 saw labeled previews with surfacing metadata semantics.
+    round2 = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[1]["messages"])
+    assert "[A]" in round2 and "[B]" in round2
+    assert "saved reference by @visa" in round2
+    # The interim node holding the quote has the CANONICAL marker.
+    interim = _fresh(llm_node.id)
+    chain_texts = []
+    node = interim
+    while node is not None:
+        chain_texts.append(node.get_content())
+        node = (Node.query.get(node.continuation_node_id)
+                if node.continuation_node_id else None)
+    all_text = "\n".join(chain_texts)
+    assert ("{quote_ext:%d}" % item_id) in all_text
+    assert "{quote:B}" not in all_text
+    # Round 3 (continuation after the quote) got the full reference text.
+    round3 = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[2]["messages"])
+    assert "the perfect saved tweet about zen" in round3
+    # Surfacing history bumped exactly once.
+    _db.session.expire_all()
+    fresh_item = ExternalItem.query.get(item_id)
+    assert fresh_item.surfaced_count == 1
+    assert fresh_item.last_surfaced_at is not None
+    assert result["status"] == "completed"
+
+
+def test_label_canonicalization_in_final_answer(app, monkeypatch):
+    """A label quoted in the FINAL answer (no extra pull round left) is
+    still canonicalized by _finalize."""
+    import backend.utils.embeddings as emb_mod
+    monkeypatch.setattr(
+        emb_mod, "embed_texts", lambda texts, key, **kw: [[1.0, 0.0]])
+
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    item = _mk_external_item(alice.id, "saved wisdom", [1.0, 0.0])
+    _db.session.commit()
+    item_id = item.id
+
+    # Round 1: search; round 2: model answers WITH the quote and the loop
+    # pulls the full reference (interim); round 3: final.
+    _ScriptedProvider.reset([
+        _resp("Searching.",
+              tool_calls=[{"id": "t1", "name": "semantic_search",
+                           "input": {"query": "wisdom"}}]),
+        _resp("Final thought with {quote:A} inline."),
+        _resp("Done."),
+    ])
+
+    generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+
+    _db.session.expire_all()
+    nodes = Node.query.filter(Node.human_owner_id == alice.id).all()
+    all_text = "\n".join(n.get_content() or "" for n in nodes)
+    assert ("{quote_ext:%d}" % item_id) in all_text
+    assert "{quote:A}" not in all_text

@@ -119,19 +119,22 @@ def top_k_similar(query_vector, rows, k=10, min_score=0.0):
 
 def retrieve_relevant_snippets(user_id, query_text, exclude_node_ids,
                                api_key, k=4, min_score=0.35,
-                               snippet_chars=400):
+                               snippet_chars=400, query_vector=None):
     """Top-k archive snippets relevant to *query_text* for agentic context
     injection (#155). Returns [(node_id, created_at, snippet, score)].
 
     Excludes nodes already present in the conversation. Any failure is the
     caller's to swallow — retrieval must never break a completion.
+    Pass *query_vector* to reuse an embedding computed by the caller
+    (e.g. when the same query also ranks external references).
     """
     from backend.models import Node, NodeEmbedding
 
-    query_vector = embed_texts(
-        [query_text], api_key, user_id=user_id,
-        request_type="embedding_query",
-    )[0]
+    if query_vector is None:
+        query_vector = embed_texts(
+            [query_text], api_key, user_id=user_id,
+            request_type="embedding_query",
+        )[0]
 
     rows = db.session.query(
         NodeEmbedding.node_id, NodeEmbedding.vector
@@ -161,4 +164,52 @@ def retrieve_relevant_snippets(user_id, query_text, exclude_node_ids,
         snippet = text[:snippet_chars] + (
             "…" if len(text) > snippet_chars else "")
         results.append((node_id, node.created_at, snippet, score))
+    return results
+
+
+def retrieve_relevant_references(user_id, query_vector, k=4, min_score=0.35,
+                                 snippet_chars=400):
+    """Top-k of the user's external references (imported tweets/bookmarks)
+    for an already-embedded query. Returns a list of dicts with the item's
+    identity, a preview snippet, and its surfacing history — the metadata
+    travels WITH the result so the model can weigh repetition itself.
+    """
+    from backend.models import ExternalItem, ExternalItemEmbedding
+
+    rows = db.session.query(
+        ExternalItemEmbedding.item_id, ExternalItemEmbedding.vector
+    ).filter(ExternalItemEmbedding.user_id == user_id).all()
+    if not rows:
+        return []
+
+    ranked = top_k_similar(query_vector, rows, k=k, min_score=min_score)
+    if not ranked:
+        return []
+
+    items_by_id = {
+        i.id: i for i in ExternalItem.query.filter(
+            ExternalItem.id.in_([iid for iid, _ in ranked]),
+            ExternalItem.user_id == user_id,
+        ).all()
+    }
+    results = []
+    for item_id, score in ranked:
+        item = items_by_id.get(item_id)
+        if item is None:
+            continue
+        text = (item.get_content() or "").strip()
+        if not text:
+            continue
+        snippet = text[:snippet_chars] + (
+            "…" if len(text) > snippet_chars else "")
+        results.append({
+            "item_id": item.id,
+            "source": item.source,
+            "author_handle": item.author_handle,
+            "posted_at": item.posted_at,
+            "snippet": snippet,
+            "score": score,
+            "surfaced_count": item.surfaced_count or 0,
+            "last_surfaced_at": item.last_surfaced_at,
+        })
     return results

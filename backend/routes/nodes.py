@@ -25,7 +25,10 @@ from backend.utils.privacy import (
     PrivacyLevel,
     AIUsage
 )
-from backend.utils.quotes import find_quote_ids, get_quote_data, has_quotes
+from backend.utils.quotes import (
+    find_quote_ids, get_quote_data, has_quotes,
+    find_ext_quote_ids, get_ext_quote_data,
+)
 from backend.utils.share_guidance import (
     SHARE_GUIDANCE_PLACEHOLDER, SHARE_GUIDANCE_TEXT, share_enabled_for_user,
 )
@@ -1019,20 +1022,30 @@ def resolve_node_quotes(node_id):
     if not can_user_access_node(node, current_user.id):
         return jsonify({"error": "Not authorized to access this node"}), 403
 
-    # Find all quote IDs in the content
-    quote_ids = find_quote_ids(node.get_content())
+    content = node.get_content()
+    # Node quotes + external-reference quotes ({quote_ext:ID}) in one pass
+    quote_ids = find_quote_ids(content)
+    ext_quote_ids = find_ext_quote_ids(content)
 
-    if not quote_ids:
+    if not quote_ids and not ext_quote_ids:
         return jsonify({
             "quotes": {},
+            "external_quotes": {},
             "has_quotes": False
         }), 200
 
-    # Get quote data with access checks
-    quote_data = get_quote_data(quote_ids, current_user.id)
+    quote_data = get_quote_data(quote_ids, current_user.id) \
+        if quote_ids else {}
+    # External references resolve against the node's human owner (whoever
+    # imported them): quoting one into a node publishes it to anyone who
+    # can see the node itself, which the check above already gates.
+    ext_owner_id = node.human_owner_id or node.user_id
+    ext_quote_data = get_ext_quote_data(ext_quote_ids, ext_owner_id) \
+        if ext_quote_ids else {}
 
     return jsonify({
         "quotes": quote_data,
+        "external_quotes": ext_quote_data,
         "has_quotes": True
     }), 200
 

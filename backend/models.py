@@ -920,6 +920,14 @@ class ExternalItem(db.Model):
     url = db.Column(db.String(512), nullable=True)
     posted_at = db.Column(db.DateTime, nullable=True)
     fetched_at = db.Column(db.DateTime, default=datetime.utcnow)
+    # Surfacing history (quote-as-response). Tracked EAGERLY at emission
+    # time — content is encrypted at rest, so "which items were quoted"
+    # cannot be derived from node content after the fact. Served to the
+    # LLM as visible metadata alongside search results (no hardcoded
+    # cooldown rules — the model weighs repetition itself).
+    surfaced_count = db.Column(db.Integer, nullable=False, default=0,
+                               server_default="0")
+    last_surfaced_at = db.Column(db.DateTime, nullable=True)
 
     user = db.relationship("User", backref="external_items")
 
