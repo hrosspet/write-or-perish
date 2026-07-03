@@ -48,9 +48,6 @@ const ExternalQuoteBubble = ({ quote }) => {
       </div>
       <div style={footerStyle}>
         {postedAt && <span>{postedAt}</span>}
-        {quote.url && (
-          <span style={linkStyle}>View original ↗</span>
-        )}
       </div>
     </div>
   );
@@ -87,10 +84,6 @@ const footerStyle = {
   gap: '12px',
   fontSize: '0.8em',
   color: 'var(--text-muted)',
-};
-
-const linkStyle = {
-  color: 'var(--accent)',
 };
 
 const notAccessibleStyle = {

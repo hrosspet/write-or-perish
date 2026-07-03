@@ -794,8 +794,8 @@ def test_search_labels_canonicalize_and_bump_surfaced(app, monkeypatch):
         _resp("Checking your archive.",
               tool_calls=[{"id": "t1", "name": "semantic_search",
                            "input": {"query": "zen"}}]),
-        _resp("Someone you saved said it better: {quote:B}"),
-        _resp("So, as that tweet shows, here's my answer."),
+        _resp("Someone you saved said it better: {quote:B} — and here's "
+              "why it matters right now."),
     ])
 
     result = generate_llm_response(
@@ -803,27 +803,24 @@ def test_search_labels_canonicalize_and_bump_surfaced(app, monkeypatch):
         source_mode="textmode",
     )
 
-    assert len(_ScriptedProvider.calls) == 3
+    # Search round + the quoting reply. Quoting a REFERENCE does NOT
+    # trigger a pull round (one-step quote-as-response; a third call here
+    # produced near-duplicate interim/final nodes on staging).
+    assert len(_ScriptedProvider.calls) == 2
     # Round 2 saw labeled previews with surfacing metadata semantics.
     round2 = "\n".join(
         m["text"] for m in _ScriptedProvider.calls[1]["messages"])
     assert "[A]" in round2 and "[B]" in round2
     assert "saved reference by @visa" in round2
-    # The interim node holding the quote has the CANONICAL marker.
+    # The FINAL node carries the canonical marker; no continuation node.
     interim = _fresh(llm_node.id)
-    chain_texts = []
-    node = interim
-    while node is not None:
-        chain_texts.append(node.get_content())
-        node = (Node.query.get(node.continuation_node_id)
-                if node.continuation_node_id else None)
-    all_text = "\n".join(chain_texts)
+    final = (Node.query.get(interim.continuation_node_id)
+             if interim.continuation_node_id else interim)
+    assert final.continuation_node_id is None
+    all_text = "\n".join(
+        n.get_content() or "" for n in [interim, final])
     assert ("{quote_ext:%d}" % item_id) in all_text
     assert "{quote:B}" not in all_text
-    # Round 3 (continuation after the quote) got the full reference text.
-    round3 = "\n".join(
-        m["text"] for m in _ScriptedProvider.calls[2]["messages"])
-    assert "the perfect saved tweet about zen" in round3
     # Surfacing history bumped exactly once.
     _db.session.expire_all()
     fresh_item = ExternalItem.query.get(item_id)
@@ -844,14 +841,13 @@ def test_label_canonicalization_in_final_answer(app, monkeypatch):
     _db.session.commit()
     item_id = item.id
 
-    # Round 1: search; round 2: model answers WITH the quote and the loop
-    # pulls the full reference (interim); round 3: final.
+    # Round 1: search; round 2: model answers WITH the quote — final
+    # (reference quotes never trigger a pull round).
     _ScriptedProvider.reset([
         _resp("Searching.",
               tool_calls=[{"id": "t1", "name": "semantic_search",
                            "input": {"query": "wisdom"}}]),
         _resp("Final thought with {quote:A} inline."),
-        _resp("Done."),
     ])
 
     generate_llm_response(

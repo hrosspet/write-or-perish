@@ -312,11 +312,13 @@ VOICE_TOOLS = [
             "reference would genuinely serve the current thread. Pass a "
             "focused natural-language query describing what to look for. "
             "You get back short PREVIEWS of the top matches, each tagged "
-            "with a label like [A], same turn — these are for triage, not "
-            "the full text. To QUOTE a match in your reply, reference it by "
-            "its label, e.g. {quote:A} — the user sees the full quoted "
-            "entry or reference card (verbatim, with attribution), and you "
-            "get the full content back the next step. When you quote, say "
+            "with a label like [A], same turn. To QUOTE a match in your "
+            "reply, reference it by its label, e.g. {quote:A} — the user "
+            "sees the full quoted entry or reference card (verbatim, with "
+            "attribution). A reference's preview is nearly its full text — "
+            "quote it and give your commentary in the same reply. An "
+            "archive entry you quote comes back to you in full the next "
+            "step. When you quote, say "
             "in your own words why it's relevant to what the user is "
             "saying right now — the quote plus your reasoning is the "
             "response, not a link dump. Reference previews show how often "
@@ -757,10 +759,13 @@ def _retrieval_injection_text(tr, with_labels=False):
             hint = (
                 "previews only. To QUOTE one in your reply, reference it "
                 "by its label, e.g. {quote:A} — it renders for the user as "
-                "the full quoted entry or reference card, and you get the "
-                "full content back next step. Quote at most a couple, only "
-                "what's actually relevant — quoting nothing is fine. In "
-                "prose, refer to items by author or content, not by label")
+                "the full quoted entry or reference card. Quote references "
+                "in the same reply as your commentary (their preview above "
+                "is nearly their full text); archive entries you quote come "
+                "back to you in full the next step. Quote at most a couple, "
+                "only what's actually relevant — quoting nothing is fine. "
+                "In prose, refer to items by author or content, not by "
+                "label")
         else:
             hint = (
                 "previews only; to read an entry in full, reference it as "
@@ -2581,7 +2586,6 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # thread (their content is in `messages`) — neither should trigger
             # a re-loop when the model references them.
             resolved_quote_ids = set()
-            resolved_ext_quote_ids = set()
             chain_ids_set = {n.id for n in node_chain}
             while True:
                 response_tool_calls = response.get("tool_calls", [])
@@ -2606,13 +2610,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     q for q in find_quote_ids(resp_text)
                     if q not in resolved_quote_ids and q not in chain_ids_set
                 ][:MAX_QUOTE_PULLS_PER_ROUND] if agentic_search_on else []
-                # Saved references quoted this round ({quote_ext:ID}) get
-                # pulled in full the same way — previews truncate at 800
-                # chars, and long-form bookmarks (note-tweets) exceed that.
-                new_ext_quote_ids = [
-                    q for q in find_ext_quote_ids(resp_text)
-                    if q not in resolved_ext_quote_ids
-                ][:MAX_QUOTE_PULLS_PER_ROUND] if agentic_search_on else []
+                # Saved references quoted this round ({quote_ext:ID}) do
+                # NOT trigger a pull round: quote-as-response is one step
+                # (quote + commentary in the same reply), previews carry a
+                # tweet nearly in full, and the user sees the whole card
+                # regardless. Re-calling the model after it already answered
+                # produced near-duplicate interim/final nodes (staging pass).
 
                 # Race B guard on the node we're about to write to.
                 db.session.refresh(current_node)
@@ -2633,8 +2636,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
                 # INTERIM step: a retrieval tool call and/or a full-node quote
                 # pull was requested, and budget remains.
-                if (retrieval_calls or new_quote_ids or new_ext_quote_ids) \
-                        and rounds_done < MAX_RETRIEVAL_ROUNDS:
+                if (retrieval_calls or new_quote_ids) and \
+                        rounds_done < MAX_RETRIEVAL_ROUNDS:
                     # #179: scrub timestamp echoes from interim text too —
                     # it's stored on the interim node and spoken in voice.
                     interim_text = strip_edge_timestamps(resp_text)
@@ -2731,26 +2734,6 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 f"[Full content of the {label} you pulled "
                                 f"up:\n{q_text}]")
                         resolved_quote_ids.update(new_quote_ids)
-                    # Same for freshly-quoted saved references — full text
-                    # (previews truncate; note-tweets and enriched imports
-                    # can be long). Non-recursive, owner-only.
-                    if new_ext_quote_ids:
-                        placeholder = "\n".join(
-                            "{quote_ext:%d}" % q for q in new_ext_quote_ids)
-                        q_text, _ = resolve_ext_quotes(
-                            placeholder, user_id, for_llm=True)
-                        if len(q_text) > MAX_QUOTE_PULL_CHARS:
-                            q_text = (q_text[:MAX_QUOTE_PULL_CHARS]
-                                      + "\n[…pulled content truncated to fit "
-                                      "the context window…]")
-                        if q_text and q_text.strip():
-                            label = ("references"
-                                     if len(new_ext_quote_ids) > 1
-                                     else "reference")
-                            injection_strings.append(
-                                f"[Full content of the saved {label} you "
-                                f"quoted:\n{q_text}]")
-                        resolved_ext_quote_ids.update(new_ext_quote_ids)
                     if not injection_strings:
                         injection_strings.append(
                             "[The requested items were unavailable.]")
