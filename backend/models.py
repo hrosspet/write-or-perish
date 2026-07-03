@@ -868,6 +868,9 @@ class APICostLog(db.Model):
     # non-cached calls; lets us query cache hit-rate over time from the DB.
     cache_read_tokens = db.Column(db.Integer, nullable=True, default=0)
     cache_write_tokens = db.Column(db.Integer, nullable=True, default=0)
+    # What specifically caused this cost, when request_type alone is too
+    # coarse — e.g. "poll:3" for a poll-draft (#207). Null for legacy rows.
+    request_ref = db.Column(db.String(64), nullable=True)
     audio_duration_seconds = db.Column(db.Float, nullable=True)
     cost_microdollars = db.Column(db.Integer, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
@@ -1012,16 +1015,32 @@ class UserNotification(db.Model):
 class Poll(db.Model):
     """A question the admin poses to users through the dev-update channel
     (#207 polling extension). Answering is entirely opt-in and two-phase —
-    see PollResponse."""
+    see PollResponse.
+
+    The admin picks per poll which model drafts answers and what data it
+    may read; both are shown to the user BEFORE opt-in 1 (informed
+    consent). Draft costs are attributed to the polls system account, not
+    the answering user — see backend/utils/system_accounts.py.
+    """
     __tablename__ = "poll"
     id = db.Column(db.Integer, primary_key=True)
     question = db.Column(db.Text, nullable=False)
+    # Model that drafts answers (chosen at creation; frozen per poll so
+    # consent shown to early responders can't drift).
+    model_id = db.Column(db.String(64), nullable=True)
+    # What the draft may read: 'derived' = profile + recent summary +
+    # intentions; 'recent_window' = the most recent raw writing that fits
+    # the model's context window.
+    data_source = db.Column(db.String(16), nullable=False,
+                            default="derived", server_default="derived")
     created_by = db.Column(db.Integer, db.ForeignKey("user.id"),
                            nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
     closed_at = db.Column(db.DateTime, nullable=True)
 
     creator = db.relationship("User", foreign_keys=[created_by])
+
+    DATA_SOURCES = ("derived", "recent_window")
 
     @property
     def active(self):
@@ -1076,3 +1095,25 @@ class PollResponse(db.Model):
 
     def get_content(self):
         return decrypt_content(self.content) if self.content else ""
+
+
+class PollDraftBatchJob(db.Model):
+    """A submitted provider batch carrying poll-draft requests (#207).
+    Drafts are async by construction, so they ride the Batch API (~50%
+    cheaper). Mirrors ProfileBatchJob: per-item routing metadata lives in
+    `items` (keyed by custom_id); the beat collector retrieves results and
+    saves each draft to its PollResponse.
+    """
+    __tablename__ = "poll_draft_batch_job"
+
+    id = db.Column(db.Integer, primary_key=True)
+    # "anthropic" | "openai:<api_model>"
+    provider_key = db.Column(db.String(64), nullable=False)
+    batch_id = db.Column(db.String(255), nullable=False, index=True)
+    # "pending" | "collected" | "failed"
+    status = db.Column(db.String(16), nullable=False, default="pending")
+    # List of per-item dicts: {custom_id, response_id, poll_id, model_id}
+    items = db.Column(db.JSON, nullable=False, default=list)
+    submitted_at = db.Column(
+        db.DateTime, nullable=False, default=datetime.utcnow)
+    collected_at = db.Column(db.DateTime, nullable=True)

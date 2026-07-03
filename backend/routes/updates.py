@@ -42,6 +42,18 @@ def _serialize_response(resp):
     }
 
 
+def _poll_draft_terms(poll):
+    """What the user is consenting to in opt-in 1 — shown BEFORE they
+    ask for a draft."""
+    model_id = (poll.model_id
+                or current_app.config.get("DEFAULT_LLM_MODEL"))
+    model_cfg = current_app.config["SUPPORTED_MODELS"].get(model_id, {})
+    return {
+        "model": model_cfg.get("display_name", model_id),
+        "data_source": poll.data_source,
+    }
+
+
 def _pending_polls_for(user):
     """Active polls the user hasn't resolved (sent or declined)."""
     responses = {
@@ -58,6 +70,7 @@ def _pending_polls_for(user):
             "id": poll.id,
             "question": poll.question,
             "created_at": iso_utc(poll.created_at),
+            "draft_terms": _poll_draft_terms(poll),
             "response": _serialize_response(resp),
         })
     return pending
@@ -181,6 +194,7 @@ def get_poll(poll_id):
         "id": poll.id,
         "question": poll.question,
         "active": poll.active,
+        "draft_terms": _poll_draft_terms(poll),
         "response": _serialize_response(resp),
     }), 200
 
@@ -189,9 +203,10 @@ def get_poll(poll_id):
 @login_required
 def request_draft(poll_id):
     """Opt-in 1: the user asks the LLM to draft an answer from their
-    archive. Refused when their global AI-usage setting opts out."""
+    archive. Refused when their global AI-usage setting opts out. No
+    spend-cap check: draft costs land on the polls system account, not
+    the user (they're answering OUR question)."""
     from backend.utils.privacy import AI_ALLOWED
-    from backend.utils.spend import user_is_capped
 
     poll = _get_active_poll(poll_id)
     if poll is None:
@@ -200,10 +215,6 @@ def request_draft(poll_id):
         return jsonify({
             "error": "Your AI-usage setting doesn't allow this. You can "
                      "still write an answer yourself."}), 403
-    if user_is_capped(current_user):
-        return jsonify({
-            "error": "monthly_spend_limit_reached",
-            "message": "You've reached your monthly usage limit."}), 402
 
     resp = _get_or_create_response(poll)
     if resp.status == "sent":
@@ -215,10 +226,8 @@ def request_draft(poll_id):
     resp.draft_requested_at = datetime.utcnow()
     db.session.commit()
 
-    from backend.tasks.poll_draft import draft_poll_response
-    task = draft_poll_response.delay(resp.id)
-    resp.draft_task_id = task.id
-    db.session.commit()
+    from backend.tasks.poll_draft import submit_poll_draft
+    submit_poll_draft.delay(resp.id)
     return jsonify({"response": _serialize_response(resp)}), 202
 
 

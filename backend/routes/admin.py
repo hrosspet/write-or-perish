@@ -368,13 +368,30 @@ def update_feedback_status(feedback_id):
 def create_poll():
     from backend.models import Poll
 
-    question = ((request.get_json() or {}).get("question") or "").strip()
+    data = request.get_json() or {}
+    question = (data.get("question") or "").strip()
     if not question:
         return jsonify({"error": "Question is required."}), 400
-    poll = Poll(question=question, created_by=current_user.id)
+
+    # Which model drafts answers, and what data it may read (#207). Both
+    # are frozen at creation and shown to users before opt-in 1.
+    model_id = data.get("model_id") or current_app.config.get(
+        "DEFAULT_LLM_MODEL")
+    supported = current_app.config.get("SUPPORTED_MODELS", {})
+    if model_id not in supported:
+        return jsonify({"error": f"Unsupported model: {model_id}"}), 400
+    data_source = data.get("data_source") or "derived"
+    if data_source not in Poll.DATA_SOURCES:
+        return jsonify({"error": f"Invalid data_source. Allowed: "
+                                 f"{list(Poll.DATA_SOURCES)}"}), 400
+
+    poll = Poll(question=question, created_by=current_user.id,
+                model_id=model_id, data_source=data_source)
     db.session.add(poll)
     db.session.commit()
     return jsonify({"id": poll.id, "question": poll.question,
+                    "model_id": poll.model_id,
+                    "data_source": poll.data_source,
                     "created_at": iso_utc(poll.created_at)}), 201
 
 
@@ -396,6 +413,8 @@ def list_polls():
         {
             "id": p.id,
             "question": p.question,
+            "model_id": p.model_id,
+            "data_source": p.data_source,
             "created_at": iso_utc(p.created_at),
             "closed_at": iso_utc(p.closed_at),
             "sent_count": counts.get(p.id, {}).get("sent", 0),

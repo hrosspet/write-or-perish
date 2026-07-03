@@ -19,6 +19,7 @@ os.environ.setdefault("ENCRYPTION_DISABLED", "true")
 from backend.extensions import db as _db  # noqa: E402
 from backend.models import (  # noqa: E402
     User, UserNotification, Poll, PollResponse, ChangelogReadState,
+    PollDraftBatchJob, APICostLog, UserProfile,
 )
 import backend.utils.changelog as changelog_mod  # noqa: E402
 from backend.utils.changelog import (  # noqa: E402
@@ -27,6 +28,25 @@ from backend.utils.changelog import (  # noqa: E402
 from backend.utils.notifications import (  # noqa: E402
     notify_user, notify_profile_ready,
 )
+from backend.utils.system_accounts import (  # noqa: E402
+    get_poll_system_user, POLL_SYSTEM_USERNAME,
+)
+
+# ── Import the real poll_draft module against stub glue (same pattern as
+# test_share.py): backend.celery_app would boot the full app. ──
+_GLUE = ("backend.celery_app",)
+_saved_glue = {k: sys.modules.get(k) for k in _GLUE}
+sys.modules["backend.celery_app"] = MagicMock()
+sys.modules.pop("backend.tasks.poll_draft", None)
+import backend.tasks.poll_draft as poll_draft_mod  # noqa: E402
+for _k, _v in _saved_glue.items():
+    if _v is None:
+        sys.modules.pop(_k, None)
+    else:
+        sys.modules[_k] = _v
+# Route tests stub sys.modules["backend.tasks.poll_draft"]; keep the real
+# module reachable for the pipeline tests regardless of ordering.
+sys.modules["backend.tasks.poll_draft"] = poll_draft_mod
 
 
 SAMPLE = textwrap.dedent("""\
@@ -145,6 +165,13 @@ def _make_app(dev_updates=True):
     app.config["SECRET_KEY"] = "test-secret"
     app.config["TESTING"] = True
     app.config["DEV_UPDATES_V1"] = dev_updates
+    app.config["DEFAULT_LLM_MODEL"] = "test-model"
+    app.config["SUPPORTED_MODELS"] = {
+        "test-model": {
+            "provider": "anthropic", "api_model": "test-model-api",
+            "display_name": "Test Model", "context_window": 200000,
+        },
+    }
 
     _db.init_app(app)
     login_manager = LoginManager(app)
@@ -278,7 +305,7 @@ def _stub_poll_draft_task(monkeypatch):
     """The route imports the celery task lazily; give it a stub module so
     tests never touch backend.celery_app."""
     stub = MagicMock()
-    stub.draft_poll_response.delay.return_value = MagicMock(id="task-123")
+    stub.submit_poll_draft.delay.return_value = MagicMock(id="task-123")
     monkeypatch.setitem(sys.modules, "backend.tasks.poll_draft", stub)
     return stub
 
@@ -302,7 +329,7 @@ class TestPolls:
         res = client.post(f"/api/updates/polls/{poll.id}/draft")
         assert res.status_code == 202
         assert res.get_json()["response"]["status"] == "drafting"
-        stub.draft_poll_response.delay.assert_called_once()
+        stub.submit_poll_draft.delay.assert_called_once()
         resp = PollResponse.query.filter_by(poll_id=poll.id).first()
         assert resp.draft_requested_at is not None
 
@@ -315,8 +342,17 @@ class TestPolls:
         poll = self._poll()
         res = client.post(f"/api/updates/polls/{poll.id}/draft")
         assert res.status_code == 403
-        stub.draft_poll_response.delay.assert_not_called()
+        stub.submit_poll_draft.delay.assert_not_called()
         assert PollResponse.query.count() == 0
+
+    def test_draft_terms_shown_before_optin(self, app, client):
+        poll = Poll(question="?", model_id="test-model",
+                    data_source="recent_window")
+        _db.session.add(poll)
+        _db.session.commit()
+        polls = client.get("/api/updates").get_json()["polls"]
+        assert polls[0]["draft_terms"] == {
+            "model": "Test Model", "data_source": "recent_window"}
 
     def test_send_requires_content(self, app, client):
         poll = self._poll()
@@ -393,13 +429,30 @@ class TestAdminPolls:
         res = admin_client.post("/api/admin/polls",
                                 json={"question": "How is voice mode?"})
         assert res.status_code == 201
-        poll_id = res.get_json()["id"]
+        created = res.get_json()
+        # Defaults: server default model, derived context
+        assert created["model_id"] == "test-model"
+        assert created["data_source"] == "derived"
+        poll_id = created["id"]
         polls = admin_client.get("/api/admin/polls").get_json()["polls"]
         assert polls[0]["id"] == poll_id
         assert polls[0]["sent_count"] == 0
+        assert polls[0]["model_id"] == "test-model"
         res = admin_client.post(f"/api/admin/polls/{poll_id}/close")
         assert res.status_code == 200
         assert res.get_json()["closed_at"] is not None
+
+    def test_create_validates_model_and_source(self, admin_client):
+        assert admin_client.post("/api/admin/polls", json={
+            "question": "?", "model_id": "nope"}).status_code == 400
+        assert admin_client.post("/api/admin/polls", json={
+            "question": "?", "data_source": "everything"
+        }).status_code == 400
+        res = admin_client.post("/api/admin/polls", json={
+            "question": "?", "model_id": "test-model",
+            "data_source": "recent_window"})
+        assert res.status_code == 201
+        assert res.get_json()["data_source"] == "recent_window"
 
     def test_admin_sees_only_sent_responses(self, app, admin_client):
         user = User.query.filter_by(username="tester").first()
@@ -423,3 +476,190 @@ class TestAdminPolls:
         assert data["responses"][0]["content"] == "shared on purpose"
         counts = admin_client.get("/api/admin/polls").get_json()["polls"][0]
         assert counts["sent_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Batch draft pipeline (submit → collect), cost attribution
+# ---------------------------------------------------------------------------
+
+TEST_MODELS_CONFIG = {
+    "SUPPORTED_MODELS": {
+        "test-model": {
+            "provider": "anthropic", "api_model": "test-model-api",
+            "display_name": "Test Model", "context_window": 200000,
+        },
+    },
+    "DEFAULT_LLM_MODEL": "test-model",
+}
+
+
+@pytest.fixture
+def pipeline(app, monkeypatch):
+    """Wire poll_draft's glue (stub flask_app config, no-op app_context,
+    captured batch calls) inside the real test app context."""
+    prev_config = poll_draft_mod.flask_app.config
+    poll_draft_mod.flask_app.config = dict(TEST_MODELS_CONFIG)
+    monkeypatch.setattr(poll_draft_mod, "get_api_keys_for_usage",
+                        lambda *a, **k: {"anthropic": "k", "openai": "k"})
+    monkeypatch.setattr(poll_draft_mod, "apply_batch_key_override",
+                        lambda keys, cfg: keys)
+    yield poll_draft_mod
+    poll_draft_mod.flask_app.config = prev_config
+
+
+def _make_drafting_response(model_id="test-model", data_source="derived",
+                            with_profile=True):
+    user = User.query.filter_by(username="tester").first()
+    if with_profile:
+        profile = UserProfile(user_id=user.id, generated_by="user",
+                              tokens_used=0)
+        profile.set_content("PROFILE: daily journaler, voice mode.")
+        _db.session.add(profile)
+    poll = Poll(question="What's missing?", model_id=model_id,
+                data_source=data_source)
+    _db.session.add(poll)
+    _db.session.commit()
+    resp = PollResponse(poll_id=poll.id, user_id=user.id,
+                        status="drafting",
+                        draft_requested_at=datetime.utcnow())
+    _db.session.add(resp)
+    _db.session.commit()
+    return poll, resp
+
+
+class TestDraftBatchPipeline:
+    def test_submit_creates_job(self, pipeline, monkeypatch):
+        captured = {}
+
+        def fake_submit(requests_by_provider, keys, phase=None):
+            captured.update(requests_by_provider)
+            return {"anthropic": "batch-abc"}
+
+        monkeypatch.setattr(pipeline, "batch_submit", fake_submit)
+        poll, resp = _make_drafting_response()
+        pipeline._submit_poll_draft(resp.id, task_id="t-1")
+
+        job = PollDraftBatchJob.query.one()
+        assert job.provider_key == "anthropic"
+        assert job.batch_id == "batch-abc"
+        assert job.status == "pending"
+        assert job.items == [{
+            "custom_id": f"poll-draft-{resp.id}",
+            "response_id": resp.id, "poll_id": poll.id,
+            "model_id": "test-model",
+        }]
+        request = captured["anthropic"][0]
+        body = request["messages"][1]["content"]
+        assert "PROFILE: daily journaler" in body
+        assert "What's missing?" in body
+        assert request["max_tokens"] == pipeline.MAX_DRAFT_TOKENS
+        assert resp.status == "drafting"
+
+    def test_submit_recent_window_uses_export(self, pipeline, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(
+            pipeline, "batch_submit",
+            lambda reqs, keys, phase=None: (
+                captured.update(reqs) or {"anthropic": "batch-w"}))
+        exports_stub = MagicMock()
+        exports_stub.build_user_export_content.return_value = (
+            "RECENT RAW WRITING")
+        monkeypatch.setitem(sys.modules, "backend.tasks.exports",
+                            exports_stub)
+
+        poll, resp = _make_drafting_response(
+            data_source="recent_window", with_profile=False)
+        pipeline._submit_poll_draft(resp.id)
+
+        kwargs = exports_stub.build_user_export_content.call_args.kwargs
+        assert kwargs["max_tokens"] == (
+            200000 - pipeline.MAX_DRAFT_TOKENS
+            - pipeline.WINDOW_OVERHEAD_TOKENS)
+        assert kwargs["filter_ai_usage"] is True
+        assert "RECENT RAW WRITING" in (
+            captured["anthropic"][0]["messages"][1]["content"])
+
+    def test_submit_without_context_fails_soft(self, pipeline,
+                                               monkeypatch):
+        submit = MagicMock()
+        monkeypatch.setattr(pipeline, "batch_submit", submit)
+        poll, resp = _make_drafting_response(with_profile=False)
+        pipeline._submit_poll_draft(resp.id)
+        assert resp.status == "draft_failed"
+        submit.assert_not_called()
+        assert PollDraftBatchJob.query.count() == 0
+
+    def _pending_job(self, poll, resp):
+        job = PollDraftBatchJob(
+            provider_key="anthropic", batch_id="batch-abc",
+            items=[{"custom_id": f"poll-draft-{resp.id}",
+                    "response_id": resp.id, "poll_id": poll.id,
+                    "model_id": "test-model"}])
+        _db.session.add(job)
+        _db.session.commit()
+        return job
+
+    def test_collect_saves_draft_and_attributes_cost(self, pipeline,
+                                                     monkeypatch):
+        poll, resp = _make_drafting_response()
+        job = self._pending_job(poll, resp)
+        monkeypatch.setattr(
+            pipeline, "batch_check_and_collect",
+            lambda ids, keys: ({f"poll-draft-{resp.id}": {
+                "content": " A drafted answer. ",
+                "input_tokens": 100, "output_tokens": 50,
+            }}, {}, {}))
+        cost_calls = {}
+
+        def fake_cost(model_id, inp, out, batch=False):
+            cost_calls.update(model=model_id, batch=batch)
+            return 4242
+
+        monkeypatch.setattr(
+            pipeline, "calculate_llm_cost_microdollars", fake_cost)
+
+        pipeline._collect_poll_draft_batches()
+
+        assert resp.status == "draft"
+        assert resp.get_content() == "A drafted answer."
+        assert resp.generated_by == "test-model"
+        assert job.status == "collected"
+
+        log = APICostLog.query.one()
+        system_user = User.query.filter_by(
+            username=POLL_SYSTEM_USERNAME).one()
+        assert log.user_id == system_user.id          # NOT the tester
+        assert log.request_type == "poll_draft"
+        assert log.request_ref == f"poll:{poll.id}"   # traceable to poll
+        assert log.cost_microdollars == 4242
+        assert cost_calls == {"model": "test-model", "batch": True}
+        # System account can't log in / never gets profile-generated
+        assert system_user.approved is False
+        assert system_user.plan == "free"
+
+    def test_collect_still_pending_leaves_job(self, pipeline, monkeypatch):
+        poll, resp = _make_drafting_response()
+        job = self._pending_job(poll, resp)
+        monkeypatch.setattr(
+            pipeline, "batch_check_and_collect",
+            lambda ids, keys: ({}, {"anthropic": "batch-abc"}, {}))
+        pipeline._collect_poll_draft_batches()
+        assert job.status == "pending"
+        assert resp.status == "drafting"
+
+    def test_collect_missing_item_fails_response(self, pipeline,
+                                                 monkeypatch):
+        poll, resp = _make_drafting_response()
+        job = self._pending_job(poll, resp)
+        monkeypatch.setattr(
+            pipeline, "batch_check_and_collect",
+            lambda ids, keys: ({}, {}, {}))  # ended, no result
+        pipeline._collect_poll_draft_batches()
+        assert job.status == "collected"
+        assert resp.status == "draft_failed"
+
+    def test_system_account_is_idempotent(self, app):
+        first = get_poll_system_user()
+        second = get_poll_system_user()
+        assert first.id == second.id
+        assert first.username == POLL_SYSTEM_USERNAME

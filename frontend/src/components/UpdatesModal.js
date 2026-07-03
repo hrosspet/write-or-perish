@@ -164,6 +164,13 @@ function NotificationItem({ notification, onDone }) {
   );
 }
 
+// Human wording for what the draft may read — must match the backend
+// Poll.DATA_SOURCES semantics (informed consent, shown before opt-in 1).
+const DATA_SOURCE_LABELS = {
+  derived: "your profile, recent summary and intentions",
+  recent_window: "your recent writing (as much as fits its context window)",
+};
+
 function PollItem({ poll, onDone }) {
   const [response, setResponse] = useState(poll.response);
   const [text, setText] = useState(poll.response?.content || "");
@@ -174,8 +181,13 @@ function PollItem({ poll, onDone }) {
   const pollTimer = useRef(null);
 
   const drafting = response?.status === "drafting";
+  const draftModel = poll.draft_terms?.model || "the AI";
+  const draftSource =
+    DATA_SOURCE_LABELS[poll.draft_terms?.data_source] ||
+    DATA_SOURCE_LABELS.derived;
 
-  // While the LLM draft is generating, poll for its completion.
+  // While the LLM draft is generating (async batch, minutes), poll for
+  // its completion.
   useEffect(() => {
     if (!drafting) return undefined;
     pollTimer.current = setInterval(async () => {
@@ -195,7 +207,7 @@ function PollItem({ poll, onDone }) {
           }
         }
       } catch (e) { /* keep polling */ }
-    }, 2500);
+    }, 5000);
     return () => clearInterval(pollTimer.current);
   }, [drafting, poll.id]);
 
@@ -240,14 +252,16 @@ function PollItem({ poll, onDone }) {
       <div style={dateStyle}>A QUESTION FROM THE DEVELOPER</div>
       <h3 style={itemTitleStyle}>{poll.question}</h3>
       <p style={{ ...mutedNoteStyle, margin: "0.5rem 0 0" }}>
-        Answering is optional. Loore can draft a reply from your profile
-        for you to edit — and nothing is sent until you press Send.
+        Answering is optional. If you ask for a draft, {draftModel} will
+        read {draftSource} to write one for you to edit — and nothing is
+        sent until you press Send.
       </p>
 
       {drafting && (
         <p style={{ ...mutedNoteStyle, margin: "0.75rem 0 0",
           color: "var(--accent)" }}>
-          Loore is drafting an answer from your profile…
+          {draftModel} is drafting an answer in the background — this can
+          take a few minutes. You can close this and come back later.
         </p>
       )}
 
@@ -262,8 +276,8 @@ function PollItem({ poll, onDone }) {
         <div>
           {response?.generated_by && response?.content === text && (
             <p style={{ ...mutedNoteStyle, margin: "0.6rem 0 0" }}>
-              Drafted by AI from your profile — please review and edit
-              before sending.
+              Drafted by {draftModel} from {draftSource} — please review
+              and edit before sending.
             </p>
           )}
           <textarea

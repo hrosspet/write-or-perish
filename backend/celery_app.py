@@ -61,6 +61,11 @@ celery.conf.update(
             'task': 'backend.tasks.spend_monitor.check_api_spend',
             'schedule': 3600.0,  # hourly
         },
+        # Poll drafts ride the Batch API (#207); no-op when none pending.
+        'collect-poll-draft-batches': {
+            'task': 'backend.tasks.poll_draft.collect_poll_draft_batches',
+            'schedule': 60.0,  # batches typically finish in 1-5 min
+        },
     },
 )
 

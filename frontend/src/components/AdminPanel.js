@@ -62,9 +62,17 @@ function SortToggle({ dir, onToggle, label }) {
 
 // Polls — the admin side of the dev-update channel (#207). Ask the
 // community a question; read only the answers users explicitly sent.
+const POLL_DATA_SOURCES = [
+  { value: "derived", label: "Profile + recent + intentions" },
+  { value: "recent_window", label: "Recent writing (context window)" },
+];
+
 function AdminPolls() {
   const [polls, setPolls] = useState([]);
   const [question, setQuestion] = useState("");
+  const [models, setModels] = useState([]);
+  const [modelId, setModelId] = useState("");
+  const [dataSource, setDataSource] = useState("derived");
   const [responses, setResponses] = useState({}); // poll_id -> array
   const [pollsError, setPollsError] = useState("");
 
@@ -77,12 +85,21 @@ function AdminPolls() {
     }
   };
 
-  useEffect(() => { fetchPolls(); }, []);
+  useEffect(() => {
+    fetchPolls();
+    api.get("/nodes/models")
+      .then((res) => setModels(res.data.models || []))
+      .catch(() => {});
+  }, []);
 
   const createPoll = async () => {
     if (!question.trim()) return;
     try {
-      await api.post("/admin/polls", { question });
+      await api.post("/admin/polls", {
+        question,
+        ...(modelId ? { model_id: modelId } : {}),
+        data_source: dataSource,
+      });
       setQuestion("");
       fetchPolls();
     } catch (err) {
@@ -127,6 +144,27 @@ function AdminPolls() {
           placeholder="Ask the community a question…"
           style={{ padding: "8px", flex: 1 }}
         />
+        <select
+          value={modelId}
+          onChange={(e) => setModelId(e.target.value)}
+          title="Model that drafts answers"
+          style={{ padding: "8px" }}
+        >
+          <option value="">Default model</option>
+          {models.map((m) => (
+            <option key={m.id} value={m.id}>{m.name}</option>
+          ))}
+        </select>
+        <select
+          value={dataSource}
+          onChange={(e) => setDataSource(e.target.value)}
+          title="What the draft may read (shown to users before opt-in)"
+          style={{ padding: "8px" }}
+        >
+          {POLL_DATA_SOURCES.map((s) => (
+            <option key={s.value} value={s.value}>{s.label}</option>
+          ))}
+        </select>
         <button onClick={createPoll}>Create poll</button>
       </div>
       {pollsError && <div style={{ color: "var(--error)" }}>{pollsError}</div>}
@@ -135,6 +173,12 @@ function AdminPolls() {
           <div style={{ display: "flex", gap: "10px", alignItems: "baseline" }}>
             <span style={{ flex: 1 }}>
               {p.question}
+              <span style={{ color: "var(--text-muted)", fontSize: "0.8rem" }}>
+                {" "}— {p.model_id || "default model"},{" "}
+                {(POLL_DATA_SOURCES.find(
+                  (s) => s.value === p.data_source) || POLL_DATA_SOURCES[0]
+                ).label.toLowerCase()}
+              </span>
               {p.closed_at && (
                 <em style={{ color: "var(--text-muted)" }}> (closed)</em>
               )}
