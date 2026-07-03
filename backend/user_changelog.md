@@ -19,16 +19,30 @@ Authoring rules:
 -->
 
 <!-- id: dev-updates-channel -->
-## 2026-07-03 — Loore now tells you what's new
+## 2026-07-03 — A quiet channel between us
 
-You're looking at it: this little window appears when something changed in
-Loore that's worth your attention — a new feature, an important fix, a new
-model worth switching to. It only shows what you haven't seen, and if
-there's nothing new, it stays out of your way.
+Loore is meant to be an intimate space — a place for your thinking, not
+another app fighting for your attention. This window will never become a
+stream of notifications: it appears only when there's something genuinely
+worth knowing, and when there's nothing new, it stays out of your way.
 
-Two buttons, no tricks: **Got it** dismisses a note for good, **Later**
-keeps it for your next visit.
+At the same time, a space like this grows best when the people living in
+it and the people building it can hear each other. So this is a two-way
+channel:
 
-Occasionally we may also ask a question here — what's working, what's
-missing. Answering is always optional, and nothing you write leaves your
-account unless you explicitly press Send.
+**From us to you** — announcements like this one: a new feature, an
+important fix, a new model worth switching to.
+
+**From you to us** — whenever you feel like it:
+
+- **A GitHub issue** for a bug report or an idea for improvement.
+- **Feedback** for anything looser — an impression, a frustration, a wish.
+
+You don't need to leave Loore or fill out any forms for either: just say
+it in Voice or Text mode — "report this as a bug", "send this as
+feedback" — and Loore will take care of everything.
+
+**And sometimes both directions at once** — occasionally we'll ask a
+question here. Answering is always optional; Loore can help you draft an
+answer from your own context, and nothing leaves your account unless you
+explicitly press Send.
