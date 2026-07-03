@@ -12,6 +12,12 @@ from flask import current_app
 CACHE_READ_MULTIPLIER = 0.1
 CACHE_WRITE_MULTIPLIER = 1.25
 
+# X API pay-per-use price per request (bookmarks fetch, /users/me), in
+# microdollars ($0.005/request as of 2026-07). Flat per-request — no
+# token dimension — so it lives here as a constant rather than in
+# SUPPORTED_MODELS. Update if X reprices.
+X_REQUEST_COST_MICRODOLLARS = 5000
+
 
 def calculate_llm_cost_microdollars(model_id, input_tokens, output_tokens,
                                     batch=False, cache_read_tokens=0,

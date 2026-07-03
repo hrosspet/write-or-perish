@@ -301,7 +301,7 @@ def twitter_callback():
     account.handle = me_data.get("username")
     account.revoked_at = None  # fresh consent supersedes any revocation
     from backend.models import APICostLog
-    from backend.tasks.external_sync import X_REQUEST_COST_MICRODOLLARS
+    from backend.utils.cost import X_REQUEST_COST_MICRODOLLARS
     db.session.add(APICostLog(
         user_id=current_user.id,
         model_id="x-api/users-me",

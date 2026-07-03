@@ -15,16 +15,13 @@ from celery.utils.log import get_task_logger
 from backend.celery_app import celery, flask_app
 from backend.extensions import db
 from backend.models import APICostLog, ExternalAccount, ExternalItem
+from backend.utils.cost import X_REQUEST_COST_MICRODOLLARS
 from backend.utils.external_content import (
     ca_fetch_tweets, ca_lookup_account, x_fetch_bookmark_pages,
     x_refresh_access_token,
 )
 
 logger = get_task_logger(__name__)
-
-# X API pay-per-use price per bookmarks request, in microdollars
-# ($0.005/request as of 2026-07 — hardcoded; update if X reprices).
-X_REQUEST_COST_MICRODOLLARS = 5000
 
 
 def _post_import(user_id, created):
