@@ -197,30 +197,32 @@ export default function ExternalImport() {
             </a>
           </>
         ) : (
-          <p style={helpStyle}>
-            Direct sync isn't configured yet. You can still import a
-            bookmarks JSON export:
-          </p>
+          <>
+            <p style={helpStyle}>
+              Direct sync isn't configured yet. You can still import a
+              bookmarks JSON export:
+            </p>
+            <div style={{ marginTop: '10px' }}>
+              <input
+                ref={fileRef}
+                type="file"
+                accept="application/json"
+                style={{ display: 'none' }}
+                onChange={(e) => e.target.files[0] && importBookmarksFile(e.target.files[0])}
+              />
+              <button
+                onClick={() => fileRef.current && fileRef.current.click()}
+                disabled={busy}
+                style={{
+                  ...buttonStyle, background: 'none',
+                  border: '1px solid var(--border)', color: 'var(--text-muted)',
+                }}
+              >
+                Import bookmarks JSON
+              </button>
+            </div>
+          </>
         )}
-        <div style={{ marginTop: '10px' }}>
-          <input
-            ref={fileRef}
-            type="file"
-            accept="application/json"
-            style={{ display: 'none' }}
-            onChange={(e) => e.target.files[0] && importBookmarksFile(e.target.files[0])}
-          />
-          <button
-            onClick={() => fileRef.current && fileRef.current.click()}
-            disabled={busy}
-            style={{
-              ...buttonStyle, background: 'none',
-              border: '1px solid var(--border)', color: 'var(--text-muted)',
-            }}
-          >
-            Import bookmarks JSON
-          </button>
-        </div>
       </div>
     </div>
   );
