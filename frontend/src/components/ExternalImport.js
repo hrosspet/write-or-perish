@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import api from '../api';
+import { useUser } from '../contexts/UserContext';
 
 /**
  * References import (#155 / Download substrate): Community Archive
@@ -40,6 +41,7 @@ const buttonStyle = {
 };
 
 export default function ExternalImport() {
+  const { user } = useUser();
   const [counts, setCounts] = useState({});
   const [caUsername, setCaUsername] = useState('');
   const [caStatus, setCaStatus] = useState(null);
@@ -240,31 +242,37 @@ export default function ExternalImport() {
             </a>
           </>
         ) : (
-          <>
-            <p style={helpStyle}>
-              Direct sync isn't configured yet. You can still import a
-              bookmarks JSON export:
-            </p>
-            <div style={{ marginTop: '10px' }}>
-              <input
-                ref={fileRef}
-                type="file"
-                accept="application/json"
-                style={{ display: 'none' }}
-                onChange={(e) => e.target.files[0] && importBookmarksFile(e.target.files[0])}
-              />
-              <button
-                onClick={() => fileRef.current && fileRef.current.click()}
-                disabled={busy}
-                style={{
-                  ...buttonStyle, background: 'none',
-                  border: '1px solid var(--border)', color: 'var(--text-muted)',
-                }}
-              >
-                Import bookmarks JSON
-              </button>
-            </div>
-          </>
+          <p style={helpStyle}>
+            Direct sync isn't configured yet. You can still import a
+            bookmarks JSON export:
+          </p>
+        )}
+        {(!(xStatus && xStatus.configured) || (user && user.craft_mode)) && (
+          <div style={{ marginTop: '10px' }}>
+            {xStatus && xStatus.configured && (
+              <p style={helpStyle}>
+                Craft: import a bookmarks JSON export (browser-exporter
+                format) — covers bookmarks beyond the API's recent window.
+              </p>
+            )}
+            <input
+              ref={fileRef}
+              type="file"
+              accept="application/json"
+              style={{ display: 'none' }}
+              onChange={(e) => e.target.files[0] && importBookmarksFile(e.target.files[0])}
+            />
+            <button
+              onClick={() => fileRef.current && fileRef.current.click()}
+              disabled={busy}
+              style={{
+                ...buttonStyle, background: 'none',
+                border: '1px solid var(--border)', color: 'var(--text-muted)',
+              }}
+            >
+              Import bookmarks JSON
+            </button>
+          </div>
         )}
       </div>
     </div>
