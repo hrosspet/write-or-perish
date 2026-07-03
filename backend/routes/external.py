@@ -204,6 +204,7 @@ def twitter_status():
     return jsonify({
         "configured": _x_configured(),
         "connected": bool(account and account.get_access_token()),
+        "revoked": bool(account and account.revoked_at),
         "handle": account.handle if account else None,
         "last_synced_at": (iso_utc(account.last_synced_at)
                            if account and account.last_synced_at else None),
@@ -286,6 +287,7 @@ def twitter_callback():
             datetime.utcnow() + timedelta(seconds=int(tokens["expires_in"])))
     account.external_user_id = me_data.get("id")
     account.handle = me_data.get("username")
+    account.revoked_at = None  # fresh consent supersedes any revocation
     db.session.commit()
     return redirect("/import?x_connect=ok")
 

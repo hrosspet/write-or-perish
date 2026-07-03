@@ -9,6 +9,7 @@ the access token when expired.
 """
 from datetime import datetime, timedelta
 
+import requests
 from celery.utils.log import get_task_logger
 
 from backend.celery_app import celery, flask_app
@@ -82,6 +83,18 @@ def fetch_community_archive(self, user_id, username, max_items=2000):
                 "created": created, "skipped": skipped}
 
 
+def _mark_revoked(account, why):
+    """X rejected the account's tokens — user revoked the app, or the
+    rotating refresh-token family died. Park the account (nightly sync
+    skips it; the import page shows a reconnect state) instead of
+    retrying forever."""
+    account.revoked_at = datetime.utcnow()
+    db.session.commit()
+    logger.warning("X account for user %s marked revoked (%s)",
+                   account.user_id, why)
+    return {"status": "revoked"}
+
+
 @celery.task(name='backend.tasks.external_sync.sync_twitter_bookmarks',
              bind=True)
 def sync_twitter_bookmarks(self, user_id, max_items=800):
@@ -90,6 +103,8 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
             user_id=user_id, provider="twitter").first()
         if account is None or not account.get_access_token():
             return {"status": "not_connected"}
+        if account.revoked_at is not None:
+            return {"status": "revoked"}
 
         client_id = flask_app.config.get("X_CLIENT_ID")
         # Refresh ahead of expiry when we can
@@ -97,8 +112,18 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
                 and account.token_expires_at
                 < datetime.utcnow() + timedelta(minutes=5)
                 and account.get_refresh_token()):
-            tokens = x_refresh_access_token(
-                client_id, account.get_refresh_token())
+            try:
+                tokens = x_refresh_access_token(
+                    client_id, account.get_refresh_token())
+            except requests.HTTPError as exc:
+                code = (exc.response.status_code
+                        if exc.response is not None else None)
+                # 400/401 = dead grant (revoked / rotated away underneath
+                # us). Anything else (429, 5xx) is transient — surface it
+                # and let the next scheduled sync retry.
+                if code in (400, 401):
+                    return _mark_revoked(account, f"refresh HTTP {code}")
+                raise
             account.set_tokens(
                 tokens["access_token"], tokens.get("refresh_token"))
             if tokens.get("expires_in"):
@@ -113,18 +138,53 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
         # Page-wise (not first-known-id) because a re-bookmarked old tweet
         # jumps to the top and would otherwise mask newer items below it.
         created = skipped = 0
-        for page in x_fetch_bookmark_pages(
-                account.get_access_token(), account.external_user_id,
-                max_items=max_items):
-            page_created, page_skipped = _upsert_items(
-                user_id, "twitter_bookmark", page)
-            created += page_created
-            skipped += page_skipped
-            if page_created == 0:
-                break
+        try:
+            for page in x_fetch_bookmark_pages(
+                    account.get_access_token(), account.external_user_id,
+                    max_items=max_items):
+                page_created, page_skipped = _upsert_items(
+                    user_id, "twitter_bookmark", page)
+                created += page_created
+                skipped += page_skipped
+                if page_created == 0:
+                    break
+        except requests.HTTPError as exc:
+            code = (exc.response.status_code
+                    if exc.response is not None else None)
+            # 401 = token invalidated without a refresh in between. 403 is
+            # NOT revocation (usually an API-tier/permissions problem on
+            # our side) — let it raise so it shows up as an operator error.
+            if code == 401:
+                return _mark_revoked(account, "bookmarks fetch HTTP 401")
+            raise
         account.last_synced_at = datetime.utcnow()
         db.session.commit()
         logger.info("X bookmarks sync for user %s: %d new, %d known",
                     user_id, created, skipped)
         _post_import(user_id, created)
         return {"status": "ok", "created": created, "skipped": skipped}
+
+
+@celery.task(name='backend.tasks.external_sync.sync_all_twitter_bookmarks')
+def sync_all_twitter_bookmarks():
+    """Nightly fan-out (beat): refresh bookmarks for every connected,
+    non-revoked X account. Runs BEFORE anything context-side is rebuilt —
+    a change in bookmarks warrants a digest/pre-selection refresh even
+    when the user hasn't touched Loore (they may have been active on X).
+    Downstream chaining is per-user via _post_import. No-op until
+    X_CLIENT_ID is configured."""
+    with flask_app.app_context():
+        if not flask_app.config.get("X_CLIENT_ID"):
+            return {"status": "not_configured"}
+        accounts = ExternalAccount.query.filter(
+            ExternalAccount.provider == "twitter",
+            ExternalAccount.access_token.isnot(None),
+            ExternalAccount.revoked_at.is_(None),
+        ).all()
+        for i, account in enumerate(accounts):
+            # Staggered so N users don't hit X (and the digest LLM) at once.
+            sync_twitter_bookmarks.apply_async(
+                args=[account.user_id], countdown=i * 30)
+        logger.info("Nightly X bookmark sync dispatched for %d accounts",
+                    len(accounts))
+        return {"status": "ok", "dispatched": len(accounts)}

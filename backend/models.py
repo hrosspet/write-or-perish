@@ -960,6 +960,10 @@ class ExternalAccount(db.Model):
     token_expires_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     last_synced_at = db.Column(db.DateTime, nullable=True)
+    # Set when X rejects our tokens (user revoked the app, or the rotating
+    # refresh-token family died). Nightly sync skips revoked accounts; the
+    # import page shows a reconnect state; a successful reconnect clears it.
+    revoked_at = db.Column(db.DateTime, nullable=True)
 
     user = db.relationship("User", backref="external_accounts")
 

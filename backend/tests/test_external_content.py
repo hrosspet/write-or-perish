@@ -178,6 +178,7 @@ def test_twitter_connect_env_gated(app, client):
         "/api/external/twitter/connect").status_code == 503
     status = client.get("/api/external/twitter/status").get_json()
     assert status == {"configured": False, "connected": False,
+                      "revoked": False,
                       "handle": None, "last_synced_at": None}
 
 

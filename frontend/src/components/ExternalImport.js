@@ -161,7 +161,18 @@ export default function ExternalImport() {
 
       <div style={cardStyle}>
         <h3 style={titleStyle}>X Bookmarks</h3>
-        {xStatus && xStatus.connected ? (
+        {xStatus && xStatus.revoked ? (
+          <>
+            <p style={helpStyle}>
+              X disconnected {xStatus.handle ? `(@${xStatus.handle}) ` : ''}—
+              access was revoked or expired. Reconnect to resume nightly
+              bookmark sync.
+            </p>
+            <a href={`${process.env.REACT_APP_BACKEND_URL}/api/external/twitter/connect`}>
+              <button style={buttonStyle}>Reconnect X</button>
+            </a>
+          </>
+        ) : xStatus && xStatus.connected ? (
           <>
             <p style={helpStyle}>
               Connected as @{xStatus.handle}
