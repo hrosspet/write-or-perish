@@ -137,8 +137,10 @@ def normalize_x_bookmark(tweet, authors_by_id):
     }
 
 
-def x_fetch_bookmarks(access_token, x_user_id, max_items=800):
-    """Fetch the user's X bookmarks (newest first, paginated).
+def x_fetch_bookmark_pages(access_token, x_user_id, max_items=800):
+    """Fetch the user's X bookmarks (newest-bookmarked first) as PAGES of
+    normalized items, so the caller can stop paginating — each page is a
+    paid API request — once a page yields nothing new.
 
     X API v2: GET /2/users/:id/bookmarks — OAuth2 user context with
     bookmark.read; max 800 most recent per X's own cap.
@@ -164,16 +166,26 @@ def x_fetch_bookmarks(access_token, x_user_id, max_items=800):
         tweets = payload.get("data") or []
         users = (payload.get("includes") or {}).get("users") or []
         authors_by_id = {u["id"]: u for u in users}
+        page = []
         for tweet in tweets:
             item = normalize_x_bookmark(tweet, authors_by_id)
             if item is not None:
-                yield item
+                page.append(item)
                 fetched += 1
                 if fetched >= max_items:
                     break
+        if page:
+            yield page
         next_token = (payload.get("meta") or {}).get("next_token")
         if not next_token:
             break
+
+
+def x_fetch_bookmarks(access_token, x_user_id, max_items=800):
+    """Flat-iteration wrapper over x_fetch_bookmark_pages."""
+    for page in x_fetch_bookmark_pages(
+            access_token, x_user_id, max_items=max_items):
+        yield from page
 
 
 def x_refresh_access_token(client_id, refresh_token):

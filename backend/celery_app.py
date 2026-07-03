@@ -92,3 +92,4 @@ from backend.tasks import spend_monitor  # noqa: F401
 from backend.tasks import embeddings  # noqa: F401
 from backend.tasks import poll_draft  # noqa: F401
 from backend.tasks import external_sync  # noqa: F401
+from backend.tasks import external_digest  # noqa: F401

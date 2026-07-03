@@ -15,11 +15,21 @@ from backend.celery_app import celery, flask_app
 from backend.extensions import db
 from backend.models import ExternalAccount, ExternalItem
 from backend.utils.external_content import (
-    ca_fetch_tweets, ca_lookup_account, x_fetch_bookmarks,
+    ca_fetch_tweets, ca_lookup_account, x_fetch_bookmark_pages,
     x_refresh_access_token,
 )
 
 logger = get_task_logger(__name__)
+
+
+def _post_import(user_id, created):
+    """After any import/fetch/sync that created items: rebuild the digest
+    artifact (topic map the agent reads before searching). The embedding
+    sweep picks new items up on its own schedule."""
+    if not created:
+        return
+    from backend.tasks.external_digest import rebuild_external_digest
+    rebuild_external_digest.delay(user_id)
 
 
 def _upsert_items(user_id, source, items):
@@ -67,6 +77,7 @@ def fetch_community_archive(self, user_id, username, max_items=2000):
         logger.info(
             "Community Archive fetch for user %s @%s: %d new, %d known",
             user_id, username, created, skipped)
+        _post_import(user_id, created)
         return {"status": "ok", "username": username,
                 "created": created, "skipped": skipped}
 
@@ -96,14 +107,24 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
                     + timedelta(seconds=int(tokens["expires_in"])))
             db.session.commit()
 
-        created, skipped = _upsert_items(
-            user_id, "twitter_bookmark",
-            x_fetch_bookmarks(
+        # Early-stop pagination (credit saving): bookmarks arrive newest-
+        # bookmarked-first, so once a whole page produced nothing new, the
+        # rest is already imported — stop instead of paying for the tail.
+        # Page-wise (not first-known-id) because a re-bookmarked old tweet
+        # jumps to the top and would otherwise mask newer items below it.
+        created = skipped = 0
+        for page in x_fetch_bookmark_pages(
                 account.get_access_token(), account.external_user_id,
-                max_items=max_items),
-        )
+                max_items=max_items):
+            page_created, page_skipped = _upsert_items(
+                user_id, "twitter_bookmark", page)
+            created += page_created
+            skipped += page_skipped
+            if page_created == 0:
+                break
         account.last_synced_at = datetime.utcnow()
         db.session.commit()
         logger.info("X bookmarks sync for user %s: %d new, %d known",
                     user_id, created, skipped)
+        _post_import(user_id, created)
         return {"status": "ok", "created": created, "skipped": skipped}

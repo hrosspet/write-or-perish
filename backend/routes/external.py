@@ -8,6 +8,7 @@
 import base64
 import hashlib
 import json
+import re
 import secrets
 from datetime import datetime, timedelta
 
@@ -108,6 +109,44 @@ def import_bookmarks_json():
 
     from backend.tasks.external_sync import _upsert_items
 
+    def _enrich_content(entry, text):
+        """Fold the exporter's enrichment fields (quoted tweet, link card,
+        media, expanded links) into the stored content — the embedding and
+        the quote card both need the bookmark's actual meaning, which for
+        link/media tweets isn't in the surface text."""
+        parts = []
+        # Trailing t.co media stub is redundant once media is captured.
+        media = entry.get("media") or []
+        if media:
+            text = re.sub(r"\s*https://t\.co/\S+$", "", text or "")
+        if text:
+            parts.append(text)
+        quoted = entry.get("quoted") or {}
+        if isinstance(quoted, dict) and quoted.get("text"):
+            q_author = quoted.get("author") or "unknown"
+            parts.append(f"[Quoting @{q_author}: {quoted['text']}]")
+        card = entry.get("card") or {}
+        if isinstance(card, dict) and (card.get("title")
+                                       or card.get("description")):
+            bits = " — ".join(
+                b for b in (card.get("title"), card.get("description"))
+                if b)
+            domain = f" ({card['domain']})" if card.get("domain") else ""
+            parts.append(f"[Link: {bits}{domain}]")
+        for m in media:
+            if not isinstance(m, dict):
+                continue
+            kind = m.get("type") or "media"
+            alt = f": {m['alt']}" if m.get("alt") else ""
+            parts.append(f"[{kind}{alt}]")
+        links = [ln for ln in (entry.get("links") or [])
+                 if isinstance(ln, str)]
+        # Links already present in the (expanded) text add nothing.
+        fresh_links = [ln for ln in links if ln not in (text or "")]
+        if fresh_links:
+            parts.append("[Links: " + " ".join(fresh_links) + "]")
+        return "\n".join(parts)
+
     def _normalize(entry):
         if not isinstance(entry, dict):
             return None
@@ -116,7 +155,10 @@ def import_bookmarks_json():
         url = entry.get("url")
         if not tweet_id and url and "/status/" in str(url):
             tweet_id = str(url).rstrip("/").split("/status/")[-1].split("?")[0]
-        if not tweet_id or not text:
+        if not tweet_id:
+            return None
+        text = _enrich_content(entry, str(text) if text else "")
+        if not text:
             return None
         handle = (entry.get("author") or entry.get("username")
                   or entry.get("screen_name"))
@@ -131,7 +173,7 @@ def import_bookmarks_json():
         return {
             "external_id": str(tweet_id),
             "author_handle": handle,
-            "content": str(text),
+            "content": text,
             "url": url or f"https://twitter.com/i/status/{tweet_id}",
             "posted_at": posted_at,
         }
@@ -139,6 +181,9 @@ def import_bookmarks_json():
     items = [n for n in (_normalize(e) for e in payload) if n]
     created, skipped = _upsert_items(
         current_user.id, "twitter_bookmark", items)
+    if created:
+        from backend.tasks.external_digest import rebuild_external_digest
+        rebuild_external_digest.delay(current_user.id)
     return jsonify({
         "created": created, "skipped": skipped,
         "unrecognized": len(payload) - len(items),
@@ -255,48 +300,3 @@ def twitter_sync():
     from backend.tasks.external_sync import sync_twitter_bookmarks
     task = sync_twitter_bookmarks.delay(current_user.id)
     return jsonify({"task_id": task.id, "status": "pending"}), 202
-
-
-@external_bp.route("/recommendations", methods=["GET"])
-@login_required
-def recommendations():
-    """Top-3 external items relevant to the thread the user is writing in
-    (Download PoC — dark behind DOWNLOAD_V1).
-
-    The query is composed server-side from the node's thread tail + the
-    user's intentions + profile (AI-visible content only) and ranked by
-    semantic relevance over the user's imported items. Returns items only
-    for their owner; empty list when nothing clears the score floor.
-    """
-    if not current_app.config.get("DOWNLOAD_V1", False):
-        return jsonify({"error": "Not found"}), 404
-
-    node_id = request.args.get("node_id", type=int)
-    if not node_id:
-        return jsonify({"error": "node_id is required"}), 400
-
-    from backend.models import Node
-    node = Node.query.get(node_id)
-    # human_owner_id is null on legacy rows — fall back to user_id (same
-    # convention as the embedding-owner helper).
-    owner_id = (node.human_owner_id or node.user_id) if node else None
-    if not node or owner_id != current_user.id:
-        return jsonify({"error": "Not found"}), 404
-
-    from backend.utils.api_keys import get_openai_chat_key
-    api_key = get_openai_chat_key(current_app.config)
-    if not api_key:
-        return jsonify({"items": []}), 200
-
-    from backend.utils.recommendations import recommend_external_items
-    try:
-        items = recommend_external_items(
-            current_user.id, node, api_key,
-            k=current_app.config.get("DOWNLOAD_TOP_K", 3),
-        )
-        db.session.commit()  # persist the query-embed cost log
-    except Exception:  # noqa: BLE001 — recommendations must never break a page
-        current_app.logger.warning(
-            "external recommendations failed", exc_info=True)
-        return jsonify({"items": []}), 200
-    return jsonify({"items": items}), 200
