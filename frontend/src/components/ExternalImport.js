@@ -47,6 +47,9 @@ export default function ExternalImport() {
   const [caStatus, setCaStatus] = useState(null);
   const [xStatus, setXStatus] = useState(null);
   const [xSyncMsg, setXSyncMsg] = useState(null);
+  const [syncing, setSyncing] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importMsg, setImportMsg] = useState(null);
   const [busy, setBusy] = useState(false);
   const fileRef = useRef(null);
   const pollRef = useRef(null);
@@ -95,24 +98,29 @@ export default function ExternalImport() {
 
   const importBookmarksFile = async (file) => {
     setBusy(true);
+    setImporting(true);
+    setImportMsg(null);
     try {
       const text = await file.text();
+      const parsed = JSON.parse(text);
       const res = await api.post('/external/bookmarks/import',
-        JSON.parse(text) instanceof Array
-          ? { bookmarks: JSON.parse(text) } : JSON.parse(text));
-      setCaStatus(null);
-      setXStatus((prev) => ({ ...prev }));
-      alert(`Imported ${res.data.created} bookmarks ` +
-            `(${res.data.skipped} already known).`);
+        parsed instanceof Array ? { bookmarks: parsed } : parsed);
+      setImportMsg(`Imported ${res.data.created} bookmark` +
+        `${res.data.created === 1 ? '' : 's'} ` +
+        `(${res.data.skipped} already known).`);
       refresh();
     } catch (e) {
-      alert(e.response?.data?.error || 'Import failed — is it valid JSON?');
+      setImportMsg(e.response?.data?.error
+        || 'Import failed — is it valid JSON?');
     }
+    if (fileRef.current) fileRef.current.value = '';
+    setImporting(false);
     setBusy(false);
   };
 
   const syncX = async () => {
     setBusy(true);
+    setSyncing(true);
     setXSyncMsg(null);  // result text appears when the sync lands
     const baselineCount = counts.twitter_bookmark || 0;
     const baselineSynced = xStatus?.last_synced_at || null;
@@ -120,6 +128,7 @@ export default function ExternalImport() {
       await api.post('/external/twitter/sync');
     } catch (e) {
       setXSyncMsg(e.response?.data?.error || 'Sync failed.');
+      setSyncing(false);
       setBusy(false);
       return;
     }
@@ -144,14 +153,17 @@ export default function ExternalImport() {
           setXSyncMsg(created > 0
             ? `Synced \u2014 ${created} new bookmark${created === 1 ? '' : 's'}.`
             : 'Synced \u2014 no new bookmarks.');
+          setSyncing(false);
           setBusy(false);
         } else if (xRes.data.revoked) {
           clearInterval(pollRef.current);
           setXSyncMsg('X access was revoked \u2014 reconnect below.');
+          setSyncing(false);
           setBusy(false);
         } else if (ticks >= 20) {
           clearInterval(pollRef.current);
           setXSyncMsg('Still syncing in the background \u2014 check back in a minute.');
+          setSyncing(false);
           setBusy(false);
         }
       } catch (e) { /* transient — keep polling */ }
@@ -218,7 +230,7 @@ export default function ExternalImport() {
               {xStatus.last_synced_at ? ` · last synced ${xStatus.last_synced_at.slice(0, 10)}` : ''}
             </p>
             <button onClick={syncX} disabled={busy} style={buttonStyle}>
-              {busy ? 'Syncing\u2026' : 'Sync bookmarks'}
+              {syncing ? 'Syncing\u2026' : 'Sync bookmarks'}
             </button>
             {xSyncMsg && (
               <p style={{ ...helpStyle, marginTop: '8px', color: 'var(--text-secondary)' }}>
@@ -270,8 +282,13 @@ export default function ExternalImport() {
                 border: '1px solid var(--border)', color: 'var(--text-muted)',
               }}
             >
-              Import bookmarks JSON
+              {importing ? 'Importing\u2026' : 'Import bookmarks JSON'}
             </button>
+            {importMsg && (
+              <p style={{ ...helpStyle, marginTop: '8px', color: 'var(--text-secondary)' }}>
+                {importMsg}
+              </p>
+            )}
           </div>
         )}
       </div>
