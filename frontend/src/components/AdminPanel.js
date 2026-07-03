@@ -67,6 +67,29 @@ const POLL_DATA_SOURCES = [
   { value: "recent_window", label: "Recent writing (context window)" },
 ];
 
+// Bubble tabs, same treatment as ArtifactsNav (the documents workspace) —
+// the admin dashboard is organized as Users / Feedback / Polls sections.
+const adminBubbleStyle = (active) => ({
+  display: "inline-flex",
+  alignItems: "center",
+  padding: "6px 14px",
+  background: active ? "var(--bg-card)" : "none",
+  border: "1px solid",
+  borderColor: active ? "var(--accent)" : "var(--border)",
+  borderRadius: "16px",
+  color: active ? "var(--text-primary)" : "var(--text-muted)",
+  fontFamily: "var(--sans)",
+  fontSize: "0.8rem",
+  fontWeight: 300,
+  cursor: "pointer",
+});
+
+const ADMIN_TABS = [
+  { key: "users", label: "Users" },
+  { key: "feedback", label: "Feedback" },
+  { key: "polls", label: "Polls" },
+];
+
 // Same select treatment as AccountPage's Settings (inputStyle+selectStyle
 // there) so admin controls don't render as bare browser widgets.
 const adminSelectStyle = {
@@ -166,8 +189,7 @@ function AdminPolls() {
   };
 
   return (
-    <div style={{ marginBottom: "20px", padding: "10px", border: "1px solid var(--border)" }}>
-      <h2>Polls</h2>
+    <div>
       <div style={{ display: "flex", gap: "10px", marginBottom: "12px" }}>
         <input
           type="text"
@@ -281,9 +303,8 @@ function AdminFeedback() {
   const countFor = (s) => items.filter((f) => f.status === s).length;
 
   return (
-    <div style={{ marginBottom: "20px", padding: "10px", border: "1px solid var(--border)" }}>
+    <div>
       <div style={{ display: "flex", alignItems: "baseline", gap: "12px" }}>
-        <h2>Feedback</h2>
         <select
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
@@ -333,6 +354,7 @@ function AdminFeedback() {
 }
 
 function AdminPanel() {
+  const [activeTab, setActiveTab] = useState("users");
   const [users, setUsers] = useState([]);
   const [allowedPlans, setAllowedPlans] = useState([]);
   const [error, setError] = useState("");
@@ -491,8 +513,28 @@ function AdminPanel() {
 
   return (
     <div style={{ padding: "20px" }}>
-      <h1>Admin Panel</h1>
+      <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "20px" }}>
+        {ADMIN_TABS.map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setActiveTab(t.key)}
+            style={adminBubbleStyle(activeTab === t.key)}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+      <h1 style={{
+        fontFamily: "var(--serif)", fontSize: "2rem", fontWeight: 300,
+        color: "var(--text-primary)", margin: "0 0 20px",
+      }}>
+        {ADMIN_TABS.find((t) => t.key === activeTab).label}
+      </h1>
 
+      {activeTab === "polls" && <AdminPolls />}
+      {activeTab === "feedback" && <AdminFeedback />}
+
+      {activeTab === "users" && (<>
       {/* Whitelist New User Section */}
       <div style={{ marginBottom: "20px", padding: "10px", border: "1px solid var(--border)" }}>
         <h2>Whitelist a New User</h2>
@@ -506,10 +548,6 @@ function AdminPanel() {
         <button onClick={handleWhitelistUser}>Whitelist User</button>
         {newHandleError && <div style={{ color: "var(--error)" }}>{newHandleError}</div>}
       </div>
-
-      <AdminPolls />
-
-      <AdminFeedback />
 
       {error && <div style={{ color: "var(--error)" }}>{error}</div>}
       <table style={{ width: "100%", borderCollapse: "collapse", color: "var(--text-primary)" }}>
@@ -649,6 +687,7 @@ function AdminPanel() {
           ))}
         </tbody>
       </table>
+      </>)}
     </div>
   );
 }
