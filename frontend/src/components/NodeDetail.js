@@ -892,7 +892,7 @@ function NodeDetail({ nodeIdOverride }) {
                       tc.status !== 'success' ? 'Read in full (failed)'
                         : tc.kind === 'external' ? (
                           tc.url
-                            ? <>Read in full — <a href={tc.url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)', textDecoration: 'none' }}>{tc.author_handle ? `@${tc.author_handle}'s post` : 'saved reference'} ↗</a></>
+                            ? <>Read in full — <a href={tc.url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)', textDecoration: 'none' }}>{tc.author_handle ? `@${tc.author_handle}'s post` : 'saved reference'}</a></>
                             : <>Read a saved reference in full</>
                         ) : (
                           <>Read in full — <Link to={`/node/${tc.ref_id}`} style={{ color: 'var(--accent)', textDecoration: 'none' }}>entry #{tc.ref_id}</Link></>
