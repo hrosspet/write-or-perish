@@ -66,6 +66,15 @@ celery.conf.update(
             'task': 'backend.tasks.poll_draft.collect_poll_draft_batches',
             'schedule': 60.0,  # batches typically finish in 1-5 min
         },
+        # Nightly X bookmark refresh (#208): an HOURLY gate that dispatches
+        # each account when its user's local clock hits ~3am (User.timezone)
+        # — users sync in their own night, wherever they are. A 20h min-gap
+        # guard stops double-syncs when beat restarts shift the phase.
+        # No-op until X_CLIENT_ID is configured.
+        'sync-twitter-bookmarks-nightly-gate': {
+            'task': 'backend.tasks.external_sync.sync_all_twitter_bookmarks',
+            'schedule': 3600.0,  # hourly; the task itself gates on local 3am
+        },
     },
 )
 
@@ -91,3 +100,5 @@ from backend.tasks import profile_batch  # noqa: F401
 from backend.tasks import spend_monitor  # noqa: F401
 from backend.tasks import embeddings  # noqa: F401
 from backend.tasks import poll_draft  # noqa: F401
+from backend.tasks import external_sync  # noqa: F401
+from backend.tasks import external_digest  # noqa: F401

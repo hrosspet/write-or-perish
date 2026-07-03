@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useUser } from "../contexts/UserContext";
 import ModelSelector from "../components/ModelSelector";
 import api from "../api";
@@ -20,6 +20,7 @@ export default function AccountPage() {
   // Privacy / AI usage defaults
   const [privacySaving, setPrivacySaving] = useState(false);
   const [publicSideSaving, setPublicSideSaving] = useState(false);
+  const [externalContentSaving, setExternalContentSaving] = useState(false);
   const [aiUsageSaving, setAiUsageSaving] = useState(false);
 
   const usernameValid = (val) => {
@@ -283,6 +284,32 @@ export default function AccountPage() {
           Default visibility for new entries.
         </div>
       </div>
+
+      {user.external_content_available && (
+        <div style={rowStyle}>
+          <div style={labelStyle}>External content</div>
+          <select
+            value={user.external_content_enabled ? "on" : "off"}
+            disabled={externalContentSaving}
+            onChange={(e) =>
+              saveField("external_content_enabled", e.target.value === "on",
+                setExternalContentSaving)
+            }
+            style={selectStyle}
+          >
+            <option value="off">Off</option>
+            <option value="on">On (experimental)</option>
+          </select>
+          <div style={helperStyle}>
+            Let Loore search your archive and your saved external content
+            (imported tweets and bookmarks) during conversations, and quote
+            what it finds. Import bookmarks on the{" "}
+            <Link to="/import" style={{ color: "var(--accent)" }}>
+              Import page
+            </Link>. Experimental.
+          </div>
+        </div>
+      )}
 
       {user.share_v1_available && (
         <div style={rowStyle}>

@@ -199,6 +199,9 @@ def create_app():
     from backend.routes.artifacts import artifacts_bp
     app.register_blueprint(artifacts_bp, url_prefix="/api/artifacts")
 
+    from backend.routes.external import external_bp
+    app.register_blueprint(external_bp, url_prefix="/api/external")
+
     from backend.routes.prompts import prompts_bp
     app.register_blueprint(prompts_bp, url_prefix="/api/prompts")
 

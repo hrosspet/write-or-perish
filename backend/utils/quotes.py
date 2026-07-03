@@ -24,6 +24,11 @@ logger = get_task_logger(__name__)
 # Pattern to match {quote:123} where 123 is a node ID
 QUOTE_PLACEHOLDER_PATTERN = r'\{quote:(\d+)\}'
 
+# Pattern to match {quote_ext:123} where 123 is an ExternalItem ID —
+# a saved reference (tweet/bookmark) quoted in a response. Resolved
+# verbatim from the DB like node quotes (never LLM-retyped), owner-only.
+EXT_QUOTE_PLACEHOLDER_PATTERN = r'\{quote_ext:(\d+)\}'
+
 # Default max depth for recursive quote resolution in direct conversation
 DEFAULT_MAX_DEPTH = 3
 
@@ -42,6 +47,82 @@ def find_quote_ids(content: str) -> List[int]:
         return []
     matches = re.findall(QUOTE_PLACEHOLDER_PATTERN, content)
     return [int(node_id) for node_id in matches]
+
+
+def find_ext_quote_ids(content: str) -> List[int]:
+    """Find all ExternalItem IDs referenced in {quote_ext:ID} placeholders."""
+    if not content:
+        return []
+    matches = re.findall(EXT_QUOTE_PLACEHOLDER_PATTERN, content)
+    return [int(item_id) for item_id in matches]
+
+
+def get_ext_quote_data(item_ids: List[int], user_id: int) -> Dict[int, Optional[dict]]:
+    """Fetch external-item data for the given IDs, owner-only.
+
+    External items belong to the user who imported them; unlike nodes
+    there is no cross-user sharing, so access == ownership.
+    """
+    from backend.models import ExternalItem
+    from backend.utils.timefmt import iso_utc
+
+    result = {}
+    for item_id in item_ids:
+        item = ExternalItem.query.get(item_id)
+        if item is None or item.user_id != user_id:
+            result[item_id] = None
+            continue
+        result[item_id] = {
+            "id": item.id,
+            "content": item.get_content(),
+            "source": item.source,
+            "author_handle": item.author_handle,
+            "url": item.url,
+            "posted_at": iso_utc(item.posted_at) if item.posted_at else None,
+        }
+    return result
+
+
+def resolve_ext_quotes(content: str, user_id: int,
+                       for_llm: bool = False) -> Tuple[str, List[int]]:
+    """Replace {quote_ext:ID} placeholders with the saved reference's
+    content, verbatim from the DB. No recursion — external items don't
+    nest. Returns (resolved_content, list_of_resolved_item_ids)."""
+    if not content:
+        return content, []
+    item_ids = find_ext_quote_ids(content)
+    if not item_ids:
+        return content, []
+
+    data = get_ext_quote_data(item_ids, user_id)
+    resolved_ids = []
+
+    def replace(match):
+        item_id = int(match.group(1))
+        d = data.get(item_id)
+        if d is None:
+            if for_llm:
+                return f"[Quoted reference #{item_id}: inaccessible]"
+            return f"[Quoted reference inaccessible: item {item_id}]"
+        resolved_ids.append(item_id)
+        author = d["author_handle"] or "unknown"
+        if for_llm:
+            return (
+                f'<quoted_reference id="{item_id}" source="{d["source"]}" '
+                f'author="@{author}">\n{d["content"]}\n</quoted_reference>')
+        posted = f' ({d["posted_at"][:10]})' if d.get("posted_at") else ""
+        return (f'\n--- Saved reference from @{author}{posted} ---\n'
+                f'{d["content"]}\n--- End reference ---\n')
+
+    resolved = re.sub(EXT_QUOTE_PLACEHOLDER_PATTERN, replace, content)
+    return resolved, resolved_ids
+
+
+def has_ext_quotes(content: str) -> bool:
+    """Check if content contains any {quote_ext:ID} placeholders."""
+    if not content:
+        return False
+    return bool(re.search(EXT_QUOTE_PLACEHOLDER_PATTERN, content))
 
 
 def get_quote_data(node_ids: List[int], user_id: int) -> Dict[int, Optional[dict]]:

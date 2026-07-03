@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from backend.extensions import db
 from backend.models import (
     Node, NodeEmbedding, User, UserProfile, UserTodo, UserArtifact,
+    NodeContextArtifact,
 )
 from backend.utils.tokens import approximate_token_count
 
@@ -50,7 +51,29 @@ def _user_id(username, owner_id, cache):
     return u.id
 
 
-def run_seed(in_path):
+def _delete_owner_nodes(owner):
+    """--force cleanup: remove the owner's existing nodes so the seed can
+    run on a staging DB that already saw some activity (e.g. a test
+    thread). Constraint order matters: null the forward continuation
+    links, drop context-artifact pins, then delete children-first."""
+    ns = Node.query.filter_by(human_owner_id=owner.id).order_by(
+        Node.id.desc()).all()
+    if not ns:
+        return 0
+    ids = [n.id for n in ns]
+    for n in ns:
+        n.continuation_node_id = None
+    db.session.flush()
+    NodeContextArtifact.query.filter(
+        NodeContextArtifact.node_id.in_(ids)).delete(
+        synchronize_session=False)
+    for n in ns:
+        db.session.delete(n)
+    db.session.commit()
+    return len(ns)
+
+
+def run_seed(in_path, force=False):
     with open(in_path) as f:
         fixture = json.load(f)
 
@@ -61,9 +84,14 @@ def run_seed(in_path):
               f"admin user first.")
         return
     if Node.query.filter_by(human_owner_id=owner.id).count():
-        print("Owner already has nodes; refusing to double-seed. Reset the "
-              "staging DB and re-run.")
-        return
+        if not force:
+            print("Owner already has nodes; refusing to double-seed. Pass "
+                  "--force to delete them and re-seed (or reset the staging "
+                  "DB).")
+            return
+        deleted = _delete_owner_nodes(owner)
+        print(f"--force: deleted {deleted} existing nodes for "
+              f"'{fixture['owner_username']}'.")
 
     nodes = fixture["nodes"]
     user_cache = {fixture["owner_username"]: owner.id}
@@ -175,11 +203,13 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--in", dest="in_path", default="staging_fixture.json",
                    help="fixture path (inside the container)")
+    p.add_argument("--force", action="store_true",
+                   help="delete the owner's existing nodes before seeding")
     args = p.parse_args()
     from backend.app import create_app
     app = create_app()
     with app.app_context():
-        run_seed(args.in_path)
+        run_seed(args.in_path, force=args.force)
 
 
 if __name__ == "__main__":

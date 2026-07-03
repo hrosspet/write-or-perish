@@ -422,6 +422,10 @@ def test_semantic_search_tool_returns_refs_and_reresolves(app, monkeypatch):
         import backend.utils.api_keys as _ak
         import backend.utils.embeddings as _emb
         monkeypatch.setattr(_ak, "get_openai_chat_key", lambda cfg: "key")
+        # The handler embeds the query once and shares the vector between
+        # the node and external-reference corpora (#208).
+        monkeypatch.setattr(
+            _emb, "embed_texts", lambda texts, key, **kw: [[1.0, 0.0]])
         captured = {}
 
         def fake_retrieve(user_id, query, exclude, key, k=4,

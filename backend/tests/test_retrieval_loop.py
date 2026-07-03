@@ -41,8 +41,9 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
 from backend.extensions import db as _db  # noqa: E402
 from backend.models import (  # noqa: E402
     User, Node, UserArtifact, UserPrompt, NodeContextArtifact, APICostLog,
-    UserTodo,
+    UserTodo, ExternalItem, ExternalItemEmbedding, NodeEmbedding,
 )
+from backend.utils.embeddings import pack_vector  # noqa: E402
 
 
 # ── Scriptable LLM provider stub ─────────────────────────────────────────
@@ -102,9 +103,9 @@ def _make_app():
     }
     app.config["OPENAI_API_KEY"] = "sk-test"
     app.config["ANTHROPIC_API_KEY"] = "sk-ant-test"
-    # Agentic semantic_search ships dark behind this flag (#155); enable it so
-    # the loop's semantic_search / quote-pull behavior is exercised. The dark
-    # (flag-off) path has its own dedicated test that toggles it back off.
+    # Agentic semantic_search is per-user opt-in (#208) under this env
+    # killswitch (defaults on). _build_chain opts alice in; the opted-out
+    # path has its own dedicated test.
     app.config["SEMANTIC_SEARCH_AGENTIC"] = True
     _db.init_app(app)
     return app
@@ -233,7 +234,8 @@ def _build_chain(source_mode="textmode"):
 
     Returns (alice, system_node, user_node, llm_node).
     """
-    alice = _mk_user("alice", approved=True, plan="alpha")
+    alice = _mk_user("alice", approved=True, plan="alpha",
+                     external_content_enabled=True)
     llm_user = _mk_user("gpt-5", twitter_id="llm-gpt-5")
 
     # System node carrying a textmode/voice prompt artifact (enables agentic).
@@ -451,12 +453,11 @@ def test_textmode_retrieval_budget_caps_at_max_rounds(app):
     assert APICostLog.query.count() == 6
 
 
-def test_quote_pull_resolves_full_content_and_continues(app):
-    """A {quote:ID} the model emits for an out-of-context node triggers a
-    within-turn resolution + continuation (no retrieval tool call needed):
-    the full node content is injected and the model answers with it, while the
-    {quote:ID} stays in the interim node's text (renders for the user +
-    flows to exports)."""
+def test_read_full_by_entry_id_resolves_and_continues(app):
+    """read_full with a numeric entry id (query intent, explicit): the
+    full node content is injected and the model answers with it in the
+    continuation. A bare {quote:ID} in the reply triggers NOTHING — quote
+    markers are presentation only."""
     alice, system, user_node, llm_node = _build_chain("textmode")
     # An archive node that is NOT part of the conversation chain.
     archive = Node(user_id=alice.id, human_owner_id=alice.id,
@@ -467,8 +468,10 @@ def test_quote_pull_resolves_full_content_and_continues(app):
     aid = archive.id
 
     _ScriptedProvider.reset([
-        _resp("Let me pull that up. {quote:%d}" % aid),
-        _resp("Based on that entry, here's my read."),
+        _resp("Let me read that entry fully.",
+              tool_calls=[{"id": "t1", "name": "read_full",
+                           "input": {"ref": str(aid)}}]),
+        _resp("Based on that entry, here's my read. {quote:%d}" % aid),
     ])
 
     result = generate_llm_response(
@@ -476,26 +479,88 @@ def test_quote_pull_resolves_full_content_and_continues(app):
         source_mode="textmode",
     )
 
-    # Quote pull (interim) + continuation = 2 calls.
+    # read_full (interim) + final answer = 2 calls; the quote marker in
+    # the final answer does NOT cause a third.
     assert len(_ScriptedProvider.calls) == 2
     interim = _fresh(llm_node.id)
     assert interim.continuation_node_id is not None
-    # The {quote:ID} reference stays in the interim node's content.
-    assert ("{quote:%d}" % aid) in interim.get_content()
     # The full node content was injected into the continuation call.
     cont_msgs = "\n".join(
         m["text"] for m in _ScriptedProvider.calls[1]["messages"])
     assert "THE FULL ARCHIVE ENTRY" in cont_msgs
     final = Node.query.get(interim.continuation_node_id)
-    assert final.get_content() == "Based on that entry, here's my read."
+    assert final.continuation_node_id is None
+    assert ("{quote:%d}" % aid) in final.get_content()
     assert result["llm_node_id"] == final.id
 
 
-def test_quote_pull_is_depth_1_no_recursive_expansion(app):
-    """A loop quote-pull resolves the pulled node's OWN content only; a
-    {quote:ID} nested INSIDE it stays as a placeholder rather than being
-    recursively inlined. This is the guard against the combinatorial blowup
-    that produced a 2.77M-token continuation prompt — depth-3 resolution
+def test_read_full_by_label_reads_external_reference(app, monkeypatch):
+    """read_full with a search-result label resolves through the turn's
+    label map — including external references."""
+    import backend.utils.embeddings as emb_mod
+    monkeypatch.setattr(
+        emb_mod, "embed_texts", lambda texts, key, **kw: [[1.0, 0.0]])
+
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    item = _mk_external_item(
+        alice.id, "LONG SAVED NOTE-TWEET " + "x" * 900, [1.0, 0.0])
+    _db.session.commit()
+    item_id = item.id
+
+    _ScriptedProvider.reset([
+        _resp("Searching.",
+              tool_calls=[{"id": "t1", "name": "semantic_search",
+                           "input": {"query": "note"}}]),
+        _resp("That preview is truncated — reading it fully.",
+              tool_calls=[{"id": "t2", "name": "read_full",
+                           "input": {"ref": "A"}}]),
+        _resp("Here it is: {quote:A} — and why it matters."),
+    ])
+
+    generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+
+    assert len(_ScriptedProvider.calls) == 3
+    # The search preview was truncated at 800 and marked.
+    round2 = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[1]["messages"])
+    assert "(preview truncated)" in round2
+    # read_full injected the FULL reference text.
+    round3 = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[2]["messages"])
+    assert "LONG SAVED NOTE-TWEET " + "x" * 900 in round3
+    # Final node carries the canonical presentation marker.
+    _db.session.expire_all()
+    nodes = Node.query.filter(Node.human_owner_id == alice.id).all()
+    all_text = "\n".join(n.get_content() or "" for n in nodes)
+    assert ("{quote_ext:%d}" % item_id) in all_text
+
+
+def test_read_full_unknown_ref_errors_cleanly(app):
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _ScriptedProvider.reset([
+        _resp("Reading.",
+              tool_calls=[{"id": "t1", "name": "read_full",
+                           "input": {"ref": "Z"}}]),
+        _resp("Never mind, answering directly."),
+    ])
+    generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+    assert len(_ScriptedProvider.calls) == 2
+    cont = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[1]["messages"])
+    assert "Unknown reference" in cont
+
+
+def test_read_full_is_depth_1_no_recursive_expansion(app):
+    """read_full resolves the read node's OWN content only; a {quote:ID}
+    nested INSIDE it stays as a placeholder rather than being recursively
+    inlined. This is the guard against the combinatorial blowup that
+    produced a 2.77M-token continuation prompt — depth-3 resolution
     inlined cross-quoted nodes once per path."""
     alice, system, user_node, llm_node = _build_chain("textmode")
     nested = Node(user_id=alice.id, human_owner_id=alice.id,
@@ -511,7 +576,9 @@ def test_quote_pull_is_depth_1_no_recursive_expansion(app):
     outer_id, nested_id = outer.id, nested.id
 
     _ScriptedProvider.reset([
-        _resp("Let me pull that up. {quote:%d}" % outer_id),
+        _resp("Let me read that fully.",
+              tool_calls=[{"id": "t1", "name": "read_full",
+                           "input": {"ref": str(outer_id)}}]),
         _resp("Here's my read."),
     ])
 
@@ -545,7 +612,9 @@ def test_continuation_prompt_too_long_degrades_gracefully(app):
     aid = archive.id
 
     _ScriptedProvider.reset([
-        _resp("Let me pull that up. {quote:%d}" % aid),
+        _resp("Let me read that fully.",
+              tool_calls=[{"id": "t1", "name": "read_full",
+                           "input": {"ref": str(aid)}}]),
         _PromptTooLongError(2769518, 1000000),  # continuation overflows
         _resp("Here's a partial read."),         # retry after dropping inject
     ])
@@ -572,13 +641,15 @@ def test_continuation_prompt_too_long_degrades_gracefully(app):
     assert "THE FULL ARCHIVE ENTRY" not in retry_msgs
 
 
-def test_semantic_search_gated_dark_by_default(app):
-    """With SEMANTIC_SEARCH_AGENTIC off (#155 ships dark), the semantic_search
-    tool is dropped from the exposed tool list — the model never sees it — and
-    a model-emitted {quote:ID} for an out-of-chain node is NOT pulled mid-turn.
-    The other retrieval tools (read_artifact/read_todo) are unaffected, and
-    manual Cmd+K search is a separate endpoint, also unaffected."""
+def test_semantic_search_gated_off_for_opted_out_user(app):
+    """Without the per-user opt-in (external_content_enabled, #208 — the
+    Account easter-egg toggle), the semantic_search tool is dropped from
+    the exposed tool list — the model never sees it — and a model-emitted
+    {quote:ID} for an out-of-chain node is NOT pulled mid-turn. The other
+    retrieval tools (read_artifact/read_todo) are unaffected, and manual
+    Cmd+K search is a separate endpoint, also unaffected."""
     alice, system, user_node, llm_node = _build_chain("textmode")
+    alice.external_content_enabled = False  # default for every user
     archive = Node(user_id=alice.id, human_owner_id=alice.id,
                    node_type="text", privacy_level="private", ai_usage="chat")
     archive.set_content("AN OUT-OF-CHAIN ENTRY.")
@@ -586,18 +657,13 @@ def test_semantic_search_gated_dark_by_default(app):
     _db.session.commit()
     aid = archive.id
 
-    saved = _app.config.get("SEMANTIC_SEARCH_AGENTIC")
-    _app.config["SEMANTIC_SEARCH_AGENTIC"] = False
-    try:
-        _ScriptedProvider.reset([
-            _resp("Here's my take. {quote:%d}" % aid),
-        ])
-        generate_llm_response(
-            _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
-            source_mode="textmode",
-        )
-    finally:
-        _app.config["SEMANTIC_SEARCH_AGENTIC"] = saved
+    _ScriptedProvider.reset([
+        _resp("Here's my take. {quote:%d}" % aid),
+    ])
+    generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
 
     # Tool list excludes semantic_search but keeps the other retrieval tools.
     tool_names = [t["name"] for t in (_ScriptedProvider.calls[0]["tools"] or [])]
@@ -690,7 +756,8 @@ def test_user_export_deduped_to_first_occurrence(app, monkeypatch):
     monkeypatch.setattr(_llm_task_mod, "build_user_export_content",
                         lambda *a, **k: MARKER)
 
-    alice = _mk_user("alice", approved=True, plan="alpha")
+    alice = _mk_user("alice", approved=True, plan="alpha",
+                     external_content_enabled=True)
     llm_user = _mk_user("gpt-5", twitter_id="llm-gpt-5")
     prompt = UserPrompt(user_id=alice.id, prompt_key="textmode", title="P",
                         generated_by="default")
@@ -742,3 +809,121 @@ def test_user_export_deduped_to_first_occurrence(app, monkeypatch):
     assert text.count(MARKER) == 1
     # ...and the other three occurrences (1 in user1, 1 in user2) are stubs.
     assert text.count("(see archive above)") == 2
+
+
+# ── Quote-as-response: labels, canonicalization, external references ────
+
+
+def _mk_external_item(user_id, content, vector, author="visa", source="twitter_bookmark"):
+    item = ExternalItem(
+        user_id=user_id, source=source, external_id=f"x{content[:8]}",
+        author_handle=author, url="https://twitter.com/i/status/1",
+    )
+    item.set_content(content)
+    _db.session.add(item)
+    _db.session.flush()
+    _db.session.add(ExternalItemEmbedding(
+        item_id=item.id, user_id=user_id, model="test",
+        content_hash="h", vector=pack_vector(vector),
+    ))
+    _db.session.flush()
+    return item
+
+
+def test_search_labels_canonicalize_and_bump_surfaced(app, monkeypatch):
+    """The full quote-as-response round-trip: semantic_search returns node
+    + external matches labeled [A]/[B]; the model quotes {quote:B}; the
+    stored content carries the canonical {quote_ext:<id>}; the reference's
+    surfacing history is bumped; the full reference text is injected into
+    the continuation call."""
+    import backend.utils.embeddings as emb_mod
+    monkeypatch.setattr(
+        emb_mod, "embed_texts", lambda texts, key, **kw: [[1.0, 0.0]])
+
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    # Archive node (out of chain) with an embedding -> match [A].
+    archive = Node(user_id=alice.id, human_owner_id=alice.id,
+                   node_type="text", privacy_level="private",
+                   ai_usage="chat")
+    archive.set_content("my old zen writing")
+    _db.session.add(archive)
+    _db.session.flush()
+    _db.session.add(NodeEmbedding(
+        node_id=archive.id, user_id=alice.id, model="test",
+        content_hash="h", vector=pack_vector([1.0, 0.0])))
+    # Saved reference with an embedding -> match [B].
+    item = _mk_external_item(
+        alice.id, "the perfect saved tweet about zen", [0.9, 0.1])
+    _db.session.commit()
+    item_id = item.id
+
+    _ScriptedProvider.reset([
+        _resp("Checking your archive.",
+              tool_calls=[{"id": "t1", "name": "semantic_search",
+                           "input": {"query": "zen"}}]),
+        _resp("Someone you saved said it better: {quote:B} — and here's "
+              "why it matters right now."),
+    ])
+
+    result = generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+
+    # Search round + the quoting reply. Quoting a REFERENCE does NOT
+    # trigger a pull round (one-step quote-as-response; a third call here
+    # produced near-duplicate interim/final nodes on staging).
+    assert len(_ScriptedProvider.calls) == 2
+    # Round 2 saw labeled previews with surfacing metadata semantics.
+    round2 = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[1]["messages"])
+    assert "[A]" in round2 and "[B]" in round2
+    assert "saved reference by @visa" in round2
+    # The FINAL node carries the canonical marker; no continuation node.
+    interim = _fresh(llm_node.id)
+    final = (Node.query.get(interim.continuation_node_id)
+             if interim.continuation_node_id else interim)
+    assert final.continuation_node_id is None
+    all_text = "\n".join(
+        n.get_content() or "" for n in [interim, final])
+    assert ("{quote_ext:%d}" % item_id) in all_text
+    assert "{quote:B}" not in all_text
+    # Surfacing history bumped exactly once.
+    _db.session.expire_all()
+    fresh_item = ExternalItem.query.get(item_id)
+    assert fresh_item.surfaced_count == 1
+    assert fresh_item.last_surfaced_at is not None
+    assert result["status"] == "completed"
+
+
+def test_label_canonicalization_in_final_answer(app, monkeypatch):
+    """A label quoted in the FINAL answer (no extra pull round left) is
+    still canonicalized by _finalize."""
+    import backend.utils.embeddings as emb_mod
+    monkeypatch.setattr(
+        emb_mod, "embed_texts", lambda texts, key, **kw: [[1.0, 0.0]])
+
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    item = _mk_external_item(alice.id, "saved wisdom", [1.0, 0.0])
+    _db.session.commit()
+    item_id = item.id
+
+    # Round 1: search; round 2: model answers WITH the quote — final
+    # (reference quotes never trigger a pull round).
+    _ScriptedProvider.reset([
+        _resp("Searching.",
+              tool_calls=[{"id": "t1", "name": "semantic_search",
+                           "input": {"query": "wisdom"}}]),
+        _resp("Final thought with {quote:A} inline."),
+    ])
+
+    generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+
+    _db.session.expire_all()
+    nodes = Node.query.filter(Node.human_owner_id == alice.id).all()
+    all_text = "\n".join(n.get_content() or "" for n in nodes)
+    assert ("{quote_ext:%d}" % item_id) in all_text
+    assert "{quote:A}" not in all_text

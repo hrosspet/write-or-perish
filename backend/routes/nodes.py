@@ -25,9 +25,16 @@ from backend.utils.privacy import (
     PrivacyLevel,
     AIUsage
 )
-from backend.utils.quotes import find_quote_ids, get_quote_data, has_quotes
+from backend.utils.quotes import (
+    find_quote_ids, get_quote_data, has_quotes,
+    find_ext_quote_ids, get_ext_quote_data,
+)
 from backend.utils.share_guidance import (
     SHARE_GUIDANCE_PLACEHOLDER, SHARE_GUIDANCE_TEXT, share_enabled_for_user,
+)
+from backend.utils.external_guidance import (
+    EXTERNAL_GUIDANCE_PLACEHOLDER, EXTERNAL_GUIDANCE_TEXT,
+    external_content_enabled_for_user,
 )
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.spend import require_spend_headroom
@@ -420,6 +427,13 @@ def _context_artifact_fields(n):
                 current_app.config, n.human_owner_id or n.user_id)
             artifacts["share_guidance"] = {
                 "content": SHARE_GUIDANCE_TEXT if enabled else "",
+            }
+        if EXTERNAL_GUIDANCE_PLACEHOLDER in content:
+            # Same mirror for the archive-search guidance (#208).
+            ext_enabled = external_content_enabled_for_user(
+                current_app.config, n.human_owner_id or n.user_id)
+            artifacts["external_content_guidance"] = {
+                "content": EXTERNAL_GUIDANCE_TEXT if ext_enabled else "",
             }
         if "{user_recent_raw}" in content:
             from backend.routes.export_data import get_raw_data_date_range
@@ -1019,20 +1033,30 @@ def resolve_node_quotes(node_id):
     if not can_user_access_node(node, current_user.id):
         return jsonify({"error": "Not authorized to access this node"}), 403
 
-    # Find all quote IDs in the content
-    quote_ids = find_quote_ids(node.get_content())
+    content = node.get_content()
+    # Node quotes + external-reference quotes ({quote_ext:ID}) in one pass
+    quote_ids = find_quote_ids(content)
+    ext_quote_ids = find_ext_quote_ids(content)
 
-    if not quote_ids:
+    if not quote_ids and not ext_quote_ids:
         return jsonify({
             "quotes": {},
+            "external_quotes": {},
             "has_quotes": False
         }), 200
 
-    # Get quote data with access checks
-    quote_data = get_quote_data(quote_ids, current_user.id)
+    quote_data = get_quote_data(quote_ids, current_user.id) \
+        if quote_ids else {}
+    # External references resolve against the node's human owner (whoever
+    # imported them): quoting one into a node publishes it to anyone who
+    # can see the node itself, which the check above already gates.
+    ext_owner_id = node.human_owner_id or node.user_id
+    ext_quote_data = get_ext_quote_data(ext_quote_ids, ext_owner_id) \
+        if ext_quote_ids else {}
 
     return jsonify({
         "quotes": quote_data,
+        "external_quotes": ext_quote_data,
         "has_quotes": True
     }), 200
 

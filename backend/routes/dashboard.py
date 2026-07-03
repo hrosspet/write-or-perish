@@ -135,6 +135,13 @@ def get_dashboard():
                 current_app.config.get("SHARE_V1", False)),
             "public_sharing_enabled": bool(
                 current_user.public_sharing_enabled),
+            # Archive search + saved references (#208): available = the
+            # env killswitch is on (decides whether Account shows the
+            # toggle); enabled = the user's own easter-egg opt-in.
+            "external_content_available": bool(
+                current_app.config.get("SEMANTIC_SEARCH_AGENTIC", True)),
+            "external_content_enabled": bool(
+                current_user.external_content_enabled),
         },
         "pinned_nodes": pinned_list,
         "nodes": nodes_list,
@@ -223,6 +230,10 @@ def update_user():
         current_user.public_sharing_enabled = bool(
             data["public_sharing_enabled"])
 
+    if "external_content_enabled" in data:
+        current_user.external_content_enabled = bool(
+            data["external_content_enabled"])
+
     if "preferred_model" in data:
         current_user.preferred_model = data["preferred_model"]
 
@@ -268,6 +279,11 @@ def update_user():
                     current_app.config.get("SHARE_V1", False)),
                 "public_sharing_enabled": bool(
                     current_user.public_sharing_enabled),
+                "external_content_available": bool(
+                    current_app.config.get(
+                        "SEMANTIC_SEARCH_AGENTIC", True)),
+                "external_content_enabled": bool(
+                    current_user.external_content_enabled),
                 "timezone": current_user.timezone or "UTC",
             }
         }), 200
