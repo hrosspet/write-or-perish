@@ -735,7 +735,13 @@ def _retrieval_injection_text(tr, with_labels=False):
             text = (item.get_content() or "").strip()
             if not text:
                 continue
-            snippet = text[:800] + ("…" if len(text) > 800 else "")
+            # References get no pull round (one-step quoting), so this
+            # preview is all the model ever reads. Long tweets are heavily
+            # overrepresented in bookmarks: 2500 chars covers ~93% of a
+            # real corpus in full (p95 ~3.4k); the tail is marked so the
+            # model knows its commentary rests on a truncated read.
+            snippet = text[:2500] + (
+                "… (preview truncated)" if len(text) > 2500 else "")
             stamp = (item.posted_at.strftime("%Y-%m-%d")
                      if item.posted_at else "?")
             score = m.get("score")
