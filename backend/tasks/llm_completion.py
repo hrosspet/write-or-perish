@@ -19,7 +19,7 @@ from backend.utils.tokens import (
     approximate_token_count, reduce_export_tokens, format_date_metadata,
 )
 from backend.utils.quotes import (
-    resolve_quotes, has_quotes, find_quote_ids,
+    resolve_quotes, has_quotes,
     resolve_ext_quotes, has_ext_quotes, find_ext_quote_ids,
 )
 from backend.utils.node_split import NODE_CHAR_CAP
@@ -83,7 +83,8 @@ USER_ARTIFACTS_INDEX_PLACEHOLDER = "{user_artifacts_index}"
 # read_artifact pulls a UserArtifact by kind; read_todo pulls the user's todo
 # list (its own model, no longer shown inline — #158 Slice 3); semantic_search
 # pulls relevant snippets from the user's own archive by meaning (#155).
-RETRIEVAL_TOOLS = {"read_artifact", "read_todo", "semantic_search"}
+RETRIEVAL_TOOLS = {"read_artifact", "read_todo", "semantic_search",
+                   "read_full"}
 # Max number of interim retrieval round-trips before the model must answer.
 MAX_RETRIEVAL_ROUNDS = 5
 
@@ -143,22 +144,20 @@ def _bump_surfaced_references(text, user_id, already_bumped):
         item.surfaced_count = (item.surfaced_count or 0) + 1
         item.last_surfaced_at = now
         already_bumped.add(item.id)
-# Max new {quote:ID} pulls resolved per loop round (a 1h sharing can be huge;
-# this bounds how much full-node content the model can inject in one step).
-MAX_QUOTE_PULLS_PER_ROUND = 5
-# Depth for resolving loop-pulled {quote:ID}. 1 = the pulled node's OWN content
+# Depth for resolving read_full content. 1 = the read item's OWN content
 # only; any {quote:ID} nested inside it stays as a placeholder the model can
-# pull explicitly next round. Recursive resolution (the default depth 3) inlines
-# cross-quoted nodes once PER PATH, which for a densely cross-referenced archive
-# blows the context up combinatorially (saw a 2.77M-token prompt). The model
-# already saw previews and chose specific nodes; give it exactly those.
+# read explicitly next round. Recursive resolution (the default depth 3)
+# inlines cross-quoted nodes once PER PATH, which for a densely
+# cross-referenced archive blows the context up combinatorially (saw a
+# 2.77M-token prompt). The model saw previews and chose ONE item; give it
+# exactly that.
 QUOTE_PULL_DEPTH = 1
-# Hard char caps so a single huge node or a pathological pull can never overflow
-# the window on the (otherwise unguarded) continuation call. Tied to the
-# per-node content cap the app already enforces on writes
-# (NODE_CHAR_CAP = 100k): the combined pulled content is bounded to one node's
-# worth (legacy/imported nodes can exceed the write cap, so this still bites),
-# and the whole per-round injection — quote pulls + search previews + an
+# Hard char caps so a single huge node or a pathological read can never
+# overflow the window on the (otherwise unguarded) continuation call. Tied
+# to the per-node content cap the app already enforces on writes
+# (NODE_CHAR_CAP = 100k): a read_full result is bounded to one node's worth
+# (legacy/imported nodes can exceed the write cap, so this still bites),
+# and the whole per-round injection — reads + search previews + an
 # artifact/todo read — to twice that. ~4 chars/token → ~25k / ~50k tokens.
 MAX_QUOTE_PULL_CHARS = NODE_CHAR_CAP
 MAX_RETRIEVAL_INJECTION_CHARS = NODE_CHAR_CAP * 2
@@ -312,13 +311,14 @@ VOICE_TOOLS = [
             "reference would genuinely serve the current thread. Pass a "
             "focused natural-language query describing what to look for. "
             "You get back short PREVIEWS of the top matches, each tagged "
-            "with a label like [A], same turn. To QUOTE a match in your "
+            "with a label like [A], same turn — previews are for TRIAGE. "
+            "Before quoting or building your answer on a match whose "
+            "preview is marked truncated, read it first with the read_full "
+            "tool; then give your final reply. To QUOTE a match in that "
             "reply, reference it by its label, e.g. {quote:A} — the user "
             "sees the full quoted entry or reference card (verbatim, with "
-            "attribution). A reference's preview is nearly its full text — "
-            "quote it and give your commentary in the same reply. An "
-            "archive entry you quote comes back to you in full the next "
-            "step. When you quote, say "
+            "attribution); the marker is presentation only and ends your "
+            "lookup. When you quote, say "
             "in your own words why it's relevant to what the user is "
             "saying right now — the quote plus your reasoning is the "
             "response, not a link dump. Reference previews show how often "
@@ -347,6 +347,32 @@ VOICE_TOOLS = [
                 },
             },
             "required": ["query"],
+        },
+    },
+    {
+        "name": "read_full",
+        "description": (
+            "Read one semantic_search match in full — pass its label from "
+            "this turn's search results (e.g. 'B'), or a numeric archive "
+            "entry id from your context. Use it BEFORE quoting or building "
+            "your answer on anything longer than its preview (previews "
+            "mark themselves truncated). The full text comes back the next "
+            "step; then write your final reply — with {quote:<label>} if "
+            "you want the user to see it quoted. Always produce a text "
+            "response alongside the call."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ref": {
+                    "type": "string",
+                    "description": (
+                        "A label from this turn's search results ('A', "
+                        "'B', …) or a numeric archive entry id."
+                    ),
+                },
+            },
+            "required": ["ref"],
         },
     },
     {
@@ -409,6 +435,7 @@ def gated_voice_tools(config, search_enabled=False):
     dropped = set()
     if not search_enabled:
         dropped.add("semantic_search")
+        dropped.add("read_full")
     if not config.get("SHARE_V1", False):
         dropped.add("apply_share")
     if not dropped:
@@ -701,6 +728,28 @@ def _retrieval_injection_text(tr, with_labels=False):
         if todo is None or todo.ai_usage not in AI_ALLOWED:
             return None
         return f"[Your current todo list:\n{todo.get_content()}]"
+    if name == "read_full":
+        # Re-resolve via the quote machinery (permission + ai_usage checks
+        # built in; depth 1 — nested {quote:ID} stay as placeholders).
+        kind, ref_id = tr.get("kind"), tr.get("ref_id")
+        reader_id = tr.get("user_id")
+        if ref_id is None or reader_id is None:
+            return None
+        if kind == "external":
+            q_text, resolved = resolve_ext_quotes(
+                "{quote_ext:%d}" % ref_id, reader_id, for_llm=True)
+        else:
+            q_text, resolved = resolve_quotes(
+                "{quote:%d}" % ref_id, reader_id, for_llm=True,
+                max_depth=QUOTE_PULL_DEPTH)
+        if not resolved:
+            return None
+        if len(q_text) > MAX_QUOTE_PULL_CHARS:
+            q_text = (q_text[:MAX_QUOTE_PULL_CHARS]
+                      + "\n[…content truncated to fit the context window…]")
+        what = "reference" if kind == "external" else "entry"
+        return (f"[Full content of the {what} you asked to read "
+                f"([{tr.get('ref', '?')}]):\n{q_text}]")
     if name == "semantic_search":
         # Re-resolve each matched node from its id (content never stored in
         # meta); re-check ai_usage + soft-delete at injection time. These are
@@ -716,7 +765,8 @@ def _retrieval_injection_text(tr, with_labels=False):
             text = (node.get_content() or "").strip()
             if not text:
                 continue
-            snippet = text[:800] + ("…" if len(text) > 800 else "")
+            snippet = text[:800] + (
+                "… (preview truncated)" if len(text) > 800 else "")
             stamp = (node.created_at.strftime("%Y-%m-%d")
                      if node.created_at else "?")
             score = m.get("score")
@@ -735,13 +785,8 @@ def _retrieval_injection_text(tr, with_labels=False):
             text = (item.get_content() or "").strip()
             if not text:
                 continue
-            # References get no pull round (one-step quoting), so this
-            # preview is all the model ever reads. Long tweets are heavily
-            # overrepresented in bookmarks: 2500 chars covers ~93% of a
-            # real corpus in full (p95 ~3.4k); the tail is marked so the
-            # model knows its commentary rests on a truncated read.
-            snippet = text[:2500] + (
-                "… (preview truncated)" if len(text) > 2500 else "")
+            snippet = text[:800] + (
+                "… (preview truncated)" if len(text) > 800 else "")
             stamp = (item.posted_at.strftime("%Y-%m-%d")
                      if item.posted_at else "?")
             score = m.get("score")
@@ -763,15 +808,14 @@ def _retrieval_injection_text(tr, with_labels=False):
             return None
         if with_labels:
             hint = (
-                "previews only. To QUOTE one in your reply, reference it "
-                "by its label, e.g. {quote:A} — it renders for the user as "
-                "the full quoted entry or reference card. Quote references "
-                "in the same reply as your commentary (their preview above "
-                "is nearly their full text); archive entries you quote come "
-                "back to you in full the next step. Quote at most a couple, "
-                "only what's actually relevant — quoting nothing is fine. "
-                "In prose, refer to items by author or content, not by "
-                "label")
+                "previews, for triage. Read anything marked '(preview "
+                "truncated)' with read_full before quoting or building on "
+                "it. To QUOTE one in your final reply, reference it by its "
+                "label, e.g. {quote:A} — it renders for the user as the "
+                "full quoted entry or reference card (presentation only; "
+                "it fetches nothing). Quote at most a couple, only what's "
+                "actually relevant — quoting nothing is fine. In prose, "
+                "refer to items by author or content, not by label")
         else:
             hint = (
                 "previews only; to read an entry in full, reference it as "
@@ -1059,8 +1103,11 @@ def _redact_tool_input(inp):
     }
 
 
-def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
-    """Execute tool calls and return metadata list."""
+def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
+                        quote_labels=None):
+    """Execute tool calls and return metadata list. *quote_labels* is the
+    turn's label map ({label: ("node"|"external", id)}) so read_full can
+    resolve a search-result label; None outside the retrieval loop."""
     tool_results = []
 
     for tc in tool_calls:
@@ -1282,6 +1329,30 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id):
                              "score": round(r["score"], 4)}
                             for r in references
                         ]
+
+            elif name == "read_full":
+                # Query intent, made explicit (#208): resolve a search
+                # label (this turn's map) or a numeric archive-entry id.
+                # Only the target's identity is stored in meta — content is
+                # re-resolved at injection time like every retrieval tool.
+                ref = (inp.get("ref") or "").strip()
+                target = None
+                if quote_labels and ref.upper() in quote_labels:
+                    target = quote_labels[ref.upper()]
+                elif ref.isdigit():
+                    target = ("node", int(ref))
+                if target is None:
+                    result["status"] = "error"
+                    result["error"] = (
+                        f"Unknown reference {ref!r} — pass a label from "
+                        "this turn's search results or a numeric entry id.")
+                else:
+                    result["status"] = "success"
+                    result["kind"], result["ref_id"] = target
+                    result["ref"] = ref
+                    # Injection re-resolves content with permission checks,
+                    # which need the requesting user (also cross-turn).
+                    result["user_id"] = user_id
 
             elif name == "apply_feedback":
                 # Send the feedback the AI proposed under a ### Feedback
@@ -2520,7 +2591,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     logger.info(
                         f"Executing {len(f_tool_calls)} tool calls")
                     tool_results = _execute_tool_calls(
-                        f_tool_calls, target_node, node_chain, user_id
+                        f_tool_calls, target_node, node_chain, user_id,
+                        quote_labels=quote_labels,
                     )
                     if f_truncated:
                         for tr in tool_results:
@@ -2588,40 +2660,22 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # content in the same turn.
             rounds_done = 0
             current_node = llm_node
-            # Quote pulls already grounded this turn, and nodes already in the
-            # thread (their content is in `messages`) — neither should trigger
-            # a re-loop when the model references them.
-            resolved_quote_ids = set()
-            chain_ids_set = {n.id for n in node_chain}
             while True:
                 response_tool_calls = response.get("tool_calls", [])
                 retrieval_calls = [
                     tc for tc in response_tool_calls
                     if tc["name"] in RETRIEVAL_TOOLS
                 ]
-                # New {quote:ID} the model emitted to pull a node in full this
-                # turn (e.g. a semantic_search hit). A search call and quote
-                # pulls can coexist in one round — both get fulfilled and the
-                # model sees everything next round. Capped per round.
-                # Labels canonicalize FIRST, so a {quote:B} emitted against
-                # this turn's search results scans as its absolute id below.
+                # Quote markers ({quote:...} / {quote_ext:...}) are PURE
+                # PRESENTATION — they render as cards and never trigger a
+                # round. Query intent is a separate explicit act: the
+                # read_full tool (in RETRIEVAL_TOOLS above). Labels
+                # canonicalize here so the stored interim text is absolute.
+                # (The old emit-a-marker-to-pull mechanic conflated the two
+                # intents and duplicated nodes when the model quoted inside
+                # a complete answer — staging pass, 2026-07-03.)
                 resp_text = _canonicalize_quote_labels(
                     response.get("content") or "", quote_labels)
-                # The within-turn {quote:ID} pull-in-full is the second half of
-                # agentic semantic search, so it's gated with it (#155 dark).
-                # Without it, a model-emitted {quote:ID} for an out-of-chain
-                # node is left as-is (resolved at chain build like on main),
-                # not pulled mid-turn — keeping prod behavior unchanged.
-                new_quote_ids = [
-                    q for q in find_quote_ids(resp_text)
-                    if q not in resolved_quote_ids and q not in chain_ids_set
-                ][:MAX_QUOTE_PULLS_PER_ROUND] if agentic_search_on else []
-                # Saved references quoted this round ({quote_ext:ID}) do
-                # NOT trigger a pull round: quote-as-response is one step
-                # (quote + commentary in the same reply), previews carry a
-                # tweet nearly in full, and the user sees the whole card
-                # regardless. Re-calling the model after it already answered
-                # produced near-duplicate interim/final nodes (staging pass).
 
                 # Race B guard on the node we're about to write to.
                 db.session.refresh(current_node)
@@ -2640,10 +2694,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         'reason': 'target_soft_deleted',
                     }
 
-                # INTERIM step: a retrieval tool call and/or a full-node quote
-                # pull was requested, and budget remains.
-                if (retrieval_calls or new_quote_ids) and \
-                        rounds_done < MAX_RETRIEVAL_ROUNDS:
+                # INTERIM step: a retrieval tool call was made and budget
+                # remains.
+                if retrieval_calls and rounds_done < MAX_RETRIEVAL_ROUNDS:
                     # #179: scrub timestamp echoes from interim text too —
                     # it's stored on the interim node and spoken in voice.
                     interim_text = strip_edge_timestamps(resp_text)
@@ -2659,7 +2712,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     # Execute ALL tool calls on the interim node.
                     tool_results = _execute_tool_calls(
                         response_tool_calls, current_node, node_chain,
-                        user_id,
+                        user_id, quote_labels=quote_labels,
                     )
                     if interim_truncated:
                         for tr in tool_results:
@@ -2715,31 +2768,6 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 f"[{tr.get('name')} failed — "
                                 f"{tr.get('error', 'unknown error')}]")
 
-                    # Resolve newly-referenced {quote:ID} to full content via
-                    # the existing quote machinery (permission + ai_usage='none'
-                    # checks built in). The {quote:ID} stays in the interim
-                    # node's text → renders for the user + flows to exports.
-                    if new_quote_ids:
-                        placeholder = "\n".join(
-                            "{quote:%d}" % q for q in new_quote_ids)
-                        # Depth 1: the pulled nodes' own content only — nested
-                        # {quote:ID} stay as placeholders the model can pull
-                        # next round. Prevents the combinatorial expansion that
-                        # produced a 2.77M-token prompt.
-                        q_text, _ = resolve_quotes(
-                            placeholder, user_id, for_llm=True,
-                            max_depth=QUOTE_PULL_DEPTH)
-                        if len(q_text) > MAX_QUOTE_PULL_CHARS:
-                            q_text = (q_text[:MAX_QUOTE_PULL_CHARS]
-                                      + "\n[…pulled content truncated to fit "
-                                      "the context window…]")
-                        if q_text and q_text.strip():
-                            label = ("entries" if len(new_quote_ids) > 1
-                                     else "entry")
-                            injection_strings.append(
-                                f"[Full content of the {label} you pulled "
-                                f"up:\n{q_text}]")
-                        resolved_quote_ids.update(new_quote_ids)
                     if not injection_strings:
                         injection_strings.append(
                             "[The requested items were unavailable.]")

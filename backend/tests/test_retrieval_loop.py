@@ -453,12 +453,11 @@ def test_textmode_retrieval_budget_caps_at_max_rounds(app):
     assert APICostLog.query.count() == 6
 
 
-def test_quote_pull_resolves_full_content_and_continues(app):
-    """A {quote:ID} the model emits for an out-of-context node triggers a
-    within-turn resolution + continuation (no retrieval tool call needed):
-    the full node content is injected and the model answers with it, while the
-    {quote:ID} stays in the interim node's text (renders for the user +
-    flows to exports)."""
+def test_read_full_by_entry_id_resolves_and_continues(app):
+    """read_full with a numeric entry id (query intent, explicit): the
+    full node content is injected and the model answers with it in the
+    continuation. A bare {quote:ID} in the reply triggers NOTHING — quote
+    markers are presentation only."""
     alice, system, user_node, llm_node = _build_chain("textmode")
     # An archive node that is NOT part of the conversation chain.
     archive = Node(user_id=alice.id, human_owner_id=alice.id,
@@ -469,8 +468,10 @@ def test_quote_pull_resolves_full_content_and_continues(app):
     aid = archive.id
 
     _ScriptedProvider.reset([
-        _resp("Let me pull that up. {quote:%d}" % aid),
-        _resp("Based on that entry, here's my read."),
+        _resp("Let me read that entry fully.",
+              tool_calls=[{"id": "t1", "name": "read_full",
+                           "input": {"ref": str(aid)}}]),
+        _resp("Based on that entry, here's my read. {quote:%d}" % aid),
     ])
 
     result = generate_llm_response(
@@ -478,26 +479,88 @@ def test_quote_pull_resolves_full_content_and_continues(app):
         source_mode="textmode",
     )
 
-    # Quote pull (interim) + continuation = 2 calls.
+    # read_full (interim) + final answer = 2 calls; the quote marker in
+    # the final answer does NOT cause a third.
     assert len(_ScriptedProvider.calls) == 2
     interim = _fresh(llm_node.id)
     assert interim.continuation_node_id is not None
-    # The {quote:ID} reference stays in the interim node's content.
-    assert ("{quote:%d}" % aid) in interim.get_content()
     # The full node content was injected into the continuation call.
     cont_msgs = "\n".join(
         m["text"] for m in _ScriptedProvider.calls[1]["messages"])
     assert "THE FULL ARCHIVE ENTRY" in cont_msgs
     final = Node.query.get(interim.continuation_node_id)
-    assert final.get_content() == "Based on that entry, here's my read."
+    assert final.continuation_node_id is None
+    assert ("{quote:%d}" % aid) in final.get_content()
     assert result["llm_node_id"] == final.id
 
 
-def test_quote_pull_is_depth_1_no_recursive_expansion(app):
-    """A loop quote-pull resolves the pulled node's OWN content only; a
-    {quote:ID} nested INSIDE it stays as a placeholder rather than being
-    recursively inlined. This is the guard against the combinatorial blowup
-    that produced a 2.77M-token continuation prompt — depth-3 resolution
+def test_read_full_by_label_reads_external_reference(app, monkeypatch):
+    """read_full with a search-result label resolves through the turn's
+    label map — including external references."""
+    import backend.utils.embeddings as emb_mod
+    monkeypatch.setattr(
+        emb_mod, "embed_texts", lambda texts, key, **kw: [[1.0, 0.0]])
+
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    item = _mk_external_item(
+        alice.id, "LONG SAVED NOTE-TWEET " + "x" * 900, [1.0, 0.0])
+    _db.session.commit()
+    item_id = item.id
+
+    _ScriptedProvider.reset([
+        _resp("Searching.",
+              tool_calls=[{"id": "t1", "name": "semantic_search",
+                           "input": {"query": "note"}}]),
+        _resp("That preview is truncated — reading it fully.",
+              tool_calls=[{"id": "t2", "name": "read_full",
+                           "input": {"ref": "A"}}]),
+        _resp("Here it is: {quote:A} — and why it matters."),
+    ])
+
+    generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+
+    assert len(_ScriptedProvider.calls) == 3
+    # The search preview was truncated at 800 and marked.
+    round2 = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[1]["messages"])
+    assert "(preview truncated)" in round2
+    # read_full injected the FULL reference text.
+    round3 = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[2]["messages"])
+    assert "LONG SAVED NOTE-TWEET " + "x" * 900 in round3
+    # Final node carries the canonical presentation marker.
+    _db.session.expire_all()
+    nodes = Node.query.filter(Node.human_owner_id == alice.id).all()
+    all_text = "\n".join(n.get_content() or "" for n in nodes)
+    assert ("{quote_ext:%d}" % item_id) in all_text
+
+
+def test_read_full_unknown_ref_errors_cleanly(app):
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _ScriptedProvider.reset([
+        _resp("Reading.",
+              tool_calls=[{"id": "t1", "name": "read_full",
+                           "input": {"ref": "Z"}}]),
+        _resp("Never mind, answering directly."),
+    ])
+    generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+    assert len(_ScriptedProvider.calls) == 2
+    cont = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[1]["messages"])
+    assert "Unknown reference" in cont
+
+
+def test_read_full_is_depth_1_no_recursive_expansion(app):
+    """read_full resolves the read node's OWN content only; a {quote:ID}
+    nested INSIDE it stays as a placeholder rather than being recursively
+    inlined. This is the guard against the combinatorial blowup that
+    produced a 2.77M-token continuation prompt — depth-3 resolution
     inlined cross-quoted nodes once per path."""
     alice, system, user_node, llm_node = _build_chain("textmode")
     nested = Node(user_id=alice.id, human_owner_id=alice.id,
@@ -513,7 +576,9 @@ def test_quote_pull_is_depth_1_no_recursive_expansion(app):
     outer_id, nested_id = outer.id, nested.id
 
     _ScriptedProvider.reset([
-        _resp("Let me pull that up. {quote:%d}" % outer_id),
+        _resp("Let me read that fully.",
+              tool_calls=[{"id": "t1", "name": "read_full",
+                           "input": {"ref": str(outer_id)}}]),
         _resp("Here's my read."),
     ])
 
@@ -547,7 +612,9 @@ def test_continuation_prompt_too_long_degrades_gracefully(app):
     aid = archive.id
 
     _ScriptedProvider.reset([
-        _resp("Let me pull that up. {quote:%d}" % aid),
+        _resp("Let me read that fully.",
+              tool_calls=[{"id": "t1", "name": "read_full",
+                           "input": {"ref": str(aid)}}]),
         _PromptTooLongError(2769518, 1000000),  # continuation overflows
         _resp("Here's a partial read."),         # retry after dropping inject
     ])
