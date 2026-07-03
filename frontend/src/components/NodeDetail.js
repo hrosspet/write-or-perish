@@ -8,7 +8,6 @@ import ModelSelector from "./ModelSelector";
 import NodeForm from "./NodeForm";
 import ProposalInline, { hasProposalSections, splitProposalText } from "./ProposalInline";
 import SemanticNeighbors from "./SemanticNeighbors";
-import RecommendationsPanel from "./RecommendationsPanel";
 import { useUser } from "../contexts/UserContext";
 import { useToast } from "../contexts/ToastContext";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
@@ -70,6 +69,7 @@ function NodeDetail({ nodeIdOverride }) {
   const [selectedModel, setSelectedModel] = useState(currentUser?.preferred_model || null);
   const [llmTaskNodeId, setLlmTaskNodeId] = useState(null);
   const [quotes, setQuotes] = useState({});
+  const [externalQuotes, setExternalQuotes] = useState({});
   const [pinLoading, setPinLoading] = useState(false);
   const [voiceLoading, setVoiceLoading] = useState(false);
   const [toolActionsExpanded, setToolActionsExpanded] = useState(false);
@@ -128,6 +128,7 @@ function NodeDetail({ nodeIdOverride }) {
     setLoading(true);
     setError("");
     setQuotes({}); // Reset quotes when node changes
+    setExternalQuotes({});
     api
       .get(`/nodes/${id}`)
       .then((response) => {
@@ -159,8 +160,8 @@ function NodeDetail({ nodeIdOverride }) {
   useEffect(() => {
     if (!node || !node.content) return;
 
-    // Check if content contains {quote:ID} patterns
-    const quotePattern = /\{quote:(\d+)\}/;
+    // Check if content contains {quote:ID} / {quote_ext:ID} patterns
+    const quotePattern = /\{quote(?:_ext)?:(\d+)\}/;
     if (!quotePattern.test(node.content)) return;
 
     // Fetch quotes for this node
@@ -169,6 +170,9 @@ function NodeDetail({ nodeIdOverride }) {
       .then((response) => {
         if (response.data.has_quotes && response.data.quotes) {
           setQuotes(response.data.quotes);
+        }
+        if (response.data.has_quotes && response.data.external_quotes) {
+          setExternalQuotes(response.data.external_quotes);
         }
       })
       .catch((err) => {
@@ -781,6 +785,7 @@ function NodeDetail({ nodeIdOverride }) {
             <QuotedContent
               content={displayContent}
               quotes={quotes}
+              externalQuotes={externalQuotes}
               contextArtifacts={node.context_artifacts || null}
               onQuoteClick={handleBubbleClick}
               onCheckboxToggle={isOwner ? handleCheckboxToggle : undefined}
@@ -812,6 +817,7 @@ function NodeDetail({ nodeIdOverride }) {
             <QuotedContent
               content={proposalAfter}
               quotes={quotes}
+              externalQuotes={externalQuotes}
               contextArtifacts={node.context_artifacts || null}
               onQuoteClick={handleBubbleClick}
             />
@@ -1011,7 +1017,6 @@ function NodeDetail({ nodeIdOverride }) {
         {topRightControls}
       </div>
       <SemanticNeighbors nodeId={node.id} />
-      <RecommendationsPanel nodeId={node.id} />
       {ancestorsSection}
       {highlightedNodeSection}
       {childrenSection}

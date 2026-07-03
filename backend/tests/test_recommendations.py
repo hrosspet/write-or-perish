@@ -1,9 +1,11 @@
-"""Tests for context-aware external-item resurfacing (Download PoC).
+"""Tests for the external-item retrieval layer (quote-as-response).
 
 Covers: query composition (thread tail privacy filter, intentions/profile
-ai_usage gates, char budgets), ranking (mocked embeddings, top-k, score
-floor), and the /api/external/recommendations endpoint (DOWNLOAD_V1
-gating, ownership, fail-open). No OpenAI traffic — embed_texts is mocked.
+ai_usage gates, char budgets) and ranking (mocked embeddings, top-k,
+score floor). The PoC recommendations endpoint was superseded by
+quote-as-response (#208); these utils remain as the retrieval layer for
+the overnight batch pre-selection. No OpenAI traffic — embed_texts is
+mocked.
 """
 import os
 import sys
@@ -200,60 +202,3 @@ def test_recommend_empty_without_items(app, monkeypatch):
         assert reco.recommend_external_items(uid, node, "fake-key") == []
         # No items -> no query embed, no cost.
         assert called == []
-
-
-# ── Endpoint ─────────────────────────────────────────────────────────────
-
-def test_endpoint_404_when_flag_off(app, client):
-    app.config["DOWNLOAD_V1"] = False
-    with app.app_context():
-        uid = User.query.first().id
-        node = _mk_node(uid, "hello")
-        node_id = node.id
-    resp = client.get(f"/api/external/recommendations?node_id={node_id}")
-    assert resp.status_code == 404
-
-
-def test_endpoint_requires_own_node(app, client):
-    with app.app_context():
-        other = User(username="other")
-        _db.session.add(other)
-        _db.session.commit()
-        node = _mk_node(other.id, "not yours")
-        node_id = node.id
-    resp = client.get(f"/api/external/recommendations?node_id={node_id}")
-    assert resp.status_code == 404
-
-
-def test_endpoint_returns_ranked_items(app, client, monkeypatch):
-    with app.app_context():
-        uid = User.query.first().id
-        node = _mk_node(uid, "learning about zen")
-        _mk_item(uid, "zen thread", [1.0, 0.0], author="zenith")
-        node_id = node.id
-
-    from backend.utils import recommendations as reco_mod
-    monkeypatch.setattr(reco_mod, "embed_texts",
-                        lambda texts, key, **kw: [[1.0, 0.0]])
-    resp = client.get(f"/api/external/recommendations?node_id={node_id}")
-    assert resp.status_code == 200
-    items = resp.get_json()["items"]
-    assert len(items) == 1
-    assert items[0]["author_handle"] == "zenith"
-
-
-def test_endpoint_fails_open(app, client, monkeypatch):
-    with app.app_context():
-        uid = User.query.first().id
-        node = _mk_node(uid, "context")
-        _mk_item(uid, "item", [1.0])
-        node_id = node.id
-
-    from backend.utils import recommendations as reco_mod
-
-    def boom(*a, **kw):
-        raise RuntimeError("openai down")
-    monkeypatch.setattr(reco_mod, "embed_texts", boom)
-    resp = client.get(f"/api/external/recommendations?node_id={node_id}")
-    assert resp.status_code == 200
-    assert resp.get_json()["items"] == []

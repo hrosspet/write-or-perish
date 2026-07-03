@@ -1,10 +1,11 @@
-"""Context-aware resurfacing of external items (Feature 2 — Download PoC).
+"""Retrieval layer for context-aware resurfacing of external items.
 
-Given the thread the user is currently writing in, compose a query from
-what Loore knows about them — the conversation tail, their intentions, and
-their profile — embed it, and rank their imported external items
-(bookmarks, Community Archive tweets) by semantic relevance. The user's
-writing context becomes the query for what to read next.
+The PoC recommendations rail was superseded by quote-as-response (#208):
+surfacing now happens as quotes inside the model's reply, judged by the
+live LLM over labeled search results. These utils remain as the retrieval
+stage for the overnight batch pre-selection follow-up — compose a query
+from what Loore knows about the user (thread tail, intentions, profile),
+embed it, and rank their imported external items by semantic relevance.
 
 Privacy: only content the AI is already allowed to see enters the query
 (thread nodes filtered by ai_usage, profile/intentions resolved through
