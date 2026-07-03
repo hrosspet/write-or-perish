@@ -192,6 +192,15 @@ def import_bookmarks_json():
 
 # ── X OAuth2 PKCE connect (env-gated) ────────────────────────────────────
 
+def _frontend_url(path):
+    """Absolute SPA URL for post-OAuth redirects. The callback runs on the
+    backend origin; a relative redirect 404s in dev (SPA lives on another
+    port) and only works in prod by the grace of same-origin nginx."""
+    from flask import current_app
+    base = (current_app.config.get("FRONTEND_URL") or "").rstrip("/")
+    return f"{base}{path}"
+
+
 def _x_configured():
     return bool(current_app.config.get("X_CLIENT_ID"))
 
@@ -245,7 +254,7 @@ def twitter_callback():
     stash = session.pop("x_oauth", None)
     if (not stash or request.args.get("state") != stash["state"]
             or not request.args.get("code")):
-        return redirect("/import?x_connect=failed")
+        return redirect(_frontend_url("/import?x_connect=failed"))
 
     data = {
         "grant_type": "authorization_code",
@@ -271,9 +280,12 @@ def twitter_callback():
         )
         me.raise_for_status()
         me_data = me.json().get("data", {})
-    except requests.RequestException:
-        current_app.logger.exception("X OAuth callback failed")
-        return redirect("/import?x_connect=failed")
+    except requests.RequestException as exc:
+        body = ""
+        if getattr(exc, "response", None) is not None:
+            body = f" — response: {exc.response.text[:500]}"
+        current_app.logger.exception("X OAuth callback failed%s", body)
+        return redirect(_frontend_url("/import?x_connect=failed"))
 
     account = ExternalAccount.query.filter_by(
         user_id=current_user.id, provider="twitter").first()
@@ -289,7 +301,7 @@ def twitter_callback():
     account.handle = me_data.get("username")
     account.revoked_at = None  # fresh consent supersedes any revocation
     db.session.commit()
-    return redirect("/import?x_connect=ok")
+    return redirect(_frontend_url("/import?x_connect=ok"))
 
 
 @external_bp.route("/twitter/sync", methods=["POST"])
