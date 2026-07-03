@@ -1353,6 +1353,14 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                     # Injection re-resolves content with permission checks,
                     # which need the requesting user (also cross-turn).
                     result["user_id"] = user_id
+                    # Display metadata for the Actions-taken chip: the user
+                    # never sees search labels, so the chip links to the
+                    # actual content instead (external URL / entry node).
+                    if target[0] == "external":
+                        item = ExternalItem.query.get(target[1])
+                        if item is not None:
+                            result["url"] = item.url
+                            result["author_handle"] = item.author_handle
 
             elif name == "apply_feedback":
                 # Send the feedback the AI proposed under a ### Feedback

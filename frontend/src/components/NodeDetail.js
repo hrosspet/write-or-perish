@@ -885,7 +885,20 @@ function NodeDetail({ nodeIdOverride }) {
                     {tc.name === 'read_artifact' && (
                       <>Read artifact{tc.kind ? <> <Link to={`/artifacts/${tc.kind}`} style={{ color: 'var(--accent)', textDecoration: 'none' }}><code style={{ fontSize: '0.95em' }}>{tc.kind}</code></Link></> : ''}</>
                     )}
-                    {!['propose_todo', 'propose_github_issue', 'propose_feedback', 'propose_share', 'apply_todo_changes', 'apply_github_issue', 'apply_feedback', 'apply_share', 'update_ai_preferences', 'update_artifact', 'read_artifact'].includes(tc.name) && tc.name}
+                    {tc.name === 'semantic_search' && (
+                      <>Searched archive & references{tc.query ? <> — <span style={{ fontStyle: 'italic' }}>“{tc.query}”</span></> : ''}</>
+                    )}
+                    {tc.name === 'read_full' && (
+                      tc.status !== 'success' ? 'Read in full (failed)'
+                        : tc.kind === 'external' ? (
+                          tc.url
+                            ? <>Read in full — <a href={tc.url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)', textDecoration: 'none' }}>{tc.author_handle ? `@${tc.author_handle}'s post` : 'saved reference'} ↗</a></>
+                            : <>Read a saved reference in full</>
+                        ) : (
+                          <>Read in full — <Link to={`/node/${tc.ref_id}`} style={{ color: 'var(--accent)', textDecoration: 'none' }}>entry #{tc.ref_id}</Link></>
+                        )
+                    )}
+                    {!['propose_todo', 'propose_github_issue', 'propose_feedback', 'propose_share', 'apply_todo_changes', 'apply_github_issue', 'apply_feedback', 'apply_share', 'update_ai_preferences', 'update_artifact', 'read_artifact', 'semantic_search', 'read_full'].includes(tc.name) && tc.name}
                     {tc.error && <span style={{ color: 'var(--accent)', marginLeft: '8px' }}> — {tc.error}</span>}
                   </div>
                 ))}
