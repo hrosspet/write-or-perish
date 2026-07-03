@@ -48,7 +48,9 @@ actually supports). For each topic give a short heading, a one-sentence \
 description of what's there, an approximate item count, and 2-4 \
 representative items (author handle + a few words each).
 - Note the overall shape at the top: total items, dominant themes, rough \
-time range.
+time range. Use the exact counts from the corpus header — you cannot \
+reliably count the list yourself, so don't estimate how many items you \
+were shown.
 - This digest is read by an AI assistant deciding whether the user's \
 saved references might contain something relevant to a live \
 conversation — write for that reader: dense, factual, scannable. No \
@@ -79,6 +81,7 @@ def rebuild_external_digest(self, user_id):
 
         lines = []
         used = 0
+        truncated = False
         for item in items:
             text = (item.get_content() or "").strip().replace("\n", " ")
             if not text:
@@ -89,12 +92,21 @@ def rebuild_external_digest(self, user_id):
             author = item.author_handle or item.source
             line = f"- @{author} ({stamp}): {snippet}"
             if used + len(line) > MAX_CORPUS_CHARS:
-                lines.append(f"[…{total - len(lines)} older items omitted…]")
+                truncated = True
                 break
             lines.append(line)
             used += len(line)
 
-        corpus = f"{total} saved items total.\n" + "\n".join(lines)
+        # State the count explicitly — the model can't count a long list
+        # and will otherwise invent a "sample of ~N" caveat.
+        if truncated or len(lines) < total:
+            header = (f"The corpus holds {total} saved items; the "
+                      f"{len(lines)} most recent are listed below "
+                      f"({total - len(lines)} older items not shown).")
+        else:
+            header = (f"The corpus holds {total} saved items; ALL of them "
+                      f"are listed below.")
+        corpus = header + "\n" + "\n".join(lines)
         prompt_text = DIGEST_PROMPT.replace("{corpus}", corpus)
 
         default_model = flask_app.config.get("LLM_NAME")
