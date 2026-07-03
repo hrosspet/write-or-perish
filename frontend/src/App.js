@@ -29,6 +29,7 @@ import PublicSharePage from "./pages/PublicSharePage";
 import CommonsPage from "./pages/CommonsPage";
 import PublicThreadPage from "./pages/PublicThreadPage";
 import ProfileGenerationWatcher from "./components/ProfileGenerationWatcher";
+import UpdatesModal from "./components/UpdatesModal";
 import PromptsPage from "./pages/PromptsPage";
 import PromptDetailPage from "./pages/PromptDetailPage";
 import SearchModal from "./components/SearchModal";
@@ -101,6 +102,8 @@ function App() {
   const [showSearch, setShowSearch] = useState(false);
   const nodeFormRef = useRef(null);
   const [showTerms, setShowTerms] = useState(false);
+  const [updates, setUpdates] = useState(null);
+  const updatesFetched = useRef(false);
   const { user, setUser } = useUser();
   const navigate = useNavigate();
 
@@ -114,6 +117,21 @@ function App() {
         setShowTerms(false);
       }
     }
+  }, [user]);
+
+  // Dev-update channel (#207): once per session, after terms are settled,
+  // ask what's unread. Anything there opens the updates modal; nothing
+  // unread means nothing is shown.
+  useEffect(() => {
+    if (!user || !user.approved || !user.terms_up_to_date) return;
+    if (updatesFetched.current) return;
+    updatesFetched.current = true;
+    api.get("/updates").then((res) => {
+      const d = res.data || {};
+      const count = (d.changelog?.length || 0) +
+        (d.notifications?.length || 0) + (d.polls?.length || 0);
+      if (count > 0) setUpdates(d);
+    }).catch(() => {});
   }, [user]);
 
   // Cmd+K / Ctrl+K to open search
@@ -168,6 +186,10 @@ function App() {
             }
           }}
         />
+      )}
+
+      {updates && !showTerms && (
+        <UpdatesModal data={updates} onClose={() => setUpdates(null)} />
       )}
 
         <ProfileGenerationWatcher />

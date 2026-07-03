@@ -354,3 +354,90 @@ def update_feedback_status(feedback_id):
     feedback.status = status
     db.session.commit()
     return jsonify({"id": feedback.id, "status": feedback.status}), 200
+
+
+# ---------------------------------------------------------------------------
+# Polls — the admin side of the dev-update channel (#207). The admin sees
+# ONLY responses the user explicitly sent (opt-in 2); drafts, failures and
+# declines stay private to the user (declined/pending appear as counts only).
+# ---------------------------------------------------------------------------
+
+@admin_bp.route("/polls", methods=["POST"])
+@login_required
+@admin_required
+def create_poll():
+    from backend.models import Poll
+
+    question = ((request.get_json() or {}).get("question") or "").strip()
+    if not question:
+        return jsonify({"error": "Question is required."}), 400
+    poll = Poll(question=question, created_by=current_user.id)
+    db.session.add(poll)
+    db.session.commit()
+    return jsonify({"id": poll.id, "question": poll.question,
+                    "created_at": iso_utc(poll.created_at)}), 201
+
+
+@admin_bp.route("/polls", methods=["GET"])
+@login_required
+@admin_required
+def list_polls():
+    from backend.models import Poll, PollResponse
+
+    counts = {}
+    rows = db.session.query(
+        PollResponse.poll_id, PollResponse.status,
+        func.count(PollResponse.id)
+    ).group_by(PollResponse.poll_id, PollResponse.status).all()
+    for poll_id, status, n in rows:
+        counts.setdefault(poll_id, {})[status] = n
+
+    return jsonify({"polls": [
+        {
+            "id": p.id,
+            "question": p.question,
+            "created_at": iso_utc(p.created_at),
+            "closed_at": iso_utc(p.closed_at),
+            "sent_count": counts.get(p.id, {}).get("sent", 0),
+            "declined_count": counts.get(p.id, {}).get("declined", 0),
+        }
+        for p in Poll.query.order_by(Poll.created_at.desc()).all()
+    ]}), 200
+
+
+@admin_bp.route("/polls/<int:poll_id>/responses", methods=["GET"])
+@login_required
+@admin_required
+def list_poll_responses(poll_id):
+    from backend.models import Poll, PollResponse
+
+    poll = Poll.query.get_or_404(poll_id)
+    responses = PollResponse.query.filter_by(
+        poll_id=poll.id, status="sent").order_by(
+        PollResponse.sent_at.asc()).all()
+    return jsonify({
+        "poll": {"id": poll.id, "question": poll.question},
+        "responses": [
+            {
+                "id": r.id,
+                "username": r.user.username if r.user else None,
+                "content": r.get_content(),
+                "llm_drafted": r.generated_by is not None,
+                "sent_at": iso_utc(r.sent_at),
+            }
+            for r in responses
+        ],
+    }), 200
+
+
+@admin_bp.route("/polls/<int:poll_id>/close", methods=["POST"])
+@login_required
+@admin_required
+def close_poll(poll_id):
+    from backend.models import Poll
+
+    poll = Poll.query.get_or_404(poll_id)
+    if poll.closed_at is None:
+        poll.closed_at = datetime.utcnow()
+        db.session.commit()
+    return jsonify({"id": poll.id, "closed_at": iso_utc(poll.closed_at)}), 200

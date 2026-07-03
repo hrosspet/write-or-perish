@@ -88,6 +88,14 @@ class Config:
     SHARE_V1 = os.environ.get(
         "SHARE_V1", "true").lower() in ("1", "true", "yes")
 
+    # --- Dev-update channel: changelog + notifications + polls (#207) ---
+    # Intrinsically quiet (nothing shows unless something is unread), so it
+    # deploys on. This env var is the emergency KILL SWITCH only: set
+    # DEV_UPDATES_V1=false to make /api/updates serve nothing (the modal
+    # never appears) without a deploy.
+    DEV_UPDATES_V1 = os.environ.get(
+        "DEV_UPDATES_V1", "true").lower() in ("1", "true", "yes")
+
     # Safety factor for prompt-too-long retries (0.99 = aim for 99% of the limit)
     RETRY_SAFETY_FACTOR = 0.99
 

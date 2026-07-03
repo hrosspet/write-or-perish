@@ -60,6 +60,120 @@ function SortToggle({ dir, onToggle, label }) {
   );
 }
 
+// Polls — the admin side of the dev-update channel (#207). Ask the
+// community a question; read only the answers users explicitly sent.
+function AdminPolls() {
+  const [polls, setPolls] = useState([]);
+  const [question, setQuestion] = useState("");
+  const [responses, setResponses] = useState({}); // poll_id -> array
+  const [pollsError, setPollsError] = useState("");
+
+  const fetchPolls = async () => {
+    try {
+      const res = await api.get("/admin/polls");
+      setPolls(res.data.polls);
+    } catch (err) {
+      setPollsError("Failed to fetch polls.");
+    }
+  };
+
+  useEffect(() => { fetchPolls(); }, []);
+
+  const createPoll = async () => {
+    if (!question.trim()) return;
+    try {
+      await api.post("/admin/polls", { question });
+      setQuestion("");
+      fetchPolls();
+    } catch (err) {
+      setPollsError(err.response?.data?.error || "Failed to create poll.");
+    }
+  };
+
+  const toggleResponses = async (pollId) => {
+    if (responses[pollId]) {
+      setResponses((r) => {
+        const next = { ...r };
+        delete next[pollId];
+        return next;
+      });
+      return;
+    }
+    try {
+      const res = await api.get(`/admin/polls/${pollId}/responses`);
+      setResponses((r) => ({ ...r, [pollId]: res.data.responses }));
+    } catch (err) {
+      setPollsError("Failed to fetch responses.");
+    }
+  };
+
+  const closePoll = async (pollId) => {
+    try {
+      await api.post(`/admin/polls/${pollId}/close`);
+      fetchPolls();
+    } catch (err) {
+      setPollsError("Failed to close poll.");
+    }
+  };
+
+  return (
+    <div style={{ marginBottom: "20px", padding: "10px", border: "1px solid var(--border)" }}>
+      <h2>Polls</h2>
+      <div style={{ display: "flex", gap: "10px", marginBottom: "12px" }}>
+        <input
+          type="text"
+          value={question}
+          onChange={(e) => setQuestion(e.target.value)}
+          placeholder="Ask the community a question…"
+          style={{ padding: "8px", flex: 1 }}
+        />
+        <button onClick={createPoll}>Create poll</button>
+      </div>
+      {pollsError && <div style={{ color: "var(--error)" }}>{pollsError}</div>}
+      {polls.map((p) => (
+        <div key={p.id} style={{ borderTop: "1px solid var(--border)", padding: "8px 0" }}>
+          <div style={{ display: "flex", gap: "10px", alignItems: "baseline" }}>
+            <span style={{ flex: 1 }}>
+              {p.question}
+              {p.closed_at && (
+                <em style={{ color: "var(--text-muted)" }}> (closed)</em>
+              )}
+            </span>
+            <span style={{ color: "var(--text-muted)", fontSize: "0.85rem", whiteSpace: "nowrap" }}>
+              {p.sent_count} sent / {p.declined_count} declined
+            </span>
+            <button onClick={() => toggleResponses(p.id)}>
+              {responses[p.id] ? "Hide" : "Responses"}
+            </button>
+            {!p.closed_at && (
+              <button onClick={() => closePoll(p.id)}>Close</button>
+            )}
+          </div>
+          {responses[p.id] && (
+            responses[p.id].length === 0 ? (
+              <div style={{ color: "var(--text-muted)", padding: "6px 0 0 12px" }}>
+                No responses sent yet.
+              </div>
+            ) : (
+              responses[p.id].map((r) => (
+                <div key={r.id} style={{ padding: "6px 0 0 12px" }}>
+                  <strong>{r.username}</strong>
+                  {r.llm_drafted && (
+                    <span style={{ color: "var(--text-muted)", fontSize: "0.8rem" }}> (AI-drafted)</span>
+                  )}
+                  <div style={{ whiteSpace: "pre-wrap", color: "var(--text-secondary)" }}>
+                    {r.content}
+                  </div>
+                </div>
+              ))
+            )
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function AdminPanel() {
   const [users, setUsers] = useState([]);
   const [allowedPlans, setAllowedPlans] = useState([]);
@@ -234,6 +348,8 @@ function AdminPanel() {
         <button onClick={handleWhitelistUser}>Whitelist User</button>
         {newHandleError && <div style={{ color: "var(--error)" }}>{newHandleError}</div>}
       </div>
+
+      <AdminPolls />
 
       {error && <div style={{ color: "var(--error)" }}>{error}</div>}
       <table style={{ width: "100%", borderCollapse: "collapse", color: "var(--text-primary)" }}>

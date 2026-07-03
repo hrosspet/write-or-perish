@@ -957,3 +957,122 @@ class TTSChunk(db.Model):
         db.UniqueConstraint('node_id', 'chunk_index', name='uq_node_tts_chunk_index'),
         db.UniqueConstraint('profile_id', 'chunk_index', name='uq_profile_tts_chunk_index'),
     )
+
+
+class ChangelogReadState(db.Model):
+    """Per-user read/skip state for a section of the user-facing changelog
+    (#207). Sections live in backend/user_changelog.md (parsed by
+    backend/utils/changelog.py); this table only stores state, keyed by the
+    section's stable id. 'skipped' sections are still served as unread on
+    the next open — skip means "show again later", read means "done".
+    """
+    __tablename__ = "changelog_read_state"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    section_id = db.Column(db.String(128), nullable=False)
+    status = db.Column(db.String(16), nullable=False, default="read")
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           onupdate=datetime.utcnow)
+
+    user = db.relationship("User", backref="changelog_read_states")
+
+    __table_args__ = (
+        db.UniqueConstraint("user_id", "section_id",
+                            name="uq_changelog_read_user_section"),
+    )
+
+
+class UserNotification(db.Model):
+    """Targeted (single-user) in-app notification (#207): profile ready,
+    briefing ready, fix-ready. The broadcast sibling is the changelog file —
+    both are served through /api/updates with the same read/skip semantics.
+    Bodies are system-generated template text, never user content.
+    """
+    __tablename__ = "user_notification"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    # e.g. "profile_ready", "briefing_ready", "fix_ready"
+    type = db.Column(db.String(32), nullable=False)
+    title = db.Column(db.String(200), nullable=False)
+    body = db.Column(db.Text, nullable=True)
+    # Optional in-app link target (e.g. "/profile")
+    link = db.Column(db.String(255), nullable=True)
+    status = db.Column(db.String(16), nullable=False, default="unread",
+                       index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    read_at = db.Column(db.DateTime, nullable=True)
+    # Last time the user hit "skip for now" (stays unread)
+    skipped_at = db.Column(db.DateTime, nullable=True)
+
+    user = db.relationship("User", backref="notifications")
+
+
+class Poll(db.Model):
+    """A question the admin poses to users through the dev-update channel
+    (#207 polling extension). Answering is entirely opt-in and two-phase —
+    see PollResponse."""
+    __tablename__ = "poll"
+    id = db.Column(db.Integer, primary_key=True)
+    question = db.Column(db.Text, nullable=False)
+    created_by = db.Column(db.Integer, db.ForeignKey("user.id"),
+                           nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    closed_at = db.Column(db.DateTime, nullable=True)
+
+    creator = db.relationship("User", foreign_keys=[created_by])
+
+    @property
+    def active(self):
+        return self.closed_at is None
+
+
+class PollResponse(db.Model):
+    """A user's answer to a Poll, with two-phase consent structurally
+    enforced (#207):
+
+    * Opt-in 1 (optional): the user asks the LLM to draft an answer from
+      their archive (profile / recent context / intentions) —
+      draft_requested_at is the consent timestamp; the draft is PRIVATE.
+    * Opt-in 2 (required to share anything): the user explicitly sends the
+      (reviewed/edited or hand-written) answer — sent_at is the consent
+      timestamp. The admin endpoint serves ONLY status='sent' rows; drafts
+      and declined rows are never visible to anyone but the user.
+
+    status: drafting -> draft -> sent | declined ('draft_failed' when the
+    LLM draft task errored; the user can retry or write manually).
+    Content is encrypted at rest like all user content.
+    """
+    __tablename__ = "poll_response"
+    id = db.Column(db.Integer, primary_key=True)
+    poll_id = db.Column(db.Integer, db.ForeignKey("poll.id"),
+                        nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    content = db.Column(db.Text, nullable=True)
+    status = db.Column(db.String(16), nullable=False, default="draft",
+                       index=True)
+    # Model id when the current content came from an LLM draft; null for
+    # hand-written answers (cleared when the user edits).
+    generated_by = db.Column(db.String(64), nullable=True)
+    draft_task_id = db.Column(db.String(255), nullable=True)
+    draft_requested_at = db.Column(db.DateTime, nullable=True)
+    sent_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           onupdate=datetime.utcnow)
+
+    poll = db.relationship("Poll", backref="responses")
+    user = db.relationship("User", backref="poll_responses")
+
+    __table_args__ = (
+        db.UniqueConstraint("poll_id", "user_id",
+                            name="uq_poll_response_poll_user"),
+    )
+
+    def set_content(self, plaintext):
+        self.content = encrypt_content(plaintext)
+
+    def get_content(self):
+        return decrypt_content(self.content) if self.content else ""

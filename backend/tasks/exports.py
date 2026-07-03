@@ -240,6 +240,9 @@ def generate_user_profile(self, user_id: int, model_id: str):
 
             logger.info(f"Profile generation successful for user {user_id}, profile ID: {new_profile.id}")
 
+            from backend.utils.notifications import notify_profile_ready
+            notify_profile_ready(user_id)
+
             return {
                 'user_id': user_id,
                 'profile_id': new_profile.id,
@@ -471,6 +474,9 @@ def update_user_profile(self, user_id: int, model_id: str,
                 )
 
             success = True
+            if result and result.get('profile_id'):
+                from backend.utils.notifications import notify_profile_ready
+                notify_profile_ready(user_id)
             return result
 
         except Exception as e:
