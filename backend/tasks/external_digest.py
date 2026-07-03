@@ -48,9 +48,13 @@ actually supports). For each topic give a short heading, a one-sentence \
 description of what's there, an approximate item count, and 2-4 \
 representative items (author handle + a few words each).
 - Note the overall shape at the top: total items, dominant themes, rough \
-time range. Use the exact counts from the corpus header — you cannot \
+time range. Use the exact total from the corpus header — you cannot \
 reliably count the list yourself, so don't estimate how many items you \
 were shown.
+- Your clusters need not cover every item — a fat head of clear topics \
+beats exhaustive coverage. But SAY what you did: roughly how many items \
+the clusters account for, and one line characterizing the uncovered \
+remainder (e.g. "long tail of one-off links and jokes").
 - This digest is read by an AI assistant deciding whether the user's \
 saved references might contain something relevant to a live \
 conversation — write for that reader: dense, factual, scannable. No \
