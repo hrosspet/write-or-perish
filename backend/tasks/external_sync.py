@@ -8,6 +8,7 @@ OAuth account (pay-per-use X API; env-gated by X_CLIENT_ID). Refreshes
 the access token when expired.
 """
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import requests
 from celery.utils.log import get_task_logger
@@ -179,26 +180,52 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
                 "requests": requests_made}
 
 
+# The nightly sync fires in each user's OWN night: the hourly beat gate
+# dispatches an account when its user's local clock (User.timezone,
+# browser-captured IANA name, UTC fallback) is in this hour.
+NIGHTLY_SYNC_LOCAL_HOUR = 3
+# Re-dispatch guard: beat restarts shift the gate's phase within the
+# hour, so without this a user could sync twice in one night.
+NIGHTLY_SYNC_MIN_GAP = timedelta(hours=20)
+
+
+def _user_local_hour(user):
+    tzname = (getattr(user, "timezone", None) or "UTC").strip() or "UTC"
+    try:
+        return datetime.now(ZoneInfo(tzname)).hour
+    except Exception:  # noqa: BLE001 — unknown zone name -> UTC
+        return datetime.utcnow().hour
+
+
 @celery.task(name='backend.tasks.external_sync.sync_all_twitter_bookmarks')
 def sync_all_twitter_bookmarks():
-    """Nightly fan-out (beat): refresh bookmarks for every connected,
-    non-revoked X account. Runs BEFORE anything context-side is rebuilt —
-    a change in bookmarks warrants a digest/pre-selection refresh even
-    when the user hasn't touched Loore (they may have been active on X).
-    Downstream chaining is per-user via _post_import. No-op until
-    X_CLIENT_ID is configured."""
+    """Hourly beat gate: dispatch bookmark syncs for connected, non-revoked
+    X accounts whose user's LOCAL time is ~3am, so every user syncs in
+    their own night. Runs BEFORE anything context-side is rebuilt — X
+    activity alone warrants a digest/pre-selection refresh even when the
+    user hasn't touched Loore. Downstream chaining is per-user via
+    _post_import. No-op until X_CLIENT_ID is configured."""
     with flask_app.app_context():
         if not flask_app.config.get("X_CLIENT_ID"):
             return {"status": "not_configured"}
+        now = datetime.utcnow()
         accounts = ExternalAccount.query.filter(
             ExternalAccount.provider == "twitter",
             ExternalAccount.access_token.isnot(None),
             ExternalAccount.revoked_at.is_(None),
         ).all()
-        for i, account in enumerate(accounts):
+        dispatched = 0
+        for account in accounts:
+            if _user_local_hour(account.user) != NIGHTLY_SYNC_LOCAL_HOUR:
+                continue
+            if (account.last_synced_at
+                    and now - account.last_synced_at < NIGHTLY_SYNC_MIN_GAP):
+                continue
             # Staggered so N users don't hit X (and the digest LLM) at once.
             sync_twitter_bookmarks.apply_async(
-                args=[account.user_id], countdown=i * 30)
-        logger.info("Nightly X bookmark sync dispatched for %d accounts",
-                    len(accounts))
-        return {"status": "ok", "dispatched": len(accounts)}
+                args=[account.user_id], countdown=dispatched * 30)
+            dispatched += 1
+        if dispatched:
+            logger.info("Nightly X bookmark sync dispatched for %d accounts",
+                        dispatched)
+        return {"status": "ok", "dispatched": dispatched}

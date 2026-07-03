@@ -113,6 +113,14 @@ def _mk_account(user_id, revoked=False, expired=True):
     return account
 
 
+def _tz_at_hour(target_hour):
+    """An IANA zone whose CURRENT local hour == target_hour, built from the
+    fixed-offset Etc/GMT zones (POSIX-inverted signs: Etc/GMT+5 = UTC-5)."""
+    from datetime import datetime
+    x = (datetime.utcnow().hour - target_hour) % 24
+    return f"Etc/GMT+{x}" if x <= 12 else f"Etc/GMT-{24 - x}"
+
+
 def _http_error(status):
     resp = MagicMock()
     resp.status_code = status
@@ -171,14 +179,29 @@ def test_revoked_account_is_skipped(app):
     assert result["status"] == "revoked"
 
 
-def test_nightly_fanout_dispatches_connected_only(app, monkeypatch):
-    uid = User.query.first().id
-    _mk_account(uid)  # connected, healthy
-    revoked_user = User(username="revoked")
-    empty_user = User(username="never-connected")
-    _db.session.add_all([revoked_user, empty_user])
+def test_nightly_fanout_dispatches_local_3am_connected_only(app, monkeypatch):
+    """Only connected, non-revoked accounts whose user's LOCAL clock is in
+    the 3am hour get dispatched; recently-synced accounts are skipped."""
+    from datetime import datetime, timedelta
+    night_tz = _tz_at_hour(_sync_mod.NIGHTLY_SYNC_LOCAL_HOUR)
+    day_tz = _tz_at_hour((_sync_mod.NIGHTLY_SYNC_LOCAL_HOUR + 12) % 24)
+
+    night_user = User.query.first()
+    night_user.timezone = night_tz
+    _mk_account(night_user.id)
+
+    day_user = User(username="daytime", timezone=day_tz)
+    revoked_user = User(username="revoked", timezone=night_tz)
+    fresh_user = User(username="freshly-synced", timezone=night_tz)
+    no_account_user = User(username="never-connected", timezone=night_tz)
+    _db.session.add_all([day_user, revoked_user, fresh_user,
+                         no_account_user])
     _db.session.commit()
+    _mk_account(day_user.id)
     _mk_account(revoked_user.id, revoked=True)
+    fresh = _mk_account(fresh_user.id)
+    fresh.last_synced_at = datetime.utcnow() - timedelta(hours=2)
+    _db.session.commit()
 
     dispatched = []
     fake_task = MagicMock()
@@ -188,7 +211,28 @@ def test_nightly_fanout_dispatches_connected_only(app, monkeypatch):
 
     result = _sync_mod.sync_all_twitter_bookmarks()
     assert result == {"status": "ok", "dispatched": 1}
-    assert dispatched == [(uid, 0)]
+    assert dispatched == [(night_user.id, 0)]
+
+
+def test_nightly_fanout_unknown_timezone_falls_back_to_utc(app, monkeypatch):
+    """A broken/unset timezone must not crash the gate — it evaluates as
+    UTC and simply syncs in UTC's night."""
+    from datetime import datetime
+    uid = User.query.first().id
+    User.query.get(uid).timezone = "Not/AZone"
+    _mk_account(uid)
+    _db.session.commit()
+
+    dispatched = []
+    fake_task = MagicMock()
+    fake_task.apply_async = lambda args, countdown: dispatched.append(
+        args[0])
+    monkeypatch.setattr(_sync_mod, "sync_twitter_bookmarks", fake_task)
+
+    result = _sync_mod.sync_all_twitter_bookmarks()
+    expected = (1 if datetime.utcnow().hour
+                == _sync_mod.NIGHTLY_SYNC_LOCAL_HOUR else 0)
+    assert result == {"status": "ok", "dispatched": expected}
 
 
 def test_nightly_fanout_noop_without_client_id(app, monkeypatch):

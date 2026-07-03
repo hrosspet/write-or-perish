@@ -34,7 +34,9 @@ for _k, _v in _GLUE.items():
     sys.modules[_k] = _v
 sys.modules.pop("backend.tasks.tts", None)
 
-from backend.tasks.tts import _strip_heading_sections  # noqa: E402
+from backend.tasks.tts import (  # noqa: E402
+    _strip_heading_sections, _strip_quote_markers,
+)
 
 for _k, _v in _saved.items():
     if _v is None:
@@ -89,3 +91,19 @@ def test_trailing_commentary_after_share_type_spoken():
     # Structured parts are shown in the card, never spoken.
     assert "thinking partner" not in out
     assert "need" not in out
+
+
+def test_quote_markers_never_spoken():
+    """{quote:ID} / {quote_ext:ID} render as cards visually; TTS must not
+    read the literal marker aloud (#208 quote-as-response)."""
+    text = ("Found it. {quote_ext:836} That's the guide by @blissbrah.\n"
+            "Also see {quote:123} from March.")
+    out = _strip_quote_markers(text)
+    assert "quote_ext" not in out and "{quote:" not in out
+    assert "Found it. That's the guide by @blissbrah." in out
+    assert "Also see from March." in out  # prose flows, no double spaces
+
+
+def test_quote_marker_only_content_becomes_empty():
+    assert _strip_quote_markers("{quote_ext:5}") == ""
+    assert _strip_quote_markers("") == ""

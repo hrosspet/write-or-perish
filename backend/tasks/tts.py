@@ -5,6 +5,7 @@ Supports streaming playback - each chunk's audio URL is stored in TTSChunk
 and can be played as soon as it's ready, without waiting for all chunks.
 """
 import json
+import re
 from celery import Task
 from celery.utils.log import get_task_logger
 from openai import OpenAI
@@ -24,6 +25,16 @@ from backend.utils.cost import calculate_audio_cost_microdollars
 logger = get_task_logger(__name__)
 
 
+def _strip_quote_markers(text):
+    """Remove {quote:ID} / {quote_ext:ID} markers from TTS input — they
+    render as quote cards visually; spoken aloud they'd be read as literal
+    brace-noise. The surrounding prose already introduces the quote."""
+    text = re.sub(r'[ \t]*\{quote(?:_ext)?:\d+\}[ \t]*', ' ', text)
+    # Collapse the whitespace the removal leaves behind.
+    text = re.sub(r' {2,}', ' ', text)
+    return re.sub(r'[ \t]+\n', '\n', text).strip()
+
+
 def _strip_heading_sections(text):
     """Extract spoken parts from a structured Voice response.
 
@@ -37,7 +48,6 @@ def _strip_heading_sections(text):
     block (after a single-line Category / Feedback category value). The
     structured lists/values are shown visually but not spoken.
     """
-    import re
     # Extract intro text before the first ### heading
     first_heading = re.search(r'^###\s+', text, flags=re.MULTILINE)
     intro = text[:first_heading.start()].strip() if first_heading else ""
@@ -360,7 +370,7 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str,
                     'tts_url': node.audio_tts_url
                 }
 
-            text = node.get_content() or ""
+            text = _strip_quote_markers(node.get_content() or "")
             if not text:
                 logger.info(f"No text content for node {node_id}, skipping TTS")
                 node.tts_task_status = 'completed'
