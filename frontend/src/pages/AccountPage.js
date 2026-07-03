@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useUser } from "../contexts/UserContext";
 import ModelSelector from "../components/ModelSelector";
 import api from "../api";
@@ -303,7 +303,10 @@ export default function AccountPage() {
           <div style={helperStyle}>
             Let Loore search your archive and your saved external content
             (imported tweets and bookmarks) during conversations, and quote
-            what it finds. Import bookmarks on the Import page. Experimental.
+            what it finds. Import bookmarks on the{" "}
+            <Link to="/import" style={{ color: "var(--accent)" }}>
+              Import page
+            </Link>. Experimental.
           </div>
         </div>
       )}

@@ -111,7 +111,7 @@ export default function ExternalImport() {
 
   const syncX = async () => {
     setBusy(true);
-    setXSyncMsg('Syncing\u2026');
+    setXSyncMsg(null);  // result text appears when the sync lands
     const baselineCount = counts.twitter_bookmark || 0;
     const baselineSynced = xStatus?.last_synced_at || null;
     try {
