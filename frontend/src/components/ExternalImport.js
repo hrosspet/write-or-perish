@@ -44,6 +44,7 @@ export default function ExternalImport() {
   const [caUsername, setCaUsername] = useState('');
   const [caStatus, setCaStatus] = useState(null);
   const [xStatus, setXStatus] = useState(null);
+  const [xSyncMsg, setXSyncMsg] = useState(null);
   const [busy, setBusy] = useState(false);
   const fileRef = useRef(null);
   const pollRef = useRef(null);
@@ -110,13 +111,49 @@ export default function ExternalImport() {
 
   const syncX = async () => {
     setBusy(true);
+    setXSyncMsg('Syncing\u2026');
+    const baselineCount = counts.twitter_bookmark || 0;
+    const baselineSynced = xStatus?.last_synced_at || null;
     try {
       await api.post('/external/twitter/sync');
-      pollCounts();
     } catch (e) {
-      alert(e.response?.data?.error || 'Sync failed.');
+      setXSyncMsg(e.response?.data?.error || 'Sync failed.');
+      setBusy(false);
+      return;
     }
-    setBusy(false);
+    // The sync runs in the background; poll until last_synced_at moves,
+    // then report what actually happened.
+    let ticks = 0;
+    pollRef.current && clearInterval(pollRef.current);
+    pollRef.current = setInterval(async () => {
+      ticks += 1;
+      try {
+        const [itemsRes, xRes] = await Promise.all([
+          api.get('/external/items', { params: { per_page: 1 } }),
+          api.get('/external/twitter/status'),
+        ]);
+        setCounts(itemsRes.data.counts || {});
+        setXStatus(xRes.data);
+        if (xRes.data.last_synced_at
+            && xRes.data.last_synced_at !== baselineSynced) {
+          clearInterval(pollRef.current);
+          const created =
+            (itemsRes.data.counts?.twitter_bookmark || 0) - baselineCount;
+          setXSyncMsg(created > 0
+            ? `Synced \u2014 ${created} new bookmark${created === 1 ? '' : 's'}.`
+            : 'Synced \u2014 no new bookmarks.');
+          setBusy(false);
+        } else if (xRes.data.revoked) {
+          clearInterval(pollRef.current);
+          setXSyncMsg('X access was revoked \u2014 reconnect below.');
+          setBusy(false);
+        } else if (ticks >= 20) {
+          clearInterval(pollRef.current);
+          setXSyncMsg('Still syncing in the background \u2014 check back in a minute.');
+          setBusy(false);
+        }
+      } catch (e) { /* transient — keep polling */ }
+    }, 3000);
   };
 
   return (
@@ -179,8 +216,13 @@ export default function ExternalImport() {
               {xStatus.last_synced_at ? ` · last synced ${xStatus.last_synced_at.slice(0, 10)}` : ''}
             </p>
             <button onClick={syncX} disabled={busy} style={buttonStyle}>
-              Sync bookmarks
+              {busy ? 'Syncing\u2026' : 'Sync bookmarks'}
             </button>
+            {xSyncMsg && (
+              <p style={{ ...helpStyle, marginTop: '8px', color: 'var(--text-secondary)' }}>
+                {xSyncMsg}
+              </p>
+            )}
             <p style={{ ...helpStyle, marginTop: '8px' }}>
               New bookmarks sync automatically once a night — the button is
               just for syncing right now.
