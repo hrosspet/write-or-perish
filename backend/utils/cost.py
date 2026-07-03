@@ -18,6 +18,11 @@ CACHE_WRITE_MULTIPLIER = 1.25
 # SUPPORTED_MODELS. Update if X reprices.
 X_REQUEST_COST_MICRODOLLARS = 5000
 
+# OpenAI text-embedding-3-small: $0.02/MTok, i.e. 0.02 microdollars per
+# token-millionth — used as (tokens * price) since the million factors
+# cancel (same convention as calculate_llm_cost_microdollars).
+EMBEDDING_PRICE_PER_MTOK = 0.02
+
 
 def calculate_llm_cost_microdollars(model_id, input_tokens, output_tokens,
                                     batch=False, cache_read_tokens=0,

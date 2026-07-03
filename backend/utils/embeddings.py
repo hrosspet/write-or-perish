@@ -14,11 +14,11 @@ from array import array
 
 from backend.extensions import db
 from backend.models import APICostLog
+from backend.utils.cost import EMBEDDING_PRICE_PER_MTOK
 
 logger = logging.getLogger(__name__)
 
 EMBEDDING_MODEL = "text-embedding-3-small"
-EMBEDDING_PRICE_PER_MTOK = 0.02
 # text-embedding-3-small hard-caps each input at 8191 tokens. We cap by
 # chars (no tokenizer dependency). Prose runs ~4 chars/token in English but
 # can be ~2.2 in Czech and lower still for code/CJK, so 30000 chars routinely
