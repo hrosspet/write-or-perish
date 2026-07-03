@@ -181,6 +181,10 @@ export default function ExternalImport() {
             <button onClick={syncX} disabled={busy} style={buttonStyle}>
               Sync bookmarks
             </button>
+            <p style={{ ...helpStyle, marginTop: '8px' }}>
+              New bookmarks sync automatically once a night — the button is
+              just for syncing right now.
+            </p>
           </>
         ) : xStatus && xStatus.configured ? (
           <>
