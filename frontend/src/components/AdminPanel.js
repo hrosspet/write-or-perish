@@ -249,6 +249,89 @@ function AdminPolls() {
   );
 }
 
+// User feedback (#158): proposed by the AI in conversation, sent only on
+// the user's explicit confirm. The admin API existed without a UI —
+// this lists items and manages their triage status.
+const FEEDBACK_STATUSES = ["new", "reviewed", "done"];
+
+function AdminFeedback() {
+  const [items, setItems] = useState([]);
+  const [filter, setFilter] = useState("new");
+  const [feedbackError, setFeedbackError] = useState("");
+
+  useEffect(() => {
+    api.get("/admin/feedback")
+      .then((res) => setItems(res.data.feedback || []))
+      .catch(() => setFeedbackError("Failed to fetch feedback."));
+  }, []);
+
+  const updateStatus = async (id, status) => {
+    try {
+      await api.put(`/admin/feedback/${id}`, { status });
+      setItems((prev) =>
+        prev.map((f) => (f.id === id ? { ...f, status } : f)));
+    } catch (err) {
+      setFeedbackError("Failed to update feedback status.");
+    }
+  };
+
+  const visible = filter === "all"
+    ? items
+    : items.filter((f) => f.status === filter);
+  const countFor = (s) => items.filter((f) => f.status === s).length;
+
+  return (
+    <div style={{ marginBottom: "20px", padding: "10px", border: "1px solid var(--border)" }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: "12px" }}>
+        <h2>Feedback</h2>
+        <select
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          style={{ ...adminSelectStyle, padding: "6px 10px", fontSize: "0.85rem" }}
+        >
+          <option value="all">All ({items.length})</option>
+          {FEEDBACK_STATUSES.map((s) => (
+            <option key={s} value={s}>{s} ({countFor(s)})</option>
+          ))}
+        </select>
+      </div>
+      {feedbackError && (
+        <div style={{ color: "var(--error)" }}>{feedbackError}</div>
+      )}
+      {visible.length === 0 ? (
+        <div style={{ color: "var(--text-muted)", padding: "8px 0" }}>
+          Nothing here.
+        </div>
+      ) : (
+        visible.map((f) => (
+          <div key={f.id} style={{ borderTop: "1px solid var(--border)", padding: "10px 0" }}>
+            <div style={{ display: "flex", gap: "10px", alignItems: "baseline" }}>
+              <strong>{f.username || `user ${f.user_id}`}</strong>
+              <span style={{ color: "var(--text-muted)", fontSize: "0.8rem" }}>
+                {f.category} · {f.source} ·{" "}
+                {f.created_at ? new Date(f.created_at).toLocaleDateString() : ""}
+              </span>
+              <span style={{ flex: 1 }} />
+              <select
+                value={f.status}
+                onChange={(e) => updateStatus(f.id, e.target.value)}
+                style={{ ...adminSelectStyle, padding: "6px 10px", fontSize: "0.85rem" }}
+              >
+                {FEEDBACK_STATUSES.map((s) => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </select>
+            </div>
+            <div style={{ whiteSpace: "pre-wrap", color: "var(--text-secondary)", marginTop: "4px" }}>
+              {f.content}
+            </div>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
 function AdminPanel() {
   const [users, setUsers] = useState([]);
   const [allowedPlans, setAllowedPlans] = useState([]);
@@ -425,6 +508,8 @@ function AdminPanel() {
       </div>
 
       <AdminPolls />
+
+      <AdminFeedback />
 
       {error && <div style={{ color: "var(--error)" }}>{error}</div>}
       <table style={{ width: "100%", borderCollapse: "collapse", color: "var(--text-primary)" }}>
