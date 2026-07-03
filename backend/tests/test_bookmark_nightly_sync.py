@@ -29,7 +29,9 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
         del sys.modules[_mod]
 
 from backend.extensions import db as _db  # noqa: E402
-from backend.models import User, ExternalAccount  # noqa: E402
+from backend.models import (  # noqa: E402
+    User, ExternalAccount, APICostLog,
+)
 
 
 def _make_app():
@@ -198,3 +200,26 @@ def test_nightly_fanout_noop_without_client_id(app, monkeypatch):
     finally:
         _app.config["X_CLIENT_ID"] = "client-id"
     assert result == {"status": "not_configured"}
+
+
+def test_successful_sync_logs_api_cost(app, monkeypatch):
+    """Every consumed page is a paid request; the sync logs the spend to
+    APICostLog like any other provider call."""
+    uid = User.query.first().id
+    _mk_account(uid, expired=False)
+
+    def two_pages(token, x_user_id, max_items=800):
+        yield [{"external_id": "n1", "content": "new one",
+                "author_handle": "x", "url": None, "posted_at": None}]
+        yield []  # stale page -> early stop; still a paid request
+        raise AssertionError("third page must never be fetched")
+    monkeypatch.setattr(_sync_mod, "x_fetch_bookmark_pages", two_pages)
+    monkeypatch.setattr(_sync_mod, "_post_import", lambda *a: None)
+
+    result = _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    assert result == {"status": "ok", "created": 1, "skipped": 0,
+                      "requests": 2}
+    log = APICostLog.query.filter_by(
+        user_id=uid, request_type="x_bookmark_sync").one()
+    assert log.cost_microdollars == 2 * _sync_mod.X_REQUEST_COST_MICRODOLLARS
+    assert log.model_id == "x-api/bookmarks"

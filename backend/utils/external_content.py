@@ -174,8 +174,9 @@ def x_fetch_bookmark_pages(access_token, x_user_id, max_items=800):
                 fetched += 1
                 if fetched >= max_items:
                     break
-        if page:
-            yield page
+        # Empty pages are yielded too: every yield corresponds to exactly
+        # one paid API request, so the caller can meter cost by counting.
+        yield page
         next_token = (payload.get("meta") or {}).get("next_token")
         if not next_token:
             break

@@ -14,13 +14,17 @@ from celery.utils.log import get_task_logger
 
 from backend.celery_app import celery, flask_app
 from backend.extensions import db
-from backend.models import ExternalAccount, ExternalItem
+from backend.models import APICostLog, ExternalAccount, ExternalItem
 from backend.utils.external_content import (
     ca_fetch_tweets, ca_lookup_account, x_fetch_bookmark_pages,
     x_refresh_access_token,
 )
 
 logger = get_task_logger(__name__)
+
+# X API pay-per-use price per bookmarks request, in microdollars
+# ($0.005/request as of 2026-07 — hardcoded; update if X reprices).
+X_REQUEST_COST_MICRODOLLARS = 5000
 
 
 def _post_import(user_id, created):
@@ -137,11 +141,12 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
         # rest is already imported — stop instead of paying for the tail.
         # Page-wise (not first-known-id) because a re-bookmarked old tweet
         # jumps to the top and would otherwise mask newer items below it.
-        created = skipped = 0
+        created = skipped = requests_made = 0
         try:
             for page in x_fetch_bookmark_pages(
                     account.get_access_token(), account.external_user_id,
                     max_items=max_items):
+                requests_made += 1  # one yielded page == one paid request
                 page_created, page_skipped = _upsert_items(
                     user_id, "twitter_bookmark", page)
                 created += page_created
@@ -158,11 +163,23 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
                 return _mark_revoked(account, "bookmarks fetch HTTP 401")
             raise
         account.last_synced_at = datetime.utcnow()
+        if requests_made:
+            db.session.add(APICostLog(
+                user_id=user_id,
+                model_id="x-api/bookmarks",
+                request_type="x_bookmark_sync",
+                input_tokens=0,
+                output_tokens=0,
+                cost_microdollars=(
+                    requests_made * X_REQUEST_COST_MICRODOLLARS),
+            ))
         db.session.commit()
-        logger.info("X bookmarks sync for user %s: %d new, %d known",
-                    user_id, created, skipped)
+        logger.info("X bookmarks sync for user %s: %d new, %d known, "
+                    "%d API requests", user_id, created, skipped,
+                    requests_made)
         _post_import(user_id, created)
-        return {"status": "ok", "created": created, "skipped": skipped}
+        return {"status": "ok", "created": created, "skipped": skipped,
+                "requests": requests_made}
 
 
 @celery.task(name='backend.tasks.external_sync.sync_all_twitter_bookmarks')
