@@ -47,6 +47,7 @@ These technical capabilities are production-ready and form the foundation:
 - **Pin-to-profile** - Pin selected nodes to user profile page (#60)
 - **Cmd+Click navigation** - Open nodes in new tab across all previews
 - **Dev-update channel** (#207) - In-app "what's new" surface: user-facing changelog authored as a markdown file in the repo (`backend/user_changelog.md`, per-section per-user read/skip state, date-gated so new users get no backlog), persistent targeted notifications (profile-generation-complete wired as first producer), and admin polls with two-phase opt-in (LLM drafts an answer from the user's profile only on explicit request; nothing reaches the admin until the user explicitly sends). `DEV_UPDATES_V1` killswitch. This modal is the announcement channel for dark-shipped features (e.g. the public side / Commons).
+- **Quote-as-response over saved references** (#208) - Feature 2 (Download) v1: external-content substrate (`ExternalItem` — references ≠ lore; X OAuth nightly sync in each user's own 3am with early-stop pagination + revocation handling + `APICostLog` metering; Community Archive fetch; craft-mode JSON import with enrichment folding), agentic `semantic_search` across own archive + references (labeled previews, server-side canonicalization of `{quote:label}` → absolute markers), `read_full` tool (query intent) vs quote markers (presentation only, verbatim cards — never LLM-retyped), `external_digest` topic-map artifact, surfacing-history metadata instead of cooldown rules. Ships as a per-user Account easter-egg toggle (`external_content_enabled`, default off — also activates #197's agentic own-archive search); `SEMANTIC_SEARCH_AGENTIC` env is killswitch-only. Follow-ups: #231 (tripwire), #232 (browser extension), #233 (overnight batch pre-selection — lags one day by design).
 
 ### User Plan Tiers
 
@@ -237,6 +238,8 @@ Users have a `plan` column (string, max 16 chars) on the User model. The plan co
 ---
 
 ## Feature 2: Download (MemeOS Integration)
+
+> **✅ SHIPPED as quote-as-response (#208, 2026-07-03)** — reframed away from MemeOS + sidebar recommendations; see the Already Built entry and FOUR-FEATURE-ECOSYSTEM.md Feature 2 for the shipped shape. Item statuses below: embeddings/semantic search/RAG ✅ (via #155/#197/#208, brute-force scan not pgvector — fine at alpha scale); MemeOS client ❌ dropped; recommendation engine ✅ superseded by quote-as-response; theme extraction ✅ as the `external_digest` artifact; spaced-repetition ranking ❌ replaced by legible age/surfacing metadata + prompt instruction (no hidden 70/30 fudge).
 
 **Vector database with pgvector extension** - Store and query embeddings for semantic search over nodes and bookmarks, enabling 10ms similarity searches at scale
 
@@ -770,6 +773,7 @@ This roadmap prioritizes **privacy & encryption first** (Phase -1), then **found
 16. ✅ **COMPLETED:** Context artifact tracking (#77) + URL-style export params (#79)
 17. ✅ **COMPLETED:** Hierarchical context freshness (#80, #84, #86)
 19. ✅ **COMPLETED:** Proposal tracking with explicit IDs and lifecycle statuses, confirmation nodes
+19b. ✅ **COMPLETED:** Feature 2 Download as quote-as-response (#208) — substrate, nightly X sync, digest, labeled search + read_full, per-user easter-egg activation
 20. **NOW:** Implement text mode — last major feature before expanding alpha to ~10 users
 21. **NOW:** Stabilize Voice/Todo workflow — open bugs: todo merge hangs (#87), checkbox UX (#93, #94), interactive proposal editing (#89), completed item deletion (#97)
 22. **NOW:** Protected usernames (#91) + Anthropic API spend monitoring (#85)

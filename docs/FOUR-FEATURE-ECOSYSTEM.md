@@ -52,20 +52,24 @@ Write or Perish evolves from journaling app to **distributed intelligence networ
 
 ---
 
-### Feature 2: Download - User-Aligned Content Recommendation (Designed)
+### Feature 2: Download - Quote-as-Response over Saved References (✅ Shipped v1)
 
-**Purpose:** Surface relevant content from your bookmark archive when you need it.
+**Purpose:** Surface relevant content from your saved external corpus (X bookmarks, Community Archive) when it genuinely serves the moment.
 
-**How It Works:**
-1. You write about topic X in journal
-2. System analyzes: current node + thread context + personal profile
-3. MemeOS integration surfaces bookmarks about X
-4. Ranking: 70% semantic relevance + 30% spaced repetition urgency
-5. "Related content you've saved" appears in sidebar
+**How It Shipped (#208, 2026-07-03)** — reframed from "recommendations sidebar" to **quote-as-response**: Loore's default way of surfacing pre-existing content is to *quote it inside its reply* and explain relevance in its own live voice. A quote borrows its author's validity (the user chose to save that voice); the commentary defeats recency bias by re-timing old content into the present.
 
-**Value:** Your writing context becomes the query for what to read next.
+- ✅ **Substrate**: `ExternalItem` (separate from Nodes — references ≠ lore), X OAuth sync (nightly, per-user 3am via `User.timezone`; early-stop pagination ≈ 1 paid request/night; revocation handling; costs metered to `APICostLog`), Community Archive fetch, craft-mode JSON import (deep backfill beyond the API's ~100-item window) with enrichment folding (quoted tweet, link card, media alt, expanded links)
+- ✅ **Search**: agentic `semantic_search` covers own archive + references in one query embedding; labeled previews (`[A]`, `[B]`) with surfacing-history metadata; server-side canonicalization to `{quote:<id>}`/`{quote_ext:<id>}` (kills the id-typo bug)
+- ✅ **Two intents, two mechanics**: `read_full` tool = query intent (read before answering, uniform for entries + references); quote markers = presentation only (verbatim card from DB, never LLM-retyped — trust invariant)
+- ✅ **Digest artifact** (`external_digest`): topic map of the corpus, rebuilt on import, read on demand via the artifacts index
+- ✅ **Activation**: per-user easter-egg toggle (`external_content_enabled`, Account page, default off) — the #229 pattern; `SEMANTIC_SEARCH_AGENTIC` env is killswitch-only. NOTE: the toggle also activates agentic own-archive search (#197's dark feature)
+- ✅ Surfacing history (`surfaced_count`/`last_surfaced_at`) as visible metadata — no hardcoded cooldowns; timing/restraint/validity mechanics live in `{external_content_guidance}`
 
-**Status:** 📋 Designed (see CHAT-AND-MEMEOS-ARCHITECTURE.md)
+**Deliberately not built (follow-ups):** overnight batch pre-selection with draft reasoning (#233 — always lags one day, by design), embedding tripwire as spending gate (#231), browser extension for deep backfill (#232), plaintext keyword search for public tweets, likes import, og-fetch for cardless links. The 70/30 spaced-repetition blend was replaced by legible age/surfacing metadata + prompt instruction (no hidden fudge factors). MemeOS dependency dropped.
+
+**Value:** Your writing context becomes the query for what to read next — delivered as a quoted voice in the conversation, not a sidebar to ignore.
+
+**Status:** ✅ Shipped v1 (dark, per-user opt-in) — #208
 
 ---
 
