@@ -55,6 +55,9 @@ services:
       - PROFILE_UPDATES_PAUSED=${PROFILE_UPDATES_PAUSED:-false}
       - SHARE_V1=${SHARE_V1:-false}
       - SEMANTIC_SEARCH_AGENTIC=${SEMANTIC_SEARCH_AGENTIC:-false}
+      - X_CLIENT_ID=${X_CLIENT_ID:-}
+      - X_CLIENT_SECRET=${X_CLIENT_SECRET:-}
+      - X_REDIRECT_URI=${X_REDIRECT_URI:-}
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
       - LLM_NAME=${LLM_NAME:-claude-opus-4.6}
       - FLASK_ENV=${FLASK_ENV:-production}
@@ -98,6 +101,9 @@ services:
       - PROFILE_UPDATES_PAUSED=${PROFILE_UPDATES_PAUSED:-false}
       - SHARE_V1=${SHARE_V1:-false}
       - SEMANTIC_SEARCH_AGENTIC=${SEMANTIC_SEARCH_AGENTIC:-false}
+      - X_CLIENT_ID=${X_CLIENT_ID:-}
+      - X_CLIENT_SECRET=${X_CLIENT_SECRET:-}
+      - X_REDIRECT_URI=${X_REDIRECT_URI:-}
       - LLM_NAME=${LLM_NAME:-claude-opus-4.6}
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - GITHUB_REPO=${GITHUB_REPO}

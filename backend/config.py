@@ -75,8 +75,14 @@ class Config:
     # DARK: gated off by default so it can be enabled per-environment (on in
     # staging) and validated before prod. Off → the tool is dropped from the
     # agentic tool list and the model never sees it.
+    # Agentic archive search + external references (#155/#208). Deployed
+    # by default; the DARKNESS is per-user (User.external_content_enabled,
+    # default off — the Account toggle is the easter-egg opt-in). This env
+    # var is the emergency KILL SWITCH only: set SEMANTIC_SEARCH_AGENTIC
+    # =false to drop the semantic_search tool, quote pulls, and the
+    # conditional prompt guidance for everyone without a deploy.
     SEMANTIC_SEARCH_AGENTIC = os.environ.get(
-        "SEMANTIC_SEARCH_AGENTIC", "false").lower() in ("1", "true", "yes")
+        "SEMANTIC_SEARCH_AGENTIC", "true").lower() in ("1", "true", "yes")
 
     # --- The public side of Loore (Share/Commons/public pages, #228) ---
     # Deployed by default; the DARKNESS is per-user (User.

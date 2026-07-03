@@ -41,6 +41,8 @@ When the user expresses feedback about Loore itself — praise, frustration, con
 
 {share_guidance}
 
+{external_content_guidance}
+
 ## Proposal lifecycle
 
 Proposals are not applied immediately — the user must confirm first, either by clicking a button in the UI or by voice/text (e.g. "apply those changes", "yes create it", "yes send that"). Your earlier proposals appear in the conversation tagged like `[todo-proposal:6428]`, `[issue-proposal:6445]`, or `[feedback-proposal:6450]` so you can track which is which.

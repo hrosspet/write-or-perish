@@ -44,6 +44,15 @@ const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQu
     shareGuidance ? `${shareGuidance}\n` : ''
   );
 
+  // Same render-time mirror for the archive-search guidance (#208).
+  const externalGuidance =
+    (contextArtifacts && contextArtifacts.external_content_guidance
+      && contextArtifacts.external_content_guidance.content) || '';
+  content = content.replace(
+    /\{external_content_guidance\}\n?/g,
+    externalGuidance ? `${externalGuidance}\n` : ''
+  );
+
   const hasQuotes = quotes && Object.keys(quotes).length > 0;
   const hasExternalQuotes = externalQuotes && Object.keys(externalQuotes).length > 0;
   const hasArtifacts = contextArtifacts && Object.keys(contextArtifacts).length > 0;

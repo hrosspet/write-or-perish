@@ -103,9 +103,9 @@ def _make_app():
     }
     app.config["OPENAI_API_KEY"] = "sk-test"
     app.config["ANTHROPIC_API_KEY"] = "sk-ant-test"
-    # Agentic semantic_search ships dark behind this flag (#155); enable it so
-    # the loop's semantic_search / quote-pull behavior is exercised. The dark
-    # (flag-off) path has its own dedicated test that toggles it back off.
+    # Agentic semantic_search is per-user opt-in (#208) under this env
+    # killswitch (defaults on). _build_chain opts alice in; the opted-out
+    # path has its own dedicated test.
     app.config["SEMANTIC_SEARCH_AGENTIC"] = True
     _db.init_app(app)
     return app
@@ -234,7 +234,8 @@ def _build_chain(source_mode="textmode"):
 
     Returns (alice, system_node, user_node, llm_node).
     """
-    alice = _mk_user("alice", approved=True, plan="alpha")
+    alice = _mk_user("alice", approved=True, plan="alpha",
+                     external_content_enabled=True)
     llm_user = _mk_user("gpt-5", twitter_id="llm-gpt-5")
 
     # System node carrying a textmode/voice prompt artifact (enables agentic).
@@ -573,13 +574,15 @@ def test_continuation_prompt_too_long_degrades_gracefully(app):
     assert "THE FULL ARCHIVE ENTRY" not in retry_msgs
 
 
-def test_semantic_search_gated_dark_by_default(app):
-    """With SEMANTIC_SEARCH_AGENTIC off (#155 ships dark), the semantic_search
-    tool is dropped from the exposed tool list — the model never sees it — and
-    a model-emitted {quote:ID} for an out-of-chain node is NOT pulled mid-turn.
-    The other retrieval tools (read_artifact/read_todo) are unaffected, and
-    manual Cmd+K search is a separate endpoint, also unaffected."""
+def test_semantic_search_gated_off_for_opted_out_user(app):
+    """Without the per-user opt-in (external_content_enabled, #208 — the
+    Account easter-egg toggle), the semantic_search tool is dropped from
+    the exposed tool list — the model never sees it — and a model-emitted
+    {quote:ID} for an out-of-chain node is NOT pulled mid-turn. The other
+    retrieval tools (read_artifact/read_todo) are unaffected, and manual
+    Cmd+K search is a separate endpoint, also unaffected."""
     alice, system, user_node, llm_node = _build_chain("textmode")
+    alice.external_content_enabled = False  # default for every user
     archive = Node(user_id=alice.id, human_owner_id=alice.id,
                    node_type="text", privacy_level="private", ai_usage="chat")
     archive.set_content("AN OUT-OF-CHAIN ENTRY.")
@@ -587,18 +590,13 @@ def test_semantic_search_gated_dark_by_default(app):
     _db.session.commit()
     aid = archive.id
 
-    saved = _app.config.get("SEMANTIC_SEARCH_AGENTIC")
-    _app.config["SEMANTIC_SEARCH_AGENTIC"] = False
-    try:
-        _ScriptedProvider.reset([
-            _resp("Here's my take. {quote:%d}" % aid),
-        ])
-        generate_llm_response(
-            _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
-            source_mode="textmode",
-        )
-    finally:
-        _app.config["SEMANTIC_SEARCH_AGENTIC"] = saved
+    _ScriptedProvider.reset([
+        _resp("Here's my take. {quote:%d}" % aid),
+    ])
+    generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
 
     # Tool list excludes semantic_search but keeps the other retrieval tools.
     tool_names = [t["name"] for t in (_ScriptedProvider.calls[0]["tools"] or [])]
@@ -691,7 +689,8 @@ def test_user_export_deduped_to_first_occurrence(app, monkeypatch):
     monkeypatch.setattr(_llm_task_mod, "build_user_export_content",
                         lambda *a, **k: MARKER)
 
-    alice = _mk_user("alice", approved=True, plan="alpha")
+    alice = _mk_user("alice", approved=True, plan="alpha",
+                     external_content_enabled=True)
     llm_user = _mk_user("gpt-5", twitter_id="llm-gpt-5")
     prompt = UserPrompt(user_id=alice.id, prompt_key="textmode", title="P",
                         generated_by="default")

@@ -62,10 +62,18 @@ USER_INTENTIONS_PLACEHOLDER = "{user_intentions}"
 from backend.utils.share_guidance import (  # noqa: E402
     SHARE_GUIDANCE_PLACEHOLDER, SHARE_GUIDANCE_TEXT, share_enabled_for_user,
 )
+from backend.utils.external_guidance import (
+    EXTERNAL_GUIDANCE_PLACEHOLDER, EXTERNAL_GUIDANCE_TEXT,
+    external_content_enabled_for_user,
+)
 
 
 def _share_enabled_for_user(user_id):
     return share_enabled_for_user(flask_app.config, user_id)
+
+
+def _external_enabled_for_user(user_id):
+    return external_content_enabled_for_user(flask_app.config, user_id)
 USER_ARTIFACTS_INDEX_PLACEHOLDER = "{user_artifacts_index}"
 
 # Within-turn retrieval loop (#158, text mode only). When the model calls one
@@ -384,19 +392,20 @@ VOICE_TOOLS = [
 ]
 
 
-def gated_voice_tools(config):
-    """The agentic voice tool list, with dark-shipped tools filtered out
-    unless their flag is enabled for this environment: ``semantic_search``
-    behind ``SEMANTIC_SEARCH_AGENTIC`` (#155) and ``apply_share`` behind
-    ``SHARE_V1`` (Upload v1).
+def gated_voice_tools(config, search_enabled=False):
+    """The agentic voice tool list, with gated tools filtered out:
+    ``semantic_search`` unless *search_enabled* (per-user opt-in resolved
+    via _external_enabled_for_user) and ``apply_share`` behind ``SHARE_V1``
+    (Upload v1).
 
     Shared by BOTH generation and the #187 pre-warm so their tool prefix is
     byte-identical: tools sit at the front of the Anthropic cache prefix, so
     any divergence here silently busts the whole cache — the warm writes a
     tool set generation never reads (observed as read=0 with the warm
-    keeping semantic_search while generation dropped it)."""
+    keeping semantic_search while generation dropped it). Both callers must
+    resolve *search_enabled* for the SAME user."""
     dropped = set()
-    if not config.get("SEMANTIC_SEARCH_AGENTIC", False):
+    if not search_enabled:
         dropped.add("semantic_search")
     if not config.get("SHARE_V1", False):
         dropped.add("apply_share")
@@ -1564,6 +1573,11 @@ def render_system_message(system_node, user_id):
             SHARE_GUIDANCE_PLACEHOLDER,
             SHARE_GUIDANCE_TEXT
             if _share_enabled_for_user(user_id) else "")
+    if EXTERNAL_GUIDANCE_PLACEHOLDER in text:
+        text = text.replace(
+            EXTERNAL_GUIDANCE_PLACEHOLDER,
+            EXTERNAL_GUIDANCE_TEXT
+            if _external_enabled_for_user(user_id) else "")
     return text
 
 
@@ -1643,8 +1657,11 @@ def prewarm_anthropic_cache(system_node_id, user_id, model_id,
                 api_keys["anthropic"],
                 max_tokens=1,
                 # SAME gated tool list generation uses, or the cached tool
-                # prefix won't match and generation can't read the warm (#187).
-                tools=gated_voice_tools(flask_app.config),
+                # prefix won't match and generation can't read the warm (#187)
+                # — including the per-user search opt-in.
+                tools=gated_voice_tools(
+                    flask_app.config,
+                    search_enabled=_external_enabled_for_user(user_id)),
             )
             cache_write = response.get("cache_creation_input_tokens", 0)
             cost = calculate_llm_cost_microdollars(
@@ -1893,16 +1910,17 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             # Detect if this is an agentic session (enables tools)
             is_agentic = _is_agentic_prompt(node_chain)
-            # semantic_search ships DARK (#155): unless enabled for this
-            # environment, gated_voice_tools drops it from the exposed tool
-            # list so the model never sees it. (Manual Cmd+K search is
-            # unaffected — separate HTTP endpoint.) The pre-warm uses the SAME
-            # helper so the cached tool prefix matches (#187). agentic_search_on
-            # also gates the within-turn {quote:ID} pull-in-full below.
-            agentic_search_on = flask_app.config.get(
-                "SEMANTIC_SEARCH_AGENTIC", False)
+            # semantic_search is per-user opt-in (#208): the Account toggle
+            # (external_content_enabled) under the env killswitch. (Manual
+            # Cmd+K search is unaffected — separate HTTP endpoint.) The
+            # pre-warm resolves the SAME per-user flag so the cached tool
+            # prefix matches (#187). agentic_search_on also gates the
+            # within-turn quote pull-in-full below.
+            agentic_search_on = _external_enabled_for_user(user_id)
             agentic_tools = (
-                gated_voice_tools(flask_app.config) if is_agentic else None)
+                gated_voice_tools(flask_app.config,
+                                  search_enabled=agentic_search_on)
+                if is_agentic else None)
 
             # Check for pending drafts and inject context notes
             pending_draft_note = None
@@ -2192,6 +2210,15 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 SHARE_GUIDANCE_PLACEHOLDER,
                                 SHARE_GUIDANCE_TEXT
                                 if _share_enabled_for_user(user_id)
+                                else ""
+                            )
+                        # Mirrors render_system_message byte-for-byte
+                        # (#187 cache prefix), like {share_guidance}.
+                        if EXTERNAL_GUIDANCE_PLACEHOLDER in message_text:
+                            message_text = message_text.replace(
+                                EXTERNAL_GUIDANCE_PLACEHOLDER,
+                                EXTERNAL_GUIDANCE_TEXT
+                                if _external_enabled_for_user(user_id)
                                 else ""
                             )
                         # Resolve {quote:ID} placeholders if present

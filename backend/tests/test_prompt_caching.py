@@ -105,18 +105,19 @@ def test_gated_voice_tools_warm_matches_generation():
     # divergence here (warm keeping semantic_search while generation drops it)
     # silently busts the whole cache — that was the read=0 bug.
     names = lambda ts: [t["name"] for t in ts]  # noqa: E731
-    off = gated_voice_tools({"SEMANTIC_SEARCH_AGENTIC": False})
-    on = gated_voice_tools({"SEMANTIC_SEARCH_AGENTIC": True})
-    assert "semantic_search" not in names(off)        # dark (prod default)
-    assert "semantic_search" in names(on)             # enabled (staging)
-    # With every dark flag enabled, the full tool list is exposed.
-    all_on = gated_voice_tools(
-        {"SEMANTIC_SEARCH_AGENTIC": True, "SHARE_V1": True})
+    # search_enabled is the per-user opt-in (#208), resolved by the caller
+    # via _agentic_search_enabled — user toggle under the env killswitch.
+    off = gated_voice_tools({}, search_enabled=False)
+    on = gated_voice_tools({}, search_enabled=True)
+    assert "semantic_search" not in names(off)        # user opted out
+    assert "semantic_search" in names(on)             # user opted in
+    # With everything enabled, the full tool list is exposed.
+    all_on = gated_voice_tools({"SHARE_V1": True}, search_enabled=True)
     assert names(all_on) == names(VOICE_TOOLS)
-    assert names(gated_voice_tools({})) == names(off)  # unset == dark
-    # Identical config -> identical list for both call sites (the invariant).
-    cfg = {"SEMANTIC_SEARCH_AGENTIC": False}
-    assert gated_voice_tools(cfg) == gated_voice_tools(cfg)
+    assert names(gated_voice_tools({})) == names(off)  # default == no search
+    # Identical inputs -> identical list for both call sites (the invariant).
+    cfg = {"SHARE_V1": False}
+    assert gated_voice_tools(cfg, True) == gated_voice_tools(cfg, True)
 
 
 def test_api_cost_log_persists_cache_breakdown(app):
