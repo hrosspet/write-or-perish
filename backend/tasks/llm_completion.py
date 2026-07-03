@@ -315,7 +315,10 @@ VOICE_TOOLS = [
             "each was already surfaced; weigh that yourself — re-quoting "
             "something recently shown needs a good reason. You can refine "
             "and search again if the previews miss, and quoting nothing is "
-            "always fine. Tell the user you're checking their archive; "
+            "always fine. Labels are your private triage handles: use them "
+            "only inside {quote:...} markers — in prose, refer to items by "
+            "author or content ('the @visa thread'), never by label. "
+            "Tell the user you're checking their archive; "
             "don't search for things already in your context. Always "
             "produce a text response alongside the call."
         ),
@@ -747,7 +750,8 @@ def _retrieval_injection_text(tr, with_labels=False):
                 "by its label, e.g. {quote:A} — it renders for the user as "
                 "the full quoted entry or reference card, and you get the "
                 "full content back next step. Quote at most a couple, only "
-                "what's actually relevant — quoting nothing is fine")
+                "what's actually relevant — quoting nothing is fine. In "
+                "prose, refer to items by author or content, not by label")
         else:
             hint = (
                 "previews only; to read an entry in full, reference it as "
