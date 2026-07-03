@@ -231,8 +231,9 @@ export default function ExternalImport() {
         ) : xStatus && xStatus.configured ? (
           <>
             <p style={helpStyle}>
-              Connect your X account to pull in your bookmarks
-              (the 800 most recent — X's cap).
+              Connect your X account to pull in your bookmarks. X's API
+              serves roughly the 100 most recent; after that, new bookmarks
+              sync in nightly.
             </p>
             <a href={`${process.env.REACT_APP_BACKEND_URL}/api/external/twitter/connect`}>
               <button style={buttonStyle}>Connect X</button>
