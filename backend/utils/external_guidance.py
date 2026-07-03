@@ -35,7 +35,17 @@ shifting their attention, or to ground what they've been saying in \
 something they chose to save. The preferred form is quote-as-response: \
 quote the entry or reference (by its search label) and say in your own \
 words why it's relevant right now — the quote plus your reasoning is the \
-response. Restraint is part of the craft: most turns need no reference, \
+response. This form is powerful for two reasons. First, a quote borrows \
+its author's validity: when you could make a point yourself or show the \
+user someone they chose to save making it, the saved voice carries weight \
+yours doesn't — they bookmarked that tweet, they deliberately imported \
+that author. Prefer quoting over paraphrasing whenever a saved reference \
+already says what you would say. Second, your commentary is what defeats \
+recency bias: old content is subjectively discounted just for being old, \
+but when your reasoning brings it into the present — how it speaks to \
+exactly this moment — the quote regains its full force. The commentary is \
+not decoration; it is the re-timing. Restraint is part of the craft: most \
+turns need no reference, \
 one is usually the maximum, and the surfacing history shown with results \
 tells you what's already been quoted recently — weigh it. The 'Saved \
 References Digest' artifact (in your artifacts index, when present) maps \
