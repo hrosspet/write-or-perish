@@ -868,6 +868,9 @@ class APICostLog(db.Model):
     # non-cached calls; lets us query cache hit-rate over time from the DB.
     cache_read_tokens = db.Column(db.Integer, nullable=True, default=0)
     cache_write_tokens = db.Column(db.Integer, nullable=True, default=0)
+    # What specifically caused this cost, when request_type alone is too
+    # coarse — e.g. "poll:3" for a poll-draft (#207). Null for legacy rows.
+    request_ref = db.Column(db.String(64), nullable=True)
     audio_duration_seconds = db.Column(db.Float, nullable=True)
     cost_microdollars = db.Column(db.Integer, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
@@ -957,3 +960,160 @@ class TTSChunk(db.Model):
         db.UniqueConstraint('node_id', 'chunk_index', name='uq_node_tts_chunk_index'),
         db.UniqueConstraint('profile_id', 'chunk_index', name='uq_profile_tts_chunk_index'),
     )
+
+
+class ChangelogReadState(db.Model):
+    """Per-user read/skip state for a section of the user-facing changelog
+    (#207). Sections live in backend/user_changelog.md (parsed by
+    backend/utils/changelog.py); this table only stores state, keyed by the
+    section's stable id. 'skipped' sections are still served as unread on
+    the next open — skip means "show again later", read means "done".
+    """
+    __tablename__ = "changelog_read_state"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    section_id = db.Column(db.String(128), nullable=False)
+    status = db.Column(db.String(16), nullable=False, default="read")
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           onupdate=datetime.utcnow)
+
+    user = db.relationship("User", backref="changelog_read_states")
+
+    __table_args__ = (
+        db.UniqueConstraint("user_id", "section_id",
+                            name="uq_changelog_read_user_section"),
+    )
+
+
+class UserNotification(db.Model):
+    """Targeted (single-user) in-app notification (#207): profile ready,
+    briefing ready, fix-ready. The broadcast sibling is the changelog file —
+    both are served through /api/updates with the same read/skip semantics.
+    Bodies are system-generated template text, never user content.
+    """
+    __tablename__ = "user_notification"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    # e.g. "profile_ready", "briefing_ready", "fix_ready"
+    type = db.Column(db.String(32), nullable=False)
+    title = db.Column(db.String(200), nullable=False)
+    body = db.Column(db.Text, nullable=True)
+    # Optional in-app link target (e.g. "/profile")
+    link = db.Column(db.String(255), nullable=True)
+    status = db.Column(db.String(16), nullable=False, default="unread",
+                       index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    read_at = db.Column(db.DateTime, nullable=True)
+    # Last time the user hit "skip for now" (stays unread)
+    skipped_at = db.Column(db.DateTime, nullable=True)
+
+    user = db.relationship("User", backref="notifications")
+
+
+class Poll(db.Model):
+    """A question the admin poses to users through the dev-update channel
+    (#207 polling extension). Answering is entirely opt-in and two-phase —
+    see PollResponse.
+
+    The admin picks per poll which model drafts answers and what data it
+    may read; both are shown to the user BEFORE opt-in 1 (informed
+    consent). Draft costs are attributed to the polls system account, not
+    the answering user — see backend/utils/system_accounts.py.
+    """
+    __tablename__ = "poll"
+    id = db.Column(db.Integer, primary_key=True)
+    question = db.Column(db.Text, nullable=False)
+    # Model that drafts answers (chosen at creation; frozen per poll so
+    # consent shown to early responders can't drift).
+    model_id = db.Column(db.String(64), nullable=True)
+    # What the draft may read: 'derived' = profile + recent summary +
+    # intentions; 'recent_window' = the most recent raw writing that fits
+    # the model's context window.
+    data_source = db.Column(db.String(16), nullable=False,
+                            default="derived", server_default="derived")
+    created_by = db.Column(db.Integer, db.ForeignKey("user.id"),
+                           nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    closed_at = db.Column(db.DateTime, nullable=True)
+
+    creator = db.relationship("User", foreign_keys=[created_by])
+
+    DATA_SOURCES = ("derived", "recent_window")
+
+    @property
+    def active(self):
+        return self.closed_at is None
+
+
+class PollResponse(db.Model):
+    """A user's answer to a Poll, with two-phase consent structurally
+    enforced (#207):
+
+    * Opt-in 1 (optional): the user asks the LLM to draft an answer from
+      their archive (profile / recent context / intentions) —
+      draft_requested_at is the consent timestamp; the draft is PRIVATE.
+    * Opt-in 2 (required to share anything): the user explicitly sends the
+      (reviewed/edited or hand-written) answer — sent_at is the consent
+      timestamp. The admin endpoint serves ONLY status='sent' rows; drafts
+      and declined rows are never visible to anyone but the user.
+
+    status: drafting -> draft -> sent | declined ('draft_failed' when the
+    LLM draft task errored; the user can retry or write manually).
+    Content is encrypted at rest like all user content.
+    """
+    __tablename__ = "poll_response"
+    id = db.Column(db.Integer, primary_key=True)
+    poll_id = db.Column(db.Integer, db.ForeignKey("poll.id"),
+                        nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    content = db.Column(db.Text, nullable=True)
+    status = db.Column(db.String(16), nullable=False, default="draft",
+                       index=True)
+    # Model id when the current content came from an LLM draft; null for
+    # hand-written answers (cleared when the user edits).
+    generated_by = db.Column(db.String(64), nullable=True)
+    draft_task_id = db.Column(db.String(255), nullable=True)
+    draft_requested_at = db.Column(db.DateTime, nullable=True)
+    sent_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           onupdate=datetime.utcnow)
+
+    poll = db.relationship("Poll", backref="responses")
+    user = db.relationship("User", backref="poll_responses")
+
+    __table_args__ = (
+        db.UniqueConstraint("poll_id", "user_id",
+                            name="uq_poll_response_poll_user"),
+    )
+
+    def set_content(self, plaintext):
+        self.content = encrypt_content(plaintext)
+
+    def get_content(self):
+        return decrypt_content(self.content) if self.content else ""
+
+
+class PollDraftBatchJob(db.Model):
+    """A submitted provider batch carrying poll-draft requests (#207).
+    Drafts are async by construction, so they ride the Batch API (~50%
+    cheaper). Mirrors ProfileBatchJob: per-item routing metadata lives in
+    `items` (keyed by custom_id); the beat collector retrieves results and
+    saves each draft to its PollResponse.
+    """
+    __tablename__ = "poll_draft_batch_job"
+
+    id = db.Column(db.Integer, primary_key=True)
+    # "anthropic" | "openai:<api_model>"
+    provider_key = db.Column(db.String(64), nullable=False)
+    batch_id = db.Column(db.String(255), nullable=False, index=True)
+    # "pending" | "collected" | "failed"
+    status = db.Column(db.String(16), nullable=False, default="pending")
+    # List of per-item dicts: {custom_id, response_id, poll_id, model_id}
+    items = db.Column(db.JSON, nullable=False, default=list)
+    submitted_at = db.Column(
+        db.DateTime, nullable=False, default=datetime.utcnow)
+    collected_at = db.Column(db.DateTime, nullable=True)

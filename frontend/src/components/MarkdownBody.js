@@ -96,7 +96,13 @@ function AddTaskInput({ onSubmit, onCancel }) {
  *   onCheckboxToggle: optional callback(lineText, currentChecked) for clickable checkboxes
  *   onAddTask: optional callback(afterItemText, newText) — enables the per-row hover "+"
  */
-const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', onCheckboxToggle, onAddTask }) => {
+// flowText: render paragraphs with standard markdown soft-wrap semantics
+// (single source newlines flow into the line) instead of the default
+// pre-wrap. The default preserves newlines because node content (user
+// writing, LLM replies) depends on it; AUTHORED markdown wrapped at a
+// fixed column (e.g. the user changelog) must opt in to flow, or every
+// source line break renders literally — unreadable on narrow screens.
+const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText = false, onCheckboxToggle, onAddTask }) => {
   const [addingAfter, setAddingAfter] = React.useState(null);
   const components = {
     h1: ({ node, children, ...props }) => (
@@ -118,7 +124,7 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', onCheckbox
       <h6 style={{ fontFamily: 'var(--serif)', fontSize: '0.95em', fontWeight: 600, lineHeight: 1.35, margin: '0.9em 0 0.3em', color: 'var(--text-primary)' }} {...props}>{children}</h6>
     ),
     p: ({ node, ...props }) => (
-      <p style={{ whiteSpace: 'pre-wrap', overflowWrap: 'break-word', margin: paragraphMargin }} {...props} />
+      <p style={{ whiteSpace: flowText ? 'normal' : 'pre-wrap', overflowWrap: 'break-word', margin: paragraphMargin }} {...props} />
     ),
     blockquote: ({ node, ...props }) => (
       <blockquote

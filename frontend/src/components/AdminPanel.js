@@ -60,7 +60,301 @@ function SortToggle({ dir, onToggle, label }) {
   );
 }
 
+// Polls — the admin side of the dev-update channel (#207). Ask the
+// community a question; read only the answers users explicitly sent.
+const POLL_DATA_SOURCES = [
+  { value: "derived", label: "Profile + recent + intentions" },
+  { value: "recent_window", label: "Recent writing (context window)" },
+];
+
+// Bubble tabs, same treatment as ArtifactsNav (the documents workspace) —
+// the admin dashboard is organized as Users / Feedback / Polls sections.
+const adminBubbleStyle = (active) => ({
+  display: "inline-flex",
+  alignItems: "center",
+  padding: "6px 14px",
+  background: active ? "var(--bg-card)" : "none",
+  border: "1px solid",
+  borderColor: active ? "var(--accent)" : "var(--border)",
+  borderRadius: "16px",
+  color: active ? "var(--text-primary)" : "var(--text-muted)",
+  fontFamily: "var(--sans)",
+  fontSize: "0.8rem",
+  fontWeight: 300,
+  cursor: "pointer",
+});
+
+const ADMIN_TABS = [
+  { key: "users", label: "Users" },
+  { key: "feedback", label: "Feedback" },
+  { key: "polls", label: "Polls" },
+];
+
+// Same select treatment as AccountPage's Settings (inputStyle+selectStyle
+// there) so admin controls don't render as bare browser widgets.
+const adminSelectStyle = {
+  padding: "10px 12px",
+  borderRadius: "6px",
+  border: "1px solid var(--border)",
+  backgroundColor: "var(--bg-input)",
+  color: "var(--text-primary)",
+  fontFamily: "var(--sans)",
+  fontWeight: 300,
+  fontSize: "0.95rem",
+  boxSizing: "border-box",
+  cursor: "pointer",
+  WebkitAppearance: "none",
+  appearance: "none",
+};
+
+function AdminPolls() {
+  const [polls, setPolls] = useState([]);
+  const [question, setQuestion] = useState("");
+  const [models, setModels] = useState([]);
+  const [modelId, setModelId] = useState("");
+  const [dataSource, setDataSource] = useState("derived");
+  const [responses, setResponses] = useState({}); // poll_id -> array
+  const [pollsError, setPollsError] = useState("");
+
+  const fetchPolls = async () => {
+    try {
+      const res = await api.get("/admin/polls");
+      setPolls(res.data.polls);
+      return res.data.default_model_id;
+    } catch (err) {
+      setPollsError("Failed to fetch polls.");
+      return null;
+    }
+  };
+
+  useEffect(() => {
+    // Preselect the app default as a concrete model — no ambiguous
+    // "default" option that resolves invisibly at creation time.
+    Promise.all([
+      fetchPolls(),
+      api.get("/nodes/models")
+        .then((res) => res.data.models || [])
+        .catch(() => []),
+    ]).then(([defaultModelId, fetchedModels]) => {
+      setModels(fetchedModels);
+      setModelId((current) => {
+        if (current) return current;
+        if (fetchedModels.some((m) => m.id === defaultModelId)) {
+          return defaultModelId;
+        }
+        return fetchedModels[0]?.id || "";
+      });
+    });
+  }, []);
+
+  const createPoll = async () => {
+    if (!question.trim() || !modelId) return;
+    try {
+      await api.post("/admin/polls", {
+        question,
+        model_id: modelId,
+        data_source: dataSource,
+      });
+      setQuestion("");
+      fetchPolls();
+    } catch (err) {
+      setPollsError(err.response?.data?.error || "Failed to create poll.");
+    }
+  };
+
+  const toggleResponses = async (pollId) => {
+    if (responses[pollId]) {
+      setResponses((r) => {
+        const next = { ...r };
+        delete next[pollId];
+        return next;
+      });
+      return;
+    }
+    try {
+      const res = await api.get(`/admin/polls/${pollId}/responses`);
+      setResponses((r) => ({ ...r, [pollId]: res.data.responses }));
+    } catch (err) {
+      setPollsError("Failed to fetch responses.");
+    }
+  };
+
+  const closePoll = async (pollId) => {
+    try {
+      await api.post(`/admin/polls/${pollId}/close`);
+      fetchPolls();
+    } catch (err) {
+      setPollsError("Failed to close poll.");
+    }
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: "10px", marginBottom: "12px" }}>
+        <input
+          type="text"
+          value={question}
+          onChange={(e) => setQuestion(e.target.value)}
+          placeholder="Ask the community a question…"
+          style={{ padding: "8px", flex: 1 }}
+        />
+        <select
+          value={modelId}
+          onChange={(e) => setModelId(e.target.value)}
+          title="Model that drafts answers"
+          style={adminSelectStyle}
+        >
+          {models.map((m) => (
+            <option key={m.id} value={m.id}>{m.name}</option>
+          ))}
+        </select>
+        <select
+          value={dataSource}
+          onChange={(e) => setDataSource(e.target.value)}
+          title="What the draft may read (shown to users before opt-in)"
+          style={adminSelectStyle}
+        >
+          {POLL_DATA_SOURCES.map((s) => (
+            <option key={s.value} value={s.value}>{s.label}</option>
+          ))}
+        </select>
+        <button onClick={createPoll}>Create poll</button>
+      </div>
+      {pollsError && <div style={{ color: "var(--error)" }}>{pollsError}</div>}
+      {polls.map((p) => (
+        <div key={p.id} style={{ borderTop: "1px solid var(--border)", padding: "8px 0" }}>
+          <div style={{ display: "flex", gap: "10px", alignItems: "baseline" }}>
+            <span style={{ flex: 1 }}>
+              {p.question}
+              <span style={{ color: "var(--text-muted)", fontSize: "0.8rem" }}>
+                {" "}— {p.model_id || "default model"},{" "}
+                {(POLL_DATA_SOURCES.find(
+                  (s) => s.value === p.data_source) || POLL_DATA_SOURCES[0]
+                ).label.toLowerCase()}
+              </span>
+              {p.closed_at && (
+                <em style={{ color: "var(--text-muted)" }}> (closed)</em>
+              )}
+            </span>
+            <span style={{ color: "var(--text-muted)", fontSize: "0.85rem", whiteSpace: "nowrap" }}>
+              {p.sent_count} sent / {p.declined_count} declined
+            </span>
+            <button onClick={() => toggleResponses(p.id)}>
+              {responses[p.id] ? "Hide" : "Responses"}
+            </button>
+            {!p.closed_at && (
+              <button onClick={() => closePoll(p.id)}>Close</button>
+            )}
+          </div>
+          {responses[p.id] && (
+            responses[p.id].length === 0 ? (
+              <div style={{ color: "var(--text-muted)", padding: "6px 0 0 12px" }}>
+                No responses sent yet.
+              </div>
+            ) : (
+              responses[p.id].map((r) => (
+                <div key={r.id} style={{ padding: "6px 0 0 12px" }}>
+                  <strong>{r.username}</strong>
+                  {r.llm_drafted && (
+                    <span style={{ color: "var(--text-muted)", fontSize: "0.8rem" }}> (AI-drafted)</span>
+                  )}
+                  <div style={{ whiteSpace: "pre-wrap", color: "var(--text-secondary)" }}>
+                    {r.content}
+                  </div>
+                </div>
+              ))
+            )
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// User feedback (#158): proposed by the AI in conversation, sent only on
+// the user's explicit confirm. The admin API existed without a UI —
+// this lists items and manages their triage status.
+const FEEDBACK_STATUSES = ["new", "reviewed", "done"];
+
+function AdminFeedback() {
+  const [items, setItems] = useState([]);
+  const [filter, setFilter] = useState("new");
+  const [feedbackError, setFeedbackError] = useState("");
+
+  useEffect(() => {
+    api.get("/admin/feedback")
+      .then((res) => setItems(res.data.feedback || []))
+      .catch(() => setFeedbackError("Failed to fetch feedback."));
+  }, []);
+
+  const updateStatus = async (id, status) => {
+    try {
+      await api.put(`/admin/feedback/${id}`, { status });
+      setItems((prev) =>
+        prev.map((f) => (f.id === id ? { ...f, status } : f)));
+    } catch (err) {
+      setFeedbackError("Failed to update feedback status.");
+    }
+  };
+
+  const visible = filter === "all"
+    ? items
+    : items.filter((f) => f.status === filter);
+  const countFor = (s) => items.filter((f) => f.status === s).length;
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "baseline", gap: "12px" }}>
+        <select
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          style={{ ...adminSelectStyle, padding: "6px 10px", fontSize: "0.85rem" }}
+        >
+          <option value="all">All ({items.length})</option>
+          {FEEDBACK_STATUSES.map((s) => (
+            <option key={s} value={s}>{s} ({countFor(s)})</option>
+          ))}
+        </select>
+      </div>
+      {feedbackError && (
+        <div style={{ color: "var(--error)" }}>{feedbackError}</div>
+      )}
+      {visible.length === 0 ? (
+        <div style={{ color: "var(--text-muted)", padding: "8px 0" }}>
+          Nothing here.
+        </div>
+      ) : (
+        visible.map((f) => (
+          <div key={f.id} style={{ borderTop: "1px solid var(--border)", padding: "10px 0" }}>
+            <div style={{ display: "flex", gap: "10px", alignItems: "baseline" }}>
+              <strong>{f.username || `user ${f.user_id}`}</strong>
+              <span style={{ color: "var(--text-muted)", fontSize: "0.8rem" }}>
+                {f.category} · {f.source} ·{" "}
+                {f.created_at ? new Date(f.created_at).toLocaleDateString() : ""}
+              </span>
+              <span style={{ flex: 1 }} />
+              <select
+                value={f.status}
+                onChange={(e) => updateStatus(f.id, e.target.value)}
+                style={{ ...adminSelectStyle, padding: "6px 10px", fontSize: "0.85rem" }}
+              >
+                {FEEDBACK_STATUSES.map((s) => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </select>
+            </div>
+            <div style={{ whiteSpace: "pre-wrap", color: "var(--text-secondary)", marginTop: "4px" }}>
+              {f.content}
+            </div>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
 function AdminPanel() {
+  const [activeTab, setActiveTab] = useState("users");
   const [users, setUsers] = useState([]);
   const [allowedPlans, setAllowedPlans] = useState([]);
   const [error, setError] = useState("");
@@ -219,8 +513,28 @@ function AdminPanel() {
 
   return (
     <div style={{ padding: "20px" }}>
-      <h1>Admin Panel</h1>
+      <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "20px" }}>
+        {ADMIN_TABS.map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setActiveTab(t.key)}
+            style={adminBubbleStyle(activeTab === t.key)}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+      <h1 style={{
+        fontFamily: "var(--serif)", fontSize: "2rem", fontWeight: 300,
+        color: "var(--text-primary)", margin: "0 0 20px",
+      }}>
+        {ADMIN_TABS.find((t) => t.key === activeTab).label}
+      </h1>
 
+      {activeTab === "polls" && <AdminPolls />}
+      {activeTab === "feedback" && <AdminFeedback />}
+
+      {activeTab === "users" && (<>
       {/* Whitelist New User Section */}
       <div style={{ marginBottom: "20px", padding: "10px", border: "1px solid var(--border)" }}>
         <h2>Whitelist a New User</h2>
@@ -292,6 +606,8 @@ function AdminPanel() {
                 <select
                   value={u.plan || "free"}
                   onChange={(e) => updatePlan(u.id, e.target.value)}
+                  style={{ ...adminSelectStyle,
+                           padding: "6px 10px", fontSize: "0.85rem" }}
                 >
                   {allowedPlans.map((p) => (
                     <option key={p} value={p}>{p}</option>
@@ -371,6 +687,7 @@ function AdminPanel() {
           ))}
         </tbody>
       </table>
+      </>)}
     </div>
   );
 }

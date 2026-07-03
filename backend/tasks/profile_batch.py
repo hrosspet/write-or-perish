@@ -293,6 +293,9 @@ def _apply_result(user, item, result, submitted_at):
             source_data_cutoff=cutoff, generation_type="integration",
             parent_profile_id=item["prev_profile_id"], batch=True)
         logger.info(f"User {user.id}: saved batch integration profile")
+        # Integration = the batch rebuild finished for this user (#207).
+        from backend.utils.notifications import notify_profile_ready
+        notify_profile_ready(user.id)
     user.profile_batch_attempts = 0
     return None
 

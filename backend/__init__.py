@@ -188,6 +188,10 @@ def create_app():
     from backend.routes.commons import commons_bp
     app.register_blueprint(commons_bp, url_prefix="/api/commons")
 
+    # Dev-update channel: changelog + notifications + polls (#207).
+    from backend.routes.updates import updates_bp
+    app.register_blueprint(updates_bp, url_prefix="/api/updates")
+
     # AI preferences folded into the artifact model (#158 Slice 5): managed via
     # the generic /api/artifacts CRUD (kind="ai_preferences"); the dedicated
     # /api/ai-preferences blueprint was removed.

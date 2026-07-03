@@ -47,6 +47,11 @@ data/
 # Documentation
 docs/
 *.md
+# The user-facing changelog is APPLICATION DATA, not documentation — the
+# backend serves it (#207). Excluding it turns the updates surface into a
+# silent no-op in Docker (staging), while local dev volume-mounts hide the
+# gap. Keep this exception.
+!user_changelog.md
 !requirements.txt
 
 # Build artifacts
