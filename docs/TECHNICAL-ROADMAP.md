@@ -46,6 +46,7 @@ These technical capabilities are production-ready and form the foundation:
 - **Dollar-cost tracking** - Per-user API cost tracking via APICostLog model, replacing token-based tracking (#61)
 - **Pin-to-profile** - Pin selected nodes to user profile page (#60)
 - **Cmd+Click navigation** - Open nodes in new tab across all previews
+- **Dev-update channel** (#207) - In-app "what's new" surface: user-facing changelog authored as a markdown file in the repo (`backend/user_changelog.md`, per-section per-user read/skip state, date-gated so new users get no backlog), persistent targeted notifications (profile-generation-complete wired as first producer), and admin polls with two-phase opt-in (LLM drafts an answer from the user's profile only on explicit request; nothing reaches the admin until the user explicitly sends). `DEV_UPDATES_V1` killswitch. This modal is the announcement channel for dark-shipped features (e.g. the public side / Commons).
 
 ### User Plan Tiers
 

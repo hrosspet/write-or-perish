@@ -96,6 +96,7 @@ Feature 1 (Journaling) is production-ready and significantly expanded — see FO
 | A.17 | Unified agentic Voice | AI tool use in voice sessions (todos, GitHub issues), proposal tracking |
 | A.18 | Resilient audio recording | 15s upload intervals, batched transcription, draft recovery |
 | A.19 | Hierarchical context freshness | Context artifacts, recent summaries, profile freshness |
+| A.20 | Dev-update channel (#207) | In-app changelog (markdown file in repo, per-user read/skip), persistent background-task notifications, admin polls with two-phase opt-in LLM-drafted answers |
 
 ### Remaining Items
 
