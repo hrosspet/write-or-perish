@@ -1036,6 +1036,13 @@ class NodeEmbedding(db.Model):
     content_hash = db.Column(db.String(64), nullable=False)
     vector = db.Column(db.LargeBinary, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    # Snapshot of Node.updated_at that this vector reflects. The sweep
+    # compares it against Node.updated_at IN SQL to find stale rows, so
+    # unchanged nodes are never loaded or decrypted (content is KMS
+    # envelope-encrypted: one decrypt per node per sweep across the whole
+    # corpus melted the 4GB prod VM and cost ~100 CZK/day in KMS calls).
+    # NULL on legacy rows — the sweep falls back to created_at.
+    node_updated_at = db.Column(db.DateTime, nullable=True)
 
     node = db.relationship("Node", backref=db.backref(
         "embedding", uselist=False, cascade="all, delete-orphan"))

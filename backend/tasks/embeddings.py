@@ -10,7 +10,7 @@ content to OpenAI, so 'none' nodes are never sent (their keyword search
 still works). Deleted nodes' embeddings are removed.
 """
 from celery.utils.log import get_task_logger
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 
 from backend.celery_app import celery, flask_app
 from backend.extensions import db
@@ -41,19 +41,37 @@ def _embedding_owner_id(node):
 
 def _candidate_nodes(limit):
     """Nodes needing (re-)embedding: AI-readable, alive, with content,
-    and either missing an embedding row or carrying a stale hash."""
+    and either missing an embedding row, embedded with another model, or
+    edited since the last embed (Node.updated_at vs the row's snapshot).
+
+    All of that is filtered IN SQL with a LIMIT. Only the resulting batch
+    is loaded and decrypted — never the full corpus. Content is KMS
+    envelope-encrypted with a per-node DEK, so the previous decrypt-
+    everything-each-sweep design made ~1.6M KMS calls/day (the dominant
+    GCP cost) and OOM-thrashed the prod VM as the corpus grew.
+    """
     rows = (
         db.session.query(Node, NodeEmbedding)
         .outerjoin(NodeEmbedding, NodeEmbedding.node_id == Node.id)
         .filter(
             Node.deleted_at.is_(None),
             Node.content.isnot(None),
+            Node.content != "",
             Node.ai_usage.in_(AI_ALLOWED),
         )
+        .filter(or_(
+            NodeEmbedding.id.is_(None),
+            NodeEmbedding.model != EMBEDDING_MODEL,
+            func.coalesce(NodeEmbedding.node_updated_at,
+                          NodeEmbedding.created_at)
+            < func.coalesce(Node.updated_at, Node.created_at),
+        ))
         .order_by(Node.id.desc())
+        .limit(limit)
         .all()
     )
     out = []
+    touched = False
     for node, emb in rows:
         text = node.get_content()
         if not text or not text.strip():
@@ -61,10 +79,15 @@ def _candidate_nodes(limit):
         digest = content_hash(text)
         if emb is not None and emb.content_hash == digest \
                 and emb.model == EMBEDDING_MODEL:
+            # Content unchanged (a non-content column bumped updated_at,
+            # or a legacy row without the snapshot): record the snapshot
+            # so the node drops out of the candidate query.
+            emb.node_updated_at = node.updated_at
+            touched = True
             continue
         out.append((node, emb, text, digest))
-        if len(out) >= limit:
-            break
+    if touched:
+        db.session.commit()
     return out
 
 
@@ -112,6 +135,10 @@ def sweep_embeddings(limit=SWEEP_BATCH_SIZE):
                 emb.model = EMBEDDING_MODEL
                 emb.content_hash = digest
                 emb.vector = pack_vector(vector)
+                # Snapshot the node version this vector reflects. Uses the
+                # value read at fetch time, so an edit racing the sweep
+                # keeps the node stale and it's re-embedded next sweep.
+                emb.node_updated_at = node.updated_at
                 embedded += 1
             db.session.commit()
 
