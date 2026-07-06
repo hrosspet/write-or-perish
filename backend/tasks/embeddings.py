@@ -73,10 +73,12 @@ def _candidate_nodes(limit):
     out = []
     touched = False
     for node, emb in rows:
-        text = node.get_content()
-        if not text or not text.strip():
-            continue
-        digest = content_hash(text)
+        # Hash the STORED bytes (the encrypted blob for encrypted nodes),
+        # not the plaintext: the unchanged-check then needs no KMS call,
+        # and no plaintext fingerprint lands in the DB. Trade-off:
+        # re-encrypting identical plaintext (fresh DEK) changes the blob
+        # and triggers one spurious re-embed — rare and cheap.
+        digest = content_hash(node.content)
         if emb is not None and emb.content_hash == digest \
                 and emb.model == EMBEDDING_MODEL:
             # Content unchanged (a non-content column bumped updated_at,
@@ -84,6 +86,9 @@ def _candidate_nodes(limit):
             # so the node drops out of the candidate query.
             emb.node_updated_at = node.updated_at
             touched = True
+            continue
+        text = node.get_content()
+        if not text or not text.strip():
             continue
         out.append((node, emb, text, digest))
     if touched:
@@ -170,7 +175,8 @@ def sweep_embeddings(limit=SWEEP_BATCH_SIZE):
                     item_id=item.id,
                     user_id=item.user_id,
                     model=EMBEDDING_MODEL,
-                    content_hash=content_hash(text),
+                    # Stored-bytes hash, same rationale as nodes above.
+                    content_hash=content_hash(item.content),
                     vector=pack_vector(vector),
                 ))
                 ext_embedded += 1
