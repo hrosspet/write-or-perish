@@ -270,6 +270,9 @@ class Config:
     # GitHub API for issue creation from Voice mode
     GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
     GITHUB_REPO = os.environ.get("GITHUB_REPO")
+    # Shared secret for the inbound GitHub webhook (issue-close
+    # notifications). Unset = endpoint disabled (returns 503).
+    GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET")
 
     # GCP Cloud KMS configuration for content encryption at rest
     # Format: projects/{project}/locations/{location}/keyRings/{keyring}/cryptoKeys/{key}

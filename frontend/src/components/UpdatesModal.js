@@ -144,10 +144,17 @@ function NotificationItem({ notification, onDone, onCloseModal }) {
   };
   // Following the link must close the WHOLE modal first — navigating
   // under a still-open overlay looks like the click did nothing.
+  // Links are either in-app routes ("/profile") or external URLs
+  // (a GitHub issue, a staging instance) — the latter open a new tab
+  // so the user's Loore session stays where it is.
   const takeALook = () => {
     mark("read");
     onCloseModal();
-    navigate(notification.link);
+    if (/^https?:\/\//.test(notification.link)) {
+      window.open(notification.link, "_blank", "noopener,noreferrer");
+    } else {
+      navigate(notification.link);
+    }
   };
   return (
     <div style={itemStyle}>
