@@ -71,6 +71,14 @@ const dateStyle = {
   textTransform: "uppercase",
 };
 
+// Serif line sitting under an eyebrow label (poll questions, issue
+// notifications): the eyebrow already gives it structure, so it steps
+// down from the bare item title and keeps clear of the modal header.
+const eyebrowTitleStyle = {
+  ...itemTitleStyle,
+  fontSize: "1.25rem",
+};
+
 const buttonRowStyle = {
   display: "flex",
   flexWrap: "wrap",
@@ -173,9 +181,7 @@ function NotificationItem({ notification, onDone, onCloseModal }) {
   return (
     <div style={itemStyle}>
       {eyebrow && <div style={dateStyle}>{eyebrow}</div>}
-      <h3 style={eyebrow
-        ? { ...itemTitleStyle, fontSize: "1.25rem" }
-        : itemTitleStyle}>
+      <h3 style={eyebrow ? eyebrowTitleStyle : itemTitleStyle}>
         {notification.title}
       </h3>
       {notification.body && (
@@ -290,7 +296,7 @@ function PollItem({ poll, onDone }) {
   return (
     <div style={itemStyle}>
       <div style={dateStyle}>A QUESTION FROM THE DEVELOPER</div>
-      <h3 style={itemTitleStyle}>{poll.question}</h3>
+      <h3 style={eyebrowTitleStyle}>{poll.question}</h3>
       <p style={{ ...mutedNoteStyle, margin: "0.9rem 0 0" }}>
         Answering is optional. If you ask for a draft, {draftModel} will
         read {draftSource} to write one for you to edit — and nothing is
