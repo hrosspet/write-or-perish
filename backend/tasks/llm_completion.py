@@ -3,6 +3,7 @@ Celery task for asynchronous LLM completion.
 """
 import json
 import re
+import time
 from celery import Task
 from celery.utils.log import get_task_logger
 from datetime import datetime, timezone
@@ -85,8 +86,18 @@ USER_ARTIFACTS_INDEX_PLACEHOLDER = "{user_artifacts_index}"
 # pulls relevant snippets from the user's own archive by meaning (#155).
 RETRIEVAL_TOOLS = {"read_artifact", "read_todo", "semantic_search",
                    "read_full"}
-# Max number of interim retrieval round-trips before the model must answer.
+# Max number of interim tool round-trips before the model must answer.
+# The within-turn loop continues after EVERY tool call (retrieval AND action
+# tools like update_artifact) — models follow the standard tool-use contract
+# and expect a result round; ending the turn on an action call made them
+# leave one-line preambles ("noting this in memory") as the whole answer.
 MAX_RETRIEVAL_ROUNDS = 5
+
+# Retry schedule for the loop's CONTINUATION calls: sleep lengths between
+# attempts (len == number of retries). A transient provider error (overload,
+# timeout) used to kill the whole turn, stranding the continuation node at
+# 'processing' forever. Module-level so tests can zero the delays.
+CONTINUATION_RETRY_DELAYS = (5, 15)
 
 # ── Relative quote labels ────────────────────────────────────────────────
 # semantic_search previews tag each match with a short label ([A], [B], …)
@@ -837,6 +848,35 @@ def _retrieval_pin(tr):
     if tr.get("name") == "read_todo":
         return ("todo", tr.get("todo_id"))
     return (None, None)
+
+
+def _action_result_text(tr):
+    """One-line result string injected back to the model for a NON-retrieval
+    tool result, so the loop can continue after action tools too: the model
+    sees its side effect land (or fail) before writing the answer the user
+    actually reads/hears."""
+    name = tr.get("name")
+    status = tr.get("status")
+    if status == "success":
+        if name == "update_artifact":
+            verb = "created" if tr.get("created") else "updated"
+            return f"[update_artifact: artifact '{tr.get('kind')}' {verb}.]"
+        if name == "apply_todo_changes":
+            return ("[apply_todo_changes: merge started in the background; "
+                    "it will finish shortly.]")
+        if name == "apply_github_issue":
+            return (f"[apply_github_issue: issue "
+                    f"#{tr.get('issue_number')} created — "
+                    f"{tr.get('issue_url')}]")
+        if name == "apply_feedback":
+            return "[apply_feedback: feedback sent to the team.]"
+        if name == "apply_share":
+            return "[apply_share: share saved as a private draft.]"
+        return f"[{name}: done.]"
+    if status == "ignored":
+        return (f"[{name}: not a tool — write the proposal as a heading "
+                f"in your reply instead.]")
+    return f"[{name} failed — {tr.get('error', 'unknown error')}]"
 
 
 def _scan_proposal_statuses(node_chain):
@@ -1591,7 +1631,12 @@ class LLMCompletionTask(Task):
         if llm_node_id:
             with flask_app.app_context():
                 node = Node.query.get(llm_node_id)
-                if node:
+                # Skip nodes already finalized: when a CONTINUATION call
+                # fails mid-loop, args[1] is the turn's FIRST node — a
+                # completed interim step whose status must survive (the
+                # in-flight continuation node is failed by the task body).
+                if node and node.llm_task_status not in (
+                        'completed', 'cancelled'):
                     node.llm_task_status = 'failed'
                     # Store error message if not already set
                     if not node.llm_task_error:
@@ -1819,6 +1864,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
         llm_node.llm_task_status = 'processing'
         llm_node.llm_task_progress = 10
         db.session.commit()
+
+        # The node currently being generated: advances to each continuation
+        # node inside the tool loop, so the failure handler below marks the
+        # node actually in flight (not an already-completed interim step).
+        current_node = llm_node
 
         try:
             # ... (The rest of the logic remains largely the same, but updates llm_node)
@@ -2660,14 +2710,16 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # Single-shot: one model call, one node, no within-turn loop.
                 return _finalize(llm_node, response)
 
-            # ── Bounded within-turn retrieval loop (#158) ──────────────────
-            # When the model calls a retrieval tool, execute it, inject the
-            # retrieved content back into `messages` as a plain user message,
-            # finalize the current node as an interim step, create a
-            # continuation node, and re-call the model so it answers WITH the
-            # content in the same turn.
+            # ── Bounded within-turn tool loop (#158) ───────────────────────
+            # When the model calls ANY tool, execute it, inject the result
+            # back into `messages` as a plain user message (full content for
+            # retrieval tools, a one-line status for action tools), finalize
+            # the current node as an interim step, create a continuation
+            # node, and re-call the model so it answers WITH the results in
+            # the same turn. This matches the tool-use contract the model
+            # expects — ending the turn on an action call left one-line
+            # preambles ("noting this in memory") as the whole answer.
             rounds_done = 0
-            current_node = llm_node
             while True:
                 response_tool_calls = response.get("tool_calls", [])
                 retrieval_calls = [
@@ -2702,9 +2754,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         'reason': 'target_soft_deleted',
                     }
 
-                # INTERIM step: a retrieval tool call was made and budget
-                # remains.
-                if retrieval_calls and rounds_done < MAX_RETRIEVAL_ROUNDS:
+                # INTERIM step: a tool call was made and budget remains.
+                if response_tool_calls and rounds_done < MAX_RETRIEVAL_ROUNDS:
+                    # Text-less rounds get a spoken-friendly placeholder;
+                    # "looking that up" only fits retrieval rounds.
+                    interim_fallback = ("(looking that up…)"
+                                        if retrieval_calls else "(on it…)")
                     # #179: scrub timestamp echoes from interim text too —
                     # it's stored on the interim node and spoken in voice.
                     interim_text = strip_edge_timestamps(resp_text)
@@ -2744,18 +2799,19 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             m["label"] = label
                             quote_labels[label] = ("external", m["item_id"])
 
-                    # Build the injection text for each retrieval call,
-                    # re-resolving content from the encrypted row, pinning the
-                    # exact version read to the interim node (faithful export),
-                    # and marking each handled here so the cross-turn scan
+                    # Build the injection text for each tool call: retrieval
+                    # tools re-resolve content from the encrypted row and pin
+                    # the exact version read to the interim node (faithful
+                    # export); action tools inject a one-line result. Every
+                    # entry is marked handled here so the cross-turn scan
                     # won't double-inject. Errors and vanished artifacts are
                     # surfaced too, so the model isn't re-called blind.
                     injection_strings = []
                     for tr in tool_results:
-                        if tr.get("name") not in RETRIEVAL_TOOLS:
-                            continue
                         tr["status_reported"] = True
-                        if tr.get("status") == "success":
+                        if tr.get("name") not in RETRIEVAL_TOOLS:
+                            injection_strings.append(_action_result_text(tr))
+                        elif tr.get("status") == "success":
                             text = _retrieval_injection_text(
                                 tr, with_labels=True)
                             if text is not None:
@@ -2783,9 +2839,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     # Finalize the interim node (NO _mode, NO proposal
                     # auto-detect — that belongs to the final answer only).
                     current_node.set_content(
-                        interim_text or "(looking that up…)")
+                        interim_text or interim_fallback)
                     current_node.token_count = approximate_token_count(
-                        interim_text or "(looking that up…)")
+                        interim_text or interim_fallback)
                     current_node.tool_calls_meta = json.dumps(tool_results)
                     current_node.llm_task_status = 'completed'
                     current_node.llm_task_progress = 100
@@ -2827,7 +2883,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         "role": "assistant",
                         "content": [{
                             "type": "text",
-                            "text": interim_text or "(looking that up…)",
+                            "text": interim_text or interim_fallback,
                         }],
                     })
                     messages.append({
@@ -2851,39 +2907,62 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     # whole turn (the old behavior — a raw multi-million-token
                     # PromptTooLong surfaced to the user), drop this round's
                     # injection and let the model answer with what it has.
-                    try:
-                        response = LLMProvider.get_completion(
-                            model_id, messages, api_keys,
-                            tools=agentic_tools,
-                            # #189: same per-thread key as the first call so
-                            # loop continuations route to the same OpenAI cache.
-                            prompt_cache_key=f"loore-t{thread_root_id}",
-                        )
-                    except PromptTooLongError:
-                        logger.warning(
-                            "Continuation prompt too long after retrieval "
-                            "round %d; dropping the injection and answering "
-                            "without it", rounds_done,
-                        )
-                        messages[-1] = {
-                            "role": "user",
-                            "content": [{
-                                "type": "text",
-                                "text": (
-                                    "[The retrieved content was too large to "
-                                    "fit in context. Answer with what you "
-                                    "already have, and let the user know you "
-                                    "could only partially load the entries "
-                                    "you referenced.]"),
-                            }],
-                        }
-                        response = LLMProvider.get_completion(
-                            model_id, messages, api_keys,
-                            tools=agentic_tools,
-                            # #189: same per-thread key as the first call so
-                            # loop continuations route to the same OpenAI cache.
-                            prompt_cache_key=f"loore-t{thread_root_id}",
-                        )
+
+                    def _call_continuation():
+                        try:
+                            return LLMProvider.get_completion(
+                                model_id, messages, api_keys,
+                                tools=agentic_tools,
+                                # #189: same per-thread key as the first call
+                                # so loop continuations route to the same
+                                # OpenAI cache.
+                                prompt_cache_key=f"loore-t{thread_root_id}",
+                            )
+                        except PromptTooLongError:
+                            logger.warning(
+                                "Continuation prompt too long after tool "
+                                "round %d; dropping the injection and "
+                                "answering without it", rounds_done,
+                            )
+                            messages[-1] = {
+                                "role": "user",
+                                "content": [{
+                                    "type": "text",
+                                    "text": (
+                                        "[The retrieved content was too large "
+                                        "to fit in context. Answer with what "
+                                        "you already have, and let the user "
+                                        "know you could only partially load "
+                                        "the entries you referenced.]"),
+                                }],
+                            }
+                            return LLMProvider.get_completion(
+                                model_id, messages, api_keys,
+                                tools=agentic_tools,
+                                # #189: same per-thread key as the first call
+                                # so loop continuations route to the same
+                                # OpenAI cache.
+                                prompt_cache_key=f"loore-t{thread_root_id}",
+                            )
+
+                    # Transient provider errors (overload, timeout) used to
+                    # propagate here and kill the turn, stranding this
+                    # continuation node at 'processing' forever. Retry a
+                    # couple of times; a terminal failure raises and the
+                    # task-level handler fails THIS node (not the completed
+                    # interim).
+                    response = None
+                    for retry_delay in (*CONTINUATION_RETRY_DELAYS, None):
+                        try:
+                            response = _call_continuation()
+                            break
+                        except Exception as cont_exc:
+                            if retry_delay is None:
+                                raise
+                            logger.warning(
+                                "Continuation call failed (%s); retrying "
+                                "in %ss", cont_exc, retry_delay)
+                            time.sleep(retry_delay)
                     continue
 
                 # FINAL answer: no retrieval (or budget exhausted).
@@ -2892,7 +2971,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
         except Exception as e:
             error_message = str(e)
             logger.error(f"LLM completion error for node {llm_node_id}: {error_message}", exc_info=True)
-            llm_node.llm_task_status = 'failed'
-            llm_node.llm_task_error = error_message
+            # Fail the node in flight: mid-loop that's the continuation
+            # placeholder. Failing llm_node here instead used to clobber the
+            # completed interim step's status and strand the continuation at
+            # 'processing' forever.
+            current_node.llm_task_status = 'failed'
+            current_node.llm_task_error = error_message
             db.session.commit()
             raise

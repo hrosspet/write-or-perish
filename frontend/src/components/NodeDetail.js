@@ -885,6 +885,9 @@ function NodeDetail({ nodeIdOverride }) {
                     {tc.name === 'read_artifact' && (
                       <>Read artifact{tc.kind ? <> <Link to={`/artifacts/${tc.kind}`} style={{ color: 'var(--accent)', textDecoration: 'none' }}><code style={{ fontSize: '0.95em' }}>{tc.kind}</code></Link></> : ''}</>
                     )}
+                    {tc.name === 'read_todo' && (
+                      <>Read <Link to="/todo" style={{ color: 'var(--accent)', textDecoration: 'none' }}>todo list</Link></>
+                    )}
                     {tc.name === 'semantic_search' && (
                       <>Searched archive & references{tc.query ? <> — <span style={{ fontStyle: 'italic' }}>“{tc.query}”</span></> : ''}</>
                     )}
@@ -898,7 +901,7 @@ function NodeDetail({ nodeIdOverride }) {
                           <>Read in full — <Link to={`/node/${tc.ref_id}`} style={{ color: 'var(--accent)', textDecoration: 'none' }}>entry #{tc.ref_id}</Link></>
                         )
                     )}
-                    {!['propose_todo', 'propose_github_issue', 'propose_feedback', 'propose_share', 'apply_todo_changes', 'apply_github_issue', 'apply_feedback', 'apply_share', 'update_ai_preferences', 'update_artifact', 'read_artifact', 'semantic_search', 'read_full'].includes(tc.name) && tc.name}
+                    {!['propose_todo', 'propose_github_issue', 'propose_feedback', 'propose_share', 'apply_todo_changes', 'apply_github_issue', 'apply_feedback', 'apply_share', 'update_ai_preferences', 'update_artifact', 'read_artifact', 'read_todo', 'semantic_search', 'read_full'].includes(tc.name) && tc.name}
                     {tc.error && <span style={{ color: 'var(--accent)', marginLeft: '8px' }}> — {tc.error}</span>}
                   </div>
                 ))}

@@ -55,7 +55,7 @@ A proposal goes through these statuses:
 - **failed** — something went wrong. You'll see `[todo-proposal:6428: failed — {error}.]`. Let the user know.
 
 ## Tools
-These tools are available. Always provide a response alongside any tool call. Tool calls are silent side effects. When using a tool, briefly acknowledge what you're doing.
+These tools are available. Every tool call resolves within the same turn: alongside your calls you write a brief acknowledgment of what you're doing (the user sees it as an interim step), the results come back to you, and you continue. Your first message WITHOUT tool calls ends the turn — that message is your actual answer, so give it the substance the user's message deserves. Proposal headings (todo changes, issues, feedback, shares) are only processed in that final message — write them there, not alongside tool calls.
 
 - **apply_todo_changes** — Apply previously proposed todo changes. Only call when the user explicitly confirms (e.g. "apply those changes", "yes update my todo").
 - **apply_github_issue** — Create the previously proposed GitHub issue. Call this only when the user explicitly confirms (e.g. "yes create it", "go ahead", "file that issue").

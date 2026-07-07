@@ -1,10 +1,11 @@
-"""Tests for the within-turn retrieval loop in generate_llm_response (#158).
+"""Tests for the within-turn tool loop in generate_llm_response (#158).
 
-Text mode only: when the model calls a retrieval tool (read_artifact), the
-task executes it, injects the retrieved content back into `messages` as a
-plain user message, finalizes the calling node as an INTERIM step, creates a
-CONTINUATION node, and re-calls the model so it answers WITH the content in
-the SAME turn. Voice / non-textmode keep their single-shot behavior.
+Both agentic modes (textmode + voice): when the model calls ANY tool, the
+task executes it, injects the result back into `messages` as a plain user
+message (full content for retrieval tools, a one-line status for action
+tools), finalizes the calling node as an INTERIM step, creates a
+CONTINUATION node, and re-calls the model so it answers WITH the results in
+the SAME turn. Non-agentic callers keep their single-shot behavior.
 
 Harness notes:
   - We stub backend.celery_app so @celery.task is an identity decorator
@@ -451,6 +452,117 @@ def test_textmode_retrieval_budget_caps_at_max_rounds(app):
     assert final.get_content() == "looking 6"
     assert result["llm_node_id"] == final.id
     assert APICostLog.query.count() == 6
+
+
+def test_textmode_action_tool_continues(app):
+    """Action tools (update_artifact) ride the loop too: the model gets a
+    result round and the turn ends on its first no-tool message — instead of
+    a one-line preamble ("noting this in memory") being the whole answer."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+
+    _ScriptedProvider.reset([
+        _resp("Noting this milestone in memory.", tool_calls=[{
+            "id": "t1", "name": "update_artifact",
+            "input": {"kind": "memory", "updated_content": "milestone!"},
+        }]),
+        _resp("Here's the fuller response you deserve."),
+    ])
+
+    result = generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+
+    # Interim + continuation calls.
+    assert len(_ScriptedProvider.calls) == 2
+
+    interim = _fresh(llm_node.id)
+    assert interim.llm_task_status == "completed"
+    assert interim.get_content() == "Noting this milestone in memory."
+    assert interim.continuation_node_id is not None
+    meta = json.loads(interim.tool_calls_meta)
+    entry = next(e for e in meta if e.get("name") == "update_artifact")
+    assert entry["status"] == "success"
+    # Reported same-turn — the cross-turn scan must not re-inject it.
+    assert entry["status_reported"] is True
+
+    # The artifact write actually happened.
+    art = UserArtifact.latest_for(alice.id, "memory")
+    assert art is not None
+    assert art.get_content() == "milestone!"
+
+    final = Node.query.get(interim.continuation_node_id)
+    assert final.get_content() == "Here's the fuller response you deserve."
+    assert final.llm_task_status == "completed"
+    assert result["llm_node_id"] == final.id
+
+    # The result round told the model the update landed.
+    second_texts = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[1]["messages"])
+    assert "[update_artifact: artifact 'memory' created.]" in second_texts
+
+
+def test_continuation_terminal_failure_fails_continuation_node(
+        app, monkeypatch):
+    """A terminal provider failure on the continuation call fails the
+    CONTINUATION node. The completed interim keeps its status and content,
+    and nothing is stranded at 'processing' (the pre-fix behavior failed
+    the interim and left the continuation pending forever)."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _mk_artifact(alice.id, "reading-list", "books", title="Reading List")
+    monkeypatch.setattr(_llm_task_mod, "CONTINUATION_RETRY_DELAYS", ())
+
+    _ScriptedProvider.reset([
+        _resp("Let me pull that up.", tool_calls=[{
+            "id": "t1", "name": "read_artifact",
+            "input": {"kind": "reading-list"},
+        }]),
+        RuntimeError("provider overloaded"),
+    ])
+
+    with pytest.raises(RuntimeError):
+        generate_llm_response(
+            _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+            source_mode="textmode",
+        )
+
+    interim = _fresh(llm_node.id)
+    assert interim.llm_task_status == "completed"
+    assert interim.get_content() == "Let me pull that up."
+    assert interim.continuation_node_id is not None
+    cont = Node.query.get(interim.continuation_node_id)
+    assert cont.llm_task_status == "failed"
+    assert "provider overloaded" in (cont.llm_task_error or "")
+
+
+def test_continuation_transient_failure_retries(app, monkeypatch):
+    """A transient provider failure on the continuation call is retried
+    (per CONTINUATION_RETRY_DELAYS) and the turn completes normally."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _mk_artifact(alice.id, "reading-list", "books", title="Reading List")
+    monkeypatch.setattr(_llm_task_mod, "CONTINUATION_RETRY_DELAYS", (0,))
+
+    _ScriptedProvider.reset([
+        _resp("Let me pull that up.", tool_calls=[{
+            "id": "t1", "name": "read_artifact",
+            "input": {"kind": "reading-list"},
+        }]),
+        RuntimeError("provider overloaded"),
+        _resp("Here's your answer."),
+    ])
+
+    result = generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+
+    assert result["status"] == "completed"
+    interim = _fresh(llm_node.id)
+    assert interim.llm_task_status == "completed"
+    final = Node.query.get(interim.continuation_node_id)
+    assert final.llm_task_status == "completed"
+    assert final.get_content() == "Here's your answer."
+    assert result["llm_node_id"] == final.id
 
 
 def test_read_full_by_entry_id_resolves_and_continues(app):
