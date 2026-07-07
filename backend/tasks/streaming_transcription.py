@@ -560,7 +560,13 @@ class BatchTranscriptionTask(Task):
                     'completed_at': datetime.utcnow()
                 }, synchronize_session='fetch')
                 db.session.commit()
-                logger.error(
+                # Warning, not error: the task's except block already
+                # reported this exception to Sentry at error level, so an
+                # error here would raise a second Sentry issue for the same
+                # incident. Failures that skip the except block (raised
+                # before its try) still reach Sentry once via the Celery
+                # integration's task-failure capture.
+                logger.warning(
                     f"Batch transcription failed for session {session_id}, "
                     f"chunks {chunk_indices}: {exc}"
                 )
