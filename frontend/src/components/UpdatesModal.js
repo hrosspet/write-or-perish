@@ -135,23 +135,49 @@ function ChangelogItem({ section, onDone }) {
   );
 }
 
+// Issue-close notifications carry the verdict in `type`; the modal shows
+// it as a small eyebrow (same register as the poll's "A question from
+// the developer") over the user's own issue title in serif — the modal
+// header keeps the typographic high ground. Unknown types render as
+// before: bare title, no eyebrow.
+const NOTIFICATION_EYEBROWS = {
+  fix_ready: "Your issue has been fixed",
+  issue_declined: "Your issue — closed without a fix",
+};
+
 function NotificationItem({ notification, onDone, onCloseModal }) {
   const navigate = useNavigate();
+  const eyebrow = NOTIFICATION_EYEBROWS[notification.type];
   const mark = (action) => {
     api.post(`/updates/notifications/${notification.id}/${action}`)
       .catch(() => {});
     onDone();
   };
-  // Following the link must close the WHOLE modal first — navigating
-  // under a still-open overlay looks like the click did nothing.
+  // Looking is not acknowledging: taking a look records a skip (stays
+  // unread) — "Got it" is the explicit dismiss. External URLs (a GitHub
+  // issue, a staging instance) open in a new tab and the modal stays
+  // open with the item, so the user returns to it and decides. In-app
+  // routes must close the WHOLE modal first — navigating under a
+  // still-open overlay looks like the click did nothing; the unread
+  // item comes back next visit.
   const takeALook = () => {
-    mark("read");
-    onCloseModal();
-    navigate(notification.link);
+    api.post(`/updates/notifications/${notification.id}/skip`)
+      .catch(() => {});
+    if (/^https?:\/\//.test(notification.link)) {
+      window.open(notification.link, "_blank", "noopener,noreferrer");
+    } else {
+      onCloseModal();
+      navigate(notification.link);
+    }
   };
   return (
     <div style={itemStyle}>
-      <h3 style={itemTitleStyle}>{notification.title}</h3>
+      {eyebrow && <div style={dateStyle}>{eyebrow}</div>}
+      <h3 style={eyebrow
+        ? { ...itemTitleStyle, fontSize: "1.25rem" }
+        : itemTitleStyle}>
+        {notification.title}
+      </h3>
       {notification.body && (
         <p style={{
           fontFamily: "var(--sans)", fontSize: "0.9rem", fontWeight: 300,

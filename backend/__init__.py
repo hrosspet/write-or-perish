@@ -192,6 +192,10 @@ def create_app():
     from backend.routes.updates import updates_bp
     app.register_blueprint(updates_bp, url_prefix="/api/updates")
 
+    # Inbound webhooks (GitHub issue-close → fix_ready notification).
+    from backend.routes.webhooks import webhooks_bp
+    app.register_blueprint(webhooks_bp, url_prefix="/api/webhooks")
+
     # AI preferences folded into the artifact model (#158 Slice 5): managed via
     # the generic /api/artifacts CRUD (kind="ai_preferences"); the dedicated
     # /api/ai-preferences blueprint was removed.
