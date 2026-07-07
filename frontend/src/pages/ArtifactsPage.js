@@ -16,6 +16,14 @@ const KIND_BLURBS = {
   intentions: "Your longer-running aspirations — noticed, clarified, and tracked together with the AI. Fulfilled or consciously released, both count.",
 };
 
+// Longer intro shown in a kind's empty state (above the generic "Nothing
+// here yet"). Distilled from the agentic prompt's description of the kind.
+const KIND_EMPTY_INTROS = {
+  intentions: "Intentions are your longer-running aspirations — the communication layer between your conscious goals and your subconscious orientation: directional rather than specific, quietly shaping which opportunities you notice and reach for.",
+  ai_preferences: "AI Interaction Preferences are your standing notes on how the AI should work with you — tone, style, boundaries, topics to leave alone — written by you or noted by the AI when you express one, and honored in every conversation.",
+  external_digest: "The Saved References Digest is a compact topic map of the tweets and bookmarks you saved elsewhere and imported into Loore — the AI reads it to judge whether your references hold something relevant before searching them, and it rebuilds itself after each import.",
+};
+
 const titleFromKind = (k) =>
   k.replace(/[-_]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 
@@ -372,6 +380,15 @@ export default function ArtifactsPage() {
           </div>
         ) : (
           <div style={{ textAlign: 'center', padding: '40px 0' }}>
+            {KIND_EMPTY_INTROS[active.kind] && (
+              <p style={{
+                color: 'var(--text-secondary)', fontFamily: 'var(--sans)',
+                fontSize: '0.9rem', fontWeight: 300, lineHeight: 1.7,
+                maxWidth: '38em', margin: '0 auto 16px',
+              }}>
+                {KIND_EMPTY_INTROS[active.kind]}
+              </p>
+            )}
             <p style={{ color: 'var(--text-muted)', fontFamily: 'var(--sans)', fontSize: '0.9rem', marginBottom: '16px' }}>
               Nothing here yet. The AI fills this in during Voice and Text sessions,
               <br />or write your own.

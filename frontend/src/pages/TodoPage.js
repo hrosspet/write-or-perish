@@ -525,6 +525,16 @@ export default function TodoPage() {
       {/* No todo yet */}
       {!todo && !editing && (
         <div style={{ textAlign: 'center', padding: '40px 0' }}>
+          <p style={{
+            color: 'var(--text-secondary)', fontFamily: 'var(--sans)',
+            fontSize: '0.9rem', fontWeight: 300, lineHeight: 1.7,
+            maxWidth: '38em', margin: '0 auto 16px',
+          }}>
+            Your todo list is the concrete counterpart to intentions — specific,
+            finishable tasks; as you write and talk, the AI notices completions,
+            new items, and priorities, and proposes updates that apply only when
+            you confirm.
+          </p>
           <p style={{ color: 'var(--text-muted)', fontFamily: 'var(--sans)', fontSize: '0.9rem', marginBottom: '16px' }}>
             No todo list yet. Create one to track your tasks.
           </p>

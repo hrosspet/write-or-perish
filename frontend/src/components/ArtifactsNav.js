@@ -5,8 +5,9 @@ import { BUILTIN_KIND_ORDER, isBuiltinKind } from '../utils/artifactKinds';
 
 // Shared navigator row for the "documents workspace" — rendered identically
 // on the Profile, Todo, and Artifacts pages so they cross-link. Bubbles, in
-// order: Profile · Todo · built-in artifacts (canonical order) · custom
-// artifacts (alphabetical) · {children} (e.g. the Artifacts page's + button).
+// order: Profile · Intentions · Todo · remaining built-in artifacts
+// (canonical order) · custom artifacts (alphabetical) · {children} (e.g. the
+// Artifacts page's + button).
 // Module-level cache of the last-fetched artifact list. Lets the bubble row
 // render instantly when ArtifactsNav remounts on cross-page navigation
 // (Profile/Todo/Artifacts are separate routes) instead of flashing empty
@@ -59,9 +60,8 @@ export default function ArtifactsNav({ activeKind, onNavigate, creating, childre
 
   useEffect(() => { fetchArtifacts(); }, [fetchArtifacts]);
 
-  // Refetch when an artifact is created/updated elsewhere (the page's inline
-  // "+" or the nav dropdown's create modal) so the bubble row updates without
-  // a reload. Dispatched by ArtifactsPage.handleSave / ArtifactsMenu.handleCreate.
+  // Refetch when an artifact is created/updated elsewhere so the bubble row
+  // updates without a reload. Dispatched by ArtifactsPage.handleSave.
   useEffect(() => {
     const handler = () => fetchArtifacts();
     window.addEventListener('loore_artifacts_changed', handler);
@@ -69,8 +69,11 @@ export default function ArtifactsNav({ activeKind, onNavigate, creating, childre
   }, [fetchArtifacts]);
 
   const byKind = Object.fromEntries(artifacts.map((a) => [a.kind, a]));
+  // Intentions renders between Profile and Todo (aspirations before tasks);
+  // the rest of the built-ins follow Todo in canonical order.
+  const intentionsArtifact = byKind['intentions'];
   const pinned = BUILTIN_KIND_ORDER
-    .filter((k) => byKind[k])
+    .filter((k) => k !== 'intentions' && byKind[k])
     .map((k) => byKind[k]);
   const custom = artifacts
     .filter((a) => !isBuiltinKind(a.kind))
@@ -116,6 +119,7 @@ export default function ArtifactsNav({ activeKind, onNavigate, creating, childre
   return (
     <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '20px' }}>
       {navBubble('Profile', '/profile')}
+      {intentionsArtifact && artBubble(intentionsArtifact)}
       {navBubble('Todo', '/todo')}
       {pinned.map(artBubble)}
       {custom.map(artBubble)}

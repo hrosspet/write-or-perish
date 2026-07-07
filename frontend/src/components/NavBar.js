@@ -3,7 +3,6 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useUser } from "../contexts/UserContext";
 import { useTheme } from "../contexts/ThemeContext";
 import GlobalAudioPlayer from "./GlobalAudioPlayer";
-import ArtifactsMenu from "./ArtifactsMenu";
 import api from "../api";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL;
@@ -208,7 +207,9 @@ function NavBar({ onNewEntryClick }) {
       <div style={{ display: "flex", alignItems: "center", gap: "clamp(0.8rem, 2vw, 1.8rem)" }}>
         {currentPath !== '/voice' && <GlobalAudioPlayer />}
 
-        {/* About dropdown */}
+        {/* About dropdown — logged-out visitors only. For logged-in users
+            the three pages live in the overflow menu below. */}
+        {!user && (
         <div ref={aboutRef} style={{ position: "relative" }}>
           <button
             onClick={() => setAboutOpen(!aboutOpen)}
@@ -248,14 +249,26 @@ function NavBar({ onNewEntryClick }) {
             </div>
           )}
         </div>
+        )}
 
-        {/* Artifacts dropdown (consolidates Profile, Todo, AI preferences and
-            all user/AI artifacts) — for approved, logged-in users. */}
+        {/* Artifacts — plain link into the documents workspace. It lands on
+            Profile, where the ArtifactsNav bubble row cross-links Todo and
+            every other artifact (one click each). */}
         {user && user.approved && (
-          <ArtifactsMenu
-            dropdownStyle={dropdownStyle}
-            dropdownItemStyle={dropdownItemStyle}
-          />
+          <Link
+            to="/profile"
+            style={{
+              ...linkStyle("/profile"),
+              color:
+                currentPath === "/profile" ||
+                currentPath === "/todo" ||
+                currentPath.startsWith("/artifacts")
+                  ? "var(--accent)"
+                  : "var(--text-muted)",
+            }}
+          >
+            Artifacts
+          </Link>
         )}
 
         {/* Logged-out visitors keep the plain links (they route to login). */}
@@ -461,6 +474,34 @@ function NavBar({ onNewEntryClick }) {
                   </>
                 )}
 
+                {/* About pages — moved out of the top nav for logged-in
+                    users; the public dropdown remains for visitors. */}
+                <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
+                <div
+                  style={{
+                    padding: "6px 16px 4px",
+                    fontFamily: "var(--sans)",
+                    fontWeight: 300,
+                    fontSize: "0.7rem",
+                    letterSpacing: "0.08em",
+                    textTransform: "uppercase",
+                    color: "var(--text-muted)",
+                    opacity: 0.6,
+                  }}
+                >
+                  About
+                </div>
+                <Link to="/why-loore" onClick={() => setOverflowOpen(false)} style={{ ...dropdownItemStyle, color: currentPath === "/why-loore" ? "var(--accent)" : "var(--text-muted)" }}>
+                  Why Loore
+                </Link>
+                <Link to="/vision" onClick={() => setOverflowOpen(false)} style={{ ...dropdownItemStyle, color: currentPath === "/vision" ? "var(--accent)" : "var(--text-muted)" }}>
+                  Vision
+                </Link>
+                <Link to="/how-to" onClick={() => setOverflowOpen(false)} style={{ ...dropdownItemStyle, color: currentPath === "/how-to" ? "var(--accent)" : "var(--text-muted)" }}>
+                  How To
+                </Link>
+
+                <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
                 <a href={`${backendUrl}/auth/logout`} style={dropdownItemStyle}>
                   Logout
                 </a>

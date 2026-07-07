@@ -273,12 +273,46 @@ export default function ProfilePage() {
       {/* Accent divider */}
       <div style={{ height: '1px', background: 'var(--accent-dim)', opacity: 0.3, marginBottom: '24px' }} />
 
-      {/* Content */}
+      {/* Content — the empty state doubles as the first-visit explainer for
+          the artifacts workspace (the top-nav "Artifacts" link lands here). */}
       {!profile && !editing && (
         <div style={{ textAlign: 'center', padding: '40px 0' }}>
-          <p style={{ color: 'var(--text-muted)', fontFamily: 'var(--sans)', fontSize: '0.9rem', marginBottom: '16px' }}>
-            No profile generated yet. Your profile will be auto-generated as you use Loore,
-            <br />or write your own.
+          <p style={{
+            color: 'var(--text-secondary)',
+            fontFamily: 'var(--sans)',
+            fontSize: '0.9rem',
+            fontWeight: 300,
+            lineHeight: 1.7,
+            maxWidth: '38em',
+            margin: '0 auto 16px',
+          }}>
+            Your profile is a living document the AI writes about you as you
+            use Loore — what you're working on, what you care about, how
+            you've changed.
+          </p>
+          <p style={{
+            color: 'var(--text-muted)',
+            fontFamily: 'var(--sans)',
+            fontSize: '0.9rem',
+            fontWeight: 300,
+            lineHeight: 1.7,
+            maxWidth: '38em',
+            margin: '0 auto 16px',
+          }}>
+            It's the first of your artifacts — the row above: documents you
+            and the AI keep together. Todo and Intentions hold what you mean
+            to do; Memory holds what the AI has learned. They start empty and
+            fill in as you write and talk.
+          </p>
+          <p style={{
+            color: 'var(--text-muted)',
+            fontFamily: 'var(--sans)',
+            fontSize: '0.9rem',
+            fontWeight: 300,
+            marginBottom: '20px',
+          }}>
+            There's nothing to set up. Start writing, and this page will
+            follow — or write the first version yourself.
           </p>
           <button
             onClick={() => { setEditing(true); setEditContent(''); }}
