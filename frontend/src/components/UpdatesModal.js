@@ -147,8 +147,10 @@ function NotificationItem({ notification, onDone, onCloseModal }) {
   // Links are either in-app routes ("/profile") or external URLs
   // (a GitHub issue, a staging instance) — the latter open a new tab
   // so the user's Loore session stays where it is.
+  // Looking is not acknowledging: taking a look only skips (stays
+  // unread, shows again next visit) — "Got it" is the explicit dismiss.
   const takeALook = () => {
-    mark("read");
+    mark("skip");
     onCloseModal();
     if (/^https?:\/\//.test(notification.link)) {
       window.open(notification.link, "_blank", "noopener,noreferrer");
