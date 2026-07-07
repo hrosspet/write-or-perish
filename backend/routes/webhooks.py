@@ -91,17 +91,18 @@ def github_webhook():
     title = issue.get("title") or f"issue #{number}"
     link = issue.get("html_url")
 
-    # Title-only, no body: the issue title says which one, the verdict
-    # prefix says what happened, and "Take a look" carries the details.
+    # Title-only, no body: the title is the user's own issue title
+    # quoted back to them; the verdict is carried by `type` (the modal
+    # renders it as an eyebrow label) and "Take a look" has the details.
     # The issue title is the submitting user's own content going back to
     # its author — the "no user content in notifications" rule guards
     # against leaks to OTHER users, which this is not.
-    issue_ref = f'"{_clip(title, 120)}" (#{number})'
+    issue_ref = f'"{_clip(title, 150)}" (#{number})'
     if issue.get("state_reason") == "completed":
         notify_user(
             user.id,
             type="fix_ready",
-            title=f"Fixed: {issue_ref}",
+            title=issue_ref,
             link=link,
             replace_unread=False,
         )
@@ -110,7 +111,7 @@ def github_webhook():
         notify_user(
             user.id,
             type="issue_declined",
-            title=f"Closed without a fix: {issue_ref}",
+            title=issue_ref,
             link=link,
             replace_unread=False,
         )

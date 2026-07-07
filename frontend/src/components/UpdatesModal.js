@@ -135,8 +135,19 @@ function ChangelogItem({ section, onDone }) {
   );
 }
 
+// Issue-close notifications carry the verdict in `type`; the modal shows
+// it as a small eyebrow (same register as the poll's "A question from
+// the developer") over the user's own issue title in serif — the modal
+// header keeps the typographic high ground. Unknown types render as
+// before: bare title, no eyebrow.
+const NOTIFICATION_EYEBROWS = {
+  fix_ready: "Your issue has been fixed",
+  issue_declined: "Your issue — closed without a fix",
+};
+
 function NotificationItem({ notification, onDone, onCloseModal }) {
   const navigate = useNavigate();
+  const eyebrow = NOTIFICATION_EYEBROWS[notification.type];
   const mark = (action) => {
     api.post(`/updates/notifications/${notification.id}/${action}`)
       .catch(() => {});
@@ -161,7 +172,12 @@ function NotificationItem({ notification, onDone, onCloseModal }) {
   };
   return (
     <div style={itemStyle}>
-      <h3 style={itemTitleStyle}>{notification.title}</h3>
+      {eyebrow && <div style={dateStyle}>{eyebrow}</div>}
+      <h3 style={eyebrow
+        ? { ...itemTitleStyle, fontSize: "1.25rem" }
+        : itemTitleStyle}>
+        {notification.title}
+      </h3>
       {notification.body && (
         <p style={{
           fontFamily: "var(--sans)", fontSize: "0.9rem", fontWeight: 300,
