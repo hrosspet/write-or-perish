@@ -142,19 +142,20 @@ function NotificationItem({ notification, onDone, onCloseModal }) {
       .catch(() => {});
     onDone();
   };
-  // Following the link must close the WHOLE modal first — navigating
-  // under a still-open overlay looks like the click did nothing.
-  // Links are either in-app routes ("/profile") or external URLs
-  // (a GitHub issue, a staging instance) — the latter open a new tab
-  // so the user's Loore session stays where it is.
-  // Looking is not acknowledging: taking a look only skips (stays
-  // unread, shows again next visit) — "Got it" is the explicit dismiss.
+  // Looking is not acknowledging: taking a look records a skip (stays
+  // unread) — "Got it" is the explicit dismiss. External URLs (a GitHub
+  // issue, a staging instance) open in a new tab and the modal stays
+  // open with the item, so the user returns to it and decides. In-app
+  // routes must close the WHOLE modal first — navigating under a
+  // still-open overlay looks like the click did nothing; the unread
+  // item comes back next visit.
   const takeALook = () => {
-    mark("skip");
-    onCloseModal();
+    api.post(`/updates/notifications/${notification.id}/skip`)
+      .catch(() => {});
     if (/^https?:\/\//.test(notification.link)) {
       window.open(notification.link, "_blank", "noopener,noreferrer");
     } else {
+      onCloseModal();
       navigate(notification.link);
     }
   };

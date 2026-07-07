@@ -35,6 +35,12 @@ def _verify_signature(secret, payload, signature_header):
     return hmac.compare_digest(f"sha256={expected}", signature_header)
 
 
+def _clip(text, limit):
+    """Keep the notification title inside its 200-char column even for
+    long issue titles."""
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
 def _submitter_from_labels(labels):
     """Extract the Loore username from an issue's ``loore:{username}``
     label. Returns None for issues not created through Loore."""
@@ -85,20 +91,17 @@ def github_webhook():
     title = issue.get("title") or f"issue #{number}"
     link = issue.get("html_url")
 
+    # Title-only, no body: the issue title says which one, the verdict
+    # prefix says what happened, and "Take a look" carries the details.
     # The issue title is the submitting user's own content going back to
-    # its author — the "no user content in notification bodies" rule
-    # guards against leaks to OTHER users, which this is not.
+    # its author — the "no user content in notifications" rule guards
+    # against leaks to OTHER users, which this is not.
+    issue_ref = f'"{_clip(title, 120)}" (#{number})'
     if issue.get("state_reason") == "completed":
         notify_user(
             user.id,
             type="fix_ready",
-            title="Your issue has been fixed",
-            body=(
-                f'"{title}" (#{number}) is done and deployed — it goes '
-                "live within minutes of this notification. Thank you for "
-                "reporting it; if it doesn't behave as you expected, "
-                "please open a new issue."
-            ),
+            title=f"Fixed: {issue_ref}",
             link=link,
             replace_unread=False,
         )
@@ -107,13 +110,7 @@ def github_webhook():
         notify_user(
             user.id,
             type="issue_declined",
-            title="An update on your issue",
-            body=(
-                f'"{title}" (#{number}) was closed without a fix — '
-                "usually because it's a duplicate or doesn't fit where "
-                "Loore is heading right now. The details are on the "
-                "issue itself. Thank you for caring enough to write it."
-            ),
+            title=f"Closed without a fix: {issue_ref}",
             link=link,
             replace_unread=False,
         )

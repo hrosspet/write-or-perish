@@ -120,9 +120,10 @@ class TestIssueClosed:
         user = User.query.filter_by(username="tester").one()
         assert n.user_id == user.id
         assert n.type == "fix_ready"
-        assert "fixed" in n.title.lower()
-        assert "Voice input drops words" in n.body
-        assert "#42" in n.body
+        assert n.title.startswith("Fixed:")
+        assert "Voice input drops words" in n.title
+        assert "#42" in n.title
+        assert n.body is None
         assert n.link == "https://github.com/o/r/issues/42"
         assert n.status == "unread"
 
@@ -133,7 +134,16 @@ class TestIssueClosed:
         assert res.get_json()["status"] == "notified"
         n = UserNotification.query.one()
         assert n.type == "issue_declined"
-        assert "without a fix" in n.body
+        assert "without a fix" in n.title
+        assert n.body is None
+
+    def test_long_issue_title_fits_column(self, app):
+        res = _signed_post(
+            app.test_client(),
+            _issue_payload(title="x" * 300))
+        assert res.get_json()["status"] == "notified"
+        n = UserNotification.query.one()
+        assert len(n.title) <= 200
 
     def test_two_closed_issues_do_not_collapse(self, app):
         client = app.test_client()
