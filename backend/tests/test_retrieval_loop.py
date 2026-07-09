@@ -1039,3 +1039,99 @@ def test_label_canonicalization_in_final_answer(app, monkeypatch):
     all_text = "\n".join(n.get_content() or "" for n in nodes)
     assert ("{quote_ext:%d}" % item_id) in all_text
     assert "{quote:A}" not in all_text
+
+
+# ── Voice per-node TTS dispatch ──────────────────────────────────────────
+# Voice turns dispatch TTS at each node's OWN finalization: the interim
+# step's audio must be playable while the continuation call is still
+# generating (it can run for minutes after a long sharing). The old design
+# chained TTS after the whole task, blocking interim audio behind the turn.
+
+
+def test_voice_tts_dispatched_per_node_at_finalization(app, monkeypatch):
+    alice, system, user_node, llm_node = _build_chain("voice")
+    _mk_artifact(alice.id, "memory", "remembered things", title="Memory")
+
+    dispatched = []
+
+    def _record(node_id, user_id):
+        # Capture how many model calls had happened at dispatch time so we
+        # can assert the interim dispatch preceded the continuation call.
+        dispatched.append((node_id, user_id, len(_ScriptedProvider.calls)))
+
+    monkeypatch.setattr(_llm_task_mod, "_dispatch_voice_tts", _record)
+
+    _ScriptedProvider.reset([
+        _resp("(on it…)", tool_calls=[{
+            "id": "t1", "name": "update_artifact",
+            "input": {"kind": "memory", "content": "updated"},
+        }]),
+        _resp("All noted — here's my full reply."),
+    ])
+
+    generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="voice",
+    )
+
+    interim = _fresh(llm_node.id)
+    final = Node.query.get(interim.continuation_node_id)
+
+    # One dispatch per node, in chain order.
+    assert [d[0] for d in dispatched] == [interim.id, final.id]
+    assert all(d[1] == alice.id for d in dispatched)
+    # The interim's TTS was dispatched after ONE model call — i.e. before
+    # the continuation call ran (that's the whole point).
+    assert dispatched[0][2] == 1
+    assert dispatched[1][2] == 2
+    # Status marked pending in the same commit as completion, so the
+    # frontend's POST /tts sees the in-flight promise and won't
+    # double-enqueue.
+    assert interim.tts_task_status == "pending"
+    assert final.tts_task_status == "pending"
+
+
+def test_voice_single_node_turn_dispatches_tts_once(app, monkeypatch):
+    alice, system, user_node, llm_node = _build_chain("voice")
+
+    dispatched = []
+    monkeypatch.setattr(
+        _llm_task_mod, "_dispatch_voice_tts",
+        lambda node_id, user_id: dispatched.append(node_id))
+
+    _ScriptedProvider.reset([_resp("Just a plain answer.")])
+
+    generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="voice",
+    )
+
+    assert dispatched == [llm_node.id]
+    assert _fresh(llm_node.id).tts_task_status == "pending"
+
+
+def test_textmode_never_dispatches_tts(app, monkeypatch):
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _mk_artifact(alice.id, "memory", "remembered things", title="Memory")
+
+    dispatched = []
+    monkeypatch.setattr(
+        _llm_task_mod, "_dispatch_voice_tts",
+        lambda node_id, user_id: dispatched.append(node_id))
+
+    _ScriptedProvider.reset([
+        _resp("(on it…)", tool_calls=[{
+            "id": "t1", "name": "update_artifact",
+            "input": {"kind": "memory", "content": "updated"},
+        }]),
+        _resp("Done."),
+    ])
+
+    generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+
+    assert dispatched == []
+    interim = _fresh(llm_node.id)
+    assert interim.tts_task_status is None

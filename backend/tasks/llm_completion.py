@@ -99,6 +99,33 @@ MAX_RETRIEVAL_ROUNDS = 5
 # 'processing' forever. Module-level so tests can zero the delays.
 CONTINUATION_RETRY_DELAYS = (5, 15)
 
+
+def _dispatch_voice_tts(node_id, user_id):
+    """Enqueue TTS generation for a finalized voice-turn node.
+
+    Voice turns dispatch TTS per node at that node's OWN finalization —
+    the interim step's audio must be playable while the continuation call
+    is still generating (it can run for minutes after a long sharing).
+    A chained-after-the-task dispatch (the old design) blocked the interim
+    audio behind the whole turn.
+
+    Dispatch failures are logged, never raised: a missing TTS is
+    recoverable (the SSE stream reports no chunks and the frontend's 60s
+    safety net kicks in), a failed LLM turn is not.
+    """
+    try:
+        import os
+        import pathlib
+        from backend.tasks.tts import generate_tts_audio
+        audio_root = str(pathlib.Path(
+            os.environ.get("AUDIO_STORAGE_PATH", "data/audio")).resolve())
+        generate_tts_audio.delay(
+            node_id, audio_root, requesting_user_id=user_id)
+    except Exception:
+        logger.exception(
+            "Failed to dispatch voice TTS for node %s", node_id)
+
+
 # ── Relative quote labels ────────────────────────────────────────────────
 # semantic_search previews tag each match with a short label ([A], [B], …)
 # and the model quotes by label ({quote:A}). The server canonicalizes
@@ -2686,7 +2713,17 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
                 target_node.llm_task_status = 'completed'
                 target_node.llm_task_progress = 100
+                # Voice: mark TTS pending in the SAME commit as completion so
+                # the frontend's POST /tts (fired the moment it polls
+                # 'completed') sees the in-flight promise and doesn't
+                # double-enqueue.
+                f_dispatch_tts = (source_mode == "voice"
+                                  and not target_node.audio_tts_url)
+                if f_dispatch_tts:
+                    target_node.tts_task_status = 'pending'
                 db.session.commit()
+                if f_dispatch_tts:
+                    _dispatch_voice_tts(target_node.id, user_id)
 
                 logger.info(
                     f"LLM completion successful, updated node "
@@ -2866,7 +2903,17 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     db.session.add(continuation)
                     db.session.flush()
                     current_node.continuation_node_id = continuation.id
+                    # Voice: the interim step is now final content — kick off
+                    # its TTS immediately so the user can play it while the
+                    # continuation call below is still generating. Status is
+                    # set in the same commit as completion (see _finalize).
+                    interim_dispatch_tts = (source_mode == "voice"
+                                            and not current_node.audio_tts_url)
+                    if interim_dispatch_tts:
+                        current_node.tts_task_status = 'pending'
                     db.session.commit()
+                    if interim_dispatch_tts:
+                        _dispatch_voice_tts(current_node.id, user_id)
 
                     # Inject the assistant turn + retrieved content into the
                     # message stream and re-call so the model answers WITH it.

@@ -98,6 +98,7 @@ Feature 1 (Journaling) is production-ready and significantly expanded — see FO
 | A.19 | Hierarchical context freshness | Context artifacts, recent summaries, profile freshness |
 | A.20 | Dev-update channel (#207) | In-app changelog (markdown file in repo, per-user read/skip), persistent background-task notifications, admin polls with two-phase opt-in LLM-drafted answers |
 | A.21 | Issue-close notifications (#236) | GitHub webhook (HMAC-verified) → targeted fix_ready/issue_declined notification to the submitting user (via loore:{username} label) through the dev-update channel; v0 of the issue→fix→verify loop (#237) |
+| A.22 | Voice interim-node playback | TTS dispatched per node at its own finalization (interim "(on it…)" playable while the continuation is still generating), chain-aware playback queue in Voice mode with playback → "Thinking…" → playback transitions when the follow-up isn't ready yet |
 
 ### Remaining Items
 

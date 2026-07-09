@@ -56,8 +56,16 @@ export const AudioProvider = ({ children }) => {
   const webAudioCtxRef = useRef(null);
   // Gesture-activated Audio element for Safari autoplay
   const warmedAudioRef = useRef(null);
-  // Track whether playback ended while waiting for more chunks
+  // Track whether playback ended while waiting for more chunks.
+  // Mirrored as state so consumers (voice mode) can react to the drain —
+  // e.g. switch back to a "Thinking..." UI while the next chain node's
+  // TTS is still being generated.
   const waitingForChunksRef = useRef(false);
+  const [waitingForChunks, _setWaitingForChunks] = useState(false);
+  const setWaitingForChunks = useCallback((value) => {
+    waitingForChunksRef.current = value;
+    _setWaitingForChunks(value);
+  }, []);
   const audioRef = useRef(null);
   const intervalRef = useRef(null);
   const audioQueueRef = useRef([]);
@@ -326,13 +334,13 @@ export const AudioProvider = ({ children }) => {
         playChunkAtTime(nextIndex, 0, true);
       } else if (generatingTTSRef.current) {
         // Queue empty but TTS still generating - wait for more chunks
-        waitingForChunksRef.current = true;
+        setWaitingForChunks(true);
         setIsPlaying(false);
         stopTimeTracking();
       } else {
         // Playback finished - keep metadata so user can seek back or replay
         // Only stop() clears everything
-        waitingForChunksRef.current = false;
+        setWaitingForChunks(false);
         setIsPlaying(false);
         stopTimeTracking();
         // Show position at end of total duration
@@ -366,7 +374,7 @@ export const AudioProvider = ({ children }) => {
     if (shouldAutoPlay) {
       audio.play().catch(err => console.error('Error playing chunk:', err));
     }
-  }, [playbackRate, calculateCumulativeTime, startTimeTracking, stopTimeTracking, recalculateTotalDuration, cleanupAudio, addToast]);
+  }, [playbackRate, calculateCumulativeTime, startTimeTracking, stopTimeTracking, recalculateTotalDuration, cleanupAudio, addToast, setWaitingForChunks]);
 
   const loadAudio = useCallback(async (audioData) => {
     // If there's already audio playing, pause it first
@@ -477,6 +485,7 @@ export const AudioProvider = ({ children }) => {
     setLoading(true);
     setCurrentAudio(audioData);
     queueMetadataRef.current = audioData;
+    setWaitingForChunks(false);
 
     // Store all URLs for seeking
     allChunkUrlsRef.current = urls;
@@ -506,7 +515,7 @@ export const AudioProvider = ({ children }) => {
     // Play the first chunk — pass the preloaded element so it doesn't
     // need to create and fetch a new one from scratch.
     playChunkAtTime(0, 0, true, preloadedElement);
-  }, [stopTimeTracking, preloadChunkDurations, playChunkAtTime]);
+  }, [stopTimeTracking, preloadChunkDurations, playChunkAtTime, setWaitingForChunks]);
 
   // Append a single chunk URL to the active audio queue (for streaming TTS)
   const appendChunkToQueue = useCallback(async (url, serverDuration = null) => {
@@ -539,10 +548,10 @@ export const AudioProvider = ({ children }) => {
 
     // If playback ended waiting for more chunks, auto-play the new chunk
     if (waitingForChunksRef.current) {
-      waitingForChunksRef.current = false;
+      setWaitingForChunks(false);
       playChunkAtTime(newIndex, 0, true);
     }
-  }, [preloadChunkDurations, playChunkAtTime]);
+  }, [preloadChunkDurations, playChunkAtTime, setWaitingForChunks]);
 
   const play = useCallback(async () => {
     if (audioRef.current && !isPlaying) {
@@ -604,12 +613,12 @@ export const AudioProvider = ({ children }) => {
     currentChunkIndexRef.current = 0;
     // Rebuild the queue so a subsequent play() restarts from chunk 0.
     audioQueueRef.current = allChunkUrlsRef.current.slice(1);
-    waitingForChunksRef.current = false;
+    setWaitingForChunks(false);
     // NOTE: intentionally NOT clearing currentAudio / allChunkUrlsRef /
     // chunkDurationsRef / queueMetadataRef / totalChunks / chunkDurations /
     // totalDuration — the player stays mounted and replayable. Use
     // closePlayer() for full teardown + hide.
-  }, [stopTimeTracking]);
+  }, [stopTimeTracking, setWaitingForChunks]);
 
   // Close the player (#161): full teardown + hide. Releases the element AND
   // clears currentAudio plus all chunk/queue metadata so the player unmounts.
@@ -640,9 +649,9 @@ export const AudioProvider = ({ children }) => {
     allChunkUrlsRef.current = [];
     audioQueueRef.current = [];
     queueMetadataRef.current = null;
-    waitingForChunksRef.current = false;
+    setWaitingForChunks(false);
     setCurrentAudio(null);
-  }, [stopTimeTracking]);
+  }, [stopTimeTracking, setWaitingForChunks]);
 
   // Seek to a cumulative time position (works across chunks)
   const seekToCumulativeTime = useCallback((targetCumulativeTime) => {
@@ -834,6 +843,7 @@ export const AudioProvider = ({ children }) => {
     chunkDurations,
     generatingTTS,
     setGeneratingTTS,
+    waitingForChunks,
     loadAudio,
     loadAudioQueue,
     updateChapters,

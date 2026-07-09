@@ -461,10 +461,21 @@ export function useTTSStreamSSE(entityId, options = {}) {
     prevUrlRef.current = url;
   }
 
+  // Chunk indices already delivered to onChunkReady. The TTS stream has no
+  // last_chunk reconnect param, so a dropped-and-reconnected EventSource
+  // replays every chunk from the start — without this guard each replayed
+  // chunk would be appended to the audio queue a second time.
+  const receivedIndicesRef = useRef(new Set());
+  useEffect(() => {
+    receivedIndicesRef.current = new Set();
+  }, [url]);
+
   // Memoize eventHandlers to prevent unnecessary reconnections
   // Handlers use refs internally to always call latest callbacks
   const eventHandlers = useMemo(() => ({
     chunk_ready: (data) => {
+      if (receivedIndicesRef.current.has(data.chunk_index)) return;
+      receivedIndicesRef.current.add(data.chunk_index);
       setAudioChunks(prev => {
         const existing = prev.find(c => c.index === data.chunk_index);
         if (existing) {
@@ -509,6 +520,7 @@ export function useTTSStreamSSE(entityId, options = {}) {
     setAudioChunks([]);
     setIsComplete(false);
     setFinalUrl(null);
+    receivedIndicesRef.current = new Set();
   }, []);
 
   return {
