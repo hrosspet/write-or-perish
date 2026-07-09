@@ -14,6 +14,11 @@ services:
     environment:
       - FLASK_ENV=development
       - FLASK_DEBUG=1
+      # Dev runs plain http; without this, browsers on LAN devices
+      # (http://<desktop-ip>:3001) reject the Secure session cookie and
+      # login silently fails. localhost is exempt, which is why desktop
+      # dev worked regardless.
+      - SESSION_COOKIE_SECURE=false
     volumes:
       # Mount source code for hot reloading (into backend/ to match project-root import layout)
       - ./backend:/app/backend
