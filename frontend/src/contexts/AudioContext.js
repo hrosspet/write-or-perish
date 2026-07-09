@@ -517,8 +517,12 @@ export const AudioProvider = ({ children }) => {
     playChunkAtTime(0, 0, true, preloadedElement);
   }, [stopTimeTracking, preloadChunkDurations, playChunkAtTime, setWaitingForChunks]);
 
-  // Append a single chunk URL to the active audio queue (for streaming TTS)
-  const appendChunkToQueue = useCallback(async (url, serverDuration = null) => {
+  // Append a single chunk URL to the active audio queue (for streaming TTS).
+  // chapterTitle: when set, a chapter marker is recorded at this chunk's
+  // start position (voice chain playback passes it on the FIRST chunk of
+  // each chain node, so the player can show/jump between the turn's
+  // nodes like .md section chapters).
+  const appendChunkToQueue = useCallback(async (url, serverDuration = null, chapterTitle = null) => {
     const urls = allChunkUrlsRef.current;
 
     // Queue invariant: one turn's audio never contains the same file
@@ -530,6 +534,26 @@ export const AudioProvider = ({ children }) => {
     if (urls.includes(url)) {
       console.warn('[Audio] Skipped duplicate queue append:', url);
       return;
+    }
+
+    // Chapter anchored to this chunk's INDEX; start_time is only a
+    // snapshot fallback (for consumers that don't track durations). The
+    // voice player derives the real start from live chunkDurations at
+    // render time — duration estimates get corrected as chunks load/play
+    // (metadata probing fails on some mobile browsers and falls back to a
+    // coarse estimate), and an index self-corrects with them where a
+    // recorded seconds value would stay wrong.
+    if (chapterTitle) {
+      const startTime = chunkDurationsRef.current.reduce((a, b) => a + b, 0);
+      const chunkIndex = urls.length;
+      setCurrentAudio(prev => prev
+        ? {
+            ...prev,
+            chapters: [...(prev.chapters || []),
+                       { title: chapterTitle, start_time: startTime,
+                         chunk_index: chunkIndex }],
+          }
+        : prev);
     }
 
     // Append URL
@@ -825,6 +849,17 @@ export const AudioProvider = ({ children }) => {
     }).catch(() => {});
   }, []);
 
+  // Resolve a chapter's start time. Chapters anchored to a chunk index
+  // (voice chain nodes) derive it from the LIVE per-chunk durations so
+  // they track corrections as chunks load/play; chapters carrying only a
+  // precomputed start_time (.md section chapters from tts-chapters) use
+  // it as-is. Both players consume this so they can never disagree.
+  const chapterStartTime = useCallback((ch) => (
+    ch.chunk_index != null
+      ? chunkDurations.slice(0, ch.chunk_index).reduce((a, b) => a + b, 0)
+      : ch.start_time
+  ), [chunkDurations]);
+
   // Replace the chapter list on the currently-loaded audio (#145). Used
   // after TTS generation completes to swap the chapters fetched mid-stream
   // (their start times were computed from not-yet-generated chunk durations,
@@ -855,6 +890,7 @@ export const AudioProvider = ({ children }) => {
     generatingTTS,
     setGeneratingTTS,
     waitingForChunks,
+    chapterStartTime,
     loadAudio,
     loadAudioQueue,
     updateChapters,

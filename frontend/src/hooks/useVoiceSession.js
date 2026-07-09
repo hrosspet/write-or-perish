@@ -14,6 +14,20 @@ import api from '../api';
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
+// Chapter label for a chain node: the node text's first words, cleaned of
+// markdown furniture, cut at a word boundary.
+const CHAPTER_TITLE_MAX = 44;
+function chapterTitleFromContent(content) {
+  const clean = (content || '')
+    .replace(/[#*_`>[\]]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!clean) return null;
+  if (clean.length <= CHAPTER_TITLE_MAX) return clean;
+  const cut = clean.slice(0, CHAPTER_TITLE_MAX);
+  return `${cut.slice(0, cut.lastIndexOf(' ') > 20 ? cut.lastIndexOf(' ') : CHAPTER_TITLE_MAX)}…`;
+}
+
 /**
  * Hook for voice conversation workflow.
  *
@@ -106,6 +120,16 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   // Latest advanceChain (defined after ttsSSE, which its body needs);
   // ref-called from the SSE callbacks above its definition.
   const advanceChainRef = useRef(null);
+  // Chapter title for the NEXT node whose audio lands in the queue —
+  // set at TTS-trigger time from the node's text, consumed once by
+  // whichever path delivers that node's first audio. Chain playback
+  // shows one chapter per node (like .md section chapters).
+  const nextChapterTitleRef = useRef(null);
+  const takeChapterTitle = () => {
+    const t = nextChapterTitleRef.current;
+    nextChapterTitleRef.current = null;
+    return t;
+  };
 
   // Silent audio loop for iOS lock-screen controls during recording.
   // Playing audio is required for Media Session API to activate on iOS.
@@ -280,11 +304,17 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       if (firstChunkRef.current) {
         firstChunkRef.current = false;
         stopSilentAudio(); // Real audio takes over
+        const chapterTitle = takeChapterTitle();
         // Await so duration state is set before we show the playback UI.
         // loadAudioQueue also starts preloading the audio for instant play.
         await audio.loadAudioQueue(
           [data.audio_url],
-          { title: ttsTitle, url: data.audio_url },
+          {
+            title: ttsTitle,
+            url: data.audio_url,
+            chapters: chapterTitle
+              ? [{ title: chapterTitle, start_time: 0, chunk_index: 0 }] : [],
+          },
           [data.duration]
         );
         audio.setGeneratingTTS(true);
@@ -293,7 +323,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         // has a play button the user can tap if autoplay was blocked.
         setPhase('playback');
       } else {
-        audio.appendChunkToQueue(data.audio_url, data.duration);
+        audio.appendChunkToQueue(data.audio_url, data.duration, takeChapterTitle());
         // A continuation's first chunk can arrive while the UI dropped
         // back to "Thinking..." (interim playback drained before the
         // answer's audio was ready) — return to the playback UI.
@@ -366,6 +396,8 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       // Remember the continuation so onAllComplete advances to it once this
       // node's TTS finishes generating (null for the final node / flag off).
       pendingContinuationRef.current = continuationId;
+      // Chapter label for this node, consumed when its first audio lands.
+      nextChapterTitleRef.current = chapterTitleFromContent(llmData.content);
 
       // Thread bookkeeping + page callback belong to the FINAL node only: the
       // next turn parents off the answer (not an interim retrieval step), and
@@ -425,10 +457,17 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
             // could otherwise flip to "Thinking..." after us and strand
             // the UI there while the appended audio plays.
             awaitingNextNodeRef.current = false;
-            audio.appendChunkToQueue(ttsUrl).then(() => setPhase('playback'));
+            audio.appendChunkToQueue(ttsUrl, null, takeChapterTitle())
+              .then(() => setPhase('playback'));
           } else {
             firstChunkRef.current = false;
-            audio.loadAudioQueue([ttsUrl], { title: ttsTitle, url: ttsUrl });
+            const chapterTitle = takeChapterTitle();
+            audio.loadAudioQueue([ttsUrl], {
+              title: ttsTitle,
+              url: ttsUrl,
+              chapters: chapterTitle
+                ? [{ title: chapterTitle, start_time: 0, chunk_index: 0 }] : [],
+            });
             setPhase('playback');
           }
           const nextId = pendingContinuationRef.current;
@@ -516,6 +555,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     pendingContinuationRef.current = null;
     continuingChainRef.current = false;
     awaitingNextNodeRef.current = false;
+    nextChapterTitleRef.current = null;
     transcriptRef.current = '';
     setHasError(false);
     if (extraReset) extraReset();
@@ -551,6 +591,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     pendingContinuationRef.current = null;
     continuingChainRef.current = false;
     awaitingNextNodeRef.current = false;
+    nextChapterTitleRef.current = null;
     transcriptRef.current = '';
     if (extraReset) extraReset();
     streaming.cancelStreaming();

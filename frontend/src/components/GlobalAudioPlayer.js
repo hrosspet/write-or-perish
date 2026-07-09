@@ -13,6 +13,7 @@ const GlobalAudioPlayer = () => {
     cumulativeTime,
     totalDuration,
     generatingTTS,
+    chapterStartTime,
     play,
     pause,
     stop,
@@ -94,9 +95,11 @@ const GlobalAudioPlayer = () => {
     }
   };
 
-  const inner = (
-    <>
-      {/* Title */}
+  // Pieces composed per layout: desktop = one inline NavBar row; mobile =
+  // TWO rows in the floating card. A single row's min-content width
+  // overflows narrow screens (especially with the chapters select), which
+  // pushed the seek bar past the card's right border and the ✕ off-card.
+  const titleEl = (
       <div style={{
         color: 'var(--text-primary)',
         fontSize: '13px',
@@ -104,29 +107,31 @@ const GlobalAudioPlayer = () => {
         fontFamily: 'var(--sans)',
         maxWidth: isMobile ? 'none' : '200px',
         flex: isMobile ? '1 1 auto' : '0 0 auto',
+        minWidth: 0,
         overflow: 'hidden',
         textOverflow: 'ellipsis',
         whiteSpace: 'nowrap',
       }}>
         {currentAudio.title || 'Audio Player'}
       </div>
+  );
 
-      {/* Chapters (#145) — only for TTS audio with real sections.
-          Controlled: shows the chapter currently playing and advances
-          live as playback crosses section boundaries. */}
-      {currentAudio.chapters && currentAudio.chapters.length > 1 && (
+  // Chapters (#145) — only for TTS audio with real sections. Controlled:
+  // shows the chapter currently playing and advances live as playback
+  // crosses section boundaries.
+  const chaptersEl = (currentAudio.chapters && currentAudio.chapters.length > 1) ? (
         <select
           value={(() => {
             let idx = 0;
             for (let i = 0; i < currentAudio.chapters.length; i++) {
-              if (displayTime >= currentAudio.chapters[i].start_time) idx = i;
+              if (displayTime >= chapterStartTime(currentAudio.chapters[i])) idx = i;
               else break;
             }
             return idx;
           })()}
           onChange={(e) => {
             const ch = currentAudio.chapters[Number(e.target.value)];
-            if (ch) seekToCumulativeTime(ch.start_time);
+            if (ch) seekToCumulativeTime(chapterStartTime(ch));
           }}
           title="Current chapter — select to jump"
           style={{
@@ -137,19 +142,22 @@ const GlobalAudioPlayer = () => {
             fontSize: '11px',
             fontFamily: 'var(--sans)',
             padding: '2px 4px',
-            maxWidth: isMobile ? '90px' : '130px',
+            maxWidth: isMobile ? '110px' : '130px',
+            // On mobile the select shrinks (instead of overflowing the
+            // card) once the fixed-width controls/time/✕ take their room.
+            flexShrink: isMobile ? 1 : 0,
+            minWidth: isMobile ? '56px' : undefined,
             cursor: 'pointer',
-            flexShrink: 0,
           }}
         >
           {currentAudio.chapters.map((ch, i) => (
             <option key={i} value={i}>{ch.title}</option>
           ))}
         </select>
-      )}
+  ) : null;
 
-      {/* Controls */}
-      <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+  const controlsEl = (
+      <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexShrink: 0 }}>
         {isPlaying ? (
           <button
             onClick={pause}
@@ -264,12 +272,14 @@ const GlobalAudioPlayer = () => {
           {playbackRate}x
         </button>
       </div>
+  );
 
-      {/* Time display */}
+  const timeEl = (
       <div style={{
         color: 'var(--text-muted)',
         fontSize: '11px',
         minWidth: '70px',
+        flexShrink: 0,
         display: 'flex',
         alignItems: 'center',
         gap: '4px',
@@ -288,8 +298,9 @@ const GlobalAudioPlayer = () => {
           </span>
         )}
       </div>
+  );
 
-      {/* Progress bar */}
+  const progressEl = (
       <div
         onClick={handleSeek}
         style={{
@@ -314,6 +325,15 @@ const GlobalAudioPlayer = () => {
           }}
         />
       </div>
+  );
+
+  const inner = (
+    <>
+      {titleEl}
+      {chaptersEl}
+      {controlsEl}
+      {timeEl}
+      {progressEl}
     </>
   );
 
@@ -375,11 +395,18 @@ const GlobalAudioPlayer = () => {
         boxShadow: '0 4px 20px rgba(0,0,0,0.3)',
       }}
     >
-      {inner}
+      {/* Single row, NO seek bar on narrow displays — its min-content
+          width is what pushed elements past the card border; the
+          elapsed/total readout plus skip ±10s and the chapter select
+          cover navigation. Title and select shrink before anything
+          overflows. */}
+      {titleEl}
+      {chaptersEl}
+      {controlsEl}
+      {timeEl}
       {/* Close — full teardown + hide the floating player (#161
-          closePlayer). The Stop button inside `inner` resets playback to 0
-          and keeps the player visible; only this X (or a refresh) dismisses
-          it. */}
+          closePlayer). The Stop button resets playback to 0 and keeps the
+          player visible; only this X (or a refresh) dismisses it. */}
       <button
         onClick={closePlayer}
         title="Close player"
