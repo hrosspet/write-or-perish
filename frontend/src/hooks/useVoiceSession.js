@@ -328,7 +328,12 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     pendingContinuationRef.current = null;
     continuingChainRef.current = true;
     awaitingNextNodeRef.current = true;
-    ttsTriggeredForNodeRef.current = null;
+    // Deliberately NOT clearing ttsTriggeredForNodeRef here: it still
+    // holds the JUST-TTS'd node's id, which keeps the trigger effect from
+    // re-firing for that node in any render between now and the llmNodeId
+    // update landing (re-firing hit the already-generated 200 path and
+    // appended the same audio to the queue a second time). The
+    // continuation triggers fine — its id differs from the stored one.
     ttsSSE.reset();
     setTtsGenerating(false);
     audio.setGeneratingTTS(true);

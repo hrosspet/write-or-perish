@@ -521,6 +521,17 @@ export const AudioProvider = ({ children }) => {
   const appendChunkToQueue = useCallback(async (url, serverDuration = null) => {
     const urls = allChunkUrlsRef.current;
 
+    // Queue invariant: one turn's audio never contains the same file
+    // twice. Chunk URLs carry a per-generation cache-bust (?v=), and for
+    // single-chunk nodes the chunk URL *is* the node's full tts URL — so
+    // any double-delivery (SSE replay, chunk_ready + already-generated
+    // POST racing on the same node) funnels into an identical URL here.
+    // Warn loudly: if this fires we want to know which path delivered it.
+    if (urls.includes(url)) {
+      console.warn('[Audio] Skipped duplicate queue append:', url);
+      return;
+    }
+
     // Append URL
     urls.push(url);
     const newIndex = urls.length - 1;
