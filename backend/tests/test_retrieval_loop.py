@@ -1248,3 +1248,136 @@ def test_interim_fallback_composition():
             == "(updating your memory, looking that up…)")
     assert (fallback([{"name": "apply_todo_changes", "input": {}}])
             == "(updating your todo list…)")
+
+
+# ── update_artifact edits mode ───────────────────────────────────────────
+# Writes come in two modes: `edits` (targeted exact-match replacements —
+# cheap) or `updated_content` (full text — creations/heavy rewrites).
+# Edits are all-or-nothing and fail cleanly with an error that steers the
+# model to fix the anchor or fall back to full text.
+
+
+def _run_update(alice, user_node, llm_node, tool_input,
+                source_mode="textmode"):
+    _ScriptedProvider.reset([
+        _resp("Updating.", tool_calls=[{
+            "id": "t1", "name": "update_artifact", "input": tool_input,
+        }]),
+        _resp("Done."),
+    ])
+    generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode=source_mode,
+    )
+    second_texts = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[1]["messages"])
+    interim = _fresh(llm_node.id)
+    entry = next(e for e in json.loads(interim.tool_calls_meta)
+                 if e.get("name") == "update_artifact")
+    return second_texts, entry
+
+
+def test_artifact_edits_mode_applies_and_echoes_diff(app):
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _mk_artifact(alice.id, "memory",
+                 "## Facts\n- has a dog\n- lives in Prague", title="Memory")
+    _db.session.commit()
+
+    second_texts, entry = _run_update(alice, user_node, llm_node, {
+        "kind": "memory",
+        "edits": [
+            {"old_text": "- has a dog", "new_text": "- has two dogs"},
+            {"old_text": "- lives in Prague",
+             "new_text": "- lives in Prague\n- started a garden"},
+        ],
+    })
+
+    assert entry["status"] == "success"
+    art = UserArtifact.latest_for(alice.id, "memory")
+    assert art.get_content() == ("## Facts\n- has two dogs\n"
+                                 "- lives in Prague\n- started a garden")
+    # Echo shows the diff of what the edits produced.
+    assert "Your changes to 'memory'" in second_texts
+    assert "+- has two dogs" in second_texts
+    assert "+- started a garden" in second_texts
+    # Edits are free text — redacted from plaintext meta.
+    assert entry["input"]["edits"] == "[redacted]"
+    assert "garden" not in _fresh(llm_node.id).tool_calls_meta
+
+
+def test_artifact_edits_anchor_not_found_fails_cleanly(app):
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    art = _mk_artifact(alice.id, "memory", "- has a dog", title="Memory")
+    _db.session.commit()
+    original_id = art.id
+
+    second_texts, entry = _run_update(alice, user_node, llm_node, {
+        "kind": "memory",
+        "edits": [{"old_text": "- has a cat", "new_text": "- has two"}],
+    })
+
+    assert entry["status"] == "error"
+    assert "was not found" in entry["error"]
+    # Error round steers to a fix; no new version was written.
+    assert "update_artifact failed" in second_texts
+    assert "updated_content" in second_texts
+    assert UserArtifact.latest_for(alice.id, "memory").id == original_id
+
+
+def test_artifact_edits_ambiguous_anchor_fails(app):
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _mk_artifact(alice.id, "memory", "note\nnote", title="Memory")
+    _db.session.commit()
+
+    _, entry = _run_update(alice, user_node, llm_node, {
+        "kind": "memory",
+        "edits": [{"old_text": "note", "new_text": "notes"}],
+    })
+    assert entry["status"] == "error"
+    assert "matches 2 places" in entry["error"]
+
+
+def test_artifact_edits_on_missing_artifact_fails(app):
+    alice, system, user_node, llm_node = _build_chain("textmode")
+
+    _, entry = _run_update(alice, user_node, llm_node, {
+        "kind": "memory",
+        "edits": [{"old_text": "x", "new_text": "y"}],
+    })
+    assert entry["status"] == "error"
+    assert "No existing artifact to edit" in entry["error"]
+
+
+def test_artifact_full_text_wins_over_edits(app):
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _mk_artifact(alice.id, "memory", "old", title="Memory")
+    _db.session.commit()
+
+    _, entry = _run_update(alice, user_node, llm_node, {
+        "kind": "memory",
+        "updated_content": "brand new full text",
+        "edits": [{"old_text": "nonexistent", "new_text": "ignored"}],
+    })
+    assert entry["status"] == "success"
+    assert (UserArtifact.latest_for(alice.id, "memory").get_content()
+            == "brand new full text")
+
+
+def test_artifact_substantial_rewrite_echoes_full_text(app):
+    """A diff larger than the threshold switches the echo to the full new
+    content — clearer and usually shorter for near-total rewrites."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    old = "\n".join(f"- old fact {i}" for i in range(200))
+    _mk_artifact(alice.id, "memory", old, title="Memory")
+    _db.session.commit()
+
+    new = "\n".join(f"- new fact {i}" for i in range(200))
+    second_texts, entry = _run_update(alice, user_node, llm_node, {
+        "kind": "memory", "updated_content": new,
+    })
+
+    assert entry["status"] == "success"
+    assert "Your rewrite of 'memory' was substantial" in second_texts
+    # Full new text, not a diff: every line present, un-prefixed.
+    assert "- new fact 199" in second_texts
+    assert "+- new fact 199" not in second_texts

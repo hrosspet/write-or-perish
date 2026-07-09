@@ -200,11 +200,13 @@ QUOTE_PULL_DEPTH = 1
 # artifact/todo read — to twice that. ~4 chars/token → ~25k / ~50k tokens.
 MAX_QUOTE_PULL_CHARS = NODE_CHAR_CAP
 MAX_RETRIEVAL_INJECTION_CHARS = NODE_CHAR_CAP * 2
-# Cap on the within-turn echo of an update_artifact write (diff for
-# updates, full text for creations) injected into the continuation call.
-# ~4 chars/token → ~1k tokens; a full-artifact rewrite can't blow up the
-# continuation prompt.
-MAX_ARTIFACT_ECHO_CHARS = 4000
+# Threshold for the within-turn echo of an update_artifact write: changes
+# come back as a unified diff, but past this size the rewrite was
+# substantial and the full new text is clearer (and usually shorter than
+# its diff), so the echo switches to the full content. Creations always
+# echo in full. The echo itself is uncapped — the round-level
+# MAX_RETRIEVAL_INJECTION_CHARS above is the final defense.
+ARTIFACT_ECHO_DIFF_THRESHOLD_CHARS = 4000
 
 # ── Voice tool definitions ──────────────────────────────────────────────
 
@@ -257,11 +259,14 @@ VOICE_TOOLS = [
             "them clarify and track — see the Intentions section of your "
             "instructions). You can "
             "also create new kinds for the user on request (e.g. "
-            "'reading-list'). The updated_content must be the FULL new "
-            "text of the artifact (not a diff) — it replaces the previous "
-            "version, and old versions stay in history. Call proactively "
-            "for memory-worthy facts; no confirmation is needed. Always "
-            "produce a text response alongside the call."
+            "'reading-list'). Write with `edits` (targeted exact-match "
+            "replacements against the current version — cheaper and "
+            "faster) for small changes, or `updated_content` (the FULL "
+            "new text) when creating or rewriting heavily. Either way a "
+            "new version is stored and old versions stay in history. "
+            "Call proactively for memory-worthy facts; no confirmation "
+            "is needed. Always produce a text response alongside the "
+            "call."
         ),
         "input_schema": {
             "type": "object",
@@ -278,9 +283,39 @@ VOICE_TOOLS = [
                     "type": "string",
                     "description": (
                         "The complete new artifact text as markdown. "
-                        "Carry forward everything still relevant from "
-                        "the current version."
+                        "Required when creating; for updates prefer "
+                        "`edits` unless most of the text changes. Carry "
+                        "forward everything still relevant from the "
+                        "current version."
                     ),
+                },
+                "edits": {
+                    "type": "array",
+                    "description": (
+                        "Targeted replacements applied in order to the "
+                        "current version — use for small changes instead "
+                        "of resending the full text. Each old_text must "
+                        "match the current content exactly (whitespace "
+                        "included) and occur exactly once; the whole call "
+                        "fails cleanly if any edit doesn't apply."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_text": {
+                                "type": "string",
+                                "description": (
+                                    "Exact text to replace (must occur "
+                                    "exactly once in the current version)."
+                                ),
+                            },
+                            "new_text": {
+                                "type": "string",
+                                "description": "The replacement text.",
+                            },
+                        },
+                        "required": ["old_text", "new_text"],
+                    },
                 },
                 "title": {
                     "type": "string",
@@ -299,7 +334,7 @@ VOICE_TOOLS = [
                     ),
                 },
             },
-            "required": ["kind", "updated_content"],
+            "required": ["kind"],
         },
     },
     {
@@ -956,10 +991,7 @@ def _artifact_update_echo(tr):
     kind = tr.get("kind")
     prev_id = tr.get("previous_artifact_id")
     if prev_id is None:
-        body = new_text
-        if len(body) > MAX_ARTIFACT_ECHO_CHARS:
-            body = body[:MAX_ARTIFACT_ECHO_CHARS] + "\n[…truncated…]"
-        return f"[You created '{kind}' with this content:\n{body}]"
+        return f"[You created '{kind}' with this content:\n{new_text}]"
     previous = UserArtifact.query.get(prev_id)
     old_text = (previous.get_content() or "") if previous else ""
     # Drop the ---/+++ file headers; keep the @@ hunks.
@@ -968,8 +1000,10 @@ def _artifact_update_echo(tr):
     diff = "\n".join(diff_lines)
     if not diff:
         return None
-    if len(diff) > MAX_ARTIFACT_ECHO_CHARS:
-        diff = diff[:MAX_ARTIFACT_ECHO_CHARS] + "\n[…truncated…]"
+    if len(diff) > ARTIFACT_ECHO_DIFF_THRESHOLD_CHARS:
+        # A rewrite this heavy reads clearer (and usually shorter) in full.
+        return (f"[Your rewrite of '{kind}' was substantial — its full "
+                f"new content:\n{new_text}]")
     return (f"[Your changes to '{kind}' — the copy shown in your context "
             f"predates this update:\n{diff}]")
 
@@ -1253,7 +1287,57 @@ def _auto_create_drafts(llm_text, llm_node, node_chain, user_id):
 # encryption-at-rest. Nothing reads ``input`` back out of tool_calls_meta
 # (the cross-turn scan, the frontend, and exports all key on other fields),
 # so redaction is lossless for every consumer.
-_REDACTED_INPUT_KEYS = {"content", "updated_content"}
+_REDACTED_INPUT_KEYS = {"content", "updated_content", "edits"}
+
+
+def _resolve_artifact_write(inp, previous):
+    """Resolve the new full text for an update_artifact call.
+
+    Two write modes: `updated_content` (full replacement — required for
+    creation, right for heavy rewrites) or `edits` (targeted exact-match
+    {old_text, new_text} replacements against the current version —
+    cheaper and faster for small changes). If both are passed the full
+    text wins (it's already complete). Edits are all-or-nothing: any
+    failing edit aborts the call before anything is written, with an
+    error that steers the model to fix the anchor or fall back to
+    updated_content.
+
+    Returns (new_text, None) on success or (None, error_message).
+    """
+    updated_content = inp.get("updated_content")
+    if updated_content:
+        return updated_content, None
+    edits = inp.get("edits")
+    if not edits:
+        return None, ("Pass updated_content (the full new text) or edits "
+                      "(a list of {old_text, new_text} replacements).")
+    if previous is None:
+        return None, ("No existing artifact to edit — pass "
+                      "updated_content with the full text to create it.")
+    text = previous.get_content() or ""
+    for i, edit in enumerate(edits):
+        if not isinstance(edit, dict):
+            return None, f"edits[{i}] is not an object."
+        old = edit.get("old_text") or ""
+        new = edit.get("new_text")
+        if not old:
+            return None, (f"edits[{i}].old_text is empty — every edit "
+                          "needs the exact text to replace.")
+        if new is None:
+            return None, f"edits[{i}].new_text is missing."
+        count = text.count(old)
+        if count == 0:
+            return None, (
+                f"edits[{i}].old_text was not found in the current "
+                f"version. Match the current text exactly (whitespace "
+                f"included), or send updated_content with the full new "
+                f"text instead.")
+        if count > 1:
+            return None, (
+                f"edits[{i}].old_text matches {count} places — include "
+                f"more surrounding context so it's unique.")
+        text = text.replace(old, new, 1)
+    return text, None
 
 
 def _redact_tool_input(inp):
@@ -1376,43 +1460,52 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                     )
                 else:
                     previous = UserArtifact.latest_for(user_id, kind)
-                    title = (inp.get("title") or "").strip()
-                    if not title:
-                        title = (
-                            previous.title if previous
-                            else UserArtifact.DEFAULT_KINDS.get(
-                                kind, kind.replace("-", " ").title())
+                    new_text, write_err = _resolve_artifact_write(
+                        inp, previous)
+                    if write_err:
+                        result["status"] = "error"
+                        result["error"] = write_err
+                    else:
+                        title = (inp.get("title") or "").strip()
+                        if not title:
+                            title = (
+                                previous.title if previous
+                                else UserArtifact.DEFAULT_KINDS.get(
+                                    kind, kind.replace("-", " ").title())
+                            )
+                        # Description: explicit value wins; else carry
+                        # forward the previous version's; else the built-in
+                        # default for the kind. Mirrors the REST route so AI
+                        # writes don't leave a null description (which
+                        # blocked editing in the UI).
+                        description = (inp.get("description") or "").strip()
+                        if not description:
+                            description = (
+                                previous.description if previous
+                                else UserArtifact.DEFAULT_DESCRIPTIONS.get(
+                                    kind)
+                            )
+                        artifact = UserArtifact(
+                            user_id=user_id,
+                            kind=kind,
+                            title=title[:128],
+                            description=description,
+                            generated_by=(llm_node.llm_model
+                                          or "agentic_session"),
+                            tokens_used=0,
                         )
-                    # Description: explicit value wins; else carry forward the
-                    # previous version's; else the built-in default for the
-                    # kind. Mirrors the REST route so AI writes don't leave a
-                    # null description (which blocked editing in the UI).
-                    description = (inp.get("description") or "").strip()
-                    if not description:
-                        description = (
-                            previous.description if previous
-                            else UserArtifact.DEFAULT_DESCRIPTIONS.get(kind)
-                        )
-                    artifact = UserArtifact(
-                        user_id=user_id,
-                        kind=kind,
-                        title=title[:128],
-                        description=description,
-                        generated_by=llm_node.llm_model or "agentic_session",
-                        tokens_used=0,
-                    )
-                    artifact.set_content(inp["updated_content"])
-                    db.session.add(artifact)
-                    db.session.flush()
-                    result["status"] = "success"
-                    result["artifact_id"] = artifact.id
-                    result["kind"] = kind
-                    result["created"] = previous is None
-                    # Id only (content stays encrypted-at-rest): lets the
-                    # within-turn loop re-resolve both versions and echo a
-                    # diff of this write back to the model.
-                    result["previous_artifact_id"] = (
-                        previous.id if previous else None)
+                        artifact.set_content(new_text)
+                        db.session.add(artifact)
+                        db.session.flush()
+                        result["status"] = "success"
+                        result["artifact_id"] = artifact.id
+                        result["kind"] = kind
+                        result["created"] = previous is None
+                        # Id only (content stays encrypted-at-rest): lets
+                        # the within-turn loop re-resolve both versions and
+                        # echo a diff of this write back to the model.
+                        result["previous_artifact_id"] = (
+                            previous.id if previous else None)
 
             elif name == "read_artifact":
                 kind = (inp.get("kind") or "").strip().lower()
