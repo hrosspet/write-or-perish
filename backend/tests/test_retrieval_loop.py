@@ -1135,3 +1135,116 @@ def test_textmode_never_dispatches_tts(app, monkeypatch):
     assert dispatched == []
     interim = _fresh(llm_node.id)
     assert interim.tts_task_status is None
+
+
+# ── Artifact write echo + interim fallback text ──────────────────────────
+# The continuation call must see WHAT an update_artifact call wrote (the
+# tool arguments are dropped from the injected assistant turn and the
+# inline copy in the system context predates the update) — otherwise the
+# model can't build on its own edit (e.g. a question it noted in the
+# artifact never gets asked). Content is re-resolved from the encrypted
+# rows; only ids live in tool_calls_meta.
+
+
+def test_artifact_update_echo_injects_diff(app):
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _mk_artifact(alice.id, "intentions",
+                 "## Active\n- become a better writer", title="Intentions")
+    _db.session.commit()
+
+    new_content = ("## Active\n- become a better writer\n"
+                   "- bodhisattva acceptance — asked him whether to endorse")
+    _ScriptedProvider.reset([
+        _resp("Updating your intentions.", tool_calls=[{
+            "id": "t1", "name": "update_artifact",
+            "input": {"kind": "intentions", "updated_content": new_content},
+        }]),
+        _resp("Want me to mark that intention endorsed?"),
+    ])
+
+    generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+
+    # The continuation saw a diff of the write: marker + the added line.
+    second_texts = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[1]["messages"])
+    assert "Your changes to 'intentions'" in second_texts
+    assert ("+- bodhisattva acceptance — asked him whether to endorse"
+            in second_texts)
+    # Unchanged lines aren't echoed wholesale (diff, not full text).
+    assert "+- become a better writer" not in second_texts
+
+    # Meta carries ids only — never the content.
+    interim = _fresh(llm_node.id)
+    meta_raw = interim.tool_calls_meta
+    assert "bodhisattva" not in meta_raw
+    entry = next(e for e in json.loads(meta_raw)
+                 if e.get("name") == "update_artifact")
+    assert entry["previous_artifact_id"] is not None
+
+
+def test_artifact_creation_echo_injects_content(app):
+    alice, system, user_node, llm_node = _build_chain("textmode")
+
+    _ScriptedProvider.reset([
+        _resp("Starting a reading list.", tool_calls=[{
+            "id": "t1", "name": "update_artifact",
+            "input": {"kind": "reading-list",
+                      "updated_content": "1. Gravity's Rainbow"},
+        }]),
+        _resp("Saved — Gravity's Rainbow is on it."),
+    ])
+
+    generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+
+    second_texts = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[1]["messages"])
+    assert "You created 'reading-list' with this content:" in second_texts
+    assert "1. Gravity's Rainbow" in second_texts
+    interim = _fresh(llm_node.id)
+    assert "Gravity" not in interim.tool_calls_meta
+
+
+def test_interim_fallback_names_the_action(app):
+    """A TEXT-LESS tool round stores a fallback naming what's happening
+    instead of the old generic "(on it…)" — voice reads it aloud."""
+    alice, system, user_node, llm_node = _build_chain("voice")
+
+    _ScriptedProvider.reset([
+        _resp("", tool_calls=[{
+            "id": "t1", "name": "update_artifact",
+            "input": {"kind": "memory", "updated_content": "a fact"},
+        }]),
+        _resp("All noted."),
+    ])
+
+    generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="voice",
+    )
+
+    interim = _fresh(llm_node.id)
+    assert interim.get_content() == "(updating your memory…)"
+
+
+def test_interim_fallback_composition():
+    """Unit: fallback text for tool combinations."""
+    fallback = _llm_task_mod._interim_fallback_text
+
+    def up(kind):
+        return {"name": "update_artifact", "input": {"kind": kind}}
+
+    read = {"name": "read_artifact", "input": {"kind": "memory"}}
+    assert fallback([read]) == "(looking that up…)"  # byte-identical to old
+    assert fallback([up("memory")]) == "(updating your memory…)"
+    assert (fallback([up("memory"), up("intentions")])
+            == "(updating your memory and intentions…)")
+    assert (fallback([up("memory"), read])
+            == "(updating your memory, looking that up…)")
+    assert (fallback([{"name": "apply_todo_changes", "input": {}}])
+            == "(updating your todo list…)")

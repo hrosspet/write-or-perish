@@ -1,6 +1,7 @@
 """
 Celery task for asynchronous LLM completion.
 """
+import difflib
 import json
 import re
 import time
@@ -199,6 +200,11 @@ QUOTE_PULL_DEPTH = 1
 # artifact/todo read — to twice that. ~4 chars/token → ~25k / ~50k tokens.
 MAX_QUOTE_PULL_CHARS = NODE_CHAR_CAP
 MAX_RETRIEVAL_INJECTION_CHARS = NODE_CHAR_CAP * 2
+# Cap on the within-turn echo of an update_artifact write (diff for
+# updates, full text for creations) injected into the continuation call.
+# ~4 chars/token → ~1k tokens; a full-artifact rewrite can't blow up the
+# continuation prompt.
+MAX_ARTIFACT_ECHO_CHARS = 4000
 
 # ── Voice tool definitions ──────────────────────────────────────────────
 
@@ -877,6 +883,97 @@ def _retrieval_pin(tr):
     return (None, None)
 
 
+# Spoken-friendly phrases for text-less tool rounds (voice reads the
+# interim aloud). update_artifact is handled separately (names the kind).
+ACTION_TOOL_LABELS = {
+    "apply_todo_changes": "updating your todo list",
+    "apply_github_issue": "filing the issue",
+    "apply_feedback": "sending your feedback",
+    "apply_share": "saving the share draft",
+}
+
+
+def _join_natural(items):
+    """["a"] → "a"; ["a", "b"] → "a and b"; ["a", "b", "c"] → "a, b and c"."""
+    if len(items) <= 1:
+        return "".join(items)
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def _interim_fallback_text(tool_calls):
+    """Fallback interim text for a TEXT-LESS tool round, naming what is
+    actually happening — "(updating your memory and intentions…)" — instead
+    of a generic "(on it…)". The model is prompted to write its own
+    one-sentence acknowledgment alongside tool calls; this only covers the
+    rounds where it didn't. Pure-retrieval rounds keep the established
+    "(looking that up…)" byte-for-byte."""
+    kinds = []
+    actions = []
+    has_retrieval = False
+    for tc in tool_calls:
+        name = tc.get("name")
+        if name in RETRIEVAL_TOOLS:
+            has_retrieval = True
+        elif name == "update_artifact":
+            kind = (tc.get("input", {}).get("kind") or "").strip().lower()
+            kind = kind.replace("-", " ").replace("_", " ") or "an artifact"
+            if kind not in kinds:
+                kinds.append(kind)
+        else:
+            label = (ACTION_TOOL_LABELS.get(name)
+                     or (name or "working").replace("_", " "))
+            if label not in actions:
+                actions.append(label)
+    parts = []
+    if kinds:
+        parts.append("updating your " + _join_natural(kinds))
+    parts.extend(actions)
+    if not parts:
+        return "(looking that up…)" if has_retrieval else "(on it…)"
+    if has_retrieval:
+        parts.append("looking that up")
+    return "(" + ", ".join(parts) + "…)"
+
+
+def _artifact_update_echo(tr):
+    """Within-turn echo of what an update_artifact call actually WROTE,
+    injected into the continuation call: a unified diff against the
+    previous version (full text for creations). Without it the model has
+    no access to its own write — the tool arguments are dropped from the
+    injected assistant turn and the inline copy in the system context
+    predates the update — so it couldn't build on what it just wrote
+    (e.g. actually ask a question it noted in the artifact).
+
+    Content is re-resolved from the encrypted rows via the stored ids and
+    NEVER persisted to plaintext tool_calls_meta. Returns None for
+    non-update or failed entries and for no-op writes."""
+    if tr.get("name") != "update_artifact" or tr.get("status") != "success":
+        return None
+    artifact = UserArtifact.query.get(tr.get("artifact_id"))
+    if artifact is None:
+        return None
+    new_text = artifact.get_content() or ""
+    kind = tr.get("kind")
+    prev_id = tr.get("previous_artifact_id")
+    if prev_id is None:
+        body = new_text
+        if len(body) > MAX_ARTIFACT_ECHO_CHARS:
+            body = body[:MAX_ARTIFACT_ECHO_CHARS] + "\n[…truncated…]"
+        return f"[You created '{kind}' with this content:\n{body}]"
+    previous = UserArtifact.query.get(prev_id)
+    old_text = (previous.get_content() or "") if previous else ""
+    # Drop the ---/+++ file headers; keep the @@ hunks.
+    diff_lines = list(difflib.unified_diff(
+        old_text.splitlines(), new_text.splitlines(), lineterm="", n=1))[2:]
+    diff = "\n".join(diff_lines)
+    if not diff:
+        return None
+    if len(diff) > MAX_ARTIFACT_ECHO_CHARS:
+        diff = diff[:MAX_ARTIFACT_ECHO_CHARS] + "\n[…truncated…]"
+    return (f"[Your changes to '{kind}' — the copy shown in your context "
+            f"predates this update:\n{diff}]")
+
+
 def _action_result_text(tr):
     """One-line result string injected back to the model for a NON-retrieval
     tool result, so the loop can continue after action tools too: the model
@@ -1311,6 +1408,11 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                     result["artifact_id"] = artifact.id
                     result["kind"] = kind
                     result["created"] = previous is None
+                    # Id only (content stays encrypted-at-rest): lets the
+                    # within-turn loop re-resolve both versions and echo a
+                    # diff of this write back to the model.
+                    result["previous_artifact_id"] = (
+                        previous.id if previous else None)
 
             elif name == "read_artifact":
                 kind = (inp.get("kind") or "").strip().lower()
@@ -2759,10 +2861,6 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             rounds_done = 0
             while True:
                 response_tool_calls = response.get("tool_calls", [])
-                retrieval_calls = [
-                    tc for tc in response_tool_calls
-                    if tc["name"] in RETRIEVAL_TOOLS
-                ]
                 # Quote markers ({quote:...} / {quote_ext:...}) are PURE
                 # PRESENTATION — they render as cards and never trigger a
                 # round. Query intent is a separate explicit act: the
@@ -2793,10 +2891,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
                 # INTERIM step: a tool call was made and budget remains.
                 if response_tool_calls and rounds_done < MAX_RETRIEVAL_ROUNDS:
-                    # Text-less rounds get a spoken-friendly placeholder;
-                    # "looking that up" only fits retrieval rounds.
-                    interim_fallback = ("(looking that up…)"
-                                        if retrieval_calls else "(on it…)")
+                    # Text-less rounds get a spoken-friendly placeholder
+                    # naming what's happening (voice reads it aloud).
+                    interim_fallback = _interim_fallback_text(
+                        response_tool_calls)
                     # #179: scrub timestamp echoes from interim text too —
                     # it's stored on the interim node and spoken in voice.
                     interim_text = strip_edge_timestamps(resp_text)
@@ -2848,6 +2946,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         tr["status_reported"] = True
                         if tr.get("name") not in RETRIEVAL_TOOLS:
                             injection_strings.append(_action_result_text(tr))
+                            # Echo what an artifact write actually changed
+                            # (diff vs. the previous version) so the model
+                            # can build on its own edit in the answer.
+                            echo = _artifact_update_echo(tr)
+                            if echo:
+                                injection_strings.append(echo)
                         elif tr.get("status") == "success":
                             text = _retrieval_injection_text(
                                 tr, with_labels=True)
