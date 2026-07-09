@@ -250,6 +250,7 @@ export default function TodoPage() {
   const [versions, setVersions] = useState([]);
   const [selectedVersionId, setSelectedVersionId] = useState(null);
   const [versionContent, setVersionContent] = useState(null);
+  const [previousVersionContent, setPreviousVersionContent] = useState(null);
 
   const fetchTodo = useCallback(async () => {
     try {
@@ -345,9 +346,18 @@ export default function TodoPage() {
   const handleSelectVersion = async (id) => {
     setSelectedVersionId(id);
     setVersionContent(null);
+    setPreviousVersionContent(null);
     try {
-      const res = await api.get(`/todo/versions/${id}`);
+      // versions is newest-first; the next entry is the previous version,
+      // fetched alongside so the drawer can render a diff.
+      const idx = versions.findIndex(v => v.id === id);
+      const prev = idx >= 0 ? versions[idx + 1] : null;
+      const [res, prevRes] = await Promise.all([
+        api.get(`/todo/versions/${id}`),
+        prev ? api.get(`/todo/versions/${prev.id}`) : Promise.resolve(null),
+      ]);
       setVersionContent(res.data.todo.content);
+      if (prevRes) setPreviousVersionContent(prevRes.data.todo.content);
     } catch (err) {
       console.error('Failed to load version:', err);
     }
@@ -653,12 +663,13 @@ export default function TodoPage() {
       {/* Version History Drawer */}
       <VersionHistoryDrawer
         isOpen={drawerOpen}
-        onClose={() => { setDrawerOpen(false); setSelectedVersionId(null); setVersionContent(null); }}
+        onClose={() => { setDrawerOpen(false); setSelectedVersionId(null); setVersionContent(null); setPreviousVersionContent(null); }}
         title="Todo History"
         versions={versions}
         selectedVersionId={selectedVersionId}
         onSelectVersion={handleSelectVersion}
         versionContent={versionContent}
+        previousVersionContent={previousVersionContent}
         onRevert={handleRevert}
       />
     </div>

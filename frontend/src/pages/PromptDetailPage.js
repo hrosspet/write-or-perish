@@ -20,6 +20,7 @@ export default function PromptDetailPage() {
   const [versions, setVersions] = useState([]);
   const [selectedVersionId, setSelectedVersionId] = useState(null);
   const [versionContent, setVersionContent] = useState(null);
+  const [previousVersionContent, setPreviousVersionContent] = useState(null);
 
   // Default-updated banner state
   const [showNewDefault, setShowNewDefault] = useState(false);
@@ -66,17 +67,30 @@ export default function PromptDetailPage() {
     }
   };
 
+  // A version's content — id may be the synthetic 'default' (file default,
+  // #128), which lives on its own endpoint.
+  const fetchPromptVersionContent = async (id) => {
+    const res = await api.get(id === 'default'
+      ? `/prompts/${promptKey}/default`
+      : `/prompts/${promptKey}/versions/${id}`);
+    return res.data.prompt.content;
+  };
+
   const handleSelectVersion = async (id) => {
     setSelectedVersionId(id);
     setVersionContent(null);
+    setPreviousVersionContent(null);
     try {
-      if (id === 'default') {
-        const res = await api.get(`/prompts/${promptKey}/default`);
-        setVersionContent(res.data.prompt.content);
-      } else {
-        const res = await api.get(`/prompts/${promptKey}/versions/${id}`);
-        setVersionContent(res.data.prompt.content);
-      }
+      // versions is newest-first; the next entry is the previous version,
+      // fetched alongside so the drawer can render a diff.
+      const idx = versions.findIndex(v => v.id === id);
+      const prev = idx >= 0 ? versions[idx + 1] : null;
+      const [content, prevContent] = await Promise.all([
+        fetchPromptVersionContent(id),
+        prev ? fetchPromptVersionContent(prev.id) : Promise.resolve(null),
+      ]);
+      setVersionContent(content);
+      if (prevContent != null) setPreviousVersionContent(prevContent);
     } catch (err) {
       console.error('Failed to load version:', err);
     }
@@ -388,12 +402,13 @@ export default function PromptDetailPage() {
       {/* Version History Drawer */}
       <VersionHistoryDrawer
         isOpen={drawerOpen}
-        onClose={() => { setDrawerOpen(false); setSelectedVersionId(null); setVersionContent(null); }}
+        onClose={() => { setDrawerOpen(false); setSelectedVersionId(null); setVersionContent(null); setPreviousVersionContent(null); }}
         title={`${prompt.title} History`}
         versions={versions}
         selectedVersionId={selectedVersionId}
         onSelectVersion={handleSelectVersion}
         versionContent={versionContent}
+        previousVersionContent={previousVersionContent}
         onRevert={handleRevert}
       />
     </div>

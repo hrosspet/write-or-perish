@@ -1,5 +1,6 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { formatDate as formatDateShared } from '../utils/date';
+import { computeLineDiff, refineWordDiffs, collapseUnchanged } from '../utils/diff';
 
 /**
  * VersionHistoryDrawer — Slides in from the right.
@@ -9,6 +10,12 @@ import { formatDate as formatDateShared } from '../utils/date';
  *   versions: [{ id, version_number, created_at, generated_by, tokens_used }],
  *   selectedVersionId, onSelectVersion,
  *   versionContent (string|null — the loaded content for selectedVersionId),
+ *   previousVersionContent (optional: string when the previous version's
+ *     content is loaded, null while loading / when no previous version
+ *     exists, undefined when the parent doesn't supply it) — when a
+ *     previous version is available the preview defaults to a line DIFF
+ *     against it (versions are long and changes incremental; a full-text
+ *     comparison by eye was hopeless), with a Diff/Full toggle,
  *   onRevert (optional — called with version id)
  */
 export default function VersionHistoryDrawer({
@@ -19,8 +26,95 @@ export default function VersionHistoryDrawer({
   selectedVersionId,
   onSelectVersion,
   versionContent,
+  previousVersionContent,
   onRevert,
 }) {
+  const [viewMode, setViewMode] = useState('diff');
+
+  // Diff is possible only when both sides are loaded strings. The oldest
+  // version has no previous → full text only.
+  const isOldest = selectedVersionId != null
+    && versions.length > 0
+    && versions[versions.length - 1].id === selectedVersionId;
+  const diffAvailable = typeof versionContent === 'string'
+    && typeof previousVersionContent === 'string'
+    && !isOldest;
+
+  const diffOps = useMemo(() => {
+    if (!diffAvailable) return null;
+    return refineWordDiffs(
+      computeLineDiff(previousVersionContent, versionContent));
+  }, [diffAvailable, previousVersionContent, versionContent]);
+
+  // Smart default per selection: incremental changes read best as a diff,
+  // but a near-total rewrite (regenerated profiles churn >50% of lines)
+  // reads as a wall of red/green — default those to full text. The toggle
+  // always allows both.
+  const changedCount = useMemo(
+    () => (diffOps ? diffOps.filter(o => o.type !== 'same').length : 0),
+    [diffOps]);
+  const isHeavyRewrite = diffOps
+    ? changedCount > diffOps.length * 0.5 && changedCount > 40
+    : false;
+  useEffect(() => {
+    if (diffOps) setViewMode(isHeavyRewrite ? 'full' : 'diff');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [diffOps]);
+
+  const diffRows = useMemo(() => {
+    if (!diffOps || viewMode !== 'diff') return null;
+    return collapseUnchanged(diffOps, 2);
+  }, [diffOps, viewMode]);
+
+  // hasSegments: word-refined lines carry the strikethrough / stronger
+  // tint on the changed WORDS instead of the whole line (GitHub-style).
+  const diffLineStyle = (type, hasSegments = false) => ({
+    fontFamily: 'var(--sans)',
+    fontSize: '0.8rem',
+    fontWeight: 300,
+    lineHeight: 1.6,
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
+    padding: '0 6px',
+    borderRadius: '2px',
+    ...(type === 'add' && {
+      color: 'var(--text-primary)',
+      background: 'color-mix(in srgb, var(--success) 12%, transparent)',
+    }),
+    ...(type === 'del' && {
+      color: 'var(--text-muted)',
+      background: 'color-mix(in srgb, var(--error) 10%, transparent)',
+      ...(!hasSegments && {
+        textDecoration: 'line-through',
+        textDecorationColor: 'color-mix(in srgb, var(--error) 45%, transparent)',
+      }),
+    }),
+    ...(type === 'same' && {
+      color: 'var(--text-muted)',
+    }),
+  });
+
+  const segmentStyle = (type, changed) => (changed ? {
+    borderRadius: '2px',
+    ...(type === 'add' && {
+      background: 'color-mix(in srgb, var(--success) 32%, transparent)',
+    }),
+    ...(type === 'del' && {
+      background: 'color-mix(in srgb, var(--error) 28%, transparent)',
+      textDecoration: 'line-through',
+      textDecorationColor: 'color-mix(in srgb, var(--error) 55%, transparent)',
+    }),
+  } : {});
+
+  const renderDiffLine = (row) => (
+    row.segments
+      ? row.segments.map((seg, j) => (
+          <span key={j} style={segmentStyle(row.type, seg.changed)}>
+            {seg.text}
+          </span>
+        ))
+      : (row.text || ' ')
+  );
   // Close on Escape
   useEffect(() => {
     if (!isOpen) return;
@@ -169,7 +263,87 @@ export default function VersionHistoryDrawer({
           {/* Version content preview */}
           {selectedVersionId && (
             <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px' }}>
-              {versionContent ? (
+              {(diffAvailable || isOldest || onRevert) && (
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: '12px',
+                  marginBottom: '14px',
+                }}>
+                  {diffAvailable && ['diff', 'full'].map((mode) => (
+                    <button
+                      key={mode}
+                      onClick={() => setViewMode(mode)}
+                      style={{
+                        background: 'none', border: 'none', cursor: 'pointer',
+                        padding: '2px 0',
+                        fontFamily: 'var(--sans)', fontSize: '0.75rem',
+                        letterSpacing: '0.04em',
+                        color: viewMode === mode ? 'var(--accent)' : 'var(--text-muted)',
+                        borderBottom: viewMode === mode
+                          ? '1px solid var(--accent)' : '1px solid transparent',
+                      }}
+                    >
+                      {mode === 'diff' ? `Changes (${changedCount})` : 'Full text'}
+                    </button>
+                  ))}
+                  {isOldest && (
+                    <span style={{
+                      fontFamily: 'var(--sans)', fontSize: '0.75rem',
+                      color: 'var(--text-muted)', letterSpacing: '0.04em',
+                    }}>
+                      Initial version
+                    </span>
+                  )}
+                  {onRevert && versions.findIndex(v => v.id === selectedVersionId) > 0 && (
+                    <button
+                      onClick={() => onRevert(selectedVersionId)}
+                      style={{
+                        marginLeft: 'auto',
+                        padding: '3px 10px',
+                        background: 'none',
+                        border: '1px solid var(--border)',
+                        borderRadius: '6px',
+                        color: 'var(--text-muted)',
+                        fontFamily: 'var(--sans)',
+                        fontSize: '0.72rem',
+                        cursor: 'pointer',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      Revert to this version
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {versionContent == null ? (
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>Loading...</p>
+              ) : diffRows ? (
+                <div style={{ margin: 0 }}>
+                  {diffRows.length === 0 || diffRows.every(r => r.type === 'same' || r.type === 'skip') ? (
+                    <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                      No changes from the previous version.
+                    </p>
+                  ) : diffRows.map((row, i) => (
+                    row.type === 'skip' ? (
+                      <div
+                        key={i}
+                        style={{
+                          fontFamily: 'var(--sans)', fontSize: '0.7rem',
+                          color: 'var(--text-muted)', opacity: 0.7,
+                          textAlign: 'center', padding: '6px 0',
+                          userSelect: 'none',
+                        }}
+                      >
+                        ⋯ {row.count} unchanged {row.count === 1 ? 'line' : 'lines'} ⋯
+                      </div>
+                    ) : (
+                      <div key={i} style={diffLineStyle(row.type, !!row.segments)}>
+                        {renderDiffLine(row)}
+                      </div>
+                    )
+                  ))}
+                </div>
+              ) : (
                 <pre style={{
                   fontFamily: 'var(--sans)',
                   fontSize: '0.8rem',
@@ -182,28 +356,8 @@ export default function VersionHistoryDrawer({
                 }}>
                   {versionContent}
                 </pre>
-              ) : (
-                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>Loading...</p>
               )}
 
-              {onRevert && versions.findIndex(v => v.id === selectedVersionId) > 0 && (
-                <button
-                  onClick={() => onRevert(selectedVersionId)}
-                  style={{
-                    marginTop: '16px',
-                    padding: '8px 16px',
-                    background: 'none',
-                    border: '1px solid var(--border)',
-                    borderRadius: '6px',
-                    color: 'var(--text-muted)',
-                    fontFamily: 'var(--sans)',
-                    fontSize: '0.8rem',
-                    cursor: 'pointer',
-                  }}
-                >
-                  Revert to this version
-                </button>
-              )}
             </div>
           )}
         </div>

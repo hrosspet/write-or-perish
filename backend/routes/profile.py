@@ -21,12 +21,25 @@ profile_bp = Blueprint("profile", __name__)
 AUDIO_STORAGE_ROOT = "data/audio"
 
 
+# Generation steps hidden from the history view: 'iterative' rows are the
+# chunk-by-chunk build steps of a full generation and 'update' rows are the
+# pre-merge increments — both are pipeline intermediates, not editions of
+# the profile. Everything else stays visible: 'initial' (complete
+# single-pass build), 'integration' (merged update), 'revert' (a user
+# action), and legacy NULL-typed rows (profiles predating the column).
+PROFILE_HISTORY_HIDDEN_TYPES = ("iterative", "update")
+
+
 @profile_bp.route("/versions", methods=["GET"])
 @login_required
 def get_profile_versions():
-    """List all profile versions for the current user."""
-    profiles = UserProfile.query.filter_by(
-        user_id=current_user.id
+    """List the user's profile versions (pipeline intermediates hidden)."""
+    profiles = UserProfile.query.filter(
+        UserProfile.user_id == current_user.id,
+        db.or_(
+            UserProfile.generation_type.is_(None),
+            UserProfile.generation_type.notin_(PROFILE_HISTORY_HIDDEN_TYPES),
+        ),
     ).order_by(UserProfile.created_at.desc()).all()
 
     versions = []
@@ -64,6 +77,51 @@ def get_profile_version(version_id):
             "generated_by": profile.generated_by,
             "tokens_used": profile.tokens_used,
             "created_at": iso_utc(profile.created_at),
+        }
+    }), 200
+
+
+@profile_bp.route("/revert/<int:version_id>", methods=["POST"])
+@login_required
+def revert_profile(version_id):
+    """Create a new profile version from a historical one. Mirrors the
+    in-pipeline revert (tasks/exports.py): a new row typed 'revert' that
+    carries the source version's attribution and ai_usage (#191)."""
+    old = UserProfile.query.get_or_404(version_id)
+    if old.user_id != current_user.id:
+        return jsonify({"error": "Unauthorized"}), 403
+
+    latest = UserProfile.query.filter_by(
+        user_id=current_user.id
+    ).order_by(UserProfile.created_at.desc()).first()
+    if latest is not None and latest.id == old.id:
+        return jsonify({"error": "Already the current version"}), 400
+
+    new_profile = UserProfile(
+        user_id=current_user.id,
+        generated_by=old.generated_by,
+        tokens_used=0,
+        privacy_level=old.privacy_level,
+        ai_usage=old.ai_usage,
+        source_tokens_used=old.source_tokens_used,
+        source_data_cutoff=old.source_data_cutoff,
+        generation_type="revert",
+        parent_profile_id=old.id,
+    )
+    # Copy the encrypted content directly (no decrypt/re-encrypt round).
+    new_profile.content = old.content
+    db.session.add(new_profile)
+    db.session.commit()
+
+    return jsonify({
+        "profile": {
+            "id": new_profile.id,
+            "content": new_profile.get_content(),
+            "generated_by": new_profile.generated_by,
+            "tokens_used": new_profile.tokens_used,
+            "created_at": iso_utc(new_profile.created_at),
+            "privacy_level": new_profile.privacy_level,
+            "ai_usage": new_profile.ai_usage,
         }
     }), 200
 

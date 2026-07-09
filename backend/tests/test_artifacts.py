@@ -980,3 +980,57 @@ def test_update_artifact_tool_handles_intentions(app):
         latest = UserArtifact.latest_for(uid, "intentions")
         assert latest.title == "Intentions"
         assert "Morning pages" in latest.get_content()
+
+
+# ── Revert route ─────────────────────────────────────────────────────────
+
+def test_revert_creates_new_version_from_old(app, client):
+    with app.app_context():
+        uid = User.query.first().id
+        old = _mk_artifact(uid, "memory", "v1 facts")
+        _mk_artifact(uid, "memory", "v2 facts")
+        old_id = old.id
+
+    res = client.post(f"/api/artifacts/memory/revert/{old_id}")
+    assert res.status_code == 200
+    data = res.get_json()["artifact"]
+    assert data["content"] == "v1 facts"
+    assert data["generated_by"] == "revert"
+    assert data["version_number"] == 3
+
+    with app.app_context():
+        uid = User.query.first().id
+        latest = UserArtifact.latest_for(uid, "memory")
+        assert latest.get_content() == "v1 facts"
+        assert latest.generated_by == "revert"
+        # Three versions total — revert appends, never rewrites history.
+        assert UserArtifact.query.filter_by(
+            user_id=uid, kind="memory").count() == 3
+
+
+def test_revert_rejects_current_version(app, client):
+    with app.app_context():
+        uid = User.query.first().id
+        _mk_artifact(uid, "memory", "v1")
+        current = _mk_artifact(uid, "memory", "v2")
+        current_id = current.id
+    assert client.post(
+        f"/api/artifacts/memory/revert/{current_id}").status_code == 400
+
+
+def test_revert_enforces_ownership_and_kind(app, client):
+    with app.app_context():
+        other = User(username="other2")
+        _db.session.add(other)
+        _db.session.commit()
+        foreign = _mk_artifact(other.id, "memory", "secret")
+        foreign_id = foreign.id
+        uid = User.query.first().id
+        mine = _mk_artifact(uid, "scratchpad", "notes v1")
+        _mk_artifact(uid, "scratchpad", "notes v2")
+        mine_id = mine.id
+    assert client.post(
+        f"/api/artifacts/memory/revert/{foreign_id}").status_code == 403
+    # Right row, wrong kind in the URL.
+    assert client.post(
+        f"/api/artifacts/memory/revert/{mine_id}").status_code == 400

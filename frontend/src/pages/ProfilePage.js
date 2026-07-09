@@ -28,6 +28,7 @@ export default function ProfilePage() {
   const [versions, setVersions] = useState([]);
   const [selectedVersionId, setSelectedVersionId] = useState(null);
   const [versionContent, setVersionContent] = useState(null);
+  const [previousVersionContent, setPreviousVersionContent] = useState(null);
 
   // Profile generation progress — read from localStorage or backend user
   const [generationTaskId, setGenerationTaskId] = useState(
@@ -155,11 +156,33 @@ export default function ProfilePage() {
   const handleSelectVersion = async (id) => {
     setSelectedVersionId(id);
     setVersionContent(null);
+    setPreviousVersionContent(null);
     try {
-      const res = await api.get(`/profile/versions/${id}`);
+      // versions is newest-first; the next entry is the previous version,
+      // fetched alongside so the drawer can render a diff.
+      const idx = versions.findIndex(v => v.id === id);
+      const prev = idx >= 0 ? versions[idx + 1] : null;
+      const [res, prevRes] = await Promise.all([
+        api.get(`/profile/versions/${id}`),
+        prev ? api.get(`/profile/versions/${prev.id}`) : Promise.resolve(null),
+      ]);
       setVersionContent(res.data.profile.content);
+      if (prevRes) setPreviousVersionContent(prevRes.data.profile.content);
     } catch (err) {
       console.error('Failed to load version:', err);
+    }
+  };
+
+  const handleRevert = async (id) => {
+    try {
+      await api.post(`/profile/revert/${id}`);
+      await fetchProfile();
+      setDrawerOpen(false);
+      setSelectedVersionId(null);
+      setVersionContent(null);
+      setPreviousVersionContent(null);
+    } catch (err) {
+      console.error('Failed to revert:', err);
     }
   };
 
@@ -407,12 +430,14 @@ export default function ProfilePage() {
       {/* Version History Drawer */}
       <VersionHistoryDrawer
         isOpen={drawerOpen}
-        onClose={() => { setDrawerOpen(false); setSelectedVersionId(null); setVersionContent(null); }}
+        onClose={() => { setDrawerOpen(false); setSelectedVersionId(null); setVersionContent(null); setPreviousVersionContent(null); }}
         title="Profile History"
         versions={versions}
         selectedVersionId={selectedVersionId}
         onSelectVersion={handleSelectVersion}
         versionContent={versionContent}
+        previousVersionContent={previousVersionContent}
+        onRevert={handleRevert}
       />
       <RegenerateTtsDialog
         open={showTtsDialog}

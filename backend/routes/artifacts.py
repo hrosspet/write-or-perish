@@ -167,3 +167,40 @@ def get_artifact_version(version_id):
     if artifact.user_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
     return jsonify({"artifact": _serialize(artifact)}), 200
+
+
+@artifacts_bp.route("/<kind>/revert/<int:version_id>", methods=["POST"])
+@login_required
+def revert_artifact(kind, version_id):
+    """Create a new artifact version from a historical one."""
+    old = UserArtifact.query.get_or_404(version_id)
+    if old.user_id != current_user.id:
+        return jsonify({"error": "Unauthorized"}), 403
+    if old.kind != kind:
+        return jsonify(
+            {"error": "Version does not belong to this artifact"}), 400
+
+    latest = UserArtifact.latest_for(current_user.id, kind)
+    if latest is not None and latest.id == old.id:
+        return jsonify({"error": "Already the current version"}), 400
+
+    new = UserArtifact(
+        user_id=current_user.id,
+        kind=kind,
+        title=old.title,
+        description=old.description,
+        generated_by="revert",
+        tokens_used=0,
+        privacy_level=old.privacy_level,
+        # A revert reproduces a prior version, so copy its ai_usage (#191).
+        ai_usage=old.ai_usage,
+    )
+    # Copy the encrypted content directly (no decrypt/re-encrypt round).
+    new.content = old.content
+    db.session.add(new)
+    db.session.commit()
+
+    version_count = UserArtifact.query.filter_by(
+        user_id=current_user.id, kind=kind).count()
+    return jsonify(
+        {"artifact": _serialize(new, version_number=version_count)}), 200
