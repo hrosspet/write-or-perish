@@ -1255,15 +1255,15 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     4. Create LLM placeholder node (enqueue=False)
     5. Set draft.llm_node_id AND draft.streaming_status='completed'
        in one commit so the SSE all_complete event includes llm_node_id
-    6. Chain: generate_llm_response → generate_tts_audio
+    6. Enqueue generate_llm_response — it dispatches TTS per node at each
+       node's own finalization (interim steps included), so interim audio
+       is playable while the continuation call is still generating
     """
-    from celery import chain as celery_chain
     from backend.models import Node, NodeTranscriptChunk
     from backend.utils.prompts import get_user_prompt_record
     from backend.utils.llm_nodes import create_llm_placeholder
     from backend.utils.context_artifacts import attach_context_artifacts
     from backend.tasks.llm_completion import generate_llm_response
-    from backend.tasks.tts import generate_tts_audio
 
     prompt_key = label.lower()  # 'voice'
 
@@ -1372,7 +1372,9 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
         return
 
     # Mark TTS as pending now so the frontend's POST /tts endpoint
-    # detects the in-progress chain and skips duplicate enqueue.
+    # detects the in-progress server-side flow and skips duplicate
+    # enqueue (generate_llm_response dispatches the actual TTS task
+    # when this node finalizes).
     llm_node.tts_task_status = 'pending'
 
     # CRITICAL: set llm_node_id AND streaming_status in one commit so
@@ -1381,17 +1383,12 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     draft.streaming_status = 'completed'
     db.session.commit()
 
-    # Chain: LLM generation → TTS generation
-    celery_chain(
-        generate_llm_response.si(
-            tip_node.id, llm_node.id, model, user_id,
-            source_mode='voice',
-            cache_split_offset=cache_split_offset,
-        ),
-        generate_tts_audio.si(
-            llm_node.id, str(audio_storage_root),
-            requesting_user_id=user_id
-        ),
+    # LLM generation; TTS is dispatched inside the task at each node's own
+    # finalization (source_mode='voice'), interim steps included.
+    generate_llm_response.si(
+        tip_node.id, llm_node.id, model, user_id,
+        source_mode='voice',
+        cache_split_offset=cache_split_offset,
     ).apply_async()
 
     logger.info(

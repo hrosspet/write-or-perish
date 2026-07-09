@@ -1,6 +1,7 @@
 """
 Celery task for asynchronous LLM completion.
 """
+import difflib
 import json
 import re
 import time
@@ -99,6 +100,33 @@ MAX_RETRIEVAL_ROUNDS = 5
 # 'processing' forever. Module-level so tests can zero the delays.
 CONTINUATION_RETRY_DELAYS = (5, 15)
 
+
+def _dispatch_voice_tts(node_id, user_id):
+    """Enqueue TTS generation for a finalized voice-turn node.
+
+    Voice turns dispatch TTS per node at that node's OWN finalization —
+    the interim step's audio must be playable while the continuation call
+    is still generating (it can run for minutes after a long sharing).
+    A chained-after-the-task dispatch (the old design) blocked the interim
+    audio behind the whole turn.
+
+    Dispatch failures are logged, never raised: a missing TTS is
+    recoverable (the SSE stream reports no chunks and the frontend's 60s
+    safety net kicks in), a failed LLM turn is not.
+    """
+    try:
+        import os
+        import pathlib
+        from backend.tasks.tts import generate_tts_audio
+        audio_root = str(pathlib.Path(
+            os.environ.get("AUDIO_STORAGE_PATH", "data/audio")).resolve())
+        generate_tts_audio.delay(
+            node_id, audio_root, requesting_user_id=user_id)
+    except Exception:
+        logger.exception(
+            "Failed to dispatch voice TTS for node %s", node_id)
+
+
 # ── Relative quote labels ────────────────────────────────────────────────
 # semantic_search previews tag each match with a short label ([A], [B], …)
 # and the model quotes by label ({quote:A}). The server canonicalizes
@@ -172,6 +200,13 @@ QUOTE_PULL_DEPTH = 1
 # artifact/todo read — to twice that. ~4 chars/token → ~25k / ~50k tokens.
 MAX_QUOTE_PULL_CHARS = NODE_CHAR_CAP
 MAX_RETRIEVAL_INJECTION_CHARS = NODE_CHAR_CAP * 2
+# Threshold for the within-turn echo of an update_artifact write: changes
+# come back as a unified diff, but past this size the rewrite was
+# substantial and the full new text is clearer (and usually shorter than
+# its diff), so the echo switches to the full content. Creations always
+# echo in full. The echo itself is uncapped — the round-level
+# MAX_RETRIEVAL_INJECTION_CHARS above is the final defense.
+ARTIFACT_ECHO_DIFF_THRESHOLD_CHARS = 4000
 
 # ── Voice tool definitions ──────────────────────────────────────────────
 
@@ -224,11 +259,14 @@ VOICE_TOOLS = [
             "them clarify and track — see the Intentions section of your "
             "instructions). You can "
             "also create new kinds for the user on request (e.g. "
-            "'reading-list'). The updated_content must be the FULL new "
-            "text of the artifact (not a diff) — it replaces the previous "
-            "version, and old versions stay in history. Call proactively "
-            "for memory-worthy facts; no confirmation is needed. Always "
-            "produce a text response alongside the call."
+            "'reading-list'). Write with `edits` (targeted exact-match "
+            "replacements against the current version — cheaper and "
+            "faster) for small changes, or `updated_content` (the FULL "
+            "new text) when creating or rewriting heavily. Either way a "
+            "new version is stored and old versions stay in history. "
+            "Call proactively for memory-worthy facts; no confirmation "
+            "is needed. Always produce a text response alongside the "
+            "call."
         ),
         "input_schema": {
             "type": "object",
@@ -245,9 +283,39 @@ VOICE_TOOLS = [
                     "type": "string",
                     "description": (
                         "The complete new artifact text as markdown. "
-                        "Carry forward everything still relevant from "
-                        "the current version."
+                        "Required when creating; for updates prefer "
+                        "`edits` unless most of the text changes. Carry "
+                        "forward everything still relevant from the "
+                        "current version."
                     ),
+                },
+                "edits": {
+                    "type": "array",
+                    "description": (
+                        "Targeted replacements applied in order to the "
+                        "current version — use for small changes instead "
+                        "of resending the full text. Each old_text must "
+                        "match the current content exactly (whitespace "
+                        "included) and occur exactly once; the whole call "
+                        "fails cleanly if any edit doesn't apply."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_text": {
+                                "type": "string",
+                                "description": (
+                                    "Exact text to replace (must occur "
+                                    "exactly once in the current version)."
+                                ),
+                            },
+                            "new_text": {
+                                "type": "string",
+                                "description": "The replacement text.",
+                            },
+                        },
+                        "required": ["old_text", "new_text"],
+                    },
                 },
                 "title": {
                     "type": "string",
@@ -266,7 +334,7 @@ VOICE_TOOLS = [
                     ),
                 },
             },
-            "required": ["kind", "updated_content"],
+            "required": ["kind"],
         },
     },
     {
@@ -850,6 +918,96 @@ def _retrieval_pin(tr):
     return (None, None)
 
 
+# Spoken-friendly phrases for text-less tool rounds (voice reads the
+# interim aloud). update_artifact is handled separately (names the kind).
+ACTION_TOOL_LABELS = {
+    "apply_todo_changes": "updating your todo list",
+    "apply_github_issue": "filing the issue",
+    "apply_feedback": "sending your feedback",
+    "apply_share": "saving the share draft",
+}
+
+
+def _join_natural(items):
+    """["a"] → "a"; ["a", "b"] → "a and b"; ["a", "b", "c"] → "a, b and c"."""
+    if len(items) <= 1:
+        return "".join(items)
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def _interim_fallback_text(tool_calls):
+    """Fallback interim text for a TEXT-LESS tool round, naming what is
+    actually happening — "(updating your memory and intentions…)" — instead
+    of a generic "(on it…)". The model is prompted to write its own
+    one-sentence acknowledgment alongside tool calls; this only covers the
+    rounds where it didn't. Pure-retrieval rounds keep the established
+    "(looking that up…)" byte-for-byte."""
+    kinds = []
+    actions = []
+    has_retrieval = False
+    for tc in tool_calls:
+        name = tc.get("name")
+        if name in RETRIEVAL_TOOLS:
+            has_retrieval = True
+        elif name == "update_artifact":
+            kind = (tc.get("input", {}).get("kind") or "").strip().lower()
+            kind = kind.replace("-", " ").replace("_", " ") or "an artifact"
+            if kind not in kinds:
+                kinds.append(kind)
+        else:
+            label = (ACTION_TOOL_LABELS.get(name)
+                     or (name or "working").replace("_", " "))
+            if label not in actions:
+                actions.append(label)
+    parts = []
+    if kinds:
+        parts.append("updating your " + _join_natural(kinds))
+    parts.extend(actions)
+    if not parts:
+        return "(looking that up…)" if has_retrieval else "(on it…)"
+    if has_retrieval:
+        parts.append("looking that up")
+    return "(" + ", ".join(parts) + "…)"
+
+
+def _artifact_update_echo(tr):
+    """Within-turn echo of what an update_artifact call actually WROTE,
+    injected into the continuation call: a unified diff against the
+    previous version (full text for creations). Without it the model has
+    no access to its own write — the tool arguments are dropped from the
+    injected assistant turn and the inline copy in the system context
+    predates the update — so it couldn't build on what it just wrote
+    (e.g. actually ask a question it noted in the artifact).
+
+    Content is re-resolved from the encrypted rows via the stored ids and
+    NEVER persisted to plaintext tool_calls_meta. Returns None for
+    non-update or failed entries and for no-op writes."""
+    if tr.get("name") != "update_artifact" or tr.get("status") != "success":
+        return None
+    artifact = UserArtifact.query.get(tr.get("artifact_id"))
+    if artifact is None:
+        return None
+    new_text = artifact.get_content() or ""
+    kind = tr.get("kind")
+    prev_id = tr.get("previous_artifact_id")
+    if prev_id is None:
+        return f"[You created '{kind}' with this content:\n{new_text}]"
+    previous = UserArtifact.query.get(prev_id)
+    old_text = (previous.get_content() or "") if previous else ""
+    # Drop the ---/+++ file headers; keep the @@ hunks.
+    diff_lines = list(difflib.unified_diff(
+        old_text.splitlines(), new_text.splitlines(), lineterm="", n=1))[2:]
+    diff = "\n".join(diff_lines)
+    if not diff:
+        return None
+    if len(diff) > ARTIFACT_ECHO_DIFF_THRESHOLD_CHARS:
+        # A rewrite this heavy reads clearer (and usually shorter) in full.
+        return (f"[Your rewrite of '{kind}' was substantial — its full "
+                f"new content:\n{new_text}]")
+    return (f"[Your changes to '{kind}' — the copy shown in your context "
+            f"predates this update:\n{diff}]")
+
+
 def _action_result_text(tr):
     """One-line result string injected back to the model for a NON-retrieval
     tool result, so the loop can continue after action tools too: the model
@@ -1129,7 +1287,57 @@ def _auto_create_drafts(llm_text, llm_node, node_chain, user_id):
 # encryption-at-rest. Nothing reads ``input`` back out of tool_calls_meta
 # (the cross-turn scan, the frontend, and exports all key on other fields),
 # so redaction is lossless for every consumer.
-_REDACTED_INPUT_KEYS = {"content", "updated_content"}
+_REDACTED_INPUT_KEYS = {"content", "updated_content", "edits"}
+
+
+def _resolve_artifact_write(inp, previous):
+    """Resolve the new full text for an update_artifact call.
+
+    Two write modes: `updated_content` (full replacement — required for
+    creation, right for heavy rewrites) or `edits` (targeted exact-match
+    {old_text, new_text} replacements against the current version —
+    cheaper and faster for small changes). If both are passed the full
+    text wins (it's already complete). Edits are all-or-nothing: any
+    failing edit aborts the call before anything is written, with an
+    error that steers the model to fix the anchor or fall back to
+    updated_content.
+
+    Returns (new_text, None) on success or (None, error_message).
+    """
+    updated_content = inp.get("updated_content")
+    if updated_content:
+        return updated_content, None
+    edits = inp.get("edits")
+    if not edits:
+        return None, ("Pass updated_content (the full new text) or edits "
+                      "(a list of {old_text, new_text} replacements).")
+    if previous is None:
+        return None, ("No existing artifact to edit — pass "
+                      "updated_content with the full text to create it.")
+    text = previous.get_content() or ""
+    for i, edit in enumerate(edits):
+        if not isinstance(edit, dict):
+            return None, f"edits[{i}] is not an object."
+        old = edit.get("old_text") or ""
+        new = edit.get("new_text")
+        if not old:
+            return None, (f"edits[{i}].old_text is empty — every edit "
+                          "needs the exact text to replace.")
+        if new is None:
+            return None, f"edits[{i}].new_text is missing."
+        count = text.count(old)
+        if count == 0:
+            return None, (
+                f"edits[{i}].old_text was not found in the current "
+                f"version. Match the current text exactly (whitespace "
+                f"included), or send updated_content with the full new "
+                f"text instead.")
+        if count > 1:
+            return None, (
+                f"edits[{i}].old_text matches {count} places — include "
+                f"more surrounding context so it's unique.")
+        text = text.replace(old, new, 1)
+    return text, None
 
 
 def _redact_tool_input(inp):
@@ -1252,38 +1460,52 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                     )
                 else:
                     previous = UserArtifact.latest_for(user_id, kind)
-                    title = (inp.get("title") or "").strip()
-                    if not title:
-                        title = (
-                            previous.title if previous
-                            else UserArtifact.DEFAULT_KINDS.get(
-                                kind, kind.replace("-", " ").title())
+                    new_text, write_err = _resolve_artifact_write(
+                        inp, previous)
+                    if write_err:
+                        result["status"] = "error"
+                        result["error"] = write_err
+                    else:
+                        title = (inp.get("title") or "").strip()
+                        if not title:
+                            title = (
+                                previous.title if previous
+                                else UserArtifact.DEFAULT_KINDS.get(
+                                    kind, kind.replace("-", " ").title())
+                            )
+                        # Description: explicit value wins; else carry
+                        # forward the previous version's; else the built-in
+                        # default for the kind. Mirrors the REST route so AI
+                        # writes don't leave a null description (which
+                        # blocked editing in the UI).
+                        description = (inp.get("description") or "").strip()
+                        if not description:
+                            description = (
+                                previous.description if previous
+                                else UserArtifact.DEFAULT_DESCRIPTIONS.get(
+                                    kind)
+                            )
+                        artifact = UserArtifact(
+                            user_id=user_id,
+                            kind=kind,
+                            title=title[:128],
+                            description=description,
+                            generated_by=(llm_node.llm_model
+                                          or "agentic_session"),
+                            tokens_used=0,
                         )
-                    # Description: explicit value wins; else carry forward the
-                    # previous version's; else the built-in default for the
-                    # kind. Mirrors the REST route so AI writes don't leave a
-                    # null description (which blocked editing in the UI).
-                    description = (inp.get("description") or "").strip()
-                    if not description:
-                        description = (
-                            previous.description if previous
-                            else UserArtifact.DEFAULT_DESCRIPTIONS.get(kind)
-                        )
-                    artifact = UserArtifact(
-                        user_id=user_id,
-                        kind=kind,
-                        title=title[:128],
-                        description=description,
-                        generated_by=llm_node.llm_model or "agentic_session",
-                        tokens_used=0,
-                    )
-                    artifact.set_content(inp["updated_content"])
-                    db.session.add(artifact)
-                    db.session.flush()
-                    result["status"] = "success"
-                    result["artifact_id"] = artifact.id
-                    result["kind"] = kind
-                    result["created"] = previous is None
+                        artifact.set_content(new_text)
+                        db.session.add(artifact)
+                        db.session.flush()
+                        result["status"] = "success"
+                        result["artifact_id"] = artifact.id
+                        result["kind"] = kind
+                        result["created"] = previous is None
+                        # Id only (content stays encrypted-at-rest): lets
+                        # the within-turn loop re-resolve both versions and
+                        # echo a diff of this write back to the model.
+                        result["previous_artifact_id"] = (
+                            previous.id if previous else None)
 
             elif name == "read_artifact":
                 kind = (inp.get("kind") or "").strip().lower()
@@ -2686,7 +2908,17 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
                 target_node.llm_task_status = 'completed'
                 target_node.llm_task_progress = 100
+                # Voice: mark TTS pending in the SAME commit as completion so
+                # the frontend's POST /tts (fired the moment it polls
+                # 'completed') sees the in-flight promise and doesn't
+                # double-enqueue.
+                f_dispatch_tts = (source_mode == "voice"
+                                  and not target_node.audio_tts_url)
+                if f_dispatch_tts:
+                    target_node.tts_task_status = 'pending'
                 db.session.commit()
+                if f_dispatch_tts:
+                    _dispatch_voice_tts(target_node.id, user_id)
 
                 logger.info(
                     f"LLM completion successful, updated node "
@@ -2722,10 +2954,6 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             rounds_done = 0
             while True:
                 response_tool_calls = response.get("tool_calls", [])
-                retrieval_calls = [
-                    tc for tc in response_tool_calls
-                    if tc["name"] in RETRIEVAL_TOOLS
-                ]
                 # Quote markers ({quote:...} / {quote_ext:...}) are PURE
                 # PRESENTATION — they render as cards and never trigger a
                 # round. Query intent is a separate explicit act: the
@@ -2756,10 +2984,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
                 # INTERIM step: a tool call was made and budget remains.
                 if response_tool_calls and rounds_done < MAX_RETRIEVAL_ROUNDS:
-                    # Text-less rounds get a spoken-friendly placeholder;
-                    # "looking that up" only fits retrieval rounds.
-                    interim_fallback = ("(looking that up…)"
-                                        if retrieval_calls else "(on it…)")
+                    # Text-less rounds get a spoken-friendly placeholder
+                    # naming what's happening (voice reads it aloud).
+                    interim_fallback = _interim_fallback_text(
+                        response_tool_calls)
                     # #179: scrub timestamp echoes from interim text too —
                     # it's stored on the interim node and spoken in voice.
                     interim_text = strip_edge_timestamps(resp_text)
@@ -2811,6 +3039,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         tr["status_reported"] = True
                         if tr.get("name") not in RETRIEVAL_TOOLS:
                             injection_strings.append(_action_result_text(tr))
+                            # Echo what an artifact write actually changed
+                            # (diff vs. the previous version) so the model
+                            # can build on its own edit in the answer.
+                            echo = _artifact_update_echo(tr)
+                            if echo:
+                                injection_strings.append(echo)
                         elif tr.get("status") == "success":
                             text = _retrieval_injection_text(
                                 tr, with_labels=True)
@@ -2866,7 +3100,17 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     db.session.add(continuation)
                     db.session.flush()
                     current_node.continuation_node_id = continuation.id
+                    # Voice: the interim step is now final content — kick off
+                    # its TTS immediately so the user can play it while the
+                    # continuation call below is still generating. Status is
+                    # set in the same commit as completion (see _finalize).
+                    interim_dispatch_tts = (source_mode == "voice"
+                                            and not current_node.audio_tts_url)
+                    if interim_dispatch_tts:
+                        current_node.tts_task_status = 'pending'
                     db.session.commit()
+                    if interim_dispatch_tts:
+                        _dispatch_voice_tts(current_node.id, user_id)
 
                     # Inject the assistant turn + retrieved content into the
                     # message stream and re-call so the model answers WITH it.

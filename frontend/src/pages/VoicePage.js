@@ -11,6 +11,10 @@ import { useToast } from '../contexts/ToastContext';
 import { isSpendBlocked, notifySpendBlocked } from '../utils/spendCap';
 import api from '../api';
 
+// Chain-chapter numerals — turns cap at a handful of nodes (tool-round
+// budget), so a static list covers it.
+const ROMAN = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII'];
+
 function formatDuration(seconds) {
   const mins = Math.floor(seconds / 60);
   const secs = Math.floor(seconds % 60);
@@ -230,6 +234,12 @@ export default function VoicePage() {
 
   const displayTime = audio.cumulativeTime || 0;
   const displayDuration = audio.totalDuration || 0;
+  // Chain-node chapters recorded by useVoiceSession as each node's audio
+  // joins the queue (empty for single-node turns). Starts come from the
+  // shared AudioContext resolver, which derives them from the LIVE
+  // per-chunk durations — see chapterStartTime in AudioContext.
+  const chapterStart = audio.chapterStartTime;
+  const chapters = audio.currentAudio?.chapters || [];
 
   const formatTime = (seconds) => {
     if (isNaN(seconds) || !isFinite(seconds)) return '0:00';
@@ -582,6 +592,21 @@ export default function VoicePage() {
             borderRadius: '3px',
             transition: 'width 0.1s linear',
           }} />
+          {/* Chapter boundary ticks (chain nodes) */}
+          {displayDuration > 0 && chapters.length > 1 && chapters.slice(1).map((ch, i) => (
+            <div
+              key={i}
+              style={{
+                position: 'absolute',
+                left: `${(chapterStart(ch) / displayDuration) * 100}%`,
+                top: 0, width: '1px', height: '100%',
+                background: 'var(--bg-deep, #000)',
+                boxShadow: '0.5px 0 0 var(--accent)',
+                opacity: 0.9,
+                pointerEvents: 'none',
+              }}
+            />
+          ))}
         </div>
         <div style={{
           display: 'flex', justifyContent: 'space-between',
@@ -600,6 +625,60 @@ export default function VoicePage() {
           </span>
         </div>
       </div>
+
+      {/* Chapters — one movement per chain node, like sections of a piece.
+          Roman numeral in serif italic, first words in sans; the movement
+          under the playhead is lit. Tap to jump (and resume if paused). */}
+      {chapters.length > 1 && (
+        <div style={{
+          display: 'flex', flexDirection: 'column', alignItems: 'center',
+          gap: '3px', maxWidth: '420px', margin: '2px 0 10px',
+        }}>
+          {chapters.map((ch, i) => {
+            const next = chapters[i + 1];
+            const start = chapterStart(ch);
+            const isActive = displayTime >= start
+              && (!next || displayTime < chapterStart(next));
+            return (
+              <button
+                key={i}
+                onClick={() => {
+                  audio.seekToCumulativeTime(start);
+                  if (!audio.isPlaying) {
+                    setTimeout(() => audio.play(), 50);
+                  }
+                }}
+                title={ch.title}
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  display: 'inline-flex', alignItems: 'baseline', gap: '8px',
+                  padding: '2px 0',
+                  opacity: isActive ? 1 : 0.5,
+                  transition: 'opacity 0.3s ease',
+                }}
+              >
+                <span style={{
+                  fontFamily: 'var(--sans)', fontWeight: 300,
+                  fontSize: '0.72rem', letterSpacing: '0.02em',
+                  lineHeight: 1,
+                  color: isActive ? 'var(--accent)' : 'var(--text-muted)',
+                }}>
+                  {ROMAN[i] || i + 1}
+                </span>
+                <span style={{
+                  fontFamily: 'var(--sans)', fontWeight: 300,
+                  fontSize: '0.72rem', letterSpacing: '0.02em',
+                  color: isActive ? 'var(--text-secondary)' : 'var(--text-muted)',
+                  maxWidth: '280px', whiteSpace: 'nowrap',
+                  overflow: 'hidden', textOverflow: 'ellipsis',
+                }}>
+                  {ch.title}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       <ProposalInline
         size="roomy"

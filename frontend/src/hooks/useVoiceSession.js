@@ -14,6 +14,20 @@ import api from '../api';
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
+// Chapter label for a chain node: the node text's first words, cleaned of
+// markdown furniture, cut at a word boundary.
+const CHAPTER_TITLE_MAX = 44;
+function chapterTitleFromContent(content) {
+  const clean = (content || '')
+    .replace(/[#*_`>[\]]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!clean) return null;
+  if (clean.length <= CHAPTER_TITLE_MAX) return clean;
+  const cut = clean.slice(0, CHAPTER_TITLE_MAX);
+  return `${cut.slice(0, cut.lastIndexOf(' ') > 20 ? cut.lastIndexOf(' ') : CHAPTER_TITLE_MAX)}…`;
+}
+
 /**
  * Hook for voice conversation workflow.
  *
@@ -83,17 +97,39 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   const ttsTriggeredForNodeRef = useRef(null);
   const [ttsGenerating, setTtsGenerating] = useState(false);
   const firstChunkRef = useRef(true);
-  // Within-turn retrieval chain (#158 Slice 4, voice). When the backend runs
-  // the retrieval loop for voice (flag-gated), a turn produces an interim
-  // node (e.g. "let me pull that up") linked to a continuation node that holds
-  // the answer. We play the whole chain as ONE continuous audio queue: each
-  // node's TTS chunks are appended in order and `audio.generatingTTS` stays
-  // true across the boundary so the queue waits (not stops) if it drains
-  // before the next node's chunks arrive. Both refs stay inert when the flag
-  // is off (continuation_node_id is always null), so the single-node path is
+  // Within-turn tool chain (#158 Slice 4, voice). When the backend runs
+  // the within-turn tool loop for voice, a turn produces an interim node
+  // (e.g. "on it…") linked to a continuation node that holds the answer.
+  // We play the whole chain as ONE continuous audio queue: each node's TTS
+  // chunks are appended in order and `audio.generatingTTS` stays true
+  // across the boundary so the queue waits (not stops) if it drains before
+  // the next node's chunks arrive. The backend dispatches each node's TTS
+  // at that node's own finalization, so the interim is playable while the
+  // continuation call is still generating — if the interim finishes
+  // playing before the continuation's audio arrives, the UI drops back to
+  // "Thinking..." (see the drain effect below) and returns to playback
+  // when the first continuation chunk lands. All refs stay inert for
+  // single-node turns (continuation_node_id is null), keeping that path
   // byte-identical.
   const pendingContinuationRef = useRef(null);
   const continuingChainRef = useRef(false);
+  // True from advancing to the continuation node until its FIRST audio
+  // chunk arrives — the window where a playback drain means "the rest of
+  // the answer isn't ready yet" rather than "buffering mid-node".
+  const awaitingNextNodeRef = useRef(false);
+  // Latest advanceChain (defined after ttsSSE, which its body needs);
+  // ref-called from the SSE callbacks above its definition.
+  const advanceChainRef = useRef(null);
+  // Chapter title for the NEXT node whose audio lands in the queue —
+  // set at TTS-trigger time from the node's text, consumed once by
+  // whichever path delivers that node's first audio. Chain playback
+  // shows one chapter per node (like .md section chapters).
+  const nextChapterTitleRef = useRef(null);
+  const takeChapterTitle = () => {
+    const t = nextChapterTitleRef.current;
+    nextChapterTitleRef.current = null;
+    return t;
+  };
 
   // Silent audio loop for iOS lock-screen controls during recording.
   // Playing audio is required for Media Session API to activate on iOS.
@@ -264,14 +300,21 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     enabled: ttsGenerating,
     onChunkReady: async (data) => {
       console.log('[VoiceSession] TTS chunk ready:', { audio_url: data.audio_url, chunk_index: data.chunk_index, firstChunk: firstChunkRef.current });
+      awaitingNextNodeRef.current = false;
       if (firstChunkRef.current) {
         firstChunkRef.current = false;
         stopSilentAudio(); // Real audio takes over
+        const chapterTitle = takeChapterTitle();
         // Await so duration state is set before we show the playback UI.
         // loadAudioQueue also starts preloading the audio for instant play.
         await audio.loadAudioQueue(
           [data.audio_url],
-          { title: ttsTitle, url: data.audio_url },
+          {
+            title: ttsTitle,
+            url: data.audio_url,
+            chapters: chapterTitle
+              ? [{ title: chapterTitle, start_time: 0, chunk_index: 0 }] : [],
+          },
           [data.duration]
         );
         audio.setGeneratingTTS(true);
@@ -280,7 +323,13 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         // has a play button the user can tap if autoplay was blocked.
         setPhase('playback');
       } else {
-        audio.appendChunkToQueue(data.audio_url, data.duration);
+        audio.appendChunkToQueue(data.audio_url, data.duration, takeChapterTitle());
+        // A continuation's first chunk can arrive while the UI dropped
+        // back to "Thinking..." (interim playback drained before the
+        // answer's audio was ready) — return to the playback UI.
+        // Autoplay of the appended chunk is handled by the audio queue
+        // (drain-waiting resume); on iOS the play button is there.
+        setPhase('playback');
       }
     },
     onAllComplete: () => {
@@ -288,24 +337,51 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       if (nextId != null) {
         // Within-turn chain (Slice 4): the current node's TTS is fully
         // generated; advance to the continuation and append its TTS to the
-        // SAME audio queue so playback flows seamlessly. Keep
-        // audio.generatingTTS TRUE (don't call setGeneratingTTS(false)) so
-        // the queue waits — not stops — if it drains before the
-        // continuation's chunks arrive. Disable the local ttsGenerating (SSE)
-        // momentarily; the continuation's TTS-trigger re-enables it AFTER its
-        // /tts POST, avoiding the connect-before-pending race.
-        pendingContinuationRef.current = null;
-        continuingChainRef.current = true;
-        ttsTriggeredForNodeRef.current = null;
-        ttsSSE.reset();
-        setTtsGenerating(false);
-        setLlmNodeId(nextId);
+        // SAME audio queue so playback flows seamlessly.
+        advanceChainRef.current(nextId);
         return;
       }
+      continuingChainRef.current = false;
       setTtsGenerating(false);
       audio.setGeneratingTTS(false);
     },
   });
+
+  // Advance the within-turn chain to the continuation node: poll its
+  // llm-status, and when completed its TTS-trigger appends to the SAME
+  // audio queue. Keep audio.generatingTTS TRUE so the queue waits — not
+  // stops — if it drains before the continuation's chunks arrive. Disable
+  // the local ttsGenerating (SSE) momentarily; the continuation's
+  // TTS-trigger re-enables it AFTER its /tts POST, avoiding the
+  // connect-before-pending race.
+  const advanceChain = useCallback((nextId) => {
+    pendingContinuationRef.current = null;
+    continuingChainRef.current = true;
+    awaitingNextNodeRef.current = true;
+    // Deliberately NOT clearing ttsTriggeredForNodeRef here: it still
+    // holds the JUST-TTS'd node's id, which keeps the trigger effect from
+    // re-firing for that node in any render between now and the llmNodeId
+    // update landing (re-firing hit the already-generated 200 path and
+    // appended the same audio to the queue a second time). The
+    // continuation triggers fine — its id differs from the stored one.
+    ttsSSE.reset();
+    setTtsGenerating(false);
+    audio.setGeneratingTTS(true);
+    setLlmNodeId(nextId);
+  }, [ttsSSE, audio]);
+  advanceChainRef.current = advanceChain;
+
+  // Interim playback finished but the continuation's audio isn't ready yet
+  // (the answer is still generating) — drop back to "Thinking..." until
+  // its first chunk arrives (onChunkReady flips back to playback).
+  // llmNodeId is a dep because the drain can precede the chain advance
+  // (last chunk finishes playing before all_complete arrives): the advance
+  // changes llmNodeId, re-running this check with awaitingNextNode now set.
+  useEffect(() => {
+    if (audio.waitingForChunks && awaitingNextNodeRef.current) {
+      setPhase('processing');
+    }
+  }, [audio.waitingForChunks, llmNodeId]);
 
   // When an LLM node completes, trigger TTS (and, for the FINAL node of the
   // turn, notify the page). With the voice retrieval loop on (Slice 4) a turn
@@ -320,6 +396,8 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       // Remember the continuation so onAllComplete advances to it once this
       // node's TTS finishes generating (null for the final node / flag off).
       pendingContinuationRef.current = continuationId;
+      // Chapter label for this node, consumed when its first audio lands.
+      nextChapterTitleRef.current = chapterTitleFromContent(llmData.content);
 
       // Thread bookkeeping + page callback belong to the FINAL node only: the
       // next turn parents off the answer (not an interim retrieval step), and
@@ -346,9 +424,13 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         }
       }
 
-      // If LLM returned no text (tool-only response), skip TTS entirely
+      // If LLM returned no text (tool-only response), skip TTS entirely.
+      // Interim nodes always carry fallback text, so an empty node is a
+      // final answer — end any chain so the audio queue can finish.
       if (!llmData.content || !llmData.content.trim()) {
         stopSilentAudio();
+        continuingChainRef.current = false;
+        audio.setGeneratingTTS(false);
         setPhase('playback');
         return;
       }
@@ -361,13 +443,40 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       // the EventSource connects before tts_task_status is set to 'pending'.
       api.post(`/nodes/${llmNodeId}/tts`).then((res) => {
         if (res.status === 200 && res.data.tts_url) {
-          // TTS was already generated — load directly, skip SSE
+          // TTS was already fully generated — no SSE. Load queue-style so
+          // a chain can still append/advance (loadAudio broke the chain
+          // here: the continuation was never picked up).
           const ttsUrl = res.data.tts_url.startsWith('http')
             ? res.data.tts_url
             : `${process.env.REACT_APP_BACKEND_URL || ''}${res.data.tts_url}`;
           stopSilentAudio();
-          audio.loadAudio({ url: ttsUrl, title: ttsTitle });
-          setPhase('playback');
+          if (continuingChainRef.current) {
+            // Mid-chain: append this node's full audio to the live queue.
+            // Flip to playback only once the append resolved (it preloads
+            // the duration first) — a simultaneous chain-advance below
+            // could otherwise flip to "Thinking..." after us and strand
+            // the UI there while the appended audio plays.
+            awaitingNextNodeRef.current = false;
+            audio.appendChunkToQueue(ttsUrl, null, takeChapterTitle())
+              .then(() => setPhase('playback'));
+          } else {
+            firstChunkRef.current = false;
+            const chapterTitle = takeChapterTitle();
+            audio.loadAudioQueue([ttsUrl], {
+              title: ttsTitle,
+              url: ttsUrl,
+              chapters: chapterTitle
+                ? [{ title: chapterTitle, start_time: 0, chunk_index: 0 }] : [],
+            });
+            setPhase('playback');
+          }
+          const nextId = pendingContinuationRef.current;
+          if (nextId != null) {
+            advanceChain(nextId);
+          } else {
+            continuingChainRef.current = false;
+            audio.setGeneratingTTS(false);
+          }
         } else {
           // TTS generation started (202) — enable SSE now that backend is ready
           setTtsGenerating(true);
@@ -382,18 +491,21 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       setHasError(true);
       setPhase('ready');
     }
-  }, [llmStatus, llmData, llmNodeId, audio, ttsTitle, stopSilentAudio]);
+  }, [llmStatus, llmData, llmNodeId, audio, ttsTitle, stopSilentAudio, advanceChain]);
 
-  // Safety net: if stuck on "processing" for 60s (e.g. SSE never delivers
-  // chunks), transition to playback anyway. The normal path transitions via
-  // onChunkReady above; this only fires if something goes wrong.
-  // Increased from 15s to 60s to accommodate tool-use responses.
+  // Safety net: TTS is being generated (POST /tts returned 202) but no
+  // chunk arrived within 60s — SSE is probably dead; transition to
+  // playback anyway. The normal path transitions via onChunkReady above.
+  // Deliberately NOT armed while the LLM itself is still generating
+  // (ttsGenerating false): long turns legitimately think for minutes and
+  // the llm-status polling handles failures — flipping to a dead player
+  // mid-generation was worse than honest "Thinking...".
   useEffect(() => {
-    if (phase === 'processing') {
+    if (phase === 'processing' && ttsGenerating) {
       const timer = setTimeout(() => setPhase('playback'), 60000);
       return () => clearTimeout(timer);
     }
-  }, [phase]);
+  }, [phase, ttsGenerating]);
 
   // Clear error indicator after a few seconds
   useEffect(() => {
@@ -442,6 +554,8 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     // New turn → fresh audio queue; drop any in-flight retrieval chain.
     pendingContinuationRef.current = null;
     continuingChainRef.current = false;
+    awaitingNextNodeRef.current = false;
+    nextChapterTitleRef.current = null;
     transcriptRef.current = '';
     setHasError(false);
     if (extraReset) extraReset();
@@ -476,6 +590,8 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     // New turn → fresh audio queue; drop any in-flight retrieval chain.
     pendingContinuationRef.current = null;
     continuingChainRef.current = false;
+    awaitingNextNodeRef.current = false;
+    nextChapterTitleRef.current = null;
     transcriptRef.current = '';
     if (extraReset) extraReset();
     streaming.cancelStreaming();

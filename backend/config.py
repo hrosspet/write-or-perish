@@ -281,9 +281,16 @@ class Config:
     ENCRYPTION_DISABLED = os.environ.get("ENCRYPTION_DISABLED", "false").lower() in ("true", "1", "yes")
 
     # Production Security Settings
-    SESSION_COOKIE_SECURE = True
+    # Secure defaults to true; local dev sets SESSION_COOKIE_SECURE=false
+    # (docker-compose.override.yml) so LAN devices (http://<desktop-ip>:3001,
+    # e.g. a phone on the same wifi) can hold a session — browsers reject
+    # Secure cookies on insecure non-localhost origins. `or "true"`: compose
+    # injects unset vars as empty strings.
+    SESSION_COOKIE_SECURE = (
+        os.environ.get("SESSION_COOKIE_SECURE") or "true"
+    ).lower() in ("true", "1", "yes")
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SAMESITE = "Lax"  # Critical for session cookies to work
-    REMEMBER_COOKIE_SECURE = True
+    REMEMBER_COOKIE_SECURE = SESSION_COOKIE_SECURE
     REMEMBER_COOKIE_SAMESITE = "Lax"
     REMEMBER_COOKIE_DURATION = timedelta(days=30)

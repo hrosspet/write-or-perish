@@ -98,6 +98,7 @@ Feature 1 (Journaling) is production-ready and significantly expanded — see FO
 | A.19 | Hierarchical context freshness | Context artifacts, recent summaries, profile freshness |
 | A.20 | Dev-update channel (#207) | In-app changelog (markdown file in repo, per-user read/skip), persistent background-task notifications, admin polls with two-phase opt-in LLM-drafted answers |
 | A.21 | Issue-close notifications (#236) | GitHub webhook (HMAC-verified) → targeted fix_ready/issue_declined notification to the submitting user (via loore:{username} label) through the dev-update channel; v0 of the issue→fix→verify loop (#237) |
+| A.22 | Voice interim-node playback | TTS dispatched per node at its own finalization (interim playable while the continuation is still generating), chain-aware playback queue in Voice mode with playback → "Thinking…" → playback transitions when the follow-up isn't ready yet; artifact writes are echoed back to the continuation call as a diff (full text for creations/heavy rewrites) so the model can build on its own edit; update_artifact gained an `edits` mode (targeted exact-match replacements — cheaper/faster than full-text resends); text-less interim rounds name the action ("(updating your memory…)") instead of "(on it…)"; chain nodes render as tappable chapters ("movements") in the Voice player with boundary ticks, shared live-derived chapter starts across both players, and a single-row no-seek-bar mobile card |
 
 ### Remaining Items
 
