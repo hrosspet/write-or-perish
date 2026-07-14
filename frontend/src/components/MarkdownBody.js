@@ -95,6 +95,12 @@ function AddTaskInput({ onSubmit, onCancel }) {
  *   paragraphMargin: optional margin for <p> elements (default: "0.5em 0")
  *   onCheckboxToggle: optional callback(lineText, currentChecked) for clickable checkboxes
  *   onAddTask: optional callback(afterItemText, newText) — enables the per-row hover "+"
+ *   onInternalLinkClick: optional callback(href) for app-internal links
+ *     (href starting with "/"). When set, those links suppress the default
+ *     new-tab behavior and hand navigation to the caller — e.g. the updates
+ *     modal closes itself and navigates in-tab, since a new tab would just
+ *     show the same unread modal again. External links keep opening in a
+ *     new tab regardless.
  */
 // flowText: render paragraphs with standard markdown soft-wrap semantics
 // (single source newlines flow into the line) instead of the default
@@ -102,7 +108,7 @@ function AddTaskInput({ onSubmit, onCancel }) {
 // writing, LLM replies) depends on it; AUTHORED markdown wrapped at a
 // fixed column (e.g. the user changelog) must opt in to flow, or every
 // source line break renders literally — unreadable on narrow screens.
-const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText = false, onCheckboxToggle, onAddTask }) => {
+const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText = false, onCheckboxToggle, onAddTask, onInternalLinkClick }) => {
   const [addingAfter, setAddingAfter] = React.useState(null);
   const components = {
     h1: ({ node, children, ...props }) => (
@@ -303,15 +309,32 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText =
       ) : (
         <code className={className} {...props}>{children}</code>
       ),
-    a: ({ node, children, ...props }) => (
-      <a
-        style={{ color: 'var(--accent)', textDecoration: 'underline' }}
-        target="_blank"
-        rel="noopener noreferrer"
-        onClick={(e) => e.stopPropagation()}
-        {...props}
-      >{children}</a>
-    ),
+    a: ({ node, children, href, ...props }) => {
+      if (onInternalLinkClick && href && href.startsWith('/')) {
+        return (
+          <a
+            href={href}
+            style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onInternalLinkClick(href);
+            }}
+            {...props}
+          >{children}</a>
+        );
+      }
+      return (
+        <a
+          href={href}
+          style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => e.stopPropagation()}
+          {...props}
+        >{children}</a>
+      );
+    },
     table: ({ node, ...props }) => (
       <div style={{ overflowX: 'auto', margin: '8px 0' }}>
         <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: '0.9em' }} {...props} />

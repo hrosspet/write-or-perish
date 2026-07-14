@@ -115,16 +115,26 @@ const textareaStyle = {
   marginTop: "0.6rem",
 };
 
-function ChangelogItem({ section, onDone }) {
+function ChangelogItem({ section, onDone, onCloseModal }) {
+  const navigate = useNavigate();
   const mark = (action) => {
     api.post(`/updates/changelog/${section.id}/${action}`).catch(() => {});
     onDone();
+  };
+  // Following a body link is not acknowledging (same semantics as
+  // NotificationItem's takeALook): record a skip so the section comes
+  // back next visit, close the whole modal, and navigate in-tab — a new
+  // tab would just show this same unread modal again over the target.
+  const followLink = (href) => {
+    api.post(`/updates/changelog/${section.id}/skip`).catch(() => {});
+    onCloseModal();
+    navigate(href);
   };
   return (
     <div style={itemStyle}>
       {section.date && <div style={dateStyle}>{section.date}</div>}
       <h3 style={itemTitleStyle}>{section.title}</h3>
-      <MarkdownBody flowText style={{
+      <MarkdownBody flowText onInternalLinkClick={followLink} style={{
         fontSize: "0.9rem",
         color: "var(--text-secondary)",
         marginTop: "0.9rem",
@@ -465,6 +475,7 @@ function UpdatesModal({ data, onClose }) {
             key={`c-${s.id}`}
             section={s}
             onDone={() => removeFrom(setChangelog)(s.id, "id")}
+            onCloseModal={onClose}
           />
         ))}
       </div>
