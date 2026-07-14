@@ -109,11 +109,24 @@ class Config:
     # Sources:
     #   Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
     #   OpenAI:    https://developers.openai.com/api/docs/pricing
-    PRICING_VERSION = "2"
-    PRICING_UPDATED_AT = "2026-06-09"
+    PRICING_VERSION = "3"
+    PRICING_UPDATED_AT = "2026-07-14"
 
     # Supported models configuration (single source of truth for all model metadata)
     SUPPORTED_MODELS = {
+        "gpt-5.6-sol": {
+            "provider": "openai",
+            "api_model": "gpt-5.6-sol",
+            "display_name": "GPT-5.6 Sol",
+            "context_window": 1050000,
+            "input_price_per_mtok": 5.00,
+            "output_price_per_mtok": 30.00,
+            # OpenAI auto-cache discount: GPT-5.6 Sol caches at 90% off
+            "cached_input_multiplier": 0.10,
+            "long_context_threshold": 272000,
+            "long_context_input_multiplier": 2.0,
+            "long_context_output_multiplier": 1.5,
+        },
         "gpt-5.5": {
             "provider": "openai",
             "api_model": "gpt-5.5",
