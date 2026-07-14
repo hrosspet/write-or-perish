@@ -252,9 +252,22 @@ function NodeDetail({ nodeIdOverride }) {
       }
       setLlmTaskNodeId(null);
     } else if (llmStatus === 'failed') {
-      setError(llmError || 'LLM response generation failed');
+      // Toast, never setError — setError replaces the entire thread view
+      // with the raw failure text, hiding the thread and the inline form.
+      addToast(llmError || 'LLM response generation failed', 8000);
+      // awaitLlm flows can park the view on the pending LLM node itself;
+      // on failure that's an empty dead node — hop to its parent (the
+      // user's entry), replacing the dead history entry so a back press
+      // walks real nodes.
+      if (String(llmTaskNodeId) === String(id)) {
+        const parent = node?.ancestors?.[node.ancestors.length - 1];
+        if (parent && !parent.deleted) {
+          navigate(`/node/${parent.id}`, { replace: true });
+        }
+      }
       setLlmTaskNodeId(null);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [llmStatus, llmData, llmError, navigate, id, llmTaskNodeId]);
 
   const getNodeContent = useCallback(() => node?.content, [node]);
@@ -408,22 +421,16 @@ function NodeDetail({ nodeIdOverride }) {
   // Shared handling for a failed LLM-request (the /nodes/:id/llm POST),
   // used by the explicit button and the auto-generate-on-submit/edit paths.
   // - 402 (monthly spend cap): surfaced globally by SpendCapBanner — return
-  //   silently so the thread stays exactly where the user was. setError()
-  //   here replaces the whole node view with the message, so echoing the
-  //   raw code would both blank the thread and look technical.
-  // - 400 (user-correctable, e.g. a bad {user_export} placeholder): toast,
-  //   keep the page intact.
-  // - otherwise: surface in the node view.
+  //   silently so the thread stays exactly where the user was.
+  // - otherwise: toast. Never setError() here — that replaces the whole
+  //   node view (thread, inline form and all) with the failure text and
+  //   strands the user on a dead end.
   const handleLlmRequestError = (err) => {
     console.error(err);
     const status = err?.response?.status;
     const apiErr = err?.response?.data?.error;
     if (status === 402) return;
-    if (status === 400 && apiErr) {
-      addToast(apiErr, 8000);
-      return;
-    }
-    setError(apiErr || err.message || "Error requesting LLM response.");
+    addToast(apiErr || err.message || "Error requesting LLM response.", 8000);
   };
 
   const handleLLMResponse = () => {
@@ -463,20 +470,20 @@ function NodeDetail({ nodeIdOverride }) {
       const chain = [node, ...(node.ancestors || [])];
       const llmNodeId = await tryAutoGenerateFor(newNodeId, chain);
       if (llmNodeId) {
-        // Navigate directly to the pending LLM node so the inline input
-        // stays anchored below it throughout generation.
-        navigate(`/node/${llmNodeId}?awaitLlm=${llmNodeId}`);
+        // Land on the NEW USER node so it gets its own URL/history step
+        // (a back press then walks the actual entries); ?awaitLlm keeps
+        // the pending LLM response polling anchored here and navigates
+        // to the response on completion.
+        navigate(`/node/${newNodeId}?awaitLlm=${llmNodeId}`);
       } else {
         navigate(`/node/${newNodeId}`);
       }
     } catch (err) {
-      // Spend cap: the user's node WAS created; only the LLM reply was
-      // blocked. Land on the new node (same as the auto-generate-off path)
-      // so it shows and the input resets — the banner fires globally.
-      if (err?.response?.status === 402) {
-        navigate(`/node/${newNodeId}`);
-        return;
-      }
+      // The user's node WAS created; only the LLM request failed. Always
+      // land on the new node so it shows, gets its history entry, and the
+      // input resets — then surface the failure (402's banner fires
+      // globally; the rest toast via handleLlmRequestError).
+      navigate(`/node/${newNodeId}`);
       handleLlmRequestError(err);
     }
   };
@@ -512,7 +519,10 @@ function NodeDetail({ nodeIdOverride }) {
     try {
       const chain = [updated, ...(updated.ancestors || [])];
       const llmNodeId = await tryAutoGenerateFor(updated.id, chain);
-      if (llmNodeId) navigate(`/node/${llmNodeId}?awaitLlm=${llmNodeId}`);
+      // Focal is already the edited node — start polling in place (no
+      // navigation), so the edited node keeps its history entry and the
+      // completion effect pushes the response when it lands.
+      if (llmNodeId) setLlmTaskNodeId(llmNodeId);
     } catch (err) {
       handleLlmRequestError(err);
     }
