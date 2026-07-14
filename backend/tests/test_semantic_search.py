@@ -223,6 +223,36 @@ def test_semantic_search_excludes_other_users(app, client, monkeypatch):
     assert resp.get_json()["results"] == []
 
 
+def test_semantic_search_respects_date_range(app, client, monkeypatch):
+    from datetime import datetime as dt
+    with app.app_context():
+        uid = User.query.first().id
+        old = _mk_node(uid, "march reflections on gardens")
+        new = _mk_node(uid, "april reflections on gardens")
+        old.created_at = dt(2026, 3, 20)
+        new.created_at = dt(2026, 4, 20)
+        _db.session.commit()
+        _mk_embedding(old, [1.0, 0.0])
+        _mk_embedding(new, [0.95, 0.05])
+        old_id, new_id = old.id, new.id
+
+    _patch_query_embedding(monkeypatch, [1.0, 0.0])
+    body = client.get(
+        "/api/search/semantic?q=gardens&from=2026-04-16").get_json()
+    ids = [r["id"] for r in body["results"]]
+    assert new_id in ids
+    assert old_id not in ids
+
+    body = client.get(
+        "/api/search/semantic?q=gardens&to=2026-04-01").get_json()
+    ids = [r["id"] for r in body["results"]]
+    assert old_id in ids
+    assert new_id not in ids
+
+    resp = client.get("/api/search/semantic?q=gardens&from=not-a-date")
+    assert resp.status_code == 400
+
+
 def test_semantic_search_requires_query(app, client):
     assert client.get("/api/search/semantic").status_code == 400
 

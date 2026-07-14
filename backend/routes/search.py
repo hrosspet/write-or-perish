@@ -196,6 +196,20 @@ def semantic_search():
     if not q:
         return jsonify({"error": "Provide a query (q)."}), 400
 
+    dt_from = dt_to = None
+    if request.args.get("from"):
+        try:
+            dt_from = datetime.fromisoformat(request.args["from"])
+        except ValueError:
+            return jsonify(
+                {"error": "Invalid 'from' date format. Use ISO 8601."}), 400
+    if request.args.get("to"):
+        try:
+            dt_to = datetime.fromisoformat(request.args["to"])
+        except ValueError:
+            return jsonify(
+                {"error": "Invalid 'to' date format. Use ISO 8601."}), 400
+
     api_key = get_openai_chat_key(current_app.config)
     if not api_key:
         return jsonify({"error": "Semantic search is not configured."}), 503
@@ -210,9 +224,16 @@ def semantic_search():
         db.session.rollback()
         return jsonify({"error": "Embedding the query failed."}), 502
 
-    rows = db.session.query(
+    emb_query = db.session.query(
         NodeEmbedding.node_id, NodeEmbedding.vector
-    ).filter(NodeEmbedding.user_id == current_user.id).all()
+    ).filter(NodeEmbedding.user_id == current_user.id)
+    if dt_from is not None or dt_to is not None:
+        emb_query = emb_query.join(Node, Node.id == NodeEmbedding.node_id)
+        if dt_from is not None:
+            emb_query = emb_query.filter(Node.created_at >= dt_from)
+        if dt_to is not None:
+            emb_query = emb_query.filter(Node.created_at <= dt_to)
+    rows = emb_query.all()
 
     ranked = top_k_similar(query_vector, rows, k=limit, min_score=min_score)
 
@@ -221,10 +242,22 @@ def semantic_search():
         "include_external", "1") not in ("0", "false")
     external_results = []
     if include_external:
+        from sqlalchemy import func
         from backend.models import ExternalItem, ExternalItemEmbedding
-        ext_rows = db.session.query(
+        ext_query = db.session.query(
             ExternalItemEmbedding.item_id, ExternalItemEmbedding.vector
-        ).filter(ExternalItemEmbedding.user_id == current_user.id).all()
+        ).filter(ExternalItemEmbedding.user_id == current_user.id)
+        if dt_from is not None or dt_to is not None:
+            ext_query = ext_query.join(
+                ExternalItem,
+                ExternalItem.id == ExternalItemEmbedding.item_id)
+            ext_date = func.coalesce(
+                ExternalItem.posted_at, ExternalItem.fetched_at)
+            if dt_from is not None:
+                ext_query = ext_query.filter(ext_date >= dt_from)
+            if dt_to is not None:
+                ext_query = ext_query.filter(ext_date <= dt_to)
+        ext_rows = ext_query.all()
         ext_ranked = top_k_similar(
             query_vector, ext_rows, k=limit, min_score=min_score)
         items_by_id = {
