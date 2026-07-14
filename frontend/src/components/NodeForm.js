@@ -419,8 +419,11 @@ const NodeForm = forwardRef(
             } catch (e) { /* no-op */ }
           }
           if (res.data.llm_node_id) {
+            // Land on the USER node so the entry gets its own URL/history
+            // step; ?awaitLlm hands the pending LLM response to NodeDetail's
+            // polling, which navigates to it on completion.
             onSuccess({
-              id: res.data.llm_node_id,
+              id: res.data.user_node_id,
               awaitLlm: res.data.llm_node_id,
               ...res.data,
             });
