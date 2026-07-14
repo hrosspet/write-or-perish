@@ -116,7 +116,7 @@ class Config:
     SUPPORTED_MODELS = {
         "gpt-5.6-sol": {
             "provider": "openai",
-            "api_model": "gpt-5.6-sol",
+            "api_model": "gpt-5.6-sol-BROKEN-FOR-STAGING-TEST",
             "display_name": "GPT-5.6 Sol",
             "context_window": 1050000,
             "input_price_per_mtok": 5.00,
