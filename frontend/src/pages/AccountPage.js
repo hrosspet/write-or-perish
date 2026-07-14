@@ -1,5 +1,5 @@
-import React, { useState, useCallback, useRef } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import React, { useState, useCallback, useRef, useEffect } from "react";
+import { Link, useNavigate, useLocation } from "react-router-dom";
 import { useUser } from "../contexts/UserContext";
 import ModelSelector from "../components/ModelSelector";
 import api from "../api";
@@ -8,6 +8,18 @@ import useSubmitShortcut from "../hooks/useSubmitShortcut";
 export default function AccountPage() {
   const { user, setUser } = useUser();
   const navigate = useNavigate();
+  const location = useLocation();
+
+  // Deep-link anchors (e.g. /account#model from the changelog): scroll
+  // the target row into view on arrival. BrowserRouter doesn't handle
+  // hash scrolling on SPA navigations, and the previous page's scroll
+  // offset carries over — without this the linked setting can sit just
+  // off-screen.
+  useEffect(() => {
+    if (!location.hash) return;
+    const el = document.getElementById(location.hash.slice(1));
+    if (el) el.scrollIntoView({ block: "start" });
+  }, [location.hash]);
 
   // Username editing
   const [username, setUsername] = useState(user?.username || "");
@@ -247,7 +259,8 @@ export default function AccountPage() {
         Settings
       </h3>
 
-      <div style={rowStyle}>
+      {/* scrollMarginTop keeps the anchored row clear of the fixed navbar */}
+      <div id="model" style={{ ...rowStyle, scrollMarginTop: "72px" }}>
         <div style={labelStyle}>Default model</div>
         <ModelSelector
           nodeId={null}

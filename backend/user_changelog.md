@@ -23,7 +23,7 @@ Authoring rules:
 <!-- id: gpt-5-6-sol -->
 ## 2026-07-14 — A new model to talk to: GPT-5.6 Sol
 
-You can now talk to GPT-5.6 Sol, OpenAI's latest frontier model — pick it in the [Account page](/account)'s model selector and see how it compares to Claude Fable 5, the strongest Claude model.
+You can now talk to GPT-5.6 Sol, OpenAI's latest frontier model — pick it in the [Account page](/account#model)'s model selector and see how it compares to Claude Fable 5, the strongest Claude model.
 
 <!-- id: dev-updates-channel -->
 ## 2026-07-03 — A quiet channel between us
