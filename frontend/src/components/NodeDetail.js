@@ -216,8 +216,13 @@ function NodeDetail({ nodeIdOverride }) {
     }
   }, [editTarget]);
 
-  // Handle LLM completion
+  // Handle LLM completion. Both branches require llmTaskNodeId: after it
+  // is cleared, this effect re-runs once (llmTaskNodeId is a dep) while
+  // llmStatus/llmData are still stale — the polling hook resets them a
+  // render later — and without the guard that stale pass acts twice
+  // (duplicate toast / duplicate navigation).
   useEffect(() => {
+    if (!llmTaskNodeId) return;
     if (llmStatus === 'completed' && llmData) {
       // Prefer the id of the node returned in payload; fall back to the
       // polled node id (llmTaskNodeId).
