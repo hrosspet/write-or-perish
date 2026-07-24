@@ -195,6 +195,14 @@ class Config:
             "input_price_per_mtok": 3.00,
             "output_price_per_mtok": 15.00,
         },
+        "claude-opus-5": {
+            "provider": "anthropic",
+            "api_model": "claude-opus-5",
+            "display_name": "Claude Opus 5",
+            "context_window": 1000000,
+            "input_price_per_mtok": 5.00,
+            "output_price_per_mtok": 25.00,
+        },
         "claude-opus-4.5": {
             "provider": "anthropic",
             "api_model": "claude-opus-4-5-20251101",
