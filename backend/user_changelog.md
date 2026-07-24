@@ -25,9 +25,9 @@ Authoring rules:
 
 Claude Opus 5 is now available in Loore — pick it in the [Account page](/account#model)'s model selector.
 
-It's Anthropic's newest Opus: more thoughtful and more proactive than Opus 4.8, noticeably better at holding a long thread of reasoning and at checking its own work — at the same price. If you've been using an older Opus, this is the one to switch to.
+It's Anthropic's newest model — slightly better than Claude Fable 5, and significantly faster to answer.
 
-You can read Anthropic's own announcement here: [Introducing Claude Opus 5](https://www.anthropic.com/news/claude-opus-5).
+Anthropic's announcement: [Introducing Claude Opus 5](https://www.anthropic.com/news/claude-opus-5).
 
 <!-- id: gpt-5-6-sol -->
 ## 2026-07-14 — A new model to talk to: GPT-5.6 Sol
