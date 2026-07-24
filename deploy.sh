@@ -248,6 +248,24 @@ else
     warn "Nginx config source not found at $NGINX_CONFIG_SOURCE"
 fi
 
+# Restart Gunicorn FIRST — it is the site. Everything above stopped the
+# services for migrations, so until this runs nginx has nothing to proxy to
+# and prod serves 502s. Any `error` below this point fails the deploy loudly
+# (red CI) without also taking prod down; before 2026-07-24 a beat that
+# wouldn't start left Gunicorn stopped and caused an outage.
+log "Restarting Gunicorn service..."
+sudo systemctl restart write-or-perish || error "Failed to restart Gunicorn service"
+
+# Wait for service to start
+sleep 3
+
+# Check if service is running
+if sudo systemctl is-active --quiet write-or-perish; then
+    log "Gunicorn service restarted successfully"
+else
+    error "Gunicorn service failed to start"
+fi
+
 # Restart Celery worker service
 log "Restarting Celery worker service..."
 sudo systemctl restart write-or-perish-celery || error "Failed to restart Celery service"
@@ -270,21 +288,11 @@ fi
 if sudo systemctl is-active --quiet write-or-perish-celery-beat; then
     log "Celery beat service restarted successfully"
 else
+    # Most common cause: a corrupt celerybeat-schedule shelve DB (a hard kill
+    # or OOM mid-write leaves it unreadable). Check logs/celery-beat.log; if
+    # it ends in a dbm/shelve traceback, stop beat, move celerybeat-schedule.*
+    # aside, and start it again — the file only holds last-run timestamps.
     error "Celery beat service failed to start"
-fi
-
-# Restart Gunicorn service
-log "Restarting Gunicorn service..."
-sudo systemctl restart write-or-perish || error "Failed to restart Gunicorn service"
-
-# Wait for service to start
-sleep 3
-
-# Check if service is running
-if sudo systemctl is-active --quiet write-or-perish; then
-    log "Gunicorn service restarted successfully"
-else
-    error "Gunicorn service failed to start"
 fi
 
 # Reload Nginx
