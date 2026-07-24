@@ -277,11 +277,18 @@ sudo systemctl restart write-or-perish-celery-beat || error "Failed to restart C
 # Wait for Celery services to start
 sleep 3
 
+# Celery failures are recorded and re-raised at the very END of the script
+# rather than exiting here: the deploy must still fail loudly (red CI), but
+# a dead worker or beat should not skip the nginx reload below, which is what
+# activates a changed nginx config.
+FAILED_SERVICES=""
+
 # Check if Celery worker service is running
 if sudo systemctl is-active --quiet write-or-perish-celery; then
     log "Celery worker service restarted successfully"
 else
-    error "Celery worker service failed to start"
+    warn "Celery worker service failed to start"
+    FAILED_SERVICES="$FAILED_SERVICES write-or-perish-celery"
 fi
 
 # Check if Celery beat service is running
@@ -292,14 +299,19 @@ else
     # or OOM mid-write leaves it unreadable). Check logs/celery-beat.log; if
     # it ends in a dbm/shelve traceback, stop beat, move celerybeat-schedule.*
     # aside, and start it again — the file only holds last-run timestamps.
-    error "Celery beat service failed to start"
+    warn "Celery beat service failed to start"
+    FAILED_SERVICES="$FAILED_SERVICES write-or-perish-celery-beat"
 fi
 
 # Reload Nginx
 log "Reloading Nginx..."
 sudo systemctl reload nginx || warn "Failed to reload Nginx (may need manual intervention)"
 
-log "====== Deployment completed successfully ======"
+if [ -n "$FAILED_SERVICES" ]; then
+    warn "====== Deployment completed WITH FAILURES ======"
+else
+    log "====== Deployment completed successfully ======"
+fi
 log "Frontend: /home/hrosspet/write-or-perish/frontend/build"
 log "Backend: Gunicorn running on 127.0.0.1:8000"
 log "Celery: Worker running with 2 concurrent processes"
@@ -311,3 +323,10 @@ sudo systemctl is-active write-or-perish-celery && log "  ✓ Celery (write-or-p
 sudo systemctl is-active write-or-perish-celery-beat && log "  ✓ Celery Beat (write-or-perish-celery-beat)" || warn "  ✗ Celery Beat not running"
 sudo systemctl is-active redis-server && log "  ✓ Redis (redis-server)" || warn "  ✗ Redis not running"
 log ""
+
+# Re-raise any Celery failure recorded earlier. The site is already back up
+# and nginx has been reloaded, so this exits non-zero purely to turn the
+# deploy run red — a failed worker or scheduler must never pass silently.
+if [ -n "$FAILED_SERVICES" ]; then
+    error "Deployment finished, but these services are NOT running:$FAILED_SERVICES"
+fi
