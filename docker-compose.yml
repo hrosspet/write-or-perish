@@ -59,7 +59,7 @@ services:
       - X_CLIENT_SECRET=${X_CLIENT_SECRET:-}
       - X_REDIRECT_URI=${X_REDIRECT_URI:-}
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
-      - LLM_NAME=${LLM_NAME:-claude-opus-4.6}
+      - LLM_NAME=${LLM_NAME:-claude-opus-5}
       - FLASK_ENV=${FLASK_ENV:-production}
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - GITHUB_REPO=${GITHUB_REPO}
@@ -105,7 +105,7 @@ services:
       - X_CLIENT_ID=${X_CLIENT_ID:-}
       - X_CLIENT_SECRET=${X_CLIENT_SECRET:-}
       - X_REDIRECT_URI=${X_REDIRECT_URI:-}
-      - LLM_NAME=${LLM_NAME:-claude-opus-4.6}
+      - LLM_NAME=${LLM_NAME:-claude-opus-5}
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - GITHUB_REPO=${GITHUB_REPO}
       - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-}
@@ -138,7 +138,7 @@ services:
       - PROFILE_USE_BATCH=${PROFILE_USE_BATCH:-false}
       - PROFILE_BATCH_USER_IDS=${PROFILE_BATCH_USER_IDS:-}
       - PROFILE_UPDATES_PAUSED=${PROFILE_UPDATES_PAUSED:-false}
-      - LLM_NAME=${LLM_NAME:-claude-opus-4.6}
+      - LLM_NAME=${LLM_NAME:-claude-opus-5}
     depends_on:
       db:
         condition: service_healthy

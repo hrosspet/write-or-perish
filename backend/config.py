@@ -27,7 +27,7 @@ class Config:
     ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
     # Default model (for backward compatibility and fallback)
-    DEFAULT_LLM_MODEL = os.environ.get("LLM_NAME", "claude-opus-4.6")
+    DEFAULT_LLM_MODEL = os.environ.get("LLM_NAME", "claude-opus-5")
 
     # --- API spend monitoring (issue #85) ---
     # Monthly Anthropic spend cap in USD. 0 (default) disables the check.

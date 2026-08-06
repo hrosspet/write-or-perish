@@ -65,7 +65,7 @@ def pick_model_for_generation(parent_node, user):
         if pref and _is_active(pref):
             return pref
 
-    return current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.6")
+    return current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-5")
 
 
 def create_llm_placeholder(parent_node_id, model_id, human_owner_id,

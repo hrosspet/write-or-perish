@@ -1391,7 +1391,7 @@ def estimate_profile_tokens():
     model_id = data.get("model")
 
     if not model_id:
-        model_id = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.6")
+        model_id = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-5")
 
     # Validate model is supported
     if model_id not in current_app.config["SUPPORTED_MODELS"]:
@@ -1452,7 +1452,7 @@ def update_profile():
     Otherwise dispatches initial generation (possibly iterative).
 
     Request body:
-        { "model": "claude-opus-4.6" }  (optional)
+        { "model": "claude-opus-5" }  (optional)
 
     Returns:
         { "task_id": "...", "status": "pending", "is_update": bool }
@@ -1465,7 +1465,7 @@ def update_profile():
 
     if not model_id:
         model_id = current_app.config.get(
-            "DEFAULT_LLM_MODEL", "claude-opus-4.6"
+            "DEFAULT_LLM_MODEL", "claude-opus-5"
         )
 
     if force_full_regen:
@@ -1553,7 +1553,7 @@ def integrate_profile():
     profile versions and integrate them into a single unified profile.
 
     Request body:
-        { "model": "claude-opus-4.6" }  (optional)
+        { "model": "claude-opus-5" }  (optional)
 
     Returns:
         { "task_id": "...", "status": "pending" }
@@ -1564,7 +1564,7 @@ def integrate_profile():
     model_id = data.get("model")
     if not model_id:
         model_id = current_app.config.get(
-            "DEFAULT_LLM_MODEL", "claude-opus-4.6"
+            "DEFAULT_LLM_MODEL", "claude-opus-5"
         )
 
     if model_id not in current_app.config["SUPPORTED_MODELS"]:
@@ -1644,7 +1644,7 @@ def generate_profile():
     model_id = data.get("model")
 
     if not model_id:
-        model_id = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.6")
+        model_id = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-5")
 
     # Validate model is supported
     if model_id not in current_app.config["SUPPORTED_MODELS"]:

@@ -61,7 +61,7 @@ def use_batch_for_user(user, config):
 
 def _model_for(user):
     return (user.preferred_model
-            or current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.6"))
+            or current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-5"))
 
 
 def _provider_and_model(model_id):
