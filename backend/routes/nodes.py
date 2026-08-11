@@ -542,6 +542,12 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
         # (#66). Needed here too because Edit can be launched from a
         # child/list node, not just the focal one.
         "has_tts": bool(n.audio_tts_url),
+        # Edit launched from a non-focal node seeds NodeForm with these;
+        # omitting them makes the form fall back to the user's defaults
+        # AND persist those defaults on save, silently rewriting the
+        # node's real settings.
+        "privacy_level": n.privacy_level,
+        "ai_usage": n.ai_usage,
     }
     data.update(_system_prompt_fields(n))
     return data
@@ -922,6 +928,10 @@ def get_node(node_id):
                 # firing an LLM reply. Without it ancestors look like
                 # ai_usage=undefined and the guard silently fails.
                 "ai_usage": current.ai_usage,
+                # Same undefined trap for Edit-from-ancestor: NodeForm
+                # would fall back to the user's default privacy AND
+                # persist it on save.
+                "privacy_level": current.privacy_level,
             }
             ancestor_data.update(_system_prompt_fields(current))
             ancestors.insert(0, ancestor_data)
@@ -930,6 +940,7 @@ def get_node(node_id):
                 **status,
                 "child_count": len(current.children),
                 "ai_usage": current.ai_usage,
+                "privacy_level": current.privacy_level,
             }
             ancestor_data.update(_system_prompt_fields(current))
             ancestors.insert(0, ancestor_data)
