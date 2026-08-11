@@ -253,8 +253,9 @@ function NavBar({ onNewEntryClick }) {
 
         {/* Artifacts — plain link into the documents workspace. It lands on
             Profile, where the ArtifactsNav bubble row cross-links Todo and
-            every other artifact (one click each). */}
-        {user && user.approved && (
+            every other artifact (one click each). Logged-out visitors see
+            it too; it routes to login. */}
+        {(!user || user.approved) && (
           <Link
             to="/profile"
             style={{
@@ -271,18 +272,6 @@ function NavBar({ onNewEntryClick }) {
           </Link>
         )}
 
-        {/* Logged-out visitors keep the plain links (they route to login). */}
-        {!user && (
-          <>
-            <Link to="/profile" style={linkStyle("/profile")}>
-              Profile
-            </Link>
-            <Link to="/todo" style={linkStyle("/todo")}>
-              Todo
-            </Link>
-          </>
-        )}
-
         {(!user || user.approved) && (
           <Link to="/log" style={linkStyle("/log")}>
             Log
@@ -292,7 +281,8 @@ function NavBar({ onNewEntryClick }) {
         {/* Commons — the Log's public sibling (#228). Creating shares
             lives on the Home page as the third mode; the nav holds the
             two records: Log (private) and Commons (public). Dark behind
-            SHARE_V1 via the dashboard payload flag. */}
+            SHARE_V1 via the dashboard payload flag. Shipped dark, so
+            logged-out visitors (who can't read the flag) don't see it. */}
         {user && user.approved && user.share_v1_enabled && (
           <Link to="/commons" style={linkStyle("/commons")}>
             Commons

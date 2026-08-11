@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation, Navigate } from 'react-router-dom';
 import api from '../api';
+import { useUser } from '../contexts/UserContext';
 import MarkdownBody from '../components/MarkdownBody';
 import { formatDate } from '../utils/date';
 
@@ -99,6 +100,8 @@ export default function PublicThreadPage({ nodeIdOverride }) {
   const params = useParams();
   const id = nodeIdOverride || params.id;
   const navigate = useNavigate();
+  const location = useLocation();
+  const { user } = useUser();
   // 'loading' | 'ok' | 'notfound'
   const [status, setStatus] = useState('loading');
   const [data, setData] = useState(null);
@@ -136,6 +139,16 @@ export default function PublicThreadPage({ nodeIdOverride }) {
   }
 
   if (status === 'notfound') {
+    // 404 covers missing, private, deleted, and feature-off — deliberately
+    // indistinguishable. For a logged-out visitor the only path forward is
+    // login (a private node's owner lands back here afterwards), so send
+    // them there instead of a dead end. Logged-in users can still reach
+    // this page via a failed permalink resolution — for them login would
+    // redirect-loop, so they keep the plain not-found message.
+    if (!user) {
+      const returnUrl = encodeURIComponent(location.pathname + location.search);
+      return <Navigate to={`/login?returnUrl=${returnUrl}`} replace />;
+    }
     return shell(
       <p style={{
         textAlign: 'center', color: 'var(--text-muted)',
