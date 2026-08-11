@@ -3,6 +3,37 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 /**
+ * The app never renders raw HTML (no rehype-raw), so anything the markdown
+ * parser classifies as HTML — e.g. a user writing `<user-archive>` around an
+ * export template — would otherwise render as flattened plain text with its
+ * newlines collapsed. Convert those nodes to code (block or inline, matching
+ * where they appear) so the literal text shows with its line breaks intact.
+ * Pure HTML comments are dropped: they are authoring metadata, not content.
+ */
+const INLINE_HTML_PARENTS = new Set([
+  'paragraph', 'heading', 'emphasis', 'strong', 'delete', 'link', 'linkReference', 'tableCell',
+]);
+
+export function remarkHtmlAsCode() {
+  return function transform(node) {
+    if (!node.children) return;
+    node.children = node.children.flatMap((child) => {
+      if (child.type !== 'html') {
+        transform(child);
+        return [child];
+      }
+      const value = child.value || '';
+      if (/^<!--[\s\S]*-->$/.test(value.trim())) return [];
+      return [
+        INLINE_HTML_PARENTS.has(node.type)
+          ? { type: 'inlineCode', value }
+          : { type: 'code', lang: null, value },
+      ];
+    });
+  };
+}
+
+/**
  * True when a rendered child is a nested list element (<ul>/<ol>). Detected via
  * the hast `node` react-markdown passes to every component, because when these
  * helpers run the element's `type` is our custom `ul`/`ol` component (a
@@ -353,7 +384,7 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText =
 
   return (
     <div className="loore-md" style={style}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+      <ReactMarkdown remarkPlugins={[remarkGfm, remarkHtmlAsCode]} components={components}>
         {children}
       </ReactMarkdown>
     </div>
