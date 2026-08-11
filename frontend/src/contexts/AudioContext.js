@@ -40,6 +40,11 @@ export const AudioProvider = ({ children }) => {
   const [duration, setDuration] = useState(0);
   const [loading, setLoading] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1);
+  // Ref mirror of playbackRate: chunk-chaining handlers (onended →
+  // playChunkAtTime) run from closures created when the previous chunk
+  // started, so reading the state var there applies a stale rate to the
+  // next chunk's element. The ref always has the latest value.
+  const playbackRateRef = useRef(1);
   const [currentChunkIndex, setCurrentChunkIndex] = useState(0);
   const [totalChunks, setTotalChunks] = useState(0);
   // For chunked playback: track durations and cumulative time
@@ -269,7 +274,7 @@ export const AudioProvider = ({ children }) => {
       audio = new Audio(chunkUrl);
     }
     audioRef.current = audio;
-    audio.playbackRate = playbackRate;
+    audio.playbackRate = playbackRateRef.current;
 
     // Track if we've already seeked (to avoid multiple seeks)
     let hasSeeked = false;
@@ -374,7 +379,7 @@ export const AudioProvider = ({ children }) => {
     if (shouldAutoPlay) {
       audio.play().catch(err => console.error('Error playing chunk:', err));
     }
-  }, [playbackRate, calculateCumulativeTime, startTimeTracking, stopTimeTracking, recalculateTotalDuration, cleanupAudio, addToast, setWaitingForChunks]);
+  }, [calculateCumulativeTime, startTimeTracking, stopTimeTracking, recalculateTotalDuration, cleanupAudio, addToast, setWaitingForChunks]);
 
   const loadAudio = useCallback(async (audioData) => {
     // If there's already audio playing, pause it first
@@ -409,7 +414,7 @@ export const AudioProvider = ({ children }) => {
     audioRef.current = audio;
 
     // Set playback rate
-    audio.playbackRate = playbackRate;
+    audio.playbackRate = playbackRateRef.current;
 
     // Set up event listeners
     audio.onloadedmetadata = () => {
@@ -455,7 +460,7 @@ export const AudioProvider = ({ children }) => {
       console.error('Error playing audio:', err);
       setLoading(false);
     }
-  }, [startTimeTracking, stopTimeTracking, playbackRate, addToast]);
+  }, [startTimeTracking, stopTimeTracking, addToast]);
 
   // Load and play a queue of audio URLs (for chunked playback)
   // serverDurations: optional array of durations from backend (accurate via ffprobe)
@@ -805,6 +810,7 @@ export const AudioProvider = ({ children }) => {
     const newRate = rates[nextIndex];
 
     setPlaybackRate(newRate);
+    playbackRateRef.current = newRate;
     if (audioRef.current) {
       const wasPlaying = !audioRef.current.paused;
       const currentTimeStamp = audioRef.current.currentTime;
