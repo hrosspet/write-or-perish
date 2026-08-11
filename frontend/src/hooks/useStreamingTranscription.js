@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { useStreamingMediaRecorder } from './useStreamingMediaRecorder';
 import { useDraftTranscriptionSSE } from './useSSE';
+import { useToast } from '../contexts/ToastContext';
 import api from '../api';
 
 /**
@@ -31,6 +32,43 @@ function playErrorSound() {
   } catch (e) {
     // Audio not available - silently ignore
     console.warn('[StreamingTranscription] Could not play error sound:', e);
+  }
+}
+
+/**
+ * Play an urgent mic-interruption alert: the descending error motif twice,
+ * louder — the recording just auto-paused because the OS took the mic
+ * (phone call, lock screen), so the user needs to notice within seconds,
+ * not 20 minutes later (#245). Best-effort: during an actual call the OS
+ * may not route app audio at all, which is why the caller re-fires this
+ * when the page returns to the foreground.
+ */
+function playInterruptionAlert() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    // The context can be suspended when the tab is backgrounded — resume it.
+    if (ctx.state === 'suspended') ctx.resume();
+    const playTone = (freq, startTime, duration) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.frequency.value = freq;
+      osc.type = 'square';
+      gain.gain.setValueAtTime(0.25, startTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, startTime + duration);
+      osc.start(startTime);
+      osc.stop(startTime + duration);
+    };
+    const now = ctx.currentTime;
+    [0, 0.9].forEach((offset) => {
+      playTone(660, now + offset, 0.15);
+      playTone(440, now + offset + 0.18, 0.15);
+      playTone(330, now + offset + 0.36, 0.25);
+    });
+    setTimeout(() => ctx.close(), 2200);
+  } catch (e) {
+    console.warn('[StreamingTranscription] Could not play interruption alert:', e);
   }
 }
 
@@ -95,6 +133,23 @@ export function useStreamingTranscription(options = {}) {
   // Network status
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
 
+  // #245: mic-interruption alert plumbing. The toast is long-lived (cleared
+  // when the interruption ends), so the user who looks at the phone 20
+  // minutes later still sees WHY the recording paused.
+  const { addToast, removeToast } = useToast();
+  const interruptionToastRef = useRef(null);
+
+  const handleInterruption = useCallback(() => {
+    console.warn('[StreamingTranscription] Mic interruption detected — alerting user');
+    playInterruptionAlert();
+    if (interruptionToastRef.current) removeToast(interruptionToastRef.current);
+    interruptionToastRef.current = addToast(
+      'Recording paused — another app took the microphone (phone call?). '
+      + 'Everything up to the interruption is saved. Press Resume to continue.',
+      24 * 60 * 60 * 1000
+    );
+  }, [addToast, removeToast]);
+
   /**
    * Upload a single chunk with exponential backoff retry.
    * Returns { success: true } on success, or { success: false, fatalError?: string }
@@ -127,7 +182,7 @@ export function useStreamingTranscription(options = {}) {
         beaconForm.append('chunk_index', chunkIndex.toString());
         beaconForm.append('mime_type', blobType);
         const sent = navigator.sendBeacon(
-          `${process.env.REACT_APP_BACKEND_URL}/api/drafts/streaming/${sessionId}/audio-chunk`,
+          `${process.env.REACT_APP_BACKEND_URL || ''}/api/drafts/streaming/${sessionId}/audio-chunk`,
           beaconForm
         );
         console.log(`[StreamingTranscription] sendBeacon fallback for chunk ${chunkIndex}: ${sent ? 'queued' : 'rejected'}`);
@@ -242,6 +297,7 @@ export function useStreamingTranscription(options = {}) {
     duration,
     chunkCount,
     error: recorderError,
+    interrupted,
     startRecording: startMediaRecorder,
     stopRecording: stopMediaRecorder,
     pauseRecording,
@@ -252,7 +308,38 @@ export function useStreamingTranscription(options = {}) {
   } = useStreamingMediaRecorder({
     chunkIntervalMs,
     onChunkReady: uploadChunk,
+    onInterruption: handleInterruption,
   });
+
+  // Clear the interruption toast once the episode ends (resume/stop/reset).
+  useEffect(() => {
+    if (!interrupted && interruptionToastRef.current) {
+      removeToast(interruptionToastRef.current);
+      interruptionToastRef.current = null;
+    }
+  }, [interrupted, removeToast]);
+
+  // #245: audio often can't reach the user while the OS holds the mic (the
+  // phone is on a call, or the screen is locked) — so when the page comes
+  // back to the foreground with the interruption still unresolved, re-fire
+  // the audible alert. The toast is already on screen at that point.
+  useEffect(() => {
+    if (!interrupted) return;
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        playInterruptionAlert();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [interrupted]);
+
+  // Don't strand a long-lived toast if the recording UI unmounts.
+  useEffect(() => () => {
+    if (interruptionToastRef.current) {
+      removeToast(interruptionToastRef.current);
+    }
+  }, [removeToast]);
 
   // Populate the indirection ref so uploadChunk can stop the recorder
   // on a fatal upload error (declared above, resetMediaRecorder not yet
@@ -668,6 +755,7 @@ export function useStreamingTranscription(options = {}) {
     // Connection status
     isRecording: recorderStatus === 'recording',
     isPaused: recorderStatus === 'paused',
+    isInterrupted: interrupted,
     isSSEConnected: sseConnected,
     isOffline,
 

@@ -26,6 +26,7 @@ const mimeFamily = (m) => (m || '').split(';', 1)[0].trim().toLowerCase();
 export function useStreamingMediaRecorder({
   chunkIntervalMs = 15 * 1000, // 15 seconds default — frequent uploads for safety
   onChunkReady = null, // Callback when a chunk is ready: (blob, chunkIndex) => void
+  onInterruption = null, // Callback when the OS takes the mic mid-recording (#245)
 } = {}) {
   const [status, setStatus] = useState('idle'); // 'idle' | 'recording' | 'paused' | 'recorded'
   const [mediaBlob, setMediaBlob] = useState(null); // Final combined blob
@@ -33,6 +34,7 @@ export function useStreamingMediaRecorder({
   const [duration, setDuration] = useState(0);
   const [chunkCount, setChunkCount] = useState(0);
   const [error, setError] = useState(null);
+  const [interrupted, setInterrupted] = useState(false); // UI mirror of interruptedRef
 
   const recorderRef = useRef(null);
   const streamRef = useRef(null);
@@ -50,6 +52,21 @@ export function useStreamingMediaRecorder({
   const pausedAtRef = useRef(null); // Timestamp when paused
   const totalPausedMsRef = useRef(0); // Accumulated paused duration
   const mimeTypeRef = useRef(null); // Active recorder's mimeType (so non-state callbacks like getPartialBlob can read it)
+  const onInterruptionRef = useRef(onInterruption);
+  onInterruptionRef.current = onInterruption;
+
+  // Mark the mic as taken by the OS. The onInterruption callback fires once
+  // per interruption episode (mute and the ended/onstop that often follows
+  // it must not double-alert); the episode ends when resume/stop/reset
+  // clears interruptedRef.
+  const markInterrupted = useCallback(() => {
+    const firstSignal = !interruptedRef.current;
+    interruptedRef.current = true;
+    setInterrupted(true);
+    if (firstSignal && onInterruptionRef.current) {
+      onInterruptionRef.current();
+    }
+  }, []);
 
   // Clean up on unmount
   useEffect(() => {
@@ -97,6 +114,7 @@ export function useStreamingMediaRecorder({
     interruptedRef.current = false;
     userStopRef.current = false;
     durationOffsetMsRef.current = 0;
+    setInterrupted(false);
     setMediaBlob(null);
     setMediaUrl('');
     setDuration(0);
@@ -169,7 +187,7 @@ export function useStreamingMediaRecorder({
         || (track && track.readyState === 'ended');
       if (trackDied && !userStopRef.current) {
         console.log('[StreamingRecorder] onstop from mic interruption — holding paused for resume');
-        interruptedRef.current = true;
+        markInterrupted();
         stream.getTracks().forEach(t => t.stop());
         if (!pausedAtRef.current) pausedAtRef.current = Date.now();
         setStatus('paused');
@@ -195,6 +213,8 @@ export function useStreamingMediaRecorder({
       setDuration(ms / 1000);
       setStatus('recorded');
       userStopRef.current = false;
+      interruptedRef.current = false;
+      setInterrupted(false);
 
       // Stop duration tracking
       if (durationIntervalRef.current) {
@@ -221,7 +241,7 @@ export function useStreamingMediaRecorder({
       setError(e.error?.message || 'Recording error');
       setStatus('idle');
     };
-  }, [onChunkReady]);
+  }, [onChunkReady, markInterrupted]);
 
   // #88: watch the mic track for OS-level interruption (phone call, lock
   // screen). 'mute' = capture suspended (may or may not come back);
@@ -237,7 +257,7 @@ export function useStreamingMediaRecorder({
       if (recorderRef.current !== mediaRecorder) return;
       if (mediaRecorder.state === 'recording') {
         console.log(`[StreamingRecorder] Mic track ${e.type} (phone call / lock screen) — auto-pausing`);
-        interruptedRef.current = true;
+        markInterrupted();
         // Flush buffered audio through the normal upload path first —
         // same mechanism as a user pause.
         try { mediaRecorder.requestData(); } catch (err) { /* no-op */ }
@@ -245,9 +265,11 @@ export function useStreamingMediaRecorder({
         if (!pausedAtRef.current) pausedAtRef.current = Date.now();
         setStatus('paused');
       } else if (e.type === 'ended') {
-        // Already paused (or auto-stopped): just mark the track dead so
-        // resume knows to re-acquire rather than resume into silence.
+        // Already paused (or auto-stopped): mark the track dead so resume
+        // knows to re-acquire rather than resume into silence. State only,
+        // no alert — a user-paused session isn't losing content.
         interruptedRef.current = true;
+        setInterrupted(true);
       }
     };
     track.addEventListener('mute', onInterruption);
@@ -256,7 +278,7 @@ export function useStreamingMediaRecorder({
       track.removeEventListener('mute', onInterruption);
       track.removeEventListener('ended', onInterruption);
     };
-  }, []);
+  }, [markInterrupted]);
 
   // startingChunkIndex: offset for chunk numbering when resuming an interrupted session
   // durationOffset: seconds of audio already recorded before this session
@@ -475,6 +497,7 @@ export function useStreamingMediaRecorder({
         pausedAtRef.current = null;
       }
       interruptedRef.current = false;
+      setInterrupted(false);
       rec.resume();
       setStatus('recording');
       return;
@@ -526,6 +549,7 @@ export function useStreamingMediaRecorder({
         pausedAtRef.current = null;
       }
       interruptedRef.current = false;
+      setInterrupted(false);
       setError(null);
       setStatus('recording');
     } catch (err) {
@@ -581,6 +605,7 @@ export function useStreamingMediaRecorder({
     duration,
     chunkCount,
     error,
+    interrupted,
     startRecording,
     stopRecording,
     pauseRecording,

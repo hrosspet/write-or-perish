@@ -76,8 +76,10 @@ export default function StreamingMicButton({
     duration,
     mediaBlob,
     isOffline,
+    isInterrupted,
     startStreaming,
     stopStreaming,
+    resumeRecording,
     cancelStreaming,
     getPartialBlob,
   } = useStreamingTranscription({
@@ -166,11 +168,17 @@ export default function StreamingMicButton({
       }
       startStreaming();
     } else if (sessionState === 'recording') {
-      stopStreaming();
+      // #245: after a mic interruption the primary action is Resume (which
+      // re-acquires the mic); a dedicated Stop button appears alongside.
+      if (isInterrupted) {
+        resumeRecording();
+      } else {
+        stopStreaming();
+      }
     } else if (sessionState === 'error') {
       cancelStreaming();
     }
-  }, [sessionState, startStreaming, stopStreaming, cancelStreaming, onRecordingStart]);
+  }, [sessionState, isInterrupted, startStreaming, stopStreaming, resumeRecording, cancelStreaming, onRecordingStart]);
 
   // Format duration as MM:SS
   const formatDuration = (seconds) => {
@@ -197,6 +205,14 @@ export default function StreamingMicButton({
           </>
         );
       case 'recording':
+        if (isInterrupted) {
+          return (
+            <>
+              <PlayIcon />
+              <span>Resume</span>
+            </>
+          );
+        }
         return (
           <>
             <StopIcon />
@@ -252,6 +268,22 @@ export default function StreamingMicButton({
           Offline — recording continues, uploads will retry when connection returns
         </div>
       )}
+      {isInterrupted && sessionState === 'recording' && (
+        <div style={{
+          padding: '4px 10px',
+          backgroundColor: 'var(--bg-card)',
+          color: 'var(--error)',
+          border: '1px solid var(--error)',
+          borderRadius: '6px',
+          fontSize: '12px',
+          fontFamily: 'var(--sans)',
+          fontWeight: 300,
+          lineHeight: '1.4',
+        }}>
+          Recording paused — another app took the microphone. Audio up to the
+          interruption is saved.
+        </div>
+      )}
       <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
         {/* The tooltip lives on this wrapper span, NOT the button: browsers
             suppress pointer events (and thus the native title tooltip) on
@@ -289,6 +321,24 @@ export default function StreamingMicButton({
             {getButtonContent()}
           </button>
         </span>
+        {isInterrupted && sessionState === 'recording' && (
+          <button
+            type="button"
+            onClick={() => stopStreaming()}
+            title="Stop and save what was recorded so far"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px',
+              padding: '8px 12px',
+              cursor: 'pointer',
+              fontSize: '12px',
+            }}
+          >
+            <StopIcon />
+            <span>Stop &amp; save</span>
+          </button>
+        )}
         {showDownload && (
           <button
             type="button"
@@ -323,6 +373,12 @@ const MicIcon = () => (
 const StopIcon = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" style={{ fill: 'var(--error)' }}>
     <rect x="6" y="6" width="12" height="12" />
+  </svg>
+);
+
+const PlayIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" style={{ fill: 'var(--accent)' }}>
+    <path d="M8 5v14l11-7z" />
   </svg>
 );
 
