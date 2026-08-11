@@ -489,9 +489,14 @@ export function useStreamingMediaRecorder({
     const track = streamRef.current ? streamRef.current.getAudioTracks()[0] : null;
     const trackAlive = !!(track && track.readyState === 'live' && !track.muted);
 
-    if (rec.state === 'paused' && trackAlive) {
-      // Healthy mic: a plain user pause, or the OS gave the track back
-      // after an interruption (Android often unmutes once the call ends).
+    // Once a session was interrupted, NEVER take the plain-resume shortcut:
+    // after a phone call iOS re-reports the old track as live and unmuted,
+    // but it never delivers audio again — a plain rec.resume() records
+    // silence (#245 field test round 3: on-page Resume pressed after the
+    // call "resumed" into a dead track; the lock-screen path only worked
+    // because it re-acquired before iOS unmuted the stale track).
+    if (rec.state === 'paused' && trackAlive && !interruptedRef.current) {
+      // Healthy mic and no interruption this episode: a plain user pause.
       if (pausedAtRef.current) {
         totalPausedMsRef.current += Date.now() - pausedAtRef.current;
         pausedAtRef.current = null;

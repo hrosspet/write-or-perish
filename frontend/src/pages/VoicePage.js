@@ -388,13 +388,13 @@ export default function VoicePage() {
 
         <EcgAnimation
           key={phase}
-          active={phase === 'recording' && !streaming.isInterrupted}
+          active={phase === 'recording' && !streaming.isPaused}
           dim={phase === 'ready'}
-          showScanline={phase === 'recording' && !streaming.isInterrupted}
+          showScanline={phase === 'recording' && !streaming.isPaused}
         />
 
         {phase === 'recording' && (
-          <WaveformBars animated={!isStopping && !streaming.isInterrupted} />
+          <WaveformBars animated={!isStopping && !streaming.isPaused} />
         )}
 
         {phase === 'recording' && (
@@ -407,7 +407,7 @@ export default function VoicePage() {
             letterSpacing: '0.1em',
           }}>
             {formatDuration(streaming.duration || 0)}
-            {streaming.isInterrupted && ' · paused'}
+            {streaming.isPaused && ' · paused'}
           </p>
         )}
 
@@ -460,35 +460,31 @@ export default function VoicePage() {
         )}
 
         {phase === 'recording' && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '24px' }}>
-            {streaming.isInterrupted && !isStopping && (
-              <button
-                onClick={handleResumeRecording}
-                title="Resume recording"
-                style={{
-                  width: '72px', height: '72px', borderRadius: '50%',
-                  border: '2px solid var(--accent)',
-                  background: 'transparent',
-                  cursor: 'pointer',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  transition: 'all 0.2s ease',
-                }}
-              >
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="var(--accent)">
-                  <path d="M8 5v14l11-7z" />
-                </svg>
-              </button>
-            )}
+          streaming.isPaused && !isStopping ? (
+            // Paused (mic interruption or lock-screen pause): a single Play
+            // button. Stopping is play-then-stop — one state, one action.
+            <button
+              onClick={handleResumeRecording}
+              title="Resume recording"
+              style={{
+                width: '72px', height: '72px', borderRadius: '50%',
+                border: '2px solid var(--accent)',
+                background: 'transparent',
+                cursor: 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                transition: 'all 0.2s ease',
+              }}
+            >
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="var(--accent)">
+                <path d="M8 5v14l11-7z" />
+              </svg>
+            </button>
+          ) : (
             <button
               onClick={() => { if (!isStopping) handleStop(); }}
-              title={streaming.isInterrupted ? 'Stop and save what was recorded' : 'Stop recording'}
               style={{
-                // Demote Stop to secondary while an interrupted session is
-                // waiting on Resume — smaller and muted, but still available.
-                width: streaming.isInterrupted && !isStopping ? '56px' : '72px',
-                height: streaming.isInterrupted && !isStopping ? '56px' : '72px',
-                borderRadius: '50%',
-                border: `2px solid ${streaming.isInterrupted && !isStopping ? 'var(--text-muted)' : 'var(--accent)'}`,
+                width: '72px', height: '72px', borderRadius: '50%',
+                border: '2px solid var(--accent)',
                 background: 'transparent',
                 cursor: 'pointer',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -499,12 +495,12 @@ export default function VoicePage() {
               {isStopping ? (
                 <Spinner />
               ) : (
-                <svg width="20" height="20" viewBox="0 0 20 20" fill={streaming.isInterrupted ? 'var(--text-muted)' : 'var(--accent)'}>
+                <svg width="20" height="20" viewBox="0 0 20 20" fill="var(--accent)">
                   <rect x="3" y="3" width="14" height="14" rx="2" />
                 </svg>
               )}
             </button>
-          </div>
+          )
         )}
       </div>
     );
