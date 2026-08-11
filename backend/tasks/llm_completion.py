@@ -1722,13 +1722,15 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
 
 
 def build_user_export_content(user, max_tokens=None, filter_ai_usage=False,
-                              created_before=None, chronological_order=False,
-                              include_strategy="authored_threads"):
-    """Import the actual implementation from export_data routes."""
+                              **kwargs):
+    """Import the actual implementation from export_data routes.
+
+    Pass-through **kwargs (like the sibling wrapper in tasks/exports.py)
+    so new params of the real implementation don't need to be mirrored
+    here — an explicit param list once silently dropped `created_after`.
+    """
     from backend.routes.export_data import build_user_export_content as _build
-    return _build(user, max_tokens, filter_ai_usage, created_before,
-                  chronological_order=chronological_order,
-                  include_strategy=include_strategy)
+    return _build(user, max_tokens, filter_ai_usage, **kwargs)
 
 
 def get_user_profile_content(user_id, pinned_node=None):
