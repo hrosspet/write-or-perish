@@ -13,11 +13,17 @@ import { useToast } from '../contexts/ToastContext';
  * toast is never seen. Best-effort — silently ignored if audio is
  * unavailable or blocked.
  */
-function playWarningSound() {
+function playWarningSound(sessionCtx) {
   try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    // Recording implies a prior user gesture, but the context can still be
-    // suspended when the tab is backgrounded (screen off) — resume it.
+    // Prefer the long-lived context created inside the record-press user
+    // gesture: iOS may refuse to START a fresh AudioContext while the page
+    // is backgrounded (screen off / pocketed) — the exact situation the
+    // 59-minute chime exists for (#243). A gesture-activated running
+    // context only needs resume(), which is permitted.
+    const ownCtx = !sessionCtx || sessionCtx.state === 'closed';
+    const ctx = ownCtx
+      ? new (window.AudioContext || window.webkitAudioContext)()
+      : sessionCtx;
     if (ctx.state === 'suspended') ctx.resume();
     const playTone = (freq, startTime, duration) => {
       const osc = ctx.createOscillator();
@@ -37,7 +43,9 @@ function playWarningSound() {
     playTone(1047, now + 0.20, 0.24);
     playTone(784, now + 0.52, 0.18);
     playTone(1047, now + 0.72, 0.30);
-    setTimeout(() => ctx.close(), 1200);
+    // Only close a context we created ourselves — the session context
+    // stays open for the rest of the recording.
+    if (ownCtx) setTimeout(() => ctx.close(), 1200);
   } catch (e) {
     // Audio not available - silently ignore
     console.warn('[StreamingMicButton] Could not play warning sound:', e);
@@ -98,16 +106,32 @@ export default function StreamingMicButton({
   // with the screen off, so a visual-only warning would go unnoticed.
   const { addToast } = useToast();
   const longRecordingWarnedRef = useRef(false);
+  // Gesture-activated AudioContext held for the whole recording so the
+  // 59-min chime can sound with the screen off (see playWarningSound).
+  const alertCtxRef = useRef(null);
   useEffect(() => {
     if (duration < 1) longRecordingWarnedRef.current = false;
     if (duration >= 59 * 60 && !longRecordingWarnedRef.current) {
       longRecordingWarnedRef.current = true;
-      playWarningSound();
+      playWarningSound(alertCtxRef.current);
       addToast(
         'You\u2019ve been recording for 59 minutes — consider stopping '
         + 'soon and continuing in a new recording.', 10000);
     }
   }, [duration, addToast]);
+
+  // Close the session alert context once the recording session ends.
+  useEffect(() => {
+    if (['idle', 'complete', 'error'].includes(sessionState) && alertCtxRef.current) {
+      try { alertCtxRef.current.close(); } catch (_) { /* already closed */ }
+      alertCtxRef.current = null;
+    }
+  }, [sessionState]);
+  useEffect(() => () => {
+    if (alertCtxRef.current) {
+      try { alertCtxRef.current.close(); } catch (_) { /* already closed */ }
+    }
+  }, []);
 
   const isOnline = useOnlineStatus();
   const isIdleOffline = !isOnline && sessionState === 'idle';
@@ -162,6 +186,11 @@ export default function StreamingMicButton({
       // Block before any recording starts — a long recording stopped only at
       // the end would be lost work (issue #85).
       if (isSpendBlocked()) { notifySpendBlocked(); return; }
+      // Create the alert context HERE, inside the user gesture — that
+      // activation is what lets the 59-min chime start while backgrounded.
+      try {
+        alertCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      } catch (_) { alertCtxRef.current = null; }
       // Call onRecordingStart before starting to capture pre-existing content
       if (onRecordingStart) {
         onRecordingStart();
