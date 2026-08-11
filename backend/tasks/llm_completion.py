@@ -7,7 +7,7 @@ import re
 import time
 from celery import Task
 from celery.utils.log import get_task_logger
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from backend.celery_app import celery, flask_app
 from backend.models import (
@@ -33,6 +33,7 @@ from backend.utils.privacy import AI_ALLOWED
 from backend.utils.placeholders import (
     USER_EXPORT_PATTERN,
     parse_placeholder_params,
+    parse_days,
     parse_max_export_tokens,
     warn_unknown_user_export_keys,
 )
@@ -2340,6 +2341,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     placeholder=export_placeholder_match,
                     log=logger,
                 )
+                export_days = parse_days(
+                    export_params.get('days'),
+                    user_id=user_id,
+                    placeholder=export_placeholder_match,
+                    log=logger,
+                )
 
             # Determine which API key to use based on ai_usage settings
             key_type = determine_api_key_type(node_chain, logger=logger)
@@ -2362,12 +2369,21 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         # Use the timestamp of the node containing {user_export} as cutoff
                         # to only include archive data created before that node
                         created_before = export_node.created_at if export_node else None
+                        # days=N floors the window at N days before that
+                        # same cutoff, so a period review anchors to when
+                        # the request was written, not when the task runs.
+                        created_after = None
+                        if export_days is not None:
+                            # Naive UTC to match Node.created_at columns.
+                            window_end = created_before or datetime.utcnow()
+                            created_after = window_end - timedelta(days=export_days)
                         chronological = export_params.get('keep') == 'oldest'
                         user_export_content = build_user_export_content(
                             user,
                             max_tokens=max_export_tokens,
                             filter_ai_usage=True,
                             created_before=created_before,
+                            created_after=created_after,
                             chronological_order=chronological,
                             include_strategy="engaged_threads",
                         )
@@ -2377,6 +2393,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             f"{len(user_export_content or '')} chars, "
                             f"~{approximate_token_count(user_export_content or '')} tokens, "
                             f"cutoff={created_before}, "
+                            f"created_after={created_after}, "
                             f"strategy=engaged_threads, "
                             f"requested_max={requested_max} "
                             f"(attempt {attempt + 1})"

@@ -31,6 +31,14 @@ from urllib.parse import parse_qs
 #                             ceiling. Non-numeric or negative values are
 #                             logged and ignored (treated as no cap). 0
 #                             disables the export entirely.
+#   days=<int>              - Time window: only include content created in
+#                             the last N days (counted back from the node
+#                             carrying the placeholder). Useful for
+#                             period reviews, e.g. {user_export?days=92}
+#                             for a quarterly writeup. Non-numeric or
+#                             values < 1 are logged and ignored (full
+#                             archive). Combines with max_export_tokens
+#                             (budget applies within the window).
 #
 USER_EXPORT_PATTERN = re.compile(r"\{user_export(\?[^}]*)?\}")
 
@@ -72,7 +80,7 @@ def parse_placeholder_params(match_str):
 # placeholder. Today's bare-string placeholders ({user_profile},
 # {user_todo}, {user_recent}, etc.) don't take params and aren't
 # vulnerable, but the next param-bearing one will be.
-USER_EXPORT_KNOWN_KEYS = frozenset({"keep", "max_export_tokens"})
+USER_EXPORT_KNOWN_KEYS = frozenset({"keep", "max_export_tokens", "days"})
 
 
 def warn_unknown_user_export_keys(params, *, user_id=None, placeholder=None,
@@ -165,6 +173,37 @@ def parse_max_export_tokens(raw, *, user_id=None, placeholder=None,
         log.warning(
             "Ignoring negative max_export_tokens for user_id=%s: "
             "raw=%r placeholder=%r",
+            user_id, raw, placeholder,
+        )
+        return None
+    return parsed
+
+
+def parse_days(raw, *, user_id=None, placeholder=None, log=None):
+    """Parse the `days` value from a {user_export} placeholder.
+
+    Returns the parsed int when valid (>= 1), or None when absent /
+    non-numeric / < 1. Invalid values emit a structured warning so user
+    typos surface in logs rather than silently exporting the full
+    archive (there is no meaningful zero-day window, so 0 is treated as
+    invalid rather than as "disable" — max_export_tokens=0 already
+    covers disabling the export).
+    """
+    if raw is None:
+        return None
+    log = log if log is not None else _default_logger
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        log.warning(
+            "Ignoring non-numeric days for user_id=%s: "
+            "raw=%r placeholder=%r",
+            user_id, raw, placeholder,
+        )
+        return None
+    if parsed < 1:
+        log.warning(
+            "Ignoring days < 1 for user_id=%s: raw=%r placeholder=%r",
             user_id, raw, placeholder,
         )
         return None
