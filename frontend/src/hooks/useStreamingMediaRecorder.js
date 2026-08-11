@@ -486,41 +486,26 @@ export function useStreamingMediaRecorder({
   }, []);
 
   const doResume = useCallback(async (rec) => {
-    const track = streamRef.current ? streamRef.current.getAudioTracks()[0] : null;
-    const trackAlive = !!(track && track.readyState === 'live' && !track.muted);
-
-    // Once a session was interrupted, NEVER take the plain-resume shortcut:
-    // after a phone call iOS re-reports the old track as live and unmuted,
-    // but it never delivers audio again — a plain rec.resume() records
-    // silence (#245 field test round 3: on-page Resume pressed after the
-    // call "resumed" into a dead track; the lock-screen path only worked
-    // because it re-acquired before iOS unmuted the stale track).
-    if (rec.state === 'paused' && trackAlive && !interruptedRef.current) {
-      // Healthy mic and no interruption this episode: a plain user pause.
-      if (pausedAtRef.current) {
-        totalPausedMsRef.current += Date.now() - pausedAtRef.current;
-        pausedAtRef.current = null;
-      }
-      interruptedRef.current = false;
-      setInterrupted(false);
-      rec.resume();
-      setStatus('recording');
-      return;
-    }
-
-    // Only an interruption leaves us here: paused on a muted/dead track,
-    // or the recorder auto-stopped when the track ended. Anything else
-    // (e.g. resume while actively recording) is a no-op.
+    // Resume while actively recording is a no-op; otherwise we only get
+    // here from a paused recorder or an interruption-stopped one.
     if (rec.state !== 'paused' && !interruptedRef.current) return;
 
-    // #88: re-acquire the mic with a fresh getUserMedia + MediaRecorder —
-    // after a phone call the old track never delivers audio again. The new
+    // EVERY resume re-acquires the mic (#245 field-test rounds 3–5). A
+    // paused recorder's capture dies silently on iOS — no 'mute', no
+    // 'ended' — whenever the OS reclaims the audio session (phone call,
+    // lock screen, or just a paused window that ran long enough), and it
+    // can re-report the old track as live/unmuted afterwards. Every
+    // shortcut that trusted track state resumed into recorded silence:
+    // duration ticking, empty transcript. A fresh track cannot be stale;
+    // the tiny cost is a subsession split server-side (#124).
+    //
+    // #88: re-acquire the mic with a fresh getUserMedia + MediaRecorder. The new
     // recorder's first chunk carries its own init segment; the server
     // detects init-bearing chunks at N>0 and splits transcription into
     // subsessions (#124), so chunk numbering simply continues. (chunksRef
     // then spans two container streams — the local preview blob may only
     // play up to the boundary; the server-side merge is canonical.)
-    console.log('[StreamingRecorder] Resuming after interruption — re-acquiring microphone');
+    console.log('[StreamingRecorder] Resuming — re-acquiring microphone');
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       // Detach + release the dead recorder/stream only once the new mic
