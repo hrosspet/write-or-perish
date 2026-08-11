@@ -19,6 +19,7 @@ from backend.utils.placeholders import (
     USER_EXPORT_KNOWN_KEYS,
     USER_EXPORT_PATTERN,
     UserExportValidationError,
+    parse_days,
     parse_max_export_tokens,
     parse_placeholder_params,
     validate_user_export_placeholders,
@@ -136,6 +137,90 @@ class TestParseMaxExportTokens:
         assert "{user_export?max_export_tokens=abc}" in record.args
 
 
+# ── parse_days ──────────────────────────────────────────────────────────
+
+class TestParseDays:
+    @pytest.fixture
+    def real_log(self):
+        log = logging.getLogger("test_parse_days")
+        log.propagate = True
+        return log
+
+    def test_none_returns_none(self):
+        assert parse_days(None) is None
+
+    def test_valid_numeric_string(self):
+        assert parse_days("92") == 92
+
+    def test_one_is_valid(self):
+        assert parse_days("1") == 1
+
+    def test_zero_falls_back_with_warning(self, caplog, real_log):
+        # There is no meaningful zero-day window; 0 is invalid (unlike
+        # max_export_tokens=0, which means "disable the export").
+        with caplog.at_level(logging.WARNING):
+            result = parse_days(
+                "0",
+                user_id=42,
+                placeholder="{user_export?days=0}",
+                log=real_log,
+            )
+        assert result is None
+        assert any(
+            "days < 1" in r.getMessage()
+            and r.levelno == logging.WARNING
+            for r in caplog.records
+        )
+
+    def test_non_numeric_falls_back_with_warning(self, caplog, real_log):
+        with caplog.at_level(logging.WARNING):
+            result = parse_days(
+                "quarter",
+                user_id=42,
+                placeholder="{user_export?days=quarter}",
+                log=real_log,
+            )
+        assert result is None
+        assert any(
+            "non-numeric days" in r.getMessage()
+            and r.levelno == logging.WARNING
+            for r in caplog.records
+        )
+
+    def test_negative_falls_back_with_warning(self, caplog, real_log):
+        with caplog.at_level(logging.WARNING):
+            result = parse_days(
+                "-30",
+                user_id=42,
+                placeholder="{user_export?days=-30}",
+                log=real_log,
+            )
+        assert result is None
+        assert any(
+            "days < 1" in r.getMessage()
+            and r.levelno == logging.WARNING
+            for r in caplog.records
+        )
+
+    def test_warning_includes_user_id_and_placeholder(
+        self, caplog, real_log
+    ):
+        with caplog.at_level(logging.WARNING):
+            parse_days(
+                "abc",
+                user_id=99,
+                placeholder="{user_export?days=abc}",
+                log=real_log,
+            )
+        record = next(
+            r for r in caplog.records
+            if "non-numeric days" in r.getMessage()
+        )
+        assert 99 in record.args
+        assert "abc" in record.args
+        assert "{user_export?days=abc}" in record.args
+
+
 # ── warn_unknown_user_export_keys ───────────────────────────────────────
 
 class TestWarnUnknownUserExportKeys:
@@ -177,7 +262,7 @@ class TestWarnUnknownUserExportKeys:
         """Lock the set of recognized keys. Adding a new param means
         updating this constant deliberately."""
         assert USER_EXPORT_KNOWN_KEYS == frozenset(
-            {"keep", "max_export_tokens"}
+            {"keep", "max_export_tokens", "days"}
         )
 
 
@@ -196,6 +281,11 @@ class TestValidateUserExportPlaceholders:
     def test_valid_placeholder_passes(self):
         validate_user_export_placeholders(
             "What patterns? {user_export?keep=newest&max_export_tokens=10000}"
+        )
+
+    def test_days_param_passes(self):
+        validate_user_export_placeholders(
+            "Quarterly review: {user_export?days=92&max_export_tokens=100000}"
         )
 
     def test_unknown_key_raises(self):
@@ -251,6 +341,11 @@ class TestUserExportPattern:
         assert m.group(0) == (
             "{user_export?keep=newest&max_export_tokens=50000}"
         )
+
+    def test_matches_with_days(self):
+        m = USER_EXPORT_PATTERN.search("{user_export?days=92}")
+        assert m is not None
+        assert m.group(0) == "{user_export?days=92}"
 
 
 # ── wiring regression ──────────────────────────────────────────────────
@@ -340,6 +435,48 @@ class TestPlaceholderHandlerWiring:
                 "build_user_export_content call missing max_tokens kwarg"
             )
         pytest.fail("No engaged_threads call found")
+
+    def test_placeholder_handler_threads_created_after(
+        self, llm_completion_ast
+    ):
+        """The handler must thread the days-derived time floor into
+        build_user_export_content via the created_after kwarg (as the
+        local `created_after` variable, not a literal)."""
+        for call in self._calls_named(
+            llm_completion_ast, "build_user_export_content"
+        ):
+            if (
+                self._kwarg_constant(call, "include_strategy")
+                != "engaged_threads"
+            ):
+                continue
+            for kw in call.keywords:
+                if kw.arg == "created_after":
+                    assert isinstance(kw.value, ast.Name), (
+                        "created_after should be passed as a variable "
+                        "(the days-derived floor), not a literal"
+                    )
+                    assert kw.value.id == "created_after"
+                    return
+            pytest.fail(
+                "build_user_export_content call missing created_after "
+                "kwarg"
+            )
+        pytest.fail("No engaged_threads call found")
+
+    def test_parse_days_called_with_logger(self, llm_completion_ast):
+        """The handler must pass log=logger to parse_days so warnings
+        go to the Celery task logger."""
+        for call in self._calls_named(llm_completion_ast, "parse_days"):
+            for kw in call.keywords:
+                if kw.arg == "log":
+                    assert isinstance(kw.value, ast.Name)
+                    assert kw.value.id == "logger"
+                    return
+        pytest.fail(
+            "Expected parse_days(..., log=logger) call in "
+            "backend/tasks/llm_completion.py"
+        )
 
     def test_parse_max_export_tokens_called_with_logger(
         self, llm_completion_ast
