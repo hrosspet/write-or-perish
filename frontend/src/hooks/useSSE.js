@@ -505,7 +505,7 @@ export function useTTSStreamSSE(entityId, options = {}) {
     },
   }), []); // Empty deps - handlers use refs internally
 
-  const { isConnected, error, disconnect } = useSSE(url, {
+  const { isConnected, error, connect, disconnect } = useSSE(url, {
     enabled,
     eventHandlers,
   });
@@ -530,6 +530,12 @@ export function useTTSStreamSSE(entityId, options = {}) {
     isComplete,
     finalUrl,
     getAudioQueue,
+    // Force a fresh EventSource. iOS Safari kills SSE connections on app
+    // suspension WITHOUT firing onerror, so the base hook's auto-reconnect
+    // never engages — callers detecting a stalled stream (#242 recovery)
+    // use this. The TTS stream replays every chunk from the start on
+    // reconnect; consumers dedup via chunk_index / queue-URL guards.
+    reconnect: connect,
     disconnect,
     reset,
   };
