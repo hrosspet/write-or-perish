@@ -1,7 +1,56 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useStreamingTranscription } from '../hooks/useStreamingTranscription';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import { isSpendBlocked, notifySpendBlocked } from '../utils/spendCap';
+import { useToast } from '../contexts/ToastContext';
+
+/**
+ * Play a rising two-note "wrap up soon" chime via the Web Audio API.
+ * Rising + repeated so it reads as an attention cue, not a failure (cf.
+ * the descending playErrorSound in useStreamingTranscription — same idiom).
+ * The sound matters more than the toast here: long recordings often run
+ * with the screen off / phone pocketed via headphones, where a visual
+ * toast is never seen. Best-effort — silently ignored if audio is
+ * unavailable or blocked.
+ */
+function playWarningSound(sessionCtx) {
+  try {
+    // Prefer the long-lived context created inside the record-press user
+    // gesture: iOS may refuse to START a fresh AudioContext while the page
+    // is backgrounded (screen off / pocketed) — the exact situation the
+    // 59-minute chime exists for (#243). A gesture-activated running
+    // context only needs resume(), which is permitted.
+    const ownCtx = !sessionCtx || sessionCtx.state === 'closed';
+    const ctx = ownCtx
+      ? new (window.AudioContext || window.webkitAudioContext)()
+      : sessionCtx;
+    if (ctx.state === 'suspended') ctx.resume();
+    const playTone = (freq, startTime, duration) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.frequency.value = freq;
+      osc.type = 'triangle';
+      gain.gain.setValueAtTime(0.2, startTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, startTime + duration);
+      osc.start(startTime);
+      osc.stop(startTime + duration);
+    };
+    const now = ctx.currentTime;
+    // Two rising G5 -> C6 chimes, repeated for salience in a pocket.
+    playTone(784, now, 0.18);
+    playTone(1047, now + 0.20, 0.24);
+    playTone(784, now + 0.52, 0.18);
+    playTone(1047, now + 0.72, 0.30);
+    // Only close a context we created ourselves — the session context
+    // stays open for the rest of the recording.
+    if (ownCtx) setTimeout(() => ctx.close(), 1200);
+  } catch (e) {
+    // Audio not available - silently ignore
+    console.warn('[StreamingMicButton] Could not play warning sound:', e);
+  }
+}
 
 /**
  * StreamingMicButton - A microphone button that supports real-time streaming transcription.
@@ -35,8 +84,10 @@ export default function StreamingMicButton({
     duration,
     mediaBlob,
     isOffline,
+    isInterrupted,
     startStreaming,
     stopStreaming,
+    resumeRecording,
     cancelStreaming,
     getPartialBlob,
   } = useStreamingTranscription({
@@ -48,6 +99,39 @@ export default function StreamingMicButton({
     onComplete,
     onError,
   });
+
+  // #127: warn just before the ~60-minute cliff so a long recording can be
+  // wrapped up deliberately instead of silently dropping content. Fires once
+  // per recording, with a sound as well as a toast — these sessions often run
+  // with the screen off, so a visual-only warning would go unnoticed.
+  const { addToast } = useToast();
+  const longRecordingWarnedRef = useRef(false);
+  // Gesture-activated AudioContext held for the whole recording so the
+  // 59-min chime can sound with the screen off (see playWarningSound).
+  const alertCtxRef = useRef(null);
+  useEffect(() => {
+    if (duration < 1) longRecordingWarnedRef.current = false;
+    if (duration >= 59 * 60 && !longRecordingWarnedRef.current) {
+      longRecordingWarnedRef.current = true;
+      playWarningSound(alertCtxRef.current);
+      addToast(
+        'You\u2019ve been recording for 59 minutes — consider stopping '
+        + 'soon and continuing in a new recording.', 10000);
+    }
+  }, [duration, addToast]);
+
+  // Close the session alert context once the recording session ends.
+  useEffect(() => {
+    if (['idle', 'complete', 'error'].includes(sessionState) && alertCtxRef.current) {
+      try { alertCtxRef.current.close(); } catch (_) { /* already closed */ }
+      alertCtxRef.current = null;
+    }
+  }, [sessionState]);
+  useEffect(() => () => {
+    if (alertCtxRef.current) {
+      try { alertCtxRef.current.close(); } catch (_) { /* already closed */ }
+    }
+  }, []);
 
   const isOnline = useOnlineStatus();
   const isIdleOffline = !isOnline && sessionState === 'idle';
@@ -102,17 +186,28 @@ export default function StreamingMicButton({
       // Block before any recording starts — a long recording stopped only at
       // the end would be lost work (issue #85).
       if (isSpendBlocked()) { notifySpendBlocked(); return; }
+      // Create the alert context HERE, inside the user gesture — that
+      // activation is what lets the 59-min chime start while backgrounded.
+      try {
+        alertCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      } catch (_) { alertCtxRef.current = null; }
       // Call onRecordingStart before starting to capture pre-existing content
       if (onRecordingStart) {
         onRecordingStart();
       }
       startStreaming();
     } else if (sessionState === 'recording') {
-      stopStreaming();
+      // #245: after a mic interruption the primary action is Resume (which
+      // re-acquires the mic); a dedicated Stop button appears alongside.
+      if (isInterrupted) {
+        resumeRecording();
+      } else {
+        stopStreaming();
+      }
     } else if (sessionState === 'error') {
       cancelStreaming();
     }
-  }, [sessionState, startStreaming, stopStreaming, cancelStreaming, onRecordingStart]);
+  }, [sessionState, isInterrupted, startStreaming, stopStreaming, resumeRecording, cancelStreaming, onRecordingStart]);
 
   // Format duration as MM:SS
   const formatDuration = (seconds) => {
@@ -139,6 +234,14 @@ export default function StreamingMicButton({
           </>
         );
       case 'recording':
+        if (isInterrupted) {
+          return (
+            <>
+              <PlayIcon />
+              <span>Resume</span>
+            </>
+          );
+        }
         return (
           <>
             <StopIcon />
@@ -194,6 +297,22 @@ export default function StreamingMicButton({
           Offline — recording continues, uploads will retry when connection returns
         </div>
       )}
+      {isInterrupted && sessionState === 'recording' && (
+        <div style={{
+          padding: '4px 10px',
+          backgroundColor: 'var(--bg-card)',
+          color: 'var(--error)',
+          border: '1px solid var(--error)',
+          borderRadius: '6px',
+          fontSize: '12px',
+          fontFamily: 'var(--sans)',
+          fontWeight: 300,
+          lineHeight: '1.4',
+        }}>
+          Recording paused — another app took the microphone. Audio up to the
+          interruption is saved.
+        </div>
+      )}
       <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
         {/* The tooltip lives on this wrapper span, NOT the button: browsers
             suppress pointer events (and thus the native title tooltip) on
@@ -231,6 +350,24 @@ export default function StreamingMicButton({
             {getButtonContent()}
           </button>
         </span>
+        {isInterrupted && sessionState === 'recording' && (
+          <button
+            type="button"
+            onClick={() => stopStreaming()}
+            title="Stop and save what was recorded so far"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px',
+              padding: '8px 12px',
+              cursor: 'pointer',
+              fontSize: '12px',
+            }}
+          >
+            <StopIcon />
+            <span>Stop &amp; save</span>
+          </button>
+        )}
         {showDownload && (
           <button
             type="button"
@@ -265,6 +402,12 @@ const MicIcon = () => (
 const StopIcon = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" style={{ fill: 'var(--error)' }}>
     <rect x="6" y="6" width="12" height="12" />
+  </svg>
+);
+
+const PlayIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" style={{ fill: 'var(--accent)' }}>
+    <path d="M8 5v14l11-7z" />
   </svg>
 );
 

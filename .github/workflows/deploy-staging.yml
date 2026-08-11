@@ -135,9 +135,14 @@ jobs:
               psql -U staging -d writeorperish_staging \
               -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" < /dev/null || true
 
+            # Run as root: the volume carries dirs created by older images
+            # running as root, which appuser can neither delete nor write
+            # into — that broke every audio move with EACCES ("no original
+            # recording" staging relic, #245). Root wipes the orphans and
+            # hands the tree back to appuser so runtime writes succeed.
             echo "Clearing staging media files..."
-            docker compose -p wop-staging exec -T backend \
-              sh -c 'rm -rf /app/data/audio/*' < /dev/null || true
+            docker compose -p wop-staging exec -T -u root backend \
+              sh -c 'rm -rf /app/data/audio/* && chown -R appuser:appuser /app/data' < /dev/null || true
 
             echo "Running flask init-db..."
             docker compose -p wop-staging exec -T backend flask init-db < /dev/null

@@ -26,6 +26,7 @@ const mimeFamily = (m) => (m || '').split(';', 1)[0].trim().toLowerCase();
 export function useStreamingMediaRecorder({
   chunkIntervalMs = 15 * 1000, // 15 seconds default — frequent uploads for safety
   onChunkReady = null, // Callback when a chunk is ready: (blob, chunkIndex) => void
+  onInterruption = null, // Callback when the OS takes the mic mid-recording (#245)
 } = {}) {
   const [status, setStatus] = useState('idle'); // 'idle' | 'recording' | 'paused' | 'recorded'
   const [mediaBlob, setMediaBlob] = useState(null); // Final combined blob
@@ -33,6 +34,7 @@ export function useStreamingMediaRecorder({
   const [duration, setDuration] = useState(0);
   const [chunkCount, setChunkCount] = useState(0);
   const [error, setError] = useState(null);
+  const [interrupted, setInterrupted] = useState(false); // UI mirror of interruptedRef
 
   const recorderRef = useRef(null);
   const streamRef = useRef(null);
@@ -42,9 +44,31 @@ export function useStreamingMediaRecorder({
   const durationIntervalRef = useRef(null);
   const stopResolveRef = useRef(null); // Resolve fn for the stop promise
   const dataAvailableFiredRef = useRef(false); // Track if ondataavailable ran during stop
+  const lifecycleCleanupRef = useRef(null); // #88 visibility/pagehide listeners
+  const trackCleanupRef = useRef(null); // #88 mic-track mute/ended listeners
+  const interruptedRef = useRef(false); // #88 mic taken by the OS (phone call / lock screen)
+  const userStopRef = useRef(false); // A user-initiated stop is in flight
+  const durationOffsetMsRef = useRef(0); // ms of audio recorded before this session (resume)
   const pausedAtRef = useRef(null); // Timestamp when paused
   const totalPausedMsRef = useRef(0); // Accumulated paused duration
   const mimeTypeRef = useRef(null); // Active recorder's mimeType (so non-state callbacks like getPartialBlob can read it)
+  const onInterruptionRef = useRef(onInterruption);
+  onInterruptionRef.current = onInterruption;
+  const resumingRef = useRef(false); // Re-entrancy guard for resumeRecording
+  const pendingResumeRef = useRef(false); // Resume requested while page hidden (lock screen)
+
+  // Mark the mic as taken by the OS. The onInterruption callback fires once
+  // per interruption episode (mute and the ended/onstop that often follows
+  // it must not double-alert); the episode ends when resume/stop/reset
+  // clears interruptedRef.
+  const markInterrupted = useCallback(() => {
+    const firstSignal = !interruptedRef.current;
+    interruptedRef.current = true;
+    setInterrupted(true);
+    if (firstSignal && onInterruptionRef.current) {
+      onInterruptionRef.current();
+    }
+  }, []);
 
   // Clean up on unmount
   useEffect(() => {
@@ -60,6 +84,14 @@ export function useStreamingMediaRecorder({
 
   const resetRecording = useCallback(() => {
     // Clean up previous recording
+    if (lifecycleCleanupRef.current) {
+      lifecycleCleanupRef.current();
+      lifecycleCleanupRef.current = null;
+    }
+    if (trackCleanupRef.current) {
+      trackCleanupRef.current();
+      trackCleanupRef.current = null;
+    }
     if (mediaUrl) {
       URL.revokeObjectURL(mediaUrl);
     }
@@ -81,6 +113,11 @@ export function useStreamingMediaRecorder({
     pausedAtRef.current = null;
     totalPausedMsRef.current = 0;
     mimeTypeRef.current = null;
+    interruptedRef.current = false;
+    userStopRef.current = false;
+    durationOffsetMsRef.current = 0;
+    pendingResumeRef.current = false;
+    setInterrupted(false);
     setMediaBlob(null);
     setMediaUrl('');
     setDuration(0);
@@ -88,6 +125,163 @@ export function useStreamingMediaRecorder({
     setError(null);
     setStatus('idle');
   }, [mediaUrl]);
+
+  // Wire ondataavailable/onstop/onerror on a recorder instance. Shared by the
+  // initial start and the interruption re-acquire path (#88) so both
+  // recorders behave identically. Every handler guards on
+  // recorderRef.current so a stale recorder (replaced by reset or
+  // re-acquire) can't emit chunks into the wrong session or clobber UI
+  // state after teardown.
+  const wireRecorder = useCallback((mediaRecorder, stream) => {
+    // MediaRecorder with a timeslice emits format-specific fragments
+    // of one continuous stream — only chunk 0 has the init prefix
+    // (Matroska EBML/Segment/Tracks for WebM, ftyp+moov for fMP4);
+    // chunks 1+ are header-less fragment bodies whose timestamps are
+    // absolute to the original recording. Per the respective byte-stream
+    // formats, those fragments concatenated in order as raw bytes form
+    // exactly one valid file. So we upload each blob verbatim and let
+    // the backend do the binary concat + a single remux pass to rewrite
+    // duration metadata.
+    mediaRecorder.ondataavailable = (e) => {
+      if (recorderRef.current !== mediaRecorder) {
+        // Stale recorder — drop the data, but never strand a pending stop.
+        if (stopResolveRef.current) {
+          stopResolveRef.current();
+          stopResolveRef.current = null;
+        }
+        return;
+      }
+      const recorderState = recorderRef.current?.state || 'unknown';
+      console.log(`[StreamingRecorder] ondataavailable fired: size=${e.data?.size || 0}, recorderState=${recorderState}, timeSinceStart=${Date.now() - startTimeRef.current}ms`);
+
+      dataAvailableFiredRef.current = true;
+
+      if (e.data && e.data.size > 0) {
+        chunksRef.current.push(e.data);
+
+        if (onChunkReady) {
+          const chunkIndex = chunkIndexRef.current;
+          chunkIndexRef.current += 1;
+          setChunkCount(prev => prev + 1);
+
+          console.log(`[StreamingRecorder] Chunk ${chunkIndex} ready: size=${e.data.size}, totalChunks=${chunksRef.current.length}`);
+          onChunkReady(e.data, chunkIndex);
+        }
+      } else {
+        console.warn(`[StreamingRecorder] ondataavailable with empty data: size=${e.data?.size}, recorderState=${recorderState}`);
+      }
+
+      if (stopResolveRef.current) {
+        stopResolveRef.current();
+        stopResolveRef.current = null;
+      }
+    };
+
+    mediaRecorder.onstop = () => {
+      if (recorderRef.current !== mediaRecorder) return;
+
+      // #88: the recorder can stop on its own when the OS takes the mic
+      // for good (track 'ended' — phone call / lock screen, esp. iOS).
+      // That is an interruption, not a user stop (user stops set
+      // userStopRef first): hold the session paused so the user can
+      // resume with a re-acquired mic instead of finalizing half-dead.
+      const track = stream.getAudioTracks()[0];
+      const trackDied = interruptedRef.current
+        || (track && track.readyState === 'ended');
+      if (trackDied && !userStopRef.current) {
+        console.log('[StreamingRecorder] onstop from mic interruption — holding paused for resume');
+        markInterrupted();
+        stream.getTracks().forEach(t => t.stop());
+        if (!pausedAtRef.current) pausedAtRef.current = Date.now();
+        setStatus('paused');
+        return;
+      }
+
+      if (lifecycleCleanupRef.current) {
+        lifecycleCleanupRef.current();
+        lifecycleCleanupRef.current = null;
+      }
+      if (trackCleanupRef.current) {
+        trackCleanupRef.current();
+        trackCleanupRef.current = null;
+      }
+      console.log(`[StreamingRecorder] onstop fired: totalChunks=${chunksRef.current.length}, chunkIndex=${chunkIndexRef.current}`);
+      // Combine all chunks into final blob
+      const blob = new Blob(chunksRef.current, { type: mediaRecorder.mimeType });
+      const url = URL.createObjectURL(blob);
+      setMediaBlob(blob);
+      setMediaUrl(url);
+
+      const ms = Date.now() - startTimeRef.current - totalPausedMsRef.current + durationOffsetMsRef.current;
+      setDuration(ms / 1000);
+      setStatus('recorded');
+      userStopRef.current = false;
+      interruptedRef.current = false;
+      setInterrupted(false);
+
+      // Stop duration tracking
+      if (durationIntervalRef.current) {
+        clearInterval(durationIntervalRef.current);
+        durationIntervalRef.current = null;
+      }
+
+      // Stop all tracks
+      stream.getTracks().forEach(track => track.stop());
+
+      // Fallback: if ondataavailable didn't fire (no data to emit),
+      // resolve the stop promise here so stopStreaming doesn't hang.
+      // When ondataavailable DID fire, it resolves the promise itself
+      // after its async work completes — so we skip this.
+      if (stopResolveRef.current && !dataAvailableFiredRef.current) {
+        console.log('[StreamingRecorder] onstop resolving stop promise (no ondataavailable)');
+        stopResolveRef.current();
+        stopResolveRef.current = null;
+      }
+    };
+
+    mediaRecorder.onerror = (e) => {
+      console.error('MediaRecorder error:', e);
+      setError(e.error?.message || 'Recording error');
+      setStatus('idle');
+    };
+  }, [onChunkReady, markInterrupted]);
+
+  // #88: watch the mic track for OS-level interruption (phone call, lock
+  // screen). 'mute' = capture suspended (may or may not come back);
+  // 'ended' = gone for good. Either way the recorder would keep
+  // "recording" silence with the timer climbing, so flush what's buffered
+  // and auto-pause. Deliberately NO auto-resume on 'unmute' — the user
+  // resumes explicitly (lock-screen play button), and resumeRecording
+  // re-acquires the mic if the track died.
+  const watchTrack = useCallback((mediaRecorder, stream) => {
+    const track = stream.getAudioTracks()[0];
+    if (!track) return;
+    const onInterruption = (e) => {
+      if (recorderRef.current !== mediaRecorder) return;
+      if (mediaRecorder.state === 'recording') {
+        console.log(`[StreamingRecorder] Mic track ${e.type} (phone call / lock screen) — auto-pausing`);
+        markInterrupted();
+        // Flush buffered audio through the normal upload path first —
+        // same mechanism as a user pause.
+        try { mediaRecorder.requestData(); } catch (err) { /* no-op */ }
+        try { mediaRecorder.pause(); } catch (err) { /* no-op */ }
+        if (!pausedAtRef.current) pausedAtRef.current = Date.now();
+        setStatus('paused');
+      } else if (e.type === 'ended') {
+        // Already paused (or auto-stopped): mark the track dead so resume
+        // knows to re-acquire rather than resume into silence. State only,
+        // no alert — a user-paused session isn't losing content.
+        interruptedRef.current = true;
+        setInterrupted(true);
+      }
+    };
+    track.addEventListener('mute', onInterruption);
+    track.addEventListener('ended', onInterruption);
+    trackCleanupRef.current = () => {
+      track.removeEventListener('mute', onInterruption);
+      track.removeEventListener('ended', onInterruption);
+    };
+  }, [markInterrupted]);
 
   // startingChunkIndex: offset for chunk numbering when resuming an interrupted session
   // durationOffset: seconds of audio already recorded before this session
@@ -216,86 +410,39 @@ export function useStreamingMediaRecorder({
       chunksRef.current = [];
       chunkIndexRef.current = startingChunkIndex;
 
-      // MediaRecorder with a timeslice emits format-specific fragments
-      // of one continuous stream — only chunk 0 has the init prefix
-      // (Matroska EBML/Segment/Tracks for WebM, ftyp+moov for fMP4);
-      // chunks 1+ are header-less fragment bodies whose timestamps are
-      // absolute to the original recording. Per the respective byte-stream
-      // formats, those fragments concatenated in order as raw bytes form
-      // exactly one valid file. So we upload each blob verbatim and let
-      // the backend do the binary concat + a single remux pass to rewrite
-      // duration metadata.
-      mediaRecorder.ondataavailable = (e) => {
-        const recorderState = recorderRef.current?.state || 'unknown';
-        console.log(`[StreamingRecorder] ondataavailable fired: size=${e.data?.size || 0}, recorderState=${recorderState}, timeSinceStart=${Date.now() - startTimeRef.current}ms`);
-
-        dataAvailableFiredRef.current = true;
-
-        if (e.data && e.data.size > 0) {
-          chunksRef.current.push(e.data);
-
-          if (onChunkReady) {
-            const chunkIndex = chunkIndexRef.current;
-            chunkIndexRef.current += 1;
-            setChunkCount(prev => prev + 1);
-
-            console.log(`[StreamingRecorder] Chunk ${chunkIndex} ready: size=${e.data.size}, totalChunks=${chunksRef.current.length}`);
-            onChunkReady(e.data, chunkIndex);
-          }
-        } else {
-          console.warn(`[StreamingRecorder] ondataavailable with empty data: size=${e.data?.size}, recorderState=${recorderState}`);
-        }
-
-        if (stopResolveRef.current) {
-          stopResolveRef.current();
-          stopResolveRef.current = null;
-        }
-      };
-
-      mediaRecorder.onstop = () => {
-        console.log(`[StreamingRecorder] onstop fired: totalChunks=${chunksRef.current.length}, chunkIndex=${chunkIndexRef.current}`);
-        // Combine all chunks into final blob
-        const blob = new Blob(chunksRef.current, { type: mediaRecorder.mimeType });
-        const url = URL.createObjectURL(blob);
-        setMediaBlob(blob);
-        setMediaUrl(url);
-
-        const ms = Date.now() - startTimeRef.current - totalPausedMsRef.current + durationOffsetMs;
-        setDuration(ms / 1000);
-        setStatus('recorded');
-
-        // Stop duration tracking
-        if (durationIntervalRef.current) {
-          clearInterval(durationIntervalRef.current);
-          durationIntervalRef.current = null;
-        }
-
-        // Stop all tracks
-        stream.getTracks().forEach(track => track.stop());
-
-        // Fallback: if ondataavailable didn't fire (no data to emit),
-        // resolve the stop promise here so stopStreaming doesn't hang.
-        // When ondataavailable DID fire, it resolves the promise itself
-        // after its async work completes — so we skip this.
-        if (stopResolveRef.current && !dataAvailableFiredRef.current) {
-          console.log('[StreamingRecorder] onstop resolving stop promise (no ondataavailable)');
-          stopResolveRef.current();
-          stopResolveRef.current = null;
-        }
-      };
-
-      mediaRecorder.onerror = (e) => {
-        console.error('MediaRecorder error:', e);
-        setError(e.error?.message || 'Recording error');
-        setStatus('idle');
-      };
+      wireRecorder(mediaRecorder, stream);
+      watchTrack(mediaRecorder, stream);
 
       startTimeRef.current = Date.now();
       totalPausedMsRef.current = 0;
       pausedAtRef.current = null;
-      const durationOffsetMs = durationOffset * 1000;
+      interruptedRef.current = false;
+      userStopRef.current = false;
+      durationOffsetMsRef.current = durationOffset * 1000;
 
       // Start recording with timeslice for chunked output
+      // #88: flush the in-flight timeslice when the page is about to be
+      // hidden or unloaded (phone call, lock screen, tab switch, kill).
+      // requestData() emits the buffered audio through the normal
+      // ondataavailable → upload path while the page can still run JS;
+      // the upload layer adds a sendBeacon fallback for dying pages.
+      const lifecycleFlush = () => {
+        if (recorderRef.current
+            && recorderRef.current.state === 'recording') {
+          console.log('[StreamingRecorder] Lifecycle flush (visibility/pagehide)');
+          try { recorderRef.current.requestData(); } catch (e) { /* no-op */ }
+        }
+      };
+      const onVisibility = () => {
+        if (document.visibilityState === 'hidden') lifecycleFlush();
+      };
+      window.addEventListener('pagehide', lifecycleFlush);
+      document.addEventListener('visibilitychange', onVisibility);
+      lifecycleCleanupRef.current = () => {
+        window.removeEventListener('pagehide', lifecycleFlush);
+        document.removeEventListener('visibilitychange', onVisibility);
+      };
+
       // The timeslice parameter makes ondataavailable fire at the specified interval
       mediaRecorder.start(chunkIntervalMs);
       setStatus('recording');
@@ -304,7 +451,7 @@ export function useStreamingMediaRecorder({
       // Start duration tracking (subtracts paused time from elapsed)
       durationIntervalRef.current = setInterval(() => {
         if (startTimeRef.current && !pausedAtRef.current) {
-          const elapsed = Date.now() - startTimeRef.current - totalPausedMsRef.current + durationOffsetMs;
+          const elapsed = Date.now() - startTimeRef.current - totalPausedMsRef.current + durationOffsetMsRef.current;
           setDuration(elapsed / 1000);
         }
       }, 1000);
@@ -324,7 +471,7 @@ export function useStreamingMediaRecorder({
       }
       throw err;
     }
-  }, [resetRecording, chunkIntervalMs, onChunkReady]);
+  }, [resetRecording, chunkIntervalMs, wireRecorder, watchTrack]);
 
   const pauseRecording = useCallback(() => {
     if (recorderRef.current && recorderRef.current.state === 'recording') {
@@ -338,17 +485,110 @@ export function useStreamingMediaRecorder({
     }
   }, []);
 
-  const resumeRecording = useCallback(() => {
-    if (recorderRef.current && recorderRef.current.state === 'paused') {
-      // Accumulate the time spent paused
+  const doResume = useCallback(async (rec) => {
+    // Resume while actively recording is a no-op; otherwise we only get
+    // here from a paused recorder or an interruption-stopped one.
+    if (rec.state !== 'paused' && !interruptedRef.current) return;
+
+    // EVERY resume re-acquires the mic (#245 field-test rounds 3–5). A
+    // paused recorder's capture dies silently on iOS — no 'mute', no
+    // 'ended' — whenever the OS reclaims the audio session (phone call,
+    // lock screen, or just a paused window that ran long enough), and it
+    // can re-report the old track as live/unmuted afterwards. Every
+    // shortcut that trusted track state resumed into recorded silence:
+    // duration ticking, empty transcript. A fresh track cannot be stale;
+    // the tiny cost is a subsession split server-side (#124).
+    //
+    // #88: re-acquire the mic with a fresh getUserMedia + MediaRecorder. The new
+    // recorder's first chunk carries its own init segment; the server
+    // detects init-bearing chunks at N>0 and splits transcription into
+    // subsessions (#124), so chunk numbering simply continues. (chunksRef
+    // then spans two container streams — the local preview blob may only
+    // play up to the boundary; the server-side merge is canonical.)
+    console.log('[StreamingRecorder] Resuming — re-acquiring microphone');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Detach + release the dead recorder/stream only once the new mic
+      // is granted, so a failed re-acquire leaves the paused state intact.
+      if (trackCleanupRef.current) {
+        trackCleanupRef.current();
+        trackCleanupRef.current = null;
+      }
+      const oldRecorder = rec;
+      const oldStream = streamRef.current;
+      oldRecorder.ondataavailable = null;
+      oldRecorder.onstop = null;
+      oldRecorder.onerror = null;
+      try {
+        if (oldRecorder.state !== 'inactive') oldRecorder.stop();
+      } catch (e) { /* already dead */ }
+      if (oldStream) oldStream.getTracks().forEach(t => t.stop());
+
+      streamRef.current = stream;
+      const mediaRecorder = new MediaRecorder(
+        stream,
+        mimeTypeRef.current ? { mimeType: mimeTypeRef.current } : undefined
+      );
+      recorderRef.current = mediaRecorder;
+      wireRecorder(mediaRecorder, stream);
+      watchTrack(mediaRecorder, stream);
+      mediaRecorder.start(chunkIntervalMs);
+
       if (pausedAtRef.current) {
         totalPausedMsRef.current += Date.now() - pausedAtRef.current;
         pausedAtRef.current = null;
       }
-      recorderRef.current.resume();
+      interruptedRef.current = false;
+      setInterrupted(false);
+      setError(null);
       setStatus('recording');
+    } catch (err) {
+      // #245 field test: iOS refuses getUserMedia while the page is hidden
+      // (screen locked) — a lock-screen play press can't re-acquire the mic
+      // directly. Remember the request and complete it when the page becomes
+      // visible again, so the recording resumes at unlock without another
+      // press. (If getUserMedia HANGS instead of rejecting, the pending
+      // promise itself resolves at unlock — both paths converge.)
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        console.log('[StreamingRecorder] Re-acquire blocked while hidden — deferring resume to visibility');
+        pendingResumeRef.current = true;
+        return;
+      }
+      // Stay paused — the user can retry resume, or stop and keep
+      // everything recorded up to the interruption (already uploaded).
+      console.error('[StreamingRecorder] Mic re-acquire failed:', err);
+      setError(err.message || 'Could not re-acquire microphone');
     }
-  }, []);
+  }, [wireRecorder, watchTrack, chunkIntervalMs]);
+
+  const resumeRecording = useCallback(async () => {
+    const rec = recorderRef.current;
+    if (!rec) return;
+    // Re-entrancy guard: a lock-screen play press can arrive while a prior
+    // re-acquire's getUserMedia is still pending (iOS defers it until the
+    // page is visible) — a second concurrent re-acquire would double-start
+    // recorders into the same session.
+    if (resumingRef.current) return;
+    resumingRef.current = true;
+    try {
+      await doResume(rec);
+    } finally {
+      resumingRef.current = false;
+    }
+  }, [doResume]);
+
+  // Complete a lock-screen-requested resume once the page is visible again.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (!pendingResumeRef.current) return;
+      pendingResumeRef.current = false;
+      console.log('[StreamingRecorder] Page visible — completing deferred resume');
+      resumeRecording();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [resumeRecording]);
 
   const stopRecording = useCallback(() => {
     const state = recorderRef.current?.state;
@@ -365,6 +605,11 @@ export function useStreamingMediaRecorder({
       return new Promise((resolve) => {
         dataAvailableFiredRef.current = false;
         stopResolveRef.current = resolve;
+        // Mark this as a USER stop so onstop finalizes normally even when
+        // the mic track died mid-session (#88 interruption handling).
+        userStopRef.current = true;
+        // A stop supersedes any resume still deferred to visibility.
+        pendingResumeRef.current = false;
         // stop() fires a final ondataavailable with all remaining data, then onstop.
         // Do NOT call requestData() before stop() — it creates a race condition
         // where the final chunk's ondataavailable may not fire reliably.
@@ -392,6 +637,7 @@ export function useStreamingMediaRecorder({
     duration,
     chunkCount,
     error,
+    interrupted,
     startRecording,
     stopRecording,
     pauseRecording,

@@ -74,7 +74,12 @@ export function useMediaSession({
       const updateTitle = () => {
         const secs = Math.floor(durationRef.current || 0);
         const time = formatTime(secs);
-        const label = isPausedRef.current ? `Paused ${time}` : `Recording ${time}`;
+        // EVERY resume re-acquires the mic, which needs a visible page
+        // (iOS blocks getUserMedia while locked) — so any paused state
+        // tells the user the play press completes at unlock.
+        const label = isPausedRef.current
+          ? `Paused ${time} — play, then unlock`
+          : `Recording ${time}`;
         ms.metadata = new MediaMetadata({ title: label, artist: 'Loore', artwork });
       };
       updateTitle();
