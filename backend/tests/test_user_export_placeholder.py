@@ -464,6 +464,28 @@ class TestPlaceholderHandlerWiring:
             )
         pytest.fail("No engaged_threads call found")
 
+    def test_local_wrapper_forwards_kwargs(self, llm_completion_ast):
+        """llm_completion.py defines a lazy build_user_export_content
+        wrapper (circular-import avoidance). It must forward **kwargs to
+        the real implementation — an explicit param list silently
+        dropped `created_after` when the days= param shipped, producing
+        'unexpected keyword argument' at task runtime (no test imported
+        the module, so only production caught it)."""
+        for node in ast.walk(llm_completion_ast):
+            if (isinstance(node, ast.FunctionDef)
+                    and node.name == "build_user_export_content"):
+                assert node.args.kwarg is not None, (
+                    "The build_user_export_content wrapper in "
+                    "llm_completion.py must accept **kwargs so params "
+                    "added to the real implementation pass through"
+                )
+                return
+        pytest.fail(
+            "No local build_user_export_content wrapper found in "
+            "llm_completion.py — if it was removed in favor of a direct "
+            "import, delete this test"
+        )
+
     def test_parse_days_called_with_logger(self, llm_completion_ast):
         """The handler must pass log=logger to parse_days so warnings
         go to the Celery task logger."""
