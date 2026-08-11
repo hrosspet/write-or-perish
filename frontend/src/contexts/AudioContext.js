@@ -856,12 +856,15 @@ export const AudioProvider = ({ children }) => {
   }, []);
 
   // Resolve a chapter's start time. Chapters anchored to a chunk index
-  // (voice chain nodes) derive it from the LIVE per-chunk durations so
-  // they track corrections as chunks load/play; chapters carrying only a
-  // precomputed start_time (.md section chapters from tts-chapters) use
-  // it as-is. Both players consume this so they can never disagree.
+  // (voice chain nodes, streamed .md sections) derive it from the LIVE
+  // per-chunk durations so they track corrections as chunks load/play;
+  // when there are no chunk durations to derive from — already-generated
+  // TTS replayed as ONE merged file via loadAudio() — fall back to the
+  // server's precomputed start_time (otherwise every chapter computes to
+  // 0 and jumps always land on the first chapter). Both players consume
+  // this so they can never disagree.
   const chapterStartTime = useCallback((ch) => (
-    ch.chunk_index != null
+    ch.chunk_index != null && chunkDurations.length > 0
       ? chunkDurations.slice(0, ch.chunk_index).reduce((a, b) => a + b, 0)
       : ch.start_time
   ), [chunkDurations]);
