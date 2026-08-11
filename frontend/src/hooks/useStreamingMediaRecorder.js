@@ -54,6 +54,8 @@ export function useStreamingMediaRecorder({
   const mimeTypeRef = useRef(null); // Active recorder's mimeType (so non-state callbacks like getPartialBlob can read it)
   const onInterruptionRef = useRef(onInterruption);
   onInterruptionRef.current = onInterruption;
+  const resumingRef = useRef(false); // Re-entrancy guard for resumeRecording
+  const pendingResumeRef = useRef(false); // Resume requested while page hidden (lock screen)
 
   // Mark the mic as taken by the OS. The onInterruption callback fires once
   // per interruption episode (mute and the ended/onstop that often follows
@@ -114,6 +116,7 @@ export function useStreamingMediaRecorder({
     interruptedRef.current = false;
     userStopRef.current = false;
     durationOffsetMsRef.current = 0;
+    pendingResumeRef.current = false;
     setInterrupted(false);
     setMediaBlob(null);
     setMediaUrl('');
@@ -482,10 +485,7 @@ export function useStreamingMediaRecorder({
     }
   }, []);
 
-  const resumeRecording = useCallback(async () => {
-    const rec = recorderRef.current;
-    if (!rec) return;
-
+  const doResume = useCallback(async (rec) => {
     const track = streamRef.current ? streamRef.current.getAudioTracks()[0] : null;
     const trackAlive = !!(track && track.readyState === 'live' && !track.muted);
 
@@ -553,12 +553,52 @@ export function useStreamingMediaRecorder({
       setError(null);
       setStatus('recording');
     } catch (err) {
+      // #245 field test: iOS refuses getUserMedia while the page is hidden
+      // (screen locked) — a lock-screen play press can't re-acquire the mic
+      // directly. Remember the request and complete it when the page becomes
+      // visible again, so the recording resumes at unlock without another
+      // press. (If getUserMedia HANGS instead of rejecting, the pending
+      // promise itself resolves at unlock — both paths converge.)
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        console.log('[StreamingRecorder] Re-acquire blocked while hidden — deferring resume to visibility');
+        pendingResumeRef.current = true;
+        return;
+      }
       // Stay paused — the user can retry resume, or stop and keep
       // everything recorded up to the interruption (already uploaded).
       console.error('[StreamingRecorder] Mic re-acquire failed:', err);
       setError(err.message || 'Could not re-acquire microphone');
     }
   }, [wireRecorder, watchTrack, chunkIntervalMs]);
+
+  const resumeRecording = useCallback(async () => {
+    const rec = recorderRef.current;
+    if (!rec) return;
+    // Re-entrancy guard: a lock-screen play press can arrive while a prior
+    // re-acquire's getUserMedia is still pending (iOS defers it until the
+    // page is visible) — a second concurrent re-acquire would double-start
+    // recorders into the same session.
+    if (resumingRef.current) return;
+    resumingRef.current = true;
+    try {
+      await doResume(rec);
+    } finally {
+      resumingRef.current = false;
+    }
+  }, [doResume]);
+
+  // Complete a lock-screen-requested resume once the page is visible again.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (!pendingResumeRef.current) return;
+      pendingResumeRef.current = false;
+      console.log('[StreamingRecorder] Page visible — completing deferred resume');
+      resumeRecording();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [resumeRecording]);
 
   const stopRecording = useCallback(() => {
     const state = recorderRef.current?.state;
@@ -578,6 +618,8 @@ export function useStreamingMediaRecorder({
         // Mark this as a USER stop so onstop finalizes normally even when
         // the mic track died mid-session (#88 interruption handling).
         userStopRef.current = true;
+        // A stop supersedes any resume still deferred to visibility.
+        pendingResumeRef.current = false;
         // stop() fires a final ondataavailable with all remaining data, then onstop.
         // Do NOT call requestData() before stop() — it creates a race condition
         // where the final chunk's ondataavailable may not fire reliably.

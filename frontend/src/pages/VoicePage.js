@@ -205,6 +205,7 @@ export default function VoicePage() {
   const {
     phase, isStopping, hasError, isOnline, streaming, audio, handleStart, handleStop,
     handleContinue, handleResumeSession, handleCancelProcessing, setThreadParentId,
+    handleResumeRecording,
   } = useVoiceSession({
     apiEndpoint: '/voice',
     ttsTitle: 'Voice',
@@ -387,12 +388,14 @@ export default function VoicePage() {
 
         <EcgAnimation
           key={phase}
-          active={phase === 'recording'}
+          active={phase === 'recording' && !streaming.isInterrupted}
           dim={phase === 'ready'}
-          showScanline={phase === 'recording'}
+          showScanline={phase === 'recording' && !streaming.isInterrupted}
         />
 
-        {phase === 'recording' && <WaveformBars animated={!isStopping} />}
+        {phase === 'recording' && (
+          <WaveformBars animated={!isStopping && !streaming.isInterrupted} />
+        )}
 
         {phase === 'recording' && (
           <p style={{
@@ -404,6 +407,22 @@ export default function VoicePage() {
             letterSpacing: '0.1em',
           }}>
             {formatDuration(streaming.duration || 0)}
+            {streaming.isInterrupted && ' · paused'}
+          </p>
+        )}
+
+        {phase === 'recording' && streaming.isInterrupted && (
+          <p style={{
+            fontFamily: 'var(--sans)',
+            fontSize: '0.85rem',
+            fontWeight: 300,
+            color: 'var(--error)',
+            margin: '0 0 24px 0',
+            maxWidth: '320px',
+            lineHeight: 1.5,
+          }}>
+            Recording paused — another app took the microphone.
+            Everything up to the interruption is saved.
           </p>
         )}
 
@@ -441,26 +460,51 @@ export default function VoicePage() {
         )}
 
         {phase === 'recording' && (
-          <button
-            onClick={() => { if (!isStopping) handleStop(); }}
-            style={{
-              width: '72px', height: '72px', borderRadius: '50%',
-              border: '2px solid var(--accent)',
-              background: 'transparent',
-              cursor: 'pointer',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              transition: 'all 0.2s ease',
-              opacity: isStopping ? 0.5 : 1,
-            }}
-          >
-            {isStopping ? (
-              <Spinner />
-            ) : (
-              <svg width="20" height="20" viewBox="0 0 20 20" fill="var(--accent)">
-                <rect x="3" y="3" width="14" height="14" rx="2" />
-              </svg>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '24px' }}>
+            {streaming.isInterrupted && !isStopping && (
+              <button
+                onClick={handleResumeRecording}
+                title="Resume recording"
+                style={{
+                  width: '72px', height: '72px', borderRadius: '50%',
+                  border: '2px solid var(--accent)',
+                  background: 'transparent',
+                  cursor: 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  transition: 'all 0.2s ease',
+                }}
+              >
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="var(--accent)">
+                  <path d="M8 5v14l11-7z" />
+                </svg>
+              </button>
             )}
-          </button>
+            <button
+              onClick={() => { if (!isStopping) handleStop(); }}
+              title={streaming.isInterrupted ? 'Stop and save what was recorded' : 'Stop recording'}
+              style={{
+                // Demote Stop to secondary while an interrupted session is
+                // waiting on Resume — smaller and muted, but still available.
+                width: streaming.isInterrupted && !isStopping ? '56px' : '72px',
+                height: streaming.isInterrupted && !isStopping ? '56px' : '72px',
+                borderRadius: '50%',
+                border: `2px solid ${streaming.isInterrupted && !isStopping ? 'var(--text-muted)' : 'var(--accent)'}`,
+                background: 'transparent',
+                cursor: 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                transition: 'all 0.2s ease',
+                opacity: isStopping ? 0.5 : 1,
+              }}
+            >
+              {isStopping ? (
+                <Spinner />
+              ) : (
+                <svg width="20" height="20" viewBox="0 0 20 20" fill={streaming.isInterrupted ? 'var(--text-muted)' : 'var(--accent)'}>
+                  <rect x="3" y="3" width="14" height="14" rx="2" />
+                </svg>
+              )}
+            </button>
+          </div>
         )}
       </div>
     );

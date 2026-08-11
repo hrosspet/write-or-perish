@@ -783,13 +783,33 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   }, [streaming]);
 
   const handleResumeRecording = useCallback(() => {
+    // Restart the silent keepalive inside the user-gesture context (lock
+    // screen play press) so the lock screen flips back to "playing".
+    const el = silentAudioRef.current?.el;
+    if (el) el.play().catch(() => {});
     streaming.resumeRecording();
   }, [streaming]);
+
+  // Keep the silent keepalive's play state mirroring the recorder while
+  // recording. iOS lock-screen controls follow the audio ELEMENT's actual
+  // state, not the declared MediaSession playbackState — so a still-playing
+  // keepalive made the lock screen show a Pause button during a mic
+  // interruption, hiding the play/resume affordance (#245 field test).
+  useEffect(() => {
+    const el = silentAudioRef.current?.el;
+    if (!el || phase !== 'recording') return;
+    if (streaming.isPaused) {
+      el.pause();
+    } else {
+      el.play().catch(() => {});
+    }
+  }, [streaming.isPaused, phase]);
 
   // iOS lock screen controls
   useMediaSession({
     phase,
     isPaused: streaming.isPaused,
+    isInterrupted: streaming.isInterrupted,
     duration: streaming.duration,
     handlePauseRecording,
     handleResumeRecording,
