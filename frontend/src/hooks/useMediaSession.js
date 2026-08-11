@@ -23,7 +23,6 @@ function formatTime(seconds) {
 export function useMediaSession({
   phase,
   isPaused,
-  isInterrupted = false,
   duration,
   handlePauseRecording,
   handleResumeRecording,
@@ -46,8 +45,6 @@ export function useMediaSession({
   durationRef.current = duration;
   const isPausedRef = useRef(false);
   isPausedRef.current = isPaused;
-  const isInterruptedRef = useRef(false);
-  isInterruptedRef.current = isInterrupted;
 
   useEffect(() => {
     if (!isIOS || !('mediaSession' in navigator)) return;
@@ -77,11 +74,12 @@ export function useMediaSession({
       const updateTitle = () => {
         const secs = Math.floor(durationRef.current || 0);
         const time = formatTime(secs);
-        // Mic re-acquire needs a visible page (iOS blocks getUserMedia while
-        // locked) — tell the user the play press completes at unlock.
-        const label = isInterruptedRef.current
+        // EVERY resume re-acquires the mic, which needs a visible page
+        // (iOS blocks getUserMedia while locked) — so any paused state
+        // tells the user the play press completes at unlock.
+        const label = isPausedRef.current
           ? `Paused ${time} — play, then unlock`
-          : isPausedRef.current ? `Paused ${time}` : `Recording ${time}`;
+          : `Recording ${time}`;
         ms.metadata = new MediaMetadata({ title: label, artist: 'Loore', artwork });
       };
       updateTitle();
