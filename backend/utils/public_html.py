@@ -177,11 +177,16 @@ def _meta_block(meta):
     tag('<meta property="og:image:alt" content="{v}"/>',
         meta.get("image_alt"))
 
-    m.append('<meta name="twitter:card" content="summary_large_image"/>')
+    # X gets the compact card with the square logo mark (Peter's call —
+    # the large generated card is finicky on X); og:image keeps the big
+    # card for platforms that read og:* (Slack, Discord, iMessage, FB).
+    m.append('<meta name="twitter:card" content="{}"/>'.format(
+        escape(meta.get("twitter_card") or "summary_large_image")))
     tag('<meta name="twitter:title" content="{v}"/>', title)
     tag('<meta name="twitter:description" content="{v}"/>',
         meta.get("description"))
-    tag('<meta name="twitter:image" content="{v}"/>', image)
+    tag('<meta name="twitter:image" content="{v}"/>',
+        meta.get("twitter_image") or image)
     tag('<meta name="twitter:creator" content="{v}"/>',
         meta.get("twitter_creator"))
 

@@ -187,6 +187,8 @@ def _article_document(root, author_user):
         "og_type": "article",
         "image": og_image,
         "image_alt": f"{title} — by @{username} on Loore",
+        "twitter_card": "summary",
+        "twitter_image": f"{origin}/loore-logo.png",
         "published_time": iso_utc(published),
         "modified_time": iso_utc(modified),
         "author_url": profile_url,
@@ -420,6 +422,8 @@ def _render_profile(username):
         "og_type": "profile",
         "image": f"{canonical}/og.png",
         "image_alt": f"@{username} on Loore",
+        "twitter_card": "summary",
+        "twitter_image": f"{origin}/loore-logo.png",
         "alternates": [
             ("alternate", "application/atom+xml",
              f"{canonical}/feed.xml", f"@{username} on Loore"),

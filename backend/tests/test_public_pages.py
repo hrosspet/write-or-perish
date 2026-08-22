@@ -166,7 +166,11 @@ def test_article_meta_tags(app):
             in html)
     assert '<meta property="og:type" content="article"/>' in html
     assert '<meta property="og:title" content="On lore — Loore"/>' in html
-    assert '<meta name="twitter:card" content="summary_large_image"/>' in html
+    # X gets the compact card with the square logo; the generated
+    # 1200×630 card stays in og:image for og:*-reading platforms.
+    assert '<meta name="twitter:card" content="summary"/>' in html
+    assert ('<meta name="twitter:image" content="https://loore.org/'
+            'loore-logo.png"/>' in html)
     assert 'property="article:published_time" content="2026-08-01' in html
     assert 'property="article:modified_time"' in html
     assert '"@type": "Article"' in html
