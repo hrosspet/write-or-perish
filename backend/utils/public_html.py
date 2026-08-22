@@ -156,13 +156,16 @@ def _meta_block(meta):
 
     site = "Loore"
     title = meta.get("title") or site
+    # Card titles drop the " — Loore" suffix the browser-tab <title>
+    # carries: the card already shows the domain right above the title.
+    social_title = meta.get("og_title") or title
     m.append(f"<title>{escape(title)}</title>")
     tag('<meta name="description" content="{v}"/>', meta.get("description"))
     if meta.get("noindex"):
         m.append('<meta name="robots" content="noindex"/>')
     tag('<link rel="canonical" href="{v}"/>', meta.get("canonical"))
 
-    tag('<meta property="og:title" content="{v}"/>', title)
+    tag('<meta property="og:title" content="{v}"/>', social_title)
     tag('<meta property="og:description" content="{v}"/>',
         meta.get("description"))
     tag('<meta property="og:url" content="{v}"/>', meta.get("canonical"))
@@ -182,7 +185,7 @@ def _meta_block(meta):
     # card for platforms that read og:* (Slack, Discord, iMessage, FB).
     m.append('<meta name="twitter:card" content="{}"/>'.format(
         escape(meta.get("twitter_card") or "summary_large_image")))
-    tag('<meta name="twitter:title" content="{v}"/>', title)
+    tag('<meta name="twitter:title" content="{v}"/>', social_title)
     tag('<meta name="twitter:description" content="{v}"/>',
         meta.get("description"))
     tag('<meta name="twitter:image" content="{v}"/>',

@@ -165,7 +165,9 @@ def test_article_meta_tags(app):
     assert ('<link rel="canonical" href="https://loore.org/@author/on-lore"/>'
             in html)
     assert '<meta property="og:type" content="article"/>' in html
-    assert '<meta property="og:title" content="On lore — Loore"/>' in html
+    # Card title without the tab-title's " — Loore" suffix — the card
+    # already shows the domain line.
+    assert '<meta property="og:title" content="On lore"/>' in html
     # X gets the compact card with the square logo; the generated
     # 1200×630 card stays in og:image for og:*-reading platforms.
     assert '<meta name="twitter:card" content="summary"/>' in html

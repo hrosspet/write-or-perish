@@ -182,6 +182,7 @@ def _article_document(root, author_user):
                 else f"{origin}/og-image.png")
     meta = {
         "title": f"{title} — Loore",
+        "og_title": title,
         "description": description,
         "canonical": canonical,
         "og_type": "article",
@@ -417,6 +418,7 @@ def _render_profile(username):
                    or f"Writing published by @{username} on Loore.")
     meta = {
         "title": f"@{username} — Loore",
+        "og_title": f"@{username}",
         "description": description,
         "canonical": canonical,
         "og_type": "profile",
