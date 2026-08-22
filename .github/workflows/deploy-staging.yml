@@ -155,6 +155,32 @@ jobs:
                   ON CONFLICT (username) DO UPDATE SET email = NULLIF('$STAGING_ADMIN_EMAIL', ''), approved = true, is_admin = true;" < /dev/null
             echo "Database setup complete."
 
+            # Sync the staging host-nginx config (same diff → test →
+            # reload pattern deploy.sh uses for prod). The site file's
+            # name on the VM isn't fixed in the repo, so locate it by its
+            # server_name; warn-and-skip if not found rather than failing
+            # the whole deploy.
+            NGINX_SRC=configs/nginx-staging.txt
+            NGINX_TGT=$(sudo grep -sl "server_name staging.loore.org" /etc/nginx/sites-available/* 2>/dev/null | head -1)
+            if [ -z "$NGINX_TGT" ]; then
+              echo "WARNING: no staging nginx site file found; config NOT synced."
+            elif sudo diff -q "$NGINX_SRC" "$NGINX_TGT" > /dev/null 2>&1; then
+              echo "Staging nginx config unchanged."
+            else
+              echo "Updating staging nginx config at $NGINX_TGT..."
+              BACKUP="$NGINX_TGT.backup.$(date +%Y%m%d_%H%M%S)"
+              sudo cp "$NGINX_TGT" "$BACKUP"
+              sudo cp "$NGINX_SRC" "$NGINX_TGT"
+              if sudo nginx -t; then
+                sudo systemctl reload nginx
+                echo "Staging nginx config updated and reloaded."
+              else
+                echo "ERROR: nginx -t failed — restoring previous staging config"
+                sudo cp "$BACKUP" "$NGINX_TGT"
+                exit 1
+              fi
+            fi
+
             # Switch back to main so production deploys aren't blocked
             git checkout main
           ENDSSH

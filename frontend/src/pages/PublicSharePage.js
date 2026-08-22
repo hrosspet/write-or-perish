@@ -30,13 +30,19 @@ export default function PublicSharePage({ usernameOverride }) {
         if (cancelled) return;
         setData(res.data);
         setStatus('ok');
+        // Keep the server-rendered per-route <title> in sync on
+        // client-side navigation.
+        document.title = `@${res.data.username} — Loore`;
       })
       .catch(() => {
         // 404 covers both "unknown user" and "feature off" — deliberately
         // indistinguishable.
         if (!cancelled) setStatus('notfound');
       });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      document.title = 'Loore';
+    };
   }, [username]);
 
   const shell = (children) => (

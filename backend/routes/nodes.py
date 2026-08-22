@@ -867,6 +867,13 @@ def update_node(node_id):
         db.session.rollback()
         return jsonify({"error": "DB error updating node"}), 500
 
+    # Public pages are cached server-side; an edit (or a privacy flip in
+    # either direction) must reach the open web immediately.
+    if (node.public_slug or node.privacy_level == "public"
+            or "privacy_level" in data):
+        from backend.utils.public_cache import invalidate_for_node
+        invalidate_for_node(node)
+
     node = get_node(node.id)[0].get_json()  # to find all ancestors and children... / [0] is the actual node (wrapped in Response), [1] is the response code
     return jsonify({"message": "Node updated", "node": node}), 200
 
@@ -2550,6 +2557,9 @@ def delete_node(node_id):
             # Pointer kept: republishing unchanged content undeletes this
             # node (identity follows content).
         db.session.commit()
+        if pre.public_slug or pre.privacy_level == "public":
+            from backend.utils.public_cache import invalidate_for_node
+            invalidate_for_node(pre)
         return jsonify({
             "scheduled": flagged,
             "grace_days": SOFT_DELETE_GRACE_DAYS,

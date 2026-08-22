@@ -114,13 +114,21 @@ export default function PublicThreadPage({ nodeIdOverride }) {
         if (cancelled) return;
         setData(res.data);
         setStatus('ok');
+        // Server-rendered pages arrive with a per-article <title>; keep
+        // it in sync on client-side navigation too.
+        const firstLine = (res.data?.thread?.content || '')
+          .trim().split('\n')[0].replace(/^[#>\s]+/, '').slice(0, 120);
+        if (firstLine) document.title = `${firstLine} — Loore`;
       })
       .catch(() => {
         // 404 covers missing, private, deleted, and feature-off —
         // deliberately indistinguishable.
         if (!cancelled) setStatus('notfound');
       });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      document.title = 'Loore';
+    };
   }, [id]);
 
   const shell = (children) => (

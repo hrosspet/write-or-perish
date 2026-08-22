@@ -135,12 +135,17 @@ def delete_share(share_id):
     share = _get_own_share_or_404(share_id)
     if not share:
         return jsonify({"error": "Not found"}), 404
+    public_node = (Node.query.get(share.public_node_id)
+                   if share.public_node_id else None)
     if share.public_node_id:
         from backend.utils.node_deletion import soft_delete_node
         soft_delete_node(share.public_node_id, current_user.id,
                          with_descendants=False)
     db.session.delete(share)
     db.session.commit()
+    if public_node is not None:
+        from backend.utils.public_cache import invalidate_for_node
+        invalidate_for_node(public_node)
     return jsonify({"status": "deleted"}), 200
 
 
@@ -209,6 +214,8 @@ def publish_share(share_id):
     share.published_at = datetime.utcnow()
     share.revoked_at = None
     db.session.commit()
+    from backend.utils.public_cache import invalidate_for_node
+    invalidate_for_node(public_node)
     return jsonify(_serialize(share)), 200
 
 
@@ -235,6 +242,11 @@ def revoke_share(share_id):
     share.status = "revoked"
     share.revoked_at = datetime.utcnow()
     db.session.commit()
+    if share.public_node_id:
+        node = Node.query.get(share.public_node_id)
+        if node is not None:
+            from backend.utils.public_cache import invalidate_for_node
+            invalidate_for_node(node)
     return jsonify(_serialize(share)), 200
 
 
@@ -308,7 +320,9 @@ def public_shares(username):
     if not _share_enabled():
         return jsonify({"error": "Not found"}), 404
     user = User.query.filter_by(username=username).first()
-    if not user:
+    # Opting out of public sharing takes the whole page down immediately —
+    # indistinguishable from a user that doesn't exist.
+    if not user or not user.public_sharing_enabled:
         return jsonify({"error": "Not found"}), 404
     # ALL the user's living public roots — shares are enriched with their
     # type/publish date; direct-created public roots (craft path) appear

@@ -23,3 +23,8 @@ ffmpeg-python==0.2.0
 google-cloud-kms>=2.0.0
 cryptography>=41.0.0
 sentry-sdk[flask]>=2.0.0
+# Server-side markdown for the public pages (escape=True: raw HTML in
+# user content is escaped, matching react-markdown's behavior)
+mistune>=3.0.0,<4
+# Per-article og:image social cards (backend/utils/og_image.py)
+Pillow>=10.0.0
