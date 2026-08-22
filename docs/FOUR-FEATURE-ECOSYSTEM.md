@@ -78,6 +78,9 @@ Write or Perish evolves from journaling app to **distributed intelligence networ
 
 **Purpose:** Share your current internal state - needs, desires, intentions, opportunities - to appropriate audiences and channels.
 
+**Shipped so far (2026-08):**
+- ✅ **Crawlable public pages (SEO/no-JS pass)** — published articles (`/@author/slug`), author pages, and marketing pages are server-rendered by Flask into the SPA shell: full article text in semantic HTML, per-route meta/OG/Twitter tags, JSON-LD Article schema, sitemap.xml, per-author Atom feeds, and a markdown representation (`/@author/slug.md`). Explicit robots.txt welcoming search + AI crawlers. Only `privacy_level=public`, living nodes by opted-in authors are ever rendered; `public_sharing_enabled` off now takes ALL of an author's public content down immediately (API + SSR + sitemap, Redis page cache invalidated on publish/revoke/edit/toggle).
+
 #### 3.1 Core Concept
 
 **Traditional Content Creation:**

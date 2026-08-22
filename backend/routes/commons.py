@@ -12,6 +12,8 @@ surface needs, private/deleted nodes structurally absent.
 """
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
+from sqlalchemy import func
+from sqlalchemy.orm import aliased
 
 from backend.models import Node, User
 from backend.extensions import db
@@ -28,10 +30,29 @@ def _enabled():
 
 
 def _public_alive(query):
-    return query.filter(
+    """Filter to nodes the open web may see: public, living, AND with an
+    author who currently has public sharing switched on. Toggling
+    public_sharing_enabled off takes every piece (and reply) down
+    immediately — respecting a takedown beats URL stability."""
+    owner = aliased(User)
+    return query.join(
+        owner,
+        owner.id == func.coalesce(Node.human_owner_id, Node.user_id),
+    ).filter(
         Node.privacy_level == PrivacyLevel.PUBLIC.value,
         Node.deleted_at.is_(None),
+        owner.public_sharing_enabled.is_(True),
     )
+
+
+def _publicly_visible(node):
+    """The same predicate as _public_alive, for a single in-hand node."""
+    if (node is None or node.deleted_at is not None
+            or node.privacy_level != PrivacyLevel.PUBLIC.value):
+        return False
+    owner_id = node.human_owner_id or node.user_id
+    owner = User.query.get(owner_id) if owner_id else None
+    return bool(owner and owner.public_sharing_enabled)
 
 
 def _author_name(node):
@@ -135,8 +156,7 @@ def public_thread(node_id):
     if not _enabled():
         return jsonify({"error": "Not found"}), 404
     node = Node.query.get(node_id)
-    if (node is None or node.deleted_at is not None
-            or node.privacy_level != PrivacyLevel.PUBLIC.value):
+    if not _publicly_visible(node):
         return jsonify({"error": "Not found"}), 404
 
     # Walk up to the nearest public root so a deep-linked reply still
@@ -146,8 +166,7 @@ def public_thread(node_id):
     while (root.parent_id and root.id not in visited):
         visited.add(root.id)
         parent = Node.query.get(root.parent_id)
-        if (parent is None or parent.deleted_at is not None
-                or parent.privacy_level != PrivacyLevel.PUBLIC.value):
+        if not _publicly_visible(parent):
             break
         root = parent
 

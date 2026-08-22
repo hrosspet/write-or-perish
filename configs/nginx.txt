@@ -25,6 +25,21 @@ server {
        try_files $uri $uri/ /index.html;
    }
 
+   # Server-rendered public pages (SEO/no-JS pass): Flask injects the
+   # article content and per-route metadata into the SPA shell for
+   # articles (/@user/slug), author pages (/@user), /node/<id>, the
+   # sitemap, and the marketing pages. If the backend is down, these
+   # degrade to the static SPA shell instead of a 502.
+   location ~ "^/(?:@|node/[0-9]+/?$)|^/(?:sitemap\.xml|landing|why-loore|vision|how-to|login|alpha-thank-you)?$" {
+       proxy_pass http://127.0.0.1:8000;
+       proxy_set_header Host $host;
+       proxy_set_header X-Real-IP $remote_addr;
+       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+       proxy_set_header X-Forwarded-Proto $scheme;
+       proxy_intercept_errors on;
+       error_page 502 503 504 =200 /index.html;
+   }
+
    # Proxy backend authentication endpoints to gunicorn.
    location /auth/ {
        proxy_pass http://127.0.0.1:8000;

@@ -111,6 +111,12 @@ def create_app():
         if any(request.path.startswith(prefix) for prefix in allowed_prefixes):
             return
 
+        # Server-rendered public pages are world-readable by definition —
+        # approval is irrelevant there (and /landing must stay reachable
+        # or the redirect below would loop).
+        if request.endpoint and request.endpoint.startswith("public_pages."):
+            return
+
         # Exempt endpoints that the frontend needs:
         # Allow GET requests to /api/dashboard to fetch current user info.
         # Allow PUT requests to /api/dashboard/user to update the profile (and email).
@@ -187,6 +193,13 @@ def create_app():
     # The Commons — public forum (#228, same dark flag as the Share family).
     from backend.routes.commons import commons_bp
     app.register_blueprint(commons_bp, url_prefix="/api/commons")
+
+    # Server-rendered public pages: articles, profiles, sitemap, feeds —
+    # real HTML for crawlers and no-JS clients. nginx routes /@…, /node/…,
+    # /sitemap.xml and the marketing paths here; everything else still
+    # goes straight to the static SPA shell.
+    from backend.routes.public_pages import public_pages_bp
+    app.register_blueprint(public_pages_bp)
 
     # Dev-update channel: changelog + notifications + polls (#207).
     from backend.routes.updates import updates_bp

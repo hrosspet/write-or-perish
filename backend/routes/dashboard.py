@@ -226,9 +226,12 @@ def update_user():
     if "craft_mode" in data:
         current_user.craft_mode = bool(data["craft_mode"])
 
+    sharing_flipped = False
     if "public_sharing_enabled" in data:
-        current_user.public_sharing_enabled = bool(
-            data["public_sharing_enabled"])
+        new_sharing = bool(data["public_sharing_enabled"])
+        sharing_flipped = (
+            current_user.public_sharing_enabled != new_sharing)
+        current_user.public_sharing_enabled = new_sharing
 
     if "external_content_enabled" in data:
         current_user.external_content_enabled = bool(
@@ -251,6 +254,11 @@ def update_user():
 
     try:
         db.session.commit()
+        # The opt-out must reach the open web immediately: drop every
+        # cached public page this user's content appears on.
+        if sharing_flipped:
+            from backend.utils.public_cache import invalidate_for_user
+            invalidate_for_user(current_user)
         # Include voice mode feature flag and user plan in the response
         voice_mode_enabled = current_user.has_voice_mode
         return jsonify({
