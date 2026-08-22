@@ -72,7 +72,9 @@ class LLMProvider:
         if provider == "openai":
             return LLMProvider._call_openai(
                 api_model, messages, api_keys["openai"], max_tokens,
-                tools=tools, prompt_cache_key=prompt_cache_key)
+                tools=tools, prompt_cache_key=prompt_cache_key,
+                tools_reasoning_effort=config.get(
+                    "chat_tools_reasoning_effort"))
         elif provider == "anthropic":
             return LLMProvider._call_anthropic(
                 api_model, messages, api_keys["anthropic"], max_tokens,
@@ -83,7 +85,8 @@ class LLMProvider:
     @staticmethod
     def _call_openai(model: str, messages: list, api_key: str,
                      max_tokens: int = None, tools: list = None,
-                     prompt_cache_key: str = None) -> dict:
+                     prompt_cache_key: str = None,
+                     tools_reasoning_effort: str = None) -> dict:
         """
         Call OpenAI API with the given model and messages.
 
@@ -122,6 +125,10 @@ class LLMProvider:
                     }
                 })
             kwargs["tools"] = openai_tools
+            # Some models (gpt-5.6-sol) reject function tools on
+            # /v1/chat/completions unless reasoning is explicitly disabled.
+            if tools_reasoning_effort:
+                kwargs["reasoning_effort"] = tools_reasoning_effort
 
         try:
             response = client.chat.completions.create(**kwargs)
