@@ -118,10 +118,6 @@ class Config:
             "provider": "openai",
             "api_model": "gpt-5.6-sol",
             "display_name": "GPT-5.6 Sol",
-            # /v1/chat/completions rejects function tools while the model's
-            # default reasoning is active; "none" is OpenAI's documented
-            # workaround (the alternative is migrating to /v1/responses).
-            "chat_tools_reasoning_effort": "none",
             "context_window": 1050000,
             "input_price_per_mtok": 5.00,
             "output_price_per_mtok": 30.00,

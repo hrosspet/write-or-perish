@@ -73,8 +73,7 @@ class LLMProvider:
             return LLMProvider._call_openai(
                 api_model, messages, api_keys["openai"], max_tokens,
                 tools=tools, prompt_cache_key=prompt_cache_key,
-                tools_reasoning_effort=config.get(
-                    "chat_tools_reasoning_effort"))
+                context_window=config.get("context_window"))
         elif provider == "anthropic":
             return LLMProvider._call_anthropic(
                 api_model, messages, api_keys["anthropic"], max_tokens,
@@ -86,100 +85,160 @@ class LLMProvider:
     def _call_openai(model: str, messages: list, api_key: str,
                      max_tokens: int = None, tools: list = None,
                      prompt_cache_key: str = None,
-                     tools_reasoning_effort: str = None) -> dict:
+                     context_window: int = None) -> dict:
         """
-        Call OpenAI API with the given model and messages.
+        Call OpenAI via the Responses API (/v1/responses).
+
+        Migrated from /v1/chat/completions because that endpoint rejects
+        function tools while model-default reasoning is active (400 on
+        gpt-5.6-sol); the Responses API supports reasoning + tools
+        together, so reasoning stays at the model's default here.
 
         Args:
-            model: OpenAI model name (e.g., "gpt-5")
-            messages: List of message dicts in OpenAI format
+            model: OpenAI model name (e.g., "gpt-5.6-sol")
+            messages: List of message dicts in OpenAI chat format
             api_key: OpenAI API key
             tools: Optional tool definitions (Anthropic format, converted here)
+            context_window: Model context window, used to report a context
+                overflow when the API error carries no token counts
 
         Returns:
             Dict with content, total_tokens, and tool_calls
         """
         client = OpenAI(api_key=api_key)
 
+        # Convert chat-format messages to Responses input items: content
+        # block type is role-dependent (input_text for user/system,
+        # output_text for assistant); plain strings pass through as-is.
+        input_items = []
+        for msg in messages:
+            content = msg["content"]
+            if isinstance(content, list):
+                block_type = ("output_text" if msg["role"] == "assistant"
+                              else "input_text")
+                content = [
+                    {"type": block_type,
+                     "text": (block["text"]
+                              if isinstance(block, dict) and "text" in block
+                              else str(block))}
+                    for block in content
+                ]
+            input_items.append({"role": msg["role"], "content": content})
+
         kwargs = dict(
             model=model,
-            messages=messages,
-            temperature=1,
-            max_completion_tokens=max_tokens or DEFAULT_MAX_OUTPUT_TOKENS,
+            input=input_items,
+            max_output_tokens=max_tokens or DEFAULT_MAX_OUTPUT_TOKENS,
+            # The Responses API defaults to store=True (response persisted
+            # on OpenAI's side); chat completions didn't store — keep that.
+            store=False,
         )
         # #189: a stable per-conversation key improves OpenAI's automatic
         # prefix-cache routing (best-effort; no behavior change otherwise).
         if prompt_cache_key:
             kwargs["prompt_cache_key"] = prompt_cache_key
 
-        # Convert Anthropic-format tools to OpenAI format
+        # Convert Anthropic-format tools to Responses format (flat, not
+        # nested under "function"). strict mode would reject our schemas
+        # (it requires all-required + additionalProperties: false).
         if tools:
-            openai_tools = []
-            for tool in tools:
-                openai_tools.append({
+            kwargs["tools"] = [
+                {
                     "type": "function",
-                    "function": {
-                        "name": tool["name"],
-                        "description": tool.get("description", ""),
-                        "parameters": tool.get("input_schema", {}),
-                    }
-                })
-            kwargs["tools"] = openai_tools
-            # Some models (gpt-5.6-sol) reject function tools on
-            # /v1/chat/completions unless reasoning is explicitly disabled.
-            if tools_reasoning_effort:
-                kwargs["reasoning_effort"] = tools_reasoning_effort
+                    "name": tool["name"],
+                    "description": tool.get("description", ""),
+                    "parameters": tool.get("input_schema", {}),
+                    "strict": False,
+                }
+                for tool in tools
+            ]
 
         try:
-            response = client.chat.completions.create(**kwargs)
+            response = client.responses.create(**kwargs)
         except openai.BadRequestError as e:
-            error_msg = str(e)
-            match = re.search(
-                r'maximum context length is (\d+) tokens.*?resulted in (\d+) tokens',
-                error_msg
-            )
-            if match:
-                max_tok = int(match.group(1))
-                actual_tok = int(match.group(2))
-                raise PromptTooLongError(actual_tok, max_tok, e) from e
-            raise
+            mapped = LLMProvider._openai_overflow_error(
+                e, input_items, context_window)
+            if mapped is e:
+                raise
+            raise mapped from e
 
-        message = response.choices[0].message
+        content = ""
         tool_calls = []
-        if message.tool_calls:
-            import json
-            for tc in message.tool_calls:
+        import json
+        for item in response.output:
+            if item.type == "message":
+                for block in item.content:
+                    text = getattr(block, "text", None)
+                    if text:
+                        content += text
+            elif item.type == "function_call":
                 tool_calls.append({
-                    "id": tc.id,
-                    "name": tc.function.name,
-                    "input": json.loads(tc.function.arguments),
+                    "id": item.call_id,
+                    "name": item.name,
+                    "input": json.loads(item.arguments),
                 })
 
-        finish_reason = response.choices[0].finish_reason
-        truncated = finish_reason == "length"
-        logger.info(f"OpenAI API response: model={model}, input_tokens={response.usage.prompt_tokens}, output_tokens={response.usage.completion_tokens}, finish_reason={finish_reason}")
+        status = response.status
+        incomplete_reason = getattr(
+            getattr(response, "incomplete_details", None), "reason", None)
+        truncated = (status == "incomplete"
+                     and incomplete_reason == "max_output_tokens")
+        logger.info(f"OpenAI API response: model={model}, input_tokens={response.usage.input_tokens}, output_tokens={response.usage.output_tokens}, status={status}")
         if truncated:
-            logger.warning(f"OpenAI response truncated (max_tokens reached): model={model}, output_tokens={response.usage.completion_tokens}")
+            logger.warning(f"OpenAI response truncated (max_tokens reached): model={model}, output_tokens={response.usage.output_tokens}")
 
         # #189: OpenAI auto-caches >=1024-token prefixes; cached_tokens is
-        # the cached SUBSET of prompt_tokens (unlike Anthropic's disjoint
+        # the cached SUBSET of input_tokens (unlike Anthropic's disjoint
         # counters) and is billed at a discount we must account for.
-        details = getattr(response.usage, "prompt_tokens_details", None)
+        details = getattr(response.usage, "input_tokens_details", None)
         cached_tokens = getattr(details, "cached_tokens", 0) or 0
         if cached_tokens:
             logger.info(
                 f"OpenAI prompt cache: cached={cached_tokens} of "
-                f"{response.usage.prompt_tokens} prompt tokens")
+                f"{response.usage.input_tokens} input tokens")
 
         return {
-            "content": message.content or "",
+            "content": content,
             "total_tokens": response.usage.total_tokens,
-            "input_tokens": response.usage.prompt_tokens,
-            "output_tokens": response.usage.completion_tokens,
+            "input_tokens": response.usage.input_tokens,
+            "output_tokens": response.usage.output_tokens,
             "cached_tokens": cached_tokens,
             "tool_calls": tool_calls,
             "truncated": truncated,
         }
+
+    @staticmethod
+    def _openai_overflow_error(e, input_items, context_window):
+        """
+        Map an OpenAI BadRequestError to PromptTooLongError when it is a
+        context overflow; otherwise return the original error to re-raise.
+
+        The Responses API's overflow error may carry no token counts
+        (unlike chat completions), so when the message has none we fall
+        back to a chars/4 estimate of the input and the configured context
+        window — reduce_export_tokens only needs a sensible ratio.
+        """
+        error_msg = str(e)
+        match = re.search(
+            r'maximum context length is (\d+) tokens.*?resulted in (\d+) tokens',
+            error_msg
+        )
+        if match:
+            return PromptTooLongError(
+                int(match.group(2)), int(match.group(1)), e)
+
+        code = getattr(e, "code", None)
+        overflow = (code == "context_length_exceeded"
+                    or "exceeds the context window" in error_msg)
+        if overflow and context_window:
+            input_chars = sum(
+                (len(m["content"]) if isinstance(m["content"], str)
+                 else sum(len(b.get("text", "")) for b in m["content"]))
+                for m in input_items
+            )
+            estimated_tokens = max(input_chars // 4, context_window + 1)
+            return PromptTooLongError(estimated_tokens, context_window, e)
+        return e
 
     @staticmethod
     def _call_anthropic(model: str, messages: list, api_key: str,
