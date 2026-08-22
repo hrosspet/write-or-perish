@@ -1,3 +1,56 @@
-# https://www.robotstxt.org/robotstxt.html
+# loore.org — crawlers are welcome on the public pages.
+#
+# Published-public content (articles at /@author/slug, author pages,
+# the marketing pages) is explicitly open to search engines and AI
+# crawlers alike. App-internal, auth, API, and editor routes carry no
+# public content (they serve the empty SPA shell or JSON) and are
+# disallowed for everyone.
+#
+# Tokens verified against operator docs, 2026-08. Google-Extended and
+# Applebot-Extended are consent tokens (not crawlers): naming them with
+# an open policy states that AI-training use is welcome.
+# xAI publishes no official crawler token (GrokBot is best-effort,
+# observed in the wild only).
+
+User-agent: Googlebot
+User-agent: Google-Extended
+User-agent: bingbot
+User-agent: CCBot
+User-agent: GPTBot
+User-agent: OAI-SearchBot
+User-agent: ChatGPT-User
+User-agent: ClaudeBot
+User-agent: Claude-SearchBot
+User-agent: Claude-User
+User-agent: PerplexityBot
+User-agent: Perplexity-User
+User-agent: Applebot
+User-agent: Applebot-Extended
+User-agent: meta-externalagent
+User-agent: Amazonbot
+User-agent: GrokBot
 User-agent: *
-Disallow:
+Disallow: /api/
+Disallow: /auth/
+Disallow: /media/
+Disallow: /voice
+Disallow: /converse
+Disallow: /textmode
+Disallow: /profile
+Disallow: /todo
+Disallow: /log
+Disallow: /feed
+Disallow: /dashboard
+Disallow: /prompts
+Disallow: /import
+Disallow: /artifacts
+Disallow: /share
+Disallow: /commons
+Disallow: /account
+Disallow: /admin
+Disallow: /welcome
+Disallow: /login
+Disallow: /ai-preferences
+Allow: /
+
+Sitemap: https://loore.org/sitemap.xml

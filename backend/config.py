@@ -284,6 +284,19 @@ class Config:
 
     FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 
+    # --- Server-rendered public pages (SEO/no-JS pass, #228 family) ---
+    # Where the built SPA shell lives; Flask injects per-route metadata
+    # and public article content into build/index.html. Missing dir (dev
+    # containers, tests) falls back to a minimal skeleton shell.
+    # (`or` fallback, not a get() default: compose passes unset vars
+    # through as empty strings.)
+    FRONTEND_BUILD_DIR = os.environ.get("FRONTEND_BUILD_DIR") or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "frontend", "build")
+    # Absolute origin used in canonical URLs, OG tags, sitemap and feeds.
+    # Falls back to FRONTEND_URL (correct on prod/staging).
+    PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL") or None
+
     # Celery configuration for async task queue
     CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', 'redis://localhost:6379/0')
     CELERY_RESULT_BACKEND = os.environ.get('CELERY_RESULT_BACKEND', 'redis://localhost:6379/0')

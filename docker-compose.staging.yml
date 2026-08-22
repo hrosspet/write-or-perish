@@ -30,9 +30,13 @@ services:
       # Dark features live on staging by design.
       - SHARE_V1=true
       - SEMANTIC_SEARCH_AGENTIC=true
+      # Server-rendered public pages read the built SPA shell.
+      - FRONTEND_BUILD_DIR=/app/frontend/build-staging
     volumes:
       # Mount migrations from repo root (not in Docker build context)
       - ./migrations:/app/migrations
+      # CI-built frontend shell for server-rendered public pages
+      - ./frontend/build-staging:/app/frontend/build-staging:ro
     deploy:
       resources:
         limits:

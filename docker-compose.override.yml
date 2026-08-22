@@ -19,11 +19,17 @@ services:
       # login silently fails. localhost is exempt, which is why desktop
       # dev worked regardless.
       - SESSION_COOKIE_SECURE=false
+      # Server-rendered public pages read the built SPA shell; run
+      # `npm run build` in frontend/ to test with the real shell —
+      # without a build they fall back to a minimal skeleton.
+      - FRONTEND_BUILD_DIR=/app/frontend/build
     volumes:
       # Mount source code for hot reloading (into backend/ to match project-root import layout)
       - ./backend:/app/backend
       # Persist media data
       - media_data:/app/data
+      # Built SPA shell for server-rendered public pages (optional in dev)
+      - ./frontend/build:/app/frontend/build:ro
 
   # Celery with auto-reload on code changes
   celery:
