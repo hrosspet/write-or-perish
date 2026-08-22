@@ -171,6 +171,11 @@ def _meta_block(meta):
     m.append(f'<meta property="og:site_name" content="{site}"/>')
     image = meta.get("image") or _base_url() + "/og-image.png"
     tag('<meta property="og:image" content="{v}"/>', image)
+    # Every image this app serves as a card is 1200×630.
+    m.append('<meta property="og:image:width" content="1200"/>')
+    m.append('<meta property="og:image:height" content="630"/>')
+    tag('<meta property="og:image:alt" content="{v}"/>',
+        meta.get("image_alt"))
 
     m.append('<meta name="twitter:card" content="summary_large_image"/>')
     tag('<meta name="twitter:title" content="{v}"/>', title)

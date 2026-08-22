@@ -362,6 +362,44 @@ def test_markdown_representation(app):
     assert "https://loore.org/@author/on-lore" in body
 
 
+# ── Social cards (og:image) ──────────────────────────────────────────────
+
+def test_article_og_image(app):
+    _publish("author", ARTICLE, "on-lore")
+    r = app.test_client().get("/@author/on-lore/og.png")
+    assert r.status_code == 200
+    assert r.mimetype == "image/png"
+    from io import BytesIO
+    from PIL import Image
+    img = Image.open(BytesIO(r.data))
+    assert img.size == (1200, 630)
+    html = app.test_client().get("/@author/on-lore").get_data(as_text=True)
+    assert ('og:image" content="https://loore.org/@author/on-lore/og.png"'
+            in html)
+    assert '<meta property="og:image:width" content="1200"/>' in html
+    assert 'og:image:alt' in html
+
+
+def test_profile_og_image(app):
+    _publish("author", ARTICLE, "on-lore")
+    r = app.test_client().get("/@author/og.png")
+    assert r.status_code == 200
+    assert r.mimetype == "image/png"
+
+
+def test_og_image_respects_privacy(app):
+    node = _publish("author", ARTICLE, "on-lore")
+    _user("author").public_sharing_enabled = False
+    _db.session.commit()
+    client = app.test_client()
+    assert client.get("/@author/on-lore/og.png").status_code == 404
+    assert client.get("/@author/og.png").status_code == 404
+    _user("author").public_sharing_enabled = True
+    node.deleted_at = datetime.utcnow()
+    _db.session.commit()
+    assert client.get("/@author/on-lore/og.png").status_code == 404
+
+
 # ── Marketing pages ──────────────────────────────────────────────────────
 
 def test_marketing_pages_have_distinct_meta(app):

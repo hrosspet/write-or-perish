@@ -178,11 +178,15 @@ def _article_document(root, author_user):
         author_person["sameAs"] = [f"https://x.com/i/user/{twitter_id}"]
 
     description = plain_excerpt(body_md or content)
+    og_image = (f"{canonical}/og.png" if root.public_slug
+                else f"{origin}/og-image.png")
     meta = {
         "title": f"{title} — Loore",
         "description": description,
         "canonical": canonical,
         "og_type": "article",
+        "image": og_image,
+        "image_alt": f"{title} — by @{username} on Loore",
         "published_time": iso_utc(published),
         "modified_time": iso_utc(modified),
         "author_url": profile_url,
@@ -208,7 +212,7 @@ def _article_document(root, author_user):
                 },
             },
             "mainEntityOfPage": canonical,
-            "image": f"{origin}/og-image.png",
+            "image": og_image,
         },
     }
     if root.public_slug:
@@ -281,6 +285,39 @@ def _render_author_feed(username):
         f"<author><name>{xml_escape(username)}</name></author>"
         + "".join(entries) + "</feed>")
     return Response(feed, mimetype="application/atom+xml")
+
+
+@public_pages_bp.route("/@<username>/<slug>/og.png")
+def article_og_image(username, slug):
+    """Per-article social card. Same visibility predicate as the page;
+    rendering needs only the root's title, so cost is one decrypt per
+    worker (DEK-cached) — no Redis layer, short HTTP cache instead."""
+    if not _enabled():
+        return Response("Not found", status=404, mimetype="text/plain")
+    user, node, _ = _resolve_permalink(username, slug)
+    if node is None:
+        return Response("Not found", status=404, mimetype="text/plain")
+    from backend.utils.og_image import render_article_card
+    title, _body = split_title(node.get_content() or "")
+    png = render_article_card(title, username, _published_at(node))
+    resp = Response(png, mimetype="image/png")
+    resp.headers["Cache-Control"] = "public, max-age=3600"
+    return resp
+
+
+@public_pages_bp.route("/@<username>/og.png")
+def profile_og_image(username):
+    if not _enabled():
+        return Response("Not found", status=404, mimetype="text/plain")
+    user = User.query.filter_by(username=username).first()
+    if (user is None or not user.public_sharing_enabled
+            or not _public_roots_for(user)):
+        return Response("Not found", status=404, mimetype="text/plain")
+    from backend.utils.og_image import render_profile_card
+    png = render_profile_card(username, user.description)
+    resp = Response(png, mimetype="image/png")
+    resp.headers["Cache-Control"] = "public, max-age=3600"
+    return resp
 
 
 @public_pages_bp.route("/@<username>/<slug>")
@@ -381,6 +418,8 @@ def _render_profile(username):
         "description": description,
         "canonical": canonical,
         "og_type": "profile",
+        "image": f"{canonical}/og.png",
+        "image_alt": f"@{username} on Loore",
         "alternates": [
             ("alternate", "application/atom+xml",
              f"{canonical}/feed.xml", f"@{username} on Loore"),
