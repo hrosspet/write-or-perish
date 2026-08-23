@@ -41,13 +41,20 @@ def _strip_heading_sections(text):
     Voice tool-use responses follow a fixed structure: an intro
     sentence, then proposal sections (### Completed / ### New Tasks /
     ### Priority Order / ### Note for todo, ### Issue Title / ### Description /
-    ### Category for issues, ### Feedback / ### Feedback category for feedback, ### Share /
-    ### Share type for shares).
+    ### Category for issues, ### Feedback / ### Feedback category for feedback,
+    fenced :::share blocks for shares — legacy ### Share / ### Share type
+    headings still occur in old nodes).
     TTS reads the prose — the intro (before the first ### heading), the ### Note
     body, and any trailing commentary the model appends below the structured
     block (after a single-line Category / Feedback category value). The
     structured lists/values are shown visually but not spoken.
     """
+    # Drop fenced :::share blocks first — the shareable piece is shown
+    # visually, not spoken; the surrounding prose already introduces it.
+    text = re.sub(
+        r'^:::share(?:[ \t]+\w+)?[ \t]*\r?\n.*?(?:^:::[ \t]*$\n?|\Z)',
+        '', text, flags=re.MULTILINE | re.DOTALL | re.IGNORECASE).strip()
+
     # Extract intro text before the first ### heading
     first_heading = re.search(r'^###\s+', text, flags=re.MULTILINE)
     intro = text[:first_heading.start()].strip() if first_heading else ""

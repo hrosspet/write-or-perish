@@ -92,13 +92,20 @@ jobs:
             mv -f docker-compose.override.yml docker-compose.override.yml.bak 2>/dev/null || true
 
             # Build and start backend services only (backend, celery, db, redis)
+            # --force-recreate: the rm -rf + mkdir of frontend/build-staging
+            # above changes the directory inode, and the backend bind-mounts
+            # that dir read-only for SSR (render_page reads index.html).
+            # Without recreation, a frontend-only deploy leaves the backend
+            # holding the deleted inode and every page serves the script-less
+            # fallback shell (blank site). The frontend service below already
+            # force-recreates for the same reason.
             docker compose \
               -f docker-compose.yml \
               -f docker-compose.prod.yml \
               -f docker-compose.staging.yml \
               --env-file .env.staging \
               -p wop-staging \
-              up -d --build backend celery db redis
+              up -d --build --force-recreate backend celery db redis
 
             # Start frontend with pre-built assets (no build, just nginx + volume mount)
             # --force-recreate is required because rm -rf + mkdir above changes the

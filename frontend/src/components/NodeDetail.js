@@ -6,7 +6,7 @@ import SpeakerIcon from "./SpeakerIcon";
 import DownloadAudioIcon from "./DownloadAudioIcon";
 import ModelSelector from "./ModelSelector";
 import NodeForm from "./NodeForm";
-import ProposalInline, { hasProposalSections, splitProposalText } from "./ProposalInline";
+import ProposalInline, { hasProposalSections, hasShareBlocks, splitProposalText } from "./ProposalInline";
 import SemanticNeighbors from "./SemanticNeighbors";
 import { useUser } from "../contexts/UserContext";
 import { useToast } from "../contexts/ToastContext";
@@ -623,11 +623,22 @@ function NodeDetail({ nodeIdOverride }) {
     node.llm_task_status === 'pending'
     || node.llm_task_status === 'processing'
   );
-  const showProposal = isLlmNode && !isLlmPending && node.content
-    && hasProposalSections(node.content);
+  const showProposal = !!node.content && !isLlmPending && (
+    (isLlmNode && hasProposalSections(node.content))
+    // User-authored nodes: the owner can write/paste fenced :::share
+    // blocks directly (e.g. after splitting one proposed post into two
+    // nodes) — same card + Save flow as LLM proposals. Fence syntax only
+    // (legacy ### Share headings stay LLM-only), and gated on the user's
+    // sharing opt-in so no Save button appears that would 404.
+    || (!isLlmNode && isOwner && !!currentUser?.share_v1_enabled
+        && hasShareBlocks(node.content))
+  );
   // When a proposal is present, the lead-in renders above the card and any
   // trailing commentary below it (proposalAfter). Otherwise show full content.
-  const proposalSplit = showProposal ? splitProposalText(node.content) : null;
+  const proposalShareOnly = showProposal && !isLlmNode;
+  const proposalSplit = showProposal
+    ? splitProposalText(node.content, { shareOnly: proposalShareOnly })
+    : null;
   const displayContent = showProposal ? proposalSplit.before : node.content;
   const proposalAfter = showProposal ? proposalSplit.after : '';
   // Inline input is always available to any viewer (reply + branch from
@@ -813,6 +824,7 @@ function NodeDetail({ nodeIdOverride }) {
             content={node.content}
             nodeId={node.id}
             toolCallsMeta={node.tool_calls_meta}
+            shareOnly={proposalShareOnly}
             onContentChange={isOwner
               ? (newContent) => setNode(prev => prev ? { ...prev, content: newContent } : prev)
               : undefined}

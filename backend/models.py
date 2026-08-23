@@ -754,8 +754,9 @@ class ShareDraft(db.Model):
     """A shareable piece extracted from the user's writing (Feature 3 —
     Upload/Share, dark behind SHARE_V1).
 
-    Two-stage consent, structurally enforced: the AI PROPOSES a share under
-    ### Share headings in conversation; confirming there (Save button or the
+    Two-stage consent, structurally enforced: a share is PROPOSED in
+    conversation as a fenced :::share block (by the AI, or written by the
+    user in their own node); confirming there (Save button or the
     apply_share tool) only creates this row as a private draft. Publication
     is a separate, deliberate action on the Share page — nothing is ever
     visible to anyone else until status is "published", and publishing is

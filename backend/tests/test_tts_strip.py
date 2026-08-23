@@ -93,6 +93,32 @@ def test_trailing_commentary_after_share_type_spoken():
     assert "need" not in out
 
 
+def test_share_fence_block_never_spoken():
+    """Fenced :::share blocks (the current share syntax) are shown in the
+    card, never spoken — including ### headings inside the fence."""
+    text = ("Happy to make that shareable.\n\n"
+            ":::share need\n"
+            "Looking for a thinking partner on consciousness.\n\n"
+            "### With its own heading\nInner body line.\n"
+            ":::\n\n"
+            "Saved as a draft when you confirm.")
+    out = _strip_heading_sections(text)
+    assert "Happy to make that shareable." in out
+    assert "Saved as a draft when you confirm." in out
+    assert "thinking partner" not in out
+    assert "Inner body line." not in out
+
+
+def test_multiple_share_fences_stripped():
+    text = ("Two pieces.\n\n:::share insight\nALPHA\n:::\n\n"
+            "And another:\n\n:::share exploration\nBETA\n:::\n\nDone.")
+    out = _strip_heading_sections(text)
+    assert "Two pieces." in out
+    assert "And another:" in out
+    assert "Done." in out
+    assert "ALPHA" not in out and "BETA" not in out
+
+
 def test_quote_markers_never_spoken():
     """{quote:ID} / {quote_ext:ID} render as cards visually; TTS must not
     read the literal marker aloud (#208 quote-as-response)."""

@@ -485,7 +485,7 @@ VOICE_TOOLS = [
             "was already saved (check the context notes for apply status). "
             "Saving does NOT publish — the user publishes from their Share "
             "page as a separate action. To PROPOSE a share in the first "
-            "place, write it under a `### Share` heading instead (see the "
+            "place, write it in a fenced `:::share` block instead (see the "
             "share guidance) — that shows the user exactly what would be "
             "saved and gives them a Save button. Always produce a text "
             "response — the user needs to hear what happened as they are "
@@ -730,6 +730,15 @@ def _find_pending_share_draft(node_chain, user_id):
     return None
 
 
+def _strip_share_fences(text):
+    """Remove fenced :::share blocks — their bodies may legitimately
+    contain ### headings, which must never trigger the other proposal
+    detectors (todo/issue/feedback)."""
+    return re.sub(
+        r'^:::share(?:[ \t]+\w+)?[ \t]*\r?\n.*?(?:^:::[ \t]*$\n?|\Z)',
+        '', text, flags=re.MULTILINE | re.DOTALL | re.IGNORECASE)
+
+
 def _detect_todo_proposal(text):
     """Check if LLM text contains todo proposal headings.
 
@@ -739,7 +748,7 @@ def _detect_todo_proposal(text):
     if not text:
         return False
     headings = [h.lower() for h in re.findall(
-        r'^###\s+(.+)', text, re.MULTILINE)]
+        r'^###\s+(.+)', _strip_share_fences(text), re.MULTILINE)]
     task_keywords = {'completed', 'new task', 'new tasks', 'priority'}
     return any(
         any(kw in h for kw in task_keywords) for h in headings
@@ -751,7 +760,7 @@ def _detect_github_issue_proposal(text):
     if not text:
         return False
     headings = [h.lower() for h in re.findall(
-        r'^###\s+(.+)', text, re.MULTILINE)]
+        r'^###\s+(.+)', _strip_share_fences(text), re.MULTILINE)]
     has_title = any(
         'issue title' in h or h.strip() == 'title' for h in headings)
     has_desc = any('description' in h for h in headings)
@@ -767,18 +776,22 @@ def _detect_feedback_proposal(text):
     if not text:
         return False
     headings = [h.strip().lower() for h in re.findall(
-        r'^###\s+(.+)', text, re.MULTILINE)]
+        r'^###\s+(.+)', _strip_share_fences(text), re.MULTILINE)]
     return any(h == 'feedback' for h in headings)
 
 
 def _detect_share_proposal(text):
-    """Check if LLM text contains a share proposal heading (SHARE_V1).
+    """Check if LLM text contains a share proposal (SHARE_V1).
 
-    A single exact ``### Share`` heading marks the block the AI proposes to
-    save to the user's Share page. Exact match (not substring) keeps it from
-    firing on incidental prose like '### Shared context'."""
+    The current syntax is a fenced ``:::share`` block (opening fence on its
+    own line, optional type word after "share"); the legacy exact
+    ``### Share`` heading is still detected so old conversation history —
+    and models imitating it — keep working. Exact heading match (not
+    substring) keeps it from firing on prose like '### Shared context'."""
     if not text:
         return False
+    if re.search(r'^:::share\b', text, re.MULTILINE | re.IGNORECASE):
+        return True
     headings = [h.strip().lower() for h in re.findall(
         r'^###\s+(.+)', text, re.MULTILINE)]
     return any(h == 'share' for h in headings)
@@ -1247,8 +1260,8 @@ def _auto_create_drafts(llm_text, llm_node, node_chain, user_id):
             })
 
     # Share proposals only exist where SHARE_V1 is enabled — with the flag
-    # off the prompt guidance isn't injected either, so stray ### Share
-    # headings in prose must not grow a Save button that would 404.
+    # off the prompt guidance isn't injected either, so stray :::share
+    # blocks in prose must not grow a Save button that would 404.
     if (_share_enabled_for_user(user_id)
             and _detect_share_proposal(llm_text)):
         already = Draft.query.filter_by(
@@ -1664,8 +1677,8 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                             result["feedback_id"] = feedback.id
 
             elif name == "apply_share":
-                # Save the share the AI proposed under a ### Share heading
-                # as a PRIVATE draft — mirrors apply_feedback. Saving never
+                # Save the share(s) the AI proposed in :::share blocks
+                # as PRIVATE drafts — mirrors apply_feedback. Saving never
                 # publishes; publication is a separate action on the Share
                 # page. Gated on a pending draft, so it can't self-confirm
                 # in the same turn it proposed.
@@ -1680,10 +1693,18 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                         result["error"] = "Origin node not found"
                     else:
                         from backend.utils.share import (
-                            save_share_draft_from_node,
+                            save_share_drafts_from_node,
                         )
-                        share, err = save_share_draft_from_node(
-                            origin_node, user_id
+                        from backend.utils.tool_meta import (
+                            get_tool_meta_entry,
+                        )
+                        # Blocks already saved via their per-block Save
+                        # buttons are skipped — confirm saves the rest.
+                        entry = get_tool_meta_entry(
+                            origin_node, "propose_share") or {}
+                        already = set(entry.get("saved_indexes") or [])
+                        saved, total, err = save_share_drafts_from_node(
+                            origin_node, user_id, skip=already
                         )
                         if err:
                             result["status"] = "error"
@@ -1691,16 +1712,24 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                         else:
                             db.session.delete(draft)
                             db.session.flush()
+                            new_ids = [s.id for _, s in saved]
+                            share_ids = (
+                                entry.get("share_ids") or []) + new_ids
+                            saved_indexes = sorted(
+                                already | {i for i, _ in saved})
                             update_tool_meta(
                                 origin_node,
                                 "propose_share",
                                 {
                                     "apply_status": "completed",
-                                    "share_id": share.id,
+                                    "share_id": share_ids[0],
+                                    "share_ids": share_ids,
+                                    "saved_indexes": saved_indexes,
                                 },
                             )
                             result["status"] = "success"
-                            result["share_id"] = share.id
+                            result["share_id"] = share_ids[0]
+                            result["share_ids"] = share_ids
 
             elif name in ("propose_todo", "propose_github_issue"):
                 # These are no longer tools — proposals are auto-detected

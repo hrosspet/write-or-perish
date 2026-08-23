@@ -12,6 +12,49 @@ export function stripProposalTag(text) {
   return text.replace(/\s*\[\w+-proposal:[^\]]*\]/g, '');
 }
 
+// Fenced share blocks — the current share-proposal syntax (SHARE_V1):
+// an opening `:::share <type>` line (type word optional), the shareable
+// text (any markdown, ### headings included), a closing bare `:::` line.
+// Fences replaced the legacy ### Share / ### Share type headings, which
+// mis-parsed whenever the share body used ### itself and couldn't carry
+// more than one post per node. Legacy headings still parse as a fallback.
+const SHARE_FENCE_OPEN_RE = /^:::share(?:[ \t]+([A-Za-z]+))?[ \t]*\r?$/i;
+const SHARE_FENCE_CLOSE_RE = /^:::[ \t]*\r?$/;
+
+export function hasShareBlocks(text) {
+  if (!text) return false;
+  return text.split('\n').some(line => SHARE_FENCE_OPEN_RE.test(line));
+}
+
+// Returns [{ content, type }] — one entry per fenced block, in order.
+// An unclosed block runs to the end of the text. With no fences present,
+// falls back to the legacy headings (single share).
+export function parseShareBlocks(text) {
+  if (!text) return [];
+  const shares = [];
+  let current = null;
+  const flush = () => {
+    if (!current) return;
+    const content = current.lines.join('\n').trim();
+    if (content) shares.push({ content, type: current.type });
+    current = null;
+  };
+  for (const line of text.split('\n')) {
+    if (current) {
+      if (SHARE_FENCE_CLOSE_RE.test(line)) flush();
+      else current.lines.push(line);
+      continue;
+    }
+    const open = line.match(SHARE_FENCE_OPEN_RE);
+    if (open) current = { type: (open[1] || '').toLowerCase(), lines: [] };
+  }
+  flush();
+  if (shares.length) return shares;
+  const legacy = parseOrientResponse(text);
+  if (legacy.share) return [{ content: legacy.share, type: legacy.shareType || '' }];
+  return [];
+}
+
 export function parseTodoItems(text) {
   return text.split('\n')
     .map(l => l.replace(/^[-*]\s*/, '').replace(/^\[[ xX]\]\s*/, '').trim())
@@ -33,10 +76,31 @@ export function parsePriorityItems(text) {
     .filter(item => item.text);
 }
 
+// Remove fenced :::share blocks entirely — their bodies may legitimately
+// contain ### headings, which must never be parsed as todo/issue/feedback
+// sections.
+export function stripShareBlocks(text) {
+  if (!text) return text;
+  const out = [];
+  let inFence = false;
+  for (const line of text.split('\n')) {
+    if (inFence) {
+      if (SHARE_FENCE_CLOSE_RE.test(line)) inFence = false;
+      continue;
+    }
+    if (SHARE_FENCE_OPEN_RE.test(line)) { inFence = true; continue; }
+    out.push(line);
+  }
+  return out.join('\n');
+}
+
 export function parseOrientResponse(text) {
   const sections = {};
-  const parts = text.split(/^###\s+/m);
-  for (const part of parts) {
+  const parts = stripShareBlocks(text).split(/^###\s+/m);
+  // parts[0] is the lead-in before the first heading — never a section.
+  // Parsing it used to misfire: a lead-in starting "Noted both — …"
+  // matched includes('note') and became a phantom todo note.
+  for (const part of parts.slice(1)) {
     if (!part.trim()) continue;
     const firstNewline = part.indexOf('\n');
     if (firstNewline < 0) continue;
@@ -63,7 +127,10 @@ export function parseOrientResponse(text) {
 
 export function hasProposalSections(text) {
   if (!text) return false;
-  const headings = (text.match(/^###\s+(.+)/gm) || []).map(h => h.replace(/^###\s+/, '').toLowerCase());
+  if (hasShareBlocks(text)) return true;
+  // Heading scan runs on fence-stripped text — ### headings inside a
+  // share body are the share's own formatting, not proposal sections.
+  const headings = (stripShareBlocks(text).match(/^###\s+(.+)/gm) || []).map(h => h.replace(/^###\s+/, '').toLowerCase());
   const taskKeywords = ['completed', 'new task', 'new tasks', 'priority'];
   const hasTodo = headings.some(h => taskKeywords.some(kw => h.includes(kw)));
   const hasIssue = headings.some(h => h.includes('issue title') || h === 'title') &&
@@ -149,7 +216,9 @@ export function moveProposalItem(content, itemText, fromSection, toSection, { pr
 // Feedback category) consume only their one value line, so a following
 // non-empty line is treated as the start of the trailing commentary. Todo
 // dodges all this via its ### Note section, which renders inside the card.
-export function splitProposalText(text) {
+// `shareOnly` (user-authored nodes) excludes only the :::share fences —
+// ### headings there are the user's own formatting, not proposal sections.
+export function splitProposalText(text, { shareOnly = false } = {}) {
   if (!text) return { before: '', after: '' };
   const lines = text.split('\n');
   const before = [];
@@ -159,14 +228,36 @@ export function splitProposalText(text) {
   let valueConsumed = false;
   let seenProposal = false;
   const proposalHeadings = ['completed', 'new task', 'new tasks', 'priority', 'priority order',
-    'note', 'issue title', 'title', 'description', 'category', 'feedback'];
+    'issue title', 'title', 'description', 'category', 'feedback'];
+  // 'note' is a todo-card section ONLY alongside a task-specific heading —
+  // the backend detector says the same ("a standalone ### Note is not
+  // enough"). Without this, a prose heading like '### A note on process'
+  // was swallowed here while no card rendered it: content vanished, and
+  // the todo card showed a stray Apply button (seen on prod).
+  const hasTaskSection = !shareOnly
+    && /^###\s+.*(completed|new task|priority)/im.test(stripShareBlocks(text));
+  if (hasTaskSection) proposalHeadings.push('note');
   // Share headings match EXACTLY ('share' / 'share type') — substring
   // matching would swallow unrelated sections like '### Shared context'.
   const exactProposalHeadings = ['share', 'share type'];
   const isValueHeading = (h) => h === 'category' || h === 'feedback category' || h === 'share type';
   const keep = (line) => (seenProposal ? after : before).push(line);
+  let inShareFence = false;
   for (const line of lines) {
-    const headingMatch = line.match(/^###\s+(.+)/);
+    // Fenced :::share blocks render in the proposal card — the fences and
+    // everything between them are excluded from the surrounding prose.
+    if (inShareFence) {
+      if (SHARE_FENCE_CLOSE_RE.test(line)) inShareFence = false;
+      continue;
+    }
+    if (SHARE_FENCE_OPEN_RE.test(line)) {
+      inShareFence = true;
+      inProposal = false;
+      valueSection = false;
+      seenProposal = true;
+      continue;
+    }
+    const headingMatch = shareOnly ? null : line.match(/^###\s+(.+)/);
     if (headingMatch) {
       const h = headingMatch[1].trim().toLowerCase();
       if (proposalHeadings.some(kw => h.includes(kw) || h === kw)
@@ -470,12 +561,19 @@ export default function ProposalInline({
   onApplied,
   onError,
   size = 'compact',
+  // User-authored nodes: only the :::share flow applies — the node's own
+  // ### headings are the user's formatting, never todo/issue/feedback
+  // proposals (whose confirm endpoints would 404 without a pending draft).
+  shareOnly = false,
 }) {
   const parsed = parseOrientResponse(content || '');
-  const hasTodo = parsed.completed || parsed.newTasks || parsed.priority || parsed.note;
+  // A note alone is NOT a todo proposal (matches the backend detector) —
+  // otherwise any '### …note…' heading grew a stray Apply button.
+  const hasTodo = parsed.completed || parsed.newTasks || parsed.priority;
   const hasIssue = parsed.issueTitle && parsed.issueDescription;
   const hasFeedback = !!parsed.feedback;
-  const hasShare = !!parsed.share;
+  const shares = parseShareBlocks(content || '');
+  const hasShare = shares.length > 0;
   const [applyStatus, setApplyStatus] = useState(null);
   // Which row (if any) currently has its inline add-input open. Lifted here so
   // opening one row's "+" closes any other — and clicking a second "+" switches
@@ -487,8 +585,12 @@ export default function ProposalInline({
   const [issueResult, setIssueResult] = useState(null);
   const [feedbackApplyStatus, setFeedbackApplyStatus] = useState(null);
   const [feedbackApplyError, setFeedbackApplyError] = useState(null);
-  const [shareApplyStatus, setShareApplyStatus] = useState(null);
-  const [shareApplyError, setShareApplyError] = useState(null);
+  // Per-share-block save state: idx -> 'started' | 'completed' | 'error'.
+  // Each block has its own Save button; blocks already saved (per server
+  // tool meta) come in via metaSavedShares ('all' or an index array).
+  const [shareStates, setShareStates] = useState({});
+  const [shareErrors, setShareErrors] = useState({});
+  const [metaSavedShares, setMetaSavedShares] = useState(null);
   const mergePollingRef = useRef(null);
   const styles = sizeStyles(size);
   const toggleable = typeof onContentChange === 'function'
@@ -563,10 +665,11 @@ export default function ProposalInline({
     }
     const shareEntry = toolCallsMeta.find(tc => tc.name === 'propose_share');
     const applyShareCall = toolCallsMeta.find(tc => tc.name === 'apply_share');
-    if (shareEntry && shareEntry.apply_status === 'completed') {
-      setShareApplyStatus('completed');
-    } else if (applyShareCall && applyShareCall.status === 'success') {
-      setShareApplyStatus('completed');
+    if ((shareEntry && shareEntry.apply_status === 'completed')
+        || (applyShareCall && applyShareCall.status === 'success')) {
+      setMetaSavedShares('all');
+    } else if (shareEntry?.saved_indexes?.length) {
+      setMetaSavedShares(shareEntry.saved_indexes);
     }
   }, [toolCallsMeta]);
 
@@ -648,35 +751,49 @@ export default function ProposalInline({
     }
   }, [nodeId, onApplied]);
 
-  const [shareCopied, setShareCopied] = useState(false);
-  const handleCopyShare = useCallback(() => {
-    if (!parsed.share) return;
-    navigator.clipboard.writeText(parsed.share).then(() => {
-      setShareCopied(true);
-      setTimeout(() => setShareCopied(false), 1500);
+  // Index of the share card whose copy button just fired (null = none).
+  const [shareCopiedIdx, setShareCopiedIdx] = useState(null);
+  const handleCopyShare = useCallback((idx, text) => {
+    if (!text) return;
+    navigator.clipboard.writeText(text).then(() => {
+      setShareCopiedIdx(idx);
+      setTimeout(() => setShareCopiedIdx(null), 1500);
     }).catch(() => { /* clipboard unavailable — no toast needed */ });
-  }, [parsed.share]);
+  }, []);
 
-  const handleSaveShare = useCallback(async () => {
+  const handleSaveShare = useCallback(async (idx) => {
     if (!nodeId) return;
-    setShareApplyStatus('started');
+    setShareStates(s => ({ ...s, [idx]: 'started' }));
     try {
-      const res = await api.post('/share/save-proposal', { llm_node_id: nodeId });
-      setShareApplyStatus('completed');
+      const res = await api.post('/share/save-proposal',
+        { node_id: nodeId, share_index: idx });
+      setShareStates(s => ({ ...s, [idx]: 'completed' }));
       onApplied?.('propose_share', {
-        apply_status: 'completed', share_id: res.data?.share?.id });
+        apply_status: res.data?.status === 'completed' ? 'completed' : 'partial',
+        share_id: res.data?.share?.id,
+        saved_indexes: res.data?.saved_indexes,
+      });
     } catch (err) {
       const msg = err?.response?.data?.error || 'Saving the share failed';
-      setShareApplyStatus('error');
-      setShareApplyError(msg);
+      setShareStates(s => ({ ...s, [idx]: 'error' }));
+      setShareErrors(e => ({ ...e, [idx]: msg }));
     }
   }, [nodeId, onApplied]);
 
-  const hasTodoUpdate = hasTodo || toolCallsMeta?.some(tc => tc.name === 'propose_todo');
-  const hasGithubIssue = hasIssue || toolCallsMeta?.some(tc => tc.name === 'propose_github_issue');
-  const hasFeedbackProposal = hasFeedback || toolCallsMeta?.some(tc => tc.name === 'propose_feedback');
+  // A block is saved if this session saved it, or the server meta says so.
+  const shareStateFor = (idx) => shareStates[idx]
+    || ((metaSavedShares === 'all'
+      || (Array.isArray(metaSavedShares) && metaSavedShares.includes(idx)))
+      ? 'completed' : null);
+
+  const hasTodoUpdate = !shareOnly
+    && (hasTodo || toolCallsMeta?.some(tc => tc.name === 'propose_todo'));
+  const hasGithubIssue = !shareOnly
+    && (hasIssue || toolCallsMeta?.some(tc => tc.name === 'propose_github_issue'));
+  const hasFeedbackProposal = !shareOnly
+    && (hasFeedback || toolCallsMeta?.some(tc => tc.name === 'propose_feedback'));
   const hasShareProposal = hasShare || toolCallsMeta?.some(tc => tc.name === 'propose_share');
-  const hasPrefsUpdate = toolCallsMeta?.some(
+  const hasPrefsUpdate = !shareOnly && toolCallsMeta?.some(
     tc => tc.name === 'update_ai_preferences' && tc.status === 'success'
   );
 
@@ -869,72 +986,86 @@ export default function ProposalInline({
         </div>
       )}
 
-      {hasShareProposal && parsed.share && (
+      {hasShareProposal && shares.length > 0 && (
         <div style={styles.issueWrapper}>
-          {sectionLabel(styles.roomy ? 'Proposed Share' : 'Share')}
-          <div style={{ ...styles.issueCard, position: 'relative' }}>
-            {/* One-click copy for pasting the share elsewhere (e.g. X). */}
-            <button
-              onClick={handleCopyShare}
-              title="Copy share text"
+          {sectionLabel(styles.roomy
+            ? (shares.length > 1 ? 'Proposed Shares' : 'Proposed Share')
+            : (shares.length > 1 ? 'Shares' : 'Share'))}
+          {shares.map((share, idx) => {
+            const state = shareStateFor(idx);
+            return (
+            <div key={idx} style={idx > 0 ? { marginTop: '14px' } : undefined}>
+            <div
               style={{
-                position: 'absolute', top: '8px', right: '8px',
-                background: 'none', border: 'none', cursor: 'pointer',
-                padding: '4px', lineHeight: 0,
-                color: shareCopied ? 'var(--success)' : 'var(--text-muted)',
-                opacity: shareCopied ? 1 : 0.6,
-                transition: 'opacity 0.15s ease, color 0.15s ease',
+                ...styles.issueCard,
+                position: 'relative',
               }}
-              onMouseEnter={(e) => { e.currentTarget.style.opacity = 1; }}
-              onMouseLeave={(e) => { if (!shareCopied) e.currentTarget.style.opacity = 0.6; }}
             >
-              {shareCopied ? (
-                <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                  <path d="M3 8.5 L6.5 12 L13 4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
-                </svg>
-              ) : (
-                <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                  <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.2"/>
-                  <path d="M10.5 5.5 V4 A1.5 1.5 0 0 0 9 2.5 H4 A1.5 1.5 0 0 0 2.5 4 V9 A1.5 1.5 0 0 0 4 10.5 H5.5" stroke="currentColor" strokeWidth="1.2"/>
-                </svg>
-              )}
-            </button>
-            <MarkdownBody
-              style={styles.issueDescStyle}
-              paragraphMargin={styles.roomy ? '0 0 8px 0' : '0 0 6px 0'}
-            >
-              {parsed.share}
-            </MarkdownBody>
-            {parsed.shareType && (
-              <span style={styles.issueCategory}>{parsed.shareType}</span>
-            )}
-          </div>
-          <div style={styles.issueButtonWrapper}>
-            {!shareApplyStatus && (
-              <button onClick={handleSaveShare} style={styles.button}>
-                {styles.roomy ? 'Save to your shares' : 'Save to shares'}
+              {/* One-click copy for pasting the share elsewhere (e.g. X). */}
+              <button
+                onClick={() => handleCopyShare(idx, share.content)}
+                title="Copy share text"
+                style={{
+                  position: 'absolute', top: '8px', right: '8px',
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  padding: '4px', lineHeight: 0,
+                  color: shareCopiedIdx === idx ? 'var(--success)' : 'var(--text-muted)',
+                  opacity: shareCopiedIdx === idx ? 1 : 0.6,
+                  transition: 'opacity 0.15s ease, color 0.15s ease',
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.opacity = 1; }}
+                onMouseLeave={(e) => { if (shareCopiedIdx !== idx) e.currentTarget.style.opacity = 0.6; }}
+              >
+                {shareCopiedIdx === idx ? (
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                    <path d="M3 8.5 L6.5 12 L13 4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                ) : (
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                    <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.2"/>
+                    <path d="M10.5 5.5 V4 A1.5 1.5 0 0 0 9 2.5 H4 A1.5 1.5 0 0 0 2.5 4 V9 A1.5 1.5 0 0 0 4 10.5 H5.5" stroke="currentColor" strokeWidth="1.2"/>
+                  </svg>
+                )}
               </button>
-            )}
-            {shareApplyStatus === 'started' && (
-              <StatusTag style={{ ...styles.statusText, color: 'var(--text-muted)' }}>
-                Saving…
-              </StatusTag>
-            )}
-            {shareApplyStatus === 'completed' && (
-              <StatusTag style={{ ...styles.statusText, color: 'var(--text-muted)' }}>
-                <span style={{ color: 'var(--success)' }}>Saved as a private draft</span>
-                {' — publish from your '}
-                <Link to="/share" style={{ color: 'var(--accent)', textDecoration: 'none' }}>
-                  Share page
-                </Link>
-              </StatusTag>
-            )}
-            {shareApplyStatus === 'error' && (
-              <StatusTag style={{ ...styles.statusText, color: 'var(--accent)' }}>
-                {shareApplyError || 'Saving the share failed'}
-              </StatusTag>
-            )}
-          </div>
+              <MarkdownBody
+                style={styles.issueDescStyle}
+                paragraphMargin={styles.roomy ? '0 0 8px 0' : '0 0 6px 0'}
+              >
+                {share.content}
+              </MarkdownBody>
+              {share.type && (
+                <span style={styles.issueCategory}>{share.type}</span>
+              )}
+            </div>
+            <div style={styles.issueButtonWrapper}>
+              {!state && (
+                <button onClick={() => handleSaveShare(idx)} style={styles.button}>
+                  {styles.roomy ? 'Save to your shares' : 'Save to shares'}
+                </button>
+              )}
+              {state === 'started' && (
+                <StatusTag style={{ ...styles.statusText, color: 'var(--text-muted)' }}>
+                  Saving…
+                </StatusTag>
+              )}
+              {state === 'completed' && (
+                <StatusTag style={{ ...styles.statusText, color: 'var(--text-muted)' }}>
+                  <span style={{ color: 'var(--success)' }}>Saved as a private draft</span>
+                  {' — publish from your '}
+                  <Link to="/share" style={{ color: 'var(--accent)', textDecoration: 'none' }}>
+                    Share page
+                  </Link>
+                </StatusTag>
+              )}
+              {state === 'error' && (
+                <StatusTag style={{ ...styles.statusText, color: 'var(--accent)' }}>
+                  {shareErrors[idx] || 'Saving the share failed'}
+                </StatusTag>
+              )}
+            </div>
+            </div>
+            );
+          })}
         </div>
       )}
 
