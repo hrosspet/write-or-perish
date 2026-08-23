@@ -190,6 +190,33 @@ test('### headings inside a share body do not trigger other proposal sections', 
   expect(hasProposalSections(text)).toBe(true); // via the share block itself
 });
 
+// Pre-existing prod bug: a prose heading like '### A note on process' was
+// swallowed by splitProposalText while no card rendered it — the content
+// vanished and a stray todo Apply button appeared. A note section belongs
+// to the todo card only alongside a task-specific heading.
+test('standalone note-ish heading stays visible in the prose', () => {
+  const text = [
+    'Lead-in.',
+    '### A note on process',
+    'keep this visible',
+    '',
+    ':::share insight',
+    'share body',
+    ':::',
+  ].join('\n');
+  const { before, after } = splitProposalText(text);
+  expect(before + after).toContain('### A note on process');
+  expect(before + after).toContain('keep this visible');
+  expect(before + after).not.toContain('share body');
+});
+
+test('note section still belongs to the todo card when task sections exist', () => {
+  const text = 'Intro.\n### Completed\n- a\n### Note\nnice work';
+  const { before, after } = splitProposalText(text);
+  expect(before).toBe('Intro.');
+  expect(after).toBe('');
+});
+
 test('shareOnly split leaves the node\'s own ### headings in the prose', () => {
   const text = [
     '### My own heading',

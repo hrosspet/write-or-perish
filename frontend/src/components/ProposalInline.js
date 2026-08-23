@@ -228,7 +228,15 @@ export function splitProposalText(text, { shareOnly = false } = {}) {
   let valueConsumed = false;
   let seenProposal = false;
   const proposalHeadings = ['completed', 'new task', 'new tasks', 'priority', 'priority order',
-    'note', 'issue title', 'title', 'description', 'category', 'feedback'];
+    'issue title', 'title', 'description', 'category', 'feedback'];
+  // 'note' is a todo-card section ONLY alongside a task-specific heading —
+  // the backend detector says the same ("a standalone ### Note is not
+  // enough"). Without this, a prose heading like '### A note on process'
+  // was swallowed here while no card rendered it: content vanished, and
+  // the todo card showed a stray Apply button (seen on prod).
+  const hasTaskSection = !shareOnly
+    && /^###\s+.*(completed|new task|priority)/im.test(stripShareBlocks(text));
+  if (hasTaskSection) proposalHeadings.push('note');
   // Share headings match EXACTLY ('share' / 'share type') — substring
   // matching would swallow unrelated sections like '### Shared context'.
   const exactProposalHeadings = ['share', 'share type'];
@@ -559,7 +567,9 @@ export default function ProposalInline({
   shareOnly = false,
 }) {
   const parsed = parseOrientResponse(content || '');
-  const hasTodo = parsed.completed || parsed.newTasks || parsed.priority || parsed.note;
+  // A note alone is NOT a todo proposal (matches the backend detector) —
+  // otherwise any '### …note…' heading grew a stray Apply button.
+  const hasTodo = parsed.completed || parsed.newTasks || parsed.priority;
   const hasIssue = parsed.issueTitle && parsed.issueDescription;
   const hasFeedback = !!parsed.feedback;
   const shares = parseShareBlocks(content || '');
