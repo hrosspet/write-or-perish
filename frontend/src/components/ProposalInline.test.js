@@ -4,7 +4,10 @@
 jest.mock('./MarkdownBody', () => () => null);
 jest.mock('../api', () => ({}));
 
-import { parseOrientResponse, stripProposalSections, splitProposalText } from './ProposalInline';
+import {
+  parseOrientResponse, stripProposalSections, splitProposalText,
+  parseShareBlocks, hasShareBlocks, hasProposalSections,
+} from './ProposalInline';
 
 // Regression: the category badges (issue + feedback) must take only the first
 // line of their heading section. The model sometimes appends a closing remark
@@ -113,4 +116,74 @@ test('split returns empty after when there is no trailing commentary', () => {
   const { before, after } = splitProposalText(text);
   expect(before).toBe('Here is the issue.');
   expect(after).toBe('');
+});
+
+// ── Fenced :::share blocks (current share syntax) ──────────────────────────
+
+const MULTI_SHARE = [
+  'Two pieces, as you asked.',
+  '',
+  ':::share insight',
+  '### On attention',
+  '',
+  'First post, with its own markdown headings.',
+  ':::',
+  '',
+  'And the second:',
+  '',
+  ':::share exploration',
+  'Second post body.',
+  ':::',
+  '',
+  'Say the word.',
+].join('\n');
+
+test('parseShareBlocks handles multiple blocks and inner ### headings', () => {
+  const shares = parseShareBlocks(MULTI_SHARE);
+  expect(shares).toHaveLength(2);
+  // ### headings inside the fence belong to the share body — the exact
+  // mis-parse the fences were introduced to fix.
+  expect(shares[0].content.startsWith('### On attention')).toBe(true);
+  expect(shares[0].type).toBe('insight');
+  expect(shares[1].content).toBe('Second post body.');
+  expect(shares[1].type).toBe('exploration');
+});
+
+test('parseShareBlocks: unclosed fence runs to end, legacy headings fall back', () => {
+  const unclosed = parseShareBlocks('lead-in\n\n:::share need\nno closing fence');
+  expect(unclosed).toEqual([{ content: 'no closing fence', type: 'need' }]);
+  const legacy = parseShareBlocks('### Share\nold style body\n### Share type\nneed');
+  expect(legacy).toEqual([{ content: 'old style body', type: 'need' }]);
+});
+
+test('hasShareBlocks matches fences only, hasProposalSections includes them', () => {
+  expect(hasShareBlocks(MULTI_SHARE)).toBe(true);
+  expect(hasShareBlocks('prose about :::share syntax')).toBe(false);
+  expect(hasShareBlocks('### Share\nlegacy')).toBe(false);
+  expect(hasProposalSections(':::share\nbody\n:::')).toBe(true);
+});
+
+test('split excludes share fences; lead-in before, commentary after', () => {
+  const { before, after } = splitProposalText(MULTI_SHARE);
+  expect(before).toBe('Two pieces, as you asked.');
+  expect(after).toContain('And the second:');
+  expect(after).toContain('Say the word.');
+  expect(after).not.toContain(':::');
+  expect(after).not.toContain('Second post body.');
+});
+
+test('shareOnly split leaves the node\'s own ### headings in the prose', () => {
+  const text = [
+    '### My own heading',
+    'my prose',
+    ':::share insight',
+    'the share',
+    ':::',
+    'closing thought',
+  ].join('\n');
+  const { before, after } = splitProposalText(text, { shareOnly: true });
+  expect(before).toContain('### My own heading');
+  expect(before).toContain('my prose');
+  expect(after).toBe('closing thought');
+  expect(before + after).not.toContain('the share');
 });

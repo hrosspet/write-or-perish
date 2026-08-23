@@ -1,7 +1,9 @@
 """Tests for Upload v1 / Share (SHARE_V1 dark flag).
 
-Covers the ShareDraft model, the ### Share propose→confirm flow (detection,
-draft creation, apply_share tool, save-proposal route), the Share CRUD +
+Covers the ShareDraft model, the :::share propose→confirm flow (detection,
+draft creation, apply_share tool, save-proposal route — including the
+legacy ### Share fallback, multi-block proposals, and the user-authored
+node path), the Share CRUD +
 publish/revoke lifecycle, the public endpoint's published-only guarantee,
 the SHARE_V1 gating (routes 404, tool dropped, no drafts created), and the
 share_pending input-draft exclusion regression.
@@ -24,7 +26,7 @@ from backend.models import (  # noqa: E402
     User, Node, Draft, ShareDraft,
 )
 from backend.utils.tool_meta import parse_share  # noqa: E402
-from backend.utils.share import save_share_draft_from_node  # noqa: E402
+from backend.utils.share import save_share_drafts_from_node  # noqa: E402
 
 # ── Import the real llm_completion against stub glue ─────────────────────
 _GLUE = ("backend.celery_app", "backend.llm_providers",
@@ -114,10 +116,30 @@ def share_flag_off():
 
 SHARE_TEXT = (
     "Happy to make that shareable.\n\n"
+    ":::share need\n"
+    "Looking for a thinking partner on consciousness — "
+    "I bring two years of daily notes.\n"
+    ":::\n\n"
+    "Say the word and I'll save it."
+)
+
+LEGACY_SHARE_TEXT = (
+    "Happy to make that shareable.\n\n"
     "### Share\nLooking for a thinking partner on consciousness — "
     "I bring two years of daily notes.\n\n"
     "### Share type\nneed\n\n"
     "Say the word and I'll save it."
+)
+
+MULTI_SHARE_TEXT = (
+    "Two pieces, as you asked.\n\n"
+    ":::share insight\n"
+    "### On attention\n\nFirst post, with its own markdown headings.\n"
+    ":::\n\n"
+    "And the second:\n\n"
+    ":::share exploration\n"
+    "Second post body.\n"
+    ":::\n"
 )
 
 
@@ -150,34 +172,93 @@ def test_share_draft_content_roundtrip(app):
 
 def test_parse_share_extracts_content_and_type():
     parsed = parse_share(SHARE_TEXT)
-    assert parsed["content"].startswith("Looking for a thinking partner")
-    assert parsed["share_type"] == "need"
+    assert len(parsed["shares"]) == 1
+    share = parsed["shares"][0]
+    assert share["content"].startswith("Looking for a thinking partner")
+    assert share["share_type"] == "need"
 
 
-def test_parse_share_type_takes_first_line_only():
-    parsed = parse_share("### Share\nbody\n### Share type\noffering\n"
-                         "extra remark that is not the type")
-    assert parsed["share_type"] == "offering"
+def test_parse_share_multiple_blocks_and_inner_headings():
+    parsed = parse_share(MULTI_SHARE_TEXT)
+    assert len(parsed["shares"]) == 2
+    first, second = parsed["shares"]
+    # ### headings inside the fence belong to the share body — the exact
+    # mis-parse the fences were introduced to fix.
+    assert first["content"].startswith("### On attention")
+    assert first["share_type"] == "insight"
+    assert second["content"] == "Second post body."
+    assert second["share_type"] == "exploration"
 
 
-def test_save_share_draft_from_node_falls_back_to_other(app):
+def test_parse_share_unclosed_fence_runs_to_end():
+    parsed = parse_share("lead-in\n\n:::share intention\nno closing fence")
+    assert len(parsed["shares"]) == 1
+    assert parsed["shares"][0]["content"] == "no closing fence"
+    assert parsed["shares"][0]["share_type"] == "intention"
+
+
+def test_parse_share_legacy_headings_fallback():
+    parsed = parse_share(LEGACY_SHARE_TEXT)
+    assert len(parsed["shares"]) == 1
+    share = parsed["shares"][0]
+    assert share["content"].startswith("Looking for a thinking partner")
+    assert share["share_type"] == "need"
+
+
+def test_save_share_drafts_from_node_falls_back_to_other(app):
     with app.app_context():
         uid = User.query.first().id
-        node = _mk_llm_node(uid, "### Share\ntext\n### Share type\nbogus")
-        share, err = save_share_draft_from_node(node, uid)
+        node = _mk_llm_node(uid, ":::share bogus\ntext\n:::")
+        saved, total, err = save_share_drafts_from_node(node, uid)
         assert err is None
-        assert share.share_type == "other"
-        assert share.status == "draft"
-        assert share.source_node_id == node.id
+        assert total == 1
+        assert [(i, s.share_type) for i, s in saved] == [(0, "other")]
+        assert saved[0][1].status == "draft"
+        assert saved[0][1].source_node_id == node.id
+
+
+def test_save_share_drafts_from_node_multiple(app):
+    with app.app_context():
+        uid = User.query.first().id
+        node = _mk_llm_node(uid, MULTI_SHARE_TEXT)
+        saved, total, err = save_share_drafts_from_node(node, uid)
+        assert err is None
+        assert total == 2
+        assert [(i, s.share_type) for i, s in saved] == [
+            (0, "insight"), (1, "exploration")]
+        assert all(s.status == "draft" for _, s in saved)
+
+
+def test_save_share_drafts_from_node_index_and_skip(app):
+    with app.app_context():
+        uid = User.query.first().id
+        node = _mk_llm_node(uid, MULTI_SHARE_TEXT)
+        saved, total, err = save_share_drafts_from_node(
+            node, uid, indexes=[1])
+        assert err is None
+        assert [(i, s.share_type) for i, s in saved] == [(1, "exploration")]
+        # skip excludes already-saved positions from a save-all.
+        saved, total, err = save_share_drafts_from_node(node, uid, skip={1})
+        assert err is None
+        assert [(i, s.share_type) for i, s in saved] == [(0, "insight")]
+        # Everything saved → nothing selectable.
+        saved, total, err = save_share_drafts_from_node(
+            node, uid, skip={0, 1})
+        assert saved == [] and err is not None
 
 
 # ── Detection + auto-draft creation ──────────────────────────────────────
 
 def test_detect_share_proposal():
+    assert _detect_share_proposal(":::share insight\nsomething\n:::") is True
+    assert _detect_share_proposal(":::share\nno type word\n:::") is True
+    # Legacy heading syntax still detected (old history, imitating models).
     assert _detect_share_proposal("### Share\nsomething") is True
     assert _detect_share_proposal("no headings") is False
     # Exact match only — incidental prose headings don't trigger.
     assert _detect_share_proposal("### Shared context\nblah") is False
+    # A mid-line ::: is not a fence.
+    assert _detect_share_proposal("prose about :::share syntax") is False
 
 
 def test_auto_create_drafts_creates_share_draft(app, share_flag_on):
@@ -270,6 +351,151 @@ def test_save_proposal_route(app, client):
         row = ShareDraft.query.first()
         assert row.get_content().startswith("Looking for a thinking partner")
         assert Draft.query.filter_by(label="share_pending").count() == 0
+
+
+def test_save_proposal_user_authored_node(app, client):
+    """The user writes/pastes :::share blocks in their OWN node — no pending
+    draft exists, the node itself is parsed. Multiple blocks → one private
+    draft each, and the completed state is recorded in tool_calls_meta."""
+    with app.app_context():
+        uid = User.query.first().id
+        node = Node(user_id=uid, node_type="user")
+        node.set_content(MULTI_SHARE_TEXT)
+        _db.session.add(node)
+        _db.session.commit()
+        node_id = node.id
+
+    resp = client.post("/api/share/save-proposal", json={"node_id": node_id})
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["status"] == "completed"
+    assert len(body["shares"]) == 2
+    assert body["saved_indexes"] == [0, 1]
+    assert all(s["status"] == "draft" for s in body["shares"])
+    with app.app_context():
+        rows = ShareDraft.query.order_by(ShareDraft.id).all()
+        assert [r.share_type for r in rows] == ["insight", "exploration"]
+        meta = json.loads(Node.query.get(node_id).tool_calls_meta)
+        entry = next(e for e in meta if e["name"] == "propose_share")
+        assert entry["apply_status"] == "completed"
+        assert len(entry["share_ids"]) == 2
+        assert entry["saved_indexes"] == [0, 1]
+
+
+def test_save_proposal_per_block(app, client):
+    """Each block has its own Save button: share_index saves just that
+    block; the rest stays pending (status 'partial') until all are saved.
+    Duplicate and out-of-range indexes are rejected."""
+    with app.app_context():
+        uid = User.query.first().id
+        node = Node(user_id=uid, node_type="user")
+        node.set_content(MULTI_SHARE_TEXT)
+        _db.session.add(node)
+        _db.session.commit()
+        node_id = node.id
+
+    resp = client.post("/api/share/save-proposal",
+                       json={"node_id": node_id, "share_index": 1})
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["status"] == "partial"
+    assert body["saved_indexes"] == [1]
+    assert body["shares"][0]["share_type"] == "exploration"
+
+    # Saving the same block again is rejected.
+    resp = client.post("/api/share/save-proposal",
+                       json={"node_id": node_id, "share_index": 1})
+    assert resp.status_code == 400
+
+    # Out-of-range index is rejected.
+    resp = client.post("/api/share/save-proposal",
+                       json={"node_id": node_id, "share_index": 5})
+    assert resp.status_code == 400
+
+    # Saving the remaining block completes the proposal.
+    resp = client.post("/api/share/save-proposal",
+                       json={"node_id": node_id, "share_index": 0})
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["status"] == "completed"
+    assert body["saved_indexes"] == [0, 1]
+    with app.app_context():
+        rows = ShareDraft.query.order_by(ShareDraft.id).all()
+        assert [r.share_type for r in rows] == ["exploration", "insight"]
+
+
+def test_save_proposal_partial_keeps_pending_draft(app, client):
+    """On LLM proposal nodes the share_pending Draft must survive a partial
+    save — the remaining Save buttons (and apply_share) still need it —
+    and go away once every block is saved."""
+    with app.app_context():
+        uid = User.query.first().id
+        origin = _mk_llm_node(uid, MULTI_SHARE_TEXT)
+        draft = Draft(user_id=uid, parent_id=origin.id, label="share_pending")
+        draft.set_content("")
+        _db.session.add(draft)
+        _db.session.commit()
+        origin_id = origin.id
+
+    resp = client.post("/api/share/save-proposal",
+                       json={"node_id": origin_id, "share_index": 0})
+    assert resp.status_code == 200
+    assert resp.get_json()["status"] == "partial"
+    with app.app_context():
+        assert Draft.query.filter_by(label="share_pending").count() == 1
+
+    resp = client.post("/api/share/save-proposal",
+                       json={"node_id": origin_id, "share_index": 1})
+    assert resp.status_code == 200
+    assert resp.get_json()["status"] == "completed"
+    with app.app_context():
+        assert Draft.query.filter_by(label="share_pending").count() == 0
+        assert ShareDraft.query.count() == 2
+
+
+def test_apply_share_skips_blocks_saved_by_button(app, client, share_flag_on):
+    """Voice confirm after a partial button save must only save the
+    remaining blocks — no duplicates."""
+    with app.app_context():
+        uid = User.query.first().id
+        origin = _mk_llm_node(uid, MULTI_SHARE_TEXT)
+        auto = _auto_create_drafts(MULTI_SHARE_TEXT, origin, [origin], uid)
+        origin.tool_calls_meta = json.dumps(auto)
+        _db.session.commit()
+        origin_id = origin.id
+
+    resp = client.post("/api/share/save-proposal",
+                       json={"node_id": origin_id, "share_index": 0})
+    assert resp.status_code == 200
+
+    with app.app_context():
+        uid = User.query.first().id
+        origin = Node.query.get(origin_id)
+        results = _execute_tool_calls(
+            [{"name": "apply_share", "input": {}}], origin, [origin], uid)
+        assert results[0]["status"] == "success"
+        assert ShareDraft.query.count() == 2
+        meta = json.loads(Node.query.get(origin_id).tool_calls_meta)
+        entry = next(e for e in meta if e["name"] == "propose_share")
+        assert entry["apply_status"] == "completed"
+        assert entry["saved_indexes"] == [0, 1]
+        assert len(entry["share_ids"]) == 2
+
+
+def test_save_proposal_rejects_another_users_node(app, client):
+    with app.app_context():
+        other = User(username="someone", public_sharing_enabled=True)
+        _db.session.add(other)
+        _db.session.commit()
+        node = Node(user_id=other.id, node_type="user")
+        node.set_content(SHARE_TEXT)
+        _db.session.add(node)
+        _db.session.commit()
+        node_id = node.id
+    resp = client.post("/api/share/save-proposal", json={"node_id": node_id})
+    assert resp.status_code == 404
+    with app.app_context():
+        assert ShareDraft.query.count() == 0
 
 
 def test_save_proposal_route_no_pending(app, client):

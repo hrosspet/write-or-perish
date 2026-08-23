@@ -1,8 +1,9 @@
 """Share routes (Feature 3 — Upload v1, dark behind SHARE_V1).
 
 Consent model, structurally enforced:
-- The AI proposes a share in conversation (### Share headings). Confirming
-  there (Save button / apply_share tool) only creates a PRIVATE draft.
+- A share is proposed in conversation (fenced :::share blocks — by the AI,
+  or written by the user in their own node). Confirming there (Save button /
+  apply_share tool) only creates a PRIVATE draft.
 - Publication happens exclusively here, on the Share page, as a second
   deliberate action — and is revocable at any time.
 - The public endpoint serves ONLY published items, and only while the flag
@@ -12,8 +13,8 @@ from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node, Draft, ShareDraft, User
 from backend.extensions import db
-from backend.utils.share import save_share_draft_from_node
-from backend.utils.tool_meta import update_tool_meta
+from backend.utils.share import save_share_drafts_from_node
+from backend.utils.tool_meta import update_tool_meta, get_tool_meta_entry
 from backend.utils.timefmt import iso_utc
 from backend.utils.privacy import PrivacyLevel, AIUsage
 from datetime import datetime
@@ -253,27 +254,48 @@ def revoke_share(share_id):
 @share_bp.route("/save-proposal", methods=["POST"])
 @login_required
 def save_proposal():
-    """Save the share the AI proposed on a pending node as a private draft.
+    """Save the share(s) proposed on a node as private drafts.
 
-    Mirrors /feedback/submit: the share text lives in the visible LLM node
-    content (under ### Share); this confirms + persists it only when the
-    user clicks Save (or the equivalent apply_share tool). The result is a
-    PRIVATE draft — publication is a separate action on the Share page."""
+    Mirrors /feedback/submit: the share text lives in the visible node
+    content (fenced :::share blocks); this confirms + persists it only when
+    the user clicks Save (or the equivalent apply_share tool). The result is
+    PRIVATE drafts — publication is a separate action on the Share page.
+
+    Two origins are accepted:
+    - LLM proposal nodes, located via the pending share_pending Draft the
+      completion task created (walking the ancestor chain).
+    - The user's OWN nodes carrying :::share blocks they wrote or pasted
+      themselves — no pending draft exists there, so the node itself is
+      parsed directly (owner-only).
+
+    Each :::share block has its own Save button: pass ``share_index``
+    (0-based, content order) to save just that block. Omitting it saves
+    every not-yet-saved block. Saved positions accumulate in the node's
+    propose_share tool meta (``saved_indexes``), and the pending Draft is
+    only deleted once ALL blocks are saved — so the remaining buttons (and
+    the apply_share voice confirm) keep working after a partial save."""
     if not _share_enabled_for_me():
         return jsonify({"error": "Not found"}), 404
     data = request.get_json() or {}
-    llm_node_id = data.get("llm_node_id")
+    node_id = data.get("node_id") or data.get("llm_node_id")
 
-    if not llm_node_id:
-        return jsonify({"error": "llm_node_id is required"}), 400
+    if not node_id:
+        return jsonify({"error": "node_id is required"}), 400
 
-    llm_node = Node.query.get(llm_node_id)
-    if not llm_node:
+    share_index = data.get("share_index")
+    if share_index is not None:
+        try:
+            share_index = int(share_index)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid share_index"}), 400
+
+    node = Node.query.get(node_id)
+    if not node:
         return jsonify({"error": "Node not found"}), 404
 
     # Find the pending draft by walking the ancestor chain.
     draft = None
-    current_node = llm_node
+    current_node = node
     visited = set()
     while current_node and current_node.id not in visited:
         visited.add(current_node.id)
@@ -286,27 +308,48 @@ def save_proposal():
             break
         current_node = current_node.parent
 
-    if not draft:
+    if draft:
+        origin_node = Node.query.get(draft.parent_id)
+        if not origin_node:
+            return jsonify({"error": "Origin node not found"}), 404
+    elif node.node_type != "llm" and node.user_id == current_user.id:
+        # Self-authored share blocks — parse the addressed node directly.
+        origin_node = node
+    else:
         return jsonify({"error": "No pending share found"}), 404
 
-    origin_node = Node.query.get(draft.parent_id)
-    if not origin_node:
-        return jsonify({"error": "Origin node not found"}), 404
+    entry = get_tool_meta_entry(origin_node, "propose_share")
+    already = set((entry or {}).get("saved_indexes") or [])
+    if share_index is not None and share_index in already:
+        return jsonify({"error": "Already saved"}), 400
 
-    share, err = save_share_draft_from_node(origin_node, current_user.id)
+    indexes = [share_index] if share_index is not None else None
+    saved, total, err = save_share_drafts_from_node(
+        origin_node, current_user.id, indexes=indexes, skip=already)
     if err:
         return jsonify({"error": err}), 400
 
-    db.session.delete(draft)
+    saved_indexes = sorted(already | {i for i, _ in saved})
+    all_saved = len(saved_indexes) >= total
+    if draft and all_saved:
+        db.session.delete(draft)
+    new_ids = [s.id for _, s in saved]
     update_tool_meta(origin_node, "propose_share", {
-        "apply_status": "completed",
-        "share_id": share.id,
-    })
+        "apply_status": "completed" if all_saved else "partial",
+        "share_id": ((entry or {}).get("share_id")) or new_ids[0],
+        "share_ids": (((entry or {}).get("share_ids")) or []) + new_ids,
+        "saved_indexes": saved_indexes,
+    }, append_if_missing=True)
     db.session.commit()
 
     return jsonify({
-        "status": "completed",
-        "share": _serialize(share),
+        "status": "completed" if all_saved else "partial",
+        # `share` kept for older clients; `shares` carries the drafts
+        # saved by THIS call, `saved_indexes` everything saved so far.
+        "share": _serialize(saved[0][1]),
+        "shares": [_serialize(s) for _, s in saved],
+        "saved_indexes": saved_indexes,
+        "total": total,
     }), 200
 
 

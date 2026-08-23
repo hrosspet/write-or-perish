@@ -1,9 +1,14 @@
 """Shared helpers for voice tool call metadata."""
 import json
+import re
 
 
-def update_tool_meta(node, tool_name, updates):
-    """Update a specific tool call's metadata in node.tool_calls_meta."""
+def update_tool_meta(node, tool_name, updates, append_if_missing=False):
+    """Update a specific tool call's metadata in node.tool_calls_meta.
+
+    *append_if_missing* adds a fresh entry when none exists — used for
+    user-authored share nodes, which never went through the LLM proposal
+    flow and so have no propose_share entry to update."""
     meta = []
     if node.tool_calls_meta:
         try:
@@ -14,7 +19,25 @@ def update_tool_meta(node, tool_name, updates):
         if entry.get("name") == tool_name:
             entry.update(updates)
             break
+    else:
+        if append_if_missing:
+            meta.append({"name": tool_name, **updates})
     node.tool_calls_meta = json.dumps(meta)
+
+
+def get_tool_meta_entry(node, tool_name):
+    """Return a specific tool call's metadata dict from node.tool_calls_meta,
+    or None. Read-only companion to update_tool_meta."""
+    if not node.tool_calls_meta:
+        return None
+    try:
+        meta = json.loads(node.tool_calls_meta)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    for entry in meta:
+        if entry.get("name") == tool_name:
+            return entry
+    return None
 
 
 def parse_github_issue(content):
@@ -65,16 +88,47 @@ def parse_feedback(content):
     return result
 
 
-def parse_share(content):
-    """Parse ### Share and ### Share type from LLM text (SHARE_V1).
+# A share block is fenced: an opening line `:::share <type>` (type word
+# optional), the shareable text (any markdown, ### headings included),
+# and a closing line of bare `:::`. An unclosed block runs to the end of
+# the text. Fences replaced the legacy `### Share` / `### Share type`
+# headings, which mis-parsed whenever the share body used ### itself and
+# couldn't carry more than one post per node.
+_SHARE_FENCE_RE = re.compile(
+    r'^:::share(?:[ \t]+([A-Za-z]+))?[ \t]*\r?\n'
+    r'(.*?)'
+    r'(?:^:::[ \t]*$|\Z)',
+    re.MULTILINE | re.DOTALL | re.IGNORECASE)
 
-    Mirrors parse_feedback: the shareable text the AI proposes lives in the
-    visible node content (so the user reads exactly what would be shared
-    before confirming), never in a hidden tool input. Returns {'content',
-    'share_type'} — share_type defaults blank if absent (the save path falls
-    back to 'other')."""
-    result = {}
-    parts = content.split('### ')
+
+def parse_share(content):
+    """Parse share blocks out of node text (SHARE_V1).
+
+    Like parse_feedback, the shareable text lives in the visible node
+    content (so the user reads exactly what would be shared before
+    confirming), never in a hidden tool input. Returns {'shares':
+    [{'content', 'share_type'}, ...]} — one entry per fenced `:::share`
+    block, in order. share_type defaults blank if absent (the save path
+    falls back to 'other').
+
+    Falls back to the legacy `### Share` / `### Share type` headings
+    (single share) when no fence is present, so pre-existing proposal
+    nodes — and models imitating old conversation history — keep working.
+    """
+    shares = []
+    for m in _SHARE_FENCE_RE.finditer(content or ""):
+        body = (m.group(2) or "").strip()
+        if not body:
+            continue
+        shares.append({
+            'content': body,
+            'share_type': (m.group(1) or "").strip().lower(),
+        })
+    if shares:
+        return {'shares': shares}
+    # Legacy heading fallback.
+    legacy = {}
+    parts = (content or "").split('### ')
     for part in parts:
         if not part.strip():
             continue
@@ -84,8 +138,13 @@ def parse_share(content):
         heading = part[:first_newline].strip().lower()
         body = part[first_newline + 1:].strip()
         if heading == 'share':
-            result['content'] = body
+            legacy['content'] = body
         elif heading == 'share type':
             first_line = body.split('\n')[0].strip().lower()
-            result['share_type'] = first_line
-    return result
+            legacy['share_type'] = first_line
+    if legacy.get('content'):
+        return {'shares': [{
+            'content': legacy['content'],
+            'share_type': legacy.get('share_type', ''),
+        }]}
+    return {'shares': []}
