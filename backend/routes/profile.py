@@ -15,32 +15,18 @@ from backend.utils.privacy import (
 )
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.spend import require_spend_headroom
+from backend.utils.profile_versions import visible_profiles_query
 
 profile_bp = Blueprint("profile", __name__)
 
 AUDIO_STORAGE_ROOT = "data/audio"
 
 
-# Generation steps hidden from the history view: 'iterative' rows are the
-# chunk-by-chunk build steps of a full generation and 'update' rows are the
-# pre-merge increments — both are pipeline intermediates, not editions of
-# the profile. Everything else stays visible: 'initial' (complete
-# single-pass build), 'integration' (merged update), 'revert' (a user
-# action), and legacy NULL-typed rows (profiles predating the column).
-PROFILE_HISTORY_HIDDEN_TYPES = ("iterative", "update")
-
-
 @profile_bp.route("/versions", methods=["GET"])
 @login_required
 def get_profile_versions():
     """List the user's profile versions (pipeline intermediates hidden)."""
-    profiles = UserProfile.query.filter(
-        UserProfile.user_id == current_user.id,
-        db.or_(
-            UserProfile.generation_type.is_(None),
-            UserProfile.generation_type.notin_(PROFILE_HISTORY_HIDDEN_TYPES),
-        ),
-    ).order_by(UserProfile.created_at.desc()).all()
+    profiles = visible_profiles_query(current_user.id).all()
 
     versions = []
     total = len(profiles)

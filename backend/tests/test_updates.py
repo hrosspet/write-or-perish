@@ -268,6 +268,16 @@ class TestUpdatesAPI:
             _db.drop_all()
 
 
+def _add_profile(user, created_at, generation_type):
+    p = UserProfile(
+        user_id=user.id, generated_by="test-model", tokens_used=0,
+        created_at=created_at, generation_type=generation_type)
+    p.set_content("PROFILE BODY")
+    _db.session.add(p)
+    _db.session.commit()
+    return p
+
+
 class TestNotifications:
     def test_notify_dedupes_unread(self, app):
         user = User.query.filter_by(username="tester").first()
@@ -293,6 +303,41 @@ class TestNotifications:
         client.post(f"/api/updates/notifications/{n.id}/skip")
         unread = client.get("/api/updates").get_json()["notifications"]
         assert [x["id"] for x in unread] == [n.id]
+
+    def test_profile_ready_carries_version_and_date(self, app, client):
+        user = User.query.filter_by(username="tester").first()
+        _add_profile(user, datetime(2026, 8, 1), "initial")
+        _add_profile(user, datetime(2026, 8, 9), "integration")
+        notify_profile_ready(user.id)
+        n = client.get("/api/updates").get_json()["notifications"][0]
+        assert n["meta"]["version"] == 2
+        assert n["meta"]["created_at"].startswith("2026-08-09")
+
+    def test_profile_meta_ignores_pipeline_intermediates(self, app, client):
+        # Same numbering rule as the profile page: the chunk-by-chunk
+        # build steps are not editions, so they must not inflate "v7".
+        user = User.query.filter_by(username="tester").first()
+        _add_profile(user, datetime(2026, 8, 1), "initial")
+        _add_profile(user, datetime(2026, 8, 5), "iterative")
+        _add_profile(user, datetime(2026, 8, 6), "update")
+        _add_profile(user, datetime(2026, 8, 9), "integration")
+        notify_profile_ready(user.id)
+        n = client.get("/api/updates").get_json()["notifications"][0]
+        assert n["meta"]["version"] == 2
+        assert n["meta"]["created_at"].startswith("2026-08-09")
+
+    def test_profile_meta_absent_without_profile(self, app, client):
+        user = User.query.filter_by(username="tester").first()
+        notify_profile_ready(user.id)
+        n = client.get("/api/updates").get_json()["notifications"][0]
+        assert n["meta"] is None
+
+    def test_other_notification_types_have_no_meta(self, app, client):
+        user = User.query.filter_by(username="tester").first()
+        _add_profile(user, datetime(2026, 8, 1), "initial")
+        notify_user(user.id, "fix_ready", "A fix you reported is live")
+        n = client.get("/api/updates").get_json()["notifications"][0]
+        assert n["meta"] is None
 
     def test_cannot_touch_others_notification(self, app, admin_client):
         user = User.query.filter_by(username="tester").first()

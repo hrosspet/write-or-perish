@@ -17,6 +17,7 @@ from backend.models import (
     ChangelogReadState, UserNotification, Poll, PollResponse,
 )
 from backend.utils.changelog import parse_changelog, unread_sections_for
+from backend.utils.profile_versions import current_profile_version
 from backend.utils.timefmt import iso_utc
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,21 @@ def _poll_draft_terms(poll):
         "model": model_cfg.get("display_name", model_id),
         "data_source": poll.data_source,
     }
+
+
+def _profile_meta(user):
+    """Which edition the "Profile updated" notification is announcing, and
+    when it was generated.
+
+    Skip keeps a notification unread, so this one can sit in the modal for
+    weeks after the generation it announces. Without a stamp it reads as
+    brand new every visit — users have reported exactly that. Renders as
+    the item's date line, same wording as the profile page ("v7 · Aug 9").
+    """
+    version, created_at = current_profile_version(user.id)
+    if version is None:
+        return None
+    return {"version": version, "created_at": iso_utc(created_at)}
 
 
 def _pending_polls_for(user):
@@ -97,6 +113,17 @@ def get_updates():
         for s in unread_sections_for(current_user, read_states)
     ]
 
+    unread = UserNotification.query.filter_by(
+        user_id=current_user.id, status="unread"
+    ).order_by(UserNotification.created_at.desc()).limit(20).all()
+    # One lookup for the whole batch, and only when it's needed — the
+    # notification's own created_at can't carry it (notify_user updates an
+    # unread row in place and leaves created_at at the first announcement).
+    profile_meta = (
+        _profile_meta(current_user)
+        if any(n.type == "profile_ready" for n in unread)
+        else None
+    )
     notifications = [
         {
             "id": n.id,
@@ -105,10 +132,9 @@ def get_updates():
             "body": n.body,
             "link": n.link,
             "created_at": iso_utc(n.created_at),
+            "meta": profile_meta if n.type == "profile_ready" else None,
         }
-        for n in UserNotification.query.filter_by(
-            user_id=current_user.id, status="unread"
-        ).order_by(UserNotification.created_at.desc()).limit(20).all()
+        for n in unread
     ]
 
     return jsonify({

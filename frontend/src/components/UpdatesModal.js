@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import api from "../api";
 import MarkdownBody from "./MarkdownBody";
 import { useIsMobile } from "../hooks/useIsMobile";
+import { formatDate } from "../utils/date";
 
 /**
  * The dev-update channel surface (#207): shows unread changelog sections,
@@ -163,9 +164,20 @@ const NOTIFICATION_EYEBROWS = {
   issue_declined: "Your issue — closed without a fix",
 };
 
+// What the item is announcing, stamped: "v7 · Aug 9, 2026", in the same
+// wording the profile page uses. An unread notification survives every
+// exit except "Got it", so it can outlive the event by weeks — the stamp
+// is what tells the reader they're looking at something they've seen.
+function metaLine(meta) {
+  if (!meta || !meta.version) return null;
+  const when = formatDate(meta.created_at);
+  return when ? `v${meta.version} · ${when}` : `v${meta.version}`;
+}
+
 function NotificationItem({ notification, onDone, onCloseModal }) {
   const navigate = useNavigate();
   const eyebrow = NOTIFICATION_EYEBROWS[notification.type];
+  const stamp = metaLine(notification.meta);
   const mark = (action) => {
     api.post(`/updates/notifications/${notification.id}/${action}`)
       .catch(() => {});
@@ -191,6 +203,7 @@ function NotificationItem({ notification, onDone, onCloseModal }) {
   return (
     <div style={itemStyle}>
       {eyebrow && <div style={dateStyle}>{eyebrow}</div>}
+      {stamp && <div style={dateStyle}>{stamp}</div>}
       <h3 style={eyebrow ? eyebrowTitleStyle : itemTitleStyle}>
         {notification.title}
       </h3>
