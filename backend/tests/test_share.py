@@ -38,7 +38,8 @@ sys.modules.pop("backend.tasks.llm_completion", None)
 
 from backend.tasks.llm_completion import (  # noqa: E402
     _execute_tool_calls, _auto_create_drafts, _detect_share_proposal,
-    gated_voice_tools,
+    _detect_todo_proposal, _detect_feedback_proposal,
+    _detect_github_issue_proposal, gated_voice_tools,
 )
 _lc_mod = sys.modules["backend.tasks.llm_completion"]
 
@@ -259,6 +260,18 @@ def test_detect_share_proposal():
     assert _detect_share_proposal("### Shared context\nblah") is False
     # A mid-line ::: is not a fence.
     assert _detect_share_proposal("prose about :::share syntax") is False
+
+
+def test_inner_share_headings_do_not_trigger_other_detectors():
+    """### headings inside a :::share body are the share's own formatting —
+    they must not read as todo/feedback/issue proposals."""
+    text = ("Lead.\n\n:::share insight\n### Completed\n- x\n\n"
+            "### Priority\n1. y\n\n### Feedback\nz\n\n"
+            "### Issue Title\nt\n### Description\nd\n:::\n")
+    assert _detect_todo_proposal(text) is False
+    assert _detect_feedback_proposal(text) is False
+    assert _detect_github_issue_proposal(text) is False
+    assert _detect_share_proposal(text) is True
 
 
 def test_auto_create_drafts_creates_share_draft(app, share_flag_on):

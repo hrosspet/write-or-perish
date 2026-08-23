@@ -172,6 +172,24 @@ test('split excludes share fences; lead-in before, commentary after', () => {
   expect(after).not.toContain('Second post body.');
 });
 
+// Regression (caught on staging): a lead-in starting "Noted both — …" made
+// includes('note') fire on the intro, rendering a phantom todo note whose
+// body was the fence line — the intro part is never a section.
+test('lead-in starting with "Noted" does not become a phantom todo note', () => {
+  const text = 'Noted both — worth keeping.\n\n:::share insight\n### Inner\nbody\n:::\n\nDone.';
+  const parsed = parseOrientResponse(text);
+  expect(parsed.note).toBeUndefined();
+  expect(parsed.completed).toBeUndefined();
+});
+
+test('### headings inside a share body do not trigger other proposal sections', () => {
+  const text = 'Lead.\n\n:::share insight\n### Completed\n- x\n\n### Feedback\ny\n:::';
+  const parsed = parseOrientResponse(text);
+  expect(parsed.completed).toBeUndefined();
+  expect(parsed.feedback).toBeUndefined();
+  expect(hasProposalSections(text)).toBe(true); // via the share block itself
+});
+
 test('shareOnly split leaves the node\'s own ### headings in the prose', () => {
   const text = [
     '### My own heading',

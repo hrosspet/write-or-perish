@@ -730,6 +730,15 @@ def _find_pending_share_draft(node_chain, user_id):
     return None
 
 
+def _strip_share_fences(text):
+    """Remove fenced :::share blocks — their bodies may legitimately
+    contain ### headings, which must never trigger the other proposal
+    detectors (todo/issue/feedback)."""
+    return re.sub(
+        r'^:::share(?:[ \t]+\w+)?[ \t]*\r?\n.*?(?:^:::[ \t]*$\n?|\Z)',
+        '', text, flags=re.MULTILINE | re.DOTALL | re.IGNORECASE)
+
+
 def _detect_todo_proposal(text):
     """Check if LLM text contains todo proposal headings.
 
@@ -739,7 +748,7 @@ def _detect_todo_proposal(text):
     if not text:
         return False
     headings = [h.lower() for h in re.findall(
-        r'^###\s+(.+)', text, re.MULTILINE)]
+        r'^###\s+(.+)', _strip_share_fences(text), re.MULTILINE)]
     task_keywords = {'completed', 'new task', 'new tasks', 'priority'}
     return any(
         any(kw in h for kw in task_keywords) for h in headings
@@ -751,7 +760,7 @@ def _detect_github_issue_proposal(text):
     if not text:
         return False
     headings = [h.lower() for h in re.findall(
-        r'^###\s+(.+)', text, re.MULTILINE)]
+        r'^###\s+(.+)', _strip_share_fences(text), re.MULTILINE)]
     has_title = any(
         'issue title' in h or h.strip() == 'title' for h in headings)
     has_desc = any('description' in h for h in headings)
@@ -767,7 +776,7 @@ def _detect_feedback_proposal(text):
     if not text:
         return False
     headings = [h.strip().lower() for h in re.findall(
-        r'^###\s+(.+)', text, re.MULTILINE)]
+        r'^###\s+(.+)', _strip_share_fences(text), re.MULTILINE)]
     return any(h == 'feedback' for h in headings)
 
 

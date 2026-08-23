@@ -76,10 +76,31 @@ export function parsePriorityItems(text) {
     .filter(item => item.text);
 }
 
+// Remove fenced :::share blocks entirely — their bodies may legitimately
+// contain ### headings, which must never be parsed as todo/issue/feedback
+// sections.
+export function stripShareBlocks(text) {
+  if (!text) return text;
+  const out = [];
+  let inFence = false;
+  for (const line of text.split('\n')) {
+    if (inFence) {
+      if (SHARE_FENCE_CLOSE_RE.test(line)) inFence = false;
+      continue;
+    }
+    if (SHARE_FENCE_OPEN_RE.test(line)) { inFence = true; continue; }
+    out.push(line);
+  }
+  return out.join('\n');
+}
+
 export function parseOrientResponse(text) {
   const sections = {};
-  const parts = text.split(/^###\s+/m);
-  for (const part of parts) {
+  const parts = stripShareBlocks(text).split(/^###\s+/m);
+  // parts[0] is the lead-in before the first heading — never a section.
+  // Parsing it used to misfire: a lead-in starting "Noted both — …"
+  // matched includes('note') and became a phantom todo note.
+  for (const part of parts.slice(1)) {
     if (!part.trim()) continue;
     const firstNewline = part.indexOf('\n');
     if (firstNewline < 0) continue;
@@ -107,7 +128,9 @@ export function parseOrientResponse(text) {
 export function hasProposalSections(text) {
   if (!text) return false;
   if (hasShareBlocks(text)) return true;
-  const headings = (text.match(/^###\s+(.+)/gm) || []).map(h => h.replace(/^###\s+/, '').toLowerCase());
+  // Heading scan runs on fence-stripped text — ### headings inside a
+  // share body are the share's own formatting, not proposal sections.
+  const headings = (stripShareBlocks(text).match(/^###\s+(.+)/gm) || []).map(h => h.replace(/^###\s+/, '').toLowerCase());
   const taskKeywords = ['completed', 'new task', 'new tasks', 'priority'];
   const hasTodo = headings.some(h => taskKeywords.some(kw => h.includes(kw)));
   const hasIssue = headings.some(h => h.includes('issue title') || h === 'title') &&
