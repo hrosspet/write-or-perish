@@ -101,8 +101,10 @@ def _make_user(username, **kwargs):
 
 def _make_node(user, parent_id=None, content="hello", node_type="user",
                privacy_level="private", ai_usage="chat", human_owner=None,
-               llm_model=None, created_at=None, token_count=None):
+               llm_model=None, created_at=None, token_count=None,
+               origin=None):
     n = Node(
+        origin=origin,
         user_id=user.id,
         human_owner_id=(human_owner or user).id,
         parent_id=parent_id,
@@ -1222,3 +1224,47 @@ class TestFullExportArtifactContent:
         assert "just text" in content
         assert "[Artifact " not in content
         assert "## Artifacts Referenced" not in content
+
+
+# ── origin: imported nodes are marked, Loore-native ones are not ────────
+
+class TestOrigin:
+    def test_header_marks_imports_only_and_metadata_counts_origins(self, app):
+        alice = _make_user("alice")
+        _db.session.commit()
+
+        _make_node(alice, content="loore entry", token_count=100,
+                   created_at=DEC_15)
+        _make_node(alice, content="a tweet", token_count=300,
+                   created_at=APR_18, origin="twitter")
+        _db.session.commit()
+
+        result = _build(alice, filter_ai_usage=True, return_metadata=True)
+        content = result["content"]
+
+        assert "User (alice) via twitter - " in content
+        # Loore is the default: never rendered.
+        assert "via loore" not in content
+        assert content.count(" via ") == 1
+        assert result["origin_stats"] == {
+            "loore": {"nodes": 1, "tokens": 100},
+            "twitter": {"nodes": 1, "tokens": 300},
+        }
+
+    def test_source_mix_preamble(self):
+        from backend.tasks.exports import (
+            source_mix_preamble, chunk_content_for_prompt)
+        loore_only = {"content": "x", "origin_stats": {
+            "loore": {"nodes": 3, "tokens": 900}}}
+        assert source_mix_preamble(loore_only) == ""
+        assert chunk_content_for_prompt(loore_only) == "x"
+        assert source_mix_preamble({"content": "x"}) == ""
+
+        mixed = {"content": "x", "origin_stats": {
+            "loore": {"nodes": 1, "tokens": 100},
+            "twitter": {"nodes": 2000, "tokens": 1900}}}
+        pre = source_mix_preamble(mixed)
+        assert pre.startswith("[Source mix: 95% public tweets")
+        assert "2,000 entries" in pre
+        assert "5% written in Loore, 1 entries" in pre
+        assert chunk_content_for_prompt(mixed) == pre + "x"

@@ -655,7 +655,7 @@ def _single_pass_generation(self, user, model_id, gen_template,
         'progress': 30, 'status': 'Preparing prompt'
     })
 
-    content = export_result["content"]
+    content = chunk_content_for_prompt(export_result)
     prompt = gen_template.replace("{user_export}", content)
 
     response = _call_llm_with_retries(
@@ -748,6 +748,42 @@ def build_update_template(user_id):
     )
 
 
+ORIGIN_LABELS = {
+    "twitter": "public tweets (imported from Twitter/X)",
+    "chatgpt": "ChatGPT conversations (imported)",
+    "claude": "Claude conversations (imported)",
+    "markdown": "markdown documents (imported)",
+    "loore": "written in Loore",
+}
+
+
+def source_mix_preamble(chunk):
+    """One-line source-mix header for a profile-generation chunk.
+
+    Empty when everything is Loore-native (the default; costs no tokens).
+    Otherwise e.g. "[Source mix: 94% public tweets (imported from
+    Twitter/X, 3,100 entries), 6% written in Loore (12 entries)]" —
+    shares by token, so the model can read register-by-channel instead
+    of treating a public-tweets corpus as a private journal.
+    """
+    stats = (chunk or {}).get("origin_stats") or {}
+    if not stats or set(stats) == {"loore"}:
+        return ""
+    total = sum(s["tokens"] for s in stats.values()) or 1
+    parts = []
+    for origin, s in sorted(stats.items(), key=lambda kv: -kv[1]["tokens"]):
+        label = ORIGIN_LABELS.get(origin, f"imported from {origin}")
+        pct = round(s["tokens"] / total * 100)
+        parts.append(f"{pct}% {label}, {s['nodes']:,} entries")
+    return "[Source mix: " + "; ".join(parts) + "]\n\n"
+
+
+def chunk_content_for_prompt(chunk):
+    """The chunk's export text as fed to the profile prompts: source-mix
+    preamble (when any content is imported) + rendered content."""
+    return source_mix_preamble(chunk) + chunk["content"]
+
+
 def build_chunk_prompt(update_template, current_profile_content,
                        cumulative_source_tokens, chunk):
     """Build the per-chunk incremental-update prompt (the non-first-chunk
@@ -761,7 +797,7 @@ def build_chunk_prompt(update_template, current_profile_content,
     prompt = update_template.replace(
         "{existing_profile}", current_profile_content
     )
-    prompt = prompt.replace("{new_data}", chunk["content"])
+    prompt = prompt.replace("{new_data}", chunk_content_for_prompt(chunk))
     prompt = prompt.replace(
         "{source_tokens_past}", str(cumulative_source_tokens)
     )
@@ -1025,7 +1061,7 @@ def _iterative_generation(self, user, model_id, gen_template, budget,
             self, user, model_id, update_template, api_keys,
             max_output_tokens=max_output_tokens,
             first_chunk_prompt_fn=lambda chunk: gen_template.replace(
-                "{user_export}", chunk["content"]
+                "{user_export}", chunk_content_for_prompt(chunk)
             ),
             generation_type="iterative",
             status_prefix="Generating profile",

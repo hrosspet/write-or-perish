@@ -35,6 +35,7 @@ from backend.utils.llm_batch import (
 from backend.tasks.exports import (
     CHUNK_BUDGET, MIN_CHUNK_TOKENS,
     build_user_export_content, build_update_template, build_chunk_prompt,
+    chunk_content_for_prompt,
     build_integration_messages, _save_profile, _load_prompt,
     _collect_iterative_chain, _has_more_source_after,
 )
@@ -167,7 +168,8 @@ def _build_next_profile_request(user):
         if is_first_initial:
             gen_template = _load_prompt(
                 "profile_generation.txt", user_id=user.id)
-            prompt = gen_template.replace("{user_export}", chunk["content"])
+            prompt = gen_template.replace(
+                "{user_export}", chunk_content_for_prompt(chunk))
             generation_type = "iterative"
         else:
             prompt = build_chunk_prompt(

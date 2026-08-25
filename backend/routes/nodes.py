@@ -534,6 +534,7 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
         "updated_at": iso_utc(n.updated_at),
         "username": n.user.username if n.user else "Unknown",
         "llm_model": n.llm_model,
+        "origin": n.origin,
         "descendant_count": n._descendant_count,
         "user_id": n.user_id,
         "parent_user_id": parent_user_id,
@@ -1012,6 +1013,7 @@ def get_node(node_id):
         # Pin-to-profile
         "pinned_at": iso_utc(node.pinned_at),
         "llm_model": node.llm_model,
+        "origin": node.origin,
         "llm_task_status": node.llm_task_status,
         "has_original_audio": bool(node.audio_original_url or node.streaming_transcription),
         # Whether this node has GENERATED TTS audio (distinct from an

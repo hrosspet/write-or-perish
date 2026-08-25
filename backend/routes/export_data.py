@@ -66,6 +66,32 @@ def _node_author_label(node):
     return f"User ({author})"
 
 
+def _origin_suffix(node):
+    """' via twitter' for imported nodes; '' for Loore-native ones.
+
+    Loore is the default and main source, so it is never rendered — only
+    the exceptions are marked, keeping the token cost to the imports.
+    """
+    return f" via {node.origin}" if node.origin else ""
+
+
+def _origin_stats(rows):
+    """Per-origin node and token counts for the export metadata.
+
+    rows: objects with .origin and .token_count (CTE rows or Nodes).
+    Returns {origin: {"nodes": n, "tokens": t}}, NULL origin keyed
+    "loore". Profile generation renders this as a source-mix preamble
+    so the model knows e.g. that 95% of the corpus is public tweets.
+    """
+    stats = {}
+    for r in rows:
+        key = r.origin or "loore"
+        entry = stats.setdefault(key, {"nodes": 0, "tokens": 0})
+        entry["nodes"] += 1
+        entry["tokens"] += r.token_count or 0
+    return stats
+
+
 def _export_visible_filter(model, user_id):
     """SQL filter for nodes visible to *user_id* in their export.
 
@@ -93,7 +119,8 @@ def _node_header_line(node, index_path):
     depth = len(index_path.split('.'))
     header = "#" * min(depth + 1, 6)
     ts = node.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-    return f"{header} [{index_path}] {_node_author_label(node)} - {ts}\n"
+    return (f"{header} [{index_path}] {_node_author_label(node)}"
+            f"{_origin_suffix(node)} - {ts}\n")
 
 
 def _filtered_children(node, filter_ai_usage, created_before, included_ids,
@@ -425,7 +452,7 @@ def _select_incremental_rows(user_id, filter_ai_usage=False,
     PostgreSQL and the SQLite test database.
     """
     cols = (Node.id, Node.parent_id, Node.created_at, Node.token_count,
-            Node.deleted_at)
+            Node.deleted_at, Node.origin)
 
     def _general_filter():
         # _export_visible_filter includes soft-deleted nodes the user
@@ -901,6 +928,7 @@ def _build_user_export_incremental(
             "earliest_node_created_at": earliest_ts,
             "node_count": len(meta_rows),
             "node_ids": {r.id for r in meta_rows},
+            "origin_stats": _origin_stats(meta_rows),
         }
 
     return content
@@ -1305,6 +1333,8 @@ def build_user_export_content(
             ).filter(Node.id.in_(selected_ids)).one()
             earliest_ts, latest_ts, node_count = row
             node_ids = set(selected_ids)
+            meta_rows = db.session.query(Node.origin, Node.token_count).filter(
+                Node.id.in_(selected_ids)).all()
         else:
             # No max_tokens path — scan all included nodes
             meta_nodes = []
@@ -1321,6 +1351,7 @@ def build_user_export_content(
             )
             node_count = len(meta_nodes)
             node_ids = {n.id for n in meta_nodes}
+            meta_rows = meta_nodes
         return {
             "content": content,
             "token_count": approximate_token_count(content),
@@ -1328,6 +1359,7 @@ def build_user_export_content(
             "earliest_node_created_at": earliest_ts,
             "node_count": node_count,
             "node_ids": node_ids,
+            "origin_stats": _origin_stats(meta_rows),
         }
 
     return content

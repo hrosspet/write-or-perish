@@ -99,7 +99,7 @@ def _chatgpt_msg_key(msg):
 def _add_imported_message_nodes(user_id, human_owner_id, parent_id,
                                 node_type, llm_model, node_content,
                                 privacy_level, ai_usage, source_key,
-                                msg_created_at):
+                                msg_created_at, origin):
     """Create the node(s) for one imported message, splitting content
     above NODE_CHAR_CAP into a serial parent→child chain.
 
@@ -125,6 +125,7 @@ def _add_imported_message_nodes(user_id, human_owner_id, parent_id,
             privacy_level=privacy_level,
             ai_usage=ai_usage,
             source_key=source_key if j == len(segments) - 1 else None,
+            origin=origin,
         )
         if msg_created_at:
             n.created_at = msg_created_at + timedelta(milliseconds=j)
@@ -444,6 +445,7 @@ def confirm_import():
                     ai_usage=ai_usage,
                     source_key=source_key,
                     msg_created_at=node_created_at,
+                    origin="markdown",
                 )
 
                 key_index[source_key] = tip.id
@@ -502,6 +504,7 @@ def confirm_import():
                     ai_usage=ai_usage,
                     source_key=source_key,
                     msg_created_at=node_created_at,
+                    origin="markdown",
                 )
 
                 nodes_created += created_count
@@ -1005,6 +1008,7 @@ def confirm_claude_import():
                     ai_usage=ai_usage,
                     source_key=source_key,
                     msg_created_at=msg_created_at,
+                    origin="claude",
                 )
 
                 key_index[source_key] = tip.id
@@ -1234,6 +1238,7 @@ def confirm_twitter_import():
                     privacy_level=privacy_level,
                     ai_usage=ai_usage,
                     source_key=source_key,
+                    origin="twitter",
                 )
 
                 if tweet_created_at:
@@ -1292,6 +1297,7 @@ def confirm_twitter_import():
                     privacy_level=privacy_level,
                     ai_usage=ai_usage,
                     source_key=source_key,
+                    origin="twitter",
                 )
 
                 if tweet_created_at:
@@ -1728,6 +1734,7 @@ def confirm_chatgpt_import():
                     ai_usage=ai_usage,
                     source_key=source_key,
                     msg_created_at=msg_created_at,
+                    origin="chatgpt",
                 )
 
                 key_index[source_key] = tip.id

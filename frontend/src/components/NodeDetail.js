@@ -945,6 +945,7 @@ function NodeDetail({ nodeIdOverride }) {
           childrenCount={highlightedChildrenCount}
           humanOwnerUsername={humanOwnerUsername}
           llmModel={node.llm_model}
+          origin={node.origin}
           publicPage={node.privacy_level === 'public'}
         >
           <button

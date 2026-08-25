@@ -4,7 +4,7 @@ import { FaRegCommentDots } from 'react-icons/fa';
 import { useUser } from '../contexts/UserContext';
 import { formatDateTime } from '../utils/date';
 
-const NodeFooter = ({ username, createdAt, childrenCount, humanOwnerUsername, llmModel, onReplyClick, publicPage = false, children }) => {
+const NodeFooter = ({ username, createdAt, childrenCount, humanOwnerUsername, llmModel, origin, onReplyClick, publicPage = false, children }) => {
   const { user } = useUser();
 
   // LLM nodes: private threads show just the model — whose thread it is
@@ -38,6 +38,14 @@ const NodeFooter = ({ username, createdAt, childrenCount, humanOwnerUsername, ll
       <Link to={linkUrl} style={{ color: "var(--text-muted)", textDecoration: "none", transition: "color 0.3s ease" }}>
         {displayUsername}
       </Link>
+      {origin && (
+        // Imported nodes carry their platform; Loore-native ones (the
+        // default) stay unmarked.
+        <>
+          <span style={{ color: "var(--border)" }}>&middot;</span>
+          <span title={`Imported from ${origin}`}>via {origin}</span>
+        </>
+      )}
       <span style={{ color: "var(--border)" }}>&middot;</span>
       <span>{formattedDateTime}</span>
       <span style={{ color: "var(--border)" }}>&middot;</span>

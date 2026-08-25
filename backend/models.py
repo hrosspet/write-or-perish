@@ -301,6 +301,12 @@ class Node(db.Model):
     # natively-created nodes. Keys are short ("chatgpt:<uuid>") or a
     # sha256 hex digest, so they always fit String(255).
     source_key = db.Column(db.String(255), nullable=True, index=True)
+    # Where the node came from. NULL = written in Loore (the default and
+    # main source, never rendered). Imports stamp the platform:
+    # "twitter" | "chatgpt" | "claude" | "markdown". Deliberately
+    # platform-only, NOT provenance (own export vs. Loore-fetched public
+    # data): dedup runs on source_key and a re-import must match.
+    origin = db.Column(db.String(16), nullable=True, index=True)
 
     # DB-level backstop against concurrent imports racing past the
     # application dedup check. NULL source_key rows are exempt (both
