@@ -33,6 +33,7 @@ def get_latest_profile(user):
             "tokens_used": profile.tokens_used,
             "created_at": iso_utc(profile.created_at),
             "source_tokens_used": profile.source_tokens_used,
+            "source_origin_stats": profile.source_origin_stats,
             "source_data_cutoff": (
                 iso_utc(profile.source_data_cutoff)
             ),
