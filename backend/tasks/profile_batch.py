@@ -35,7 +35,7 @@ from backend.utils.llm_batch import (
 from backend.tasks.exports import (
     CHUNK_BUDGET, MIN_CHUNK_TOKENS,
     build_user_export_content, build_update_template, build_chunk_prompt,
-    chunk_content_for_prompt,
+    chunk_content_for_prompt, merge_origin_stats,
     build_integration_messages, _save_profile, _load_prompt,
     _collect_iterative_chain, _has_more_source_after,
 )
@@ -174,7 +174,7 @@ def _build_next_profile_request(user):
         else:
             prompt = build_chunk_prompt(
                 build_update_template(user.id), prev.get_content(),
-                cumulative, chunk)
+                cumulative, chunk, prev.source_origin_stats)
             generation_type = "update"
         latest_ts = chunk["latest_node_created_at"]
         # NB: Anthropic requires custom_id to match ^[a-zA-Z0-9_-]{1,64}$ —
@@ -195,6 +195,9 @@ def _build_next_profile_request(user):
                 "prev_profile_id": prev_id,
                 "generation_type": generation_type,
                 "prev_cumulative": cumulative,
+                "origin_stats": merge_origin_stats(
+                    prev.source_origin_stats if prev else None,
+                    chunk.get("origin_stats")),
                 "source_data_cutoff": (
                     latest_ts.isoformat() if latest_ts else None),
                 "model_id": model_id,
@@ -223,6 +226,7 @@ def _build_next_profile_request(user):
                         "custom_id": cid, "user_id": user.id,
                         "kind": "integration", "prev_profile_id": prev.id,
                         "prev_source_tokens": prev.source_tokens_used,
+                        "prev_origin_stats": prev.source_origin_stats,
                         "source_data_cutoff": (
                             prev.source_data_cutoff.isoformat()
                             if prev.source_data_cutoff else None),
@@ -268,7 +272,8 @@ def _apply_result(user, item, result, submitted_at):
                 user, item["model_id"], response["content"], response,
                 source_tokens_used=cumulative, source_data_cutoff=cutoff,
                 generation_type=item["generation_type"],
-                parent_profile_id=item["prev_profile_id"], batch=True)
+                parent_profile_id=item["prev_profile_id"], batch=True,
+                source_origin_stats=item.get("origin_stats"))
             # mirror PR #181: a from-scratch full regen is no longer needed
             # once its first chunk is committed. Only a from-scratch chunk
             # (prev_profile_id None) satisfies the flag — a flag set while
@@ -293,7 +298,8 @@ def _apply_result(user, item, result, submitted_at):
             user, item["model_id"], response["content"], response,
             source_tokens_used=item.get("prev_source_tokens"),
             source_data_cutoff=cutoff, generation_type="integration",
-            parent_profile_id=item["prev_profile_id"], batch=True)
+            parent_profile_id=item["prev_profile_id"], batch=True,
+            source_origin_stats=item.get("prev_origin_stats"))
         logger.info(f"User {user.id}: saved batch integration profile")
         # Integration = the batch rebuild finished for this user (#207).
         from backend.utils.notifications import notify_profile_ready

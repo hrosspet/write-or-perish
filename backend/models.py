@@ -542,6 +542,11 @@ class UserProfile(db.Model):
     source_tokens_used = db.Column(db.Integer, nullable=True, default=0)
     # Timestamp cursor: created_at of last included Node
     source_data_cutoff = db.Column(db.DateTime, nullable=True)
+    # Cumulative {origin: {"nodes": n, "tokens": t}} over every chunk
+    # that fed this profile (NULL origin keyed "loore"). Lets an update
+    # tell the model the base was e.g. 100% public tweets while the new
+    # data is the first Loore-native writing.
+    source_origin_stats = db.Column(db.JSON, nullable=True)
     # Distinguishes initial, update, iterative, and user edits
     generation_type = db.Column(db.String(16), nullable=True, default="initial")
     # Links to previous profile version used as input (chain tracing)

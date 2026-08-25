@@ -313,7 +313,8 @@ def _call_llm_with_retries(self, model_id, prompt_text, user_id,
 
 def _save_profile(user, model_id, profile_text, response,
                    source_tokens_used, source_data_cutoff,
-                   generation_type, parent_profile_id=None, batch=False):
+                   generation_type, parent_profile_id=None, batch=False,
+                   source_origin_stats=None):
     """Save a new UserProfile and log API cost. Returns the profile.
 
     batch=True records the Batch API discount in the cost log (issue #173)."""
@@ -342,6 +343,7 @@ def _save_profile(user, model_id, profile_text, response,
         ai_usage=user.default_ai_usage,
         source_tokens_used=source_tokens_used,
         source_data_cutoff=source_data_cutoff,
+        source_origin_stats=source_origin_stats,
         generation_type=generation_type,
         parent_profile_id=parent_profile_id,
     )
@@ -407,6 +409,7 @@ def revert_profile_for_import(user_id, earliest_imported_created_at):
         ai_usage=valid_profile.ai_usage,
         source_tokens_used=valid_profile.source_tokens_used,
         source_data_cutoff=valid_profile.source_data_cutoff,
+        source_origin_stats=valid_profile.source_origin_stats,
         generation_type="revert",
         parent_profile_id=valid_profile.id,
     )
@@ -566,6 +569,7 @@ def _do_iterative_incremental_update(self, user, model_id, prev_profile,
             initial_profile_id=prev_profile.id,
             initial_source_tokens=prev_profile.source_tokens_used or 0,
             initial_cutoff=cutoff,
+            initial_origin_stats=prev_profile.source_origin_stats,
             generation_type="update",
             status_prefix="Updating profile",
         )
@@ -677,6 +681,7 @@ def _single_pass_generation(self, user, model_id, gen_template,
         source_tokens_used=actual_source_tokens,
         source_data_cutoff=export_result["latest_node_created_at"],
         generation_type="initial",
+        source_origin_stats=export_result.get("origin_stats"),
     )
 
     logger.info(
@@ -757,35 +762,63 @@ ORIGIN_LABELS = {
 }
 
 
-def source_mix_preamble(chunk):
-    """One-line source-mix header for a profile-generation chunk.
+def merge_origin_stats(prev_stats, chunk_stats):
+    """Sum two {origin: {nodes, tokens}} dicts (either may be None)."""
+    merged = {k: dict(v) for k, v in (prev_stats or {}).items()}
+    for origin, s in (chunk_stats or {}).items():
+        entry = merged.setdefault(origin, {"nodes": 0, "tokens": 0})
+        entry["nodes"] += s.get("nodes", 0)
+        entry["tokens"] += s.get("tokens", 0)
+    return merged
 
-    Empty when everything is Loore-native (the default; costs no tokens).
-    Otherwise e.g. "[Source mix: 94% public tweets (imported from
-    Twitter/X, 3,100 entries), 6% written in Loore (12 entries)]" —
-    shares by token, so the model can read register-by-channel instead
-    of treating a public-tweets corpus as a private journal.
-    """
-    stats = (chunk or {}).get("origin_stats") or {}
-    if not stats or set(stats) == {"loore"}:
-        return ""
+
+def _format_origin_shares(stats):
     total = sum(s["tokens"] for s in stats.values()) or 1
     parts = []
     for origin, s in sorted(stats.items(), key=lambda kv: -kv[1]["tokens"]):
         label = ORIGIN_LABELS.get(origin, f"imported from {origin}")
         pct = round(s["tokens"] / total * 100)
         parts.append(f"{pct}% {label}, {s['nodes']:,} entries")
-    return "[Source mix: " + "; ".join(parts) + "]\n\n"
+    return "; ".join(parts)
 
 
-def chunk_content_for_prompt(chunk):
+def _loore_only(stats):
+    return not stats or set(stats) == {"loore"}
+
+
+def source_mix_preamble(chunk, prev_stats=None):
+    """Source-mix header for a profile-generation chunk.
+
+    prev_stats: cumulative origin stats of the profile being updated
+    (UserProfile.source_origin_stats), None for initial generation.
+
+    Empty when the WHOLE history (base + chunk) is Loore-native — the
+    default costs no tokens. Otherwise, initial generation gets
+    "[Source mix: 94% public tweets (...), 3,100 entries; 6% written in
+    Loore, 12 entries]"; an update gets both the base's mix and the new
+    data's, so the model sees e.g. a 100%-tweets base receiving its
+    first Loore-native writing instead of treating a public-tweets
+    corpus as a private journal.
+    """
+    stats = (chunk or {}).get("origin_stats") or {}
+    if _loore_only(stats) and _loore_only(prev_stats):
+        return ""
+    if not prev_stats:
+        return "[Source mix: " + _format_origin_shares(stats) + "]\n\n"
+    new_part = _format_origin_shares(stats) if stats else "none"
+    return ("[Source mix — existing profile built from: "
+            + _format_origin_shares(prev_stats)
+            + ". New data below: " + new_part + "]\n\n")
+
+
+def chunk_content_for_prompt(chunk, prev_stats=None):
     """The chunk's export text as fed to the profile prompts: source-mix
-    preamble (when any content is imported) + rendered content."""
-    return source_mix_preamble(chunk) + chunk["content"]
+    preamble (when any content, base or new, is imported) + content."""
+    return source_mix_preamble(chunk, prev_stats) + chunk["content"]
 
 
 def build_chunk_prompt(update_template, current_profile_content,
-                       cumulative_source_tokens, chunk):
+                       cumulative_source_tokens, chunk, prev_origin_stats=None):
     """Build the per-chunk incremental-update prompt (the non-first-chunk
     branch of _chunked_profile_loop)."""
     chunk_tokens_est = chunk["token_count"]
@@ -797,7 +830,8 @@ def build_chunk_prompt(update_template, current_profile_content,
     prompt = update_template.replace(
         "{existing_profile}", current_profile_content
     )
-    prompt = prompt.replace("{new_data}", chunk_content_for_prompt(chunk))
+    prompt = prompt.replace(
+        "{new_data}", chunk_content_for_prompt(chunk, prev_origin_stats))
     prompt = prompt.replace(
         "{source_tokens_past}", str(cumulative_source_tokens)
     )
@@ -889,6 +923,7 @@ def _do_integration(self, user, model_id, last_iterative_profile_id,
         source_data_cutoff=last_profile.source_data_cutoff,
         generation_type="integration",
         parent_profile_id=last_profile.id,
+        source_origin_stats=last_profile.source_origin_stats,
     )
 
     logger.info(
@@ -912,6 +947,7 @@ def _chunked_profile_loop(self, user, model_id, update_template,
                           initial_profile_id=None,
                           initial_source_tokens=0,
                           initial_cutoff=None,
+                          initial_origin_stats=None,
                           first_chunk_prompt_fn=None,
                           generation_type="iterative",
                           status_prefix="Generating profile",
@@ -936,6 +972,7 @@ def _chunked_profile_loop(self, user, model_id, update_template,
     current_profile_content = initial_profile_content
     current_profile_id = initial_profile_id
     cumulative_source_tokens = initial_source_tokens
+    cumulative_origin_stats = initial_origin_stats
     current_cutoff = initial_cutoff
     chunk_num = 0
 
@@ -989,7 +1026,7 @@ def _chunked_profile_loop(self, user, model_id, update_template,
         else:
             prompt = build_chunk_prompt(
                 update_template, current_profile_content,
-                cumulative_source_tokens, chunk
+                cumulative_source_tokens, chunk, cumulative_origin_stats
             )
 
         response = _call_llm_with_retries(
@@ -1003,6 +1040,8 @@ def _chunked_profile_loop(self, user, model_id, update_template,
             "input_tokens", chunk_tokens_est
         )
         cumulative_source_tokens += actual_chunk_tokens
+        cumulative_origin_stats = merge_origin_stats(
+            cumulative_origin_stats, chunk.get("origin_stats"))
 
         profile = _save_profile(
             user, model_id, response["content"], response,
@@ -1010,6 +1049,7 @@ def _chunked_profile_loop(self, user, model_id, update_template,
             source_data_cutoff=latest_ts,
             generation_type=generation_type,
             parent_profile_id=current_profile_id,
+            source_origin_stats=cumulative_origin_stats,
         )
 
         current_profile_content = response["content"]

@@ -1268,3 +1268,24 @@ class TestOrigin:
         assert "2,000 entries" in pre
         assert "5% written in Loore, 1 entries" in pre
         assert chunk_content_for_prompt(mixed) == pre + "x"
+
+    def test_source_mix_is_cumulative_across_updates(self):
+        from backend.tasks.exports import (
+            source_mix_preamble, merge_origin_stats)
+        tweets_base = {"twitter": {"nodes": 38130, "tokens": 900000}}
+        loore_chunk = {"content": "x", "origin_stats": {
+            "loore": {"nodes": 12, "tokens": 4000}}}
+        # A Loore-only chunk on a tweets-built profile MUST still say so.
+        pre = source_mix_preamble(loore_chunk, prev_stats=tweets_base)
+        assert "existing profile built from: 100% public tweets" in pre
+        assert "38,130 entries" in pre
+        assert "New data below: 100% written in Loore, 12 entries" in pre
+        # Pure-Loore history stays silent.
+        assert source_mix_preamble(
+            loore_chunk, prev_stats={"loore": {"nodes": 5, "tokens": 9}}) == ""
+        assert source_mix_preamble(loore_chunk, prev_stats=None) == ""
+        merged = merge_origin_stats(tweets_base, loore_chunk["origin_stats"])
+        assert merged == {
+            "twitter": {"nodes": 38130, "tokens": 900000},
+            "loore": {"nodes": 12, "tokens": 4000}}
+        assert tweets_base == {"twitter": {"nodes": 38130, "tokens": 900000}}
