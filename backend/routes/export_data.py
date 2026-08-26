@@ -1040,7 +1040,39 @@ def build_user_export_content(
     if created_before:
         query = query.filter(Node.created_at < created_before)
 
-    all_top_level_nodes = query.order_by(Node.created_at.desc()).all()
+    # Thread count for the header — a COUNT, never a load.
+    total_threads = query.count()
+    if not total_threads:
+        return None
+
+    # Variables for smart quote resolution (used when max_tokens is specified)
+    embedded_quotes = None
+    included_ids = None
+    ai_blocked_ids = None
+    resolver = None
+    selected_ids = None
+    budget = None
+
+    if max_tokens:
+        # Budgeted callers ({user_recent_raw} every reply, {user_export}
+        # windows) must never materialise the whole corpus: pre-select the
+        # window in SQL FIRST and load only those rows. Loading every
+        # top-level node and running the per-thread alive check on each
+        # (61k rows, 61k queries) OOM-killed the 512 MB worker on a large
+        # imported archive before the 10k-token budget was even consulted.
+        header_footer_tokens = 100
+        budget = max_tokens - header_footer_tokens
+        selected_ids = _preselect_node_ids(
+            user.id, budget, filter_ai_usage=filter_ai_usage,
+            created_before=created_before, created_after=created_after,
+            chronological_order=chronological_order,
+        )
+        all_top_level_nodes = (
+            query.filter(Node.id.in_(selected_ids))
+            .order_by(Node.created_at.desc()).all()
+        ) if selected_ids else []
+    else:
+        all_top_level_nodes = query.order_by(Node.created_at.desc()).all()
 
     # §5a per-thread skip: drop fully-deleted threads so the export
     # doesn't show a chain of `[Node deleted by author]` placeholders
@@ -1054,26 +1086,8 @@ def build_user_export_content(
     if not all_top_level_nodes:
         return None
 
-    # Variables for smart quote resolution (used when max_tokens is specified)
-    embedded_quotes = None
-    included_ids = None
-    ai_blocked_ids = None
-    resolver = None
-    selected_ids = None
-
     # If max_tokens is specified, use ExportQuoteResolver for smart quote handling
     if max_tokens:
-        # Reserve tokens for header and footer
-        header_footer_tokens = 100
-        budget = max_tokens - header_footer_tokens
-
-        # Pre-select node IDs via SQL window function (no loading/decryption)
-        selected_ids = _preselect_node_ids(
-            user.id, budget, filter_ai_usage=filter_ai_usage,
-            created_before=created_before, created_after=created_after,
-            chronological_order=chronological_order,
-        )
-
         # Load selected Node objects with context_artifacts eager-loaded
         selected_nodes = (
             Node.query
@@ -1151,8 +1165,8 @@ def build_user_export_content(
     export_lines.append("")
     export_lines.append(f"**User:** {user.username}")
     export_lines.append(f"**Export Date:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
-    export_lines.append(f"**Total Threads:** {len(all_top_level_nodes)}")
-    if max_tokens and len(top_level_nodes) < len(all_top_level_nodes):
+    export_lines.append(f"**Total Threads:** {total_threads}")
+    if max_tokens and len(top_level_nodes) < total_threads:
         export_lines.append(f"**Included Threads (most recent):** {len(top_level_nodes)}")
         export_lines.append(f"*(Limited to ~{max_tokens:,} tokens)*")
     export_lines.append("")

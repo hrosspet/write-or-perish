@@ -762,3 +762,33 @@ def test_quote_resolver_deleted_vs_inaccessible(app, alice, bob):
     assert data[target_id] is None
     rendered, _ = resolve_quotes(text, bob.id, for_llm=True)
     assert "inaccessible" in rendered
+
+
+def test_budgeted_export_preselects_before_loading(app, alice, monkeypatch):
+    """A budgeted export ({user_recent_raw} on every reply) must window in
+    SQL first and only touch the selected rows: loading every top-level
+    node and running the per-thread alive check on each OOM-killed the
+    worker on a 61k-node imported archive (2026-08-26)."""
+    from backend.routes import export_data
+    base = datetime(2026, 1, 1)
+    for i in range(40):
+        n = _make_node(alice, content=f"entry number {i:02d} " + "x" * 200)
+        n.created_at = base + timedelta(days=i)
+        n.token_count = 55  # the SQL window sums stored token_count
+    _db.session.commit()
+
+    calls = []
+    real = export_data._thread_has_alive_node
+
+    def counting(root_id):
+        calls.append(root_id)
+        return real(root_id)
+    monkeypatch.setattr(export_data, "_thread_has_alive_node", counting)
+
+    content = export_data.build_user_export_content(alice, max_tokens=400)
+    assert content is not None
+    assert "entry number 39" in content          # newest first
+    assert "entry number 00" not in content      # outside the window
+    assert 0 < len(calls) < 40                    # only the window, not the corpus
+    assert "**Total Threads:** 40" in content     # header still counts everything
+    assert "Included Threads" in content
