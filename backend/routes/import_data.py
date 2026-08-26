@@ -8,8 +8,6 @@ import hashlib
 import zipfile
 import io
 import json
-import re
-from werkzeug.utils import secure_filename
 
 import_bp = Blueprint("import_bp", __name__)
 
@@ -165,7 +163,7 @@ def _restore_node(node_id, content, privacy_level, ai_usage,
     set to this import's choices, like any other (re)imported node.
     """
     node = Node.query.get(node_id)
-    node.content = content
+    node.set_content(content)
     node.token_count = (
         token_count if token_count is not None
         else approximate_token_count(content)
@@ -600,20 +598,24 @@ def analyze_twitter_import():
     """
     Analyze a Twitter/X data export zip file.
 
-    Expects:
-        - multipart/form-data with 'zip_file' field containing a Twitter data export
+    Expects multipart/form-data with a 'zip_file' field.
+
+    The tweets themselves stay on the server: they are parsed once,
+    streamed to a per-user stash file (backend/utils/twitter_archive.py)
+    and referenced by ``import_token`` in the confirm step. Only counts
+    go back to the browser, so the response size no longer scales with
+    the archive.
 
     Returns:
         {
-            "tweets": [...],
-            "total_tweets": N,
-            "original_count": N,
-            "reply_count": N,
+            "import_token": "...",
+            "total_tweets": N, "original_count": N, "reply_count": N,
             "skipped_retweets": N,
-            "total_tokens": N,
-            "total_size": N
+            "total_tokens": N, "original_tokens": N, "total_size": N
         }
     """
+    from backend.utils import twitter_archive as ta
+
     if 'zip_file' not in request.files:
         return jsonify({"error": "No zip_file provided"}), 400
 
@@ -626,100 +628,22 @@ def analyze_twitter_import():
         return jsonify({"error": "File must be a .zip file"}), 400
 
     try:
-        zip_bytes = io.BytesIO(zip_file.read())
+        token, path = ta.stash_new(current_user.id)
+    except OSError as e:
+        current_app.logger.error(f"Twitter import stash failed: {e}")
+        return jsonify({"error": "Could not store the archive for import"}), 500
 
-        tweets_js_content = None
-
-        with zipfile.ZipFile(zip_bytes, 'r') as zip_ref:
-            # Find data/tweets.js — may be nested under a top-level folder
-            for name in zip_ref.namelist():
-                if name.endswith('data/tweets.js') or name == 'data/tweets.js':
-                    tweets_js_content = zip_ref.read(name).decode('utf-8')
-                    break
-
-        if tweets_js_content is None:
-            return jsonify({
-                "error": "Could not find data/tweets.js in the zip archive. "
-                         "Please upload the original Twitter/X data export."
-            }), 400
-
-        # Strip the JS variable assignment prefix to get valid JSON
-        # Format: window.YTD.tweets.part0 = [...]
-        json_match = re.search(r'=\s*(\[.*)', tweets_js_content, re.DOTALL)
-        if not json_match:
-            return jsonify({
-                "error": "Could not parse tweets.js — unexpected format."
-            }), 400
-
-        raw_tweets = json.loads(json_match.group(1))
-
-        tweets = []
-        skipped_retweets = 0
-        original_count = 0
-        reply_count = 0
-        total_tokens = 0
-        total_size = 0
-
-        for entry in raw_tweets:
-            tweet = entry.get('tweet', entry)
-
-            full_text = tweet.get('full_text', '')
-
-            # Skip retweets
-            if full_text.startswith('RT @'):
-                skipped_retweets += 1
-                continue
-
-            id_str = tweet.get('id_str', '')
-            created_at = tweet.get('created_at', '')
-            favorite_count = int(tweet.get('favorite_count', 0))
-            retweet_count = int(tweet.get('retweet_count', 0))
-            in_reply_to_status_id_str = tweet.get(
-                'in_reply_to_status_id_str', None
-            )
-            in_reply_to_screen_name = tweet.get(
-                'in_reply_to_screen_name', None
-            )
-
-            is_reply = bool(in_reply_to_status_id_str)
-            if is_reply:
-                reply_count += 1
-            else:
-                original_count += 1
-
-            token_count = approximate_token_count(full_text)
-            total_tokens += token_count
-            total_size += len(full_text.encode('utf-8'))
-
-            tweets.append({
-                "id_str": id_str,
-                "full_text": full_text,
-                "created_at": created_at,
-                "is_reply": is_reply,
-                "in_reply_to_screen_name": in_reply_to_screen_name,
-                "favorite_count": favorite_count,
-                "retweet_count": retweet_count,
-                "token_count": token_count
-            })
-
-        return jsonify({
-            "tweets": tweets,
-            "total_tweets": len(tweets),
-            "original_count": original_count,
-            "reply_count": reply_count,
-            "skipped_retweets": skipped_retweets,
-            "total_tokens": total_tokens,
-            "total_size": total_size
-        }), 200
-
-    except zipfile.BadZipFile:
-        return jsonify({"error": "Invalid zip file"}), 400
-    except json.JSONDecodeError as e:
-        return jsonify({
-            "error": "Failed to parse tweets JSON",
-            "details": str(e)
-        }), 400
+    try:
+        # The zip itself is small (a few MB); BytesIO gives ZipFile the
+        # seekable handle werkzeug's spooled upload doesn't.
+        summary = ta.analyze_archive_to_stash(
+            io.BytesIO(zip_file.read()), path
+        )
+    except ta.TwitterArchiveError as e:
+        ta.stash_delete(path)
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
+        ta.stash_delete(path)
         current_app.logger.error(
             f"Error analyzing Twitter import: {str(e)}"
         )
@@ -727,6 +651,9 @@ def analyze_twitter_import():
             "error": "Failed to analyze Twitter export",
             "details": str(e)
         }), 500
+
+    summary["import_token"] = token
+    return jsonify(summary), 200
 
 
 @import_bp.route("/import/claude/analyze", methods=["POST"])
@@ -1112,42 +1039,218 @@ def confirm_claude_import():
         }), 500
 
 
+def _parse_tweet_ts(raw_ts):
+    """Export timestamp -> naive UTC datetime, or None."""
+    if not raw_ts:
+        return None
+    try:
+        return datetime.strptime(
+            raw_ts, "%a %b %d %H:%M:%S %z %Y"
+        ).replace(tzinfo=None)
+    except (ValueError, TypeError):
+        return None
+
+
+def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
+                         privacy_level, ai_usage, on_deleted,
+                         batch_size=500, on_progress=None):
+    """Create nodes for analyzed tweets. Runs inside the Celery import
+    task (backend/tasks/imports.py); ``rows`` is any iterable of compact
+    tweet rows sorted by created_at (the analyze step sorts the stash).
+
+    Commits every ``batch_size`` created nodes so a 60k-tweet archive
+    never holds one giant transaction, and reports ``done`` rows through
+    ``on_progress`` after each batch. Dedup/restore/skip semantics are the
+    same as the other importers (see _load_source_key_index).
+
+    Returns the dict the frontend renders as the import result.
+    """
+    if import_type not in ('single_thread', 'separate_nodes'):
+        raise ValueError("Invalid import_type")
+
+    nodes_created = 0
+    nodes_skipped = 0
+    nodes_restored = 0
+    skipped_alive_ids = []
+    key_index, deleted_keys = _load_source_key_index(user_id)
+    parent_id = None
+    earliest_ts = None
+    total_imported_tokens = 0
+    since_commit = 0
+    done = 0
+
+    for tweet_data in rows:
+        done += 1
+        if not include_replies and tweet_data.get('is_reply', False):
+            continue
+
+        content = tweet_data.get('full_text', '')
+        token_count = tweet_data.get(
+            'token_count', approximate_token_count(content)
+        )
+        total_imported_tokens += token_count
+        tweet_created_at = _parse_tweet_ts(tweet_data.get('created_at', ''))
+        if tweet_created_at and (earliest_ts is None
+                                 or tweet_created_at < earliest_ts):
+            earliest_ts = tweet_created_at
+
+        source_key = _tweet_source_key(tweet_data)
+        if source_key in key_index:
+            if source_key in deleted_keys and on_deleted == 'restore':
+                _restore_node(
+                    key_index[source_key], content,
+                    privacy_level, ai_usage, token_count
+                )
+                deleted_keys.discard(source_key)
+                nodes_restored += 1
+            else:
+                nodes_skipped += 1
+                if source_key not in deleted_keys:
+                    skipped_alive_ids.append(key_index[source_key])
+            if import_type == 'single_thread':
+                # Chain the next new tweet onto the existing copy so
+                # partially-skipped imports don't orphan new nodes.
+                parent_id = key_index[source_key]
+            continue
+
+        node = Node(
+            user_id=user_id,
+            human_owner_id=user_id,
+            parent_id=parent_id if import_type == 'single_thread' else None,
+            node_type="user",
+            token_count=token_count,
+            privacy_level=privacy_level,
+            ai_usage=ai_usage,
+            source_key=source_key,
+            origin="twitter",
+        )
+        node.set_content(content)
+        if tweet_created_at:
+            node.created_at = tweet_created_at
+        db.session.add(node)
+
+        if import_type == 'single_thread':
+            db.session.flush()
+            key_index[source_key] = node.id
+            parent_id = node.id
+        else:
+            key_index[source_key] = None  # id not needed: no chaining
+
+        nodes_created += 1
+        since_commit += 1
+        if since_commit >= batch_size:
+            db.session.commit()
+            since_commit = 0
+            if on_progress:
+                on_progress(done)
+
+    nodes_updated = _apply_settings_to_skipped(
+        skipped_alive_ids, privacy_level, ai_usage
+    )
+    nodes_skipped -= nodes_updated
+    db.session.commit()
+    if on_progress:
+        on_progress(total)
+
+    thread_count = 1 if import_type == 'single_thread' else nodes_created
+
+    profile_update_task_id = None
+    if ai_usage in AI_ALLOWED and nodes_created + nodes_restored > 0:
+        profile_update_task_id = _maybe_update_profile_after_import(
+            user_id, earliest_ts, total_imported_tokens
+        )
+
+    return {
+        "message": "Import successful",
+        "nodes_created": nodes_created,
+        "thread_count": thread_count,
+        "profile_update_task_id": profile_update_task_id,
+        "created": nodes_created,
+        "skipped": nodes_skipped,
+        "restored": nodes_restored,
+        "updated": nodes_updated,
+    }
+
+
+def _maybe_update_profile_after_import(user_id, earliest_ts, imported_tokens):
+    """Revert the profile if imported data predates its cutoff, then
+    trigger an update when enough new tokens landed. Best-effort."""
+    try:
+        user_obj = User.query.get(user_id)
+        if not user_obj or (user_obj.plan or "free") not in User.VOICE_MODE_PLANS:
+            return None
+        latest_profile = UserProfile.query.filter_by(
+            user_id=user_id
+        ).order_by(UserProfile.created_at.desc()).first()
+        cutoff = latest_profile.source_data_cutoff if latest_profile else None
+        needs_full_regen = bool(cutoff and earliest_ts and earliest_ts < cutoff)
+        if needs_full_regen:
+            from backend.tasks.exports import revert_profile_for_import
+            revert_profile_for_import(user_id, earliest_ts)
+            db.session.commit()
+        if imported_tokens >= 10000:
+            from backend.tasks.exports import maybe_trigger_profile_update
+            return maybe_trigger_profile_update(
+                user_id, force_full_regen=needs_full_regen,
+            )
+    except Exception as e:
+        current_app.logger.warning(
+            f"Auto-trigger profile update failed: {e}"
+        )
+    return None
+
+
+def _tweet_source_key(tweet_data):
+    """twitter:<id_str>; content hash when id_str is absent."""
+    id_str = tweet_data.get('id_str', '')
+    if id_str:
+        return f"twitter:{id_str}"
+    return _generic_source_key(
+        "twitter",
+        tweet_data.get('created_at', ''),
+        tweet_data.get('full_text', ''),
+    )
+
+
 @import_bp.route("/import/twitter/confirm", methods=["POST"])
 @login_required
 def confirm_twitter_import():
     """
-    Create nodes from analyzed Twitter data.
+    Start creating nodes from an analyzed Twitter archive.
 
     Request body:
         {
-            "tweets": [...],
+            "import_token": "...",       # from /import/twitter/analyze
             "import_type": "single_thread" | "separate_nodes",
             "include_replies": true | false,
             "privacy_level": "private",
-            "ai_usage": "none"
+            "ai_usage": "none",
+            "on_deleted": "restore" | "skip"   # after a 409
         }
 
-    Returns:
-        {
-            "message": "Import successful",
-            "nodes_created": N,
-            "thread_count": N
-        }
+    Node creation runs in a Celery task; poll
+    GET /import/status/<task_id> for progress and the final result.
+
+    Returns 202 {"task_id": "...", "total": N}.
     """
+    from backend.utils import twitter_archive as ta
+
     data = request.get_json()
 
     if not data:
         return jsonify({"error": "No data provided"}), 400
 
-    tweets = data.get('tweets', [])
     import_type = data.get('import_type', 'separate_nodes')
-    include_replies = data.get('include_replies', False)
+    include_replies = bool(data.get('include_replies', False))
     privacy_level = data.get('privacy_level', 'private')
     ai_usage = data.get('ai_usage', 'none')
     on_deleted = data.get('on_deleted')
 
-    if not tweets:
-        return jsonify({"error": "No tweets provided"}), 400
+    path = ta.stash_path(current_user.id, data.get('import_token'))
+    if path is None or not path.exists():
+        return jsonify({
+            "error": "Import data expired — please upload the archive again."
+        }), 400
 
     if import_type not in ['single_thread', 'separate_nodes']:
         return jsonify({
@@ -1155,248 +1258,69 @@ def confirm_twitter_import():
                      "Must be 'single_thread' or 'separate_nodes'"
         }), 400
 
-    try:
-        # Filter out replies if not included
-        if not include_replies:
-            tweets = [t for t in tweets if not t.get('is_reply', False)]
+    _, deleted_keys = _load_source_key_index(current_user.id)
+    conflict = _deleted_match_response(
+        (_tweet_source_key(t) for t in ta.stash_iter(path)
+         if include_replies or not t.get('is_reply', False)),
+        deleted_keys, on_deleted,
+    )
+    if conflict:
+        return conflict
 
-        # Sort by created_at ascending
-        tweets_sorted = sorted(
-            tweets, key=lambda t: t.get('created_at', '')
-        )
+    from backend.tasks.imports import import_twitter_archive
+    task = import_twitter_archive.delay(current_user.id, data['import_token'], {
+        "import_type": import_type,
+        "include_replies": include_replies,
+        "privacy_level": privacy_level,
+        "ai_usage": ai_usage,
+        "on_deleted": on_deleted,
+    })
+    return jsonify({
+        "task_id": task.id,
+        "status": "queued",
+        "total": ta.stash_count(path),
+    }), 202
 
-        nodes_created = 0
-        nodes_skipped = 0
-        nodes_restored = 0
-        thread_count = 0
-        skipped_alive_ids = []
-        key_index, deleted_keys = _load_source_key_index(current_user.id)
 
-        def _tweet_source_key(tweet_data):
-            """twitter:<id_str>; content hash when id_str is absent."""
-            id_str = tweet_data.get('id_str', '')
-            if id_str:
-                return f"twitter:{id_str}"
-            return _generic_source_key(
-                "twitter",
-                tweet_data.get('created_at', ''),
-                tweet_data.get('full_text', ''),
-            )
+@import_bp.route("/import/status/<task_id>", methods=["GET"])
+@login_required
+def import_status(task_id):
+    """Progress of a background import task.
 
-        conflict = _deleted_match_response(
-            (_tweet_source_key(t) for t in tweets_sorted),
-            deleted_keys, on_deleted,
-        )
-        if conflict:
-            return conflict
+    {"status": "queued" | "running" | "completed" | "failed",
+     "done": N, "total": N, "result": {...} | null, "error": str | null}
 
-        if import_type == 'single_thread':
-            parent_id = None
+    Task meta carries the owning user_id; anyone else's task id reads
+    as "queued" forever rather than leaking counts.
+    """
+    from backend.celery_app import celery
 
-            for tweet_data in tweets_sorted:
-                content = tweet_data.get('full_text', '')
-                token_count = tweet_data.get(
-                    'token_count', approximate_token_count(content)
-                )
+    task = celery.AsyncResult(task_id)
+    info = task.info if isinstance(task.info, dict) else {}
+    owner = info.get("user_id")
+    if task.state in ("PROGRESS", "SUCCESS") and owner != current_user.id:
+        return jsonify({"task_id": task_id, "status": "queued",
+                        "done": 0, "total": None, "result": None,
+                        "error": None}), 200
 
-                source_key = _tweet_source_key(tweet_data)
-                if source_key in key_index:
-                    # Chain the next new tweet onto the existing copy so
-                    # partially-skipped imports don't orphan new nodes.
-                    if source_key in deleted_keys and on_deleted == 'restore':
-                        _restore_node(
-                            key_index[source_key], content,
-                            privacy_level, ai_usage, token_count
-                        )
-                        deleted_keys.discard(source_key)
-                        nodes_restored += 1
-                    else:
-                        nodes_skipped += 1
-                        if source_key not in deleted_keys:
-                            skipped_alive_ids.append(key_index[source_key])
-                    parent_id = key_index[source_key]
-                    continue
-
-                # Parse original Twitter timestamp
-                tweet_created_at = None
-                raw_ts = tweet_data.get('created_at', '')
-                if raw_ts:
-                    try:
-                        tweet_created_at = datetime.strptime(
-                            raw_ts, "%a %b %d %H:%M:%S %z %Y"
-                        ).replace(tzinfo=None)
-                    except (ValueError, TypeError):
-                        pass
-
-                node = Node(
-                    user_id=current_user.id,
-                    human_owner_id=current_user.id,
-                    parent_id=parent_id,
-                    node_type="user",
-                    content=content,
-                    token_count=token_count,
-                    privacy_level=privacy_level,
-                    ai_usage=ai_usage,
-                    source_key=source_key,
-                    origin="twitter",
-                )
-
-                if tweet_created_at:
-                    node.created_at = tweet_created_at
-
-                db.session.add(node)
-                db.session.flush()
-
-                key_index[source_key] = node.id
-                parent_id = node.id
-                nodes_created += 1
-
-            thread_count = 1
-
-        else:  # separate_nodes
-            for tweet_data in tweets_sorted:
-                content = tweet_data.get('full_text', '')
-                token_count = tweet_data.get(
-                    'token_count', approximate_token_count(content)
-                )
-
-                source_key = _tweet_source_key(tweet_data)
-                if source_key in key_index:
-                    if source_key in deleted_keys and on_deleted == 'restore':
-                        _restore_node(
-                            key_index[source_key], content,
-                            privacy_level, ai_usage, token_count
-                        )
-                        deleted_keys.discard(source_key)
-                        nodes_restored += 1
-                    else:
-                        nodes_skipped += 1
-                        if source_key not in deleted_keys:
-                            skipped_alive_ids.append(key_index[source_key])
-                    continue
-                key_index[source_key] = None  # id not needed: no chaining
-
-                # Parse original Twitter timestamp
-                tweet_created_at = None
-                raw_ts = tweet_data.get('created_at', '')
-                if raw_ts:
-                    try:
-                        tweet_created_at = datetime.strptime(
-                            raw_ts, "%a %b %d %H:%M:%S %z %Y"
-                        ).replace(tzinfo=None)
-                    except (ValueError, TypeError):
-                        pass
-
-                node = Node(
-                    user_id=current_user.id,
-                    human_owner_id=current_user.id,
-                    parent_id=None,
-                    node_type="user",
-                    content=content,
-                    token_count=token_count,
-                    privacy_level=privacy_level,
-                    ai_usage=ai_usage,
-                    source_key=source_key,
-                    origin="twitter",
-                )
-
-                if tweet_created_at:
-                    node.created_at = tweet_created_at
-
-                db.session.add(node)
-                nodes_created += 1
-
-            thread_count = nodes_created
-
-        nodes_updated = _apply_settings_to_skipped(
-            skipped_alive_ids, privacy_level, ai_usage
-        )
-        nodes_skipped -= nodes_updated
-
-        db.session.commit()
-
-        # Determine if imported data predates the current profile cutoff
-        profile_update_task_id = None
-        if ai_usage in AI_ALLOWED:
-            try:
-                user_obj = User.query.get(current_user.id)
-                if (user_obj and (user_obj.plan or "free")
-                        in User.VOICE_MODE_PLANS):
-                    latest_profile = UserProfile.query.filter_by(
-                        user_id=current_user.id
-                    ).order_by(UserProfile.created_at.desc()).first()
-                    cutoff = (latest_profile.source_data_cutoff
-                              if latest_profile else None)
-
-                    needs_full_regen = False
-                    earliest_ts = None
-                    if cutoff:
-                        for t in tweets_sorted:
-                            raw_ts = t.get('created_at', '')
-                            if raw_ts:
-                                try:
-                                    ts = datetime.strptime(
-                                        raw_ts,
-                                        "%a %b %d %H:%M:%S %z %Y"
-                                    ).replace(tzinfo=None)
-                                    if ts < cutoff:
-                                        needs_full_regen = True
-                                    if (earliest_ts is None
-                                            or ts < earliest_ts):
-                                        earliest_ts = ts
-                                except (ValueError, TypeError):
-                                    pass
-
-                    if needs_full_regen:
-                        from backend.tasks.exports import (
-                            revert_profile_for_import
-                        )
-                        revert_profile_for_import(
-                            user_obj.id, earliest_ts
-                        )
-                        db.session.commit()
-
-                    total_imported_tokens = sum(
-                        t.get('token_count', approximate_token_count(
-                            t.get('full_text', '')
-                        ))
-                        for t in tweets_sorted
-                    )
-                    if total_imported_tokens >= 10000:
-                        from backend.tasks.exports import (
-                            maybe_trigger_profile_update
-                        )
-                        profile_update_task_id = (
-                            maybe_trigger_profile_update(
-                                current_user.id,
-                                force_full_regen=needs_full_regen,
-                            )
-                        )
-            except Exception as e:
-                current_app.logger.warning(
-                    f"Auto-trigger profile update failed: {e}"
-                )
-
-        return jsonify({
-            "message": "Import successful",
-            "nodes_created": nodes_created,
-            "thread_count": thread_count,
-            "profile_update_task_id": profile_update_task_id,
-            "created": nodes_created,
-            "skipped": nodes_skipped,
-            "restored": nodes_restored,
-            "updated": nodes_updated,
-        }), 201
-
-    except Exception as e:
-        db.session.rollback()
-        current_app.logger.error(
-            f"Error confirming Twitter import: {str(e)}"
-        )
-        return jsonify({
-            "error": "Failed to import tweets",
-            "details": str(e)
-        }), 500
+    if task.state == "PROGRESS":
+        return jsonify({"task_id": task_id, "status": "running",
+                        "done": info.get("done", 0),
+                        "total": info.get("total"),
+                        "result": None, "error": None}), 200
+    if task.state == "SUCCESS":
+        return jsonify({"task_id": task_id, "status": "completed",
+                        "done": info.get("total"), "total": info.get("total"),
+                        "result": {k: v for k, v in info.items() if k != "user_id"},
+                        "error": None}), 200
+    if task.state == "FAILURE":
+        err = task.info
+        return jsonify({"task_id": task_id, "status": "failed",
+                        "done": 0, "total": None, "result": None,
+                        "error": str(err) if err else "Import failed"}), 200
+    return jsonify({"task_id": task_id, "status": "queued",
+                    "done": 0, "total": None, "result": None,
+                    "error": None}), 200
 
 
 def _linearize_chatgpt_messages(mapping):

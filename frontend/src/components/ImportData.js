@@ -43,11 +43,12 @@ function importErr(userMessage) {
 // A spinning icon + stage label, shown inside import buttons while an
 // import is in flight. `stage` is one of STAGE_LABELS' keys; falls back to
 // the provided label when the stage is unknown.
-function ImportSpinner({ stage, fallback }) {
+function ImportSpinner({ stage, fallback, detail }) {
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: "0.4em" }}>
       <FaSpinner className="spin" aria-hidden="true" />
       {STAGE_LABELS[stage] || fallback}
+      {detail && <span style={{ opacity: 0.75 }}>{detail}</span>}
     </span>
   );
 }
@@ -195,6 +196,8 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
   const [dateOrdering, setDateOrdering] = useState("modified");
   const [importing, setImporting] = useState(false);
   const [importStage, setImportStage] = useState(null);
+  // {done, total} while a background import task runs (Twitter)
+  const [importProgress, setImportProgress] = useState(null);
   const [importPrivacy, setImportPrivacy] = useState("private");
   const [importAiUsage, setImportAiUsage] = useState("none");
   const [error, setError] = useState("");
@@ -352,8 +355,46 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
 
     setImporting(true);
     setImportStage("importing");
+    setImportProgress(null);
+
+    const finishWith = (result) => {
+      setShowTwitterImportDialog(false);
+      setTwitterImportData(null);
+      setImporting(false);
+      setImportStage(null);
+      setImportProgress(null);
+      setError("");
+      if (result.profile_update_task_id && onProfileUpdateStarted) {
+        onProfileUpdateStarted(result.profile_update_task_id);
+      }
+      setImportResult(result);
+    };
+    const failWith = (message) => {
+      setError(message || "Error importing Twitter data. Please try again.");
+      setImporting(false);
+      setImportStage(null);
+      setImportProgress(null);
+    };
+
+    // The confirm request only queues a Celery task (node creation for a
+    // large archive takes minutes); progress and the result come from
+    // polling /import/status until it completes.
+    const poll = (taskId) => {
+      api.get(`/import/status/${taskId}`)
+        .then(({ data }) => {
+          if (data.status === "completed") return finishWith(data.result || {});
+          if (data.status === "failed") return failWith(data.error);
+          if (data.status === "running") setImportProgress({ done: data.done, total: data.total });
+          setTimeout(() => poll(taskId), 1500);
+        })
+        .catch((err) => {
+          console.error("Error polling Twitter import status:", err);
+          failWith("Lost track of the import — reload the page to check whether it finished.");
+        });
+    };
+
     api.post("/import/twitter/confirm", {
-      tweets: twitterImportData.tweets,
+      import_token: twitterImportData.import_token,
       import_type: importType,
       include_replies: includeReplies,
       privacy_level: importPrivacy,
@@ -361,22 +402,13 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
       ...(onDeleted ? { on_deleted: onDeleted } : {})
     })
       .then((response) => {
-        setShowTwitterImportDialog(false);
-        setTwitterImportData(null);
-        setImporting(false);
-        setImportStage(null);
-        setError("");
-        if (response.data.profile_update_task_id && onProfileUpdateStarted) {
-          onProfileUpdateStarted(response.data.profile_update_task_id);
-        }
-        setImportResult(response.data);
+        setImportProgress({ done: 0, total: response.data.total });
+        poll(response.data.task_id);
       })
       .catch((err) => {
         if (handleDeletedConflict(err, handleConfirmTwitterImport)) return;
         console.error("Error importing Twitter data:", err);
-        setError(err.response?.data?.error || "Error importing Twitter data. Please try again.");
-        setImporting(false);
-        setImportStage(null);
+        failWith(err.response?.data?.error);
       });
   };
 
@@ -1021,13 +1053,10 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
           )}
           <p style={{ color: "var(--text-secondary)", fontFamily: "var(--sans)", fontWeight: 300 }}>
             Estimated tokens: <strong style={{ color: "var(--text-primary)" }}>
-              {includeReplies
-                ? twitterImportData.total_tokens.toLocaleString()
-                : twitterImportData.tweets
-                    .filter(t => !t.is_reply)
-                    .reduce((sum, t) => sum + t.token_count, 0)
-                    .toLocaleString()
-              }
+              {(includeReplies
+                ? twitterImportData.total_tokens
+                : twitterImportData.original_tokens
+              ).toLocaleString()}
             </strong>
             {" "}({includeReplies ? twitterImportData.total_tweets : twitterImportData.original_count} tweets)
           </p>
@@ -1096,7 +1125,15 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                 opacity: importing ? 0.6 : 1
               }}
             >
-              {importing ? <ImportSpinner stage={importStage} fallback="Importing…" /> : "Confirm Import"}
+              {importing
+                ? <ImportSpinner
+                    stage={importStage}
+                    fallback="Importing…"
+                    detail={importProgress && importProgress.total
+                      ? `${importProgress.done.toLocaleString()} / ${importProgress.total.toLocaleString()}`
+                      : null}
+                  />
+                : "Confirm Import"}
             </button>
             <button
               onClick={handleCancelTwitterImport}
