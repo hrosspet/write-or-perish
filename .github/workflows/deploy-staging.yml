@@ -136,11 +136,18 @@ jobs:
               sleep 1
             done
 
-            # Reset staging DB to match current models (staging data is ephemeral)
+            # Reset staging DB to match current models (staging data is ephemeral).
+            # First terminate every other connection: DROP SCHEMA needs exclusive
+            # locks, and a Celery task mid-LLM-call holding a read transaction
+            # (celery-beat re-dispatches profile updates right after the worker
+            # restarts) blocked it indefinitely on 2026-08-26 — with every
+            # backend request then queued behind the pending DROP, the whole
+            # site hung and the deploy sat in this step.
             echo "Resetting staging database..."
             docker compose -p wop-staging exec -T db \
               psql -U staging -d writeorperish_staging \
-              -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" < /dev/null || true
+              -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid();" \
+              -c "SET lock_timeout = '30s'; DROP SCHEMA public CASCADE; CREATE SCHEMA public;" < /dev/null || true
 
             # Run as root: the volume carries dirs created by older images
             # running as root, which appuser can neither delete nor write
