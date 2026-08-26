@@ -76,6 +76,20 @@ def build_user_export_content(user, max_tokens=None, filter_ai_usage=False,
     return _build(user, max_tokens, filter_ai_usage, **kwargs)
 
 
+def _estimate_source_tokens(user):
+    """Stored token_count summed over the profile pipeline's anchor scope
+    (own + addressed nodes, AI-readable, alive). Pure SQL — no node
+    loading, no decryption — so it is safe for any corpus size."""
+    from sqlalchemy import func, or_
+    from backend.models import Node
+    total = db.session.query(func.coalesce(func.sum(Node.token_count), 0)).filter(
+        or_(Node.user_id == user.id, Node.human_owner_id == user.id),
+        Node.ai_usage.in_(['chat', 'train']),
+        Node.deleted_at.is_(None),
+    ).scalar()
+    return int(total or 0)
+
+
 def _has_more_source_after(user, ts):
     """Any AI-readable source data newer than *ts*, in the anchor scope
     the profile pipeline reads (own + addressed nodes)?
@@ -621,23 +635,33 @@ def _do_initial_generation(self, user, model_id, context_window,
         5000
     )
 
-    # First pass: get metadata to decide if iterative is needed.
-    # engaged_threads: profiles read the user's full conversational
-    # scope — their own threads AND their replies in other users'
-    # threads (anchor-based selection, same scope incremental updates
-    # already use). The legacy authored_threads scope missed the latter
-    # entirely (#110).
-    total_export = build_user_export_content(
-        user, max_tokens=None, filter_ai_usage=True,
-        return_metadata=True, include_strategy="engaged_threads"
-    )
-
-    if not total_export or not total_export.get("content"):
+    # Decide single-pass vs iterative from a SQL token sum, NOT by
+    # rendering the whole corpus: an unbudgeted export loads and decrypts
+    # every node in scope, which OOM-killed the 512 MB staging worker
+    # four seconds into a 61k-node (1.5M-token) Twitter import. The sum
+    # is an estimate of the rendered size (same anchor scope
+    # _has_more_source_after uses); the exact export is only built when
+    # the estimate says it plausibly fits, and re-checked against the
+    # budget before use.
+    estimated_tokens = _estimate_source_tokens(user)
+    if estimated_tokens == 0:
         raise ValueError("No writing found to analyze")
 
-    total_tokens = total_export["token_count"]
+    total_export = None
+    if estimated_tokens <= budget:
+        # engaged_threads: profiles read the user's full conversational
+        # scope — their own threads AND their replies in other users'
+        # threads (anchor-based selection, same scope incremental updates
+        # already use). The legacy authored_threads scope missed the
+        # latter entirely (#110).
+        total_export = build_user_export_content(
+            user, max_tokens=None, filter_ai_usage=True,
+            return_metadata=True, include_strategy="engaged_threads"
+        )
+        if not total_export or not total_export.get("content"):
+            raise ValueError("No writing found to analyze")
 
-    if total_tokens <= budget:
+    if total_export is not None and total_export["token_count"] <= budget:
         # Single-pass generation
         return _single_pass_generation(
             self, user, model_id, gen_template, total_export,
