@@ -8,11 +8,11 @@ everything else KMS-envelope — #257).
 Run INSIDE the target environment:
 
     # staging
-    docker compose -p wop-staging cp data/rich.json backend:/app/data/rich.json
+    docker compose -p wop-staging cp data/rich.jsonl backend:/app/data/rich.jsonll
     docker compose -p wop-staging exec -T backend \\
-        python backend/scripts/load_user.py --in /app/data/rich.json
+        python backend/scripts/load_user.py --in /app/data/rich.jsonll
     # prod (systemd env, repo root)
-    python backend/scripts/load_user.py --in data/rich.json
+    python backend/scripts/load_user.py --in data/rich.jsonl
 
 Options:
     --as-username NAME   load onto this username instead of the dumped one
@@ -70,6 +70,36 @@ def _check_schema(db):
                      f"deploy the matching code first.")
 
 
+def _open_dump(path):
+    """Return (header, node_iterator, node_total). Format 2 (JSON Lines:
+    header line + one node per line) streams; format 1 (single JSON
+    document) is loaded whole for compatibility — fine on a workstation,
+    NOT inside a memory-capped container (convert it first:
+    convert_user_dump.py)."""
+    with open(path, encoding="utf-8") as f:
+        first = f.readline()
+    if first.lstrip().startswith("{") and '"format": 2' in first[:200]:
+        header = json.loads(first)
+        with open(path, encoding="utf-8") as f:
+            total = sum(1 for _ in f) - 1
+
+        def _iter():
+            with open(path, encoding="utf-8") as f:
+                f.readline()
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        yield json.loads(line)
+        return header, _iter(), total
+    with open(path, encoding="utf-8") as f:
+        dump = json.load(f)
+    if dump.get("format") != 1:
+        sys.exit(f"Unsupported dump format {dump.get('format')!r}")
+    print("WARNING: format-1 dump loaded whole into memory; use "
+          "convert_user_dump.py for large archives", file=sys.stderr)
+    return dump, iter(dump["nodes"]), len(dump["nodes"])
+
+
 def _author_id(username, owner_id, cache, db, User):
     if not username:
         return owner_id
@@ -93,10 +123,7 @@ def _run(path, as_username, merge, create_approved):
         UserTodo, UserArtifact,
     )
 
-    with open(path, encoding="utf-8") as f:
-        dump = json.load(f)
-    if dump.get("format") != 1:
-        sys.exit(f"Unsupported dump format {dump.get('format')!r}")
+    dump, node_iter, node_total = _open_dump(path)
 
     _check_schema(db)
 
@@ -131,7 +158,7 @@ def _run(path, as_username, merge, create_approved):
             existing_keys[key] = nid
 
     cache = {dump["user"]["username"]: user_id, username: user_id}
-    nodes = dump["nodes"]
+    nodes = node_iter
     id_map = {}
     created = 0
     skipped = 0
@@ -180,7 +207,7 @@ def _run(path, as_username, merge, create_approved):
         if created % NODE_BATCH == 0:
             db.session.commit()
             db.session.expunge_all()
-            print(f"  nodes {i}/{len(nodes)} (created {created}, skipped {skipped})",
+            print(f"  nodes {i}/{node_total} (created {created}, skipped {skipped})",
                   file=sys.stderr)
     db.session.commit()
 

@@ -12,10 +12,10 @@ that environment's DB and KMS key:
 
     # staging
     docker compose -p wop-staging exec -T backend \\
-        python backend/scripts/dump_user.py --username RichDecibels --out /app/data/rich.json
-    docker compose -p wop-staging cp backend:/app/data/rich.json data/rich.json
+        python backend/scripts/dump_user.py --username RichDecibels --out /app/data/rich.jsonl
+    docker compose -p wop-staging cp backend:/app/data/rich.jsonl data/rich.jsonl
     # prod (systemd env, repo root)
-    python backend/scripts/dump_user.py --username RichDecibels --out data/rich.json
+    python backend/scripts/dump_user.py --username RichDecibels --out data/rich.jsonl
 
 What it carries (all of it, not "latest N"):
   - user: username, description, timezone, preferred_model, plan (flags like
@@ -52,7 +52,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2  # JSON Lines: header line, then one node per line
 NODE_BATCH = 1000
 
 
@@ -94,7 +94,31 @@ def _run(username, out_path, include_private=False):
             "node_updated_at": _iso(e.node_updated_at),
         }
 
-    nodes = []
+    # Everything small goes in the header line; nodes stream one per line
+    # so neither this script nor load_user.py ever holds the corpus in
+    # memory (a 61k-node dump json.load()ed into a 512 MB container was
+    # OOM-killed silently).
+    header = {
+        "format": FORMAT_VERSION,
+        "source_env": os.environ.get("FLASK_ENV") or os.environ.get("ENV") or "unknown",
+        "user": {
+            "username": user.username,
+            "description": user.description,
+            "timezone": getattr(user, "timezone", None),
+            "preferred_model": user.preferred_model,
+            "plan": user.plan,
+        },
+        "profiles": _profiles(user, UserProfile),
+        "recent_contexts": _recent(user, UserRecentContext),
+        "todos": _todos(user, UserTodo),
+        "artifacts": _artifacts(user, UserArtifact),
+    }
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    out = open(out_path, "w", encoding="utf-8")
+    out.write(json.dumps(header, ensure_ascii=False) + "\n")
+
+    n_nodes = 0
+    n_emb = 0
     last_id = 0
     done = 0
     while True:
@@ -102,7 +126,7 @@ def _run(username, out_path, include_private=False):
         if not batch:
             break
         for n in batch:
-            nodes.append({
+            row = {
                 "id": n.id,
                 "author_username": authors.get(n.user_id),
                 "owner_is_user": n.human_owner_id == user.id,
@@ -124,13 +148,24 @@ def _run(username, out_path, include_private=False):
                 "created_at": _iso(n.created_at),
                 "updated_at": _iso(n.updated_at),
                 "embedding": embeddings.get(n.id),
-            })
+            }
+            out.write(json.dumps(row, ensure_ascii=False) + "\n")
+            n_nodes += 1
+            n_emb += 1 if row["embedding"] else 0
             last_id = n.id
         done += len(batch)
-        db.session.expunge_all()  # keep memory flat: decrypted text only lives in `nodes`
+        db.session.expunge_all()  # keep memory flat
         print(f"  nodes {done}/{total}", file=sys.stderr)
+    out.close()
+    h = header
+    print(f"wrote {out_path}: {n_nodes} nodes, {n_emb} embeddings, "
+          f"{len(h['profiles'])} profiles, {len(h['recent_contexts'])} recent contexts, "
+          f"{len(h['todos'])} todos, {len(h['artifacts'])} artifacts "
+          f"({os.path.getsize(out_path) // 1024} KB)")
 
-    profiles = [{
+
+def _profiles(user, UserProfile):
+    return [{
         "id": p.id, "content": p.get_content(), "generated_by": p.generated_by,
         "tokens_used": p.tokens_used, "created_at": _iso(p.created_at),
         "privacy_level": p.privacy_level, "ai_usage": p.ai_usage,
@@ -141,7 +176,9 @@ def _run(username, out_path, include_private=False):
         "parent_profile_id": p.parent_profile_id,
     } for p in UserProfile.query.filter_by(user_id=user.id).order_by(UserProfile.id).all()]
 
-    recent = [{
+
+def _recent(user, UserRecentContext):
+    return [{
         "content": r.get_content(), "generated_by": r.generated_by,
         "tokens_used": r.tokens_used, "created_at": _iso(r.created_at),
         "source_data_cutoff": _iso(r.source_data_cutoff),
@@ -149,42 +186,22 @@ def _run(username, out_path, include_private=False):
         "profile_id": r.profile_id, "ai_usage": r.ai_usage,
     } for r in UserRecentContext.query.filter_by(user_id=user.id).order_by(UserRecentContext.id).all()]
 
-    todos = [{
+
+def _todos(user, UserTodo):
+    return [{
         "content": t.get_content(), "generated_by": t.generated_by,
         "tokens_used": t.tokens_used, "created_at": _iso(t.created_at),
         "privacy_level": t.privacy_level, "ai_usage": t.ai_usage,
     } for t in UserTodo.query.filter_by(user_id=user.id).order_by(UserTodo.id).all()]
 
-    artifacts = [{
+
+def _artifacts(user, UserArtifact):
+    return [{
         "kind": a.kind, "title": a.title, "description": a.description,
         "content": a.get_content(), "generated_by": a.generated_by,
         "tokens_used": a.tokens_used, "created_at": _iso(a.created_at),
         "privacy_level": a.privacy_level, "ai_usage": a.ai_usage,
     } for a in UserArtifact.query.filter_by(user_id=user.id).order_by(UserArtifact.id).all()]
-
-    dump = {
-        "format": FORMAT_VERSION,
-        "source_env": os.environ.get("FLASK_ENV") or os.environ.get("ENV") or "unknown",
-        "user": {
-            "username": user.username,
-            "description": user.description,
-            "timezone": getattr(user, "timezone", None),
-            "preferred_model": user.preferred_model,
-            "plan": user.plan,
-        },
-        "nodes": nodes,
-        "profiles": profiles,
-        "recent_contexts": recent,
-        "todos": todos,
-        "artifacts": artifacts,
-    }
-    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(dump, f, ensure_ascii=False)
-    print(f"wrote {out_path}: {len(nodes)} nodes, {len(embeddings)} embeddings, "
-          f"{len(profiles)} profiles, {len(recent)} recent contexts, "
-          f"{len(todos)} todos, {len(artifacts)} artifacts "
-          f"({os.path.getsize(out_path) // 1024} KB)")
 
 
 def main():

@@ -92,6 +92,15 @@ def _seed_source():
     return alice, root, child, cont, p1.id, p2.id
 
 
+def _read(path):
+    """Format 2: header line + one node per line → dict with 'nodes'."""
+    with open(path, encoding="utf-8") as f:
+        lines = [ln for ln in f.read().splitlines() if ln.strip()]
+    d = json.loads(lines[0])
+    d["nodes"] = [json.loads(ln) for ln in lines[1:]]
+    return d
+
+
 def _raw(node_id):
     return db.session.execute(db.text("SELECT content FROM node WHERE id=:i"), {"i": node_id}).scalar()
 
@@ -100,7 +109,8 @@ def test_round_trip_remaps_links_and_respects_privacy(app, tmp_path):
     alice, root, child, cont, p1_id, p2_id = _seed_source()
     out = tmp_path / "alice.json"
     dump_user._run("alice", str(out))
-    d = json.loads(out.read_text())
+    d = _read(out)
+    assert d["format"] == 2
     assert [n["source_key"] for n in d["nodes"]] == ["twitter:1", None, "twitter:2"]  # private skipped
     assert d["nodes"][1]["author_username"] == "claude-opus-5"
     assert d["profiles"][1]["parent_profile_id"] == p1_id
@@ -147,6 +157,26 @@ def test_include_private_dumps_everything(app, tmp_path):
     _seed_source()
     out = tmp_path / "all.json"
     dump_user._run("alice", str(out), include_private=True)
-    d = json.loads(out.read_text())
+    d = _read(out)
     assert len(d["nodes"]) == 4
     assert [n for n in d["nodes"] if n["privacy_level"] == "private"][0]["content"] == "my secret"
+
+
+def test_format1_converts_and_loads(app, tmp_path):
+    """A format-1 dump (single JSON document) converts to format 2 and loads."""
+    import convert_user_dump
+    _seed_source()
+    out = tmp_path / "alice.jsonl"
+    dump_user._run("alice", str(out))
+    d = _read(out)
+    nodes = d.pop("nodes")
+    d["format"] = 1
+    d["nodes"] = nodes
+    legacy = tmp_path / "alice.json"
+    legacy.write_text(json.dumps(d))
+    converted = tmp_path / "alice2.jsonl"
+    sys.argv = ["convert_user_dump.py", str(legacy), str(converted)]
+    convert_user_dump.main()
+    assert _read(converted)["nodes"] == nodes
+    load_user._run(str(converted), "carol", merge=False, create_approved=False)
+    assert Node.query.filter_by(human_owner_id=User.query.filter_by(username="carol").one().id).count() == 3
