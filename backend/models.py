@@ -1,8 +1,12 @@
 from datetime import datetime
 from flask_login import UserMixin
-from sqlalchemy import or_
+import logging
+from sqlalchemy import event, or_
 from backend.extensions import db
-from backend.utils.encryption import encrypt_content, decrypt_content
+from backend.utils.encryption import (
+    encrypt_content, decrypt_content, is_encrypted, is_encryption_enabled)
+
+logger = logging.getLogger(__name__)
 
 class User(db.Model, UserMixin):
     id = db.Column(db.Integer, primary_key=True)
@@ -383,8 +387,28 @@ class Node(db.Model):
     # ----- Content ---------------------------------------------------------
 
     def set_content(self, plaintext: str):
-        """Set content with encryption."""
-        self.content = encrypt_content(plaintext)
+        """Store content: plaintext for PUBLIC nodes, KMS-envelope
+        encrypted otherwise (#257). Public content is public — encrypting
+        it only adds a KMS call per write and per profile/context read.
+        Set privacy_level BEFORE calling this (constructor kwarg or
+        set_privacy_level)."""
+        if self.privacy_level == "public":
+            self.content = plaintext
+        else:
+            self.content = encrypt_content(plaintext)
+
+    def set_privacy_level(self, level: str):
+        """The one sanctioned way to change privacy_level: moves the
+        stored content across the encryption boundary with it —
+        leaving public encrypts, becoming public decrypts."""
+        self.privacy_level = level
+        if not self.content:
+            return
+        if level == "public":
+            if is_encrypted(self.content):
+                self.content = decrypt_content(self.content)
+        elif not is_encrypted(self.content):
+            self.content = encrypt_content(self.content)
 
     def get_content(self) -> str:
         """Get decrypted content. Resolves from linked UserPrompt if set."""
@@ -396,6 +420,23 @@ class Node(db.Model):
         if self.content is None:
             return ""
         return decrypt_content(self.content)
+
+@event.listens_for(Node, "before_insert")
+@event.listens_for(Node, "before_update")
+def _enforce_node_content_encryption(mapper, connection, node):
+    """Invariant: a non-public node never persists plaintext while
+    encryption is on. Every sanctioned writer (set_content /
+    set_privacy_level) already satisfies this; the hook is the backstop
+    for a missed path (#256 was exactly that) — it heals the row and
+    logs loudly so the offending writer gets fixed."""
+    if (node.content and node.privacy_level != "public"
+            and is_encryption_enabled() and not is_encrypted(node.content)):
+        logger.warning(
+            "Node %s (%s) reached persist with plaintext content — "
+            "encrypting; fix the writer (use set_content/set_privacy_level)",
+            node.id, node.privacy_level)
+        node.content = encrypt_content(node.content)
+
 
 class NodeContextArtifact(db.Model):
     """Generic join table linking nodes to versioned context artifacts.

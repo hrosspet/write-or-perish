@@ -140,6 +140,12 @@ def _unwrap_dek(wrapped_dek: bytes) -> bytes:
     return dek
 
 
+def is_encrypted(value) -> bool:
+    """True when *value* carries a v1/v2 encryption envelope."""
+    return bool(value) and isinstance(value, str) and value.startswith(
+        (ENCRYPTED_PREFIX_V1, ENCRYPTED_PREFIX_V2))
+
+
 def encrypt_content(plaintext: str) -> str:
     """
     Encrypt content using envelope encryption (AES-GCM + KMS-wrapped DEK).

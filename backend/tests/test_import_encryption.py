@@ -1,4 +1,4 @@
-"""Imported nodes must be encrypted at rest (#256).
+"""Imported nodes must be encrypted at rest (#256); public nodes are plaintext (#257).
 
 Every importer used to build ``Node(content=plaintext)``, writing the raw
 column and bypassing ``set_content()`` — the only place KMS envelope
@@ -132,3 +132,87 @@ def test_restore_re_encrypts(app):
     db.session.commit()
     assert n.deleted_at is None
     _assert_encrypted(n, "restored text")
+
+
+# ── #257: public nodes are stored in plaintext; transitions move content ──
+
+def _raw(node):
+    return db.session.execute(
+        db.text("SELECT content FROM node WHERE id = :id"), {"id": node.id}).scalar()
+
+
+def test_public_import_is_stored_plaintext(app):
+    from backend.routes.import_data import create_twitter_nodes
+    u = _user()
+    rows = [{"id_str": "1", "full_text": "a public tweet", "created_at": "Mon Aug 24 10:00:00 +0000 2026",
+             "is_reply": False, "token_count": 3}]
+    create_twitter_nodes(
+        user_id=u.id, rows=iter(rows), total=1, import_type="separate_nodes",
+        include_replies=False, privacy_level="public", ai_usage="chat", on_deleted=None,
+    )
+    node = Node.query.filter_by(source_key="twitter:1").one()
+    assert _raw(node) == "a public tweet"
+    assert node.get_content() == "a public tweet"
+
+
+def test_set_privacy_level_moves_content_across_the_boundary(app):
+    u = _user()
+    n = Node(user_id=u.id, human_owner_id=u.id, node_type="user", privacy_level="private")
+    n.set_content("secret")
+    db.session.add(n)
+    db.session.commit()
+    assert _raw(n).startswith(ENC_PREFIX)
+
+    n.set_privacy_level("public")
+    db.session.commit()
+    assert _raw(n) == "secret"
+
+    n.set_privacy_level("private")
+    db.session.commit()
+    _assert_encrypted(n, "secret")
+
+    n.set_privacy_level("circles")  # anything non-public stays encrypted
+    db.session.commit()
+    _assert_encrypted(n, "secret")
+
+
+def test_persist_guard_heals_plaintext_on_private_node(app, caplog):
+    u = _user()
+    n = Node(user_id=u.id, human_owner_id=u.id, node_type="user",
+             privacy_level="private", content="leaked plaintext")  # the #256 bug shape
+    db.session.add(n)
+    with caplog.at_level("WARNING"):
+        db.session.commit()
+    _assert_encrypted(n, "leaked plaintext")
+    assert "plaintext content" in caplog.text
+
+    # raw assignment on update is healed too
+    n.privacy_level = "private"
+    n.content = "edited raw"
+    db.session.commit()
+    _assert_encrypted(n, "edited raw")
+
+    # public nodes are left alone
+    p = Node(user_id=u.id, human_owner_id=u.id, node_type="user",
+             privacy_level="public", content="open")
+    db.session.add(p)
+    db.session.commit()
+    assert _raw(p) == "open"
+
+
+def test_reimport_settings_change_reencrypts_skipped_nodes(app):
+    from backend.routes.import_data import _apply_settings_to_skipped
+    u = _user()
+    n = Node(user_id=u.id, human_owner_id=u.id, node_type="user",
+             privacy_level="public", ai_usage="chat", source_key="twitter:5")
+    n.set_content("was public")
+    db.session.add(n)
+    db.session.commit()
+    assert _raw(n) == "was public"
+
+    assert _apply_settings_to_skipped([n.id, None], "private", "none") == 1
+    db.session.commit()
+    assert n.ai_usage == "none"
+    _assert_encrypted(n, "was public")
+    # no-op when nothing differs
+    assert _apply_settings_to_skipped([n.id], "private", "none") == 0

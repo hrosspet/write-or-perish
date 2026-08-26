@@ -817,7 +817,7 @@ def update_node(node_id):
         privacy_level = data["privacy_level"]
         if not validate_privacy_level(privacy_level):
             return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
-        node.privacy_level = privacy_level
+        node.set_privacy_level(privacy_level)
         # Auto-unpin if node is made private
         if privacy_level == "private" and node.pinned_at is not None:
             node.pinned_at = None

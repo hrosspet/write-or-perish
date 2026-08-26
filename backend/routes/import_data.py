@@ -166,12 +166,12 @@ def _restore_node(node_id, content, privacy_level, ai_usage,
     set to this import's choices, like any other (re)imported node.
     """
     node = Node.query.get(node_id)
+    node.set_privacy_level(privacy_level)  # before set_content: decides encryption
     node.set_content(content)
     node.token_count = (
         token_count if token_count is not None
         else approximate_token_count(content)
     )
-    node.privacy_level = privacy_level
     node.ai_usage = ai_usage
     node.deleted_at = None
 
@@ -189,18 +189,22 @@ def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage):
     ids = [i for i in node_ids if i is not None]
     updated = 0
     # Chunked so a huge archive doesn't produce an unbounded IN clause.
+    # Goes through the ORM (not a bulk UPDATE) because a privacy change
+    # moves content across the encryption boundary (#257) — only the
+    # rows whose settings actually differ are loaded.
     for start in range(0, len(ids), 1000):
         chunk = ids[start:start + 1000]
-        updated += Node.query.filter(
+        for node in Node.query.filter(
             Node.id.in_(chunk),
             or_(
                 Node.privacy_level != privacy_level,
                 Node.ai_usage != ai_usage,
             ),
-        ).update(
-            {"privacy_level": privacy_level, "ai_usage": ai_usage},
-            synchronize_session=False,
-        )
+        ).all():
+            node.set_privacy_level(privacy_level)
+            node.ai_usage = ai_usage
+            updated += 1
+        db.session.flush()
     return updated
 
 
