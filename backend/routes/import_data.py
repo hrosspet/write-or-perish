@@ -118,13 +118,16 @@ def _add_imported_message_nodes(user_id, human_owner_id, parent_id,
             parent_id=parent_id if tip is None else tip.id,
             node_type=node_type,
             llm_model=llm_model,
-            content=seg,
             token_count=approximate_token_count(seg),
             privacy_level=privacy_level,
             ai_usage=ai_usage,
             source_key=source_key if j == len(segments) - 1 else None,
             origin=origin,
         )
+        # Never pass content= to Node(): that writes the raw column and
+        # bypasses KMS envelope encryption (#256). set_content() is the
+        # only sanctioned way to store text.
+        n.set_content(seg)
         if msg_created_at:
             n.created_at = msg_created_at + timedelta(milliseconds=j)
         db.session.add(n)
