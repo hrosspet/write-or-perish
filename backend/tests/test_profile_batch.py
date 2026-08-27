@@ -714,3 +714,30 @@ def test_batch_lock_skips_when_held(app, monkeypatch):
             assert b is False
     with pb.batch_pipeline_lock() as c:
         assert c is True
+
+
+def test_pinned_account_continues_mid_chain_and_folds_small_tail(app, monkeypatch):
+    """A pre-filled account whose chunk 2 was lost (worker restart) has a
+    root chunk, data beyond its cutoff, nothing in flight, and a tail
+    under MIN_CHUNK_TOKENS. It must be seeded again and the tail chunked."""
+    u = _user(profile_force_batch=True)
+    prev = _prev_profile(u, datetime(2026, 5, 1), source_tokens=70000, gen_type="iterative")
+    prev.created_at = datetime.utcnow()  # inside MIN_INTERVAL
+    db.session.commit()
+    monkeypatch.setattr(pb._exports, "_has_more_source_after",
+                        lambda user, ts: ts == datetime(2026, 5, 1))
+    assert pb._should_seed(u) is True
+    monkeypatch.setattr(pb._exports, "build_user_export_content", MagicMock(
+        return_value={"content": "TAIL", "token_count": 6000,  # < min_chunk
+                      "latest_node_created_at": datetime(2026, 6, 1)}))
+    monkeypatch.setattr(pb._exports, "build_update_template", lambda uid: (
+        "T {existing_profile}|{new_data}|{source_tokens_past}|{source_tokens_new}|{ratio_percent}"))
+    req = pb._build_next_profile_request(u)
+    assert req is not None and req["meta"]["kind"] == "chunk"
+    assert req["meta"]["prev_profile_id"] == prev.id
+    # An organic (unpinned) user with the same state is still gated.
+    v = _user()
+    pv = _prev_profile(v, datetime(2026, 5, 1), source_tokens=70000, gen_type="iterative")
+    pv.created_at = datetime.utcnow()
+    db.session.commit()
+    assert pb._should_seed(v) is False

@@ -149,6 +149,15 @@ def _should_seed(user):
     if last_node and (datetime.utcnow() - last_node.created_at) < MIN_INACTIVITY:
         return False
     latest = _latest_non_integration_profile(user.id)
+    # Pinned (pre-filled) accounts: a chain with data still beyond its
+    # cutoff is a rebuild in progress and must continue regardless of the
+    # interval / new-token gates — those measure organic growth, and a
+    # pre-filled corpus never grows. Without this, a chunk lost to a worker
+    # restart (2026-08-27, MarvinKeilbach) stalls the account forever.
+    if (user.profile_force_batch and latest is not None
+            and latest.source_data_cutoff is not None
+            and _exports._has_more_source_after(user, latest.source_data_cutoff)):
+        return True
     if latest:
         if (datetime.utcnow() - latest.created_at) < MIN_INTERVAL:
             return False
@@ -201,8 +210,12 @@ def _build_next_profile_request(user):
     # can re-measure below MIN_CHUNK_TOKENS while being a full budget
     # window (rendered chars/4 vs stored token_count unit mismatch);
     # if data remains beyond it, process it anyway.
+    # Pinned accounts fold their final small tail in rather than deferring
+    # it to "the next update cycle" — there is no next cycle for a corpus
+    # that doesn't grow.
     big_enough = have_chunk and (
         is_first_initial
+        or bool(user.profile_force_batch)
         or chunk["token_count"] >= min_chunk
         or _exports._has_more_source_after(user, chunk["latest_node_created_at"]))
 
