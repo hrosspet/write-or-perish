@@ -1,17 +1,36 @@
 import React, { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, Navigate } from "react-router-dom";
 import Fade from "../utils/Fade";
 import { useUser } from "../contexts/UserContext";
 import api from "../api";
+import PrefillConsentCard from "../components/PrefillConsentCard";
 
 export default function AlphaThankYouPage() {
-  const { user, setUser } = useUser();
+  const { user, setUser, loading: userLoading } = useUser();
   const [email, setEmail] = useState(user?.email || "");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [submitted, setSubmitted] = useState(false);
 
   const needsEmail = user && (!user.email || user.email.trim() === "");
+
+  // This page is handed out as a link (e.g. to fresh X signups, so they can
+  // opt in to the tweet seed). Signed-up users are logged in even before
+  // approval, so they land here directly. Anyone without a session is a
+  // stranger — send them to the landing page (a logged-out signup who logs
+  // in from there is bounced back here by ProtectedRoute anyway). Can't use
+  // ProtectedRoute on this page itself: it redirects unapproved users
+  // *here*, which would loop.
+  if (userLoading) {
+    return (
+      <div style={{ padding: "40px", textAlign: "center" }}>
+        <p>Loading...</p>
+      </div>
+    );
+  }
+  if (!user) {
+    return <Navigate to="/landing" replace />;
+  }
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -137,6 +156,13 @@ export default function AlphaThankYouPage() {
           </div>
         </Fade>
       )}
+
+      {/* Opt-in: seed the account from the user's own public tweets. Asked
+          here because it's dead time — the signup is already done, so a
+          hesitation costs nothing. Renders null unless X-login + unanswered. */}
+      <Fade delay={0.26}>
+        <PrefillConsentCard style={{ marginBottom: "2rem" }} />
+      </Fade>
 
       <Fade delay={0.28}>
         <div style={{

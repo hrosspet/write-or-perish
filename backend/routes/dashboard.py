@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node, User, UserProfile
@@ -123,6 +124,9 @@ def get_dashboard():
             "profile_generation_task_id": current_user.profile_generation_task_id,
             "default_privacy_level": current_user.default_privacy_level,
             "default_ai_usage": current_user.default_ai_usage,
+            "twitter_login": bool(current_user.twitter_id),
+            "prefill_consent": current_user.prefill_consent,
+            "prefilled_handle": current_user.prefilled_handle,
             "timezone": current_user.timezone or "UTC",
             # Lets the client block cost actions (e.g. starting a long voice
             # recording) up front instead of after the fact (issue #85).
@@ -254,6 +258,13 @@ def update_user():
             return jsonify({"error": f"Invalid AI usage value: {val}"}), 400
         current_user.default_ai_usage = val
 
+    if "prefill_consent" in data:
+        val = data["prefill_consent"]
+        if val not in ("yes", "no"):
+            return jsonify({"error": f"Invalid prefill_consent value: {val}"}), 400
+        current_user.prefill_consent = val
+        current_user.prefill_consent_at = datetime.now(timezone.utc)
+
     try:
         db.session.commit()
         # The opt-out must reach the open web immediately: drop every
@@ -281,6 +292,9 @@ def update_user():
                 "profile_generation_task_id": current_user.profile_generation_task_id,
                 "default_privacy_level": current_user.default_privacy_level,
                 "default_ai_usage": current_user.default_ai_usage,
+                "twitter_login": bool(current_user.twitter_id),
+                "prefill_consent": current_user.prefill_consent,
+                "prefilled_handle": current_user.prefilled_handle,
                 "spend_blocked": user_is_capped(current_user),
                 "share_v1_enabled": bool(
                     current_app.config.get("SHARE_V1", False)

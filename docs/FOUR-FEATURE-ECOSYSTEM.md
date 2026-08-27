@@ -1374,6 +1374,7 @@ POST   /api/connections/:id/message     # Message in connection thread
 
 **Cold Start Strategy:**
 0. ✅ Per-account cold start (2026-08-27): admin pre-fills a whitelisted account from its Community Archive tweets → batch-built "public persona so far" profile, so a new signup never faces the blank page
+   - ✅ Opt-in (2026-08-27): X-login signups answer yes / not now on `/alpha-thank-you` (and once more on `/welcome`); escapable, nothing preselected, unanswered ≠ declined
 1. Launch Features 1-3 first (single-player value)
 2. Build user base (waitlist, invite-only)
 3. Launch Feature 4 when 500+ users (critical mass)

@@ -157,6 +157,8 @@ def list_users():
             "profile_batch_pending": bool(user.profile_batch_pending),
             "profile_force_batch": bool(user.profile_force_batch),
             "prefilled_handle": user.prefilled_handle,
+            "prefill_consent": user.prefill_consent,
+            "prefill_consent_at": iso_utc(user.prefill_consent_at),
             "profile": profile_status.get(user.id) or {
                 "versions": 0,
                 "last_generation_type": None,
