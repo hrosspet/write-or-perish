@@ -203,7 +203,6 @@ class TestProfileStatus:
     def test_stuck_chain_is_not_complete(self, app, users, monkeypatch):
         """Latest version is a root chunk but data remains beyond its
         cutoff and nothing is in flight → chunk 2 failed → not ✓."""
-        from backend.routes import admin as admin_mod
         from datetime import datetime
         adm = users["renamed_admin"]
         stuck = User(username="stuck", approved=True, profile_batch_attempts=1)
@@ -211,15 +210,14 @@ class TestProfileStatus:
         p = self._profile(stuck, "iterative")
         p.source_data_cutoff = datetime(2026, 1, 1)
         _db.session.commit()
-        monkeypatch.setattr(admin_mod, "_has_more_source_after", lambda u, ts: True, raising=False)
-        import backend.tasks.exports as ex
-        monkeypatch.setattr(ex, "_has_more_source_after", lambda u, ts: True)
+        import backend.tasks.profile_batch as pbm
+        monkeypatch.setattr(pbm, "_new_token_count", lambda u, ts: 85000)
         client = app.test_client()
         _login(client, adm.id)
         row = {u["username"]: u for u in client.get("/api/admin/users").json["users"]}["stuck"]
         assert row["profile"]["state"] == "generating"
         assert row["profile"]["incomplete"] is True and row["profile"]["batch_attempts"] == 1
-        monkeypatch.setattr(ex, "_has_more_source_after", lambda u, ts: False)
+        monkeypatch.setattr(pbm, "_new_token_count", lambda u, ts: 30000)  # waiting tail
         row = {u["username"]: u for u in client.get("/api/admin/users").json["users"]}["stuck"]
         assert row["profile"]["state"] == "complete" and row["profile"]["incomplete"] is False
 

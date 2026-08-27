@@ -43,7 +43,8 @@ def _profile_status_map():
         UserProfile.user_id).subquery()
     latest = {p.user_id: p for p in UserProfile.query.filter(
         UserProfile.id.in_(latest_ids)).all()}
-    from backend.tasks.exports import _has_more_source_after
+    from backend.tasks.exports import chunk_budget_for
+    from backend.tasks.profile_batch import _new_token_count, _model_for
     users_by_id = {u.id: u for u in User.query.all()}
     out = {}
     for user_id, n in counts.items():
@@ -53,12 +54,15 @@ def _profile_status_map():
         at_rest = last is not None and (
             last.generation_type == "integration" or last.parent_profile_id is None)
         # A chain whose latest version is a root chunk is only at rest if
-        # nothing remains beyond its cutoff — otherwise chunk 2+ is still
-        # owed (e.g. its batch failed) and ✓ would hide a stuck rebuild.
-        stuck = bool(
-            at_rest and last.generation_type != "integration" and u
-            and last.source_data_cutoff is not None
-            and _has_more_source_after(u, last.source_data_cutoff))
+        # less than a full minimum chunk remains beyond its cutoff (a
+        # small tail legitimately waits for more data). A full chunk's
+        # worth unprocessed with nothing in flight = a stuck rebuild
+        # (e.g. its batch failed) that ✓ would otherwise hide.
+        stuck = False
+        if (at_rest and last.generation_type != "integration" and u
+                and last.source_data_cutoff is not None):
+            _, min_chunk = chunk_budget_for(u, _model_for(u))
+            stuck = _new_token_count(u, last.source_data_cutoff) >= min_chunk
         out[user_id] = {
             "versions": n,
             "last_generation_type": last.generation_type if last else None,

@@ -716,28 +716,35 @@ def test_batch_lock_skips_when_held(app, monkeypatch):
         assert c is True
 
 
-def test_pinned_account_continues_mid_chain_and_folds_small_tail(app, monkeypatch):
-    """A pre-filled account whose chunk 2 was lost (worker restart) has a
-    root chunk, data beyond its cutoff, nothing in flight, and a tail
-    under MIN_CHUNK_TOKENS. It must be seeded again and the tail chunked."""
+def test_pinned_account_resumes_when_a_full_chunk_remains(app, monkeypatch):
+    """A pre-filled account whose chunk 2 was lost (worker restart): root
+    chunk saved, >= a minimum chunk of data beyond its cutoff, nothing in
+    flight, inside MIN_INTERVAL → seeded again. A tail smaller than a
+    minimum chunk waits for more data (chunks are never made uneven)."""
     u = _user(profile_force_batch=True)
     prev = _prev_profile(u, datetime(2026, 5, 1), source_tokens=70000, gen_type="iterative")
     prev.created_at = datetime.utcnow()  # inside MIN_INTERVAL
     db.session.commit()
-    monkeypatch.setattr(pb._exports, "_has_more_source_after",
-                        lambda user, ts: ts == datetime(2026, 5, 1))
+    monkeypatch.setattr(pb, "_new_token_count", lambda user, cutoff: 85000)
     assert pb._should_seed(u) is True
-    monkeypatch.setattr(pb._exports, "build_user_export_content", MagicMock(
-        return_value={"content": "TAIL", "token_count": 6000,  # < min_chunk
-                      "latest_node_created_at": datetime(2026, 6, 1)}))
-    monkeypatch.setattr(pb._exports, "build_update_template", lambda uid: (
-        "T {existing_profile}|{new_data}|{source_tokens_past}|{source_tokens_new}|{ratio_percent}"))
-    req = pb._build_next_profile_request(u)
-    assert req is not None and req["meta"]["kind"] == "chunk"
-    assert req["meta"]["prev_profile_id"] == prev.id
-    # An organic (unpinned) user with the same state is still gated.
+    monkeypatch.setattr(pb, "_new_token_count", lambda user, cutoff: 30000)  # small tail
+    assert pb._should_seed(u) is False
+    # An organic (unpinned) user with a full chunk remaining is still gated
+    # by MIN_INTERVAL.
     v = _user()
     pv = _prev_profile(v, datetime(2026, 5, 1), source_tokens=70000, gen_type="iterative")
     pv.created_at = datetime.utcnow()
     db.session.commit()
+    monkeypatch.setattr(pb, "_new_token_count", lambda user, cutoff: 85000)
     assert pb._should_seed(v) is False
+
+
+def test_small_tail_is_deferred_even_for_pinned_accounts(app, monkeypatch):
+    u = _user(profile_force_batch=True)
+    _prev_profile(u, datetime(2026, 5, 1), source_tokens=70000, gen_type="iterative")
+    db.session.commit()
+    monkeypatch.setattr(pb._exports, "_has_more_source_after", lambda user, ts: False)
+    monkeypatch.setattr(pb._exports, "build_user_export_content", MagicMock(
+        return_value={"content": "TAIL", "token_count": 6000,
+                      "latest_node_created_at": datetime(2026, 6, 1)}))
+    assert pb._build_next_profile_request(u) is None  # 1 version → no integration either
