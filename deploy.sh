@@ -270,8 +270,15 @@ fi
 log "Restarting Celery worker service..."
 sudo systemctl restart write-or-perish-celery || error "Failed to restart Celery service"
 
-# Restart Celery beat service
+# Restart Celery beat service.
+# The celerybeat-schedule shelve file only caches "last run at" timestamps;
+# a restart that lands mid-write leaves it truncated and beat dies on
+# startup with EOFError/KeyError('entries') (2026-07-24, 2026-08-27). It has
+# no state worth keeping across a deploy, so remove it every time — the
+# schedule is regenerated from backend/celery_app.py on start.
 log "Restarting Celery beat service..."
+sudo systemctl stop write-or-perish-celery-beat 2>/dev/null || true
+rm -f "$PROJECT_DIR"/celerybeat-schedule "$PROJECT_DIR"/celerybeat-schedule.* "$PROJECT_DIR"/celery-beat.pid
 sudo systemctl restart write-or-perish-celery-beat || error "Failed to restart Celery beat service"
 
 # Wait for Celery services to start
@@ -295,11 +302,10 @@ fi
 if sudo systemctl is-active --quiet write-or-perish-celery-beat; then
     log "Celery beat service restarted successfully"
 else
-    # Most common cause: a corrupt celerybeat-schedule shelve DB (a hard kill
-    # or OOM mid-write leaves it unreadable). Check logs/celery-beat.log; if
-    # it ends in a dbm/shelve traceback, stop beat, move celerybeat-schedule.*
-    # aside, and start it again — the file only holds last-run timestamps.
+    # The schedule file was already removed above, so this is not the
+    # corrupt-shelve case. Surface the log tail so the deploy output says why.
     warn "Celery beat service failed to start"
+    tail -n 20 "$PROJECT_DIR/logs/celery-beat.log" 2>/dev/null || true
     FAILED_SERVICES="$FAILED_SERVICES write-or-perish-celery-beat"
 fi
 
