@@ -67,8 +67,20 @@ def import_twitter_archive(self, user_id, token, options):
         return result
 
 
+def snapshot_dir_for(config):
+    """Where the Community Archive parquet snapshot lives: configured dir, or
+    ``<data>/community-archive`` next to the audio/import stashes."""
+    import pathlib
+    configured = config.get("COMMUNITY_ARCHIVE_SNAPSHOT_DIR")
+    if configured:
+        return pathlib.Path(configured)
+    from backend.utils.twitter_archive import STASH_ROOT
+    return STASH_ROOT.parent / "community-archive"
+
+
 def prefill_community_archive_impl(user_id, handle, options, update_state=None):
-    """Fetch @handle's tweets from the Community Archive into the user's
+    """Fetch @handle's tweets from the Community Archive (REST for small
+    accounts, the nightly parquet snapshot for large ones) into the user's
     account (origin="twitter", private, AI-readable) and pin the user to
     the BATCH profile pipeline before the import's profile handoff runs,
     so a bootstrapped corpus never triggers a synchronous (full-price)
@@ -86,6 +98,7 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None):
                 "total": total, "handle": handle,
             })
 
+    from flask import current_app
     user = User.query.get(user_id)
     if not user:
         raise RuntimeError(f"User {user_id} not found")
@@ -94,11 +107,29 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None):
         raise ca.CommunityArchiveError(
             f"@{handle} is not in the Community Archive")
     expected = account.get("num_tweets") or 0
+
+    # Small accounts page through the REST API; large ones read the nightly
+    # parquet snapshot (downloaded once per export into the data dir).
+    min_parquet = current_app.config.get("COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS", 5000)
+    use_parquet = bool(options.get("force_parquet")) or expected >= min_parquet
+    if use_parquet:
+        snapshot_dir = snapshot_dir_for(current_app.config)
+        state("downloading", 0, None)
+        ca.ensure_snapshot(snapshot_dir, on_progress=lambda name, done, total: state(
+            f"downloading {name}", done >> 20, (total >> 20) if total else None))
+        parquet_account = ca.fetch_account_parquet(account["username"], snapshot_dir)
+        if parquet_account:
+            account = parquet_account
+        source = ca.iter_tweets_parquet(
+            account["account_id"], snapshot_dir,
+            on_page=lambda n: state("fetching", n, expected))
+    else:
+        source = ca.iter_tweets(
+            account["username"], on_page=lambda n: state("fetching", n, expected))
     state("fetching", 0, expected)
 
     rows, seen = [], set()
-    for raw in ca.iter_tweets(account["username"],
-                              on_page=lambda n: state("fetching", n, expected)):
+    for raw in source:
         if raw["tweet_id"] in seen:
             continue
         seen.add(raw["tweet_id"])
@@ -135,6 +166,7 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None):
     result.update({
         "user_id": user_id, "handle": account["username"],
         "total": total, "stage": "done",
+        "source": "parquet" if use_parquet else "rest",
         "profile_batch_queued": bool(
             User.query.get(user_id).profile_needs_full_regen),
     })

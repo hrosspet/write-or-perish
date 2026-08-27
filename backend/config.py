@@ -102,6 +102,15 @@ class Config:
     DEV_UPDATES_V1 = os.environ.get(
         "DEV_UPDATES_V1", "true").lower() in ("1", "true", "yes")
 
+    # Community Archive pre-fill (admin): accounts with at least this many
+    # tweets are read from the nightly parquet snapshot (downloaded once per
+    # export to COMMUNITY_ARCHIVE_SNAPSHOT_DIR, ~1 GB) instead of the REST
+    # API. Env vars reach containers as empty strings when unset — guard.
+    COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS = int(
+        os.environ.get("COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS") or "5000")
+    COMMUNITY_ARCHIVE_SNAPSHOT_DIR = (
+        os.environ.get("COMMUNITY_ARCHIVE_SNAPSHOT_DIR") or None)
+
     # Safety factor for prompt-too-long retries (0.99 = aim for 99% of the limit)
     RETRY_SAFETY_FACTOR = 0.99
 

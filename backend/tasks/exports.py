@@ -26,10 +26,14 @@ logger = get_task_logger(__name__)
 CHUNK_BUDGET = 90000
 MIN_CHUNK_TOKENS = 80000
 
-# Calibration clamp: the observed actual/estimated ratio is applied within
-# these bounds so one odd chunk can't collapse or explode the budget.
-TOKEN_RATIO_MIN = 0.5
-TOKEN_RATIO_MAX = 4.0
+# Stored token counts are chars // 4. A model's effective divisor is
+# 4 / (token_multiplier × observed calibration): 4 for older tokenizers,
+# 2 for the new generation, nudged by what the provider actually counted.
+# Clamp the effective divisor to [1, 5] chars/token so one odd chunk can't
+# collapse or explode the budget.
+CHARS_PER_TOKEN_BASE = 4
+CHARS_PER_TOKEN_MIN = 1
+CHARS_PER_TOKEN_MAX = 5
 
 
 def token_multiplier(model_id):
@@ -49,8 +53,15 @@ def effective_token_ratio(user, model_id):
     ratio = token_multiplier(model_id)
     observed = getattr(user, "profile_token_ratio", None)
     if observed:
-        ratio *= min(max(float(observed), TOKEN_RATIO_MIN), TOKEN_RATIO_MAX)
-    return ratio
+        ratio *= float(observed)
+    # ratio == CHARS_PER_TOKEN_BASE / effective chars-per-token
+    return min(max(ratio, CHARS_PER_TOKEN_BASE / CHARS_PER_TOKEN_MAX),
+               CHARS_PER_TOKEN_BASE / CHARS_PER_TOKEN_MIN)
+
+
+def effective_chars_per_token(user, model_id):
+    """The divisor in ``chars // x`` this user+model currently runs at."""
+    return CHARS_PER_TOKEN_BASE / effective_token_ratio(user, model_id)
 
 
 def chunk_budget_for(user, model_id, base_budget=CHUNK_BUDGET):
@@ -1122,8 +1133,9 @@ def _chunked_profile_loop(self, user, model_id, update_template,
         if observed is not None:
             logger.info(
                 f"User {user.id}: chunk {chunk_num} tokenizer calibration "
-                f"actual/estimated={observed} (model multiplier "
-                f"{token_multiplier(model_id)}, budget was {budget})"
+                f"actual/estimated={observed} → chars/token="
+                f"{effective_chars_per_token(user, model_id):.2f} "
+                f"(budget was {budget})"
             )
         cumulative_origin_stats = merge_origin_stats(
             cumulative_origin_stats, chunk.get("origin_stats"))

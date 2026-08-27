@@ -518,3 +518,118 @@ def test_prefill_impl_unknown_handle(app, monkeypatch):
     monkeypatch.setattr(ca, "fetch_account", lambda h: None)
     with pytest.raises(ca.CommunityArchiveError):
         imports_mod.prefill_community_archive_impl(u.id, "nobody", {})
+
+
+# ── parquet snapshot path (large accounts) ────────────────────────────────
+
+def _make_snapshot(d):
+    """Tiny tweets.parquet + profiles.parquet with the real column names."""
+    import duckdb
+    d.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect()
+    con.execute(f"""
+        copy (select * from (values
+            ('10', 'A1', 'alice', 'Alice', 3::UBIGINT),
+            ('20', 'B2', 'bob', 'Bob', 1::UBIGINT))
+            t(_, account_id, username, display_name, num_tweets))
+        to '{d / "profiles.parquet"}' (format parquet)""")
+    con.execute(f"""
+        copy (select * from (values
+            ('102', 'A1', timestamp with time zone '2026-08-25 10:00:00+00', 'second', 1::UBIGINT, 0::UBIGINT, NULL, NULL),
+            ('101', 'A1', timestamp with time zone '2026-08-24 10:00:00+00', 'first', 2::UBIGINT, 0::UBIGINT, NULL, NULL),
+            ('103', 'A1', timestamp with time zone '2026-08-26 10:00:00+00', 'reply to bob',
+             0::UBIGINT, 0::UBIGINT, '77', 'B2'),
+            ('201', 'B2', timestamp with time zone '2026-08-24 11:00:00+00', 'bobs tweet', 0::UBIGINT, 0::UBIGINT, NULL, NULL))
+            t(tweet_id, account_id, created_at, full_text, favorite_count, retweet_count,
+              reply_to_tweet_id, reply_to_account_id))
+        to '{d / "tweets.parquet"}' (format parquet)""")
+    (d / "export_id").write_text("2026-08-27T07-03-56Z")
+
+
+def test_parquet_account_and_tweets(tmp_path):
+    from backend.utils import community_archive as ca
+    snap = tmp_path / "snap"
+    _make_snapshot(snap)
+    acct = ca.fetch_account_parquet("@Alice", snap)
+    assert acct == {"account_id": "A1", "username": "alice",
+                    "account_display_name": "Alice", "num_tweets": 3}
+    assert ca.fetch_account_parquet("nobody", snap) is None
+    pages = []
+    rows = list(ca.iter_tweets_parquet("A1", snap, batch=2, on_page=pages.append))
+    assert [r["tweet_id"] for r in rows] == ["101", "102", "103"]
+    assert rows[2]["reply_to_username"] == "bob" and rows[2]["reply_to_user_id"] == "B2"
+    assert pages == [2, 3]
+    entry = ca.to_export_entry(rows[0])["tweet"]
+    assert entry["created_at"] == "Mon Aug 24 10:00:00 +0000 2026"
+    assert ta.compact_row(entry)["full_text"] == "first"
+
+
+def test_ensure_snapshot_downloads_once_per_export(tmp_path, monkeypatch):
+    from backend.utils import community_archive as ca
+    manifest = {"export_id": "E1", "package_paths": [
+        "v1/E1/tweets.parquet", "v1/E1/profiles.parquet", "v1/E1/manifest.json"]}
+    opened = []
+
+    class FakeResp(io.BytesIO):
+        headers = {"Content-Length": "6"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(url):
+        opened.append(url)
+        return FakeResp(b"abcdef")
+
+    monkeypatch.setattr(ca, "_urlopen", fake_urlopen)
+    monkeypatch.setattr(ca, "DOWNLOAD_CHUNK", 4)
+    progress = []
+    snap = tmp_path / "snap"
+    assert ca.ensure_snapshot(snap, on_progress=lambda *a: progress.append(a),
+                              manifest=manifest) == "E1"
+    assert sorted(p.name for p in snap.iterdir()) == [
+        "export_id", "profiles.parquet", "tweets.parquet"]
+    assert (snap / "tweets.parquet").read_bytes() == b"abcdef"
+    assert opened[0].endswith("/v1/E1/tweets.parquet")
+    assert progress[:2] == [("tweets.parquet", 4, 6), ("tweets.parquet", 6, 6)]
+    # Same export cached → no download; new export → re-download.
+    ca.ensure_snapshot(snap, manifest=manifest)
+    assert len(opened) == 2
+    ca.ensure_snapshot(snap, manifest={**manifest, "export_id": "E2"})
+    assert len(opened) == 4 and ca.snapshot_export_id(snap) == "E2"
+    # A half-written snapshot (no marker) is not trusted.
+    (snap / "export_id").unlink()
+    assert ca.snapshot_export_id(snap) is None
+
+
+def test_prefill_impl_large_account_uses_parquet(app, tmp_path, monkeypatch):
+    from backend.tasks import imports as imports_mod
+    from backend.utils import community_archive as ca
+    snap = tmp_path / "snap"
+    _make_snapshot(snap)
+    app.config["COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS"] = 3
+    app.config["COMMUNITY_ARCHIVE_SNAPSHOT_DIR"] = str(snap)
+    u = _make_user("alice_local")
+    _db.session.commit()
+    monkeypatch.setattr(ca, "fetch_account", lambda h: {
+        "account_id": "A1", "username": "alice", "num_tweets": 3})
+    monkeypatch.setattr(ca, "iter_tweets", MagicMock(
+        side_effect=AssertionError("REST must not be used for large accounts")))
+    ensured = []
+    monkeypatch.setattr(ca, "ensure_snapshot", lambda d, on_progress=None, **k: (
+        ensured.append(str(d)) or "2026-08-27T07-03-56Z"))
+    import backend.tasks.exports as ex
+    monkeypatch.setattr(ex, "maybe_trigger_profile_update", MagicMock())
+    states = []
+
+    result = imports_mod.prefill_community_archive_impl(
+        u.id, "alice", {"include_replies": True},
+        update_state=lambda **kw: states.append(kw["meta"]))
+
+    assert ensured == [str(snap)]
+    assert result["source"] == "parquet" and result["created"] == 3
+    assert states[0]["stage"] == "downloading"
+    nodes = Node.query.filter_by(human_owner_id=u.id).order_by(Node.created_at).all()
+    assert [n.get_content() for n in nodes] == ["first", "second", "reply to bob"]

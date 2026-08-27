@@ -286,6 +286,7 @@ def prefill_from_community_archive(user_id):
     from backend.tasks.imports import prefill_community_archive
     task = prefill_community_archive.delay(user.id, handle, {
         "include_replies": bool(data.get("include_replies", True)),
+        "force_parquet": bool(data.get("force_parquet", False)),
     })
     return jsonify({"task_id": task.id, "handle": handle}), 202
 

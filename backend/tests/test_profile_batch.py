@@ -552,10 +552,14 @@ def test_chunk_budget_scales_with_multiplier_and_calibration(app):
     ratio = ex.record_token_ratio(u, "dense-model", 10000, 32000)
     assert ratio == 1.6
     assert ex.chunk_budget_for(u, "dense-model")[0] == int(ex.CHUNK_BUDGET / 3.2)
-    # Clamped so one odd chunk can't collapse the budget.
+    assert ex.effective_chars_per_token(u, "dense-model") == 1.25
+    # Clamped to [1, 5] chars/token so one odd chunk can't collapse or
+    # explode the budget.
     ex.record_token_ratio(u, "dense-model", 10000, 200000)
-    assert ex.chunk_budget_for(u, "dense-model")[0] == int(
-        ex.CHUNK_BUDGET / (2.0 * ex.TOKEN_RATIO_MAX))
+    assert ex.effective_chars_per_token(u, "dense-model") == ex.CHARS_PER_TOKEN_MIN
+    assert ex.chunk_budget_for(u, "dense-model")[0] == ex.CHUNK_BUDGET // 4
+    ex.record_token_ratio(u, "test-model", 10000, 1000)
+    assert ex.effective_chars_per_token(u, "test-model") == ex.CHARS_PER_TOKEN_MAX
     # No signal → no change.
     assert ex.record_token_ratio(u, "dense-model", 0, 5) is None
 

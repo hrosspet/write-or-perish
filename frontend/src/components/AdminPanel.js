@@ -530,11 +530,17 @@ function AdminPanel() {
     if (p.status === "running") {
       const n = (p.done || 0).toLocaleString();
       const t = p.total ? ` / ${p.total.toLocaleString()}` : "";
+      if ((p.stage || "").startsWith("downloading")) {
+        // Nightly parquet snapshot (~1 GB, once per export); done/total in MB.
+        const file = p.stage.replace("downloading", "").trim();
+        return `Downloading snapshot${file ? ` ${file}` : ""} ${n}${t} MB`;
+      }
       return `${p.stage === "importing" ? "Importing" : "Fetching"} ${n}${t}`;
     }
     if (p.status === "completed") {
       const r = p.result || {};
       return `Done: ${(r.created || 0).toLocaleString()} nodes from @${r.handle}` +
+        `${r.source === "parquet" ? " (snapshot)" : ""}` +
         `${r.skipped ? `, ${r.skipped} skipped` : ""}` +
         `${r.profile_batch_queued ? " — batch profile queued" : " — below profile threshold"}`;
     }
