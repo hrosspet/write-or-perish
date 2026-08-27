@@ -254,7 +254,7 @@ def test_profile_content_edit_without_flag_preserves_tts(app, alice):
 
 def _make_system_node(user):
     from backend.models import UserPrompt, NodeContextArtifact
-    prompt = UserPrompt(user_id=user.id, prompt_key="agentic", title="Agentic",
+    prompt = UserPrompt(user_id=user.id, prompt_key="textmode", title="Agentic",
                         generated_by="default")
     prompt.set_content("You are Loore. {user_profile}")
     _db.session.add(prompt)
