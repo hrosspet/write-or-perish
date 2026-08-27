@@ -303,9 +303,10 @@ if sudo systemctl is-active --quiet write-or-perish-celery-beat; then
     log "Celery beat service restarted successfully"
 else
     # The schedule file was already removed above, so this is not the
-    # corrupt-shelve case. Surface the log tail so the deploy output says why.
-    warn "Celery beat service failed to start"
-    tail -n 20 "$PROJECT_DIR/logs/celery-beat.log" 2>/dev/null || true
+    # corrupt-shelve case. Do NOT print the log here: this output lands in
+    # a public repo's Actions log, and server logs can carry paths, task
+    # args and broker details. Point at it instead.
+    warn "Celery beat service failed to start — see logs/celery-beat.log on the VM"
     FAILED_SERVICES="$FAILED_SERVICES write-or-perish-celery-beat"
 fi
 
