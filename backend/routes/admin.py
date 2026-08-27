@@ -106,6 +106,8 @@ def list_users():
             "spend_limit_usd": get_user_spend_limit_usd(user, config),
             "spend_limit_is_override": user.monthly_spend_limit_usd is not None,
             "spend_blocked": user_is_capped(user, now),
+            "profile_batch_pending": bool(user.profile_batch_pending),
+            "profile_force_batch": bool(user.profile_force_batch),
         })
     return jsonify({
         "users": user_list,
@@ -265,6 +267,55 @@ def activate_and_welcome(user_id):
         "approved": True,
         "email_sent": True,
     }), 200
+
+
+@admin_bp.route("/users/<int:user_id>/prefill", methods=["POST"])
+@login_required
+@admin_required
+def prefill_from_community_archive(user_id):
+    """Bootstrap a (typically whitelisted, not-yet-signed-in) account with its
+    public tweets from the Community Archive, then queue a BATCH profile
+    build. Body: {"handle": "...", "include_replies": bool}; handle
+    defaults to the user's username. Returns {"task_id"} — poll
+    /admin/prefill/status/<task_id>."""
+    user = User.query.get_or_404(user_id)
+    data = request.get_json() or {}
+    handle = (data.get("handle") or user.username or "").strip().lstrip("@")
+    if not handle:
+        return jsonify({"error": "Handle is required."}), 400
+    from backend.tasks.imports import prefill_community_archive
+    task = prefill_community_archive.delay(user.id, handle, {
+        "include_replies": bool(data.get("include_replies", True)),
+    })
+    return jsonify({"task_id": task.id, "handle": handle}), 202
+
+
+@admin_bp.route("/prefill/status/<task_id>", methods=["GET"])
+@login_required
+@admin_required
+def prefill_status(task_id):
+    """Same shape as /import/status/<task_id> plus a ``stage``
+    ("fetching" | "importing"); no owner check — the admin isn't the
+    target user."""
+    from backend.celery_app import celery
+    task = celery.AsyncResult(task_id)
+    info = task.info if isinstance(task.info, dict) else {}
+    base = {"task_id": task_id, "done": 0, "total": None,
+            "stage": info.get("stage"), "result": None, "error": None}
+    if task.state == "PROGRESS":
+        return jsonify({**base, "status": "running",
+                        "done": info.get("done", 0),
+                        "total": info.get("total")}), 200
+    if task.state == "SUCCESS":
+        return jsonify({**base, "status": "completed",
+                        "done": info.get("total"), "total": info.get("total"),
+                        "result": {k: v for k, v in info.items()
+                                   if k != "user_id"}}), 200
+    if task.state == "FAILURE":
+        return jsonify({**base, "status": "failed",
+                        "error": str(task.info) if task.info
+                        else "Pre-fill failed"}), 200
+    return jsonify({**base, "status": "queued"}), 200
 
 
 @admin_bp.route("/spend", methods=["GET"])

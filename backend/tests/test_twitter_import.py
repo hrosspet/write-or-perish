@@ -420,3 +420,101 @@ def test_status_maps_states_and_hides_other_users(app, monkeypatch):
 
     _fake_celery(monkeypatch, "PENDING", None)
     assert client.get("/api/import/status/t1").get_json()["status"] == "queued"
+
+
+# ── Community Archive pre-fill (admin cold-start bootstrap) ───────────────
+
+def _ca_row(i, text, created="2026-08-24T10:00:00+00:00", reply=None):
+    return {"tweet_id": str(i), "created_at": created, "full_text": text,
+            "favorite_count": 1, "retweet_count": 0,
+            "reply_to_tweet_id": reply,
+            "reply_to_user_id": "7" if reply else None,
+            "reply_to_username": "someone" if reply else None}
+
+
+def test_community_archive_keyset_paging_and_export_shape(monkeypatch):
+    from backend.utils import community_archive as ca
+    calls = []
+
+    def fake_get(table, params):
+        calls.append(params)
+        assert table == "enriched_tweets"
+        if "tweet_id" not in params:
+            return [_ca_row(1, "a"), _ca_row(2, "b")]
+        assert params["tweet_id"] == "gt.2"
+        return [_ca_row(3, "c")]
+
+    monkeypatch.setattr(ca, "_get", fake_get)
+    rows = list(ca.iter_tweets("Someone", page_size=2))
+    assert [r["tweet_id"] for r in rows] == ["1", "2", "3"]
+    assert "offset" not in calls[0] and calls[1]["order"] == "tweet_id.asc"
+
+    entry = ca.to_export_entry(_ca_row(9, "hi", reply="5"))["tweet"]
+    assert entry["created_at"] == "Mon Aug 24 10:00:00 +0000 2026"
+    assert entry["in_reply_to_status_id_str"] == "5"
+    row = ta.compact_row(entry)
+    assert row["is_reply"] and row["full_text"] == "hi"
+
+
+def test_import_handoff_routes_batch_users_to_seeder(app, monkeypatch):
+    """A batch-pinned user never gets the synchronous profile task after an
+    import; the from-scratch build is requested via the regen flag."""
+    from backend.routes import import_data
+    u = _make_user("batchy")
+    u.profile_force_batch = True
+    _db.session.commit()
+    import backend.tasks.exports as ex
+    sync = MagicMock(return_value="sync-task")
+    monkeypatch.setattr(ex, "maybe_trigger_profile_update", sync)
+
+    assert import_data._maybe_update_profile_after_import(u.id, None, 50000) is None
+    assert sync.call_count == 0
+    assert User.query.get(u.id).profile_needs_full_regen is True
+
+    # Non-batch users keep the existing synchronous dispatch.
+    v = _make_user("syncy")
+    _db.session.commit()
+    assert import_data._maybe_update_profile_after_import(v.id, None, 50000) == "sync-task"
+
+
+def test_prefill_impl_imports_pins_batch_and_reports(app, monkeypatch):
+    from backend.tasks import imports as imports_mod
+    from backend.utils import community_archive as ca
+    u = _make_user("tyler")
+    _db.session.commit()
+    monkeypatch.setattr(ca, "fetch_account", lambda h: {
+        "account_id": "1", "username": "TylerAlterman", "num_tweets": 3})
+    monkeypatch.setattr(ca, "iter_tweets", lambda h, on_page=None, **k: iter([
+        _ca_row(2, "second", "2026-08-25T10:00:00+00:00"),
+        _ca_row(1, "first"),
+        _ca_row(1, "first (dup)"),
+        _ca_row(3, "RT @x: retweet", "2026-08-26T10:00:00+00:00"),
+        _ca_row(4, "a reply", "2026-08-27T10:00:00+00:00", reply="2"),
+    ]))
+    import backend.tasks.exports as ex
+    sync = MagicMock(return_value="sync-task")
+    monkeypatch.setattr(ex, "maybe_trigger_profile_update", sync)
+    states = []
+
+    result = imports_mod.prefill_community_archive_impl(
+        u.id, "tyleralterman", {"include_replies": False},
+        update_state=lambda **kw: states.append(kw["meta"]))
+
+    assert result["created"] == 2 and result["handle"] == "TylerAlterman"
+    nodes = Node.query.filter_by(human_owner_id=u.id).order_by(Node.created_at).all()
+    assert [n.get_content() for n in nodes] == ["first", "second"]
+    assert all(n.origin == "twitter" and n.ai_usage == "chat" for n in nodes)
+    assert User.query.get(u.id).profile_force_batch is True
+    assert sync.call_count == 0  # never the synchronous path
+    assert states[0]["stage"] == "fetching" and states[-1]["stage"] == "importing"
+    assert result["profile_batch_queued"] is False  # tiny corpus < 10k tokens
+
+
+def test_prefill_impl_unknown_handle(app, monkeypatch):
+    from backend.tasks import imports as imports_mod
+    from backend.utils import community_archive as ca
+    u = _make_user("nobody")
+    _db.session.commit()
+    monkeypatch.setattr(ca, "fetch_account", lambda h: None)
+    with pytest.raises(ca.CommunityArchiveError):
+        imports_mod.prefill_community_archive_impl(u.id, "nobody", {})

@@ -52,9 +52,11 @@ BATCH_STALE_AFTER = timedelta(hours=24)   # provider SLA ceiling
 
 
 def use_batch_for_user(user, config):
-    """A user takes the Batch path if the global switch is on OR their id is
-    in the canary allowlist (issue #173)."""
+    """A user takes the Batch path if the global switch is on, their id is
+    in the canary allowlist (issue #173), or they are pinned to batch
+    (User.profile_force_batch — admin pre-fills)."""
     return (bool(config.get("PROFILE_USE_BATCH"))
+            or bool(getattr(user, "profile_force_batch", False))
             or user.id in config.get("PROFILE_BATCH_USER_IDS", set()))
 
 
@@ -148,8 +150,9 @@ def _build_next_profile_request(user):
     # incremental machinery, which renders budget windows correctly via
     # entry-point preambles; the legacy authored_threads path silently
     # returned None whenever no thread *root* fit the budget window.
+    budget, min_chunk = _exports.chunk_budget_for(user, model_id)
     chunk = _exports.build_user_export_content(
-        user, max_tokens=_exports.CHUNK_BUDGET, filter_ai_usage=True,
+        user, max_tokens=budget, filter_ai_usage=True,
         created_after=cutoff, chronological_order=True, return_metadata=True,
         include_strategy="engaged_threads")
 
@@ -161,7 +164,7 @@ def _build_next_profile_request(user):
     # if data remains beyond it, process it anyway.
     big_enough = have_chunk and (
         is_first_initial
-        or chunk["token_count"] >= _exports.MIN_CHUNK_TOKENS
+        or chunk["token_count"] >= min_chunk
         or _exports._has_more_source_after(user, chunk["latest_node_created_at"]))
 
     if big_enough:
@@ -201,6 +204,9 @@ def _build_next_profile_request(user):
                 "source_data_cutoff": (
                     latest_ts.isoformat() if latest_ts else None),
                 "model_id": model_id,
+                # chars/4 of the prompt: calibrates the next chunk's budget
+                # against the provider-reported input_tokens (_apply_result).
+                "prompt_tokens_est": _exports.approximate_token_count(prompt),
             },
         }
 
@@ -284,6 +290,13 @@ def _apply_result(user, item, result, submitted_at):
                 user.profile_needs_full_regen = False
             logger.info(
                 f"User {user.id}: saved batch chunk profile {profile.id}")
+        if item.get("prompt_tokens_est"):
+            observed = _exports.record_token_ratio(
+                user, item["model_id"], item["prompt_tokens_est"],
+                response.get("input_tokens"))
+            if observed is not None:
+                logger.info(f"User {user.id}: batch chunk tokenizer "
+                            f"calibration actual/estimated={observed}")
         user.profile_batch_attempts = 0
         return _build_next_profile_request(user)
 

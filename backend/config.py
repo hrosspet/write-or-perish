@@ -128,6 +128,10 @@ class Config:
             "long_context_threshold": 272000,
             "long_context_input_multiplier": 2.0,
             "long_context_output_multiplier": 1.5,
+            # New-generation tokenizer: ~2 chars/token on real corpora
+            # (tweets measured at 3.2x the chars/4 estimate). Scales the
+            # stored chars/4 token counts when sizing profile chunks.
+            "token_multiplier": 2.0,
         },
         "gpt-5.5": {
             "provider": "openai",
@@ -204,6 +208,10 @@ class Config:
             "context_window": 1000000,
             "input_price_per_mtok": 5.00,
             "output_price_per_mtok": 25.00,
+            # New-generation tokenizer: ~2 chars/token on real corpora
+            # (tweets measured at 3.2x the chars/4 estimate). Scales the
+            # stored chars/4 token counts when sizing profile chunks.
+            "token_multiplier": 2.0,
         },
         "claude-opus-4.5": {
             "provider": "anthropic",
@@ -245,6 +253,10 @@ class Config:
             "context_window": 1000000,
             "input_price_per_mtok": 10.00,
             "output_price_per_mtok": 50.00,
+            # New-generation tokenizer: ~2 chars/token on real corpora
+            # (tweets measured at 3.2x the chars/4 estimate). Scales the
+            # stored chars/4 token counts when sizing profile chunks.
+            "token_multiplier": 2.0,
         },
         "claude-opus-3": {
             "provider": "anthropic",

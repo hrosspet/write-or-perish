@@ -480,6 +480,68 @@ function AdminPanel() {
     }
   };
 
+  // Community Archive pre-fill (admin cold-start bootstrap): per-row inline
+  // form -> POST /admin/users/:id/prefill -> poll /admin/prefill/status.
+  // prefill[userId] = { open, handle, includeReplies, taskId, status, done,
+  //                     total, stage, result, error }
+  const [prefill, setPrefill] = useState({});
+  const patchPrefill = (userId, patch) =>
+    setPrefill((prev) => ({ ...prev, [userId]: { ...(prev[userId] || {}), ...patch } }));
+
+  const openPrefill = (u) =>
+    patchPrefill(u.id, { open: true, handle: u.username || "", includeReplies: true, error: null });
+
+  const startPrefill = async (userId) => {
+    const form = prefill[userId] || {};
+    try {
+      const res = await api.post(`/admin/users/${userId}/prefill`, {
+        handle: form.handle,
+        include_replies: form.includeReplies !== false,
+      });
+      patchPrefill(userId, { taskId: res.data.task_id, status: "queued", error: null, result: null });
+    } catch (err) {
+      patchPrefill(userId, { error: err.response?.data?.error || "Error starting pre-fill." });
+    }
+  };
+
+  useEffect(() => {
+    const active = Object.entries(prefill).filter(
+      ([, p]) => p.taskId && (p.status === "queued" || p.status === "running")
+    );
+    if (active.length === 0) return undefined;
+    const timer = setInterval(async () => {
+      for (const [userId, p] of active) {
+        try {
+          const res = await api.get(`/admin/prefill/status/${p.taskId}`);
+          patchPrefill(Number(userId), res.data);
+          if (res.data.status === "completed") fetchUsers();
+        } catch (err) {
+          patchPrefill(Number(userId), { status: "failed", error: "Status check failed." });
+        }
+      }
+    }, 2000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefill]);
+
+  const prefillLabel = (p) => {
+    if (!p || !p.status) return null;
+    if (p.status === "queued") return "Queued…";
+    if (p.status === "running") {
+      const n = (p.done || 0).toLocaleString();
+      const t = p.total ? ` / ${p.total.toLocaleString()}` : "";
+      return `${p.stage === "importing" ? "Importing" : "Fetching"} ${n}${t}`;
+    }
+    if (p.status === "completed") {
+      const r = p.result || {};
+      return `Done: ${(r.created || 0).toLocaleString()} nodes from @${r.handle}` +
+        `${r.skipped ? `, ${r.skipped} skipped` : ""}` +
+        `${r.profile_batch_queued ? " — batch profile queued" : " — below profile threshold"}`;
+    }
+    if (p.status === "failed") return `Failed: ${p.error}`;
+    return null;
+  };
+
   const handleWhitelistUser = async () => {
     if (!newHandle.trim()) {
       setNewHandleError("Handle is required.");
@@ -681,7 +743,54 @@ function AdminPanel() {
                 )}{" "}
                 <button onClick={() => updateEmail(u.id, u.email)}>
                   Update Email
+                </button>{" "}
+                <button
+                  onClick={() => openPrefill(u)}
+                  title="Import this account's public tweets from the Community Archive and queue a batch profile build"
+                >
+                  Pre-fill from CA
                 </button>
+                {u.profile_batch_pending && (
+                  <span
+                    title="A batch profile job is in flight for this user"
+                    style={{ marginLeft: "6px", color: "var(--text-muted)", fontSize: "0.85em" }}
+                  >
+                    ⏳ batch
+                  </span>
+                )}
+                {prefill[u.id]?.open && (
+                  <div style={{ marginTop: "6px", display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap" }}>
+                    <input
+                      type="text"
+                      value={prefill[u.id].handle || ""}
+                      placeholder="CA handle"
+                      onChange={(e) => patchPrefill(u.id, { handle: e.target.value })}
+                      onKeyDown={(e) => { if (e.key === "Enter") startPrefill(u.id); }}
+                      style={{ width: "140px", padding: "4px" }}
+                      disabled={["queued", "running"].includes(prefill[u.id].status)}
+                    />
+                    <label style={{ fontSize: "0.85em", whiteSpace: "nowrap" }}>
+                      <input
+                        type="checkbox"
+                        checked={prefill[u.id].includeReplies !== false}
+                        onChange={(e) => patchPrefill(u.id, { includeReplies: e.target.checked })}
+                      />{" "}
+                      replies
+                    </label>
+                    <button
+                      onClick={() => startPrefill(u.id)}
+                      disabled={["queued", "running"].includes(prefill[u.id].status)}
+                    >
+                      Start
+                    </button>
+                    <button onClick={() => patchPrefill(u.id, { open: false })}>Close</button>
+                    {(prefillLabel(prefill[u.id]) || prefill[u.id].error) && (
+                      <span style={{ fontSize: "0.85em", color: prefill[u.id].status === "failed" || prefill[u.id].error ? "var(--error)" : "var(--text-secondary)" }}>
+                        {prefill[u.id].error && !prefill[u.id].status ? prefill[u.id].error : prefillLabel(prefill[u.id])}
+                      </span>
+                    )}
+                  </div>
+                )}
               </td>
             </tr>
           ))}
