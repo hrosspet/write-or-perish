@@ -15,10 +15,12 @@ export default function AlphaThankYouPage() {
   const needsEmail = user && (!user.email || user.email.trim() === "");
 
   // This page is handed out as a link (e.g. to fresh X signups, so they can
-  // opt in to the tweet seed). Logged-out visitors would otherwise see the
-  // "you're in" copy with neither a sign-in nor the opt-in — so require a
-  // session, approved or not. Can't use ProtectedRoute: it redirects
-  // unapproved users *here*, which would loop.
+  // opt in to the tweet seed). Signed-up users are logged in even before
+  // approval, so they land here directly. Anyone without a session is a
+  // stranger — send them to the landing page (a logged-out signup who logs
+  // in from there is bounced back here by ProtectedRoute anyway). Can't use
+  // ProtectedRoute on this page itself: it redirects unapproved users
+  // *here*, which would loop.
   if (userLoading) {
     return (
       <div style={{ padding: "40px", textAlign: "center" }}>
@@ -27,7 +29,7 @@ export default function AlphaThankYouPage() {
     );
   }
   if (!user) {
-    return <Navigate to="/login?returnUrl=%2Falpha-thank-you" replace />;
+    return <Navigate to="/landing" replace />;
   }
 
   const handleSubmit = async (e) => {
