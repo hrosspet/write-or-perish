@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import Fade from "../utils/Fade";
 import { useUser } from "../contexts/UserContext";
 import api from "../api";
+import PrefillConsentCard from "../components/PrefillConsentCard";
 
 export default function AlphaThankYouPage() {
   const { user, setUser } = useUser();
@@ -137,6 +138,13 @@ export default function AlphaThankYouPage() {
           </div>
         </Fade>
       )}
+
+      {/* Opt-in: seed the account from the user's own public tweets. Asked
+          here because it's dead time — the signup is already done, so a
+          hesitation costs nothing. Renders null unless X-login + unanswered. */}
+      <Fade delay={0.26}>
+        <PrefillConsentCard style={{ marginBottom: "2rem" }} />
+      </Fade>
 
       <Fade delay={0.28}>
         <div style={{

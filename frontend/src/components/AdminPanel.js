@@ -796,6 +796,14 @@ function AdminPanel() {
                     pre-filled @{u.prefilled_handle}
                   </div>
                 )}
+                {u.prefill_consent && (
+                  <div
+                    style={{ color: u.prefill_consent === "yes" ? "var(--success)" : "var(--text-muted)", fontSize: "0.85em" }}
+                    title={u.prefill_consent_at ? `answered ${new Date(u.prefill_consent_at).toLocaleString()}` : undefined}
+                  >
+                    {u.prefill_consent === "yes" ? "✓ opted in to tweet seed" : "✗ declined tweet seed"}
+                  </div>
+                )}
               </td>
               <td
                 style={{ border: "1px solid var(--border)", padding: "8px", width: "85px", whiteSpace: "nowrap" }}

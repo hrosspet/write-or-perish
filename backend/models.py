@@ -123,6 +123,12 @@ class User(db.Model, UserMixin):
     # Community Archive handle this account was pre-filled from (admin
     # cold-start bootstrap); null for organically-grown accounts.
     prefilled_handle = db.Column(db.String(64), nullable=True)
+    # Opt-in answer to "seed your Loore from your public tweets?" asked on
+    # /alpha-thank-you (and once more on /welcome). "yes" | "no" | NULL.
+    # NULL = never answered / dismissed: the question is deliberately
+    # escapable, so "we don't know" is a real state distinct from "no".
+    prefill_consent = db.Column(db.String(8), nullable=True)
+    prefill_consent_at = db.Column(db.DateTime(timezone=True), nullable=True)
 
     # All valid subscription plans (single source of truth).
     ALLOWED_PLANS = {"free", "alpha", "pro"}

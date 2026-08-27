@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import Fade from "../utils/Fade";
 import ImportData from "../components/ImportData";
 import CtaButton, { ctaButtonStyle, ctaButtonHoverStyle } from "../components/CtaButton";
+import PrefillConsentCard from "../components/PrefillConsentCard";
 
 export default function WelcomePage({ onNewEntryClick }) {
   return (
@@ -83,6 +84,14 @@ export default function WelcomePage({ onNewEntryClick }) {
               You can type or record a voice note — whatever feels natural.
             </p>
           </div>
+        </Fade>
+      </div>
+
+      {/* Second touch for the tweets opt-in — only for X-login users who
+          never answered on /alpha-thank-you. Renders null otherwise. */}
+      <div style={{ maxWidth: 580, margin: "0 auto", padding: "0 0 2.5rem" }}>
+        <Fade>
+          <PrefillConsentCard delayHint="Already on X?" style={{ maxWidth: "none", padding: "2.2rem 2rem", textAlign: "center" }} />
         </Fade>
       </div>
 
