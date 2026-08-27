@@ -388,16 +388,20 @@ def seed_profile_batches():
         _seed_profile_batches()
 
 
-def _seed_profile_batches():
-    """Impl — runs inside an active app context (testable directly)."""
+def _seed_profile_batches(users=None):
+    """Impl — runs inside an active app context (testable directly).
+    ``users`` restricts the cohort (immediate seed for one user); the
+    default is every profile-eligible user."""
     config = current_app.config
     if config.get("PROFILE_UPDATES_PAUSED"):
         logger.info("PROFILE_UPDATES_PAUSED — skipping batch seeder")
-        return
+        return 0
     keys = apply_batch_key_override(
         get_api_keys_for_usage(config, 'chat'), config)
     built = []
-    for user in User.profile_eligible_query().all():
+    if users is None:
+        users = User.profile_eligible_query().all()
+    for user in users:
         if user.profile_batch_pending:
             continue
         if not use_batch_for_user(user, config):
@@ -415,6 +419,20 @@ def _seed_profile_batches():
         if req:
             built.append(req)
     _submit_requests(built, keys)
+    return len(built)
+
+
+@celery.task
+def seed_profile_batch_for_user(user_id):
+    """Immediate seed for one user (admin pre-fill): same gates as the
+    hourly seeder, without waiting for it. Returns the number submitted."""
+    with flask_app.app_context():
+        user = User.query.get(user_id)
+        if not user:
+            return 0
+        n = _seed_profile_batches(users=[user])
+        logger.info(f"User {user_id}: immediate batch seed → {n} request(s)")
+        return n
 
 
 @celery.task

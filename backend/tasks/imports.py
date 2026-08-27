@@ -78,7 +78,8 @@ def snapshot_dir_for(config):
     return STASH_ROOT.parent / "community-archive"
 
 
-def prefill_community_archive_impl(user_id, handle, options, update_state=None):
+def prefill_community_archive_impl(user_id, handle, options, update_state=None,
+                                   seed_now=True):
     """Fetch @handle's tweets from the Community Archive (REST for small
     accounts, the nightly parquet snapshot for large ones) into the user's
     account (origin="twitter", private, AI-readable) and pin the user to
@@ -163,12 +164,17 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None):
     except Exception:
         db.session.rollback()
         raise
+    queued = bool(User.query.get(user_id).profile_needs_full_regen)
+    if queued and seed_now:
+        # Don't wait for the hourly seeder: submit this user's first chunk
+        # now (the ~60s poller then drives the rest of the chain).
+        from backend.tasks.profile_batch import seed_profile_batch_for_user
+        seed_profile_batch_for_user.delay(user_id)
     result.update({
         "user_id": user_id, "handle": account["username"],
         "total": total, "stage": "done",
         "source": "parquet" if use_parquet else "rest",
-        "profile_batch_queued": bool(
-            User.query.get(user_id).profile_needs_full_regen),
+        "profile_batch_queued": queued,
     })
     return result
 
