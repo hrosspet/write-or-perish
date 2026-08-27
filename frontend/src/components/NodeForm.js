@@ -457,7 +457,9 @@ const NodeForm = forwardRef(
             content,
             privacy_level: privacyLevel,
             ai_usage: aiUsage,
-            ...(detachPrompt && { detach_prompt: true }),
+            // Detaching the pinned prompt only makes sense when the text was
+            // actually edited; a privacy/AI-usage-only save keeps it.
+            ...(detachPrompt && content !== initialContent && { detach_prompt: true }),
             ...(regenerateTts && { regenerate_tts: true }),
           });
         } else if (uploadedFile) {

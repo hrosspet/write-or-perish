@@ -531,6 +531,10 @@ class TestConfirmChatgptImportDedup:
         assert b1["skipped"] == 0
         assert b1["nodes_created"] == 2
         assert self._count_nodes(alice.id) == 2
+        # Every imported node is stamped with its platform (Loore-native
+        # nodes stay NULL).
+        assert {n.origin for n in Node.query.filter_by(
+            human_owner_id=alice.id)} == {"chatgpt"}
 
         # Re-import the identical archive: zero new nodes.
         r2 = _confirm_conversations(client, convs)

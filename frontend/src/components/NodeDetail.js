@@ -134,6 +134,14 @@ function NodeDetail({ nodeIdOverride }) {
       .then((response) => {
         setNode(response.data);
         setLoading(false);
+        // /node/<id> is server-rendered: a private node arrives in the
+        // "Not found" shell (404 for private-or-missing alike, so ids can't
+        // be probed), so the tab title has to be set here once the
+        // logged-in fetch succeeds — same first-line rule PublicThreadPage
+        // uses. Reset on unmount below.
+        const firstLine = (response.data?.content || '')
+          .trim().split('\n')[0].replace(/^[#>\s]+/, '').slice(0, 120);
+        document.title = firstLine ? `${firstLine} — Loore` : 'Loore';
         // Human-readable address (#228): when the node has a permalink and
         // we arrived via /node/<id>, show the pretty URL instead. Display
         // only — router state is untouched, and revisiting the pretty URL
@@ -154,6 +162,9 @@ function NodeDetail({ nodeIdOverride }) {
         }
         setLoading(false);
       });
+    return () => {
+      document.title = 'Loore';
+    };
   }, [id]);
 
   // Fetch quote data when node loads (if content contains {quote:ID} placeholders)
@@ -945,6 +956,7 @@ function NodeDetail({ nodeIdOverride }) {
           childrenCount={highlightedChildrenCount}
           humanOwnerUsername={humanOwnerUsername}
           llmModel={node.llm_model}
+          origin={node.origin}
           publicPage={node.privacy_level === 'public'}
         >
           <button

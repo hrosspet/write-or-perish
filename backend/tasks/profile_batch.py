@@ -32,12 +32,13 @@ from backend.llm_providers import DEFAULT_MAX_OUTPUT_TOKENS
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.llm_batch import (
     batch_submit, batch_check_and_collect, apply_batch_key_override)
-from backend.tasks.exports import (
-    CHUNK_BUDGET, MIN_CHUNK_TOKENS,
-    build_user_export_content, build_update_template, build_chunk_prompt,
-    build_integration_messages, _save_profile, _load_prompt,
-    _collect_iterative_chain, _has_more_source_after,
-)
+# Module reference, not `from ... import names`: exports imports
+# celery_app, which imports this module to register its tasks. When a
+# web request touches backend.tasks.exports FIRST (e.g. POST
+# /export/update_profile on a fresh gunicorn worker), exports is only
+# partially initialised at this point and a names-import raises
+# ImportError; attribute access at call time is fine.
+from backend.tasks import exports as _exports
 
 logger = get_task_logger(__name__)
 
@@ -147,8 +148,8 @@ def _build_next_profile_request(user):
     # incremental machinery, which renders budget windows correctly via
     # entry-point preambles; the legacy authored_threads path silently
     # returned None whenever no thread *root* fit the budget window.
-    chunk = build_user_export_content(
-        user, max_tokens=CHUNK_BUDGET, filter_ai_usage=True,
+    chunk = _exports.build_user_export_content(
+        user, max_tokens=_exports.CHUNK_BUDGET, filter_ai_usage=True,
         created_after=cutoff, chronological_order=True, return_metadata=True,
         include_strategy="engaged_threads")
 
@@ -160,19 +161,20 @@ def _build_next_profile_request(user):
     # if data remains beyond it, process it anyway.
     big_enough = have_chunk and (
         is_first_initial
-        or chunk["token_count"] >= MIN_CHUNK_TOKENS
-        or _has_more_source_after(user, chunk["latest_node_created_at"]))
+        or chunk["token_count"] >= _exports.MIN_CHUNK_TOKENS
+        or _exports._has_more_source_after(user, chunk["latest_node_created_at"]))
 
     if big_enough:
         if is_first_initial:
-            gen_template = _load_prompt(
+            gen_template = _exports._load_prompt(
                 "profile_generation.txt", user_id=user.id)
-            prompt = gen_template.replace("{user_export}", chunk["content"])
+            prompt = gen_template.replace(
+                "{user_export}", _exports.chunk_content_for_prompt(chunk))
             generation_type = "iterative"
         else:
-            prompt = build_chunk_prompt(
-                build_update_template(user.id), prev.get_content(),
-                cumulative, chunk)
+            prompt = _exports.build_chunk_prompt(
+                _exports.build_update_template(user.id), prev.get_content(),
+                cumulative, chunk, prev.source_origin_stats)
             generation_type = "update"
         latest_ts = chunk["latest_node_created_at"]
         # NB: Anthropic requires custom_id to match ^[a-zA-Z0-9_-]{1,64}$ —
@@ -193,6 +195,9 @@ def _build_next_profile_request(user):
                 "prev_profile_id": prev_id,
                 "generation_type": generation_type,
                 "prev_cumulative": cumulative,
+                "origin_stats": _exports.merge_origin_stats(
+                    prev.source_origin_stats if prev else None,
+                    chunk.get("origin_stats")),
                 "source_data_cutoff": (
                     latest_ts.isoformat() if latest_ts else None),
                 "model_id": model_id,
@@ -202,12 +207,12 @@ def _build_next_profile_request(user):
     # No (full-size) new data → integrate the chain if there are ≥2 versions
     # and we haven't already integrated this tip.
     if prev is not None:
-        chain = _collect_iterative_chain(prev.id)
+        chain = _exports._collect_iterative_chain(prev.id)
         already = UserProfile.query.filter_by(
             user_id=user.id, generation_type="integration",
             parent_profile_id=prev.id).first()
         if len(chain) >= 2 and not already:
-            messages, _chain = build_integration_messages(user.id, prev.id)
+            messages, _chain = _exports.build_integration_messages(user.id, prev.id)
             if messages is not None:
                 cid = f"profile_{user.id}_{prev.id}_integration"
                 return {
@@ -221,6 +226,7 @@ def _build_next_profile_request(user):
                         "custom_id": cid, "user_id": user.id,
                         "kind": "integration", "prev_profile_id": prev.id,
                         "prev_source_tokens": prev.source_tokens_used,
+                        "prev_origin_stats": prev.source_origin_stats,
                         "source_data_cutoff": (
                             prev.source_data_cutoff.isoformat()
                             if prev.source_data_cutoff else None),
@@ -262,11 +268,12 @@ def _apply_result(user, item, result, submitted_at):
             logger.info(f"User {user.id}: chunk already saved (idempotent)")
         else:
             cumulative = item["prev_cumulative"] + response["input_tokens"]
-            profile = _save_profile(
+            profile = _exports._save_profile(
                 user, item["model_id"], response["content"], response,
                 source_tokens_used=cumulative, source_data_cutoff=cutoff,
                 generation_type=item["generation_type"],
-                parent_profile_id=item["prev_profile_id"], batch=True)
+                parent_profile_id=item["prev_profile_id"], batch=True,
+                source_origin_stats=item.get("origin_stats"))
             # mirror PR #181: a from-scratch full regen is no longer needed
             # once its first chunk is committed. Only a from-scratch chunk
             # (prev_profile_id None) satisfies the flag — a flag set while
@@ -287,11 +294,12 @@ def _apply_result(user, item, result, submitted_at):
         parent_profile_id=item["prev_profile_id"]).filter(
         UserProfile.created_at >= submitted_at).first()
     if not existing:
-        _save_profile(
+        _exports._save_profile(
             user, item["model_id"], response["content"], response,
             source_tokens_used=item.get("prev_source_tokens"),
             source_data_cutoff=cutoff, generation_type="integration",
-            parent_profile_id=item["prev_profile_id"], batch=True)
+            parent_profile_id=item["prev_profile_id"], batch=True,
+            source_origin_stats=item.get("prev_origin_stats"))
         logger.info(f"User {user.id}: saved batch integration profile")
         # Integration = the batch rebuild finished for this user (#207).
         from backend.utils.notifications import notify_profile_ready

@@ -119,8 +119,10 @@ class Config:
             "api_model": "gpt-5.6-sol",
             "display_name": "GPT-5.6 Sol",
             "context_window": 1050000,
-            "input_price_per_mtok": 5.00,
-            "output_price_per_mtok": 30.00,
+            # Lowered 2026-08-25 (was 5.00 / 30.00); promotional pricing
+            # runs at least through 2026-11-21.
+            "input_price_per_mtok": 4.00,
+            "output_price_per_mtok": 20.00,
             # OpenAI auto-cache discount: GPT-5.6 Sol caches at 90% off
             "cached_input_multiplier": 0.10,
             "long_context_threshold": 272000,

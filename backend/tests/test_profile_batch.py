@@ -112,10 +112,10 @@ def test_build_next_request_chunk(app, monkeypatch):
     u = _user()
     prev = _prev_profile(u, datetime(2026, 5, 1))
     db.session.commit()
-    monkeypatch.setattr(pb, "build_user_export_content", MagicMock(
+    monkeypatch.setattr(pb._exports, "build_user_export_content", MagicMock(
         return_value={"content": "NEW DATA", "token_count": 90000,
                       "latest_node_created_at": datetime(2026, 6, 1)}))
-    monkeypatch.setattr(pb, "build_update_template", lambda uid: (
+    monkeypatch.setattr(pb._exports, "build_update_template", lambda uid: (
         "T {existing_profile}|{new_data}|{source_tokens_past}"
         "|{source_tokens_new}|{ratio_percent}"))
 
@@ -144,8 +144,8 @@ def test_build_next_request_uses_engaged_scope(app, monkeypatch):
     export = MagicMock(
         return_value={"content": "DATA", "token_count": 90000,
                       "latest_node_created_at": datetime(2026, 6, 1)})
-    monkeypatch.setattr(pb, "build_user_export_content", export)
-    monkeypatch.setattr(pb, "build_update_template", lambda uid: (
+    monkeypatch.setattr(pb._exports, "build_user_export_content", export)
+    monkeypatch.setattr(pb._exports, "build_update_template", lambda uid: (
         "T {existing_profile}|{new_data}|{source_tokens_past}"
         "|{source_tokens_new}|{ratio_percent}"))
 
@@ -163,13 +163,13 @@ def test_build_next_request_small_chunk_mid_corpus_still_chunks(
     u = _user()
     _prev_profile(u, datetime(2026, 5, 1))
     db.session.commit()
-    monkeypatch.setattr(pb, "build_user_export_content", MagicMock(
+    monkeypatch.setattr(pb._exports, "build_user_export_content", MagicMock(
         return_value={"content": "SMALL RENDER", "token_count": 50000,
                       "latest_node_created_at": datetime(2026, 6, 1)}))
-    monkeypatch.setattr(pb, "build_update_template", lambda uid: (
+    monkeypatch.setattr(pb._exports, "build_update_template", lambda uid: (
         "T {existing_profile}|{new_data}|{source_tokens_past}"
         "|{source_tokens_new}|{ratio_percent}"))
-    monkeypatch.setattr(pb, "_has_more_source_after", lambda u, ts: True)
+    monkeypatch.setattr(pb._exports, "_has_more_source_after", lambda u, ts: True)
 
     req = pb._build_next_profile_request(u)
 
@@ -182,11 +182,11 @@ def test_build_next_request_small_tail_defers(app, monkeypatch):
     u = _user()
     _prev_profile(u, datetime(2026, 5, 1))
     db.session.commit()
-    monkeypatch.setattr(pb, "build_user_export_content", MagicMock(
+    monkeypatch.setattr(pb._exports, "build_user_export_content", MagicMock(
         return_value={"content": "TINY TAIL", "token_count": 5000,
                       "latest_node_created_at": datetime(2026, 6, 1)}))
-    monkeypatch.setattr(pb, "_has_more_source_after", lambda u, ts: False)
-    monkeypatch.setattr(pb, "build_integration_messages",
+    monkeypatch.setattr(pb._exports, "_has_more_source_after", lambda u, ts: False)
+    monkeypatch.setattr(pb._exports, "build_integration_messages",
                         lambda uid, pid: (None, None))
 
     req = pb._build_next_profile_request(u)
@@ -198,7 +198,7 @@ def test_build_next_request_none_when_no_data(app, monkeypatch):
     u = _user()
     _prev_profile(u, datetime(2026, 5, 1))   # single version → no integration
     db.session.commit()
-    monkeypatch.setattr(pb, "build_user_export_content",
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
                         MagicMock(return_value=None))
     assert pb._build_next_profile_request(u) is None
 
@@ -267,8 +267,8 @@ def test_build_next_request_full_regen_starts_from_scratch(app, monkeypatch):
     export = MagicMock(
         return_value={"content": "ALL DATA", "token_count": 90000,
                       "latest_node_created_at": datetime(2026, 6, 1)})
-    monkeypatch.setattr(pb, "build_user_export_content", export)
-    monkeypatch.setattr(pb, "_load_prompt",
+    monkeypatch.setattr(pb._exports, "build_user_export_content", export)
+    monkeypatch.setattr(pb._exports, "_load_prompt",
                         lambda *a, **k: "GEN {user_export}")
 
     req = pb._build_next_profile_request(u)
@@ -286,9 +286,9 @@ def test_poll_clears_flag_only_for_from_scratch_chunk(app, monkeypatch):
     """A flag set while an incremental chunk is in flight survives that
     chunk (so the next build honors it); a from-scratch chunk commits the
     rebuild and clears it."""
-    monkeypatch.setattr(pb, "build_user_export_content",
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
                         MagicMock(return_value=None))
-    monkeypatch.setattr(pb, "build_integration_messages",
+    monkeypatch.setattr(pb._exports, "build_integration_messages",
                         lambda uid, pid: (None, None))
     monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
 
@@ -364,9 +364,9 @@ def test_poll_saves_from_scratch_chunk_despite_historic_twin(app, monkeypatch):
         {item["custom_id"]: {"content": "REBUILT CHUNK 1",
                              "input_tokens": 100, "output_tokens": 50}},
         {}, {}))
-    monkeypatch.setattr(pb, "build_user_export_content",
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
                         MagicMock(return_value=None))
-    monkeypatch.setattr(pb, "build_integration_messages",
+    monkeypatch.setattr(pb._exports, "build_integration_messages",
                         lambda uid, pid: (None, None))
     submit = MagicMock(return_value={})
     monkeypatch.setattr(pb, "batch_submit", submit)
@@ -410,9 +410,9 @@ def test_poll_saves_chunk_then_enqueues_integration(app, monkeypatch):
                              "input_tokens": 2000, "output_tokens": 500}},
         {}, {}))
     # After the chunk, no more raw data → the chain (prev + new) integrates.
-    monkeypatch.setattr(pb, "build_user_export_content",
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
                         MagicMock(return_value=None))
-    monkeypatch.setattr(pb, "build_integration_messages", lambda uid, pid: (
+    monkeypatch.setattr(pb._exports, "build_integration_messages", lambda uid, pid: (
         [{"role": "user", "content": [{"type": "text", "text": "INTEG"}]}],
         [prev]))
     monkeypatch.setattr(pb, "batch_submit",
@@ -497,9 +497,9 @@ def test_poll_is_not_paused(app, monkeypatch):
     monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
         {item["custom_id"]: {"content": "P", "input_tokens": 100,
                              "output_tokens": 50}}, {}, {}))
-    monkeypatch.setattr(pb, "build_user_export_content",
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
                         MagicMock(return_value=None))
-    monkeypatch.setattr(pb, "build_integration_messages",
+    monkeypatch.setattr(pb._exports, "build_integration_messages",
                         lambda uid, pid: (None, None))
     monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
 

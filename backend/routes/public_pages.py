@@ -54,8 +54,23 @@ def _html(body, status=200):
 
 
 def _shell_404(title="Not found"):
-    return _html(render_page({"title": f"{title} — Loore", "noindex": True}),
-                 404)
+    """The app shell for a page that is not publicly renderable.
+
+    Anonymous: 404 + "Not found" — private and missing are deliberately
+    indistinguishable. Signed-in: the same 404 shell but titled plainly
+    "Loore", because for a member this is usually their own private node
+    which the SPA is about to render; a tab that reads "Not found" for a
+    second before the real title arrives is a lie, not a safeguard. The
+    status stays 404 so the page cache (200/410 only) never stores the
+    member variant.
+    """
+    try:
+        from flask_login import current_user
+        signed_in = bool(current_user.is_authenticated)
+    except Exception:
+        signed_in = False
+    page_title = "Loore" if signed_in else f"{title} — Loore"
+    return _html(render_page({"title": page_title, "noindex": True}), 404)
 
 
 def _shell_410():

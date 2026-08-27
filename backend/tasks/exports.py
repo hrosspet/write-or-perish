@@ -76,6 +76,20 @@ def build_user_export_content(user, max_tokens=None, filter_ai_usage=False,
     return _build(user, max_tokens, filter_ai_usage, **kwargs)
 
 
+def _estimate_source_tokens(user):
+    """Stored token_count summed over the profile pipeline's anchor scope
+    (own + addressed nodes, AI-readable, alive). Pure SQL — no node
+    loading, no decryption — so it is safe for any corpus size."""
+    from sqlalchemy import func, or_
+    from backend.models import Node
+    total = db.session.query(func.coalesce(func.sum(Node.token_count), 0)).filter(
+        or_(Node.user_id == user.id, Node.human_owner_id == user.id),
+        Node.ai_usage.in_(['chat', 'train']),
+        Node.deleted_at.is_(None),
+    ).scalar()
+    return int(total or 0)
+
+
 def _has_more_source_after(user, ts):
     """Any AI-readable source data newer than *ts*, in the anchor scope
     the profile pipeline reads (own + addressed nodes)?
@@ -313,7 +327,8 @@ def _call_llm_with_retries(self, model_id, prompt_text, user_id,
 
 def _save_profile(user, model_id, profile_text, response,
                    source_tokens_used, source_data_cutoff,
-                   generation_type, parent_profile_id=None, batch=False):
+                   generation_type, parent_profile_id=None, batch=False,
+                   source_origin_stats=None):
     """Save a new UserProfile and log API cost. Returns the profile.
 
     batch=True records the Batch API discount in the cost log (issue #173)."""
@@ -342,6 +357,7 @@ def _save_profile(user, model_id, profile_text, response,
         ai_usage=user.default_ai_usage,
         source_tokens_used=source_tokens_used,
         source_data_cutoff=source_data_cutoff,
+        source_origin_stats=source_origin_stats,
         generation_type=generation_type,
         parent_profile_id=parent_profile_id,
     )
@@ -407,6 +423,7 @@ def revert_profile_for_import(user_id, earliest_imported_created_at):
         ai_usage=valid_profile.ai_usage,
         source_tokens_used=valid_profile.source_tokens_used,
         source_data_cutoff=valid_profile.source_data_cutoff,
+        source_origin_stats=valid_profile.source_origin_stats,
         generation_type="revert",
         parent_profile_id=valid_profile.id,
     )
@@ -566,6 +583,7 @@ def _do_iterative_incremental_update(self, user, model_id, prev_profile,
             initial_profile_id=prev_profile.id,
             initial_source_tokens=prev_profile.source_tokens_used or 0,
             initial_cutoff=cutoff,
+            initial_origin_stats=prev_profile.source_origin_stats,
             generation_type="update",
             status_prefix="Updating profile",
         )
@@ -617,23 +635,33 @@ def _do_initial_generation(self, user, model_id, context_window,
         5000
     )
 
-    # First pass: get metadata to decide if iterative is needed.
-    # engaged_threads: profiles read the user's full conversational
-    # scope — their own threads AND their replies in other users'
-    # threads (anchor-based selection, same scope incremental updates
-    # already use). The legacy authored_threads scope missed the latter
-    # entirely (#110).
-    total_export = build_user_export_content(
-        user, max_tokens=None, filter_ai_usage=True,
-        return_metadata=True, include_strategy="engaged_threads"
-    )
-
-    if not total_export or not total_export.get("content"):
+    # Decide single-pass vs iterative from a SQL token sum, NOT by
+    # rendering the whole corpus: an unbudgeted export loads and decrypts
+    # every node in scope, which OOM-killed the 512 MB staging worker
+    # four seconds into a 61k-node (1.5M-token) Twitter import. The sum
+    # is an estimate of the rendered size (same anchor scope
+    # _has_more_source_after uses); the exact export is only built when
+    # the estimate says it plausibly fits, and re-checked against the
+    # budget before use.
+    estimated_tokens = _estimate_source_tokens(user)
+    if estimated_tokens == 0:
         raise ValueError("No writing found to analyze")
 
-    total_tokens = total_export["token_count"]
+    total_export = None
+    if estimated_tokens <= budget:
+        # engaged_threads: profiles read the user's full conversational
+        # scope — their own threads AND their replies in other users'
+        # threads (anchor-based selection, same scope incremental updates
+        # already use). The legacy authored_threads scope missed the
+        # latter entirely (#110).
+        total_export = build_user_export_content(
+            user, max_tokens=None, filter_ai_usage=True,
+            return_metadata=True, include_strategy="engaged_threads"
+        )
+        if not total_export or not total_export.get("content"):
+            raise ValueError("No writing found to analyze")
 
-    if total_tokens <= budget:
+    if total_export is not None and total_export["token_count"] <= budget:
         # Single-pass generation
         return _single_pass_generation(
             self, user, model_id, gen_template, total_export,
@@ -655,7 +683,7 @@ def _single_pass_generation(self, user, model_id, gen_template,
         'progress': 30, 'status': 'Preparing prompt'
     })
 
-    content = export_result["content"]
+    content = chunk_content_for_prompt(export_result)
     prompt = gen_template.replace("{user_export}", content)
 
     response = _call_llm_with_retries(
@@ -677,6 +705,7 @@ def _single_pass_generation(self, user, model_id, gen_template,
         source_tokens_used=actual_source_tokens,
         source_data_cutoff=export_result["latest_node_created_at"],
         generation_type="initial",
+        source_origin_stats=export_result.get("origin_stats"),
     )
 
     logger.info(
@@ -748,8 +777,72 @@ def build_update_template(user_id):
     )
 
 
+ORIGIN_LABELS = {
+    "twitter": "public tweets (imported from Twitter/X)",
+    "chatgpt": "ChatGPT conversations (imported)",
+    "claude": "Claude conversations (imported)",
+    "markdown": "markdown documents (imported)",
+    "loore": "written in Loore",
+}
+
+
+def merge_origin_stats(prev_stats, chunk_stats):
+    """Sum two {origin: {nodes, tokens}} dicts (either may be None)."""
+    merged = {k: dict(v) for k, v in (prev_stats or {}).items()}
+    for origin, s in (chunk_stats or {}).items():
+        entry = merged.setdefault(origin, {"nodes": 0, "tokens": 0})
+        entry["nodes"] += s.get("nodes", 0)
+        entry["tokens"] += s.get("tokens", 0)
+    return merged
+
+
+def _format_origin_shares(stats):
+    total = sum(s["tokens"] for s in stats.values()) or 1
+    parts = []
+    for origin, s in sorted(stats.items(), key=lambda kv: -kv[1]["tokens"]):
+        label = ORIGIN_LABELS.get(origin, f"imported from {origin}")
+        pct = round(s["tokens"] / total * 100)
+        parts.append(f"{pct}% {label}, {s['nodes']:,} entries")
+    return "; ".join(parts)
+
+
+def _loore_only(stats):
+    return not stats or set(stats) == {"loore"}
+
+
+def source_mix_preamble(chunk, prev_stats=None):
+    """Source-mix header for a profile-generation chunk.
+
+    prev_stats: cumulative origin stats of the profile being updated
+    (UserProfile.source_origin_stats), None for initial generation.
+
+    Empty when the WHOLE history (base + chunk) is Loore-native — the
+    default costs no tokens. Otherwise, initial generation gets
+    "[Source mix: 94% public tweets (...), 3,100 entries; 6% written in
+    Loore, 12 entries]"; an update gets both the base's mix and the new
+    data's, so the model sees e.g. a 100%-tweets base receiving its
+    first Loore-native writing instead of treating a public-tweets
+    corpus as a private journal.
+    """
+    stats = (chunk or {}).get("origin_stats") or {}
+    if _loore_only(stats) and _loore_only(prev_stats):
+        return ""
+    if not prev_stats:
+        return "[Source mix: " + _format_origin_shares(stats) + "]\n\n"
+    new_part = _format_origin_shares(stats) if stats else "none"
+    return ("[Source mix — existing profile built from: "
+            + _format_origin_shares(prev_stats)
+            + ". New data below: " + new_part + "]\n\n")
+
+
+def chunk_content_for_prompt(chunk, prev_stats=None):
+    """The chunk's export text as fed to the profile prompts: source-mix
+    preamble (when any content, base or new, is imported) + content."""
+    return source_mix_preamble(chunk, prev_stats) + chunk["content"]
+
+
 def build_chunk_prompt(update_template, current_profile_content,
-                       cumulative_source_tokens, chunk):
+                       cumulative_source_tokens, chunk, prev_origin_stats=None):
     """Build the per-chunk incremental-update prompt (the non-first-chunk
     branch of _chunked_profile_loop)."""
     chunk_tokens_est = chunk["token_count"]
@@ -761,7 +854,8 @@ def build_chunk_prompt(update_template, current_profile_content,
     prompt = update_template.replace(
         "{existing_profile}", current_profile_content
     )
-    prompt = prompt.replace("{new_data}", chunk["content"])
+    prompt = prompt.replace(
+        "{new_data}", chunk_content_for_prompt(chunk, prev_origin_stats))
     prompt = prompt.replace(
         "{source_tokens_past}", str(cumulative_source_tokens)
     )
@@ -853,6 +947,7 @@ def _do_integration(self, user, model_id, last_iterative_profile_id,
         source_data_cutoff=last_profile.source_data_cutoff,
         generation_type="integration",
         parent_profile_id=last_profile.id,
+        source_origin_stats=last_profile.source_origin_stats,
     )
 
     logger.info(
@@ -876,6 +971,7 @@ def _chunked_profile_loop(self, user, model_id, update_template,
                           initial_profile_id=None,
                           initial_source_tokens=0,
                           initial_cutoff=None,
+                          initial_origin_stats=None,
                           first_chunk_prompt_fn=None,
                           generation_type="iterative",
                           status_prefix="Generating profile",
@@ -900,6 +996,7 @@ def _chunked_profile_loop(self, user, model_id, update_template,
     current_profile_content = initial_profile_content
     current_profile_id = initial_profile_id
     cumulative_source_tokens = initial_source_tokens
+    cumulative_origin_stats = initial_origin_stats
     current_cutoff = initial_cutoff
     chunk_num = 0
 
@@ -953,7 +1050,7 @@ def _chunked_profile_loop(self, user, model_id, update_template,
         else:
             prompt = build_chunk_prompt(
                 update_template, current_profile_content,
-                cumulative_source_tokens, chunk
+                cumulative_source_tokens, chunk, cumulative_origin_stats
             )
 
         response = _call_llm_with_retries(
@@ -967,6 +1064,8 @@ def _chunked_profile_loop(self, user, model_id, update_template,
             "input_tokens", chunk_tokens_est
         )
         cumulative_source_tokens += actual_chunk_tokens
+        cumulative_origin_stats = merge_origin_stats(
+            cumulative_origin_stats, chunk.get("origin_stats"))
 
         profile = _save_profile(
             user, model_id, response["content"], response,
@@ -974,6 +1073,7 @@ def _chunked_profile_loop(self, user, model_id, update_template,
             source_data_cutoff=latest_ts,
             generation_type=generation_type,
             parent_profile_id=current_profile_id,
+            source_origin_stats=cumulative_origin_stats,
         )
 
         current_profile_content = response["content"]
@@ -1025,7 +1125,7 @@ def _iterative_generation(self, user, model_id, gen_template, budget,
             self, user, model_id, update_template, api_keys,
             max_output_tokens=max_output_tokens,
             first_chunk_prompt_fn=lambda chunk: gen_template.replace(
-                "{user_export}", chunk["content"]
+                "{user_export}", chunk_content_for_prompt(chunk)
             ),
             generation_type="iterative",
             status_prefix="Generating profile",

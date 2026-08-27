@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useAsyncTaskPolling } from '../hooks/useAsyncTaskPolling';
 import { useToast } from '../contexts/ToastContext';
 import { useUser } from '../contexts/UserContext';
@@ -15,18 +15,23 @@ import { useUser } from '../contexts/UserContext';
  */
 export default function ProfileGenerationWatcher() {
   const { addToast } = useToast();
-  const { user } = useUser();
+  const { user, setUser } = useUser();
   const [taskId, setTaskId] = useState(
     () => localStorage.getItem('loore_profile_task_id')
   );
+  // Task ids that already reached a terminal state. The cached `user`
+  // object may still carry the finished id (it was fetched while the
+  // task was running); re-adopting it would restart polling, re-fire
+  // the completion toast, and loop — dozens of toasts in seconds.
+  const finishedIdsRef = useRef(new Set());
 
   // Pick up task ID from backend if localStorage doesn't have it
   // (cross-browser continuation).
   useEffect(() => {
-    if (!taskId && user && user.profile_generation_task_id) {
-      localStorage.setItem(
-        'loore_profile_task_id', user.profile_generation_task_id);
-      setTaskId(user.profile_generation_task_id);
+    const backendId = user?.profile_generation_task_id;
+    if (!taskId && backendId && !finishedIdsRef.current.has(backendId)) {
+      localStorage.setItem('loore_profile_task_id', backendId);
+      setTaskId(backendId);
     }
   }, [user, taskId]);
 
@@ -56,15 +61,19 @@ export default function ProfileGenerationWatcher() {
   }, [taskId, status, progress, data]);
 
   useEffect(() => {
+    if (status !== 'completed' && status !== 'failed') return;
+    if (taskId) finishedIdsRef.current.add(taskId);
+    localStorage.removeItem('loore_profile_task_id');
+    setTaskId(null);
+    // Drop the stale id from the cached user too, so nothing else
+    // treats the finished task as still running.
+    if (user && user.profile_generation_task_id === taskId) {
+      setUser({ ...user, profile_generation_task_id: null });
+    }
+    window.dispatchEvent(new Event('loore_profile_done'));
     if (status === 'completed') {
-      localStorage.removeItem('loore_profile_task_id');
-      setTaskId(null);
-      window.dispatchEvent(new Event('loore_profile_done'));
       addToast('Your profile has been updated ✓', 6000);
-    } else if (status === 'failed') {
-      localStorage.removeItem('loore_profile_task_id');
-      setTaskId(null);
-      window.dispatchEvent(new Event('loore_profile_done'));
+    } else {
       addToast('Profile generation failed');
     }
   }, [status]); // eslint-disable-line react-hooks/exhaustive-deps

@@ -38,6 +38,7 @@ def get_profile_versions():
             "created_at": iso_utc(profile.created_at),
             "version_number": total - i,
             "source_tokens_used": profile.source_tokens_used,
+            "source_origin_stats": profile.source_origin_stats,
             "source_data_cutoff": (
                 iso_utc(profile.source_data_cutoff)
             ),

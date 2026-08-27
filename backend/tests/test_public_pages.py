@@ -427,3 +427,34 @@ def test_no_cookies_required(app):
     assert r.status_code == 200
     assert "Everything you say is kept." in r.get_data(as_text=True)
     assert "Set-Cookie" not in r.headers
+
+
+def test_private_node_shell_is_neutral_for_signed_in_member(app):
+    """A member opening their own private node in a new tab gets the SSR
+    shell too; it must not flash 'Not found' in the tab before the SPA
+    sets the real title. Still 404 (never cached), still noindex, still
+    no content; anonymous keeps 'Not found'."""
+    node = _mk_node("author", "deeply private thought", privacy="private")
+    anon = app.test_client().get(f"/node/{node.id}")
+    assert anon.status_code == 404
+    assert "Not found — Loore" in anon.get_data(as_text=True)
+
+    # The fixture wraps the whole test in one app context, so flask-login
+    # caches the anon request's (anonymous) user on g; drop it so the
+    # signed-in request re-loads identity from its own session cookie.
+    from flask import g
+    g.pop("_login_user", None)
+
+    client = app.test_client()
+    with client.session_transaction() as sess:
+        sess["_user_id"] = str(_user("author").id)
+        sess["_fresh"] = True
+    r = client.get(f"/node/{node.id}")
+    assert r.status_code == 404
+    html = r.get_data(as_text=True)
+    import re
+    m = re.search(r"<title>(.*?)</title>", html)
+    assert m and m.group(1) == "Loore", html[:700]
+    assert "Not found" not in html
+    assert "deeply private thought" not in html
+    assert "noindex" in html

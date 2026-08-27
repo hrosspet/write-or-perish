@@ -247,3 +247,57 @@ def test_profile_content_edit_without_flag_preserves_tts(app, alice):
     refreshed = UserProfile.query.get(profile.id)
     assert refreshed.audio_tts_url == "data/audio/profile_1/tts.mp3"
     assert TTSChunk.query.filter_by(profile_id=profile.id).count() == 1
+
+
+# ── System node: settings-only edit keeps the pinned prompt ──────────────
+
+
+def _make_system_node(user):
+    from backend.models import UserPrompt, NodeContextArtifact
+    prompt = UserPrompt(user_id=user.id, prompt_key="textmode", title="Agentic",
+                        generated_by="default")
+    prompt.set_content("You are Loore. {user_profile}")
+    _db.session.add(prompt)
+    _db.session.flush()
+    node = Node(user_id=user.id, human_owner_id=user.id, node_type="user",
+                privacy_level="private", ai_usage="chat", token_count=1)
+    node.set_content("")
+    _db.session.add(node)
+    _db.session.flush()
+    _db.session.add(NodeContextArtifact(node_id=node.id, artifact_type="prompt",
+                                        artifact_id=prompt.id))
+    _db.session.commit()
+    return node
+
+
+def test_system_node_settings_only_edit_keeps_prompt(app, alice):
+    """The editor round-trips the resolved prompt text; saving it back
+    unchanged with a new ai_usage must NOT detach the prompt or copy the
+    prompt into the node (the Log would then preview the prompt)."""
+    node = _make_system_node(alice)
+    client = app.test_client()
+    _login(client, alice)
+    resp = client.put(f"/nodes/{node.id}", json={
+        "content": node.get_content(), "privacy_level": "private",
+        "ai_usage": "none", "detach_prompt": True,
+    })
+    assert resp.status_code == 200
+    refreshed = Node.query.get(node.id)
+    assert refreshed.ai_usage == "none"
+    assert refreshed.is_system_prompt
+    assert refreshed.content in ("", None)          # nothing copied in
+    assert refreshed.get_content().startswith("You are Loore")
+
+
+def test_system_node_text_edit_with_detach_copies_content(app, alice):
+    node = _make_system_node(alice)
+    client = app.test_client()
+    _login(client, alice)
+    resp = client.put(f"/nodes/{node.id}", json={
+        "content": "my own instructions", "privacy_level": "private",
+        "ai_usage": "chat", "detach_prompt": True,
+    })
+    assert resp.status_code == 200
+    refreshed = Node.query.get(node.id)
+    assert not refreshed.is_system_prompt
+    assert refreshed.get_content() == "my own instructions"

@@ -33,6 +33,7 @@ def get_latest_profile(user):
             "tokens_used": profile.tokens_used,
             "created_at": iso_utc(profile.created_at),
             "source_tokens_used": profile.source_tokens_used,
+            "source_origin_stats": profile.source_origin_stats,
             "source_data_cutoff": (
                 iso_utc(profile.source_data_cutoff)
             ),
@@ -78,6 +79,7 @@ def _serialize_node_for_list(node):
         "username": node.user.username if node.user else "Unknown",
         "human_owner_username": human_owner_username,
         "llm_model": display_node.llm_model,
+        "origin": display_node.origin,
         "has_original_audio": bool(display_node.audio_original_url or display_node.streaming_transcription),
         "prompt_key": prompt_key,
     }

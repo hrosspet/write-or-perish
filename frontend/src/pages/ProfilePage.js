@@ -10,6 +10,28 @@ import useSubmitShortcut from '../hooks/useSubmitShortcut';
 import useEscapeKey from '../hooks/useEscapeKey';
 import { formatDate } from '../utils/date';
 
+// Share of imported sources in the profile's corpus, by tokens — e.g.
+// " (96% public tweets)". Loore-native writing is the default and stays
+// unmarked, so this renders nothing for a pure-Loore profile.
+const ORIGIN_LABELS = {
+  twitter: 'public tweets',
+  chatgpt: 'ChatGPT imports',
+  claude: 'Claude imports',
+  markdown: 'markdown imports',
+};
+function formatSourceMix(stats) {
+  if (!stats) return '';
+  const total = Object.values(stats).reduce((a, s) => a + (s.tokens || 0), 0);
+  if (!total) return '';
+  const parts = Object.entries(stats)
+    .filter(([origin]) => origin !== 'loore')
+    .map(([origin, s]) => [origin, Math.round((s.tokens || 0) / total * 100)])
+    .filter(([, pct]) => pct > 0)
+    .sort((a, b) => b[1] - a[1])
+    .map(([origin, pct]) => `${pct}% ${ORIGIN_LABELS[origin] || origin}`);
+  return parts.length ? ` (${parts.join(', ')})` : '';
+}
+
 export default function ProfilePage() {
   const { user } = useUser();
   const [profile, setProfile] = useState(null);
@@ -286,6 +308,7 @@ export default function ProfilePage() {
           {profile.source_tokens_used
             ? `Built from ~${profile.source_tokens_used.toLocaleString()} tokens of writing`
             : `Generated from ${profile.tokens_used?.toLocaleString() || 0} tokens`}
+          {formatSourceMix(profile.source_origin_stats)}
           {' '}&middot; {profile.generated_by}
           {profile.source_data_cutoff && (
             <> &middot; Data through {formatDate(profile.source_data_cutoff, { relative: false })}</>
