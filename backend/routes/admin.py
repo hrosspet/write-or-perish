@@ -29,10 +29,12 @@ def admin_required(func):
 
 def _profile_status_map():
     """{user_id: {versions, last_generation_type, last_created_at, state}}
-    in two grouped queries. state: "complete" when the chain is at rest —
-    a single version, or the latest version is an integration (the batch
-    rebuild's final step) — "generating" while a batch job is in flight /
-    a rebuild is requested / a multi-version chain hasn't integrated yet."""
+    in two grouped queries. state: "complete" when nothing is in flight and
+    the chain is at rest — the latest version is an integration (the batch
+    rebuild's final step) or a root chunk (parent None: a single-chunk
+    build, or a from-scratch rebuild that superseded older versions) —
+    "generating" while a batch job is in flight / a rebuild is requested /
+    a multi-version chain hasn't integrated yet."""
     from backend.models import UserProfile
     counts = dict(db.session.query(
         UserProfile.user_id, func.count(UserProfile.id)
@@ -48,7 +50,8 @@ def _profile_status_map():
         last = latest.get(user_id)
         f = flags.get(user_id)
         in_flight = bool(f and (f.profile_batch_pending or f.profile_needs_full_regen))
-        at_rest = n == 1 or (last is not None and last.generation_type == "integration")
+        at_rest = last is not None and (
+            last.generation_type == "integration" or last.parent_profile_id is None)
         out[user_id] = {
             "versions": n,
             "last_generation_type": last.generation_type if last else None,

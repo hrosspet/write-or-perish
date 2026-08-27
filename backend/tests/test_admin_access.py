@@ -190,10 +190,11 @@ class TestProfileStatus:
     the latest is an integration) or still generating, plus the
     Community Archive handle an account was pre-filled from."""
 
-    def _profile(self, user, gen_type):
+    def _profile(self, user, gen_type, parent=None):
         from backend.models import UserProfile
         p = UserProfile(user_id=user.id, generated_by="m", tokens_used=0,
-                        generation_type=gen_type)
+                        generation_type=gen_type,
+                        parent_profile_id=parent.id if parent else None)
         p.set_content("x")
         _db.session.add(p)
         _db.session.flush()
@@ -209,9 +210,13 @@ class TestProfileStatus:
         _db.session.add_all([none_u, one, chain, done, pending])
         _db.session.flush()
         self._profile(one, "initial")
-        self._profile(chain, "iterative"); self._profile(chain, "update")
-        self._profile(done, "iterative"); self._profile(done, "integration")
+        c1 = self._profile(chain, "iterative"); self._profile(chain, "update", parent=c1)
+        d1 = self._profile(done, "iterative"); self._profile(done, "integration", parent=d1)
         self._profile(pending, "initial")
+        # From-scratch rebuild: 2 versions, latest is a root chunk → at rest
+        rebuilt = User(username="rebuilt", approved=True)
+        _db.session.add(rebuilt); _db.session.flush()
+        self._profile(rebuilt, "iterative"); self._profile(rebuilt, "iterative")
         _db.session.commit()
 
         client = app.test_client()
@@ -228,3 +233,5 @@ class TestProfileStatus:
         assert rows["done"]["profile"]["last_generation_type"] == "integration"
         # A batch job in flight overrides "one version at rest"
         assert rows["pending"]["profile"]["state"] == "generating"
+        assert rows["rebuilt"]["profile"]["state"] == "complete"
+        assert rows["rebuilt"]["profile"]["versions"] == 2
