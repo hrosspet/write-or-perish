@@ -334,6 +334,40 @@ def prefill_from_community_archive(user_id):
     return jsonify({"task_id": task.id, "handle": handle}), 202
 
 
+@admin_bp.route("/prefill/check", methods=["GET"])
+@login_required
+@admin_required
+def prefill_check():
+    """Archive coverage for ?handle= before paying for a pre-fill:
+    exact archived count, retweets / replies / originals, est. tokens,
+    ingestion path, which source the import would read, and how many of
+    the tweets ?user_id= already has (re-runs dedup on twitter:<id>)."""
+    from backend.models import Node
+    from backend.utils import community_archive as ca
+    from backend.tasks.imports import snapshot_dir_for
+    handle = (request.args.get("handle") or "").strip().lstrip("@")
+    if not handle:
+        return jsonify({"error": "Handle is required."}), 400
+    config = current_app.config
+    try:
+        summary = ca.coverage_summary(handle, snapshot_dir=snapshot_dir_for(config))
+    except Exception as e:  # network / provider errors → readable, not a 500
+        current_app.logger.warning(f"Community Archive check failed for @{handle}: {e}")
+        return jsonify({"error": f"Community Archive lookup failed: {e}"}), 502
+    if summary is None:
+        return jsonify({"error": f"@{handle} is not in the Community Archive."}), 404
+    min_parquet = config.get("COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS", 5000)
+    summary["import_source"] = (
+        "parquet" if summary["account_num_tweets"] >= min_parquet else "rest")
+    summary["profile_threshold_tokens"] = 10000
+    user_id = request.args.get("user_id", type=int)
+    if user_id:
+        summary["already_imported"] = Node.query.filter(
+            Node.human_owner_id == user_id, Node.origin == "twitter",
+            Node.deleted_at.is_(None)).count()
+    return jsonify(summary), 200
+
+
 @admin_bp.route("/prefill/status/<task_id>", methods=["GET"])
 @login_required
 @admin_required

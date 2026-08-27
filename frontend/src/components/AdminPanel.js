@@ -491,6 +491,42 @@ function AdminPanel() {
   const openPrefill = (u) =>
     patchPrefill(u.id, { open: true, handle: u.username || "", includeReplies: true, error: null });
 
+  const checkPrefill = async (userId) => {
+    const form = prefill[userId] || {};
+    patchPrefill(userId, { checking: true, check: null, error: null });
+    try {
+      const res = await api.get("/admin/prefill/check", {
+        params: { handle: form.handle, user_id: userId },
+      });
+      patchPrefill(userId, { checking: false, check: res.data });
+    } catch (err) {
+      patchPrefill(userId, {
+        checking: false,
+        check: null,
+        error: err.response?.data?.error || "Check failed.",
+      });
+    }
+  };
+
+  const checkLabel = (c) => {
+    if (!c) return null;
+    const n = (v) => (v == null ? "?" : v.toLocaleString());
+    const parts = [`${n(c.archived)} archived`];
+    if (c.archived_live != null) parts.push(`(${n(c.archived_live)} live)`);
+    if (c.retweets != null) parts.push(`${n(c.retweets)} RT`);
+    if (c.replies != null) parts.push(`${n(c.replies)} replies`);
+    if (c.originals != null) parts.push(`${n(c.originals)} originals`);
+    if (c.est_tokens != null) {
+      const below = c.est_tokens < (c.profile_threshold_tokens || 10000);
+      parts.push(`~${n(c.est_tokens)} tokens${below ? " — below profile threshold" : ""}`);
+    }
+    parts.push(`account reports ${n(c.account_num_tweets)}`);
+    parts.push(c.ingestion === "twitter_import" ? "extension-ingested (partial, grows)" : `via ${c.ingestion || "archive"}`);
+    parts.push(`import via ${c.import_source}`);
+    if (c.already_imported) parts.push(`${n(c.already_imported)} already imported`);
+    return parts.join(" · ");
+  };
+
   const startPrefill = async (userId) => {
     const form = prefill[userId] || {};
     try {
@@ -800,7 +836,7 @@ function AdminPanel() {
                       type="text"
                       value={prefill[u.id].handle || ""}
                       placeholder="CA handle"
-                      onChange={(e) => patchPrefill(u.id, { handle: e.target.value })}
+                      onChange={(e) => patchPrefill(u.id, { handle: e.target.value, check: null })}
                       onKeyDown={(e) => { if (e.key === "Enter") startPrefill(u.id); }}
                       style={{ width: "140px", padding: "4px" }}
                       disabled={["queued", "running"].includes(prefill[u.id].status)}
@@ -814,12 +850,25 @@ function AdminPanel() {
                       replies
                     </label>
                     <button
+                      onClick={() => checkPrefill(u.id)}
+                      disabled={prefill[u.id].checking || ["queued", "running"].includes(prefill[u.id].status)}
+                      title="What the Community Archive actually holds for this handle (before paying for an import)"
+                    >
+                      {prefill[u.id].checking ? "Checking…" : "Check"}
+                    </button>
+                    <button
                       onClick={() => startPrefill(u.id)}
                       disabled={["queued", "running"].includes(prefill[u.id].status)}
+                      style={prefill[u.id].check && prefill[u.id].check.est_tokens != null && prefill[u.id].check.est_tokens < (prefill[u.id].check.profile_threshold_tokens || 10000) ? { opacity: 0.6 } : undefined}
                     >
                       Start
                     </button>
                     <button onClick={() => patchPrefill(u.id, { open: false })}>Close</button>
+                    {prefill[u.id].check && !prefill[u.id].status && (
+                      <span style={{ fontSize: "0.85em", color: "var(--text-secondary)", flexBasis: "100%" }}>
+                        @{prefill[u.id].check.username}: {checkLabel(prefill[u.id].check)}
+                      </span>
+                    )}
                     {(prefillLabel(prefill[u.id]) || prefill[u.id].error) && (
                       <span style={{ fontSize: "0.85em", color: prefill[u.id].status === "failed" || prefill[u.id].error ? "var(--error)" : "var(--text-secondary)" }}>
                         {prefill[u.id].error && !prefill[u.id].status ? prefill[u.id].error : prefillLabel(prefill[u.id])}

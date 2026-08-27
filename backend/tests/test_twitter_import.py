@@ -636,3 +636,38 @@ def test_prefill_impl_large_account_uses_parquet(app, tmp_path, monkeypatch):
     assert states[0]["stage"] == "downloading"
     nodes = Node.query.filter_by(human_owner_id=u.id).order_by(Node.created_at).all()
     assert [n.get_content() for n in nodes] == ["first", "second", "reply to bob"]
+
+
+def test_coverage_summary_rest(monkeypatch):
+    from backend.utils import community_archive as ca
+    monkeypatch.setattr(ca, "fetch_account", lambda h: {
+        "account_id": "9", "username": "cedcolas", "num_tweets": 571,
+        "created_via": "twitter_import"})
+    monkeypatch.setattr(ca, "count_archived", lambda aid: 6)
+    monkeypatch.setattr(ca, "iter_tweets", lambda h, **k: iter([
+        _ca_row(1, "a" * 40), _ca_row(2, "RT @x: b" * 5),
+        _ca_row(3, "reply" * 8, reply="1"), _ca_row(3, "dup", reply="1"),
+        _ca_row(4, "c" * 20), _ca_row(5, "d" * 20), _ca_row(6, "e" * 20)]))
+    s = ca.coverage_summary("cedcolas")
+    assert (s["archived"], s["retweets"], s["replies"], s["originals"]) == (6, 1, 1, 4)
+    assert s["est_tokens"] == (40 + 40 + 60) // 4
+    assert s["ingestion"] == "twitter_import" and s["detail_source"] == "rest"
+    assert "archived_live" not in s
+    # Beyond the scan limit → count only.
+    monkeypatch.setattr(ca, "count_archived", lambda aid: 50000)
+    s = ca.coverage_summary("cedcolas")
+    assert s["archived"] == 50000 and s["est_tokens"] is None
+    assert s["detail_source"] == "count_only"
+
+
+def test_coverage_summary_parquet(tmp_path, monkeypatch):
+    from backend.utils import community_archive as ca
+    snap = tmp_path / "snap"
+    _make_snapshot(snap)
+    monkeypatch.setattr(ca, "fetch_account", lambda h: {
+        "account_id": "A1", "username": "alice", "num_tweets": 3, "created_via": "archive"})
+    monkeypatch.setattr(ca, "count_archived", lambda aid: 5)  # live archive grew
+    s = ca.coverage_summary("alice", snapshot_dir=snap)
+    assert (s["archived"], s["retweets"], s["replies"], s["originals"]) == (3, 0, 1, 2)
+    assert s["est_tokens"] == (len("first") + len("second") + len("reply to bob")) // 4
+    assert s["detail_source"] == "parquet" and s["archived_live"] == 5

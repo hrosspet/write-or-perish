@@ -65,7 +65,7 @@ def fetch_account(handle):
         return None
     rows = _get("all_account", {
         "username": f"ilike.{handle}",
-        "select": "account_id,username,account_display_name,num_tweets",
+        "select": "account_id,username,account_display_name,num_tweets,created_via",
     })
     return rows[0] if rows else None
 
@@ -235,3 +235,92 @@ def iter_tweets_parquet(account_id, snapshot_dir, batch=1000, on_page=None):
         fetched += len(rows)
         if on_page:
             on_page(fetched)
+
+
+# ── coverage check (before paying for an import) ──────────────────────────
+
+CHECK_SCAN_LIMIT = 20000  # rows the REST summary will walk before giving up on detail
+
+
+def count_archived(account_id):
+    """Exact number of tweets the archive holds for an account — from the
+    Content-Range header, independent of paging."""
+    req = urllib.request.Request(
+        f"{SUPABASE_URL}/rest/v1/tweets?account_id=eq.{account_id}&select=tweet_id",
+        headers={"apikey": ANON_KEY, "Authorization": f"Bearer {ANON_KEY}",
+                 "Prefer": "count=exact", "Range": "0-0"})
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+        total = (resp.headers.get("Content-Range") or "/").split("/")[-1]
+    return int(total) if total.isdigit() else None
+
+
+def _summarize_rows(rows):
+    total = retweets = replies = chars = 0
+    seen = set()
+    for r in rows:
+        if r["tweet_id"] in seen:
+            continue
+        seen.add(r["tweet_id"])
+        total += 1
+        text = r.get("full_text") or ""
+        if text.startswith("RT @"):
+            retweets += 1
+            continue
+        if r.get("reply_to_tweet_id"):
+            replies += 1
+        chars += len(text)
+    return {"archived": total, "retweets": retweets, "replies": replies,
+            "originals": total - retweets - replies,
+            "est_tokens": chars // 4}
+
+
+def coverage_summary(handle, snapshot_dir=None, scan_limit=CHECK_SCAN_LIMIT):
+    """What the archive actually holds for a handle, so a pre-fill can be
+    judged before it runs. Reads a cached parquet snapshot when one is
+    given and the account is in it; otherwise walks the REST view (up to
+    ``scan_limit`` rows — beyond that only the exact count is reported).
+
+    Returns None for unknown handles; else {account_id, username,
+    account_num_tweets, ingestion, archived, retweets, replies, originals,
+    est_tokens, detail_source}. ``ingestion`` is the archive's
+    ``created_via``: 'twitter_import' = browser-extension / timeline
+    ingestion (partial, grows over time), other values = an uploaded
+    data export."""
+    account = fetch_account(handle)
+    if not account:
+        return None
+    out = {
+        "account_id": account["account_id"], "username": account["username"],
+        "account_num_tweets": account.get("num_tweets") or 0,
+        "ingestion": account.get("created_via"),
+    }
+    archived = count_archived(account["account_id"])
+    if snapshot_dir and snapshot_export_id(snapshot_dir):
+        con, tweets, _ = _duckdb(snapshot_dir)
+        row = con.execute(
+            "select count(*), "
+            "sum(case when full_text like 'RT @%' then 1 else 0 end), "
+            "sum(case when full_text not like 'RT @%' and reply_to_tweet_id is not null "
+            "then 1 else 0 end), "
+            "sum(case when full_text like 'RT @%' then 0 else length(full_text) end) "
+            "from read_parquet(?) where account_id = ?",
+            [tweets, account["account_id"]]).fetchone()
+        if row and row[0]:
+            n, rt, rp, chars = int(row[0]), int(row[1] or 0), int(row[2] or 0), int(row[3] or 0)
+            out.update({"archived": n, "retweets": rt, "replies": rp,
+                        "originals": n - rt - rp, "est_tokens": chars // 4,
+                        "detail_source": "parquet"})
+            # The live archive may hold more than the nightly snapshot.
+            if archived is not None and archived > n:
+                out["archived_live"] = archived
+            return out
+    if archived is not None and archived > scan_limit:
+        out.update({"archived": archived, "retweets": None, "replies": None,
+                    "originals": None, "est_tokens": None,
+                    "detail_source": "count_only"})
+        return out
+    out.update(_summarize_rows(iter_tweets(account["username"])))
+    out["detail_source"] = "rest"
+    if archived is not None and archived != out["archived"]:
+        out["archived_live"] = archived
+    return out

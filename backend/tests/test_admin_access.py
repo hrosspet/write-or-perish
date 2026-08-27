@@ -235,3 +235,30 @@ class TestProfileStatus:
         assert rows["pending"]["profile"]["state"] == "generating"
         assert rows["rebuilt"]["profile"]["state"] == "complete"
         assert rows["rebuilt"]["profile"]["versions"] == 2
+
+
+class TestPrefillCheck:
+    def test_check_reports_coverage_and_already_imported(self, app, users, monkeypatch):
+        from backend.utils import community_archive as ca
+        from backend.models import Node
+        admin = users["renamed_admin"]
+        target = User(username="cedcolas", approved=False)
+        _db.session.add(target); _db.session.flush()
+        n = Node(user_id=target.id, human_owner_id=target.id, origin="twitter",
+                 privacy_level="private", ai_usage="chat", token_count=1)
+        n.set_content("x")
+        _db.session.add(n); _db.session.commit()
+        monkeypatch.setattr(ca, "coverage_summary", lambda h, snapshot_dir=None: {
+            "account_id": "9", "username": "cedcolas", "account_num_tweets": 571,
+            "ingestion": "twitter_import", "archived": 6, "retweets": 0,
+            "replies": 4, "originals": 2, "est_tokens": 221, "detail_source": "rest"})
+        client = app.test_client()
+        _login(client, admin.id)
+        r = client.get(f"/api/admin/prefill/check?handle=@cedcolas&user_id={target.id}")
+        assert r.status_code == 200, r.json
+        assert r.json["archived"] == 6 and r.json["import_source"] == "rest"
+        assert r.json["already_imported"] == 1
+        assert r.json["profile_threshold_tokens"] == 10000
+        monkeypatch.setattr(ca, "coverage_summary", lambda h, snapshot_dir=None: None)
+        assert client.get("/api/admin/prefill/check?handle=nobody").status_code == 404
+        assert client.get("/api/admin/prefill/check").status_code == 400
