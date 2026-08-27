@@ -781,8 +781,11 @@ function AdminPanel() {
                   </span>
                 )}
                 {u.profile?.state === "generating" && (
-                  <span style={{ color: "var(--warning)" }}>
-                    ⏳ generating{u.profile.versions ? ` (${u.profile.versions} so far)` : ""}
+                  <span
+                    style={{ color: u.profile.incomplete || u.profile.batch_attempts ? "var(--error)" : "var(--warning)" }}
+                    title={u.profile.incomplete ? "Data remains after the latest version's cutoff and no batch job is in flight — the last chunk failed; the hourly seeder retries" : undefined}
+                  >
+                    ⏳ {u.profile.incomplete ? "stuck" : "generating"}{u.profile.versions ? ` (${u.profile.versions} so far)` : ""}{u.profile.batch_attempts ? ` · ${u.profile.batch_attempts} failed` : ""}
                   </span>
                 )}
                 {(!u.profile || u.profile.state === "none") && (

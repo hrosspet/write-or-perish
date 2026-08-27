@@ -43,20 +43,29 @@ def _profile_status_map():
         UserProfile.user_id).subquery()
     latest = {p.user_id: p for p in UserProfile.query.filter(
         UserProfile.id.in_(latest_ids)).all()}
-    flags = {u.id: u for u in User.query.with_entities(
-        User.id, User.profile_batch_pending, User.profile_needs_full_regen).all()}
+    from backend.tasks.exports import _has_more_source_after
+    users_by_id = {u.id: u for u in User.query.all()}
     out = {}
     for user_id, n in counts.items():
         last = latest.get(user_id)
-        f = flags.get(user_id)
-        in_flight = bool(f and (f.profile_batch_pending or f.profile_needs_full_regen))
+        u = users_by_id.get(user_id)
+        in_flight = bool(u and (u.profile_batch_pending or u.profile_needs_full_regen))
         at_rest = last is not None and (
             last.generation_type == "integration" or last.parent_profile_id is None)
+        # A chain whose latest version is a root chunk is only at rest if
+        # nothing remains beyond its cutoff — otherwise chunk 2+ is still
+        # owed (e.g. its batch failed) and ✓ would hide a stuck rebuild.
+        stuck = bool(
+            at_rest and last.generation_type != "integration" and u
+            and last.source_data_cutoff is not None
+            and _has_more_source_after(u, last.source_data_cutoff))
         out[user_id] = {
             "versions": n,
             "last_generation_type": last.generation_type if last else None,
             "last_created_at": iso_utc(last.created_at) if last else None,
-            "state": "generating" if (in_flight or not at_rest) else "complete",
+            "state": "generating" if (in_flight or not at_rest or stuck) else "complete",
+            "incomplete": stuck,
+            "batch_attempts": (u.profile_batch_attempts or 0) if u else 0,
         }
     return out
 
