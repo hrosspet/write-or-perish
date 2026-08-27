@@ -27,6 +27,37 @@ def admin_required(func):
         return func(*args, **kwargs)
     return decorated_function
 
+def _profile_status_map():
+    """{user_id: {versions, last_generation_type, last_created_at, state}}
+    in two grouped queries. state: "complete" when the chain is at rest —
+    a single version, or the latest version is an integration (the batch
+    rebuild's final step) — "generating" while a batch job is in flight /
+    a rebuild is requested / a multi-version chain hasn't integrated yet."""
+    from backend.models import UserProfile
+    counts = dict(db.session.query(
+        UserProfile.user_id, func.count(UserProfile.id)
+    ).group_by(UserProfile.user_id).all())
+    latest_ids = db.session.query(func.max(UserProfile.id)).group_by(
+        UserProfile.user_id).subquery()
+    latest = {p.user_id: p for p in UserProfile.query.filter(
+        UserProfile.id.in_(latest_ids)).all()}
+    flags = {u.id: u for u in User.query.with_entities(
+        User.id, User.profile_batch_pending, User.profile_needs_full_regen).all()}
+    out = {}
+    for user_id, n in counts.items():
+        last = latest.get(user_id)
+        f = flags.get(user_id)
+        in_flight = bool(f and (f.profile_batch_pending or f.profile_needs_full_regen))
+        at_rest = n == 1 or (last is not None and last.generation_type == "integration")
+        out[user_id] = {
+            "versions": n,
+            "last_generation_type": last.generation_type if last else None,
+            "last_created_at": iso_utc(last.created_at) if last else None,
+            "state": "generating" if (in_flight or not at_rest) else "complete",
+        }
+    return out
+
+
 @admin_bp.route("/users", methods=["GET"])
 @login_required
 @admin_required
@@ -38,6 +69,7 @@ def list_users():
     config = current_app.config
     now = datetime.utcnow()
     users = User.query.order_by(User.created_at.desc()).all()
+    profile_status = _profile_status_map()
 
     # Aggregate total (all-time) spending per user in a single query
     spending_rows = db.session.query(
@@ -108,6 +140,14 @@ def list_users():
             "spend_blocked": user_is_capped(user, now),
             "profile_batch_pending": bool(user.profile_batch_pending),
             "profile_force_batch": bool(user.profile_force_batch),
+            "prefilled_handle": user.prefilled_handle,
+            "profile": profile_status.get(user.id) or {
+                "versions": 0,
+                "last_generation_type": None,
+                "last_created_at": None,
+                "state": ("generating" if user.profile_batch_pending
+                          or user.profile_needs_full_regen else "none"),
+            },
         })
     return jsonify({
         "users": user_list,

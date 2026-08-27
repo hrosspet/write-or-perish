@@ -120,6 +120,9 @@ class User(db.Model, UserMixin):
     # grow the next chunk's budget so chunks land near CHUNK_BUDGET real
     # tokens (and below long-context pricing tiers).
     profile_token_ratio = db.Column(db.Float, nullable=True)
+    # Community Archive handle this account was pre-filled from (admin
+    # cold-start bootstrap); null for organically-grown accounts.
+    prefilled_handle = db.Column(db.String(64), nullable=True)
 
     # All valid subscription plans (single source of truth).
     ALLOWED_PLANS = {"free", "alpha", "pro"}

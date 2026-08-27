@@ -654,6 +654,12 @@ function AdminPanel() {
             </th>
             <th style={{ border: "1px solid var(--border)", padding: "8px", width: "85px", whiteSpace: "nowrap" }}>Limit ($)</th>
             <th
+              style={{ border: "1px solid var(--border)", padding: "8px", width: "150px", whiteSpace: "nowrap" }}
+              title="Profile chain: ✓ complete = one version, or the latest version is an integration; ⏳ generating = batch job in flight / rebuild requested / chain not yet integrated. 'pre-filled @handle' = bootstrapped from the Community Archive."
+            >
+              Profile
+            </th>
+            <th
               style={{ border: "1px solid var(--border)", padding: "8px", width: "85px", whiteSpace: "nowrap" }}
               title="Prompt-cache hit-rate over conversation turns (all-time): input tokens served from cache ÷ total prompt input. Covers both Anthropic and OpenAI caching."
             >
@@ -721,6 +727,33 @@ function AdminPanel() {
                 />
               </td>
               <td
+                style={{ border: "1px solid var(--border)", padding: "8px", width: "150px", whiteSpace: "nowrap", fontSize: "0.9em" }}
+                title={
+                  u.profile?.last_created_at
+                    ? `Latest version: ${u.profile.last_generation_type} at ${new Date(u.profile.last_created_at).toLocaleString()}`
+                    : "No profile yet"
+                }
+              >
+                {u.profile?.state === "complete" && (
+                  <span style={{ color: "var(--success)" }}>
+                    ✓ {u.profile.versions} {u.profile.versions === 1 ? "version" : "versions"}
+                  </span>
+                )}
+                {u.profile?.state === "generating" && (
+                  <span style={{ color: "var(--warning)" }}>
+                    ⏳ generating{u.profile.versions ? ` (${u.profile.versions} so far)` : ""}
+                  </span>
+                )}
+                {(!u.profile || u.profile.state === "none") && (
+                  <span style={{ color: "var(--text-muted)" }}>—</span>
+                )}
+                {u.prefilled_handle && (
+                  <div style={{ color: "var(--text-muted)", fontSize: "0.85em" }}>
+                    pre-filled @{u.prefilled_handle}
+                  </div>
+                )}
+              </td>
+              <td
                 style={{ border: "1px solid var(--border)", padding: "8px", width: "85px", whiteSpace: "nowrap" }}
                 title={
                   u.cache_hit_rate == null
@@ -756,14 +789,6 @@ function AdminPanel() {
                 >
                   Pre-fill from CA
                 </button>
-                {u.profile_batch_pending && (
-                  <span
-                    title="A batch profile job is in flight for this user"
-                    style={{ marginLeft: "6px", color: "var(--text-muted)", fontSize: "0.85em" }}
-                  >
-                    ⏳ batch
-                  </span>
-                )}
                 {prefill[u.id]?.open && (
                   <div style={{ marginTop: "6px", display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap" }}>
                     <input

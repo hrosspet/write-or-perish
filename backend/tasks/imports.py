@@ -145,6 +145,7 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None,
     # Pin BEFORE create_twitter_nodes: its profile handoff consults
     # use_batch_for_user and must route to the seeder, not the sync task.
     user.profile_force_batch = True
+    user.prefilled_handle = account["username"]
     db.session.commit()
 
     state("importing", 0, total)

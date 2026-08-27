@@ -183,3 +183,48 @@ class TestCacheHitRate:
         _login(client, admin.id)
         rows = {u["id"]: u for u in client.get("/api/admin/users").get_json()["users"]}
         assert abs(rows[admin.id]["cache_hit_rate"] - 7_808 / 7_993) < 1e-9
+
+
+class TestProfileStatus:
+    """Admin list shows whether a profile chain is at rest (one version, or
+    the latest is an integration) or still generating, plus the
+    Community Archive handle an account was pre-filled from."""
+
+    def _profile(self, user, gen_type):
+        from backend.models import UserProfile
+        p = UserProfile(user_id=user.id, generated_by="m", tokens_used=0,
+                        generation_type=gen_type)
+        p.set_content("x")
+        _db.session.add(p)
+        _db.session.flush()
+        return p
+
+    def test_states(self, app, users):
+        admin = users["renamed_admin"]
+        none_u = User(username="fresh", approved=True)
+        one = User(username="one", approved=True, prefilled_handle="corbindreams")
+        chain = User(username="chain", approved=True)
+        done = User(username="done", approved=True)
+        pending = User(username="pending", approved=True, profile_batch_pending=True)
+        _db.session.add_all([none_u, one, chain, done, pending])
+        _db.session.flush()
+        self._profile(one, "initial")
+        self._profile(chain, "iterative"); self._profile(chain, "update")
+        self._profile(done, "iterative"); self._profile(done, "integration")
+        self._profile(pending, "initial")
+        _db.session.commit()
+
+        client = app.test_client()
+        _login(client, admin.id)
+        rows = {u["username"]: u for u in client.get("/api/admin/users").json["users"]}
+        assert rows["fresh"]["profile"] == {
+            "versions": 0, "last_generation_type": None,
+            "last_created_at": None, "state": "none"}
+        assert rows["one"]["profile"]["state"] == "complete"
+        assert rows["one"]["profile"]["versions"] == 1
+        assert rows["one"]["prefilled_handle"] == "corbindreams"
+        assert rows["chain"]["profile"]["state"] == "generating"
+        assert rows["done"]["profile"]["state"] == "complete"
+        assert rows["done"]["profile"]["last_generation_type"] == "integration"
+        # A batch job in flight overrides "one version at rest"
+        assert rows["pending"]["profile"]["state"] == "generating"

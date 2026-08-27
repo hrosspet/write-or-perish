@@ -505,6 +505,7 @@ def test_prefill_impl_imports_pins_batch_and_reports(app, monkeypatch):
     assert [n.get_content() for n in nodes] == ["first", "second"]
     assert all(n.origin == "twitter" and n.ai_usage == "chat" for n in nodes)
     assert User.query.get(u.id).profile_force_batch is True
+    assert User.query.get(u.id).prefilled_handle == "TylerAlterman"
     assert sync.call_count == 0  # never the synchronous path
     assert states[0]["stage"] == "fetching" and states[-1]["stage"] == "importing"
     assert result["profile_batch_queued"] is False  # tiny corpus < 10k tokens
