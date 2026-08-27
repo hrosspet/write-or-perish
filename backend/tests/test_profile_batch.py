@@ -651,3 +651,66 @@ def test_force_batch_user_never_exhausts_to_sync(app, monkeypatch):
     assert pb._seed_profile_batches(users=[u, plain]) == 1  # only the pinned one
     ids = [r["custom_id"] for r in list(submitted[0].values())[0]]
     assert ids == [f"profile_{u.id}_0_chunk"]
+
+
+def test_submit_drops_duplicate_users_and_custom_ids(app, monkeypatch):
+    u = _user(profile_force_batch=True)
+    db.session.commit()
+    submitted = []
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
+        submitted.append(reqs) or {k: f"b-{k}" for k in reqs}))
+    def req(cid):
+        return {"provider": "anthropic",
+                "request": {"custom_id": cid, "model_id": "test-model",
+                            "api_model": "claude-x", "messages": [], "max_tokens": 10},
+                "meta": {"custom_id": cid, "user_id": u.id, "kind": "chunk",
+                         "prev_profile_id": None, "model_id": "test-model"}}
+    n = pb._submit_requests([req("profile_1_290_chunk"), req("profile_1_290_chunk"),
+                             req("profile_1_293_chunk")], {"anthropic": "k"})
+    assert n == 1
+    items = list(submitted[0].values())[0]
+    assert [r["custom_id"] for r in items] == ["profile_1_290_chunk"]
+
+
+def test_apply_duplicate_item_does_not_advance_chain(app, monkeypatch):
+    """The 2026-08-27 cascade: a doubled cohort item, once its twin has
+    been saved, must NOT return the next step again."""
+    u = _user()
+    db.session.commit()
+    monkeypatch.setattr(pb._exports, "build_user_export_content", MagicMock(
+        return_value={"content": "MORE", "token_count": 90000,
+                      "latest_node_created_at": datetime(2026, 7, 1)}))
+    monkeypatch.setattr(pb._exports, "build_update_template", lambda uid: (
+        "T {existing_profile}|{new_data}|{source_tokens_past}|{source_tokens_new}|{ratio_percent}"))
+    item = {"custom_id": "x", "user_id": u.id, "kind": "chunk",
+            "prev_profile_id": None, "generation_type": "iterative",
+            "prev_cumulative": 0, "origin_stats": None,
+            "source_data_cutoff": "2026-06-01T00:00:00", "model_id": "test-model",
+            "prompt_tokens_est": 100}
+    result = {"content": "P1", "input_tokens": 100, "output_tokens": 5, "total_tokens": 105}
+    submitted_at = datetime.utcnow() - timedelta(minutes=1)
+    first = pb._apply_result(u, item, result, submitted_at)
+    assert first is not None and first["meta"]["kind"] == "chunk"
+    assert UserProfile.query.filter_by(user_id=u.id).count() == 1
+    twin = pb._apply_result(u, item, result, submitted_at)
+    assert twin is None
+    assert UserProfile.query.filter_by(user_id=u.id).count() == 1
+
+
+def test_batch_lock_skips_when_held(app, monkeypatch):
+    class FakeRedis:
+        held = {}
+        @classmethod
+        def from_url(cls, *a, **k): return cls()
+        def set(self, key, val, nx=False, ex=None):
+            if nx and key in self.held: return False
+            self.held[key] = val; return True
+        def delete(self, key): self.held.pop(key, None)
+    import types, sys
+    monkeypatch.setitem(sys.modules, "redis", types.SimpleNamespace(Redis=FakeRedis))
+    with pb.batch_pipeline_lock() as a:
+        assert a is True
+        with pb.batch_pipeline_lock() as b:
+            assert b is False
+    with pb.batch_pipeline_lock() as c:
+        assert c is True

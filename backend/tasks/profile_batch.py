@@ -19,6 +19,7 @@ UserProfile is the cursor.
 Gated by use_batch_for_user (canary allowlist OR global switch); non-selected
 users stay on the synchronous path. See docs/design/profile-batch-processing.md
 """
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 from celery.utils.log import get_task_logger
@@ -61,6 +62,44 @@ def use_batch_for_user(user, config):
 
 
 # ── helpers ────────────────────────────────────────────────────────────
+
+BATCH_LOCK_KEY = "loore:profile_batch:lock"
+BATCH_LOCK_TTL = 30 * 60  # a poll/seed pass must finish well within this
+
+
+@contextmanager
+def batch_pipeline_lock():
+    """Serialize seed/poll passes. On 2026-08-27 a 17-minute poll overlapped
+    the next ~60s poll: both collected the same job, both built 'the next
+    request' for the same users, and the cohort went out with duplicate
+    custom_ids — which OpenAI rejects wholesale, and which re-seeded
+    itself on every subsequent step (5 items per user, 5x the cost).
+
+    Yields True when the lock was acquired (or Redis is unreachable — the
+    pipeline must not stop because the lock store is down), False when
+    another pass holds it (caller skips this cycle)."""
+    client = None
+    try:
+        import redis
+        client = redis.Redis.from_url(current_app.config.get(
+            "CELERY_BROKER_URL", "redis://localhost:6379/0"),
+            socket_connect_timeout=2)
+        acquired = bool(client.set(BATCH_LOCK_KEY, "1", nx=True, ex=BATCH_LOCK_TTL))
+    except Exception as e:  # no redis (tests, local) → run unlocked
+        logger.warning(f"profile batch lock unavailable ({e}); running unlocked")
+        client, acquired = None, True
+    if not acquired:
+        logger.info("profile batch pass skipped: another pass holds the lock")
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        if client is not None:
+            try:
+                client.delete(BATCH_LOCK_KEY)
+            except Exception:
+                pass
 
 def _model_for(user):
     return (user.preferred_model
@@ -271,7 +310,13 @@ def _apply_result(user, item, result, submitted_at):
             generation_type=item["generation_type"]).filter(
             UserProfile.created_at >= submitted_at).first()
         if existing:
-            logger.info(f"User {user.id}: chunk already saved (idempotent)")
+            # A duplicate of a step already applied (poll overlap / doubled
+            # cohort). Advancing the chain from here would submit the SAME
+            # next step twice — the duplicate-custom_id cascade. Stop.
+            logger.info(f"User {user.id}: chunk already saved (idempotent) — "
+                        f"duplicate item, not advancing")
+            user.profile_batch_attempts = 0
+            return None
         else:
             cumulative = item["prev_cumulative"] + response["input_tokens"]
             profile = _exports._save_profile(
@@ -327,6 +372,17 @@ def _submit_requests(built, keys):
 
     `built` items are not in flight until their batch id comes back; a failed
     submission clears the guard so the user is re-seeded next cycle."""
+    # Invariant: ONE in-flight step per user. Drop duplicate custom_ids
+    # (OpenAI rejects the whole batch) and extra steps for the same user
+    # (they'd race each other on the chain); keep the first built.
+    seen_users, seen_ids, unique = set(), set(), []
+    for b in built:
+        uid, cid = b["meta"]["user_id"], b["request"]["custom_id"]
+        if uid in seen_users or cid in seen_ids:
+            logger.warning(f"Dropping duplicate batch request {cid} for user {uid}")
+            continue
+        seen_users.add(uid); seen_ids.add(cid); unique.append(b)
+    built = unique
     if not built:
         return 0
     requests_by_provider = {}
@@ -388,7 +444,9 @@ def seed_profile_batches():
     """Hourly: submit one cohort batch of current-step requests for
     batch-selected, eligible users not already in flight."""
     with flask_app.app_context():
-        _seed_profile_batches()
+        with batch_pipeline_lock() as ok:
+            if ok:
+                _seed_profile_batches()
 
 
 def _seed_profile_batches(users=None):
@@ -436,7 +494,12 @@ def seed_profile_batch_for_user(user_id):
         user = User.query.get(user_id)
         if not user:
             return 0
-        n = _seed_profile_batches(users=[user])
+        with batch_pipeline_lock() as ok:
+            if not ok:
+                logger.info(f"User {user_id}: immediate seed skipped (pass in "
+                            f"progress); the hourly seeder will pick it up")
+                return 0
+            n = _seed_profile_batches(users=[user])
         logger.info(f"User {user_id}: immediate batch seed → {n} request(s)")
         return n
 
@@ -446,7 +509,9 @@ def poll_profile_batches():
     """~Every 60s: collect finished batches, advance each user's chain, and
     submit the cohort's next step."""
     with flask_app.app_context():
-        _poll_profile_batches()
+        with batch_pipeline_lock() as ok:
+            if ok:
+                _poll_profile_batches()
 
 
 def _poll_profile_batches():
