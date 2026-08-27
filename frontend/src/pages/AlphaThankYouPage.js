@@ -1,18 +1,34 @@
 import React, { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, Navigate } from "react-router-dom";
 import Fade from "../utils/Fade";
 import { useUser } from "../contexts/UserContext";
 import api from "../api";
 import PrefillConsentCard from "../components/PrefillConsentCard";
 
 export default function AlphaThankYouPage() {
-  const { user, setUser } = useUser();
+  const { user, setUser, loading: userLoading } = useUser();
   const [email, setEmail] = useState(user?.email || "");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [submitted, setSubmitted] = useState(false);
 
   const needsEmail = user && (!user.email || user.email.trim() === "");
+
+  // This page is handed out as a link (e.g. to fresh X signups, so they can
+  // opt in to the tweet seed). Logged-out visitors would otherwise see the
+  // "you're in" copy with neither a sign-in nor the opt-in — so require a
+  // session, approved or not. Can't use ProtectedRoute: it redirects
+  // unapproved users *here*, which would loop.
+  if (userLoading) {
+    return (
+      <div style={{ padding: "40px", textAlign: "center" }}>
+        <p>Loading...</p>
+      </div>
+    );
+  }
+  if (!user) {
+    return <Navigate to="/login?returnUrl=%2Falpha-thank-you" replace />;
+  }
 
   const handleSubmit = async (e) => {
     e.preventDefault();
