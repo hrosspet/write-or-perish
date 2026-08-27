@@ -27,6 +27,37 @@ def admin_required(func):
         return func(*args, **kwargs)
     return decorated_function
 
+def _profile_status_map():
+    """{user_id: {versions, last_generation_type, last_created_at, state}}
+    in two grouped queries. state: "complete" when the chain is at rest —
+    a single version, or the latest version is an integration (the batch
+    rebuild's final step) — "generating" while a batch job is in flight /
+    a rebuild is requested / a multi-version chain hasn't integrated yet."""
+    from backend.models import UserProfile
+    counts = dict(db.session.query(
+        UserProfile.user_id, func.count(UserProfile.id)
+    ).group_by(UserProfile.user_id).all())
+    latest_ids = db.session.query(func.max(UserProfile.id)).group_by(
+        UserProfile.user_id).subquery()
+    latest = {p.user_id: p for p in UserProfile.query.filter(
+        UserProfile.id.in_(latest_ids)).all()}
+    flags = {u.id: u for u in User.query.with_entities(
+        User.id, User.profile_batch_pending, User.profile_needs_full_regen).all()}
+    out = {}
+    for user_id, n in counts.items():
+        last = latest.get(user_id)
+        f = flags.get(user_id)
+        in_flight = bool(f and (f.profile_batch_pending or f.profile_needs_full_regen))
+        at_rest = n == 1 or (last is not None and last.generation_type == "integration")
+        out[user_id] = {
+            "versions": n,
+            "last_generation_type": last.generation_type if last else None,
+            "last_created_at": iso_utc(last.created_at) if last else None,
+            "state": "generating" if (in_flight or not at_rest) else "complete",
+        }
+    return out
+
+
 @admin_bp.route("/users", methods=["GET"])
 @login_required
 @admin_required
@@ -38,6 +69,7 @@ def list_users():
     config = current_app.config
     now = datetime.utcnow()
     users = User.query.order_by(User.created_at.desc()).all()
+    profile_status = _profile_status_map()
 
     # Aggregate total (all-time) spending per user in a single query
     spending_rows = db.session.query(
@@ -106,6 +138,16 @@ def list_users():
             "spend_limit_usd": get_user_spend_limit_usd(user, config),
             "spend_limit_is_override": user.monthly_spend_limit_usd is not None,
             "spend_blocked": user_is_capped(user, now),
+            "profile_batch_pending": bool(user.profile_batch_pending),
+            "profile_force_batch": bool(user.profile_force_batch),
+            "prefilled_handle": user.prefilled_handle,
+            "profile": profile_status.get(user.id) or {
+                "versions": 0,
+                "last_generation_type": None,
+                "last_created_at": None,
+                "state": ("generating" if user.profile_batch_pending
+                          or user.profile_needs_full_regen else "none"),
+            },
         })
     return jsonify({
         "users": user_list,
@@ -265,6 +307,56 @@ def activate_and_welcome(user_id):
         "approved": True,
         "email_sent": True,
     }), 200
+
+
+@admin_bp.route("/users/<int:user_id>/prefill", methods=["POST"])
+@login_required
+@admin_required
+def prefill_from_community_archive(user_id):
+    """Bootstrap a (typically whitelisted, not-yet-signed-in) account with its
+    public tweets from the Community Archive, then queue a BATCH profile
+    build. Body: {"handle": "...", "include_replies": bool}; handle
+    defaults to the user's username. Returns {"task_id"} — poll
+    /admin/prefill/status/<task_id>."""
+    user = User.query.get_or_404(user_id)
+    data = request.get_json() or {}
+    handle = (data.get("handle") or user.username or "").strip().lstrip("@")
+    if not handle:
+        return jsonify({"error": "Handle is required."}), 400
+    from backend.tasks.imports import prefill_community_archive
+    task = prefill_community_archive.delay(user.id, handle, {
+        "include_replies": bool(data.get("include_replies", True)),
+        "force_parquet": bool(data.get("force_parquet", False)),
+    })
+    return jsonify({"task_id": task.id, "handle": handle}), 202
+
+
+@admin_bp.route("/prefill/status/<task_id>", methods=["GET"])
+@login_required
+@admin_required
+def prefill_status(task_id):
+    """Same shape as /import/status/<task_id> plus a ``stage``
+    ("fetching" | "importing"); no owner check — the admin isn't the
+    target user."""
+    from backend.celery_app import celery
+    task = celery.AsyncResult(task_id)
+    info = task.info if isinstance(task.info, dict) else {}
+    base = {"task_id": task_id, "done": 0, "total": None,
+            "stage": info.get("stage"), "result": None, "error": None}
+    if task.state == "PROGRESS":
+        return jsonify({**base, "status": "running",
+                        "done": info.get("done", 0),
+                        "total": info.get("total")}), 200
+    if task.state == "SUCCESS":
+        return jsonify({**base, "status": "completed",
+                        "done": info.get("total"), "total": info.get("total"),
+                        "result": {k: v for k, v in info.items()
+                                   if k != "user_id"}}), 200
+    if task.state == "FAILURE":
+        return jsonify({**base, "status": "failed",
+                        "error": str(task.info) if task.info
+                        else "Pre-fill failed"}), 200
+    return jsonify({**base, "status": "queued"}), 200
 
 
 @admin_bp.route("/spend", methods=["GET"])

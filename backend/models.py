@@ -108,6 +108,21 @@ class User(db.Model, UserMixin):
     # Consecutive batch failures for the current step (bounds retries).
     profile_batch_attempts = db.Column(
         db.Integer, nullable=False, default=0, server_default="0")
+    # Pin this user to the Batch profile pipeline regardless of the global
+    # switch / canary list. Set by admin pre-fills (Community Archive):
+    # a bootstrapped corpus must never hit the synchronous (full-price) path.
+    profile_force_batch = db.Column(
+        db.Boolean, nullable=False, default=False,
+        server_default=db.text("false"))
+    # Observed tokenizer calibration for profile chunks: actual model input
+    # tokens / our estimate (chars/4 × the model's token_multiplier) on the
+    # last chunk call. Null until the first chunk lands. Used to shrink or
+    # grow the next chunk's budget so chunks land near CHUNK_BUDGET real
+    # tokens (and below long-context pricing tiers).
+    profile_token_ratio = db.Column(db.Float, nullable=True)
+    # Community Archive handle this account was pre-filled from (admin
+    # cold-start bootstrap); null for organically-grown accounts.
+    prefilled_handle = db.Column(db.String(64), nullable=True)
 
     # All valid subscription plans (single source of truth).
     ALLOWED_PLANS = {"free", "alpha", "pro"}

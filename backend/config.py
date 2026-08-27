@@ -102,6 +102,15 @@ class Config:
     DEV_UPDATES_V1 = os.environ.get(
         "DEV_UPDATES_V1", "true").lower() in ("1", "true", "yes")
 
+    # Community Archive pre-fill (admin): accounts with at least this many
+    # tweets are read from the nightly parquet snapshot (downloaded once per
+    # export to COMMUNITY_ARCHIVE_SNAPSHOT_DIR, ~1 GB) instead of the REST
+    # API. Env vars reach containers as empty strings when unset — guard.
+    COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS = int(
+        os.environ.get("COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS") or "5000")
+    COMMUNITY_ARCHIVE_SNAPSHOT_DIR = (
+        os.environ.get("COMMUNITY_ARCHIVE_SNAPSHOT_DIR") or None)
+
     # Safety factor for prompt-too-long retries (0.99 = aim for 99% of the limit)
     RETRY_SAFETY_FACTOR = 0.99
 
@@ -128,6 +137,10 @@ class Config:
             "long_context_threshold": 272000,
             "long_context_input_multiplier": 2.0,
             "long_context_output_multiplier": 1.5,
+            # New-generation tokenizer: ~2 chars/token on real corpora
+            # (tweets measured at 3.2x the chars/4 estimate). Scales the
+            # stored chars/4 token counts when sizing profile chunks.
+            "token_multiplier": 2.0,
         },
         "gpt-5.5": {
             "provider": "openai",
@@ -204,6 +217,10 @@ class Config:
             "context_window": 1000000,
             "input_price_per_mtok": 5.00,
             "output_price_per_mtok": 25.00,
+            # New-generation tokenizer: ~2 chars/token on real corpora
+            # (tweets measured at 3.2x the chars/4 estimate). Scales the
+            # stored chars/4 token counts when sizing profile chunks.
+            "token_multiplier": 2.0,
         },
         "claude-opus-4.5": {
             "provider": "anthropic",
@@ -245,6 +262,10 @@ class Config:
             "context_window": 1000000,
             "input_price_per_mtok": 10.00,
             "output_price_per_mtok": 50.00,
+            # New-generation tokenizer: ~2 chars/token on real corpora
+            # (tweets measured at 3.2x the chars/4 estimate). Scales the
+            # stored chars/4 token counts when sizing profile chunks.
+            "token_multiplier": 2.0,
         },
         "claude-opus-3": {
             "provider": "anthropic",

@@ -524,3 +524,130 @@ def test_poll_fails_stale_job(app, monkeypatch):
     u2 = User.query.get(u.id)
     assert u2.profile_batch_pending is False
     assert u2.profile_batch_attempts == 1
+
+
+# ── tokenizer-aware budgets (Community Archive pre-fill cost fixes) ───────
+
+def test_use_batch_for_user_force_flag(app):
+    u = _user(profile_force_batch=True)
+    db.session.commit()
+    assert pb.use_batch_for_user(
+        u, {"PROFILE_USE_BATCH": False, "PROFILE_BATCH_USER_IDS": set()})
+
+
+def test_chunk_budget_scales_with_multiplier_and_calibration(app):
+    ex = pb._exports
+    u = _user()
+    app.config["SUPPORTED_MODELS"] = {
+        **MODELS, "dense-model": {**MODELS["test-model"], "token_multiplier": 2.0}}
+    # Older tokenizer: chars/4 stands as-is.
+    assert ex.chunk_budget_for(u, "test-model") == (
+        ex.CHUNK_BUDGET, ex.MIN_CHUNK_TOKENS)
+    # New-generation tokenizer: chars/2 → half the stored-token budget,
+    # and the min-chunk threshold shrinks with it.
+    assert ex.chunk_budget_for(u, "dense-model") == (
+        ex.CHUNK_BUDGET // 2, ex.MIN_CHUNK_TOKENS // 2)
+    # In-loop calibration: the last chunk came in 1.6x over the multiplied
+    # estimate → next budget shrinks by that residual.
+    ratio = ex.record_token_ratio(u, "dense-model", 10000, 32000)
+    assert ratio == 1.6
+    assert ex.chunk_budget_for(u, "dense-model")[0] == int(ex.CHUNK_BUDGET / 3.2)
+    assert ex.effective_chars_per_token(u, "dense-model") == 1.25
+    # Clamped to [1, 5] chars/token so one odd chunk can't collapse or
+    # explode the budget.
+    ex.record_token_ratio(u, "dense-model", 10000, 200000)
+    assert ex.effective_chars_per_token(u, "dense-model") == ex.CHARS_PER_TOKEN_MIN
+    assert ex.chunk_budget_for(u, "dense-model")[0] == ex.CHUNK_BUDGET // 4
+    ex.record_token_ratio(u, "test-model", 10000, 1000)
+    assert ex.effective_chars_per_token(u, "test-model") == ex.CHARS_PER_TOKEN_MAX
+    # No signal → no change.
+    assert ex.record_token_ratio(u, "dense-model", 0, 5) is None
+
+
+def test_build_next_request_uses_scaled_budget_and_records_estimate(
+        app, monkeypatch):
+    u = _user()
+    app.config["SUPPORTED_MODELS"] = {
+        "test-model": {**MODELS["test-model"], "token_multiplier": 2.0}}
+    db.session.commit()
+    export = MagicMock(return_value={
+        "content": "NEW DATA", "token_count": 45000,
+        "latest_node_created_at": datetime(2026, 6, 1)})
+    monkeypatch.setattr(pb._exports, "build_user_export_content", export)
+    monkeypatch.setattr(pb._exports, "_load_prompt",
+                        lambda *a, **k: "GEN {user_export}")
+
+    req = pb._build_next_profile_request(u)
+
+    assert export.call_args.kwargs["max_tokens"] == pb._exports.CHUNK_BUDGET // 2
+    assert req["meta"]["prompt_tokens_est"] > 0
+
+
+def test_apply_result_calibrates_from_actual_tokens(app, monkeypatch):
+    u = _user()
+    db.session.commit()
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=None))
+    item = {"custom_id": "x", "user_id": u.id, "kind": "chunk",
+            "prev_profile_id": None, "generation_type": "iterative",
+            "prev_cumulative": 0, "origin_stats": None,
+            "source_data_cutoff": "2026-06-01T00:00:00",
+            "model_id": "test-model", "prompt_tokens_est": 1000}
+    result = {"content": "PROFILE", "input_tokens": 3200,
+              "output_tokens": 10, "total_tokens": 3210}
+    pb._apply_result(u, item, result, datetime.utcnow() - timedelta(minutes=1))
+    assert u.profile_token_ratio == 3.2
+
+
+def test_seed_single_user_submits_immediately(app, monkeypatch):
+    u = _user(profile_force_batch=True, profile_needs_full_regen=True)
+    other = _user(profile_force_batch=True, profile_needs_full_regen=True)
+    db.session.commit()
+    monkeypatch.setattr(pb._exports, "build_user_export_content", MagicMock(
+        return_value={"content": "DATA", "token_count": 90000,
+                      "latest_node_created_at": datetime(2026, 6, 1)}))
+    monkeypatch.setattr(pb._exports, "_load_prompt", lambda *a, **k: "G {user_export}")
+    submitted = []
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
+        submitted.append(reqs) or {k: f"b-{k}" for k in reqs}))
+
+    assert pb._seed_profile_batches(users=[u]) == 1
+    assert len(submitted) == 1
+    ids = [r["custom_id"] for r in list(submitted[0].values())[0]]
+    assert ids == [f"profile_{u.id}_0_chunk"]  # only the targeted user
+    assert User.query.get(u.id).profile_batch_pending is True
+    assert User.query.get(other.id).profile_batch_pending is False
+
+
+def test_seed_reports_submitted_not_built(app, monkeypatch):
+    u = _user(profile_force_batch=True, profile_needs_full_regen=True)
+    db.session.commit()
+    monkeypatch.setattr(pb._exports, "build_user_export_content", MagicMock(
+        return_value={"content": "DATA", "token_count": 90000,
+                      "latest_node_created_at": datetime(2026, 6, 1)}))
+    monkeypatch.setattr(pb._exports, "_load_prompt", lambda *a, **k: "G {user_export}")
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: {})  # provider rejected
+    assert pb._seed_profile_batches(users=[u]) == 0
+    assert User.query.get(u.id).profile_batch_pending is False
+    assert User.query.get(u.id).profile_batch_attempts == 1
+
+
+def test_force_batch_user_never_exhausts_to_sync(app, monkeypatch):
+    """Pinned accounts keep being seeded past MAX_BATCH_ATTEMPTS; the
+    sync last-resort in exports skips them too."""
+    u = _user(profile_force_batch=True, profile_needs_full_regen=True,
+              profile_batch_attempts=pb.MAX_BATCH_ATTEMPTS + 2)
+    plain = _user(profile_needs_full_regen=True,
+                  profile_batch_attempts=pb.MAX_BATCH_ATTEMPTS + 2)
+    app.config["PROFILE_USE_BATCH"] = True
+    db.session.commit()
+    monkeypatch.setattr(pb._exports, "build_user_export_content", MagicMock(
+        return_value={"content": "DATA", "token_count": 90000,
+                      "latest_node_created_at": datetime(2026, 6, 1)}))
+    monkeypatch.setattr(pb._exports, "_load_prompt", lambda *a, **k: "G {user_export}")
+    submitted = []
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
+        submitted.append(reqs) or {k: f"b-{k}" for k in reqs}))
+    assert pb._seed_profile_batches(users=[u, plain]) == 1  # only the pinned one
+    ids = [r["custom_id"] for r in list(submitted[0].values())[0]]
+    assert ids == [f"profile_{u.id}_0_chunk"]

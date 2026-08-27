@@ -52,9 +52,11 @@ BATCH_STALE_AFTER = timedelta(hours=24)   # provider SLA ceiling
 
 
 def use_batch_for_user(user, config):
-    """A user takes the Batch path if the global switch is on OR their id is
-    in the canary allowlist (issue #173)."""
+    """A user takes the Batch path if the global switch is on, their id is
+    in the canary allowlist (issue #173), or they are pinned to batch
+    (User.profile_force_batch — admin pre-fills)."""
     return (bool(config.get("PROFILE_USE_BATCH"))
+            or bool(getattr(user, "profile_force_batch", False))
             or user.id in config.get("PROFILE_BATCH_USER_IDS", set()))
 
 
@@ -148,8 +150,9 @@ def _build_next_profile_request(user):
     # incremental machinery, which renders budget windows correctly via
     # entry-point preambles; the legacy authored_threads path silently
     # returned None whenever no thread *root* fit the budget window.
+    budget, min_chunk = _exports.chunk_budget_for(user, model_id)
     chunk = _exports.build_user_export_content(
-        user, max_tokens=_exports.CHUNK_BUDGET, filter_ai_usage=True,
+        user, max_tokens=budget, filter_ai_usage=True,
         created_after=cutoff, chronological_order=True, return_metadata=True,
         include_strategy="engaged_threads")
 
@@ -161,7 +164,7 @@ def _build_next_profile_request(user):
     # if data remains beyond it, process it anyway.
     big_enough = have_chunk and (
         is_first_initial
-        or chunk["token_count"] >= _exports.MIN_CHUNK_TOKENS
+        or chunk["token_count"] >= min_chunk
         or _exports._has_more_source_after(user, chunk["latest_node_created_at"]))
 
     if big_enough:
@@ -201,6 +204,9 @@ def _build_next_profile_request(user):
                 "source_data_cutoff": (
                     latest_ts.isoformat() if latest_ts else None),
                 "model_id": model_id,
+                # chars/4 of the prompt: calibrates the next chunk's budget
+                # against the provider-reported input_tokens (_apply_result).
+                "prompt_tokens_est": _exports.approximate_token_count(prompt),
             },
         }
 
@@ -284,6 +290,13 @@ def _apply_result(user, item, result, submitted_at):
                 user.profile_needs_full_regen = False
             logger.info(
                 f"User {user.id}: saved batch chunk profile {profile.id}")
+        if item.get("prompt_tokens_est"):
+            observed = _exports.record_token_ratio(
+                user, item["model_id"], item["prompt_tokens_est"],
+                response.get("input_tokens"))
+            if observed is not None:
+                logger.info(f"User {user.id}: batch chunk tokenizer "
+                            f"calibration actual/estimated={observed}")
         user.profile_batch_attempts = 0
         return _build_next_profile_request(user)
 
@@ -315,7 +328,7 @@ def _submit_requests(built, keys):
     `built` items are not in flight until their batch id comes back; a failed
     submission clears the guard so the user is re-seeded next cycle."""
     if not built:
-        return
+        return 0
     requests_by_provider = {}
     for b in built:
         requests_by_provider.setdefault(b["provider"], []).append(b["request"])
@@ -328,6 +341,7 @@ def _submit_requests(built, keys):
         items_by_key.setdefault(key, []).append(b["meta"])
 
     now = datetime.utcnow()
+    submitted = 0
     for provider_key, items in items_by_key.items():
         batch_id = batch_ids.get(provider_key)
         if not batch_id:
@@ -349,8 +363,10 @@ def _submit_requests(built, keys):
             if u:
                 u.profile_batch_pending = True
         db.session.commit()
+        submitted += len(items)
         logger.info(f"Profile batch {batch_id} ({provider_key}): "
                     f"{len(items)} item(s) submitted")
+    return submitted
 
 
 def _fail_job(job, reason):
@@ -375,22 +391,29 @@ def seed_profile_batches():
         _seed_profile_batches()
 
 
-def _seed_profile_batches():
-    """Impl — runs inside an active app context (testable directly)."""
+def _seed_profile_batches(users=None):
+    """Impl — runs inside an active app context (testable directly).
+    ``users`` restricts the cohort (immediate seed for one user); the
+    default is every profile-eligible user."""
     config = current_app.config
     if config.get("PROFILE_UPDATES_PAUSED"):
         logger.info("PROFILE_UPDATES_PAUSED — skipping batch seeder")
-        return
+        return 0
     keys = apply_batch_key_override(
         get_api_keys_for_usage(config, 'chat'), config)
     built = []
-    for user in User.profile_eligible_query().all():
+    if users is None:
+        users = User.profile_eligible_query().all()
+    for user in users:
         if user.profile_batch_pending:
             continue
         if not use_batch_for_user(user, config):
             continue
-        if (user.profile_batch_attempts or 0) >= MAX_BATCH_ATTEMPTS:
+        if ((user.profile_batch_attempts or 0) >= MAX_BATCH_ATTEMPTS
+                and not user.profile_force_batch):
             continue  # exhausted → synchronous last-resort handles it
+        # (force-batch users keep retrying here every cycle instead:
+        # they must never fall back to the full-price sync path)
         if not _should_seed(user):
             continue
         try:
@@ -401,7 +424,21 @@ def _seed_profile_batches():
             continue
         if req:
             built.append(req)
-    _submit_requests(built, keys)
+    return _submit_requests(built, keys)
+
+
+@celery.task
+def seed_profile_batch_for_user(user_id):
+    """Immediate seed for one user (admin pre-fill): same gates as the
+    hourly seeder, without waiting for it. Returns the number actually
+    put in flight (0 when the provider rejected the submit)."""
+    with flask_app.app_context():
+        user = User.query.get(user_id)
+        if not user:
+            return 0
+        n = _seed_profile_batches(users=[user])
+        logger.info(f"User {user_id}: immediate batch seed → {n} request(s)")
+        return n
 
 
 @celery.task

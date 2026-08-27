@@ -28,3 +28,5 @@ sentry-sdk[flask]>=2.0.0
 mistune>=3.0.0,<4
 # Per-article og:image social cards (backend/utils/og_image.py)
 Pillow>=10.0.0
+# Community Archive parquet snapshot reads (admin pre-fill of large accounts)
+duckdb>=1.0

@@ -1196,6 +1196,21 @@ def _maybe_update_profile_after_import(user_id, earliest_ts, imported_tokens):
             revert_profile_for_import(user_id, earliest_ts)
             db.session.commit()
         if imported_tokens >= 10000:
+            from backend.tasks.profile_batch import use_batch_for_user
+            if use_batch_for_user(user_obj, current_app.config):
+                # Batch users are driven by the hourly seeder, never the
+                # synchronous (full-price) path. A from-scratch build or a
+                # rewind past the cutoff is requested via the regen flag;
+                # an incremental update is picked up once the seeder's
+                # token gate is crossed.
+                if needs_full_regen or latest_profile is None:
+                    user_obj.profile_needs_full_regen = True
+                    db.session.commit()
+                current_app.logger.info(
+                    f"User {user_id}: import handed to the batch profile "
+                    f"pipeline (full_regen={needs_full_regen or latest_profile is None})"
+                )
+                return None
             from backend.tasks.exports import maybe_trigger_profile_update
             return maybe_trigger_profile_update(
                 user_id, force_full_regen=needs_full_regen,

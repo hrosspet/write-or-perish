@@ -26,6 +26,64 @@ logger = get_task_logger(__name__)
 CHUNK_BUDGET = 90000
 MIN_CHUNK_TOKENS = 80000
 
+# Stored token counts are chars // 4. A model's effective divisor is
+# 4 / (token_multiplier × observed calibration): 4 for older tokenizers,
+# 2 for the new generation, nudged by what the provider actually counted.
+# Clamp the effective divisor to [1, 5] chars/token so one odd chunk can't
+# collapse or explode the budget.
+CHARS_PER_TOKEN_BASE = 4
+CHARS_PER_TOKEN_MIN = 1
+CHARS_PER_TOKEN_MAX = 5
+
+
+def token_multiplier(model_id):
+    """Static chars/4 → model-token factor for a model (config
+    ``token_multiplier``; 1.0 for older tokenizers)."""
+    from flask import current_app
+    cfg = current_app.config.get("SUPPORTED_MODELS", {}).get(model_id) or {}
+    try:
+        return float(cfg.get("token_multiplier") or 1.0)
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def effective_token_ratio(user, model_id):
+    """Stored token_count → expected model tokens: the model's static
+    multiplier times the user's observed calibration, when one exists."""
+    ratio = token_multiplier(model_id)
+    observed = getattr(user, "profile_token_ratio", None)
+    if observed:
+        ratio *= float(observed)
+    # ratio == CHARS_PER_TOKEN_BASE / effective chars-per-token
+    return min(max(ratio, CHARS_PER_TOKEN_BASE / CHARS_PER_TOKEN_MAX),
+               CHARS_PER_TOKEN_BASE / CHARS_PER_TOKEN_MIN)
+
+
+def effective_chars_per_token(user, model_id):
+    """The divisor in ``chars // x`` this user+model currently runs at."""
+    return CHARS_PER_TOKEN_BASE / effective_token_ratio(user, model_id)
+
+
+def chunk_budget_for(user, model_id, base_budget=CHUNK_BUDGET):
+    """(budget, min_chunk) in STORED token units so that a chunk lands near
+    ``base_budget`` real model tokens. MIN_CHUNK_TOKENS scales with it, or
+    every chunk would read as an undersized tail."""
+    ratio = effective_token_ratio(user, model_id)
+    return (max(int(base_budget / ratio), 5000),
+            max(int(MIN_CHUNK_TOKENS / ratio), 1000))
+
+
+def record_token_ratio(user, model_id, estimated_prompt_tokens,
+                       actual_input_tokens):
+    """Store actual/estimated for the chunk just sent. ``estimated`` is the
+    chars/4 count of the prompt text; the model multiplier is applied here
+    so the stored ratio is the residual the multiplier did not explain."""
+    est = float(estimated_prompt_tokens or 0) * token_multiplier(model_id)
+    if est <= 0 or not actual_input_tokens:
+        return None
+    user.profile_token_ratio = round(actual_input_tokens / est, 3)
+    return user.profile_token_ratio
+
 # Prepended to a user-written profile (generated_by == "user") whenever it's
 # fed to the LLM — as the base for an incremental update or as the root of an
 # integration chain — so the model treats it as the user's own words rather
@@ -647,8 +705,10 @@ def _do_initial_generation(self, user, model_id, context_window,
     if estimated_tokens == 0:
         raise ValueError("No writing found to analyze")
 
+    # Stored counts are chars/4; the model may tokenize denser than that.
+    ratio = effective_token_ratio(user, model_id)
     total_export = None
-    if estimated_tokens <= budget:
+    if estimated_tokens * ratio <= budget:
         # engaged_threads: profiles read the user's full conversational
         # scope — their own threads AND their replies in other users'
         # threads (anchor-based selection, same scope incremental updates
@@ -661,7 +721,7 @@ def _do_initial_generation(self, user, model_id, context_window,
         if not total_export or not total_export.get("content"):
             raise ValueError("No writing found to analyze")
 
-    if total_export is not None and total_export["token_count"] <= budget:
+    if total_export is not None and total_export["token_count"] * ratio <= budget:
         # Single-pass generation
         return _single_pass_generation(
             self, user, model_id, gen_template, total_export,
@@ -1008,8 +1068,11 @@ def _chunked_profile_loop(self, user, model_id, update_template,
             'status': f'Processing chunk {chunk_num}'
         })
 
+        # Re-derived every iteration: the previous chunk's actual token
+        # count calibrates this one (record_token_ratio below).
+        budget, min_chunk = chunk_budget_for(user, model_id, chunk_budget)
         chunk = build_user_export_content(
-            user, max_tokens=chunk_budget, filter_ai_usage=True,
+            user, max_tokens=budget, filter_ai_usage=True,
             created_after=current_cutoff, chronological_order=True,
             return_metadata=True, include_strategy="engaged_threads"
         )
@@ -1030,18 +1093,18 @@ def _chunked_profile_loop(self, user, model_id, update_template,
         is_first_with_gen = (
             first_chunk_prompt_fn and current_profile_content is None
         )
-        if not is_first_with_gen and chunk_tokens_est < MIN_CHUNK_TOKENS:
+        if not is_first_with_gen and chunk_tokens_est < min_chunk:
             if not _has_more_source_after(user, latest_ts):
                 logger.info(
                     f"User {user.id}: stopping chunked loop — "
                     f"tail chunk {chunk_num} has {chunk_tokens_est} "
-                    f"formatted tokens < {MIN_CHUNK_TOKENS} min threshold "
+                    f"formatted tokens < {min_chunk} min threshold "
                     f"and no data remains after {latest_ts}"
                 )
                 break
             logger.info(
                 f"User {user.id}: chunk {chunk_num} renders to "
-                f"{chunk_tokens_est} formatted tokens (< {MIN_CHUNK_TOKENS}) "
+                f"{chunk_tokens_est} formatted tokens (< {min_chunk}) "
                 f"but more data remains after {latest_ts} — processing"
             )
 
@@ -1064,6 +1127,16 @@ def _chunked_profile_loop(self, user, model_id, update_template,
             "input_tokens", chunk_tokens_est
         )
         cumulative_source_tokens += actual_chunk_tokens
+        observed = record_token_ratio(
+            user, model_id, approximate_token_count(prompt),
+            response.get("input_tokens"))
+        if observed is not None:
+            logger.info(
+                f"User {user.id}: chunk {chunk_num} tokenizer calibration "
+                f"actual/estimated={observed} → chars/token="
+                f"{effective_chars_per_token(user, model_id):.2f} "
+                f"(budget was {budget})"
+            )
         cumulative_origin_stats = merge_origin_stats(
             cumulative_origin_stats, chunk.get("origin_stats"))
 
@@ -1282,8 +1355,12 @@ def maybe_trigger_incremental_profile_update(user):
     # Local import avoids a circular import (profile_batch imports exports).
     from backend.tasks.profile_batch import (
         use_batch_for_user, MAX_BATCH_ATTEMPTS)
-    if (use_batch_for_user(user, flask_app.config)
-            and (user.profile_batch_attempts or 0) < MAX_BATCH_ATTEMPTS):
+    if use_batch_for_user(user, flask_app.config) and (
+            user.profile_force_batch
+            or (user.profile_batch_attempts or 0) < MAX_BATCH_ATTEMPTS):
+        # Pinned (pre-filled) accounts never take the sync last resort —
+        # a persistent batch failure leaves them visibly "generating" in
+        # the admin list rather than silently running at full price.
         return None
 
     # User must have been inactive for at least 30 minutes

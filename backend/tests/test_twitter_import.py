@@ -420,3 +420,217 @@ def test_status_maps_states_and_hides_other_users(app, monkeypatch):
 
     _fake_celery(monkeypatch, "PENDING", None)
     assert client.get("/api/import/status/t1").get_json()["status"] == "queued"
+
+
+# ── Community Archive pre-fill (admin cold-start bootstrap) ───────────────
+
+def _ca_row(i, text, created="2026-08-24T10:00:00+00:00", reply=None):
+    return {"tweet_id": str(i), "created_at": created, "full_text": text,
+            "favorite_count": 1, "retweet_count": 0,
+            "reply_to_tweet_id": reply,
+            "reply_to_user_id": "7" if reply else None,
+            "reply_to_username": "someone" if reply else None}
+
+
+def test_community_archive_keyset_paging_and_export_shape(monkeypatch):
+    from backend.utils import community_archive as ca
+    calls = []
+
+    def fake_get(table, params):
+        calls.append(params)
+        assert table == "enriched_tweets"
+        if "tweet_id" not in params:
+            return [_ca_row(1, "a"), _ca_row(2, "b")]
+        assert params["tweet_id"] == "gt.2"
+        return [_ca_row(3, "c")]
+
+    monkeypatch.setattr(ca, "_get", fake_get)
+    rows = list(ca.iter_tweets("Someone", page_size=2))
+    assert [r["tweet_id"] for r in rows] == ["1", "2", "3"]
+    assert "offset" not in calls[0] and calls[1]["order"] == "tweet_id.asc"
+
+    entry = ca.to_export_entry(_ca_row(9, "hi", reply="5"))["tweet"]
+    assert entry["created_at"] == "Mon Aug 24 10:00:00 +0000 2026"
+    assert entry["in_reply_to_status_id_str"] == "5"
+    row = ta.compact_row(entry)
+    assert row["is_reply"] and row["full_text"] == "hi"
+
+
+def test_import_handoff_routes_batch_users_to_seeder(app, monkeypatch):
+    """A batch-pinned user never gets the synchronous profile task after an
+    import; the from-scratch build is requested via the regen flag."""
+    from backend.routes import import_data
+    u = _make_user("batchy")
+    u.profile_force_batch = True
+    _db.session.commit()
+    import backend.tasks.exports as ex
+    sync = MagicMock(return_value="sync-task")
+    monkeypatch.setattr(ex, "maybe_trigger_profile_update", sync)
+
+    assert import_data._maybe_update_profile_after_import(u.id, None, 50000) is None
+    assert sync.call_count == 0
+    assert User.query.get(u.id).profile_needs_full_regen is True
+
+    # Non-batch users keep the existing synchronous dispatch.
+    v = _make_user("syncy")
+    _db.session.commit()
+    assert import_data._maybe_update_profile_after_import(v.id, None, 50000) == "sync-task"
+
+
+def test_prefill_impl_imports_pins_batch_and_reports(app, monkeypatch):
+    from backend.tasks import imports as imports_mod
+    from backend.utils import community_archive as ca
+    u = _make_user("tyler")
+    _db.session.commit()
+    monkeypatch.setattr(ca, "fetch_account", lambda h: {
+        "account_id": "1", "username": "TylerAlterman", "num_tweets": 3})
+    monkeypatch.setattr(ca, "iter_tweets", lambda h, on_page=None, **k: iter([
+        _ca_row(2, "second", "2026-08-25T10:00:00+00:00"),
+        _ca_row(1, "first"),
+        _ca_row(1, "first (dup)"),
+        _ca_row(3, "RT @x: retweet", "2026-08-26T10:00:00+00:00"),
+        _ca_row(4, "a reply", "2026-08-27T10:00:00+00:00", reply="2"),
+    ]))
+    import backend.tasks.exports as ex
+    sync = MagicMock(return_value="sync-task")
+    monkeypatch.setattr(ex, "maybe_trigger_profile_update", sync)
+    states = []
+
+    result = imports_mod.prefill_community_archive_impl(
+        u.id, "tyleralterman", {"include_replies": False},
+        update_state=lambda **kw: states.append(kw["meta"]))
+
+    assert result["created"] == 2 and result["handle"] == "TylerAlterman"
+    nodes = Node.query.filter_by(human_owner_id=u.id).order_by(Node.created_at).all()
+    assert [n.get_content() for n in nodes] == ["first", "second"]
+    assert all(n.origin == "twitter" and n.ai_usage == "chat" for n in nodes)
+    assert User.query.get(u.id).profile_force_batch is True
+    assert User.query.get(u.id).prefilled_handle == "TylerAlterman"
+    assert sync.call_count == 0  # never the synchronous path
+    assert states[0]["stage"] == "fetching" and states[-1]["stage"] == "importing"
+    assert result["profile_batch_queued"] is False  # tiny corpus < 10k tokens
+
+
+def test_prefill_impl_unknown_handle(app, monkeypatch):
+    from backend.tasks import imports as imports_mod
+    from backend.utils import community_archive as ca
+    u = _make_user("nobody")
+    _db.session.commit()
+    monkeypatch.setattr(ca, "fetch_account", lambda h: None)
+    with pytest.raises(ca.CommunityArchiveError):
+        imports_mod.prefill_community_archive_impl(u.id, "nobody", {})
+
+
+# ── parquet snapshot path (large accounts) ────────────────────────────────
+
+def _make_snapshot(d):
+    """Tiny tweets.parquet + profiles.parquet with the real column names."""
+    import duckdb
+    d.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect()
+    con.execute(f"""
+        copy (select * from (values
+            ('10', 'A1', 'alice', 'Alice', 3::UBIGINT),
+            ('20', 'B2', 'bob', 'Bob', 1::UBIGINT))
+            t(_, account_id, username, display_name, num_tweets))
+        to '{d / "profiles.parquet"}' (format parquet)""")
+    con.execute(f"""
+        copy (select * from (values
+            ('102', 'A1', timestamp with time zone '2026-08-25 10:00:00+00', 'second', 1::UBIGINT, 0::UBIGINT, NULL, NULL),
+            ('101', 'A1', timestamp with time zone '2026-08-24 10:00:00+00', 'first', 2::UBIGINT, 0::UBIGINT, NULL, NULL),
+            ('103', 'A1', timestamp with time zone '2026-08-26 10:00:00+00', 'reply to bob',
+             0::UBIGINT, 0::UBIGINT, '77', 'B2'),
+            ('201', 'B2', timestamp with time zone '2026-08-24 11:00:00+00', 'bobs tweet', 0::UBIGINT, 0::UBIGINT, NULL, NULL))
+            t(tweet_id, account_id, created_at, full_text, favorite_count, retweet_count,
+              reply_to_tweet_id, reply_to_account_id))
+        to '{d / "tweets.parquet"}' (format parquet)""")
+    (d / "export_id").write_text("2026-08-27T07-03-56Z")
+
+
+def test_parquet_account_and_tweets(tmp_path):
+    from backend.utils import community_archive as ca
+    snap = tmp_path / "snap"
+    _make_snapshot(snap)
+    acct = ca.fetch_account_parquet("@Alice", snap)
+    assert acct == {"account_id": "A1", "username": "alice",
+                    "account_display_name": "Alice", "num_tweets": 3}
+    assert ca.fetch_account_parquet("nobody", snap) is None
+    pages = []
+    rows = list(ca.iter_tweets_parquet("A1", snap, batch=2, on_page=pages.append))
+    assert [r["tweet_id"] for r in rows] == ["101", "102", "103"]
+    assert rows[2]["reply_to_username"] == "bob" and rows[2]["reply_to_user_id"] == "B2"
+    assert pages == [2, 3]
+    entry = ca.to_export_entry(rows[0])["tweet"]
+    assert entry["created_at"] == "Mon Aug 24 10:00:00 +0000 2026"
+    assert ta.compact_row(entry)["full_text"] == "first"
+
+
+def test_ensure_snapshot_downloads_once_per_export(tmp_path, monkeypatch):
+    from backend.utils import community_archive as ca
+    manifest = {"export_id": "E1", "package_paths": [
+        "v1/E1/tweets.parquet", "v1/E1/profiles.parquet", "v1/E1/manifest.json"]}
+    opened = []
+
+    class FakeResp(io.BytesIO):
+        headers = {"Content-Length": "6"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(url):
+        opened.append(url)
+        return FakeResp(b"abcdef")
+
+    monkeypatch.setattr(ca, "_urlopen", fake_urlopen)
+    monkeypatch.setattr(ca, "DOWNLOAD_CHUNK", 4)
+    progress = []
+    snap = tmp_path / "snap"
+    assert ca.ensure_snapshot(snap, on_progress=lambda *a: progress.append(a),
+                              manifest=manifest) == "E1"
+    assert sorted(p.name for p in snap.iterdir()) == [
+        "export_id", "profiles.parquet", "tweets.parquet"]
+    assert (snap / "tweets.parquet").read_bytes() == b"abcdef"
+    assert opened[0].endswith("/v1/E1/tweets.parquet")
+    assert progress[:2] == [("tweets.parquet", 4, 6), ("tweets.parquet", 6, 6)]
+    # Same export cached → no download; new export → re-download.
+    ca.ensure_snapshot(snap, manifest=manifest)
+    assert len(opened) == 2
+    ca.ensure_snapshot(snap, manifest={**manifest, "export_id": "E2"})
+    assert len(opened) == 4 and ca.snapshot_export_id(snap) == "E2"
+    # A half-written snapshot (no marker) is not trusted.
+    (snap / "export_id").unlink()
+    assert ca.snapshot_export_id(snap) is None
+
+
+def test_prefill_impl_large_account_uses_parquet(app, tmp_path, monkeypatch):
+    from backend.tasks import imports as imports_mod
+    from backend.utils import community_archive as ca
+    snap = tmp_path / "snap"
+    _make_snapshot(snap)
+    app.config["COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS"] = 3
+    app.config["COMMUNITY_ARCHIVE_SNAPSHOT_DIR"] = str(snap)
+    u = _make_user("alice_local")
+    _db.session.commit()
+    monkeypatch.setattr(ca, "fetch_account", lambda h: {
+        "account_id": "A1", "username": "alice", "num_tweets": 3})
+    monkeypatch.setattr(ca, "iter_tweets", MagicMock(
+        side_effect=AssertionError("REST must not be used for large accounts")))
+    ensured = []
+    monkeypatch.setattr(ca, "ensure_snapshot", lambda d, on_progress=None, **k: (
+        ensured.append(str(d)) or "2026-08-27T07-03-56Z"))
+    import backend.tasks.exports as ex
+    monkeypatch.setattr(ex, "maybe_trigger_profile_update", MagicMock())
+    states = []
+
+    result = imports_mod.prefill_community_archive_impl(
+        u.id, "alice", {"include_replies": True},
+        update_state=lambda **kw: states.append(kw["meta"]))
+
+    assert ensured == [str(snap)]
+    assert result["source"] == "parquet" and result["created"] == 3
+    assert states[0]["stage"] == "downloading"
+    nodes = Node.query.filter_by(human_owner_id=u.id).order_by(Node.created_at).all()
+    assert [n.get_content() for n in nodes] == ["first", "second", "reply to bob"]
