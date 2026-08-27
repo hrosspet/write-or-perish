@@ -44,7 +44,7 @@ def _profile_status_map():
     latest = {p.user_id: p for p in UserProfile.query.filter(
         UserProfile.id.in_(latest_ids)).all()}
     from backend.tasks.exports import chunk_budget_for
-    from backend.tasks.profile_batch import _new_token_count, _model_for
+    from backend.tasks.profile_batch import _remaining_token_count, _model_for
     users_by_id = {u.id: u for u in User.query.all()}
     out = {}
     for user_id, n in counts.items():
@@ -62,7 +62,7 @@ def _profile_status_map():
         if (at_rest and last.generation_type != "integration" and u
                 and last.source_data_cutoff is not None):
             _, min_chunk = chunk_budget_for(u, _model_for(u))
-            stuck = _new_token_count(u, last.source_data_cutoff) >= min_chunk
+            stuck = _remaining_token_count(u, last.source_data_cutoff) >= min_chunk
         out[user_id] = {
             "versions": n,
             "last_generation_type": last.generation_type if last else None,

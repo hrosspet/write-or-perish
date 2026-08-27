@@ -211,13 +211,13 @@ class TestProfileStatus:
         p.source_data_cutoff = datetime(2026, 1, 1)
         _db.session.commit()
         import backend.tasks.profile_batch as pbm
-        monkeypatch.setattr(pbm, "_new_token_count", lambda u, ts: 85000)
+        monkeypatch.setattr(pbm, "_remaining_token_count", lambda u, ts: 85000)
         client = app.test_client()
         _login(client, adm.id)
         row = {u["username"]: u for u in client.get("/api/admin/users").json["users"]}["stuck"]
         assert row["profile"]["state"] == "generating"
         assert row["profile"]["incomplete"] is True and row["profile"]["batch_attempts"] == 1
-        monkeypatch.setattr(pbm, "_new_token_count", lambda u, ts: 30000)  # waiting tail
+        monkeypatch.setattr(pbm, "_remaining_token_count", lambda u, ts: 30000)  # waiting tail
         row = {u["username"]: u for u in client.get("/api/admin/users").json["users"]}["stuck"]
         assert row["profile"]["state"] == "complete" and row["profile"]["incomplete"] is False
 

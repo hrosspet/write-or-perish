@@ -725,9 +725,9 @@ def test_pinned_account_resumes_when_a_full_chunk_remains(app, monkeypatch):
     prev = _prev_profile(u, datetime(2026, 5, 1), source_tokens=70000, gen_type="iterative")
     prev.created_at = datetime.utcnow()  # inside MIN_INTERVAL
     db.session.commit()
-    monkeypatch.setattr(pb, "_new_token_count", lambda user, cutoff: 85000)
+    monkeypatch.setattr(pb, "_remaining_token_count", lambda user, cutoff: 85000)
     assert pb._should_seed(u) is True
-    monkeypatch.setattr(pb, "_new_token_count", lambda user, cutoff: 30000)  # small tail
+    monkeypatch.setattr(pb, "_remaining_token_count", lambda user, cutoff: 30000)  # small tail
     assert pb._should_seed(u) is False
     # An organic (unpinned) user with a full chunk remaining is still gated
     # by MIN_INTERVAL.
@@ -748,3 +748,19 @@ def test_small_tail_is_deferred_even_for_pinned_accounts(app, monkeypatch):
         return_value={"content": "TAIL", "token_count": 6000,
                       "latest_node_created_at": datetime(2026, 6, 1)}))
     assert pb._build_next_profile_request(u) is None  # 1 version → no integration either
+
+
+def test_remaining_token_count_uses_created_at_not_updated_at(app):
+    """Imported tweets have updated_at = import time but created_at = tweet
+    date; the remaining-data measure must follow the chunk cutoff (created_at)."""
+    u = _user()
+    db.session.flush()
+    for day, tokens in ((1, 100), (10, 200), (20, 400)):
+        n = Node(user_id=u.id, human_owner_id=u.id, privacy_level="private",
+                 ai_usage="chat", token_count=tokens, created_at=datetime(2026, 1, day))
+        n.set_content("x")
+        db.session.add(n)
+    db.session.commit()
+    assert pb._remaining_token_count(u, datetime(2026, 1, 5)) == 600
+    assert pb._remaining_token_count(u, datetime(2026, 1, 15)) == 400
+    assert pb._remaining_token_count(u, datetime(2026, 1, 25)) == 0

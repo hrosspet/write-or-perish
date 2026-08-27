@@ -134,6 +134,20 @@ def _new_token_count(user, cutoff):
     return q.scalar()
 
 
+def _remaining_token_count(user, cutoff):
+    """Stored tokens the chunk builder still has ahead of it: nodes CREATED
+    after the cutoff, in the profile's anchor scope. Not _new_token_count —
+    that keys on updated_at (organic "new activity"), and imported tweets
+    all carry the import time there, so a pre-filled corpus reads as
+    entirely unprocessed forever."""
+    return db.session.query(func.coalesce(func.sum(Node.token_count), 0)).filter(
+        or_(Node.user_id == user.id, Node.human_owner_id == user.id),
+        Node.ai_usage.in_(['chat', 'train']),
+        Node.deleted_at.is_(None),
+        Node.created_at > cutoff,
+    ).scalar() or 0
+
+
 def _should_seed(user):
     """Whether the user has crossed the trigger gates right now. Mirrors
     maybe_trigger_incremental_profile_update (inactivity, interval, tokens)
@@ -160,7 +174,7 @@ def _should_seed(user):
     if (user.profile_force_batch and latest is not None
             and latest.source_data_cutoff is not None):
         _, min_chunk = _exports.chunk_budget_for(user, _model_for(user))
-        if _new_token_count(user, latest.source_data_cutoff) >= min_chunk:
+        if _remaining_token_count(user, latest.source_data_cutoff) >= min_chunk:
             return True
     if latest:
         if (datetime.utcnow() - latest.created_at) < MIN_INTERVAL:
