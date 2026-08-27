@@ -792,3 +792,20 @@ def test_budgeted_export_preselects_before_loading(app, alice, monkeypatch):
     assert 0 < len(calls) < 40                    # only the window, not the corpus
     assert "**Total Threads:** 40" in content     # header still counts everything
     assert "Included Threads" in content
+
+
+def test_cleanup_purge_clears_continuation_references(app, alice):
+    """Deleting an agentic continuation turn leaves the interim node's
+    continuation_node_id pointing at it (undelete restores the chain);
+    the hard purge must clear that link or the FK blocks the DELETE."""
+    interim = _make_node(alice, content="interim step")
+    cont = _make_node(alice, parent=interim, content="follow-up turn")
+    interim.continuation_node_id = cont.id
+    cont.deleted_at = datetime.utcnow() - timedelta(days=31)
+    _db.session.commit()
+    cid = cont.id
+    from backend.tasks.node_cleanup import _full_purge
+    _full_purge(Node.query.get(cid))
+    _db.session.commit()
+    assert Node.query.get(cid) is None
+    assert Node.query.get(interim.id).continuation_node_id is None

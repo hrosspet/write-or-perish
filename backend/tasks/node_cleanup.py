@@ -59,6 +59,13 @@ def _full_purge(node):
     Node.query.filter_by(linked_node_id=node.id).update(
         {"linked_node_id": None}
     )
+    # An agentic interim step keeps continuation_node_id pointing at the
+    # turn that followed it; soft-delete leaves the link (undelete restores
+    # the chain), so the hard purge must clear it or the FK blocks the
+    # DELETE every day.
+    Node.query.filter_by(continuation_node_id=node.id).update(
+        {"continuation_node_id": None}
+    )
 
     # No orphan-children: predicate guarantees zero child rows.
     db.session.delete(node)
