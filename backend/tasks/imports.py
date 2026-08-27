@@ -129,13 +129,15 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None,
             account["username"], on_page=lambda n: state("fetching", n, expected))
     state("fetching", 0, expected)
 
-    rows, seen = [], set()
+    rows, seen, retweets = [], set(), 0
     for raw in source:
         if raw["tweet_id"] in seen:
             continue
         seen.add(raw["tweet_id"])
         row = ta.compact_row(ca.to_export_entry(raw)["tweet"])
-        if row is not None:
+        if row is None:
+            retweets += 1  # compact_row drops retweets, like the native import
+        else:
             rows.append(row)
     rows.sort(key=lambda r: ta._sort_key(r["created_at"]))
     total = len(rows)
@@ -175,6 +177,11 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None,
         "user_id": user_id, "handle": account["username"],
         "total": total, "stage": "done",
         "source": "parquet" if use_parquet else "rest",
+        # What the archive actually holds vs. the account's self-reported
+        # lifetime counter (uploads are often partial) — so a low node
+        # count reads as "partial archive", not "import bug".
+        "archived": len(seen), "retweets_skipped": retweets,
+        "account_num_tweets": expected,
         "profile_batch_queued": queued,
     })
     return result

@@ -501,6 +501,8 @@ def test_prefill_impl_imports_pins_batch_and_reports(app, monkeypatch):
         update_state=lambda **kw: states.append(kw["meta"]))
 
     assert result["created"] == 2 and result["handle"] == "TylerAlterman"
+    assert (result["archived"], result["retweets_skipped"],
+            result["account_num_tweets"]) == (4, 1, 3)
     nodes = Node.query.filter_by(human_owner_id=u.id).order_by(Node.created_at).all()
     assert [n.get_content() for n in nodes] == ["first", "second"]
     assert all(n.origin == "twitter" and n.ai_usage == "chat" for n in nodes)

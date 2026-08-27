@@ -539,9 +539,14 @@ function AdminPanel() {
     }
     if (p.status === "completed") {
       const r = p.result || {};
-      return `Done: ${(r.created || 0).toLocaleString()} nodes from @${r.handle}` +
-        `${r.source === "parquet" ? " (snapshot)" : ""}` +
-        `${r.skipped ? `, ${r.skipped} skipped` : ""}` +
+      const archived = r.archived != null ? ` of ${r.archived.toLocaleString()} archived` : "";
+      const rts = r.retweets_skipped ? `, ${r.retweets_skipped.toLocaleString()} retweets skipped` : "";
+      const reported = r.account_num_tweets != null && r.account_num_tweets !== r.archived
+        ? `; account reports ${r.account_num_tweets.toLocaleString()} tweets`
+        : "";
+      return `Done: ${(r.created || 0).toLocaleString()} nodes${archived} from @${r.handle}` +
+        `${r.source === "parquet" ? " (snapshot)" : ""}${rts}${reported}` +
+        `${r.skipped ? `, ${r.skipped} already imported` : ""}` +
         `${r.profile_batch_queued ? " — batch profile queued" : " — below profile threshold"}`;
     }
     if (p.status === "failed") return `Failed: ${p.error}`;
