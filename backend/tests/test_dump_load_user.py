@@ -180,3 +180,14 @@ def test_format1_converts_and_loads(app, tmp_path):
     assert _read(converted)["nodes"] == nodes
     load_user._run(str(converted), "carol", merge=False, create_approved=False)
     assert Node.query.filter_by(human_owner_id=User.query.filter_by(username="carol").one().id).count() == 3
+
+
+def test_twitter_id_is_set_and_guarded(app, tmp_path):
+    _seed_source()
+    out = tmp_path / "alice.jsonl"
+    dump_user._run("alice", str(out))
+    load_user._run(str(out), "bob", merge=False, create_approved=True, twitter_id=316970336)
+    assert User.query.filter_by(username="bob").one().twitter_id == "316970336"
+    # the same id can't be attached to a second account
+    with pytest.raises(SystemExit):
+        load_user._run(str(out), "dave", merge=False, create_approved=True, twitter_id="316970336")

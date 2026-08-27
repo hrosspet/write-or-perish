@@ -24,6 +24,9 @@ Options:
     --create-approved    when the user has to be created, set approved=True
                          (default: created unapproved — the same gate a
                          fresh signup gets; flip it in the admin page)
+    --twitter-id ID      set the account's X/Twitter numeric id so "Sign in
+                         with X" claims it by id, not only by username match
+                         (the Community Archive's account_id; e.g. 316970336)
 
 Ids are remapped in two passes (nodes: parent + continuation links;
 profiles: parent_profile_id; recent contexts: profile_id). LLM author
@@ -115,7 +118,7 @@ def _author_id(username, owner_id, cache, db, User):
     return u.id
 
 
-def _run(path, as_username, merge, create_approved):
+def _run(path, as_username, merge, create_approved, twitter_id=None):
     from sqlalchemy import or_
     from backend.extensions import db
     from backend.models import (
@@ -149,6 +152,14 @@ def _run(path, as_username, merge, create_approved):
                      f"pass --merge to add to them (dedup on source_key).")
         print(f"loading onto existing user '{username}' (id {user.id}, "
               f"{existing} nodes, merge={merge})", file=sys.stderr)
+
+    if twitter_id:
+        other = User.query.filter(User.twitter_id == str(twitter_id), User.id != user.id).first()
+        if other:
+            sys.exit(f"twitter_id {twitter_id} already belongs to '{other.username}'")
+        user.twitter_id = str(twitter_id)
+        db.session.flush()
+        print(f"twitter_id set to {twitter_id}", file=sys.stderr)
 
     user_id = user.id  # scalar: `user` is detached after each batch expunge
     existing_keys = {}
@@ -303,11 +314,13 @@ def main():
     p.add_argument("--as-username", default=None)
     p.add_argument("--merge", action="store_true")
     p.add_argument("--create-approved", action="store_true")
+    p.add_argument("--twitter-id", default=None)
     args = p.parse_args()
     from backend import create_app
     app = create_app()
     with app.app_context():
-        _run(args.path, args.as_username, args.merge, args.create_approved)
+        _run(args.path, args.as_username, args.merge, args.create_approved,
+             twitter_id=args.twitter_id)
 
 
 if __name__ == "__main__":
