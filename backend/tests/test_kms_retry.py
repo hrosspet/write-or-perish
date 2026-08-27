@@ -22,10 +22,7 @@ def _fast_and_enabled(monkeypatch):
     monkeypatch.setenv("ENCRYPTION_DISABLED", "false")
     monkeypatch.setenv("GCP_KMS_KEY_NAME",
                        "projects/t/locations/l/keyRings/r/cryptoKeys/k")
-    monkeypatch.setattr(enc.time if hasattr(enc, "time") else __import__("time"),
-                        "sleep", lambda *_: None, raising=False)
-    import time
-    monkeypatch.setattr(time, "sleep", lambda *_: None)
+    monkeypatch.setattr(enc.time, "sleep", lambda *_: None)
 
 
 def _client_failing(n_times, exc):
@@ -71,6 +68,26 @@ def test_non_transient_error_is_not_retried(monkeypatch):
     with pytest.raises(_Boom):
         enc._kms_encrypt({"name": "k", "plaintext": b"x"})
     assert calls["n"] == 1  # raised immediately, no retry
+
+
+def test_status_code_only_counts_at_message_start():
+    assert enc._is_transient_kms_error(_Boom("502 Bad Gateway"))
+    assert enc._is_transient_kms_error(_Boom("503 try again in 30s"))
+    # Digits inside resource names must not look like a status code.
+    assert not enc._is_transient_kms_error(
+        _Boom("PermissionDenied on projects/123502/locations/l/keyRings/500"))
+    assert not enc._is_transient_kms_error(_Boom("404 key not found"))
+
+
+def test_known_google_error_classes():
+    gexc = pytest.importorskip("google.api_core.exceptions")
+    assert enc._is_transient_kms_error(gexc.BadGateway("x"))
+    assert enc._is_transient_kms_error(gexc.InternalServerError("x"))
+    assert enc._is_transient_kms_error(gexc.DeadlineExceeded("x"))
+    assert enc._is_transient_kms_error(gexc.RetryError("Deadline of 60.0s exceeded", None))
+    # A typed non-transient error is never retried, whatever its message says.
+    assert not enc._is_transient_kms_error(
+        gexc.PermissionDenied("502 in the message but really a 403"))
 
 
 def test_encrypt_content_round_trips_through_retry(monkeypatch):

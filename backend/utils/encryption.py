@@ -14,7 +14,9 @@ Legacy format (v1) is still supported for decryption only.
 import base64
 import logging
 import os
+import re
 import threading
+import time
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -105,28 +107,34 @@ _KMS_MAX_RETRIES = 6
 _KMS_BACKOFF_BASE = 0.5   # 0.5, 1, 2, 4, 8, 16s — ~30s total before giving up
 _TRANSIENT_MARKERS = (
     "Deadline Exceeded", "DEADLINE_EXCEEDED", "ServiceUnavailable",
-    "Bad Gateway", "BadGateway", "Gateway Timeout", "Internal Server Error",
-    "InternalServerError", "503", "502", "500", "504",
+    "Service Unavailable", "Bad Gateway", "BadGateway", "Gateway Timeout",
+    "GatewayTimeout", "Internal Server Error", "InternalServerError",
 )
+# google.api_core formats GoogleAPICallError as "<code> <message>", so a
+# leading status code is a reliable signal. A bare "502"/"500" substring is
+# NOT: resource names carry numeric project ids ("projects/123502/...") and
+# would turn a hard PermissionDenied into a 30s retry loop.
+_TRANSIENT_STATUS_RE = re.compile(r"^\s*50[0234]\b")
 
 
 def _is_transient_kms_error(e):
-    msg = str(e)
     try:
         from google.api_core import exceptions as gexc
         if isinstance(e, (gexc.ServiceUnavailable, gexc.BadGateway,
                           gexc.GatewayTimeout, gexc.InternalServerError,
-                          gexc.DeadlineExceeded)):
+                          gexc.DeadlineExceeded, gexc.RetryError)):
             return True
-    except Exception:
+        if isinstance(e, gexc.GoogleAPICallError):
+            return False  # a known, non-transient API error (403/404/400...)
+    except ImportError:
         pass
-    return any(m in msg for m in _TRANSIENT_MARKERS)
+    msg = str(e)
+    return bool(_TRANSIENT_STATUS_RE.match(msg)) or any(m in msg for m in _TRANSIENT_MARKERS)
 
 
 def _kms_call(op, request):
     """Run a KMS ``encrypt``/``decrypt`` with bounded retry on transient
     (Google-side) errors and a reconnect on deadline/stale-connection."""
-    import time
     last = None
     for attempt in range(_KMS_MAX_RETRIES + 1):
         try:
