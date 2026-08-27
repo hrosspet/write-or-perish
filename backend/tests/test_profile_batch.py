@@ -617,3 +617,37 @@ def test_seed_single_user_submits_immediately(app, monkeypatch):
     assert ids == [f"profile_{u.id}_0_chunk"]  # only the targeted user
     assert User.query.get(u.id).profile_batch_pending is True
     assert User.query.get(other.id).profile_batch_pending is False
+
+
+def test_seed_reports_submitted_not_built(app, monkeypatch):
+    u = _user(profile_force_batch=True, profile_needs_full_regen=True)
+    db.session.commit()
+    monkeypatch.setattr(pb._exports, "build_user_export_content", MagicMock(
+        return_value={"content": "DATA", "token_count": 90000,
+                      "latest_node_created_at": datetime(2026, 6, 1)}))
+    monkeypatch.setattr(pb._exports, "_load_prompt", lambda *a, **k: "G {user_export}")
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: {})  # provider rejected
+    assert pb._seed_profile_batches(users=[u]) == 0
+    assert User.query.get(u.id).profile_batch_pending is False
+    assert User.query.get(u.id).profile_batch_attempts == 1
+
+
+def test_force_batch_user_never_exhausts_to_sync(app, monkeypatch):
+    """Pinned accounts keep being seeded past MAX_BATCH_ATTEMPTS; the
+    sync last-resort in exports skips them too."""
+    u = _user(profile_force_batch=True, profile_needs_full_regen=True,
+              profile_batch_attempts=pb.MAX_BATCH_ATTEMPTS + 2)
+    plain = _user(profile_needs_full_regen=True,
+                  profile_batch_attempts=pb.MAX_BATCH_ATTEMPTS + 2)
+    app.config["PROFILE_USE_BATCH"] = True
+    db.session.commit()
+    monkeypatch.setattr(pb._exports, "build_user_export_content", MagicMock(
+        return_value={"content": "DATA", "token_count": 90000,
+                      "latest_node_created_at": datetime(2026, 6, 1)}))
+    monkeypatch.setattr(pb._exports, "_load_prompt", lambda *a, **k: "G {user_export}")
+    submitted = []
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
+        submitted.append(reqs) or {k: f"b-{k}" for k in reqs}))
+    assert pb._seed_profile_batches(users=[u, plain]) == 1  # only the pinned one
+    ids = [r["custom_id"] for r in list(submitted[0].values())[0]]
+    assert ids == [f"profile_{u.id}_0_chunk"]

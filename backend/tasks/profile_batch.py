@@ -328,7 +328,7 @@ def _submit_requests(built, keys):
     `built` items are not in flight until their batch id comes back; a failed
     submission clears the guard so the user is re-seeded next cycle."""
     if not built:
-        return
+        return 0
     requests_by_provider = {}
     for b in built:
         requests_by_provider.setdefault(b["provider"], []).append(b["request"])
@@ -341,6 +341,7 @@ def _submit_requests(built, keys):
         items_by_key.setdefault(key, []).append(b["meta"])
 
     now = datetime.utcnow()
+    submitted = 0
     for provider_key, items in items_by_key.items():
         batch_id = batch_ids.get(provider_key)
         if not batch_id:
@@ -362,8 +363,10 @@ def _submit_requests(built, keys):
             if u:
                 u.profile_batch_pending = True
         db.session.commit()
+        submitted += len(items)
         logger.info(f"Profile batch {batch_id} ({provider_key}): "
                     f"{len(items)} item(s) submitted")
+    return submitted
 
 
 def _fail_job(job, reason):
@@ -406,8 +409,11 @@ def _seed_profile_batches(users=None):
             continue
         if not use_batch_for_user(user, config):
             continue
-        if (user.profile_batch_attempts or 0) >= MAX_BATCH_ATTEMPTS:
+        if ((user.profile_batch_attempts or 0) >= MAX_BATCH_ATTEMPTS
+                and not user.profile_force_batch):
             continue  # exhausted → synchronous last-resort handles it
+        # (force-batch users keep retrying here every cycle instead:
+        # they must never fall back to the full-price sync path)
         if not _should_seed(user):
             continue
         try:
@@ -418,14 +424,14 @@ def _seed_profile_batches(users=None):
             continue
         if req:
             built.append(req)
-    _submit_requests(built, keys)
-    return len(built)
+    return _submit_requests(built, keys)
 
 
 @celery.task
 def seed_profile_batch_for_user(user_id):
     """Immediate seed for one user (admin pre-fill): same gates as the
-    hourly seeder, without waiting for it. Returns the number submitted."""
+    hourly seeder, without waiting for it. Returns the number actually
+    put in flight (0 when the provider rejected the submit)."""
     with flask_app.app_context():
         user = User.query.get(user_id)
         if not user:

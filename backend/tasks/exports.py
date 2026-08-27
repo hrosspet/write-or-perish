@@ -1355,8 +1355,12 @@ def maybe_trigger_incremental_profile_update(user):
     # Local import avoids a circular import (profile_batch imports exports).
     from backend.tasks.profile_batch import (
         use_batch_for_user, MAX_BATCH_ATTEMPTS)
-    if (use_batch_for_user(user, flask_app.config)
-            and (user.profile_batch_attempts or 0) < MAX_BATCH_ATTEMPTS):
+    if use_batch_for_user(user, flask_app.config) and (
+            user.profile_force_batch
+            or (user.profile_batch_attempts or 0) < MAX_BATCH_ATTEMPTS):
+        # Pinned (pre-filled) accounts never take the sync last resort —
+        # a persistent batch failure leaves them visibly "generating" in
+        # the admin list rather than silently running at full price.
         return None
 
     # User must have been inactive for at least 30 minutes
