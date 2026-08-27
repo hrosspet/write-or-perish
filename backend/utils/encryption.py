@@ -14,7 +14,9 @@ Legacy format (v1) is still supported for decryption only.
 import base64
 import logging
 import os
+import re
 import threading
+import time
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -95,28 +97,70 @@ def _cache_put(wrapped_dek_b64: str, dek: bytes):
         _dek_cache_order.append(wrapped_dek_b64)
 
 
-def _kms_encrypt(request):
-    """KMS encrypt with retry on stale gRPC connection."""
+# Transient KMS failures — Google-side blips that the API itself says to
+# retry ("try again in 30s"). The gRPC/REST client's default retry covers
+# 503/DEADLINE_EXCEEDED but NOT 502 BadGateway / 500 Internal, so a single
+# 502 crashed a 61k-node import mid-run (2026-08-27). We wrap every KMS
+# call in a bounded exponential backoff over the full transient set. The
+# stale-connection reconnect (DEADLINE_EXCEEDED) is folded in.
+_KMS_MAX_RETRIES = 6
+_KMS_BACKOFF_BASE = 0.5   # 0.5, 1, 2, 4, 8, 16s — ~30s total before giving up
+_TRANSIENT_MARKERS = (
+    "Deadline Exceeded", "DEADLINE_EXCEEDED", "ServiceUnavailable",
+    "Service Unavailable", "Bad Gateway", "BadGateway", "Gateway Timeout",
+    "GatewayTimeout", "Internal Server Error", "InternalServerError",
+)
+# google.api_core formats GoogleAPICallError as "<code> <message>", so a
+# leading status code is a reliable signal. A bare "502"/"500" substring is
+# NOT: resource names carry numeric project ids ("projects/123502/...") and
+# would turn a hard PermissionDenied into a 30s retry loop.
+_TRANSIENT_STATUS_RE = re.compile(r"^\s*50[0234]\b")
+
+
+def _is_transient_kms_error(e):
     try:
-        return _get_kms_client().encrypt(request=request)
-    except Exception as e:
-        if "Deadline Exceeded" in str(e) or "DEADLINE_EXCEEDED" in str(e):
-            logger.warning("KMS deadline exceeded on encrypt, reconnecting...")
-            _reset_kms_client()
-            return _get_kms_client().encrypt(request=request)
-        raise
+        from google.api_core import exceptions as gexc
+        if isinstance(e, (gexc.ServiceUnavailable, gexc.BadGateway,
+                          gexc.GatewayTimeout, gexc.InternalServerError,
+                          gexc.DeadlineExceeded, gexc.RetryError)):
+            return True
+        if isinstance(e, gexc.GoogleAPICallError):
+            return False  # a known, non-transient API error (403/404/400...)
+    except ImportError:
+        pass
+    msg = str(e)
+    return bool(_TRANSIENT_STATUS_RE.match(msg)) or any(m in msg for m in _TRANSIENT_MARKERS)
+
+
+def _kms_call(op, request):
+    """Run a KMS ``encrypt``/``decrypt`` with bounded retry on transient
+    (Google-side) errors and a reconnect on deadline/stale-connection."""
+    last = None
+    for attempt in range(_KMS_MAX_RETRIES + 1):
+        try:
+            return getattr(_get_kms_client(), op)(request=request)
+        except Exception as e:  # noqa: BLE001 — re-raised below if not transient
+            last = e
+            if not _is_transient_kms_error(e):
+                raise
+            if "Deadline Exceeded" in str(e) or "DEADLINE_EXCEEDED" in str(e):
+                _reset_kms_client()
+            if attempt == _KMS_MAX_RETRIES:
+                break
+            sleep_s = _KMS_BACKOFF_BASE * (2 ** attempt)
+            logger.warning(
+                "Transient KMS error on %s (attempt %d/%d), retrying in %.1fs: %s",
+                op, attempt + 1, _KMS_MAX_RETRIES, sleep_s, str(e)[:120])
+            time.sleep(sleep_s)
+    raise last
+
+
+def _kms_encrypt(request):
+    return _kms_call("encrypt", request)
 
 
 def _kms_decrypt(request):
-    """KMS decrypt with retry on stale gRPC connection."""
-    try:
-        return _get_kms_client().decrypt(request=request)
-    except Exception as e:
-        if "Deadline Exceeded" in str(e) or "DEADLINE_EXCEEDED" in str(e):
-            logger.warning("KMS deadline exceeded on decrypt, reconnecting...")
-            _reset_kms_client()
-            return _get_kms_client().decrypt(request=request)
-        raise
+    return _kms_call("decrypt", request)
 
 
 def _wrap_dek(dek: bytes) -> bytes:
