@@ -150,7 +150,11 @@ def test_refuses_non_empty_user_without_merge_and_dedups_with_it(app, tmp_path):
     # keyed nodes deduped; the unkeyed LLM reply is re-created (no key to match)
     assert Node.query.filter_by(human_owner_id=bob.id, source_key="twitter:1").count() == 1
     assert Node.query.filter_by(human_owner_id=bob.id).count() == 4
-    assert UserProfile.query.filter_by(user_id=bob.id).count() == 4  # chain appended
+    # Header content (no source_key) dedups on created_at across a --merge
+    # resume, so the profile chain / recent context are NOT doubled — the
+    # bug that doubled Rich's prod profiles to 36 after a crash+rerun.
+    assert UserProfile.query.filter_by(user_id=bob.id).count() == 2
+    assert UserRecentContext.query.filter_by(user_id=bob.id).count() == 1
 
 
 def test_include_private_dumps_everything(app, tmp_path):
@@ -242,3 +246,29 @@ def test_system_node_prompt_pin_round_trips(app, tmp_path):
     # second load onto bob reuses the prompt row rather than duplicating it
     load_user._run(str(out), "bob", merge=True, create_approved=True)
     assert UserPrompt.query.filter_by(user_id=bob.id, prompt_key="textmode").count() == 1
+
+
+def test_merge_resume_does_not_duplicate_header_content(app, tmp_path):
+    """A crash-and-resume (load, then load --merge again) must not double
+    profiles/recent-contexts/artifacts. Regression for the prod seeding
+    incident where a KMS 502 mid-load led to a --merge rerun that doubled
+    the 18-profile chain to 36."""
+    from backend.models import UserArtifact
+    alice = User(username="alice", approved=True, plan="alpha")
+    db.session.add(alice)
+    db.session.flush()
+    p1 = UserProfile(user_id=alice.id, generated_by="m", generation_type="initial")
+    p1.set_content("v1")
+    db.session.add(p1)
+    art = UserArtifact(user_id=alice.id, kind="memory", title="Memory", generated_by="m")
+    art.set_content("remember this")
+    db.session.add(art)
+    db.session.commit()
+
+    out = tmp_path / "a.jsonl"
+    dump_user._run("alice", str(out), include_private=True)
+    load_user._run(str(out), "carol", merge=False, create_approved=True)
+    load_user._run(str(out), "carol", merge=True, create_approved=True)  # resume
+    carol = User.query.filter_by(username="carol").one()
+    assert UserProfile.query.filter_by(user_id=carol.id).count() == 1
+    assert UserArtifact.query.filter_by(user_id=carol.id).count() == 1

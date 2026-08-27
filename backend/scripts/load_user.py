@@ -170,9 +170,29 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
 
     cache = {dump["user"]["username"]: user_id, username: user_id}
 
+    # Header content (profiles/contexts/todos/artifacts) has no source_key,
+    # so a --merge resume must dedup it explicitly or a rerun after a crash
+    # doubles the profile chain and artifacts (happened once: a KMS 502
+    # crashed a load mid-nodes, the rerun re-inserted all 18 profiles). Key
+    # on created_at, which the dump preserves and which is distinct per row.
+    existing_profiles, existing_rc, existing_todos, existing_arts = {}, set(), set(), set()
+    if merge:
+        for r in UserProfile.query.filter_by(user_id=user_id).all():
+            existing_profiles[(r.created_at, r.generation_type)] = r.id
+        existing_rc = {r.created_at for r in
+                       UserRecentContext.query.filter_by(user_id=user_id).all()}
+        existing_todos = {r.created_at for r in
+                          UserTodo.query.filter_by(user_id=user_id).all()}
+        existing_arts = {(r.kind, r.created_at) for r in
+                         UserArtifact.query.filter_by(user_id=user_id).all()}
+
     # Profile chain (ids remapped so parent_profile_id stays coherent).
     profile_map = {}
     for pf in dump.get("profiles", []):
+        pkey = (_dt(pf.get("created_at")), pf.get("generation_type") or "initial")
+        if pkey[0] is not None and pkey in existing_profiles:
+            profile_map[pf["id"]] = existing_profiles[pkey]  # map to the row already there
+            continue
         row = UserProfile(
             user_id=user_id, generated_by=pf.get("generated_by") or "import",
             tokens_used=pf.get("tokens_used") or 0,
@@ -198,6 +218,8 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
     db.session.commit()
 
     for rc in dump.get("recent_contexts", []):
+        if _dt(rc.get("created_at")) in existing_rc:
+            continue
         row = UserRecentContext(
             user_id=user_id, generated_by=rc.get("generated_by") or "import",
             tokens_used=rc.get("tokens_used") or 0,
@@ -211,6 +233,8 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
             row.created_at = _dt(rc["created_at"])
         db.session.add(row)
     for td in dump.get("todos", []):
+        if _dt(td.get("created_at")) in existing_todos:
+            continue
         row = UserTodo(
             user_id=user_id, generated_by=td.get("generated_by") or "import",
             tokens_used=td.get("tokens_used") or 0,
@@ -222,6 +246,8 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
             row.created_at = _dt(td["created_at"])
         db.session.add(row)
     for a in dump.get("artifacts", []):
+        if (a["kind"], _dt(a.get("created_at"))) in existing_arts:
+            continue
         row = UserArtifact(
             user_id=user_id, kind=a["kind"], title=a.get("title") or a["kind"],
             description=a.get("description"),
