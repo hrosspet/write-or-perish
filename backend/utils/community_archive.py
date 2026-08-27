@@ -191,6 +191,14 @@ def _duckdb(snapshot_dir):
     return con, str(d / "tweets.parquet"), str(d / "profiles.parquet")
 
 
+def count_parquet(account_id, snapshot_dir):
+    """Rows the cached snapshot holds for an account (0 if absent)."""
+    con, tweets, _ = _duckdb(snapshot_dir)
+    row = con.execute("select count(*) from read_parquet(?) where account_id = ?",
+                      [tweets, str(account_id)]).fetchone()
+    return int(row[0]) if row else 0
+
+
 def fetch_account_parquet(handle, snapshot_dir):
     """Same shape as fetch_account(), from profiles.parquet."""
     con, _, profiles = _duckdb(snapshot_dir)

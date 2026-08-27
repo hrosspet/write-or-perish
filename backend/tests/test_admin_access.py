@@ -257,6 +257,18 @@ class TestPrefillCheck:
         r = client.get(f"/api/admin/prefill/check?handle=@cedcolas&user_id={target.id}")
         assert r.status_code == 200, r.json
         assert r.json["archived"] == 6 and r.json["import_source"] == "rest"
+        # Big by live count but not in the snapshot → parquet only if current
+        monkeypatch.setattr(ca, "coverage_summary", lambda h, snapshot_dir=None: {
+            "account_id": "9", "username": "big", "account_num_tweets": 13762,
+            "ingestion": "twitter_import", "archived": 6000, "retweets": 0,
+            "replies": 0, "originals": 6000, "est_tokens": 90000, "detail_source": "rest"})
+        assert client.get("/api/admin/prefill/check?handle=big").json["import_source"] == "parquet (if snapshot is current)"
+        monkeypatch.setattr(ca, "coverage_summary", lambda h, snapshot_dir=None: {
+            "account_id": "9", "username": "big", "account_num_tweets": 13762,
+            "ingestion": "archive", "archived": 6000, "retweets": 0, "replies": 0,
+            "originals": 6000, "est_tokens": 90000, "detail_source": "parquet",
+            "archived_live": 6100})
+        assert client.get("/api/admin/prefill/check?handle=big").json["import_source"] == "rest"
         assert r.json["already_imported"] == 1
         assert r.json["profile_threshold_tokens"] == 10000
         monkeypatch.setattr(ca, "coverage_summary", lambda h, snapshot_dir=None: None)

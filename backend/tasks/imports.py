@@ -107,10 +107,22 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None,
     if not account:
         raise ca.CommunityArchiveError(
             f"@{handle} is not in the Community Archive")
-    expected = account.get("num_tweets") or 0
+    # Size by what the archive actually holds (exact live count) — NOT
+    # all_account.num_tweets, the account's lifetime counter: an
+    # extension-ingested account can "report 13k tweets" while the
+    # archive holds 1k and the nightly snapshot none at all.
+    try:
+        archived = ca.count_archived(account["account_id"])
+    except Exception as e:  # header lookup failed → fall back to the counter
+        logger.warning("Community Archive count failed for @%s: %s", handle, e)
+        archived = None
+    expected = archived if archived is not None else (account.get("num_tweets") or 0)
 
     # Small accounts page through the REST API; large ones read the nightly
-    # parquet snapshot (downloaded once per export into the data dir).
+    # parquet snapshot (downloaded once per export into the data dir) —
+    # unless the snapshot holds fewer rows than the live archive (account
+    # ingested/updated after the export), in which case REST is complete
+    # and parquet is not.
     min_parquet = current_app.config.get("COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS", 5000)
     use_parquet = bool(options.get("force_parquet")) or expected >= min_parquet
     if use_parquet:
@@ -118,6 +130,12 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None,
         state("downloading", 0, None)
         ca.ensure_snapshot(snapshot_dir, on_progress=lambda name, done, total: state(
             f"downloading {name}", done >> 20, (total >> 20) if total else None))
+        in_snapshot = ca.count_parquet(account["account_id"], snapshot_dir)
+        if in_snapshot == 0 or (archived is not None and in_snapshot < archived):
+            logger.info("@%s: snapshot holds %s rows vs %s live — using REST",
+                        handle, in_snapshot, archived)
+            use_parquet = False
+    if use_parquet:
         parquet_account = ca.fetch_account_parquet(account["username"], snapshot_dir)
         if parquet_account:
             account = parquet_account
@@ -181,7 +199,7 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None,
         # lifetime counter (uploads are often partial) — so a low node
         # count reads as "partial archive", not "import bug".
         "archived": len(seen), "retweets_skipped": retweets,
-        "account_num_tweets": expected,
+        "account_num_tweets": account.get("num_tweets") or 0,
         "profile_batch_queued": queued,
     })
     return result

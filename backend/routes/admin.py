@@ -357,8 +357,15 @@ def prefill_check():
     if summary is None:
         return jsonify({"error": f"@{handle} is not in the Community Archive."}), 404
     min_parquet = config.get("COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS", 5000)
-    summary["import_source"] = (
-        "parquet" if summary["account_num_tweets"] >= min_parquet else "rest")
+    live = summary.get("archived_live", summary.get("archived")) or 0
+    big = live >= min_parquet
+    # The import falls back to REST when the snapshot lags the live archive
+    # (detail_source == "parquet" means the snapshot has the account).
+    snapshot_complete = (summary.get("detail_source") == "parquet"
+                         and "archived_live" not in summary)
+    summary["import_source"] = "parquet" if (big and snapshot_complete) else (
+        "parquet (if snapshot is current)" if big and summary.get("detail_source") != "parquet"
+        else "rest")
     summary["profile_threshold_tokens"] = 10000
     user_id = request.args.get("user_id", type=int)
     if user_id:

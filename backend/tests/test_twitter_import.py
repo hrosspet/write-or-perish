@@ -484,6 +484,7 @@ def test_prefill_impl_imports_pins_batch_and_reports(app, monkeypatch):
     _db.session.commit()
     monkeypatch.setattr(ca, "fetch_account", lambda h: {
         "account_id": "1", "username": "TylerAlterman", "num_tweets": 3})
+    monkeypatch.setattr(ca, "count_archived", lambda aid: 5)
     monkeypatch.setattr(ca, "iter_tweets", lambda h, on_page=None, **k: iter([
         _ca_row(2, "second", "2026-08-25T10:00:00+00:00"),
         _ca_row(1, "first"),
@@ -618,6 +619,7 @@ def test_prefill_impl_large_account_uses_parquet(app, tmp_path, monkeypatch):
     _db.session.commit()
     monkeypatch.setattr(ca, "fetch_account", lambda h: {
         "account_id": "A1", "username": "alice", "num_tweets": 3})
+    monkeypatch.setattr(ca, "count_archived", lambda aid: 3)
     monkeypatch.setattr(ca, "iter_tweets", MagicMock(
         side_effect=AssertionError("REST must not be used for large accounts")))
     ensured = []
@@ -671,3 +673,28 @@ def test_coverage_summary_parquet(tmp_path, monkeypatch):
     assert (s["archived"], s["retweets"], s["replies"], s["originals"]) == (3, 0, 1, 2)
     assert s["est_tokens"] == (len("first") + len("second") + len("reply to bob")) // 4
     assert s["detail_source"] == "parquet" and s["archived_live"] == 5
+
+
+def test_prefill_falls_back_to_rest_when_snapshot_lags(app, tmp_path, monkeypatch):
+    """Lifetime counter says 13k, live archive has 1k, snapshot has 0 (account
+    ingested after the export) → must import via REST, not fail with
+    'no own tweets found'."""
+    from backend.tasks import imports as imports_mod
+    from backend.utils import community_archive as ca
+    snap = tmp_path / "snap"
+    _make_snapshot(snap)  # has A1/B2 only
+    app.config["COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS"] = 1000
+    app.config["COMMUNITY_ARCHIVE_SNAPSHOT_DIR"] = str(snap)
+    u = _make_user("marvin")
+    _db.session.commit()
+    monkeypatch.setattr(ca, "fetch_account", lambda h: {
+        "account_id": "M9", "username": "MarvinKeilbach", "num_tweets": 13762})
+    monkeypatch.setattr(ca, "count_archived", lambda aid: 1069)
+    monkeypatch.setattr(ca, "ensure_snapshot", lambda d, on_progress=None, **k: "E1")
+    monkeypatch.setattr(ca, "iter_tweets", lambda h, on_page=None, **k: iter([
+        _ca_row(1, "first"), _ca_row(2, "second", "2026-08-25T10:00:00+00:00")]))
+    import backend.tasks.exports as ex
+    monkeypatch.setattr(ex, "maybe_trigger_profile_update", MagicMock())
+    result = imports_mod.prefill_community_archive_impl(u.id, "MarvinKeilbach", {})
+    assert result["source"] == "rest" and result["created"] == 2
+    assert result["account_num_tweets"] == 13762
