@@ -829,23 +829,34 @@ def update_node(node_id):
             return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
         node.ai_usage = ai_usage
 
-    # If this node has a prompt artifact and detach_prompt is requested,
-    # remove the artifact so the edited content takes effect.
-    if data.get("detach_prompt"):
+    # Resolved text BEFORE any artifact change: for a system node this is
+    # the pinned prompt's content, which is also what the editor showed.
+    old_content = node.get_content()
+    # A settings-only edit (privacy / AI usage; text untouched) must not
+    # detach the prompt: the editor round-trips the resolved prompt text,
+    # so treating it as "new content" copied the whole agentic prompt into
+    # the node verbatim and the Log then previewed the prompt instead of
+    # the conversation.
+    content_changed = (new_content or "").strip() != (old_content or "").strip()
+
+    # If this node has a prompt artifact and detach_prompt is requested
+    # (and the text actually changed), remove the artifact so the edited
+    # content takes effect.
+    if data.get("detach_prompt") and content_changed:
         from backend.models import NodeContextArtifact
         NodeContextArtifact.query.filter_by(
             node_id=node.id, artifact_type="prompt"
         ).delete()
 
-    # Sync context artifacts to match placeholders in new content
-    from backend.utils.context_artifacts import sync_context_artifacts
-    sync_context_artifacts(node.id, node.user_id, new_content)
+    if content_changed:
+        # Sync context artifacts to match placeholders in new content
+        from backend.utils.context_artifacts import sync_context_artifacts
+        sync_context_artifacts(node.id, node.user_id, new_content)
 
-    # Save the current version before update.
-    version = NodeVersion(node_id=node.id)
-    old_content = node.get_content()
-    version.set_content(old_content)
-    db.session.add(version)
+        # Save the current version before update.
+        version = NodeVersion(node_id=node.id)
+        version.set_content(old_content)
+        db.session.add(version)
 
     # Editing the text makes any generated TTS audio stale. Rather than
     # silently dropping it, the frontend asks the user whether to keep or
@@ -857,11 +868,12 @@ def update_node(node_id):
         from backend.utils.audio_storage import clear_tts_artifacts
         clear_tts_artifacts(node)
 
-    node.set_content(new_content)
-    # Keep the stored information-content measure in sync with the
-    # edited text — chunk windowing and update gates sum this column.
-    from backend.utils.tokens import approximate_token_count as _atc_upd
-    node.token_count = _atc_upd(new_content)
+    if content_changed:
+        node.set_content(new_content)
+        # Keep the stored information-content measure in sync with the
+        # edited text — chunk windowing and update gates sum this column.
+        from backend.utils.tokens import approximate_token_count as _atc_upd
+        node.token_count = _atc_upd(new_content)
     try:
         db.session.commit()
     except Exception as e:

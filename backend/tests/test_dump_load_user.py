@@ -191,3 +191,54 @@ def test_twitter_id_is_set_and_guarded(app, tmp_path):
     # the same id can't be attached to a second account
     with pytest.raises(SystemExit):
         load_user._run(str(out), "dave", merge=False, create_approved=True, twitter_id="316970336")
+
+
+def test_system_node_prompt_pin_round_trips(app, tmp_path):
+    """An agentic thread root carries its pinned prompt as a reference:
+    the dump stores the raw node text + the prompt by value, the loader
+    recreates the prompt row for the target user and re-pins it, so the
+    loaded root still resolves to the prompt and the Log skips it."""
+    from backend.models import UserPrompt, NodeContextArtifact
+    alice, root, child, cont, _, _ = _seed_source()
+    prompt = UserPrompt(user_id=alice.id, prompt_key="agentic", title="Agentic",
+                        generated_by="default")
+    prompt.set_content("You are Loore. {user_profile}")
+    db.session.add(prompt)
+    db.session.flush()
+    sysnode = Node(user_id=alice.id, human_owner_id=alice.id, node_type="user",
+                   privacy_level="private", ai_usage="chat", token_count=1)
+    sysnode.set_content("")  # system nodes hold no text of their own
+    db.session.add(sysnode)
+    db.session.flush()
+    db.session.add(NodeContextArtifact(node_id=sysnode.id, artifact_type="prompt",
+                                       artifact_id=prompt.id))
+    reply = Node(user_id=alice.id, human_owner_id=alice.id, node_type="user",
+                 parent_id=sysnode.id, privacy_level="private", ai_usage="chat", token_count=2)
+    reply.set_content("the actual conversation")
+    db.session.add(reply)
+    db.session.commit()
+    assert sysnode.is_system_prompt and sysnode.get_content().startswith("You are Loore")
+
+    out = tmp_path / "alice.jsonl"
+    dump_user._run("alice", str(out), include_private=True)
+    d = _read(out)
+    dumped = [n for n in d["nodes"] if n["prompt"]]
+    assert len(dumped) == 1
+    assert dumped[0]["content"] == ""                       # raw, not the resolved prompt
+    assert dumped[0]["prompt"]["prompt_key"] == "agentic"
+    assert dumped[0]["prompt"]["content"] == "You are Loore. {user_profile}"
+
+    load_user._run(str(out), "bob", merge=False, create_approved=True)
+    bob = User.query.filter_by(username="bob").one()
+    loaded_root = Node.query.filter_by(human_owner_id=bob.id, parent_id=None).filter(
+        Node.source_key.is_(None)).one()
+    assert loaded_root.is_system_prompt
+    assert loaded_root.get_content() == "You are Loore. {user_profile}"
+    assert _raw(loaded_root.id) in ("", None)
+    bob_prompt = UserPrompt.query.filter_by(user_id=bob.id, prompt_key="agentic").one()
+    assert bob_prompt.get_content() == "You are Loore. {user_profile}"
+    child_row = Node.query.filter_by(human_owner_id=bob.id, parent_id=loaded_root.id).one()
+    assert child_row.get_content() == "the actual conversation"
+    # second load onto bob reuses the prompt row rather than duplicating it
+    load_user._run(str(out), "bob", merge=True, create_approved=True)
+    assert UserPrompt.query.filter_by(user_id=bob.id, prompt_key="agentic").count() == 1

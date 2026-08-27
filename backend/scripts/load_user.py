@@ -169,72 +169,6 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
             existing_keys[key] = nid
 
     cache = {dump["user"]["username"]: user_id, username: user_id}
-    nodes = node_iter
-    id_map = {}
-    created = 0
-    skipped = 0
-    pending_links = []
-
-    # Pass 1: rows, in batches. Content re-encrypted by set_content()
-    # according to the node's privacy level (public stays plaintext).
-    for i, nd in enumerate(nodes, 1):
-        key = nd.get("source_key")
-        if key and key in existing_keys:
-            id_map[nd["id"]] = existing_keys[key]
-            skipped += 1
-            continue
-        new = Node(
-            user_id=_author_id(nd.get("author_username"), user_id, cache, db, User),
-            human_owner_id=user_id if nd.get("owner_is_user", True) else None,
-            node_type=nd.get("node_type", "user"),
-            llm_model=nd.get("llm_model"),
-            token_count=nd.get("token_count") or 0,
-            distributed_tokens=nd.get("distributed_tokens") or 0,
-            privacy_level=nd.get("privacy_level", "private"),
-            ai_usage=nd.get("ai_usage", "none"),
-            source_key=key,
-            origin=nd.get("origin"),
-            tool_calls_meta=nd.get("tool_calls_meta"),
-        )
-        new.set_content(nd.get("content") or "")
-        if _dt(nd.get("created_at")):
-            new.created_at = _dt(nd["created_at"])
-        if _dt(nd.get("updated_at")):
-            new.updated_at = _dt(nd["updated_at"])
-        db.session.add(new)
-        db.session.flush()
-        id_map[nd["id"]] = new.id
-        created += 1
-        if nd.get("parent_id") or nd.get("continuation_node_id") or nd.get("linked_node_id"):
-            pending_links.append((new.id, nd))
-        if nd.get("embedding"):
-            e = nd["embedding"]
-            db.session.add(NodeEmbedding(
-                node_id=new.id, user_id=user_id, model=e["model"],
-                content_hash=e.get("content_hash") or "",
-                vector=base64.b64decode(e["vector"]),
-                node_updated_at=_dt(e.get("node_updated_at")),
-            ))
-        if created % NODE_BATCH == 0:
-            db.session.commit()
-            db.session.expunge_all()
-            print(f"  nodes {i}/{node_total} (created {created}, skipped {skipped})",
-                  file=sys.stderr)
-    db.session.commit()
-
-    # Pass 2: links, via bulk UPDATEs keyed by the new ids.
-    relinked = 0
-    for new_id, nd in pending_links:
-        values = {}
-        for col in ("parent_id", "continuation_node_id", "linked_node_id"):
-            old = nd.get(col)
-            if old in id_map:
-                values[col] = id_map[old]
-        if values:
-            db.session.query(Node).filter(Node.id == new_id).update(
-                values, synchronize_session=False)
-            relinked += 1
-    db.session.commit()
 
     # Profile chain (ids remapped so parent_profile_id stays coherent).
     profile_map = {}
@@ -302,8 +236,109 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
         db.session.add(row)
     db.session.commit()
 
+    # Nodes last, so context pins on system nodes resolve to the rows above.
+    from backend.models import NodeContextArtifact, UserPrompt
+    from backend.utils.context_artifacts import sync_context_artifacts
+    prompt_cache = {}
+    pinned = 0
+
+    def _prompt_row(ref):
+        key = (ref["prompt_key"], ref.get("content") or "")
+        if key in prompt_cache:
+            return prompt_cache[key]
+        row = None
+        for cand in UserPrompt.query.filter_by(user_id=user_id, prompt_key=ref["prompt_key"]) \
+                                    .order_by(UserPrompt.created_at.desc()).all():
+            if (cand.get_content() or "") == key[1]:
+                row = cand
+                break
+        if row is None:
+            row = UserPrompt(user_id=user_id, prompt_key=ref["prompt_key"],
+                             title=ref.get("title") or ref["prompt_key"],
+                             generated_by=ref.get("generated_by") or "import")
+            row.set_content(key[1])
+            if _dt(ref.get("created_at")):
+                row.created_at = _dt(ref["created_at"])
+            db.session.add(row)
+            db.session.flush()
+        prompt_cache[key] = row.id
+        return row.id
+
+    nodes = node_iter
+    id_map = {}
+    created = 0
+    skipped = 0
+    pending_links = []
+
+    # Pass 1: rows, in batches. Content re-encrypted by set_content()
+    # according to the node's privacy level (public stays plaintext).
+    for i, nd in enumerate(nodes, 1):
+        key = nd.get("source_key")
+        if key and key in existing_keys:
+            id_map[nd["id"]] = existing_keys[key]
+            skipped += 1
+            continue
+        new = Node(
+            user_id=_author_id(nd.get("author_username"), user_id, cache, db, User),
+            human_owner_id=user_id if nd.get("owner_is_user", True) else None,
+            node_type=nd.get("node_type", "user"),
+            llm_model=nd.get("llm_model"),
+            token_count=nd.get("token_count") or 0,
+            distributed_tokens=nd.get("distributed_tokens") or 0,
+            privacy_level=nd.get("privacy_level", "private"),
+            ai_usage=nd.get("ai_usage", "none"),
+            source_key=key,
+            origin=nd.get("origin"),
+            tool_calls_meta=nd.get("tool_calls_meta"),
+        )
+        new.set_content(nd.get("content") or "")
+        if _dt(nd.get("created_at")):
+            new.created_at = _dt(nd["created_at"])
+        if _dt(nd.get("updated_at")):
+            new.updated_at = _dt(nd["updated_at"])
+        db.session.add(new)
+        db.session.flush()
+        id_map[nd["id"]] = new.id
+        created += 1
+        if nd.get("prompt"):
+            db.session.add(NodeContextArtifact(
+                node_id=new.id, artifact_type="prompt",
+                artifact_id=_prompt_row(nd["prompt"])))
+            sync_context_artifacts(new.id, user_id, nd["prompt"].get("content") or "")
+            pinned += 1
+        if nd.get("parent_id") or nd.get("continuation_node_id") or nd.get("linked_node_id"):
+            pending_links.append((new.id, nd))
+        if nd.get("embedding"):
+            e = nd["embedding"]
+            db.session.add(NodeEmbedding(
+                node_id=new.id, user_id=user_id, model=e["model"],
+                content_hash=e.get("content_hash") or "",
+                vector=base64.b64decode(e["vector"]),
+                node_updated_at=_dt(e.get("node_updated_at")),
+            ))
+        if created % NODE_BATCH == 0:
+            db.session.commit()
+            db.session.expunge_all()
+            print(f"  nodes {i}/{node_total} (created {created}, skipped {skipped})",
+                  file=sys.stderr)
+    db.session.commit()
+
+    # Pass 2: links, via bulk UPDATEs keyed by the new ids.
+    relinked = 0
+    for new_id, nd in pending_links:
+        values = {}
+        for col in ("parent_id", "continuation_node_id", "linked_node_id"):
+            old = nd.get(col)
+            if old in id_map:
+                values[col] = id_map[old]
+        if values:
+            db.session.query(Node).filter(Node.id == new_id).update(
+                values, synchronize_session=False)
+            relinked += 1
+    db.session.commit()
+
     print(f"loaded '{username}' (id {user_id}): {created} nodes created, "
-          f"{skipped} deduped, {relinked} relinked, "
+          f"{skipped} deduped, {relinked} relinked, {pinned} prompt-pinned, "
           f"{len(profile_map)} profiles, {len(dump.get('recent_contexts', []))} recent "
           f"contexts, {len(dump.get('todos', []))} todos, {len(dump.get('artifacts', []))} artifacts")
 

@@ -29,6 +29,8 @@ What it carries (all of it, not "latest N"):
   - user_profile: the FULL iterative chain with every column, incl.
     parent_profile_id, generation_type, source_data_cutoff, origin stats
   - user_recent_context (linked to its profile), user_todo, user_artifact
+  - the prompt pinned on each system node (by value), so agentic threads
+    load as prompt references, not as copies of the prompt text
 
 NOT carried: audio files / TTS artifacts, node versions (edit history),
 drafts, per-node context-artifact pins, deleted nodes, cost logs.
@@ -67,7 +69,7 @@ def _run(username, out_path, include_private=False):
         Node, NodeEmbedding, User, UserProfile, UserRecentContext,
         UserTodo, UserArtifact,
     )
-    from backend.utils.encryption import is_encrypted
+    from backend.utils.encryption import is_encrypted, decrypt_content
 
     user = User.query.filter_by(username=username).first()
     if not user:
@@ -135,9 +137,13 @@ def _run(username, out_path, include_private=False):
                 "linked_node_id": n.linked_node_id,
                 "node_type": n.node_type,
                 "llm_model": n.llm_model,
-                # public rows are plaintext under #257: no KMS round-trip
-                "content": (n.content if n.privacy_level == "public"
-                            and not is_encrypted(n.content) else n.get_content()),
+                # Raw stored text, NOT get_content(): for a system node that
+                # resolves to the pinned prompt, which would flatten the
+                # reference into 17k of copied prompt on load. Public rows
+                # are plaintext under #257 (no KMS round-trip).
+                "content": (n.content if not is_encrypted(n.content)
+                            else decrypt_content(n.content)),
+                "prompt": _prompt_ref(n),
                 "token_count": n.token_count,
                 "distributed_tokens": n.distributed_tokens,
                 "privacy_level": n.privacy_level,
@@ -162,6 +168,19 @@ def _run(username, out_path, include_private=False):
           f"{len(h['profiles'])} profiles, {len(h['recent_contexts'])} recent contexts, "
           f"{len(h['todos'])} todos, {len(h['artifacts'])} artifacts "
           f"({os.path.getsize(out_path) // 1024} KB)")
+
+
+def _prompt_ref(node):
+    """The pinned prompt (system nodes), carried by value so the loader can
+    recreate the row for the target user and re-pin it."""
+    prompt = node.get_artifact("prompt") if node.has_artifact("prompt") else None
+    if prompt is None:
+        return None
+    return {
+        "prompt_key": prompt.prompt_key, "title": prompt.title,
+        "content": prompt.get_content(), "generated_by": prompt.generated_by,
+        "created_at": _iso(prompt.created_at),
+    }
 
 
 def _profiles(user, UserProfile):
