@@ -123,6 +123,33 @@ def _node_header_line(node, index_path):
             f"{_origin_suffix(node)} - {ts}\n")
 
 
+def prefetch_children(nodes, batch=500):
+    """Load the whole subtree under ``nodes`` level by level in batched
+    ``parent_id IN (...)`` queries and hand each node its ``children``
+    list, so rendering never lazy-loads per node. Semantics are identical
+    to the relationship (all children, unordered — callers sort); the
+    cost drops from one full-row query per rendered node (an N+1 that
+    seq-scanned the node table 1,700 times per profile chunk before
+    parent_id was indexed) to ~one query per tree level."""
+    from sqlalchemy.orm.attributes import set_committed_value
+    level = list(nodes)
+    seen = {n.id for n in level}
+    while level:
+        by_parent = {n.id: [] for n in level}
+        ids = list(by_parent)
+        for start in range(0, len(ids), batch):
+            for child in Node.query.filter(
+                    Node.parent_id.in_(ids[start:start + batch])).all():
+                by_parent[child.parent_id].append(child)
+        next_level = []
+        for n in level:
+            kids = by_parent[n.id]
+            set_committed_value(n, "children", kids)
+            next_level.extend(k for k in kids if k.id not in seen)
+            seen.update(k.id for k in kids)
+        level = next_level
+
+
 def _filtered_children(node, filter_ai_usage, created_before, included_ids,
                        keep_tombstones):
     """Children of *node* that should render, sorted chronologically.
@@ -874,6 +901,7 @@ def _build_user_export_incremental(
             export_lines.append("---")
             export_lines.append("")
 
+    prefetch_children(entry_nodes)
     for thread_num, entry in enumerate(entry_nodes, 1):
         if entry.parent_id is not None:
             top_started = _entry_point_top_level_started(entry, user.id)
@@ -1311,6 +1339,7 @@ def build_user_export_content(
             export_lines.append("")
 
     # Process each thread
+    prefetch_children(top_level_nodes)
     for thread_num, node in enumerate(top_level_nodes, 1):
         export_lines.append(f"# Thread {thread_num}")
         export_lines.append(f"**Started:** {node.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")

@@ -215,9 +215,17 @@ class ProfileBatchJob(db.Model):
 
 class Node(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
-    parent_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True)
-    human_owner_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
+    # FK columns are NOT auto-indexed in PostgreSQL. Every children lookup
+    # (node.children lazy load), ownership scope (user_id / human_owner_id)
+    # and thread CTE seeks on these; without indexes each was a sequential
+    # scan of the whole table — ~1,700 of them per profile chunk build on
+    # a 150k-row table pegged both prod CPUs on 2026-08-27.
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False,
+                        index=True)
+    parent_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True,
+                          index=True)
+    human_owner_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                               nullable=True, index=True)
     linked_node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True)
     node_type = db.Column(db.String(16), nullable=False, default="user")
     # Human-readable permalink slug for PUBLIC nodes (#228): the permalink

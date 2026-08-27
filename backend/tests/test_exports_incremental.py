@@ -1289,3 +1289,38 @@ class TestOrigin:
             "twitter": {"nodes": 38130, "tokens": 900000},
             "loore": {"nodes": 12, "tokens": 4000}}
         assert tweets_base == {"twitter": {"nodes": 38130, "tokens": 900000}}
+
+
+def test_export_render_does_not_lazy_load_children_per_node(app):
+    """Regression for the 2026-08-27 prod CPU incident: rendering N flat
+    threads issued N `SELECT node WHERE parent_id = ?` queries (one lazy
+    children load per node, each a seq scan without an index). Children
+    are now prefetched level by level; the query count must stay flat in N."""
+    from sqlalchemy import event
+    from datetime import datetime, timedelta
+    from backend.routes.export_data import build_user_export_content
+    u = _make_user("flat")
+    base = datetime(2026, 8, 1)
+    for i in range(60):
+        _make_node(u, content=f"tweet {i}", created_at=base + timedelta(minutes=i),
+                   token_count=5)
+    reply_root = _make_node(u, content="root", created_at=base + timedelta(days=1), token_count=5)
+    child = _make_node(u, parent_id=reply_root.id, content="reply", created_at=base + timedelta(days=1, minutes=1), token_count=5)
+    _make_node(u, parent_id=child.id, content="reply 2", created_at=base + timedelta(days=1, minutes=2), token_count=5)
+    _db.session.commit()
+    _db.session.expire_all()
+
+    n_child_queries = [0]
+
+    def after(conn, cursor, statement, params, context, executemany):
+        if "FROM node" in statement and "parent_id" in statement and "IN (" not in statement:
+            n_child_queries[0] += 1
+    event.listen(_db.engine, "after_cursor_execute", after)
+    try:
+        out = build_user_export_content(
+            u, max_tokens=100000, filter_ai_usage=True, chronological_order=True,
+            return_metadata=True, include_strategy="engaged_threads")
+    finally:
+        event.remove(_db.engine, "after_cursor_execute", after)
+    assert "tweet 59" in out["content"] and "reply 2" in out["content"]
+    assert n_child_queries[0] == 0, n_child_queries[0]
