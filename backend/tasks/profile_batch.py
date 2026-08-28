@@ -452,6 +452,40 @@ def _submit_requests(built, keys):
     return submitted
 
 
+def _notify_prefill_complete(user):
+    """Email the admin when a PRE-FILLED account's INITIAL chain completes.
+
+    Fires from the poller's chain-complete branch. Scoped to the first
+    build: the chain that just ended must start at the user's oldest
+    version (no profile predates its root). Later incremental/integration
+    runs on the same account — and every organic account — stay silent.
+    Never raises: a mail failure must not break the poll pass."""
+    if not user.prefilled_handle:
+        return
+    try:
+        tip = (UserProfile.query.filter_by(user_id=user.id)
+               .order_by(UserProfile.id.desc()).first())
+        if tip is None:
+            return
+        root, hops = tip, 0
+        while root.parent_profile_id is not None and hops < 1000:
+            parent = UserProfile.query.get(root.parent_profile_id)
+            if parent is None:
+                break
+            root, hops = parent, hops + 1
+        older = UserProfile.query.filter(
+            UserProfile.user_id == user.id, UserProfile.id < root.id).count()
+        if older:
+            return  # not the first build → routine update, stay quiet
+        versions = UserProfile.query.filter_by(user_id=user.id).count()
+        from backend.utils.email import send_admin_prefill_complete_notification
+        send_admin_prefill_complete_notification(
+            user.username, user.prefilled_handle, versions,
+            tip.source_tokens_used or 0, bool(user.approved))
+    except Exception:
+        logger.exception(f"User {user.id}: pre-fill-complete notification failed")
+
+
 def _fail_job(job, reason):
     job.status = "failed"
     job.collected_at = datetime.utcnow()
@@ -604,6 +638,7 @@ def _poll_profile_batches():
                 next_built.append(nxt)   # stays pending; re-submitted below
             else:
                 user.profile_batch_pending = False
+                _notify_prefill_complete(user)
             db.session.commit()
 
         job.status = "collected"

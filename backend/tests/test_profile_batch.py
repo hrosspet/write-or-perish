@@ -439,6 +439,79 @@ def test_poll_saves_chunk_then_enqueues_integration(app, monkeypatch):
     assert User.query.get(u.id).profile_batch_pending is True
 
 
+def _integration_job(user, tip):
+    item = {
+        "custom_id": f"profile_{user.id}_{tip.id}_integration",
+        "user_id": user.id, "kind": "integration", "prev_profile_id": tip.id,
+        "prev_source_tokens": 5000, "source_data_cutoff": "2026-06-01T00:00:00",
+        "model_id": "test-model",
+    }
+    job = ProfileBatchJob(
+        provider_key="anthropic", batch_id="b9", status="pending",
+        items=[item], submitted_at=datetime.utcnow())
+    db.session.add(job)
+    user.profile_batch_pending = True
+    db.session.commit()
+    return job, item
+
+
+def _poll_integration(monkeypatch, item):
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        {item["custom_id"]: {"content": "INTEGRATED", "input_tokens": 100, "output_tokens": 50}},
+        {}, {}))
+    monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
+    import backend.utils.notifications as notif
+    monkeypatch.setattr(notif, "notify_profile_ready", lambda uid: None)
+    pb._poll_profile_batches()
+
+
+def test_prefill_complete_emails_admin_once_for_initial_chain(app, monkeypatch):
+    """Pre-filled account: chunk (root) → integration lands → one admin
+    email with the whole chain's numbers. A later run on the same account
+    (older versions exist below the new chain's root) stays silent, as
+    does an organic account."""
+    import backend.utils.email as em
+    sent = []
+    monkeypatch.setattr(em, "send_admin_prefill_complete_notification",
+                        lambda *a: sent.append(a))
+    u = _user(profile_force_batch=True, prefilled_handle="alice_x")
+    u.approved = False
+    root = _prev_profile(u, datetime(2026, 5, 1), source_tokens=70000, gen_type="iterative")
+    job, item = _integration_job(u, root)
+    _poll_integration(monkeypatch, item)
+    assert len(sent) == 1
+    username, handle, versions, source_tokens, approved = sent[0]
+    assert (username, handle, versions, approved) == (u.username, "alice_x", 2, False)
+    assert User.query.get(u.id).profile_batch_pending is False
+    # Second build later: new root chunk above the old chain → not the first → silent.
+    root2 = _prev_profile(u, datetime(2026, 7, 1), source_tokens=90000, gen_type="iterative")
+    job2, item2 = _integration_job(u, root2)
+    job2.batch_id = "b10"
+    db.session.commit()
+    _poll_integration(monkeypatch, item2)
+    assert len(sent) == 1
+    # Organic account (no prefilled_handle): never.
+    o = _user(profile_force_batch=True)
+    oroot = _prev_profile(o, datetime(2026, 5, 1), source_tokens=70000, gen_type="iterative")
+    ojob, oitem = _integration_job(o, oroot)
+    ojob.batch_id = "b11"
+    db.session.commit()
+    _poll_integration(monkeypatch, oitem)
+    assert len(sent) == 1
+
+
+def test_prefill_complete_email_failure_does_not_break_poll(app, monkeypatch):
+    import backend.utils.email as em
+    monkeypatch.setattr(em, "send_admin_prefill_complete_notification",
+                        MagicMock(side_effect=RuntimeError("smtp down")))
+    u = _user(profile_force_batch=True, prefilled_handle="bob_x")
+    root = _prev_profile(u, datetime(2026, 5, 1), source_tokens=70000, gen_type="iterative")
+    job, item = _integration_job(u, root)
+    _poll_integration(monkeypatch, item)
+    assert ProfileBatchJob.query.get(job.id).status == "collected"
+    assert User.query.get(u.id).profile_batch_pending is False
+
+
 def test_poll_failed_item_bumps_attempts_and_clears_pending(app, monkeypatch):
     u = _user()
     prev = _prev_profile(u, datetime(2026, 5, 1))

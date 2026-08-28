@@ -352,3 +352,82 @@ def send_admin_signup_notification(username, user_email):
         logger.info(f"Admin signup notification sent for user {username}")
     except Exception:
         logger.exception(f"Failed to send admin signup notification for user {username}")
+
+
+def send_admin_prefill_complete_notification(username, handle, versions,
+                                             source_tokens, approved):
+    """Admin heads-up that a pre-filled account's INITIAL profile chain has
+    finished (single chunk, or chunks + integration) — the whole build, not
+    just the first version. Sent once per account; routine updates of
+    active users never trigger it (see profile_batch._notify_prefill_complete)."""
+    config = current_app.config
+    sender = config.get("MAIL_DEFAULT_SENDER", "login@loore.org")
+    admin_email = "signup@loore.org"
+    admin_url = "https://loore.org/admin"
+    status = "Active" if approved else "Inactive — not yet activated"
+    tokens = f"{source_tokens:,}" if source_tokens else "?"
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"Pre-fill profile ready: {username}"
+    msg["From"] = sender
+    msg["To"] = admin_email
+
+    text_body = (
+        f"Pre-fill profile ready on Loore\n\n"
+        f"Username: {username}\n"
+        f"Seeded from: @{handle}\n"
+        f"Chain: {versions} version(s), {tokens} source tokens\n"
+        f"Account: {status}\n\n"
+        f"Admin dashboard:\n{admin_url}\n"
+    )
+
+    html_body = f"""\
+<html>
+<body style="font-family: 'Outfit', -apple-system, sans-serif; background: #0e0d0b; color: #ede8dd; padding: 40px 20px; margin: 0;">
+  <div style="max-width: 460px; margin: 0 auto; background: #181714; border-radius: 10px; border: 1px solid #302c27; padding: 48px 40px;">
+    <div style="font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif; font-size: 14px; font-weight: 300; text-transform: uppercase; letter-spacing: 0.3em; color: #736b5f; margin-bottom: 32px;">
+      Loore
+    </div>
+    <h2 style="font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif; font-weight: 300; font-size: 28px; color: #ede8dd; margin: 0 0 12px 0;">
+      Pre-fill profile ready
+    </h2>
+    <p style="font-size: 15px; font-weight: 300; color: #a89f91; margin: 0 0 8px 0; line-height: 1.6;">
+      <strong style="color: #ede8dd;">{username}</strong>'s initial profile chain finished
+      (seeded from <strong style="color: #ede8dd;">@{handle}</strong>).
+    </p>
+    <p style="font-size: 15px; font-weight: 300; color: #a89f91; margin: 0 0 8px 0; line-height: 1.6;">
+      {versions} version(s) &middot; {tokens} source tokens
+    </p>
+    <p style="font-size: 15px; font-weight: 300; color: #a89f91; margin: 0 0 28px 0; line-height: 1.6;">
+      Account: {status}
+    </p>
+    <a href="{admin_url}"
+       style="display: inline-block; padding: 12px 32px; background: transparent; color: #c4956a;
+              text-decoration: none; border-radius: 6px; border: 1px solid #c4956a;
+              font-family: 'Outfit', -apple-system, sans-serif; font-size: 14px; font-weight: 400;
+              letter-spacing: 0.04em;">
+      Open admin dashboard
+    </a>
+  </div>
+</body>
+</html>"""
+
+    msg.attach(MIMEText(text_body, "plain"))
+    msg.attach(MIMEText(html_body, "html"))
+
+    server = config.get("MAIL_SERVER", "localhost")
+    port = config.get("MAIL_PORT", 587)
+    use_tls = config.get("MAIL_USE_TLS", True)
+    username_smtp = config.get("MAIL_USERNAME")
+    password = config.get("MAIL_PASSWORD")
+
+    try:
+        with smtplib.SMTP(server, port) as smtp:
+            if use_tls:
+                smtp.starttls()
+            if username_smtp and password:
+                smtp.login(username_smtp, password)
+            smtp.sendmail(sender, admin_email, msg.as_string())
+        logger.info(f"Admin pre-fill-complete notification sent for user {username}")
+    except Exception:
+        logger.exception(f"Failed to send admin pre-fill-complete notification for user {username}")
