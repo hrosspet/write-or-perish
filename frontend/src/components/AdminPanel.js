@@ -389,7 +389,7 @@ function AdminActivity() {
                         ? <span style={{ color: "var(--text-muted)" }}>terms {relTime(u.accepted_terms_at)}</span>
                         : <span style={{ color: "var(--error)" }}>never</span>}
                   </td>
-                  <td style={{ ...cell, fontFamily: "monospace", letterSpacing: "1px" }}>
+                  <td style={{ ...cell, fontFamily: "monospace", fontSize: "1.25em", letterSpacing: "2px", lineHeight: 1 }}>
                     {u.strip.map((d) => {
                       const active = d.w + d.a > 0;
                       return (
