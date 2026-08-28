@@ -63,19 +63,28 @@ if [[ "$CURRENT_REMOTE" == https://* ]]; then
     log "Git remote updated to: $SSH_REMOTE"
 fi
 
-# Stop application services before migrations to avoid lock contention.
-# ALTER TABLE requires ACCESS EXCLUSIVE lock which blocks on active connections.
-log "Stopping application services before migrations..."
-sudo systemctl stop write-or-perish-celery-beat 2>/dev/null || true
-sudo systemctl stop write-or-perish-celery 2>/dev/null || true
-sudo systemctl stop write-or-perish 2>/dev/null || true
-sleep 2
+# Database migrations.
+#
+# Services are stopped ONLY when a migration is actually pending, and only
+# around `flask db upgrade` (ALTER TABLE needs an ACCESS EXCLUSIVE lock that
+# blocks on live connections). Generating the migration and committing it
+# back only read the schema and must not cost downtime: before 2026-08-28
+# every deploy stopped Gunicorn up front, so 13 of 14 no-op deploys served
+# 502s for a minute each and the one real migration for ~4 minutes.
+SERVICES_STOPPED=0
+stop_services_for_upgrade() {
+    log "Stopping application services for the schema upgrade..."
+    sudo systemctl stop write-or-perish-celery-beat 2>/dev/null || true
+    sudo systemctl stop write-or-perish-celery 2>/dev/null || true
+    sudo systemctl stop write-or-perish 2>/dev/null || true
+    sleep 2
+    SERVICES_STOPPED=1
+}
 
-# Run database migrations
 log "Running database migrations..."
 export FLASK_APP="$BACKEND_DIR/app.py"
 if [ -d "migrations" ]; then
-    # Auto-generate migrations if models changed
+    # Auto-generate migrations if models changed (services stay up)
     log "Checking for model changes..."
     MIGRATION_OUTPUT=$(flask db migrate -m "auto-generated migration from deployment" 2>&1) || true
     echo "$MIGRATION_OUTPUT"
@@ -100,8 +109,16 @@ if [ -d "migrations" ]; then
         error "Multiple migration heads detected! Please merge them manually before deploying."
     fi
 
-    # Apply migrations
-    flask db upgrade || error "Database migration failed"
+    # Apply migrations — stop the services only if there is something to apply
+    CURRENT_REV=$( (flask db current 2>/dev/null || true) | grep -oE '^[a-f0-9]+' | head -1 || true)
+    HEAD_REV=$( (flask db heads 2>/dev/null || true) | grep -oE '^[a-f0-9]+' | head -1 || true)
+    if [ -n "$HEAD_REV" ] && [ "$CURRENT_REV" != "$HEAD_REV" ]; then
+        log "Pending migration (${CURRENT_REV:-none} -> $HEAD_REV)"
+        stop_services_for_upgrade
+        flask db upgrade || error "Database migration failed"
+    else
+        log "Database already at head (${HEAD_REV:-unknown}); no downtime needed"
+    fi
 else
     warn "No migrations directory found, skipping migrations"
 fi
@@ -253,8 +270,32 @@ fi
 # and prod serves 502s. Any `error` below this point fails the deploy loudly
 # (red CI) without also taking prod down; before 2026-07-24 a beat that
 # wouldn't start left Gunicorn stopped and caused an outage.
-log "Restarting Gunicorn service..."
-sudo systemctl restart write-or-perish || error "Failed to restart Gunicorn service"
+# Zero-downtime path: when the services were never stopped, HUP the Gunicorn
+# master (ExecReload) — it re-forks workers on the new code while the old
+# ones drain, so nginx always has an upstream. A HUP does NOT re-read
+# EnvironmentFile, so if .env.production changed since the master started,
+# fall back to a full restart.
+GUNICORN_PID=$(cat "$PROJECT_DIR/gunicorn.pid" 2>/dev/null || true)
+NEED_FULL_RESTART=1
+if [ "$SERVICES_STOPPED" -eq 0 ] && [ -n "$GUNICORN_PID" ] && sudo systemctl is-active --quiet write-or-perish; then
+    MASTER_START=$(date -d "$(ps -o lstart= -p "$GUNICORN_PID" 2>/dev/null)" +%s 2>/dev/null || echo 0)
+    ENV_MTIME=$(stat -c %Y "$PROJECT_DIR/.env.production" 2>/dev/null || echo 0)
+    if [ "$MASTER_START" -gt 0 ] && [ "$ENV_MTIME" -le "$MASTER_START" ]; then
+        NEED_FULL_RESTART=0
+    else
+        log ".env.production changed since Gunicorn started — full restart instead of reload"
+    fi
+fi
+if [ "$NEED_FULL_RESTART" -eq 0 ]; then
+    log "Reloading Gunicorn workers (graceful, no downtime)..."
+    sudo systemctl reload write-or-perish || {
+        warn "Graceful reload failed; restarting Gunicorn"
+        sudo systemctl restart write-or-perish || error "Failed to restart Gunicorn service"
+    }
+else
+    log "Restarting Gunicorn service..."
+    sudo systemctl restart write-or-perish || error "Failed to restart Gunicorn service"
+fi
 
 # Wait for service to start
 sleep 3
