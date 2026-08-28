@@ -220,6 +220,9 @@ def _import_prefill_rows(user_id, handle, rows, options, state, seed_now,
     result.update({
         "user_id": user_id, "handle": handle, "total": total, "stage": "done",
         "profile_batch_queued": queued,
+        # The immediate seed runs regardless, but every LATER chunk comes
+        # from the hourly seeder, which only walks approved accounts.
+        "awaiting_activation": queued and not User.query.get(user_id).approved,
     })
     return result
 

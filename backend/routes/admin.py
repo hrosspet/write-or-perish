@@ -63,12 +63,20 @@ def _profile_status_map():
                 and last.source_data_cutoff is not None):
             _, min_chunk = chunk_budget_for(u, _model_for(u))
             stuck = _remaining_token_count(u, last.source_data_cutoff) >= min_chunk
+        # Nothing in flight and the account can't be seeded: the hourly
+        # seeder only walks approved users (budget guard), so a pre-filled
+        # Inactive account with a rebuild requested (regen flag) or a
+        # chunk still to go (stuck) waits until activation — a different
+        # thing from provider latency, and it must not look like it.
+        waiting = bool(u and not u.approved and not u.profile_batch_pending
+                       and (u.profile_needs_full_regen or stuck))
         out[user_id] = {
             "versions": n,
             "last_generation_type": last.generation_type if last else None,
             "last_created_at": iso_utc(last.created_at) if last else None,
             "state": "generating" if (in_flight or not at_rest or stuck) else "complete",
-            "incomplete": stuck,
+            "incomplete": stuck and not waiting,
+            "waiting": "inactive" if waiting else None,
             "batch_attempts": (u.profile_batch_attempts or 0) if u else 0,
         }
     return out
@@ -166,6 +174,12 @@ def list_users():
                 "last_created_at": None,
                 "state": ("generating" if user.profile_batch_pending
                           or user.profile_needs_full_regen else "none"),
+                # Rebuild requested, nothing in flight, account inactive →
+                # the seeder won't touch it until activation (see
+                # _profile_status_map).
+                "waiting": ("inactive" if (user.profile_needs_full_regen
+                                           and not user.profile_batch_pending
+                                           and not user.approved) else None),
             },
         })
     return jsonify({

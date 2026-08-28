@@ -620,7 +620,7 @@ function AdminPanel() {
           ` (≈ $${(r.est_cost_usd || 0).toFixed(2)})` +
           `${r.retweets_skipped ? `, ${r.retweets_skipped.toLocaleString()} retweets skipped` : ""}` +
           `${r.skipped ? `, ${r.skipped} already imported` : ""}` +
-          `${r.profile_batch_queued ? " — batch profile queued" : " — below profile threshold"}`;
+          `${r.profile_batch_queued ? (r.awaiting_activation ? " — batch profile queued; later chunks wait for activation" : " — batch profile queued") : " — below profile threshold"}`;
       }
       const archived = r.archived != null ? ` of ${r.archived.toLocaleString()} archived` : "";
       const rts = r.retweets_skipped ? `, ${r.retweets_skipped.toLocaleString()} retweets skipped` : "";
@@ -630,7 +630,7 @@ function AdminPanel() {
       return `Done: ${(r.created || 0).toLocaleString()} nodes${archived} from @${r.handle}` +
         `${r.source === "parquet" ? " (snapshot)" : ""}${rts}${reported}` +
         `${r.skipped ? `, ${r.skipped} already imported` : ""}` +
-        `${r.profile_batch_queued ? " — batch profile queued" : " — below profile threshold"}`;
+        `${r.profile_batch_queued ? (r.awaiting_activation ? " — batch profile queued; later chunks wait for activation" : " — batch profile queued") : " — below profile threshold"}`;
     }
     if (p.status === "failed") return `Failed: ${p.error}`;
     return null;
@@ -848,7 +848,15 @@ function AdminPanel() {
                     ✓ {u.profile.versions} {u.profile.versions === 1 ? "version" : "versions"}
                   </span>
                 )}
-                {u.profile?.state === "generating" && (
+                {u.profile?.state === "generating" && u.profile.waiting === "inactive" && (
+                  <span
+                    style={{ color: "var(--text-muted)" }}
+                    title="A profile build is requested but the account is Inactive: the hourly seeder only walks approved accounts, so nothing will happen until you Activate it"
+                  >
+                    ⏸ waiting: inactive{u.profile.versions ? ` (${u.profile.versions} so far)` : ""}
+                  </span>
+                )}
+                {u.profile?.state === "generating" && u.profile.waiting !== "inactive" && (
                   <span
                     style={{ color: u.profile.incomplete || u.profile.batch_attempts ? "var(--error)" : "var(--warning)" }}
                     title={u.profile.incomplete ? "Data remains after the latest version's cutoff and no batch job is in flight — the last chunk failed; the hourly seeder retries" : undefined}

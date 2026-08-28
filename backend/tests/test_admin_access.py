@@ -238,6 +238,15 @@ class TestProfileStatus:
         rebuilt = User(username="rebuilt", approved=True)
         _db.session.add(rebuilt); _db.session.flush()
         self._profile(rebuilt, "iterative"); self._profile(rebuilt, "iterative")
+        # Pre-filled but never activated: rebuild requested, nothing in
+        # flight → the approved-only seeder will never pick it up.
+        waiting0 = User(username="waiting0", approved=False, profile_force_batch=True,
+                        profile_needs_full_regen=True)
+        waiting1 = User(username="waiting1", approved=False, profile_force_batch=True,
+                        profile_needs_full_regen=True)
+        active_regen = User(username="active_regen", approved=True, profile_needs_full_regen=True)
+        _db.session.add_all([waiting0, waiting1, active_regen]); _db.session.flush()
+        self._profile(waiting1, "iterative")
         _db.session.commit()
 
         client = app.test_client()
@@ -245,7 +254,7 @@ class TestProfileStatus:
         rows = {u["username"]: u for u in client.get("/api/admin/users").json["users"]}
         assert rows["fresh"]["profile"] == {
             "versions": 0, "last_generation_type": None,
-            "last_created_at": None, "state": "none"}
+            "last_created_at": None, "state": "none", "waiting": None}
         assert rows["one"]["profile"]["state"] == "complete"
         assert rows["one"]["profile"]["versions"] == 1
         assert rows["one"]["prefilled_handle"] == "corbindreams"
@@ -256,6 +265,13 @@ class TestProfileStatus:
         assert rows["pending"]["profile"]["state"] == "generating"
         assert rows["rebuilt"]["profile"]["state"] == "complete"
         assert rows["rebuilt"]["profile"]["versions"] == 2
+        assert rows["waiting0"]["profile"]["state"] == "generating"
+        assert rows["waiting0"]["profile"]["waiting"] == "inactive"
+        assert rows["waiting1"]["profile"]["state"] == "generating"
+        assert rows["waiting1"]["profile"]["waiting"] == "inactive"
+        assert rows["waiting1"]["profile"]["incomplete"] is False
+        assert rows["active_regen"]["profile"]["waiting"] is None
+        assert rows["pending"]["profile"]["waiting"] is None
 
 
 class TestPrefillCheck:

@@ -512,23 +512,39 @@ def _seed_profile_batches(users=None):
     return _submit_requests(built, keys)
 
 
-@celery.task
-def seed_profile_batch_for_user(user_id):
+@celery.task(bind=True, max_retries=20, default_retry_delay=30)
+def seed_profile_batch_for_user(self, user_id):
     """Immediate seed for one user (admin pre-fill): same gates as the
     hourly seeder, without waiting for it. Returns the number actually
-    put in flight (0 when the provider rejected the submit)."""
+    put in flight (0 when the provider rejected the submit).
+
+    Retries (every 30s, up to ~10 min) when the pipeline lock is held —
+    the 60s poller and back-to-back pre-fills contend for it. It used to
+    give up silently "for the hourly seeder", but that seeder skips
+    unapproved accounts, so a pre-filled Inactive user whose immediate
+    seed lost the lock never got a profile at all (2026-08-28, four
+    accounts)."""
     with flask_app.app_context():
-        user = User.query.get(user_id)
-        if not user:
-            return 0
-        with batch_pipeline_lock() as ok:
-            if not ok:
-                logger.info(f"User {user_id}: immediate seed skipped (pass in "
-                            f"progress); the hourly seeder will pick it up")
-                return 0
-            n = _seed_profile_batches(users=[user])
-        logger.info(f"User {user_id}: immediate batch seed → {n} request(s)")
+        n = _seed_profile_batch_for_user_impl(user_id)
+        if n is None:
+            logger.info(f"User {user_id}: immediate seed deferred (pass in "
+                        f"progress); retry {self.request.retries + 1}")
+            raise self.retry()
         return n
+
+
+def _seed_profile_batch_for_user_impl(user_id):
+    """Impl — runs inside an active app context. None = lock held (caller
+    retries); otherwise the number of requests put in flight."""
+    user = User.query.get(user_id)
+    if not user:
+        return 0
+    with batch_pipeline_lock() as ok:
+        if not ok:
+            return None
+        n = _seed_profile_batches(users=[user])
+    logger.info(f"User {user_id}: immediate batch seed → {n} request(s)")
+    return n
 
 
 @celery.task

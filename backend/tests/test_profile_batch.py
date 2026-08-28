@@ -716,6 +716,36 @@ def test_batch_lock_skips_when_held(app, monkeypatch):
         assert c is True
 
 
+def test_immediate_seed_defers_when_lock_held(app, monkeypatch):
+    """A pre-fill's immediate seed must not give up on lock contention:
+    the hourly seeder skips unapproved accounts, so a dropped immediate
+    seed left Inactive pre-filled users without any profile (2026-08-28).
+    The impl returns None while the lock is held (the task retries) and
+    seeds with the user passed explicitly — bypassing the approved-only
+    cohort query — once it is free."""
+    u = _user(profile_force_batch=True, profile_needs_full_regen=True)
+    u.approved = False
+    db.session.commit()
+
+    class Held:
+        def __enter__(self): return False
+
+        def __exit__(self, *a): return False
+
+    class Free(Held):
+        def __enter__(self): return True
+
+    monkeypatch.setattr(pb, "batch_pipeline_lock", lambda: Held())
+    seeded = []
+    monkeypatch.setattr(pb, "_seed_profile_batches", lambda users=None: seeded.append([x.id for x in users]) or 1)
+    assert pb._seed_profile_batch_for_user_impl(u.id) is None
+    assert seeded == []
+    monkeypatch.setattr(pb, "batch_pipeline_lock", lambda: Free())
+    assert pb._seed_profile_batch_for_user_impl(u.id) == 1
+    assert seeded == [[u.id]]
+    assert pb._seed_profile_batch_for_user_impl(10 ** 9) == 0  # unknown user: no retry loop
+
+
 def test_pinned_account_resumes_when_a_full_chunk_remains(app, monkeypatch):
     """A pre-filled account whose chunk 2 was lost (worker restart): root
     chunk saved, >= a minimum chunk of data beyond its cutoff, nothing in
