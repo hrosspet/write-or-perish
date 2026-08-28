@@ -145,6 +145,44 @@ def test_prefill_x_impl_imports_and_pins_batch(app, monkeypatch):  # noqa: F811
     assert log.model_id == "x-api/timeline"
 
 
+def test_prefill_x_impl_keeps_partial_pull_on_api_error(app, monkeypatch):  # noqa: F811
+    """Credits depleted mid-walk: what was fetched is billed, dumped and
+    imported; the result says partial. Nothing fetched → hard failure."""
+    from backend.tasks import imports as imports_mod
+    import backend.tasks.exports as ex
+    monkeypatch.setattr(ex, "maybe_trigger_profile_update", MagicMock())
+    u = _make_user("carol")
+    _db.session.commit()
+    monkeypatch.setattr(x_api, "lookup_user", lambda h, c: {
+        "id": "U2", "username": "Carol", "name": "C", "tweet_count": 5000, "protected": False})
+
+    def failing_iter(user_id, creds, max_tweets=3200, on_page=None, on_raw=None):
+        users = {}
+        for t in [_v2_tweet(2, "two"), _v2_tweet(1, "one")]:
+            if on_raw:
+                on_raw(t, users)
+            yield x_api.to_export_entry(t, users)
+        raise x_api.XApiError('X API 402: {"detail":"credits depleted"}')
+
+    monkeypatch.setattr(x_api, "iter_user_tweets", failing_iter)
+    result = imports_mod.prefill_x_api_impl(u.id, "carol", {"max_tweets": 3200})
+    assert result["partial"] is True and "credits depleted" in result["fetch_error"]
+    assert result["fetched"] == 2 and result["created"] == 2
+    assert APICostLog.query.filter_by(user_id=u.id, request_type="x_prefill").one().cost_microdollars == 2 * 5000 + 10000
+    assert len(open(result["dump_path"]).read().splitlines()) == 3  # header + 2 posts
+
+    def empty_iter(user_id, creds, max_tweets=3200, on_page=None, on_raw=None):
+        raise x_api.XApiError("X API 402: credits depleted")
+        yield  # pragma: no cover — makes this a generator
+
+    monkeypatch.setattr(x_api, "iter_user_tweets", empty_iter)
+    u2 = _make_user("dave")
+    _db.session.commit()
+    with pytest.raises(x_api.XApiError, match="credits depleted"):
+        imports_mod.prefill_x_api_impl(u2.id, "dave", {})
+    assert APICostLog.query.filter_by(user_id=u2.id, request_type="x_prefill").one().cost_microdollars == 10000
+
+
 def test_prefill_x_impl_refuses_protected_and_unknown(app, monkeypatch):  # noqa: F811
     from backend.tasks import imports as imports_mod
     u = _make_user("bob")

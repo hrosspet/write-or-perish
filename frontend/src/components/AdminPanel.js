@@ -615,7 +615,8 @@ function AdminPanel() {
     if (p.status === "completed") {
       const r = p.result || {};
       if (r.source === "x-api") {
-        return `Done: ${(r.created || 0).toLocaleString()} nodes from ${(r.fetched || 0).toLocaleString()} posts via X` +
+        return `${r.partial ? "PARTIAL" : "Done"}: ${(r.created || 0).toLocaleString()} nodes from ${(r.fetched || 0).toLocaleString()} posts via X` +
+          `${r.partial ? ` (stopped: ${r.fetch_error})` : ""}` +
           ` (≈ $${(r.est_cost_usd || 0).toFixed(2)})` +
           `${r.retweets_skipped ? `, ${r.retweets_skipped.toLocaleString()} retweets skipped` : ""}` +
           `${r.skipped ? `, ${r.skipped} already imported` : ""}` +

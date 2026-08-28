@@ -260,26 +260,35 @@ def prefill_x_api_impl(user_id, handle, options, update_state=None, seed_now=Tru
     # <data>/x-api/ (one file per pull), separate from the user's account
     # and its nodes — the fetch is billable and the account may be deleted.
     dump_path = x_api_dump_path(account["username"])
-    rows, seen, retweets = [], set(), 0
+    rows, seen, retweets, fetch_error = [], set(), 0, None
     with open(dump_path, "w", encoding="utf-8") as dump:
         dump.write(json.dumps({
             "_meta": "loore x-api pre-fill", "fetched_at": datetime.now(timezone.utc).isoformat(),
             "account": account, "max_tweets": expected, "for_user_id": user_id,
         }) + "\n")
-        for entry in x_api.iter_user_tweets(
-                account["id"], creds, max_tweets=expected,
-                on_page=lambda n: state("fetching", n, expected),
-                on_raw=lambda t, users: dump.write(json.dumps(
-                    {**t, "_reply_to_username": users.get(t.get("in_reply_to_user_id"))}) + "\n")):
-            tweet = entry["tweet"]
-            if tweet["id_str"] in seen:
-                continue
-            seen.add(tweet["id_str"])
-            row = ta.compact_row(tweet)
-            if row is None:
-                retweets += 1
-            else:
-                rows.append(row)
+        try:
+            for entry in x_api.iter_user_tweets(
+                    account["id"], creds, max_tweets=expected,
+                    on_page=lambda n: state("fetching", n, expected),
+                    on_raw=lambda t, users: dump.write(json.dumps(
+                        {**t, "_reply_to_username": users.get(t.get("in_reply_to_user_id"))}) + "\n")):
+                tweet = entry["tweet"]
+                if tweet["id_str"] in seen:
+                    continue
+                seen.add(tweet["id_str"])
+                row = ta.compact_row(tweet)
+                if row is None:
+                    retweets += 1
+                else:
+                    rows.append(row)
+        except x_api.XApiError as e:
+            # Credits depleted (402), rate limit (429), transient 5xx…:
+            # every post already returned has been billed, so keep it —
+            # log the cost, import what we have, report the pull as
+            # partial. Only a pull that got nothing is a hard failure.
+            fetch_error = str(e)
+            logger.warning("X API pre-fill for @%s stopped after %d posts: %s",
+                           account["username"], len(seen), e)
     logger.info("X API pre-fill: %d posts for @%s saved to %s", len(seen), account["username"], dump_path)
     # Bill the pull to the target user's ledger (same table the admin
     # Spent columns and cost_report.py read): posts read + the lookup.
@@ -290,6 +299,8 @@ def prefill_x_api_impl(user_id, handle, options, update_state=None, seed_now=Tru
         request_ref=f"@{account['username']}"[:64], input_tokens=0, output_tokens=0,
         cost_microdollars=x_api.cost_microdollars(len(seen), user_reads=1)))
     db.session.commit()
+    if fetch_error and not seen:
+        raise x_api.XApiError(fetch_error)
     result = _import_prefill_rows(user_id, account["username"], rows, options,
                                   state, seed_now, no_rows_error=x_api.XApiError)
     result.update({
@@ -298,6 +309,7 @@ def prefill_x_api_impl(user_id, handle, options, update_state=None, seed_now=Tru
         "account_num_tweets": account.get("tweet_count") or 0,
         "est_cost_usd": x_api.estimate_cost(len(seen)),
         "dump_path": str(dump_path),
+        "partial": bool(fetch_error), "fetch_error": fetch_error,
     })
     return result
 
