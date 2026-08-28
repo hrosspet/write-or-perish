@@ -198,8 +198,22 @@ def toggle_user_status(user_id):
     if not user.approved:
         # Record deactivation time (terms acceptance fields are preserved for audit)
         user.deactivated_at = datetime.utcnow()
+    else:
+        user.approved_at = datetime.utcnow()
     db.session.commit()
     return jsonify({"message": "User status updated", "approved": user.approved}), 200
+
+@admin_bp.route("/activity", methods=["GET"])
+@login_required
+@admin_required
+def activity():
+    """Per-user engagement since activation for the Activity tab —
+    writes / asks / voice per day, last seen, retention flags — measured
+    directly, not via spend. ?days= (default 14, max 60)."""
+    from backend.utils.activity import activity_report
+    days = min(max(request.args.get("days", 14, type=int), 7), 60)
+    return jsonify(activity_report(days=days)), 200
+
 
 @admin_bp.route("/users/<int:user_id>/toggle_spam", methods=["POST"])
 @login_required
@@ -317,6 +331,7 @@ def activate_and_welcome(user_id):
 
     # Approve the user
     user.approved = True
+    user.approved_at = datetime.utcnow()
     db.session.commit()
 
     # Generate magic link pointing to /welcome (30-day expiry)

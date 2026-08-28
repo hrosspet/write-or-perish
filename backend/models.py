@@ -134,6 +134,16 @@ class User(db.Model, UserMixin):
     # whatever approved/plan state it had.
     spam = db.Column(db.Boolean, nullable=False, default=False,
                      server_default=db.text("false"))
+    # When the account was (last) approved — the "since activation" origin
+    # for the admin Activity tab. Null for accounts approved before the
+    # column existed: fall back to accepted_terms_at, then created_at.
+    approved_at = db.Column(db.DateTime, nullable=True)
+    # Last authenticated API request (throttled to one write per
+    # ACTIVITY_TOUCH_INTERVAL) and its path, so "checked the profile and
+    # left" is distinguishable from "never came". Not engagement — a view
+    # is a view; engagement is writing / asking (see admin Activity).
+    last_seen_at = db.Column(db.DateTime, nullable=True)
+    last_seen_path = db.Column(db.String(128), nullable=True)
 
     # All valid subscription plans (single source of truth).
     ALLOWED_PLANS = {"free", "alpha", "pro"}

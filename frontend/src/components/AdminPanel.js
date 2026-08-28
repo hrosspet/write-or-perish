@@ -86,6 +86,7 @@ const adminBubbleStyle = (active) => ({
 
 const ADMIN_TABS = [
   { key: "users", label: "Users" },
+  { key: "activity", label: "Activity" },
   { key: "feedback", label: "Feedback" },
   { key: "polls", label: "Polls" },
 ];
@@ -275,6 +276,150 @@ function AdminPolls() {
 // the user's explicit confirm. The admin API existed without a UI —
 // this lists items and manages their triage status.
 const FEEDBACK_STATUSES = ["new", "reviewed", "done"];
+
+// Engagement since activation, measured directly (writes / asks / voice),
+// not through spend. Active accounts only. The strip is one cell per day:
+// filled when the person wrote or asked that day; a dot marks voice.
+const relTime = (iso) => {
+  if (!iso) return null;
+  const ms = Date.now() - new Date(iso + (iso.endsWith("Z") ? "" : "Z")).getTime();
+  const m = Math.round(ms / 60000);
+  if (m < 60) return `${Math.max(m, 0)}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h}h ago`;
+  return `${Math.round(h / 24)}d ago`;
+};
+
+const pathArea = (p) => {
+  if (!p) return null;
+  const seg = p.replace(/^\/api\//, "").split("/")[0];
+  return seg || null;
+};
+
+function AdminActivity() {
+  const [data, setData] = useState(null);
+  const [cohort, setCohort] = useState("seeded");
+  const [days, setDays] = useState(14);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    setData(null);
+    api.get("/admin/activity", { params: { days } })
+      .then((res) => setData(res.data))
+      .catch(() => setErr("Failed to fetch activity."));
+  }, [days]);
+
+  const COHORTS = [
+    ["seeded", "seeded"], ["x", "from X"], ["ca", "from CA"],
+    ["unseeded", "not seeded"], ["optout", "opted out"], ["all", "all"],
+  ];
+  const inCohort = (u) => {
+    if (cohort === "all") return true;
+    if (cohort === "seeded") return !!u.seeded;
+    if (cohort === "unseeded") return !u.seeded;
+    if (cohort === "optout") return u.prefill_consent === "no";
+    return u.seeded === cohort;
+  };
+  const users = (data?.users || []).filter(inCohort);
+  const cell = { border: "1px solid var(--border)", padding: "6px 8px", whiteSpace: "nowrap", fontSize: "0.9em" };
+  const th = { ...cell, textAlign: "left", color: "var(--text-secondary)", fontWeight: 400 };
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap", marginBottom: "12px" }}>
+        {COHORTS.map(([k, label]) => (
+          <button
+            key={k}
+            onClick={() => setCohort(k)}
+            style={{
+              padding: "4px 10px", borderRadius: "999px", cursor: "pointer", fontSize: "0.85em",
+              border: `1px solid ${cohort === k ? "var(--accent)" : "var(--border)"}`,
+              background: "transparent", color: cohort === k ? "var(--accent)" : "var(--text-secondary)",
+            }}
+          >
+            {label}
+          </button>
+        ))}
+        <span style={{ flex: 1 }} />
+        <label style={{ fontSize: "0.85em", color: "var(--text-secondary)" }}>
+          days{" "}
+          <select value={days} onChange={(e) => setDays(Number(e.target.value))} style={{ ...adminSelectStyle, padding: "4px 8px", fontSize: "0.85em" }}>
+            {[7, 14, 30, 60].map((d) => <option key={d} value={d}>{d}</option>)}
+          </select>
+        </label>
+      </div>
+      {err && <div style={{ color: "var(--error)" }}>{err}</div>}
+      {!data && !err && <div style={{ color: "var(--text-muted)" }}>Loading…</div>}
+      {data && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ borderCollapse: "collapse", color: "var(--text-primary)", width: "100%" }}>
+            <thead>
+              <tr>
+                <th style={th}>user</th>
+                <th style={th} title="Seeded from X API / Community Archive; ✗ = declined tweet seed">seed</th>
+                <th style={th} title="Activation (approved) — everything on this tab counts from here">activated</th>
+                <th style={th} title="Last authenticated request (5-min resolution) and the area they were in">last seen</th>
+                <th style={th} title={`One cell per day (oldest → newest). Filled = wrote or asked that day; · = voice. Grey = before activation.`}>{data.days.length}d</th>
+                <th style={th} title="Days with at least one write or ask / days since activation">active</th>
+                <th style={th} title="Human-written nodes (text or voice) since activation">writes</th>
+                <th style={th} title="LLM responses requested since activation">asks</th>
+                <th style={th} title="Transcribed voice minutes since activation">voice</th>
+                <th style={th} title="Nodes imported by the user (archives) since activation">imports</th>
+                <th style={th} title="Profile versions created since activation / latest">profile</th>
+                <th style={th} title="Came back the day after activation / any time in days 2–7">d1 / d7</th>
+                <th style={th} title="User-initiated spend only (conversation, transcription, TTS, search) since activation">$ own</th>
+              </tr>
+            </thead>
+            <tbody>
+              {users.length === 0 && (
+                <tr><td style={cell} colSpan={13}><span style={{ color: "var(--text-muted)" }}>No accounts in this cohort.</span></td></tr>
+              )}
+              {users.map((u) => (
+                <tr key={u.id}>
+                  <td style={cell}>{u.username}</td>
+                  <td style={cell}>
+                    {u.seeded === "x" ? "X" : u.seeded === "ca" ? "CA" : "—"}
+                    {u.prefill_consent === "no" && <span title="declined tweet seed" style={{ color: "var(--text-muted)" }}> ✗</span>}
+                  </td>
+                  <td style={cell} title={u.activated_at || ""}>{relTime(u.activated_at) || "—"}</td>
+                  <td style={cell} title={u.last_seen_path || (u.accepted_terms_at ? "no last_seen yet — accepted terms " + u.accepted_terms_at : "")}>
+                    {u.last_seen_at
+                      ? <>{relTime(u.last_seen_at)}{pathArea(u.last_seen_path) && <span style={{ color: "var(--text-muted)" }}> · {pathArea(u.last_seen_path)}</span>}</>
+                      : u.accepted_terms_at
+                        ? <span style={{ color: "var(--text-muted)" }}>terms {relTime(u.accepted_terms_at)}</span>
+                        : <span style={{ color: "var(--error)" }}>never</span>}
+                  </td>
+                  <td style={{ ...cell, fontFamily: "monospace", letterSpacing: "1px" }}>
+                    {u.strip.map((d) => {
+                      const active = d.w + d.a > 0;
+                      return (
+                        <span
+                          key={d.d}
+                          title={`${d.d}: ${d.w} writes, ${d.a} asks${d.v ? `, ${d.v} voice` : ""}${d.pre ? " (before activation)" : ""}`}
+                          style={{ color: d.pre ? "var(--border)" : active ? "var(--accent)" : "var(--text-muted)" }}
+                        >
+                          {d.pre ? "·" : active ? (d.v ? "◉" : "●") : "○"}
+                        </span>
+                      );
+                    })}
+                  </td>
+                  <td style={cell}>{u.active_days}/{u.days_since_activation}</td>
+                  <td style={cell}>{u.writes}</td>
+                  <td style={cell}>{u.asks}</td>
+                  <td style={cell}>{u.voice_minutes ? `${u.voice_minutes}m` : "—"}</td>
+                  <td style={cell}>{u.imports || "—"}</td>
+                  <td style={cell} title={u.latest_profile_at || ""}>{u.profile_versions_since_activation || "—"}{u.latest_profile_at ? <span style={{ color: "var(--text-muted)" }}> · {relTime(u.latest_profile_at)}</span> : null}</td>
+                  <td style={cell}>{u.day1_return ? "✓" : "○"} / {u.day7_return ? "✓" : "○"}</td>
+                  <td style={cell}>${(u.user_spend_usd || 0).toFixed(2)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function AdminFeedback() {
   const [items, setItems] = useState([]);
@@ -691,6 +836,7 @@ function AdminPanel() {
       </h1>
 
       {activeTab === "polls" && <AdminPolls />}
+      {activeTab === "activity" && <AdminActivity />}
       {activeTab === "feedback" && <AdminFeedback />}
 
       {activeTab === "users" && (<>
