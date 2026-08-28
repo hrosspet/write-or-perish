@@ -7,7 +7,7 @@ import pytest
 
 from backend.tests.test_twitter_import import app, _make_user, _db  # noqa: F401
 from backend.tests.test_admin_access import app as admin_app, _login  # noqa: F401
-from backend.models import User, Node
+from backend.models import User, Node, APICostLog
 from backend.utils import x_api
 
 
@@ -137,6 +137,10 @@ def test_prefill_x_impl_imports_and_pins_batch(app, monkeypatch):  # noqa: F811
     assert [ln["id"] for ln in lines[1:]] == ["3", "2", "1", "0"]  # retweet kept too
     assert lines[2]["_reply_to_username"] == "bob"
     assert "/x-api/Alice-" in result["dump_path"]
+    # Cost ledger: 4 posts * $0.005 + 1 user read * $0.010
+    log = APICostLog.query.filter_by(user_id=u.id, request_type="x_prefill").one()
+    assert log.cost_microdollars == 4 * 5000 + 10000 and log.request_ref == "@Alice"
+    assert log.model_id == "x-api/timeline"
 
 
 def test_prefill_x_impl_refuses_protected_and_unknown(app, monkeypatch):  # noqa: F811
@@ -170,6 +174,8 @@ def test_x_check_route(admin_app, monkeypatch):  # noqa: F811
     assert r.status_code == 200, r.json
     assert r.json["fetchable"] == 3200 and r.json["est_cost_usd"] == 16.01
     assert r.json["already_imported"] == 0 and r.json["timeline_cap"] == 3200
+    log = APICostLog.query.filter_by(user_id=target.id, request_type="x_prefill_check").one()
+    assert log.cost_microdollars == 10000 and log.model_id == "x-api/user-lookup"
     assert client.get("/api/admin/prefill/x/check?handle=kat_szpiech&max_tweets=500").json["fetchable"] == 500
     monkeypatch.setattr(x_api, "lookup_user", lambda h, c: {
         "id": "2", "username": "mikeytong", "name": "M", "tweet_count": 1995, "protected": True})

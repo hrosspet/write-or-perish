@@ -23,8 +23,11 @@ API_BASE = "https://api.twitter.com"
 TIMEOUT = 60
 PAGE_SIZE = 100          # max_results ceiling on /2/users/:id/tweets
 TIMELINE_CAP = 3200      # documented per-user limit of the timeline endpoint
-COST_PER_POST_READ = 0.005
-COST_PER_USER_READ = 0.010
+from backend.utils.cost import (  # noqa: E402
+    X_POST_READ_COST_MICRODOLLARS, X_USER_READ_COST_MICRODOLLARS)
+
+COST_PER_POST_READ = X_POST_READ_COST_MICRODOLLARS / 1_000_000
+COST_PER_USER_READ = X_USER_READ_COST_MICRODOLLARS / 1_000_000
 
 _bearer_cache = {}
 
@@ -34,7 +37,11 @@ class XApiError(Exception):
 
 
 def estimate_cost(posts, user_reads=1):
-    return round(posts * COST_PER_POST_READ + user_reads * COST_PER_USER_READ, 2)
+    return round(cost_microdollars(posts, user_reads) / 1_000_000, 2)
+
+
+def cost_microdollars(posts, user_reads=1):
+    return posts * X_POST_READ_COST_MICRODOLLARS + user_reads * X_USER_READ_COST_MICRODOLLARS
 
 
 def fetchable(tweet_count, requested=None):

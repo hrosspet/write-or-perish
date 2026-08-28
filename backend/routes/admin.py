@@ -426,6 +426,16 @@ def prefill_x_check():
     except Exception as e:
         current_app.logger.warning(f"X API check failed for @{handle}: {e}")
         return jsonify({"error": f"X API lookup failed: {e}"}), 502
+    # The lookup itself is billable: log it against the target user when
+    # given, else the admin doing the check.
+    user_id = request.args.get("user_id", type=int)
+    from backend.models import APICostLog
+    db.session.add(APICostLog(
+        user_id=user_id or current_user.id, model_id="x-api/user-lookup",
+        request_type="x_prefill_check", request_ref=f"@{handle}"[:64],
+        input_tokens=0, output_tokens=0,
+        cost_microdollars=x_api.cost_microdollars(0, user_reads=1)))
+    db.session.commit()
     if account is None:
         return jsonify({"error": f"@{handle} is not on X (suspended, renamed, or never existed)."}), 404
     requested = request.args.get("max_tweets", type=int)
@@ -437,7 +447,6 @@ def prefill_x_check():
         "est_cost_usd": x_api.estimate_cost(fetchable),
         "profile_threshold_tokens": 10000,
     }
-    user_id = request.args.get("user_id", type=int)
     if user_id:
         summary["already_imported"] = Node.query.filter(
             Node.human_owner_id == user_id, Node.origin == "twitter",

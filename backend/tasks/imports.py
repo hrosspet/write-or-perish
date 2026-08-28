@@ -281,6 +281,15 @@ def prefill_x_api_impl(user_id, handle, options, update_state=None, seed_now=Tru
             else:
                 rows.append(row)
     logger.info("X API pre-fill: %d posts for @%s saved to %s", len(seen), account["username"], dump_path)
+    # Bill the pull to the target user's ledger (same table the admin
+    # Spent columns and cost_report.py read): posts read + the lookup.
+    from backend.extensions import db
+    from backend.models import APICostLog
+    db.session.add(APICostLog(
+        user_id=user_id, model_id="x-api/timeline", request_type="x_prefill",
+        request_ref=f"@{account['username']}"[:64], input_tokens=0, output_tokens=0,
+        cost_microdollars=x_api.cost_microdollars(len(seen), user_reads=1)))
+    db.session.commit()
     result = _import_prefill_rows(user_id, account["username"], rows, options,
                                   state, seed_now, no_rows_error=x_api.XApiError)
     result.update({
