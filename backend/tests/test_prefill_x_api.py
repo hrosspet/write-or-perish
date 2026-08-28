@@ -1,4 +1,4 @@
-"""Admin "Fetch via X" pre-fill: stdlib X API client (pagination, export
+"""Admin "Pre-fill from X": stdlib X API client (pagination, export
 shaping, cap), the task impl (shares the CA pre-fill tail), the admin
 check/start routes, and the spam flag/toggle."""
 from unittest.mock import MagicMock

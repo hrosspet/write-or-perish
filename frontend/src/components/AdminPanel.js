@@ -912,7 +912,7 @@ function AdminPanel() {
                   onClick={() => openPrefill(u, "x")}
                   title="Paid: pull the account's most recent posts from the X API (~$0.005/post, ≤3,200) and queue a batch profile build"
                 >
-                  Fetch via X
+                  Pre-fill from X
                 </button>{" "}
                 <button
                   onClick={() => toggleSpam(u.id)}
