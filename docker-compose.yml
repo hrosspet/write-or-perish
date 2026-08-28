@@ -92,6 +92,9 @@ services:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-writeorperish}:${POSTGRES_PASSWORD:-writeorperish}@db:5432/${POSTGRES_DB:-writeorperish}
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      # Admin "Pre-fill from X" runs in the worker (app-only auth).
+      - TWITTER_API_KEY=${TWITTER_API_KEY:-}
+      - TWITTER_API_SECRET=${TWITTER_API_SECRET:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_API_KEY_CHAT=${OPENAI_API_KEY_CHAT}
       - OPENAI_API_KEY_TRAIN=${OPENAI_API_KEY_TRAIN}
