@@ -86,9 +86,7 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None,
     the BATCH profile pipeline before the import's profile handoff runs,
     so a bootstrapped corpus never triggers a synchronous (full-price)
     build. Runs inside an app context; testable without Celery."""
-    from backend.extensions import db
     from backend.models import User
-    from backend.routes.import_data import create_twitter_nodes
     from backend.utils import twitter_archive as ta
     from backend.utils import community_archive as ca
 
@@ -157,15 +155,40 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None,
             retweets += 1  # compact_row drops retweets, like the native import
         else:
             rows.append(row)
+    result = _import_prefill_rows(user_id, account["username"], rows, options,
+                                  state, seed_now, no_rows_error=ca.CommunityArchiveError)
+    result.update({
+        "source": "parquet" if use_parquet else "rest",
+        # What the archive actually holds vs. the account's self-reported
+        # lifetime counter (uploads are often partial) — so a low node
+        # count reads as "partial archive", not "import bug".
+        "archived": len(seen), "retweets_skipped": retweets,
+        "account_num_tweets": account.get("num_tweets") or 0,
+    })
+    return result
+
+
+def _import_prefill_rows(user_id, handle, rows, options, state, seed_now,
+                         no_rows_error=RuntimeError):
+    """Shared tail of every admin pre-fill: sort the compact rows, pin the
+    user to the BATCH profile pipeline, create private twitter-origin nodes,
+    and kick the batch seeder. ``handle`` is the canonical username the
+    tweets came from (stored as ``prefilled_handle``)."""
+    from backend.extensions import db
+    from backend.models import User
+    from backend.routes.import_data import create_twitter_nodes
+    from backend.utils import twitter_archive as ta
+
     rows.sort(key=lambda r: ta._sort_key(r["created_at"]))
     total = len(rows)
     if total == 0:
-        raise ca.CommunityArchiveError(f"@{handle}: no own tweets found")
+        raise no_rows_error(f"@{handle}: no own tweets found")
 
     # Pin BEFORE create_twitter_nodes: its profile handoff consults
     # use_batch_for_user and must route to the seeder, not the sync task.
+    user = User.query.get(user_id)
     user.profile_force_batch = True
-    user.prefilled_handle = account["username"]
+    user.prefilled_handle = handle
     db.session.commit()
 
     state("importing", 0, total)
@@ -192,15 +215,64 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None,
         from backend.tasks.profile_batch import seed_profile_batch_for_user
         seed_profile_batch_for_user.delay(user_id)
     result.update({
-        "user_id": user_id, "handle": account["username"],
-        "total": total, "stage": "done",
-        "source": "parquet" if use_parquet else "rest",
-        # What the archive actually holds vs. the account's self-reported
-        # lifetime counter (uploads are often partial) — so a low node
-        # count reads as "partial archive", not "import bug".
-        "archived": len(seen), "retweets_skipped": retweets,
-        "account_num_tweets": account.get("num_tweets") or 0,
+        "user_id": user_id, "handle": handle, "total": total, "stage": "done",
         "profile_batch_queued": queued,
+    })
+    return result
+
+
+def prefill_x_api_impl(user_id, handle, options, update_state=None, seed_now=True):
+    """Pull @handle's most recent own posts straight from the X API (paid,
+    ~$0.005/post; capped by the timeline endpoint at ~3,200) into the
+    user's account, then hand off to the same batch-profile tail as the
+    Community Archive pre-fill. ``options["max_tweets"]`` bounds the pull
+    (clamped to min(cap, account's tweet_count))."""
+    from flask import current_app
+    from backend.models import User
+    from backend.utils import twitter_archive as ta
+    from backend.utils import x_api
+
+    def state(stage, done, total):
+        if update_state:
+            update_state(state="PROGRESS", meta={
+                "user_id": user_id, "stage": stage, "done": done,
+                "total": total, "handle": handle,
+            })
+
+    if not User.query.get(user_id):
+        raise RuntimeError(f"User {user_id} not found")
+    creds = (current_app.config.get("TWITTER_API_KEY"),
+             current_app.config.get("TWITTER_API_SECRET"))
+    account = x_api.lookup_user(handle, creds)
+    if not account:
+        raise x_api.XApiError(f"@{handle}: no such X account")
+    if account["protected"]:
+        raise x_api.XApiError(f"@{account['username']} is protected — app-only auth can't read the timeline")
+    expected = x_api.fetchable(account["tweet_count"], options.get("max_tweets"))
+    if expected == 0:
+        raise x_api.XApiError(f"@{account['username']}: nothing to fetch")
+    state("fetching", 0, expected)
+
+    rows, seen, retweets = [], set(), 0
+    for entry in x_api.iter_user_tweets(
+            account["id"], creds, max_tweets=expected,
+            on_page=lambda n: state("fetching", n, expected)):
+        tweet = entry["tweet"]
+        if tweet["id_str"] in seen:
+            continue
+        seen.add(tweet["id_str"])
+        row = ta.compact_row(tweet)
+        if row is None:
+            retweets += 1
+        else:
+            rows.append(row)
+    result = _import_prefill_rows(user_id, account["username"], rows, options,
+                                  state, seed_now, no_rows_error=x_api.XApiError)
+    result.update({
+        "source": "x-api",
+        "fetched": len(seen), "retweets_skipped": retweets,
+        "account_num_tweets": account.get("tweet_count") or 0,
+        "est_cost_usd": x_api.estimate_cost(len(seen)),
     })
     return result
 
@@ -215,4 +287,16 @@ def prefill_community_archive(self, user_id, handle, options):
         except Exception:
             logger.exception("Community Archive pre-fill failed for user %s (@%s)",
                              user_id, handle)
+            raise
+
+
+@celery.task(bind=True, name="backend.tasks.imports.prefill_x_api")
+def prefill_x_api(self, user_id, handle, options):
+    """Admin pre-fill via the X API (see prefill_x_api_impl)."""
+    with flask_app.app_context():
+        try:
+            return prefill_x_api_impl(
+                user_id, handle, options or {}, update_state=self.update_state)
+        except Exception:
+            logger.exception("X API pre-fill failed for user %s (@%s)", user_id, handle)
             raise
