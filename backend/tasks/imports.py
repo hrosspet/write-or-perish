@@ -13,6 +13,9 @@ with the whole tweet list in memory twice (request body + Python).
 Progress meta always carries ``user_id`` so the status endpoint can
 refuse to leak another user's import.
 """
+import json
+from datetime import datetime, timezone
+
 from celery.utils.log import get_task_logger
 
 from backend.celery_app import celery, flask_app
@@ -253,19 +256,31 @@ def prefill_x_api_impl(user_id, handle, options, update_state=None, seed_now=Tru
         raise x_api.XApiError(f"@{account['username']}: nothing to fetch")
     state("fetching", 0, expected)
 
+    # Keep an independent copy of every paid-for post as raw v2 JSON under
+    # <data>/x-api/ (one file per pull), separate from the user's account
+    # and its nodes — the fetch is billable and the account may be deleted.
+    dump_path = x_api_dump_path(account["username"])
     rows, seen, retweets = [], set(), 0
-    for entry in x_api.iter_user_tweets(
-            account["id"], creds, max_tweets=expected,
-            on_page=lambda n: state("fetching", n, expected)):
-        tweet = entry["tweet"]
-        if tweet["id_str"] in seen:
-            continue
-        seen.add(tweet["id_str"])
-        row = ta.compact_row(tweet)
-        if row is None:
-            retweets += 1
-        else:
-            rows.append(row)
+    with open(dump_path, "w", encoding="utf-8") as dump:
+        dump.write(json.dumps({
+            "_meta": "loore x-api pre-fill", "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "account": account, "max_tweets": expected, "for_user_id": user_id,
+        }) + "\n")
+        for entry in x_api.iter_user_tweets(
+                account["id"], creds, max_tweets=expected,
+                on_page=lambda n: state("fetching", n, expected),
+                on_raw=lambda t, users: dump.write(json.dumps(
+                    {**t, "_reply_to_username": users.get(t.get("in_reply_to_user_id"))}) + "\n")):
+            tweet = entry["tweet"]
+            if tweet["id_str"] in seen:
+                continue
+            seen.add(tweet["id_str"])
+            row = ta.compact_row(tweet)
+            if row is None:
+                retweets += 1
+            else:
+                rows.append(row)
+    logger.info("X API pre-fill: %d posts for @%s saved to %s", len(seen), account["username"], dump_path)
     result = _import_prefill_rows(user_id, account["username"], rows, options,
                                   state, seed_now, no_rows_error=x_api.XApiError)
     result.update({
@@ -273,8 +288,20 @@ def prefill_x_api_impl(user_id, handle, options, update_state=None, seed_now=Tru
         "fetched": len(seen), "retweets_skipped": retweets,
         "account_num_tweets": account.get("tweet_count") or 0,
         "est_cost_usd": x_api.estimate_cost(len(seen)),
+        "dump_path": str(dump_path),
     })
     return result
+
+
+def x_api_dump_path(handle):
+    """``<data>/x-api/<handle>-<UTC stamp>.jsonl`` next to the audio/import
+    stashes (AUDIO_STORAGE_PATH's parent — /home/.../write-or-perish/data
+    on prod). Created on demand."""
+    from backend.utils.twitter_archive import STASH_ROOT
+    d = STASH_ROOT.parent / "x-api"
+    d.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+    return d / f"{handle}-{stamp}.jsonl"
 
 
 @celery.task(bind=True, name="backend.tasks.imports.prefill_community_archive")

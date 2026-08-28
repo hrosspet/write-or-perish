@@ -119,9 +119,11 @@ def to_export_entry(t, users_by_id):
     }}
 
 
-def iter_user_tweets(user_id, creds, max_tweets=TIMELINE_CAP, on_page=None):
+def iter_user_tweets(user_id, creds, max_tweets=TIMELINE_CAP, on_page=None, on_raw=None):
     """Newest-first pages of @user's own posts (retweets excluded server-side,
-    so they aren't billed), up to ``max_tweets``. Yields export-shaped rows."""
+    so they aren't billed), up to ``max_tweets``. Yields export-shaped rows.
+    ``on_raw(tweet, users_by_id)`` sees each raw v2 object first — the
+    pre-fill uses it to keep a copy of what we paid for."""
     remaining = fetchable(TIMELINE_CAP, max_tweets)
     token, seen = None, 0
     while remaining > 0:
@@ -143,6 +145,8 @@ def iter_user_tweets(user_id, creds, max_tweets=TIMELINE_CAP, on_page=None):
                 break
             remaining -= 1
             seen += 1
+            if on_raw:
+                on_raw(t, users_by_id)
             yield to_export_entry(t, users_by_id)
         if on_page:
             on_page(seen)

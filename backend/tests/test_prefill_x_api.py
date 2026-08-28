@@ -86,10 +86,14 @@ def _fake_x(monkeypatch, tweet_count=5, protected=False, tweets=None):
         "tweet_count": tweet_count, "protected": protected})
     seen = {}
 
-    def fake_iter(user_id, creds, max_tweets=3200, on_page=None):
+    def fake_iter(user_id, creds, max_tweets=3200, on_page=None, on_raw=None):
         seen["max_tweets"] = max_tweets
         users = {"77": "bob"}
-        out = [x_api.to_export_entry(t, users) for t in (tweets or [])][:max_tweets]
+        raw = (tweets or [])[:max_tweets]
+        for t in raw:
+            if on_raw:
+                on_raw(t, users)
+        out = [x_api.to_export_entry(t, users) for t in raw]
         if on_page:
             on_page(len(out))
         return iter(out)
@@ -126,6 +130,13 @@ def test_prefill_x_impl_imports_and_pins_batch(app, monkeypatch):  # noqa: F811
     assert sync.call_count == 0
     assert states[0]["stage"] == "fetching" and states[-1]["stage"] == "importing"
     assert result["profile_batch_queued"] is False
+    # Every paid-for post is kept as raw JSON, independent of the account.
+    import json
+    lines = [json.loads(ln) for ln in open(result["dump_path"], encoding="utf-8")]
+    assert lines[0]["_meta"] == "loore x-api pre-fill" and lines[0]["account"]["username"] == "Alice"
+    assert [ln["id"] for ln in lines[1:]] == ["3", "2", "1", "0"]  # retweet kept too
+    assert lines[2]["_reply_to_username"] == "bob"
+    assert "/x-api/Alice-" in result["dump_path"]
 
 
 def test_prefill_x_impl_refuses_protected_and_unknown(app, monkeypatch):  # noqa: F811
