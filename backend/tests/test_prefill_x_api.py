@@ -8,6 +8,7 @@ import pytest
 from backend.tests.test_twitter_import import app, _make_user, _db  # noqa: F401
 from backend.tests.test_admin_access import app as admin_app, _login  # noqa: F401
 from backend.models import User, Node, APICostLog
+from backend.utils import twitter_archive as ta
 from backend.utils import x_api
 
 
@@ -124,6 +125,7 @@ def test_prefill_x_impl_imports_and_pins_batch(app, monkeypatch):  # noqa: F811
     assert result["source"] == "x-api" and result["handle"] == "Alice"
     assert (result["fetched"], result["retweets_skipped"], result["created"]) == (4, 1, 2)
     assert result["est_cost_usd"] == x_api.estimate_cost(4)
+    assert result["imported_tokens"] == sum(ta.approximate_token_count(t) for t in ("first", "third", "reply"))
     nodes = Node.query.filter_by(human_owner_id=u.id).order_by(Node.created_at).all()
     assert [n.get_content() for n in nodes] == ["first", "third"]  # reply excluded, sorted
     assert all(n.origin == "twitter" and n.privacy_level == "private" for n in nodes)

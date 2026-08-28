@@ -220,9 +220,9 @@ def _import_prefill_rows(user_id, handle, rows, options, state, seed_now,
     result.update({
         "user_id": user_id, "handle": handle, "total": total, "stage": "done",
         "profile_batch_queued": queued,
-        # The immediate seed runs regardless, but every LATER chunk comes
-        # from the hourly seeder, which only walks approved accounts.
-        "awaiting_activation": queued and not User.query.get(user_id).approved,
+        # Importer's approximate count over the rows offered (incl. any
+        # deduped as already imported) — what the 10k profile gate sees.
+        "imported_tokens": sum(r.get("token_count") or 0 for r in rows),
     })
     return result
 

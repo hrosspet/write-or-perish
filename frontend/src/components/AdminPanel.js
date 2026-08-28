@@ -620,7 +620,8 @@ function AdminPanel() {
           ` (≈ $${(r.est_cost_usd || 0).toFixed(2)})` +
           `${r.retweets_skipped ? `, ${r.retweets_skipped.toLocaleString()} retweets skipped` : ""}` +
           `${r.skipped ? `, ${r.skipped} already imported` : ""}` +
-          `${r.profile_batch_queued ? (r.awaiting_activation ? " — batch profile queued; later chunks wait for activation" : " — batch profile queued") : " — below profile threshold"}`;
+          `${r.imported_tokens != null ? `, ~${r.imported_tokens.toLocaleString()} tokens` : ""}` +
+          `${r.profile_batch_queued ? " — batch profile queued" : " — below profile threshold"}`;
       }
       const archived = r.archived != null ? ` of ${r.archived.toLocaleString()} archived` : "";
       const rts = r.retweets_skipped ? `, ${r.retweets_skipped.toLocaleString()} retweets skipped` : "";
@@ -630,7 +631,8 @@ function AdminPanel() {
       return `Done: ${(r.created || 0).toLocaleString()} nodes${archived} from @${r.handle}` +
         `${r.source === "parquet" ? " (snapshot)" : ""}${rts}${reported}` +
         `${r.skipped ? `, ${r.skipped} already imported` : ""}` +
-        `${r.profile_batch_queued ? (r.awaiting_activation ? " — batch profile queued; later chunks wait for activation" : " — batch profile queued") : " — below profile threshold"}`;
+        `${r.imported_tokens != null ? `, ~${r.imported_tokens.toLocaleString()} tokens` : ""}` +
+        `${r.profile_batch_queued ? " — batch profile queued" : " — below profile threshold"}`;
     }
     if (p.status === "failed") return `Failed: ${p.error}`;
     return null;
