@@ -18,8 +18,10 @@ CACHE_WRITE_MULTIPLIER = 1.25
 # SUPPORTED_MODELS. Update if X reprices.
 X_REQUEST_COST_MICRODOLLARS = 5000
 # X API v2 pay-per-use, per returned resource (docs.x.com pricing, 2026-08):
-# post reads $0.005, user reads $0.010. The admin "Pre-fill from X" logs
-# one APICostLog row per pull (posts * POST + 1 USER) and one per Check.
+# post reads $0.005 (retweets included — see x_api.iter_user_tweets for
+# why we can't exclude them server-side), user reads $0.010. The admin
+# "Pre-fill from X" logs one APICostLog row per pull (posts * POST +
+# 1 USER) and one per Check.
 X_POST_READ_COST_MICRODOLLARS = 5000
 X_USER_READ_COST_MICRODOLLARS = 10000
 

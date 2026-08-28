@@ -535,7 +535,7 @@ function AdminPanel() {
     const n = (v) => (v == null ? "?" : v.toLocaleString());
     const parts = [`${n(c.tweet_count)} tweets on X`];
     if (c.protected) parts.push("PROTECTED — timeline not readable");
-    else parts.push(`fetch up to ${n(c.fetchable)} (cap ${n(c.timeline_cap)}) ≈ $${(c.est_cost_usd || 0).toFixed(2)}`);
+    else parts.push(`fetch up to ${n(c.fetchable)} posts incl. retweets (cap ${n(c.timeline_cap)}) ≈ $${(c.est_cost_usd || 0).toFixed(2)}`);
     if (c.already_imported) parts.push(`${n(c.already_imported)} already imported`);
     return parts.join(" · ");
   };
@@ -910,7 +910,7 @@ function AdminPanel() {
                 </button>{" "}
                 <button
                   onClick={() => openPrefill(u, "x")}
-                  title="Paid: pull the account's most recent posts from the X API (~$0.005/post, ≤3,200) and queue a batch profile build"
+                  title="Paid: pull the account's most recent posts from the X API (~$0.005/post incl. retweets, ≤3,200; retweets are dropped on import) and queue a batch profile build"
                 >
                   Pre-fill from X
                 </button>{" "}

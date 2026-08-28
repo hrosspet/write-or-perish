@@ -127,8 +127,16 @@ def to_export_entry(t, users_by_id):
 
 
 def iter_user_tweets(user_id, creds, max_tweets=TIMELINE_CAP, on_page=None, on_raw=None):
-    """Newest-first pages of @user's own posts (retweets excluded server-side,
-    so they aren't billed), up to ``max_tweets``. Yields export-shaped rows.
+    """Newest-first pages of @user's timeline, up to ``max_tweets`` posts
+    INCLUDING retweets. Yields export-shaped rows (the importer's
+    compact_row() drops the retweets).
+
+    We deliberately do NOT pass ``exclude=retweets``: X applies the
+    exclusion to each page *after* slicing it and then omits
+    ``next_token``, so a heavy retweeter's walk stops after one page
+    (observed 2026-08-28: 17k-tweet account → 13 posts, no cursor).
+    Retweets are therefore billed like any other post read.
+
     ``on_raw(tweet, users_by_id)`` sees each raw v2 object first — the
     pre-fill uses it to keep a copy of what we paid for."""
     remaining = fetchable(TIMELINE_CAP, max_tweets)
@@ -136,7 +144,6 @@ def iter_user_tweets(user_id, creds, max_tweets=TIMELINE_CAP, on_page=None, on_r
     while remaining > 0:
         params = {
             "max_results": max(5, min(PAGE_SIZE, remaining)),  # API floor is 5
-            "exclude": "retweets",
             "tweet.fields": "created_at,public_metrics,in_reply_to_user_id,referenced_tweets,note_tweet,lang",
             "expansions": "in_reply_to_user_id",
             "user.fields": "username",

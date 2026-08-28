@@ -57,7 +57,9 @@ def test_iter_user_tweets_pages_caps_and_shapes(monkeypatch):
     assert rows[0]["tweet"]["in_reply_to_status_id_str"] == "900"
     assert rows[0]["tweet"]["created_at"] == "Thu Aug 13 10:00:00 +0000 2026"
     assert rows[0]["tweet"]["favorite_count"] == "3"
-    assert calls[0][1]["exclude"] == "retweets" and "pagination_token" not in calls[0][1]
+    # No exclude=retweets: X drops next_token when a page filters to
+    # nothing, which silently truncates heavy retweeters (see iter docstring).
+    assert "exclude" not in calls[0][1] and "pagination_token" not in calls[0][1]
     assert calls[1][1]["pagination_token"] == "T2"
     # cap: stop after max_tweets even if the API has more
     calls.clear()
