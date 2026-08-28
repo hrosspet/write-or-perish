@@ -99,6 +99,14 @@ def create_app():
     #   - For other API requests, return a 403 JSON error.
     #   - For other (HTML) requests, redirect to "/" with the query flag ?alpha=1.
     @app.before_request
+    def touch_last_seen_hook():
+        # Admin Activity tab: who came back, and where they last were.
+        if (current_user.is_authenticated and request.path.startswith("/api/")
+                and not request.path.startswith("/api/admin")):
+            from backend.utils.activity import touch_last_seen
+            touch_last_seen(current_user, request.path)
+
+    @app.before_request
     def block_unapproved_users():
         if not current_user.is_authenticated:
             return  # nothing to check
