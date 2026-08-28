@@ -232,7 +232,8 @@ class Node(db.Model):
                           index=True)
     human_owner_id = db.Column(db.Integer, db.ForeignKey("user.id"),
                                nullable=True, index=True)
-    linked_node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True)
+    linked_node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True,
+                               index=True)
     node_type = db.Column(db.String(16), nullable=False, default="user")
     # Human-readable permalink slug for PUBLIC nodes (#228): the permalink
     # is /u/<owner username>/<public_slug>. Unique per human owner; null on
@@ -319,7 +320,8 @@ class Node(db.Model):
     # interim node to its continuation so callers can follow the chain to the
     # final answer within a single turn.
     continuation_node_id = db.Column(
-        db.Integer, db.ForeignKey("node.id"), nullable=True
+        db.Integer, db.ForeignKey("node.id"), nullable=True,
+        index=True
     )
 
     # Pin-to-profile: surfaces any node on Dashboard & Feed
@@ -507,7 +509,8 @@ class NodeContextArtifact(db.Model):
 class NodeVersion(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     # Which node this version belongs to
-    node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=False)
+    node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=False,
+                        index=True)
     # The prior content of the node
     content = db.Column(db.Text, nullable=False)
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)
@@ -537,9 +540,9 @@ class Draft(db.Model):
     # The user who owns this draft
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     # If editing an existing node, store its ID; null for new node drafts
-    node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True)
+    node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True, index=True)
     # Parent node ID for new node creation drafts
-    parent_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True)
+    parent_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True, index=True)
     # The draft content
     content = db.Column(db.Text, nullable=False, default="")
     # Timestamps
@@ -565,7 +568,7 @@ class Draft(db.Model):
 
     # Server-side LLM generation: stores the LLM node ID when the finalize
     # task kicks off LLM + TTS server-side (lock-screen workflow).
-    llm_node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True)
+    llm_node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True, index=True)
 
     # User-facing warning emitted during the streaming finalize task —
     # e.g. a misconfigured {user_export} placeholder rejected before LLM
@@ -856,12 +859,12 @@ class ShareDraft(db.Model):
     # The LLM node whose proposal this draft came from (null for drafts the
     # user creates by hand on the Share page).
     source_node_id = db.Column(db.Integer, db.ForeignKey("node.id"),
-                               nullable=True)
+                               nullable=True, index=True)
     # The standalone public root node created when this share is published
     # (#228). Publishing = extraction into the public forum; revoking
     # soft-deletes that node. Null while draft/revoked.
     public_node_id = db.Column(db.Integer, db.ForeignKey("node.id"),
-                               nullable=True)
+                               nullable=True, index=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow,
                            onupdate=datetime.utcnow)
