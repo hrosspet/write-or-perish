@@ -159,6 +159,7 @@ def list_users():
             "prefilled_handle": user.prefilled_handle,
             "prefill_consent": user.prefill_consent,
             "prefill_consent_at": iso_utc(user.prefill_consent_at),
+            "spam": bool(user.spam),
             "profile": profile_status.get(user.id) or {
                 "versions": 0,
                 "last_generation_type": None,
@@ -185,6 +186,18 @@ def toggle_user_status(user_id):
         user.deactivated_at = datetime.utcnow()
     db.session.commit()
     return jsonify({"message": "User status updated", "approved": user.approved}), 200
+
+@admin_bp.route("/users/<int:user_id>/toggle_spam", methods=["POST"])
+@login_required
+@admin_required
+def toggle_user_spam(user_id):
+    """Flip the admin spam flag. Marking spam only hides the row behind
+    the Users-table eye toggle; it does not deactivate the account."""
+    user = User.query.get_or_404(user_id)
+    user.spam = not bool(user.spam)
+    db.session.commit()
+    return jsonify({"message": "Spam flag updated", "spam": user.spam}), 200
+
 
 @admin_bp.route("/users/<int:user_id>/update_email", methods=["PUT"])
 @login_required
@@ -388,6 +401,87 @@ def prefill_check():
             Node.human_owner_id == user_id, Node.origin == "twitter",
             Node.deleted_at.is_(None)).count()
     return jsonify(summary), 200
+
+
+@admin_bp.route("/prefill/x/check", methods=["GET"])
+@login_required
+@admin_required
+def prefill_x_check():
+    """What a paid X-API pull for ?handle= would get: the account's
+    lifetime tweet_count, whether it's protected, how many posts the
+    timeline endpoint can actually serve (min(3200, tweet_count), further
+    bounded by ?max_tweets=), and the pay-per-use cost of that pull.
+    Costs one user read (~$0.01) itself."""
+    from backend.models import Node
+    from backend.utils import x_api
+    handle = (request.args.get("handle") or "").strip().lstrip("@")
+    if not handle:
+        return jsonify({"error": "Handle is required."}), 400
+    config = current_app.config
+    creds = (config.get("TWITTER_API_KEY"), config.get("TWITTER_API_SECRET"))
+    try:
+        account = x_api.lookup_user(handle, creds)
+    except x_api.XApiError as e:
+        return jsonify({"error": str(e)}), 502
+    except Exception as e:
+        current_app.logger.warning(f"X API check failed for @{handle}: {e}")
+        return jsonify({"error": f"X API lookup failed: {e}"}), 502
+    # The lookup itself is billable: log it against the target user when
+    # given, else the admin doing the check.
+    user_id = request.args.get("user_id", type=int)
+    from backend.models import APICostLog
+    db.session.add(APICostLog(
+        user_id=user_id or current_user.id, model_id="x-api/user-lookup",
+        request_type="x_prefill_check", request_ref=f"@{handle}"[:64],
+        input_tokens=0, output_tokens=0,
+        cost_microdollars=x_api.cost_microdollars(0, user_reads=1)))
+    db.session.commit()
+    if account is None:
+        return jsonify({"error": f"@{handle} is not on X (suspended, renamed, or never existed)."}), 404
+    requested = request.args.get("max_tweets", type=int)
+    fetchable = 0 if account["protected"] else x_api.fetchable(account["tweet_count"], requested)
+    summary = {
+        **account,
+        "timeline_cap": x_api.TIMELINE_CAP,
+        "fetchable": fetchable,
+        "est_cost_usd": x_api.estimate_cost(fetchable),
+        "profile_threshold_tokens": 10000,
+    }
+    if user_id:
+        summary["already_imported"] = Node.query.filter(
+            Node.human_owner_id == user_id, Node.origin == "twitter",
+            Node.deleted_at.is_(None)).count()
+    return jsonify(summary), 200
+
+
+@admin_bp.route("/users/<int:user_id>/prefill-x", methods=["POST"])
+@login_required
+@admin_required
+def prefill_from_x_api(user_id):
+    """Paid pre-fill straight from the X API. Body: {"handle", "max_tweets",
+    "include_replies"}; max_tweets is clamped to the timeline cap here and
+    to the account's tweet_count in the task. Returns {"task_id"} — poll
+    /admin/prefill/status/<task_id> (same shape as the CA pre-fill)."""
+    from backend.utils import x_api
+    user = User.query.get_or_404(user_id)
+    data = request.get_json() or {}
+    handle = (data.get("handle") or user.username or "").strip().lstrip("@")
+    if not handle:
+        return jsonify({"error": "Handle is required."}), 400
+    try:
+        raw = data.get("max_tweets")
+        max_tweets = x_api.TIMELINE_CAP if raw in (None, "") else int(raw)
+    except (TypeError, ValueError):
+        return jsonify({"error": "max_tweets must be a number."}), 400
+    max_tweets = x_api.fetchable(x_api.TIMELINE_CAP, max_tweets)
+    if max_tweets <= 0:
+        return jsonify({"error": "max_tweets must be positive."}), 400
+    from backend.tasks.imports import prefill_x_api
+    task = prefill_x_api.delay(user.id, handle, {
+        "max_tweets": max_tweets,
+        "include_replies": bool(data.get("include_replies", True)),
+    })
+    return jsonify({"task_id": task.id, "handle": handle, "max_tweets": max_tweets}), 202
 
 
 @admin_bp.route("/prefill/status/<task_id>", methods=["GET"])

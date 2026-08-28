@@ -129,6 +129,11 @@ class User(db.Model, UserMixin):
     # escapable, so "we don't know" is a real state distinct from "no".
     prefill_consent = db.Column(db.String(8), nullable=True)
     prefill_consent_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    # Admin-flagged spam signup. Hidden from the admin Users table by
+    # default (eye toggle); nothing else changes — the account keeps
+    # whatever approved/plan state it had.
+    spam = db.Column(db.Boolean, nullable=False, default=False,
+                     server_default=db.text("false"))
 
     # All valid subscription plans (single source of truth).
     ALLOWED_PLANS = {"free", "alpha", "pro"}

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { FaTimesCircle, FaFilter, FaCaretDown, FaCaretUp } from "react-icons/fa";
+import { FaTimesCircle, FaFilter, FaCaretDown, FaCaretUp, FaEye, FaEyeSlash } from "react-icons/fa";
 import api from "../api";
 
 // Small header toggle that hides rows with $0 in its column.
@@ -364,6 +364,8 @@ function AdminPanel() {
   const [limitEdits, setLimitEdits] = useState({});
   // Column filters: hide rows with $0 in Spent / This Month (independent).
   const [hideZeroSpent, setHideZeroSpent] = useState(false);
+  // Admin-flagged spam signups are hidden by default (crossed-out eye).
+  const [showSpam, setShowSpam] = useState(false);
   const [hideZeroMonth, setHideZeroMonth] = useState(false);
   // Column sort: one of Spent / This Month at a time, toggling desc <-> asc.
   const [sortColumn, setSortColumn] = useState(null); // 'spent' | 'month' | null
@@ -409,6 +411,16 @@ function AdminPanel() {
     } catch (err) {
       console.error(err);
       setError("Error toggling user status.");
+    }
+  };
+
+  const toggleSpam = async (userId) => {
+    try {
+      await api.post(`/admin/users/${userId}/toggle_spam`);
+      fetchUsers();
+    } catch (err) {
+      console.error(err);
+      setError("Error toggling spam flag.");
     }
   };
 
@@ -488,17 +500,28 @@ function AdminPanel() {
   const patchPrefill = (userId, patch) =>
     setPrefill((prev) => ({ ...prev, [userId]: { ...(prev[userId] || {}), ...patch } }));
 
-  const openPrefill = (u) =>
-    patchPrefill(u.id, { open: true, handle: u.username || "", includeReplies: true, error: null });
+  // source: "ca" (Community Archive, free) | "x" (X API, paid, ≤3,200 posts)
+  const openPrefill = (u, source = "ca") =>
+    patchPrefill(u.id, {
+      open: true, source, handle: u.username || "", includeReplies: true,
+      maxTweets: "", check: null, status: null, result: null, error: null,
+    });
 
   const checkPrefill = async (userId) => {
     const form = prefill[userId] || {};
     patchPrefill(userId, { checking: true, check: null, error: null });
     try {
-      const res = await api.get("/admin/prefill/check", {
-        params: { handle: form.handle, user_id: userId },
-      });
-      patchPrefill(userId, { checking: false, check: res.data });
+      const res = form.source === "x"
+        ? await api.get("/admin/prefill/x/check", {
+          params: { handle: form.handle, user_id: userId, max_tweets: form.maxTweets || undefined },
+        })
+        : await api.get("/admin/prefill/check", {
+          params: { handle: form.handle, user_id: userId },
+        });
+      const patch = { checking: false, check: res.data };
+      // Default the X max input to what the timeline can actually serve.
+      if (form.source === "x" && !form.maxTweets) patch.maxTweets = String(res.data.fetchable || "");
+      patchPrefill(userId, patch);
     } catch (err) {
       patchPrefill(userId, {
         checking: false,
@@ -508,8 +531,18 @@ function AdminPanel() {
     }
   };
 
+  const xCheckLabel = (c) => {
+    const n = (v) => (v == null ? "?" : v.toLocaleString());
+    const parts = [`${n(c.tweet_count)} tweets on X`];
+    if (c.protected) parts.push("PROTECTED — timeline not readable");
+    else parts.push(`fetch up to ${n(c.fetchable)} (cap ${n(c.timeline_cap)}) ≈ $${(c.est_cost_usd || 0).toFixed(2)}`);
+    if (c.already_imported) parts.push(`${n(c.already_imported)} already imported`);
+    return parts.join(" · ");
+  };
+
   const checkLabel = (c) => {
     if (!c) return null;
+    if (c.timeline_cap != null) return xCheckLabel(c);
     const n = (v) => (v == null ? "?" : v.toLocaleString());
     const parts = [`${n(c.archived)} archived`];
     if (c.archived_live != null) parts.push(`(${n(c.archived_live)} live)`);
@@ -530,10 +563,16 @@ function AdminPanel() {
   const startPrefill = async (userId) => {
     const form = prefill[userId] || {};
     try {
-      const res = await api.post(`/admin/users/${userId}/prefill`, {
-        handle: form.handle,
-        include_replies: form.includeReplies !== false,
-      });
+      const res = form.source === "x"
+        ? await api.post(`/admin/users/${userId}/prefill-x`, {
+          handle: form.handle,
+          max_tweets: form.maxTweets ? Number(form.maxTweets) : undefined,
+          include_replies: form.includeReplies !== false,
+        })
+        : await api.post(`/admin/users/${userId}/prefill`, {
+          handle: form.handle,
+          include_replies: form.includeReplies !== false,
+        });
       patchPrefill(userId, { taskId: res.data.task_id, status: "queued", error: null, result: null });
     } catch (err) {
       patchPrefill(userId, { error: err.response?.data?.error || "Error starting pre-fill." });
@@ -575,6 +614,13 @@ function AdminPanel() {
     }
     if (p.status === "completed") {
       const r = p.result || {};
+      if (r.source === "x-api") {
+        return `Done: ${(r.created || 0).toLocaleString()} nodes from ${(r.fetched || 0).toLocaleString()} posts via X` +
+          ` (≈ $${(r.est_cost_usd || 0).toFixed(2)})` +
+          `${r.retweets_skipped ? `, ${r.retweets_skipped.toLocaleString()} retweets skipped` : ""}` +
+          `${r.skipped ? `, ${r.skipped} already imported` : ""}` +
+          `${r.profile_batch_queued ? " — batch profile queued" : " — below profile threshold"}`;
+      }
       const archived = r.archived != null ? ` of ${r.archived.toLocaleString()} archived` : "";
       const rts = r.retweets_skipped ? `, ${r.retweets_skipped.toLocaleString()} retweets skipped` : "";
       const reported = r.account_num_tweets != null && r.account_num_tweets !== r.archived
@@ -606,6 +652,7 @@ function AdminPanel() {
   };
 
   let displayedUsers = users
+    .filter((u) => showSpam || !u.spam)
     .filter((u) => !hideZeroSpent || (u.total_spending_usd || 0) > 0)
     .filter((u) => !hideZeroMonth || (u.current_month_spending_usd || 0) > 0);
   if (sortColumn) {
@@ -663,7 +710,22 @@ function AdminPanel() {
         <thead>
           <tr>
             <th style={{ border: "1px solid var(--border)", padding: "8px" }}>ID</th>
-            <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Username</th>
+            <th style={{ border: "1px solid var(--border)", padding: "8px", whiteSpace: "nowrap" }}>
+              Username
+              <button
+                type="button"
+                onClick={() => setShowSpam((v) => !v)}
+                title={showSpam ? "Showing spam accounts — click to hide" : "Spam accounts hidden — click to show"}
+                aria-label={showSpam ? "Hide spam accounts" : "Show spam accounts"}
+                style={{
+                  marginLeft: "6px", padding: 0, background: "none", border: "none",
+                  cursor: "pointer", verticalAlign: "middle", fontSize: "0.9em",
+                  color: showSpam ? "var(--accent)" : "var(--text-muted)",
+                }}
+              >
+                {showSpam ? <FaEye /> : <FaEyeSlash />}
+              </button>
+            </th>
             <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Approved</th>
             <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Plan</th>
             <th style={{ border: "1px solid var(--border)", padding: "8px" }}>Email</th>
@@ -713,7 +775,12 @@ function AdminPanel() {
           {displayedUsers.map((u) => (
             <tr key={u.id}>
               <td style={{ border: "1px solid var(--border)", padding: "8px" }}>{u.id}</td>
-              <td style={{ border: "1px solid var(--border)", padding: "8px" }}>{u.username}</td>
+              <td style={{ border: "1px solid var(--border)", padding: "8px" }}>
+                {u.username}
+                {u.spam && (
+                  <span style={{ marginLeft: "6px", fontSize: "0.75em", color: "var(--error)" }} title="Flagged as spam">spam</span>
+                )}
+              </td>
               <td style={{ border: "1px solid var(--border)", padding: "8px" }}>
                 {u.approved ? "Active" : "Inactive"}
               </td>
@@ -836,22 +903,48 @@ function AdminPanel() {
                   Update Email
                 </button>{" "}
                 <button
-                  onClick={() => openPrefill(u)}
+                  onClick={() => openPrefill(u, "ca")}
                   title="Import this account's public tweets from the Community Archive and queue a batch profile build"
                 >
                   Pre-fill from CA
+                </button>{" "}
+                <button
+                  onClick={() => openPrefill(u, "x")}
+                  title="Paid: pull the account's most recent posts from the X API (~$0.005/post, ≤3,200) and queue a batch profile build"
+                >
+                  Pre-fill from X
+                </button>{" "}
+                <button
+                  onClick={() => toggleSpam(u.id)}
+                  title={u.spam ? "Unmark as spam" : "Mark as spam (hides the row behind the eye toggle; does not deactivate)"}
+                  style={u.spam ? { color: "var(--error)" } : undefined}
+                >
+                  {u.spam ? "Not spam" : "Spam"}
                 </button>
                 {prefill[u.id]?.open && (
                   <div style={{ marginTop: "6px", display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap" }}>
                     <input
                       type="text"
                       value={prefill[u.id].handle || ""}
-                      placeholder="CA handle"
+                      placeholder={prefill[u.id].source === "x" ? "X handle" : "CA handle"}
                       onChange={(e) => patchPrefill(u.id, { handle: e.target.value, check: null })}
                       onKeyDown={(e) => { if (e.key === "Enter") startPrefill(u.id); }}
                       style={{ width: "140px", padding: "4px" }}
                       disabled={["queued", "running"].includes(prefill[u.id].status)}
                     />
+                    {prefill[u.id].source === "x" && (
+                      <input
+                        type="number"
+                        min="1"
+                        max={prefill[u.id].check?.fetchable || 3200}
+                        value={prefill[u.id].maxTweets || ""}
+                        placeholder="max (≤3200)"
+                        title="Most recent posts to fetch; capped at min(3200, account's tweet count)"
+                        onChange={(e) => patchPrefill(u.id, { maxTweets: e.target.value })}
+                        style={{ width: "110px", padding: "4px" }}
+                        disabled={["queued", "running"].includes(prefill[u.id].status)}
+                      />
+                    )}
                     <label style={{ fontSize: "0.85em", whiteSpace: "nowrap" }}>
                       <input
                         type="checkbox"
@@ -863,13 +956,15 @@ function AdminPanel() {
                     <button
                       onClick={() => checkPrefill(u.id)}
                       disabled={prefill[u.id].checking || ["queued", "running"].includes(prefill[u.id].status)}
-                      title="What the Community Archive actually holds for this handle (before paying for an import)"
+                      title={prefill[u.id].source === "x"
+                        ? "Look up the account on X: tweet count, protected?, fetchable posts and cost (one ~$0.01 user read)"
+                        : "What the Community Archive actually holds for this handle (before paying for an import)"}
                     >
                       {prefill[u.id].checking ? "Checking…" : "Check"}
                     </button>
                     <button
                       onClick={() => startPrefill(u.id)}
-                      disabled={["queued", "running"].includes(prefill[u.id].status)}
+                      disabled={["queued", "running"].includes(prefill[u.id].status) || (prefill[u.id].source === "x" && prefill[u.id].check?.protected)}
                       style={prefill[u.id].check && prefill[u.id].check.est_tokens != null && prefill[u.id].check.est_tokens < (prefill[u.id].check.profile_threshold_tokens || 10000) ? { opacity: 0.6 } : undefined}
                     >
                       Start
