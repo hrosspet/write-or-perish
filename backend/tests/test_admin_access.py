@@ -274,6 +274,29 @@ class TestProfileStatus:
         assert rows["pending"]["profile"]["waiting"] is None
 
 
+class TestBuildProfile:
+    def test_force_build_sets_flags_and_seeds(self, app, users, monkeypatch):
+        from unittest.mock import MagicMock
+        from backend.tasks import profile_batch as pb
+        admin = users["renamed_admin"]
+        small = User(username="small", approved=True)
+        _db.session.add(small); _db.session.commit()
+        delay = MagicMock()
+        monkeypatch.setattr(pb.seed_profile_batch_for_user, "delay", delay)
+        client = app.test_client()
+        _login(client, admin.id)
+        r = client.post(f"/api/admin/users/{small.id}/build_profile")
+        assert r.status_code == 202 and r.json["queued"] is True
+        fresh = User.query.get(small.id)
+        assert fresh.profile_needs_full_regen is True and fresh.profile_force_batch is True
+        delay.assert_called_once_with(small.id)
+        # In flight → no double seed.
+        fresh.profile_batch_pending = True; _db.session.commit()
+        r = client.post(f"/api/admin/users/{small.id}/build_profile")
+        assert r.status_code == 200 and r.json["queued"] is False
+        assert delay.call_count == 1
+
+
 class TestPrefillCheck:
     def test_check_reports_coverage_and_already_imported(self, app, users, monkeypatch):
         from backend.utils import community_archive as ca

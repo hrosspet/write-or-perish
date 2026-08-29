@@ -564,6 +564,17 @@ function AdminPanel() {
     }
   };
 
+  const buildProfile = async (userId) => {
+    try {
+      const res = await api.post(`/admin/users/${userId}/build_profile`);
+      if (!res.data.queued) setError(res.data.message);
+      fetchUsers();
+    } catch (err) {
+      console.error(err);
+      setError("Error queueing profile build.");
+    }
+  };
+
   const toggleSpam = async (userId) => {
     try {
       await api.post(`/admin/users/${userId}/toggle_spam`);
@@ -1075,6 +1086,13 @@ function AdminPanel() {
                   title="Paid: pull the account's most recent posts from the X API (~$0.005/post incl. retweets, ≤3,200; retweets are dropped on import) and queue a batch profile build"
                 >
                   Pre-fill from X
+                </button>{" "}
+                <button
+                  onClick={() => buildProfile(u.id)}
+                  disabled={u.profile_batch_pending}
+                  title="Force a from-scratch batch profile build now, ignoring the token gate (for small corpora you want profiled anyway)"
+                >
+                  Build profile
                 </button>{" "}
                 <button
                   onClick={() => toggleSpam(u.id)}

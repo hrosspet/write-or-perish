@@ -215,6 +215,27 @@ def activity():
     return jsonify(activity_report(days=days)), 200
 
 
+@admin_bp.route("/users/<int:user_id>/build_profile", methods=["POST"])
+@login_required
+@admin_required
+def build_profile(user_id):
+    """Force a from-scratch BATCH profile build regardless of the token
+    gate (a few-thousand-token corpus the admin wants profiled anyway).
+    Sets the full-regen flag (which _should_seed honours unconditionally
+    and which makes the first chunk build at any size), pins the user to
+    the batch path, and seeds immediately. Idempotent while a job is in
+    flight."""
+    user = User.query.get_or_404(user_id)
+    if user.profile_batch_pending:
+        return jsonify({"message": "A batch step is already in flight.", "queued": False}), 200
+    user.profile_needs_full_regen = True
+    user.profile_force_batch = True
+    db.session.commit()
+    from backend.tasks.profile_batch import seed_profile_batch_for_user
+    seed_profile_batch_for_user.delay(user.id)
+    return jsonify({"message": "Batch profile build queued.", "queued": True}), 202
+
+
 @admin_bp.route("/users/<int:user_id>/toggle_spam", methods=["POST"])
 @login_required
 @admin_required
