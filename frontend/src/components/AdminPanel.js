@@ -382,7 +382,12 @@ function AdminActivity() {
                     {u.prefill_consent === "no" && <span title="declined tweet seed" style={{ color: "var(--text-muted)" }}> ✗</span>}
                   </td>
                   <td style={cell} title={u.activated_at || ""}>{relTime(u.activated_at) || "—"}</td>
-                  <td style={cell} title={u.last_seen_path || (u.accepted_terms_at ? "no last_seen yet — accepted terms " + u.accepted_terms_at : "")}>
+                  <td
+                    style={cell}
+                    title={u.last_seen_at
+                      ? `last seen ${u.last_seen_at} UTC · ${u.last_seen_path || "area unknown (only dashboard/notification polls so far)"}`
+                      : (u.accepted_terms_at ? "no last_seen yet — accepted terms " + u.accepted_terms_at : "never logged in")}
+                  >
                     {u.last_seen_at
                       ? <>{relTime(u.last_seen_at)}{pathArea(u.last_seen_path) && <span style={{ color: "var(--text-muted)" }}> · {pathArea(u.last_seen_path)}</span>}</>
                       : u.accepted_terms_at
