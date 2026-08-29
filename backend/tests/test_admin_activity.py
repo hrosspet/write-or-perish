@@ -23,21 +23,26 @@ def _cost(user, when, rtype, micro=1000, audio=None):
                                audio_duration_seconds=audio, created_at=when))
 
 
-def test_touch_last_seen_throttles_and_keeps_informative_path(app):  # noqa: F811
+def test_touch_last_seen_throttles_and_tracks_area(app):  # noqa: F811
     u = User(username="t", approved=True)
     _db.session.add(u); _db.session.commit()
     t0 = datetime(2026, 8, 29, 10, 0, 0)
-    assert act.touch_last_seen(u, "/api/profile/versions", now=t0) is True
-    assert (u.last_seen_at, u.last_seen_path) == (t0, "/api/profile/versions")
-    # Within the interval: no write at all.
-    assert act.touch_last_seen(u, "/api/nodes/1", now=t0 + timedelta(minutes=2)) is False
+    # App bootstrap fires first (polling path): time written, area stays unknown.
+    assert act.touch_last_seen(u, "/api/dashboard", now=t0) is True
+    assert (u.last_seen_at, u.last_seen_path) == (t0, None)
+    # Profile request 200ms later, inside the interval: a NEW area always lands.
+    assert act.touch_last_seen(u, "/api/profile/versions", now=t0 + timedelta(seconds=1)) is True
     assert u.last_seen_path == "/api/profile/versions"
-    # After the interval: timestamp moves; a polling path doesn't overwrite the area.
-    t1 = t0 + timedelta(minutes=6)
+    # Same area again inside the interval: throttled, no write.
+    assert act.touch_last_seen(u, "/api/profile/versions", now=t0 + timedelta(minutes=2)) is False
+    assert u.last_seen_at == t0 + timedelta(seconds=1)
+    # Polls inside the interval: throttled; after it: time moves, area kept.
+    assert act.touch_last_seen(u, "/api/notifications", now=t0 + timedelta(minutes=3)) is False
+    t1 = t0 + timedelta(minutes=7)
     assert act.touch_last_seen(u, "/api/dashboard", now=t1) is True
     assert (u.last_seen_at, u.last_seen_path) == (t1, "/api/profile/versions")
-    t2 = t1 + timedelta(minutes=6)
-    assert act.touch_last_seen(u, "/api/nodes/1", now=t2) is True
+    # Moving to the editor: written immediately even inside the interval.
+    assert act.touch_last_seen(u, "/api/nodes/1", now=t1 + timedelta(seconds=5)) is True
     assert u.last_seen_path == "/api/nodes/1"
 
 

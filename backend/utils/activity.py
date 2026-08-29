@@ -26,16 +26,20 @@ IMPORT_ORIGINS = ("twitter", "chatgpt", "claude", "markdown")
 
 
 def touch_last_seen(user, path, now=None):
-    """Record an authenticated request. One write per TOUCH_INTERVAL;
-    returns True when it wrote. Never raises (a failed touch must not
-    break the request)."""
+    """Record an authenticated request. Writes when the user moved to a new
+    informative area (so a profile visit lands even when the app's
+    /api/dashboard bootstrap fired a moment earlier), otherwise at most
+    once per TOUCH_INTERVAL. Returns True when it wrote. Never raises."""
     now = now or datetime.utcnow()
-    if user.last_seen_at and now - user.last_seen_at < TOUCH_INTERVAL:
+    informative = bool(path) and not path.startswith(UNINFORMATIVE_PREFIXES)
+    area = path[:128] if informative else None
+    moved = informative and area != user.last_seen_path
+    if not moved and user.last_seen_at and now - user.last_seen_at < TOUCH_INTERVAL:
         return False
     try:
         user.last_seen_at = now
-        if path and not path.startswith(UNINFORMATIVE_PREFIXES):
-            user.last_seen_path = path[:128]
+        if informative:
+            user.last_seen_path = area
         db.session.commit()
         return True
     except Exception:
