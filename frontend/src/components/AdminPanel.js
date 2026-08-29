@@ -385,7 +385,7 @@ function AdminActivity() {
                   <td
                     style={cell}
                     title={u.last_seen_at
-                      ? `last seen ${u.last_seen_at} UTC · ${u.last_seen_path || "area unknown (only dashboard/notification polls so far)"}`
+                      ? `last seen ${u.last_seen_at} UTC · ${u.last_seen_path ? `last in ${u.last_seen_path}` : "loaded the app, no page recorded yet"}`
                       : (u.accepted_terms_at ? "no last_seen yet — accepted terms " + u.accepted_terms_at : "never logged in")}
                   >
                     {u.last_seen_at
