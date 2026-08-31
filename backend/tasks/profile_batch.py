@@ -621,7 +621,7 @@ def _poll_profile_batches():
                 from backend.tasks import intentions as intentions_mod
                 try:
                     if result is None:
-                        intentions_mod.handle_failed_intentions_item(user, item, keys)
+                        intentions_mod.handle_failed_intentions_item(user, item, job, keys)
                     else:
                         intentions_mod.apply_intentions_item(user, item, result)
                 except Exception as e:

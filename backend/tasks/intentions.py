@@ -35,6 +35,13 @@ PROMPT_FILE = "intentions_detection_public.txt"
 KIND = "intentions"
 BATCH_OUTPUT_TOKENS = 8192     # ample for a ~14-item intentions list
 PROBE_THRESHOLD_TOKENS = 560_000
+# Stored token_counts are chars/4-ish; on tweet corpora the real tokenizer
+# runs ~3x that (Rich: 6.26M chars -> 4.93M real = 3.1x; config's Sol note:
+# 3.2x). Pre-filled accounts are tweet corpora, so their DB estimate is
+# scaled by this before the probe-threshold check — otherwise a 20k-tweet
+# account sails under the threshold and straight into a context overflow
+# (user 110, 2026-08-31). Heuristic — tune if measurements say otherwise.
+TWEET_TOKEN_UNDERESTIMATE = 3.0
 
 
 def _template_and_params():
@@ -151,6 +158,8 @@ def start_infer_intentions_impl(user_id):
     batch_keys = apply_batch_key_override(
         get_api_keys_for_usage(config, "chat"), config)
     db_tokens = _count_total_eligible_tokens(user.id)
+    if user.prefilled_handle:
+        db_tokens = int(db_tokens * TWEET_TOKEN_UNDERESTIMATE)
 
     if db_tokens <= PROBE_THRESHOLD_TOKENS:
         return "batch", _submit(user, template, budget, chronological,
@@ -193,20 +202,52 @@ def apply_intentions_item(user, item, result):
     return saved
 
 
-def handle_failed_intentions_item(user, item, keys):
+def _failed_item_tokens(provider_key, batch_id, custom_id, keys):
+    """Best-effort: read the failed batch item's error and pull the real
+    token counts out of it (Anthropic reports "N tokens > M maximum").
+    Returns (actual, maximum) or (None, None). Never raises."""
+    import re
+    try:
+        if provider_key == "anthropic":
+            from anthropic import Anthropic
+            client = Anthropic(api_key=keys.get("anthropic"))
+            for entry in client.messages.batches.results(batch_id):
+                if entry.custom_id != custom_id:
+                    continue
+                if entry.result.type == "succeeded":
+                    return None, None
+                err = getattr(entry.result, "error", None)
+                msg = str(err) if err is not None else str(entry.result.type)
+                mt = re.search(r"(\d+) tokens > (\d+) maximum", msg)
+                if mt:
+                    return int(mt.group(1)), int(mt.group(2))
+    except Exception:  # noqa: BLE001 — calibration helper must never raise
+        pass
+    return None, None
+
+
+def handle_failed_intentions_item(user, item, job, keys):
     """Called by the poller when a kind="intentions" item ended without a
-    result. One calibrated resubmit — a new persisted job — when possible;
-    otherwise just log (the admin re-clicks the button)."""
+    result. One calibrated resubmit — a new persisted job — sized from the
+    provider's real token count when the error carries it (Anthropic does),
+    else a 70% shrink. A resubmitted item that fails again gives up."""
+    from backend.utils.tokens import reduce_export_tokens
     if item.get("resubmitted"):
         logger.warning("intentions user %s: batch failed again after resubmit — giving up", user.id)
         return
-    # No token counts in the failure payload here (llm_batch doesn't parse
-    # them); shrink deterministically instead: 70% of the prior budget.
     template, cap, chronological = _template_and_params()
     prior = item.get("budget") or cap
-    calibrated = max(int(prior * 0.7), 10_000)
-    logger.warning("intentions user %s: batch item failed — resubmitting once at budget=%s",
-                   user.id, calibrated)
+    actual, maximum = _failed_item_tokens(
+        job.provider_key, job.batch_id, item["custom_id"], keys)
+    if actual and maximum:
+        calibrated = reduce_export_tokens(prior, actual, maximum,
+                                          export_content=None)
+        label = f"real={actual} > max={maximum}"
+    else:
+        calibrated = max(int(prior * 0.7), 10_000)
+        label = "no token count in error — 70% shrink"
+    logger.warning("intentions user %s: batch item failed (%s) — resubmitting once at budget=%s",
+                   user.id, label, calibrated)
     try:
         _submit(user, template, calibrated, chronological, keys,
                 "overflow-recalibrated")

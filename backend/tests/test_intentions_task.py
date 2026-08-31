@@ -101,17 +101,62 @@ def test_apply_intentions_item_saves_at_batch_price(app, wired):  # noqa: F811
     assert UserArtifact.query.filter_by(user_id=u.id, kind="intentions").count() == 1
 
 
-def test_failed_item_resubmits_once_at_reduced_budget(app, wired):  # noqa: F811
+def _job_for(item):
+    from datetime import datetime
+    j = ProfileBatchJob(provider_key="anthropic", batch_id="b-old",
+                        status="pending", items=[item], submitted_at=datetime.utcnow())
+    _db.session.add(j)
+    _db.session.commit()
+    return j
+
+
+def test_failed_item_resubmits_calibrated_from_real_count(app, wired, monkeypatch):  # noqa: F811
     u = _make_user("erin")
     _db.session.commit()
     item = {"custom_id": f"int-u{u.id}", "user_id": u.id, "kind": "intentions",
             "budget": 1_000_000, "resubmitted": False}
-    it.handle_failed_intentions_item(u, item, {})
-    job = ProfileBatchJob.query.filter_by(status="pending").one()
-    assert job.items[0]["resubmitted"] is True and job.items[0]["budget"] == 700_000
+    job = _job_for(item)
+    monkeypatch.setattr(it, "_failed_item_tokens", lambda pk, bid, cid, keys: (2_300_000, 1_000_000))
+    it.handle_failed_intentions_item(u, item, job, {})
+    new = ProfileBatchJob.query.filter(ProfileBatchJob.batch_id != "b-old").one()
+    assert new.items[0]["resubmitted"] is True
+    assert new.items[0]["budget"] < 500_000  # scaled by the real overflow ratio, not 70%
     # A failure of the resubmitted item gives up (no third job).
-    it.handle_failed_intentions_item(u, job.items[0], {})
-    assert ProfileBatchJob.query.count() == 1
+    it.handle_failed_intentions_item(u, new.items[0], new, {})
+    assert ProfileBatchJob.query.count() == 2
+
+
+def test_failed_item_falls_back_to_70pct_without_counts(app, wired, monkeypatch):  # noqa: F811
+    u = _make_user("gita")
+    _db.session.commit()
+    item = {"custom_id": f"int-u{u.id}", "user_id": u.id, "kind": "intentions",
+            "budget": 1_000_000, "resubmitted": False}
+    job = _job_for(item)
+    monkeypatch.setattr(it, "_failed_item_tokens", lambda pk, bid, cid, keys: (None, None))
+    it.handle_failed_intentions_item(u, item, job, {})
+    new = ProfileBatchJob.query.filter(ProfileBatchJob.batch_id != "b-old").one()
+    assert new.items[0]["budget"] == 700_000
+
+
+def test_prefilled_account_estimate_scaled_into_probe(app, wired, monkeypatch):  # noqa: F811
+    """A 20k-tweet CA pre-fill: DB estimate ~200k (chars/4) is really ~600k+
+    — the x3 tweet scaling must push it over the probe threshold instead of
+    submitting a full-cap batch that overflows (user 110, 2026-08-31)."""
+    import backend.tasks.recent_context as rc
+    import backend.llm_providers as lp
+    monkeypatch.setattr(rc, "_count_total_eligible_tokens", lambda uid: 200_000)
+    monkeypatch.setattr(lp.LLMProvider, "get_completion", staticmethod(
+        lambda model_id, messages, keys: (_ for _ in ()).throw(
+            lp.PromptTooLongError(actual_tokens=1_400_000, max_tokens=1_000_000))))
+    u = _make_user("hana")
+    u.prefilled_handle = "hana"
+    _db.session.commit()
+    kind, ref = it.start_infer_intentions_impl(u.id)
+    assert kind == "batch" and ref["item"]["budget"] < 1_000_000  # probed + calibrated
+    o = _make_user("iris")  # organic account, same estimate: no scaling, direct batch
+    _db.session.commit()
+    kind, ref = it.start_infer_intentions_impl(o.id)
+    assert kind == "batch" and ref["item"]["budget"] == 1_000_000
 
 
 def test_opted_out_user_refused(app, wired):  # noqa: F811

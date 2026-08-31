@@ -545,7 +545,7 @@ def test_poll_routes_intentions_items_without_touching_profile_flags(app, monkey
     db.session.commit()
     failed = []
     monkeypatch.setattr(intentions_mod, "handle_failed_intentions_item",
-                        lambda user, itm, keys: failed.append(user.id))
+                        lambda user, itm, job, keys: failed.append(user.id))
     monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: ({}, {}, {}))
     pb._poll_profile_batches()
     assert failed == [u.id]
