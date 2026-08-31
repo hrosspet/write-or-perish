@@ -738,6 +738,18 @@ class UserAIPreferences(db.Model):
         return decrypt_content(self.content)
 
 
+class ArtifactView(db.Model):
+    """One row per artifact open in the UI (admin Activity monitoring —
+    e.g. "did they check their intentions?"). Written by
+    POST /api/artifacts/<kind>/viewed, pinged once per kind per page
+    visit; never read by the product itself."""
+    __tablename__ = "artifact_view"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
+    kind = db.Column(db.String(48), nullable=False)
+    viewed_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+
+
 class UserArtifact(db.Model):
     """Generic named user artifact (issue #158): "memory", "scratchpad",
     and user/LLM-created artifacts.

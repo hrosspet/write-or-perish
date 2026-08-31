@@ -366,13 +366,14 @@ function AdminActivity() {
                 <th style={th} title="Transcribed voice minutes since activation">voice</th>
                 <th style={th} title="Nodes imported by the user (archives) since activation">imports</th>
                 <th style={th} title="Profile versions created since activation / latest">profile</th>
+                <th style={th} title="Artifacts opened since activation (views · most recent first); hover a row for last-view times">artifacts</th>
                 <th style={th} title="Came back the day after activation / any time in days 2–7">d1 / d7</th>
                 <th style={th} title="User-initiated spend only (conversation, transcription, TTS, search) since activation">$ own</th>
               </tr>
             </thead>
             <tbody>
               {users.length === 0 && (
-                <tr><td style={cell} colSpan={13}><span style={{ color: "var(--text-muted)" }}>No accounts in this cohort.</span></td></tr>
+                <tr><td style={cell} colSpan={14}><span style={{ color: "var(--text-muted)" }}>No accounts in this cohort.</span></td></tr>
               )}
               {users.map((u) => (
                 <tr key={u.id}>
@@ -414,6 +415,14 @@ function AdminActivity() {
                   <td style={cell}>{u.voice_minutes ? `${u.voice_minutes}m` : "—"}</td>
                   <td style={cell}>{u.imports || "—"}</td>
                   <td style={cell} title={u.latest_profile_at || ""}>{u.profile_versions_since_activation || "—"}{u.latest_profile_at ? <span style={{ color: "var(--text-muted)" }}> · {relTime(u.latest_profile_at)}</span> : null}</td>
+                  <td style={cell} title={(u.artifact_views || []).map((v) => `${v.kind} ×${v.count} — last ${relTime(v.last)}`).join("\n")}>
+                    {(u.artifact_views || []).length === 0 ? "—" : (
+                      <>
+                        {u.artifact_views.slice(0, 2).map((v) => `${v.kind} ×${v.count}`).join(", ")}
+                        {u.artifact_views.length > 2 ? ` +${u.artifact_views.length - 2}` : ""}
+                      </>
+                    )}
+                  </td>
                   <td style={cell}>{u.day1_return ? "✓" : "○"} / {u.day7_return ? "✓" : "○"}</td>
                   <td style={cell}>${(u.user_spend_usd || 0).toFixed(2)}</td>
                 </tr>

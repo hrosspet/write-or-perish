@@ -4,7 +4,7 @@ last-seen touch, and approved_at stamping on activation."""
 from datetime import datetime, timedelta
 
 from backend.tests.test_admin_access import app, users, _login, _db  # noqa: F401
-from backend.models import User, Node, APICostLog, UserProfile
+from backend.models import User, Node, APICostLog, ArtifactView, UserProfile
 from backend.utils import activity as act
 
 
@@ -77,6 +77,12 @@ def test_activity_report_counts_since_activation(app):  # noqa: F811
     p = UserProfile(user_id=u.id, generated_by="m", tokens_used=0, generation_type="initial",
                     created_at=d1 + timedelta(hours=1))
     p.set_content("p"); _db.session.add(p)
+    # Artifact views: intentions twice (one before activation — ignored), memory once.
+    _db.session.add_all([
+        ArtifactView(user_id=u.id, kind="intentions", viewed_at=act_at - timedelta(days=1)),
+        ArtifactView(user_id=u.id, kind="intentions", viewed_at=d1),
+        ArtifactView(user_id=u.id, kind="intentions", viewed_at=d3),
+        ArtifactView(user_id=u.id, kind="memory", viewed_at=d1)])
     _db.session.commit()
 
     rep = act.activity_report(days=7, now=now)
@@ -95,8 +101,12 @@ def test_activity_report_counts_since_activation(app):  # noqa: F811
     by_day = {c["d"]: c for c in r["strip"]}
     assert by_day[d1.date().isoformat()] == {"d": d1.date().isoformat(), "w": 2, "a": 1, "v": 1, "pre": False}
     assert by_day[(act_at - timedelta(days=1)).date().isoformat()]["pre"] is True
+    assert r["artifact_views"] == [
+        {"kind": "intentions", "count": 2, "last": d3.isoformat()},
+        {"kind": "memory", "count": 1, "last": d1.isoformat()}]
     q = next(x for x in rep["users"] if x["username"] == "quiet")
     assert q["seeded"] is None and q["writes"] == 0 and q["last_seen_at"] is None
+    assert q["artifact_views"] == []
     assert q["day1_return"] is False and q["active_days"] == 0
 
 

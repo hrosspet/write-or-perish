@@ -68,6 +68,15 @@ export default function ArtifactsPage() {
     fetchArtifacts();
   }, [fetchArtifacts]);
 
+  // View ping for the admin Activity tab — once per kind per visit,
+  // fire-and-forget (a failure must never affect the page).
+  const viewedKindsRef = useRef(new Set());
+  useEffect(() => {
+    if (!activeKind || creatingKind || viewedKindsRef.current.has(activeKind)) return;
+    viewedKindsRef.current.add(activeKind);
+    api.post(`/artifacts/${activeKind}/viewed`).catch(() => {});
+  }, [activeKind, creatingKind]);
+
   // Deep-link: /artifacts/:kind selects that artifact (e.g. predictions, or
   // a custom one opened from the nav dropdown). Switching kinds always
   // leaves edit mode so one artifact's draft can't leak onto another.

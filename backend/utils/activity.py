@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func
 
 from backend.extensions import db
-from backend.models import APICostLog, Node, User, UserProfile
+from backend.models import APICostLog, ArtifactView, Node, User, UserProfile
 
 TOUCH_INTERVAL = timedelta(minutes=5)
 # Paths the frontend polls or hits on every page — they don't say where
@@ -101,6 +101,13 @@ def activity_report(days=14, now=None):
             APICostLog.created_at >= since).scalar() or 0
         imports = Node.query.filter(*own, Node.origin.in_(IMPORT_ORIGINS),
                                     Node.created_at >= since).count()
+        views = (db.session.query(ArtifactView.kind, func.count(), func.max(ArtifactView.viewed_at))
+                 .filter(ArtifactView.user_id == u.id, ArtifactView.viewed_at >= since)
+                 .group_by(ArtifactView.kind).all())
+        artifact_views = sorted(
+            ({"kind": k, "count": n, "last": last.isoformat() if last else None}
+             for k, n, last in views),
+            key=lambda v: v["last"] or "", reverse=True)
         profiles_since = UserProfile.query.filter(
             UserProfile.user_id == u.id, UserProfile.created_at >= since).count()
         latest_profile = (UserProfile.query.filter_by(user_id=u.id)
@@ -121,6 +128,7 @@ def activity_report(days=14, now=None):
             "voice_nodes": sum(voice_by_day.values()),
             "voice_minutes": round(voice_sec / 60, 1),
             "imports": imports,
+            "artifact_views": artifact_views,
             "profile_versions_since_activation": profiles_since,
             "latest_profile_at": latest_profile.created_at.isoformat() if latest_profile else None,
             "user_spend_usd": user_spend / 1_000_000,

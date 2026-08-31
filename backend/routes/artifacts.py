@@ -95,6 +95,24 @@ def get_artifact(kind):
     ), 200
 
 
+@artifacts_bp.route("/<kind>/viewed", methods=["POST"])
+@login_required
+def artifact_viewed(kind):
+    """View ping from the artifacts page (once per kind per visit) — feeds
+    the admin Activity tab. Fire-and-forget on the client; errors here
+    must never surface to the user."""
+    from backend.models import ArtifactView
+    kind = (kind or "").strip()[:48]
+    if not kind:
+        return "", 204
+    try:
+        db.session.add(ArtifactView(user_id=current_user.id, kind=kind))
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+    return "", 204
+
+
 @artifacts_bp.route("/<kind>", methods=["PUT"])
 @login_required
 def update_artifact(kind):
