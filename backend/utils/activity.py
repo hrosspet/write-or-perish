@@ -17,7 +17,8 @@ TOUCH_INTERVAL = timedelta(minutes=5)
 # the person is, so they never overwrite last_seen_path (they still
 # refresh last_seen_at).
 UNINFORMATIVE_PREFIXES = ("/api/dashboard", "/api/notifications", "/api/ready",
-                          "/api/health", "/api/terms", "/api/changelog")
+                          "/api/health", "/api/terms", "/api/changelog",
+                          "/api/updates")  # App.js fetches /updates once per load
 # User-initiated cost rows — what the person actually did. Everything
 # else in api_cost_log is automation (profile/batch/embedding/summaries,
 # pre-fill, bookmarks, polls, cache warming).

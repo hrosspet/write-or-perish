@@ -36,8 +36,9 @@ def test_touch_last_seen_throttles_and_tracks_area(app):  # noqa: F811
     # Same area again inside the interval: throttled, no write.
     assert act.touch_last_seen(u, "/api/profile/versions", now=t0 + timedelta(minutes=2)) is False
     assert u.last_seen_at == t0 + timedelta(seconds=1)
-    # Polls inside the interval: throttled; after it: time moves, area kept.
+    # Polls/bootstraps inside the interval: throttled; after it: time moves, area kept.
     assert act.touch_last_seen(u, "/api/notifications", now=t0 + timedelta(minutes=3)) is False
+    assert act.touch_last_seen(u, "/api/updates", now=t0 + timedelta(minutes=3)) is False
     t1 = t0 + timedelta(minutes=7)
     assert act.touch_last_seen(u, "/api/dashboard", now=t1) is True
     assert (u.last_seen_at, u.last_seen_path) == (t1, "/api/profile/versions")
