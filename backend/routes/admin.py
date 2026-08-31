@@ -236,6 +236,23 @@ def build_profile(user_id):
     return jsonify({"message": "Batch profile build queued.", "queued": True}), 202
 
 
+@admin_bp.route("/users/<int:user_id>/infer_intentions", methods=["POST"])
+@login_required
+@admin_required
+def infer_intentions_route(user_id):
+    """Generate the intentions artifact from a pre-filled account's public
+    tweets (public fork of the tested intentions_detection prompt; whole
+    corpus, newest-kept shrink loop). Returns {"task_id"} — poll
+    /admin/prefill/status/<task_id>."""
+    from backend.utils.privacy import AI_ALLOWED
+    user = User.query.get_or_404(user_id)
+    if user.default_ai_usage not in AI_ALLOWED:
+        return jsonify({"error": "User has opted out of AI usage."}), 400
+    from backend.tasks.intentions import infer_intentions
+    task = infer_intentions.delay(user.id)
+    return jsonify({"task_id": task.id}), 202
+
+
 @admin_bp.route("/users/<int:user_id>/toggle_spam", methods=["POST"])
 @login_required
 @admin_required

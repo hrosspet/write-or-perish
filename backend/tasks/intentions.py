@@ -1,0 +1,231 @@
+"""Admin "Infer intentions": generate the intentions artifact for a
+pre-filled account from its PUBLIC tweets, via the Batch API (~50%
+cheaper), using the public fork of the tested intentions_detection prompt.
+
+Mirrors the --batch mode of backend/scripts/backfill_intentions.py. A batch
+can't retry-shrink mid-flight, so sizing happens BEFORE submit:
+  * cheap DB token estimate <= PROBE_THRESHOLD: the corpus comfortably fits
+    the 1M context at the prompt's own budget — submit the batch directly.
+  * estimate > threshold: one sync calibration probe at full budget; its
+    "prompt too long" rejection is unbilled and carries the provider's real
+    token count, which sizes the batch export (newest kept, oldest cut) to
+    fit. A probe that unexpectedly fits is saved synchronously (full price).
+If the batch item itself still overflows, it is resubmitted once, calibrated
+from the reported count.
+
+Model is PINNED to claude-opus-4-8 (flat pricing across the 1M window; the
+prompt was tested on it) — deliberately no preferred_model override, so
+long-context-premium models (gpt-5.6-sol) can never be picked.
+
+The task then polls for the batch via Celery retries (60s apart, <=24h) and
+saves a NEW version of the "intentions" UserArtifact plus an APICostLog row
+(request_type="intentions_infer").
+"""
+from celery.utils.log import get_task_logger
+
+from backend.celery_app import celery, flask_app
+
+logger = get_task_logger(__name__)
+
+MODEL_ID = "claude-opus-4.8"  # pinned (config key; api_model is claude-opus-4-8) — see module docstring
+PROMPT_FILE = "intentions_detection_public.txt"
+KIND = "intentions"
+BATCH_OUTPUT_TOKENS = 8192     # ample for a ~14-item intentions list
+PROBE_THRESHOLD_TOKENS = 560_000
+POLL_COUNTDOWN = 60
+MAX_POLLS = 1440               # 24h provider SLA
+
+
+def _template_and_params():
+    import os
+    from backend.utils.placeholders import (
+        USER_EXPORT_PATTERN, parse_placeholder_params, parse_max_export_tokens)
+    # Relative to the backend package, not current_app.root_path — test
+    # apps have a different root.
+    prompts_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "prompts")
+    with open(os.path.join(prompts_dir, PROMPT_FILE), encoding="utf-8") as f:
+        template = f.read()
+    m = USER_EXPORT_PATTERN.search(template)
+    if not m:
+        raise RuntimeError(f"{PROMPT_FILE} has no {{user_export}} placeholder")
+    params = parse_placeholder_params(m.group(1) or "")
+    return (template, parse_max_export_tokens(params.get("max_export_tokens")),
+            params.get("keep") == "oldest")
+
+
+def _build_messages(user, template, budget, chronological):
+    from backend.routes.export_data import build_user_export_content
+    from backend.utils.placeholders import USER_EXPORT_PATTERN
+    from backend.utils.tokens import approximate_token_count
+    export = build_user_export_content(
+        user, max_tokens=budget, filter_ai_usage=True,
+        chronological_order=chronological, include_strategy="engaged_threads")
+    if not export:
+        return None
+    prompt = USER_EXPORT_PATTERN.sub(lambda _m: export, template, count=1)
+    messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+    return messages, export, approximate_token_count(export)
+
+
+def _save(user, content, input_tokens, output_tokens, total_tokens, batch):
+    from backend.extensions import db
+    from backend.models import UserArtifact, APICostLog
+    from backend.utils.cost import calculate_llm_cost_microdollars
+    cost = calculate_llm_cost_microdollars(
+        MODEL_ID, input_tokens, output_tokens, batch=batch)
+    db.session.add(APICostLog(
+        user_id=user.id, model_id=MODEL_ID, request_type="intentions_infer",
+        input_tokens=input_tokens, output_tokens=output_tokens,
+        cost_microdollars=cost))
+    artifact = UserArtifact(
+        user_id=user.id, kind=KIND,
+        title=UserArtifact.DEFAULT_KINDS.get(KIND, "Intentions"),
+        generated_by=MODEL_ID, tokens_used=total_tokens,
+        ai_usage=user.default_ai_usage)
+    artifact.set_content(content)
+    db.session.add(artifact)
+    db.session.commit()
+    version = UserArtifact.query.filter_by(user_id=user.id, kind=KIND).count()
+    return {"version": version, "cost_usd": round(cost / 1e6, 4),
+            "llm_tokens": total_tokens, "batch": batch}
+
+
+def _submit(user, template, budget, chronological, keys, label):
+    """Build at `budget` and submit a one-user batch. Returns a batch ref."""
+    from flask import current_app
+    from backend.utils.llm_batch import batch_submit
+    built = _build_messages(user, template, budget, chronological)
+    if built is None:
+        raise RuntimeError(f"user {user.id}: no AI-readable archive")
+    messages, _, est = built
+    cfg = current_app.config["SUPPORTED_MODELS"][MODEL_ID]
+    req = {"custom_id": f"int-u{user.id}", "model_id": MODEL_ID,
+           "api_model": cfg["api_model"], "messages": messages,
+           "max_tokens": BATCH_OUTPUT_TOKENS}
+    batch_ids = batch_submit({cfg["provider"]: [req]}, keys, "intentions")
+    if not batch_ids:
+        raise RuntimeError(f"user {user.id}: batch submit failed (see logs)")
+    provider_key, batch_id = next(iter(batch_ids.items()))
+    logger.info("intentions user %s: submitted batch %s (%s export ~%s est tokens, budget=%s)",
+                user.id, batch_id, label, est, budget)
+    return {"provider_key": provider_key, "batch_id": batch_id,
+            "custom_id": req["custom_id"], "budget": budget,
+            "resubmitted": label == "overflow-recalibrated"}
+
+
+def start_infer_intentions_impl(user_id):
+    """Size (maybe probe) and submit. Returns ("done", result) when the
+    probe unexpectedly fit (saved synchronously), else ("batch", ref)."""
+    from flask import current_app
+    from backend.models import User
+    from backend.utils.api_keys import get_api_keys_for_usage
+    from backend.utils.llm_batch import apply_batch_key_override
+    from backend.utils.privacy import AI_ALLOWED
+    from backend.utils.tokens import reduce_export_tokens
+    from backend.llm_providers import LLMProvider, PromptTooLongError
+    from backend.tasks.recent_context import _count_total_eligible_tokens
+
+    user = User.query.get(user_id)
+    if not user:
+        raise RuntimeError(f"User {user_id} not found")
+    if user.default_ai_usage not in AI_ALLOWED:
+        raise RuntimeError(
+            f"user {user_id} has default_ai_usage='{user.default_ai_usage}' "
+            f"(opted out) — not sending their data to any LLM")
+    template, budget, chronological = _template_and_params()
+    config = current_app.config
+    batch_keys = apply_batch_key_override(
+        get_api_keys_for_usage(config, "chat"), config)
+    db_tokens = _count_total_eligible_tokens(user.id)
+
+    if db_tokens <= PROBE_THRESHOLD_TOKENS:
+        return "batch", _submit(user, template, budget, chronological,
+                                batch_keys, "full-cap")
+
+    # Large corpus — free sync calibration probe (rejected 400 isn't billed).
+    api_keys = get_api_keys_for_usage(config, "chat")
+    built = _build_messages(user, template, budget, chronological)
+    if built is None:
+        raise RuntimeError(f"user {user_id}: no AI-readable archive")
+    messages, export, _ = built
+    try:
+        result = LLMProvider.get_completion(MODEL_ID, messages, api_keys)
+    except PromptTooLongError as e:
+        calibrated = reduce_export_tokens(
+            budget, e.actual_tokens, e.max_tokens, export_content=export)
+        logger.info("intentions user %s: probe real=%s > max=%s — batch budget=%s",
+                    user_id, e.actual_tokens, e.max_tokens, calibrated)
+        return "batch", _submit(user, template, calibrated, chronological,
+                                batch_keys, "calibrated")
+    # Probe fit — we already paid full price for the answer; save it.
+    return "done", _save(user, result["content"],
+                         result.get("input_tokens", 0),
+                         result.get("output_tokens", 0),
+                         result["total_tokens"], batch=False)
+
+
+def collect_intentions_impl(user_id, ref):
+    """One poll. Returns None while the batch is processing, ("done", result)
+    on success, ("resubmit", new_ref) after an in-batch overflow (once)."""
+    from flask import current_app
+    from backend.models import User
+    from backend.utils.api_keys import get_api_keys_for_usage
+    from backend.utils.llm_batch import apply_batch_key_override, batch_check_and_collect
+    from backend.utils.tokens import reduce_export_tokens
+
+    config = current_app.config
+    keys = apply_batch_key_override(get_api_keys_for_usage(config, "chat"), config)
+    results, still_pending, _ = batch_check_and_collect(
+        {ref["provider_key"]: ref["batch_id"]}, keys)
+    if ref["provider_key"] in still_pending:
+        return None
+    item = results.get(ref["custom_id"])
+    user = User.query.get(user_id)
+    if item is None or "content" not in item:
+        # Failed item. One calibrated resubmit if the error reports the real
+        # token count and we haven't already resubmitted.
+        err = (item or {}).get("error", "batch ended without a result")
+        actual = (item or {}).get("actual_tokens")
+        maximum = (item or {}).get("max_tokens")
+        if actual and maximum and not ref.get("resubmitted"):
+            template, _, chronological = _template_and_params()
+            calibrated = reduce_export_tokens(
+                ref["budget"], actual, maximum, export_content=None)
+            logger.warning("intentions user %s: batch overflow (%s > %s) — "
+                           "resubmitting once at budget=%s",
+                           user_id, actual, maximum, calibrated)
+            return "resubmit", _submit(user, template, calibrated, chronological,
+                                       keys, "overflow-recalibrated")
+        raise RuntimeError(f"user {user_id}: batch item failed: {err}")
+    return "done", _save(user, item["content"],
+                         item.get("input_tokens", 0),
+                         item.get("output_tokens", 0),
+                         item.get("input_tokens", 0) + item.get("output_tokens", 0),
+                         batch=True)
+
+
+@celery.task(bind=True, name="backend.tasks.intentions.infer_intentions",
+             max_retries=MAX_POLLS, default_retry_delay=POLL_COUNTDOWN)
+def infer_intentions(self, user_id, ref=None):
+    """First run sizes and submits; retries poll the batch (same task id, so
+    the admin status endpoint follows one task throughout)."""
+    with flask_app.app_context():
+        try:
+            if ref is None:
+                self.update_state(state="PROGRESS", meta={
+                    "user_id": user_id, "stage": "sizing + submitting batch",
+                    "done": None, "total": None})
+                kind, payload = start_infer_intentions_impl(user_id)
+            else:
+                kind, payload = (collect_intentions_impl(user_id, ref)
+                                 or ("pending", ref))
+        except Exception:
+            logger.exception("Infer intentions failed for user %s", user_id)
+            raise
+        if kind == "done":
+            return {"user_id": user_id, "stage": "done", "model_id": MODEL_ID,
+                    "total": None, **payload}
+        # "batch" (just submitted), "resubmit", or "pending" → poll again.
+        raise self.retry(kwargs={"user_id": user_id, "ref": payload},
+                         countdown=POLL_COUNTDOWN)

@@ -573,6 +573,53 @@ function AdminPanel() {
     }
   };
 
+  // Infer intentions (admin, post-pre-fill): fire the task, poll the generic
+  // task-status endpoint. intent[userId] = {taskId, status, stage, result, error}
+  const [intent, setIntent] = useState({});
+  const patchIntent = (userId, patch) =>
+    setIntent((prev) => ({ ...prev, [userId]: { ...(prev[userId] || {}), ...patch } }));
+
+  const inferIntentions = async (userId) => {
+    try {
+      const res = await api.post(`/admin/users/${userId}/infer_intentions`);
+      patchIntent(userId, { taskId: res.data.task_id, status: "queued", error: null, result: null });
+    } catch (err) {
+      patchIntent(userId, { error: err.response?.data?.error || "Error starting intentions run." });
+    }
+  };
+
+  useEffect(() => {
+    const active = Object.entries(intent).filter(
+      ([, p]) => p.taskId && (p.status === "queued" || p.status === "running")
+    );
+    if (active.length === 0) return undefined;
+    const timer = setInterval(async () => {
+      for (const [userId, p] of active) {
+        try {
+          const res = await api.get(`/admin/prefill/status/${p.taskId}`);
+          patchIntent(Number(userId), res.data);
+        } catch (err) {
+          patchIntent(Number(userId), { status: "failed", error: "Status check failed." });
+        }
+      }
+    }, 2000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [intent]);
+
+  const intentLabel = (p) => {
+    if (!p) return null;
+    if (p.error && !p.status) return p.error;
+    if (p.status === "queued") return "Intentions: queued…";
+    if (p.status === "running") return `Intentions: ${p.stage || "running"}…`;
+    if (p.status === "failed") return `Intentions failed: ${p.error}`;
+    if (p.status === "completed") {
+      const r = p.result || {};
+      return `Intentions v${r.version} saved (${r.model_id}, ${(r.llm_tokens || 0).toLocaleString()} tokens, $${(r.cost_usd || 0).toFixed(2)})`;
+    }
+    return null;
+  };
+
   const buildProfile = async (userId) => {
     try {
       const res = await api.post(`/admin/users/${userId}/build_profile`);
@@ -1104,12 +1151,24 @@ function AdminPanel() {
                   Build profile
                 </button>{" "}
                 <button
+                  onClick={() => inferIntentions(u.id)}
+                  disabled={["queued", "running"].includes(intent[u.id]?.status)}
+                  title="Generate the Intentions artifact from this account's public tweets (public fork of the intentions prompt; whole corpus, oldest data trimmed until it fits the context)"
+                >
+                  Infer intentions
+                </button>{" "}
+                <button
                   onClick={() => toggleSpam(u.id)}
                   title={u.spam ? "Unmark as spam" : "Mark as spam (hides the row behind the eye toggle; does not deactivate)"}
                   style={u.spam ? { color: "var(--error)" } : undefined}
                 >
                   {u.spam ? "Not spam" : "Spam"}
                 </button>
+                {(intentLabel(intent[u.id])) && (
+                  <div style={{ marginTop: "4px", fontSize: "0.85em", color: intent[u.id]?.status === "failed" || (intent[u.id]?.error && !intent[u.id]?.status) ? "var(--error)" : "var(--text-secondary)" }}>
+                    {intentLabel(intent[u.id])}
+                  </div>
+                )}
                 {prefill[u.id]?.open && (
                   <div style={{ marginTop: "6px", display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap" }}>
                     <input
