@@ -17,9 +17,12 @@ Model is PINNED to claude-opus-4-8 (flat pricing across the 1M window; the
 prompt was tested on it) — deliberately no preferred_model override, so
 long-context-premium models (gpt-5.6-sol) can never be picked.
 
-The task then polls for the batch via Celery retries (60s apart, <=24h) and
-saves a NEW version of the "intentions" UserArtifact plus an APICostLog row
-(request_type="intentions_infer").
+The submitted batch is PERSISTED as a ProfileBatchJob row whose item is
+tagged kind="intentions", and collected by the same beat-driven
+poll_profile_batches pass that drives profile chunks — so a worker restart
+or deploy mid-flight loses nothing (the poller picks the batch up on the
+next tick). Saving writes a NEW version of the "intentions" UserArtifact
+plus an APICostLog row (request_type="intentions_infer").
 """
 from celery.utils.log import get_task_logger
 
@@ -32,8 +35,6 @@ PROMPT_FILE = "intentions_detection_public.txt"
 KIND = "intentions"
 BATCH_OUTPUT_TOKENS = 8192     # ample for a ~14-item intentions list
 PROBE_THRESHOLD_TOKENS = 560_000
-POLL_COUNTDOWN = 60
-MAX_POLLS = 1440               # 24h provider SLA
 
 
 def _template_and_params():
@@ -92,8 +93,14 @@ def _save(user, content, input_tokens, output_tokens, total_tokens, batch):
 
 
 def _submit(user, template, budget, chronological, keys, label):
-    """Build at `budget` and submit a one-user batch. Returns a batch ref."""
+    """Build at `budget`, submit a one-user batch, and PERSIST it as a
+    ProfileBatchJob whose item is tagged kind="intentions" — the beat
+    poller (poll_profile_batches) collects and saves it, so the flight
+    survives worker restarts and deploys."""
+    from datetime import datetime
     from flask import current_app
+    from backend.extensions import db
+    from backend.models import ProfileBatchJob
     from backend.utils.llm_batch import batch_submit
     built = _build_messages(user, template, budget, chronological)
     if built is None:
@@ -107,16 +114,22 @@ def _submit(user, template, budget, chronological, keys, label):
     if not batch_ids:
         raise RuntimeError(f"user {user.id}: batch submit failed (see logs)")
     provider_key, batch_id = next(iter(batch_ids.items()))
+    item = {"custom_id": req["custom_id"], "user_id": user.id,
+            "kind": "intentions", "budget": budget,
+            "resubmitted": label == "overflow-recalibrated"}
+    db.session.add(ProfileBatchJob(
+        provider_key=provider_key, batch_id=batch_id, status="pending",
+        items=[item], submitted_at=datetime.utcnow()))
+    db.session.commit()
     logger.info("intentions user %s: submitted batch %s (%s export ~%s est tokens, budget=%s)",
                 user.id, batch_id, label, est, budget)
-    return {"provider_key": provider_key, "batch_id": batch_id,
-            "custom_id": req["custom_id"], "budget": budget,
-            "resubmitted": label == "overflow-recalibrated"}
+    return {"provider_key": provider_key, "batch_id": batch_id, "item": item}
 
 
 def start_infer_intentions_impl(user_id):
     """Size (maybe probe) and submit. Returns ("done", result) when the
-    probe unexpectedly fit (saved synchronously), else ("batch", ref)."""
+    probe unexpectedly fit (saved synchronously), else ("batch", ref) with
+    the persisted job's coordinates."""
     from flask import current_app
     from backend.models import User
     from backend.utils.api_keys import get_api_keys_for_usage
@@ -165,67 +178,58 @@ def start_infer_intentions_impl(user_id):
                          result["total_tokens"], batch=False)
 
 
-def collect_intentions_impl(user_id, ref):
-    """One poll. Returns None while the batch is processing, ("done", result)
-    on success, ("resubmit", new_ref) after an in-batch overflow (once)."""
-    from flask import current_app
-    from backend.models import User
-    from backend.utils.api_keys import get_api_keys_for_usage
-    from backend.utils.llm_batch import apply_batch_key_override, batch_check_and_collect
-    from backend.utils.tokens import reduce_export_tokens
-
-    config = current_app.config
-    keys = apply_batch_key_override(get_api_keys_for_usage(config, "chat"), config)
-    results, still_pending, _ = batch_check_and_collect(
-        {ref["provider_key"]: ref["batch_id"]}, keys)
-    if ref["provider_key"] in still_pending:
-        return None
-    item = results.get(ref["custom_id"])
-    user = User.query.get(user_id)
-    if item is None or "content" not in item:
-        # Failed item. One calibrated resubmit if the error reports the real
-        # token count and we haven't already resubmitted.
-        err = (item or {}).get("error", "batch ended without a result")
-        actual = (item or {}).get("actual_tokens")
-        maximum = (item or {}).get("max_tokens")
-        if actual and maximum and not ref.get("resubmitted"):
-            template, _, chronological = _template_and_params()
-            calibrated = reduce_export_tokens(
-                ref["budget"], actual, maximum, export_content=None)
-            logger.warning("intentions user %s: batch overflow (%s > %s) — "
-                           "resubmitting once at budget=%s",
-                           user_id, actual, maximum, calibrated)
-            return "resubmit", _submit(user, template, calibrated, chronological,
-                                       keys, "overflow-recalibrated")
-        raise RuntimeError(f"user {user_id}: batch item failed: {err}")
-    return "done", _save(user, item["content"],
-                         item.get("input_tokens", 0),
-                         item.get("output_tokens", 0),
-                         item.get("input_tokens", 0) + item.get("output_tokens", 0),
-                         batch=True)
+def apply_intentions_item(user, item, result):
+    """Called by poll_profile_batches for a collected kind="intentions"
+    item. Saves the artifact at batch price. Idempotent enough for poll
+    overlap: a second apply would add a version, so the poller marks the
+    job collected in the same pass (like profile items)."""
+    saved = _save(user, result["content"],
+                  result.get("input_tokens", 0),
+                  result.get("output_tokens", 0),
+                  result.get("input_tokens", 0) + result.get("output_tokens", 0),
+                  batch=True)
+    logger.info("intentions user %s: saved v%s from batch (%s llm tokens, $%.4f)",
+                user.id, saved["version"], saved["llm_tokens"], saved["cost_usd"])
+    return saved
 
 
-@celery.task(bind=True, name="backend.tasks.intentions.infer_intentions",
-             max_retries=MAX_POLLS, default_retry_delay=POLL_COUNTDOWN)
-def infer_intentions(self, user_id, ref=None):
-    """First run sizes and submits; retries poll the batch (same task id, so
-    the admin status endpoint follows one task throughout)."""
+def handle_failed_intentions_item(user, item, keys):
+    """Called by the poller when a kind="intentions" item ended without a
+    result. One calibrated resubmit — a new persisted job — when possible;
+    otherwise just log (the admin re-clicks the button)."""
+    if item.get("resubmitted"):
+        logger.warning("intentions user %s: batch failed again after resubmit — giving up", user.id)
+        return
+    # No token counts in the failure payload here (llm_batch doesn't parse
+    # them); shrink deterministically instead: 70% of the prior budget.
+    template, cap, chronological = _template_and_params()
+    prior = item.get("budget") or cap
+    calibrated = max(int(prior * 0.7), 10_000)
+    logger.warning("intentions user %s: batch item failed — resubmitting once at budget=%s",
+                   user.id, calibrated)
+    try:
+        _submit(user, template, calibrated, chronological, keys,
+                "overflow-recalibrated")
+    except Exception:
+        logger.exception("intentions user %s: resubmit failed", user.id)
+
+
+@celery.task(bind=True, name="backend.tasks.intentions.infer_intentions")
+def infer_intentions(self, user_id):
+    """Sizes (maybe probes) and submits, then ends — collection is the
+    beat poller's job, so nothing is lost to worker restarts. The admin
+    row's persistent state lives in the Users-tab Profile column."""
     with flask_app.app_context():
         try:
-            if ref is None:
-                self.update_state(state="PROGRESS", meta={
-                    "user_id": user_id, "stage": "sizing + submitting batch",
-                    "done": None, "total": None})
-                kind, payload = start_infer_intentions_impl(user_id)
-            else:
-                kind, payload = (collect_intentions_impl(user_id, ref)
-                                 or ("pending", ref))
+            self.update_state(state="PROGRESS", meta={
+                "user_id": user_id, "stage": "sizing + submitting batch",
+                "done": None, "total": None})
+            kind, payload = start_infer_intentions_impl(user_id)
         except Exception:
             logger.exception("Infer intentions failed for user %s", user_id)
             raise
         if kind == "done":
             return {"user_id": user_id, "stage": "done", "model_id": MODEL_ID,
                     "total": None, **payload}
-        # "batch" (just submitted), "resubmit", or "pending" → poll again.
-        raise self.retry(kwargs={"user_id": user_id, "ref": payload},
-                         countdown=POLL_COUNTDOWN)
+        return {"user_id": user_id, "stage": "batch submitted",
+                "batch_id": payload["batch_id"], "total": None}

@@ -615,6 +615,19 @@ def _poll_profile_batches():
             if not user:
                 continue
             result = results.get(item["custom_id"])
+            if item.get("kind") == "intentions":
+                # Admin "Infer intentions" rides the same job table/poller
+                # but never touches the profile pending/attempt flags.
+                from backend.tasks import intentions as intentions_mod
+                try:
+                    if result is None:
+                        intentions_mod.handle_failed_intentions_item(user, item, keys)
+                    else:
+                        intentions_mod.apply_intentions_item(user, item, result)
+                except Exception as e:
+                    logger.error(f"Apply intentions result failed for user "
+                                 f"{user.id}: {e}", exc_info=True)
+                continue
             if result is None:
                 user.profile_batch_attempts = (
                     user.profile_batch_attempts or 0) + 1

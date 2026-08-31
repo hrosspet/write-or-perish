@@ -273,6 +273,32 @@ class TestProfileStatus:
         assert rows["active_regen"]["profile"]["waiting"] is None
         assert rows["pending"]["profile"]["waiting"] is None
 
+    def test_intentions_column_state(self, app, users):
+        from datetime import datetime
+        from backend.models import ProfileBatchJob, UserArtifact
+        adm = users["renamed_admin"]
+        gen = User(username="gen", approved=True)
+        done = User(username="donei", approved=True)
+        neither = User(username="neither", approved=True)
+        _db.session.add_all([gen, done, neither]); _db.session.flush()
+        _db.session.add(ProfileBatchJob(
+            provider_key="anthropic", batch_id="bi-9", status="pending",
+            items=[{"custom_id": f"int-u{gen.id}", "user_id": gen.id,
+                    "kind": "intentions", "budget": 1, "resubmitted": False}],
+            submitted_at=datetime.utcnow()))
+        a = UserArtifact(user_id=done.id, kind="intentions", title="Intentions",
+                         generated_by="m", tokens_used=1)
+        a.set_content("x"); _db.session.add(a)
+        _db.session.commit()
+        client = app.test_client()
+        _login(client, adm.id)
+        rows = {u["username"]: u for u in client.get("/api/admin/users").json["users"]}
+        assert rows["gen"]["intentions"]["state"] == "generating"
+        assert rows["donei"]["intentions"] == {"state": "complete", "versions": 1,
+                                               "last_created_at": rows["donei"]["intentions"]["last_created_at"]}
+        assert rows["donei"]["intentions"]["last_created_at"] is not None
+        assert rows["neither"]["intentions"] is None
+
 
 class TestBuildProfile:
     def test_force_build_sets_flags_and_seeds(self, app, users, monkeypatch):
