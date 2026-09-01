@@ -232,6 +232,42 @@ else
     warn "Celery beat service file not found at $CELERY_BEAT_SERVICE_SOURCE"
 fi
 
+# Install/update nightly backup service + timer (scripts/backup.sh)
+log "Installing backup timer..."
+BACKUP_SERVICE_SOURCE="$PROJECT_DIR/write-or-perish-backup.service"
+BACKUP_SERVICE_TARGET="/etc/systemd/system/write-or-perish-backup.service"
+BACKUP_TIMER_SOURCE="$PROJECT_DIR/write-or-perish-backup.timer"
+BACKUP_TIMER_TARGET="/etc/systemd/system/write-or-perish-backup.timer"
+
+if [ -f "$BACKUP_SERVICE_SOURCE" ] && [ -f "$BACKUP_TIMER_SOURCE" ]; then
+    BACKUP_UNITS_CHANGED=false
+    for pair in "$BACKUP_SERVICE_SOURCE:$BACKUP_SERVICE_TARGET" "$BACKUP_TIMER_SOURCE:$BACKUP_TIMER_TARGET"; do
+        src="${pair%%:*}"
+        dst="${pair##*:}"
+        if ! sudo diff -q "$src" "$dst" >/dev/null 2>&1; then
+            sudo cp "$src" "$dst" || error "Failed to copy $(basename "$src")"
+            BACKUP_UNITS_CHANGED=true
+        fi
+    done
+    if [ "$BACKUP_UNITS_CHANGED" = true ]; then
+        sudo systemctl daemon-reload || error "Failed to reload systemd daemon"
+        log "Backup unit files updated"
+    else
+        log "Backup unit files unchanged"
+    fi
+
+    # Arm the timer only when a destination is configured; otherwise every
+    # night would just produce a failed unit.
+    if grep -qE '^BACKUP_BUCKET=.+' "$PROJECT_DIR/.env.production" 2>/dev/null; then
+        sudo systemctl enable --now write-or-perish-backup.timer || warn "Failed to enable backup timer"
+        log "Backup timer enabled; next run: $(systemctl show write-or-perish-backup.timer -p NextElapseUSecRealtime --value 2>/dev/null || echo unknown)"
+    else
+        warn "BACKUP_BUCKET not set in .env.production — nightly backups are NOT enabled (docs/RUNBOOKS.md → Backups and restore)"
+    fi
+else
+    warn "Backup unit files not found, skipping backup timer"
+fi
+
 # Update Nginx configuration if changed
 NGINX_CONFIG_SOURCE="$PROJECT_DIR/configs/nginx.txt"
 NGINX_CONFIG_TARGET="/etc/nginx/sites-available/write-or-perish"
