@@ -354,6 +354,9 @@ Priority tiers by follower count: top 10 = $2.59 · top 100 (≥8,639 followers,
   from substring hits inside unrelated evidence lines. Final numbers in §6 are
   manually verified; treat automated coverage scoring as a triage aid only.
 - **Aggregation is unmeasured.** Every chunked result reports raw chunk output.
+- **The artifact being costed may be the wrong unit for matching.** The
+  intentions definition was designed for self-reflection, not for matching
+  against other people; see §10, *Open questions on scope and framing*.
 
 ---
 
@@ -384,6 +387,59 @@ Priority tiers by follower count: top 10 = $2.59 · top 100 (≥8,639 followers,
 8. Cost optimisation now belongs in **extraction**, not matching (see §11) —
    and the earlier premise that matching cost would force compromises on
    extraction quality no longer holds.
+
+---
+
+### Open questions on scope and framing
+
+Recorded after the study, before committing to an architecture. None of these
+is measured, and each changes how the tables in §7 and §11 should be read.
+
+**Time slices as a matching lever.** Chunking already partitions every corpus
+by time (§6), so per-period intentions fall out of extraction for free, before
+any aggregation. Intentions inferred from the latest slice are plausibly more
+valuable to match than ones from years ago, which may be outdated. That gives
+a dial between two failure modes: a pool that is too small (only the latest
+slice of everyone), where no reasonable match exists, and a pool that is too
+large (all periods), where a genuinely serendipitous match is more likely to
+exist but must be paid for with quadratically more compute — the total volume
+of intentions is the term every matching route in §11 is quadratic in. Two
+consequences for the pipeline: aggregation as sketched (dedupe to ~13 per
+account) collapses the time index, so if recency is to be usable downstream
+the aggregated intentions must carry a last-seen period; and the trajectory
+inferences that distinguished the baseline in §5 are exactly the ones that need
+the old slices, so "latest only" has a quality cost as well as a recall cost.
+
+**Whether the intentions definition is right for matching at all.** The
+intentions prompt was designed for the reflective side of Loore: its
+definition of an intention and its level of abstraction are chosen to help one
+person gain clarity about their own life. Nothing here tests whether that is
+the right unit for matching against other people's intentions, and there is
+reason to doubt it — §5 found the cheap models' inferred intentions are true of
+a large class of reflective people, and an intention that is true of many
+people matches everyone and therefore no one. All of §11 costs the matching of
+the *current* artifact; if the unit is wrong, those tables cost the wrong
+thing. The cheap way to find out, before any sweep: a small-scale matching
+experiment over a handful of accounts, or simply reading a dozen accounts'
+intentions side by side and judging whether a match between them would make
+common sense to the people involved or whether the intentions are too abstract
+to act on. This question is upstream of every other decision on this page.
+
+**Whether to include the largest accounts.** The biggest accounts (@visakanv
+is the canonical example) carry the most data, so they incur the largest
+extraction cost and the hardest aggregation (§11, the heavy tail: a 125:1
+compression), and they have the largest followings, so convincing one of them
+to use Loore would be the biggest publicity win. Against that: the people
+behind very large accounts are the hardest to convince, and it may be hardest
+to be genuinely useful to them. That is the highest-variance bet in the pool
+and probably not the one to make first. The alternative is to focus on middle
+accounts: enough data for the inferred intentions to be good, a realistic
+chance of actually helping the person, and far more of them. Two facts from
+§7 sharpen the choice. Cost is not a reason to exclude anyone (top 10 is
+$2.59, top 100 is $16). And "largest" names two different sets — follower
+count and corpus size are nearly uncorrelated — so an inclusion rule should
+say which axis it means: the aggregation-quality risk is about corpus size,
+the publicity and reachability question is about followers.
 
 ---
 
@@ -623,7 +679,79 @@ it swings the cascade total). Output volume is the least certain input: at 1,000
 tokens per match instead of 300, exhaustive pairwise on luna rises from $493 to
 ~$706 batch.
 
-## 12. Reproduction
+## 12. Lab instance (`lab.loore.org`) — infra and cost
+
+**Decision (2026-09-02).** None of the above runs on prod. A separate GCP VM,
+prod-shaped — systemd services, host Postgres, Redis, gunicorn, not Docker — so
+that infra findings transfer 1:1; `ENCRYPTION_DISABLED=true` (the source data
+is public, and KMS per node would make a 9M-node import slow and billable);
+walled to the operator (firewall allowlist or IAP tunnel, admin-only, public
+routes off); its own LLM API keys under a separate spend cap; Ubuntu 24.04.
+Three uses share the one Community Archive import: intention-market R&D,
+precomputed prefill bundles for signups (published to a private GCS bucket that
+prod hydrates from after the consent step — one-directional, the lab holds no
+prod credentials), and, later, Twitter thread reconstruction for Loore Commons.
+
+Two traps. `deploy.sh` runs `flask db migrate` and pushes the generated
+migration to `main`; that step must be disabled on the lab, with a read-only
+deploy key as backstop. And the per-user Celery prefill chain is not the sweep
+driver: extraction, aggregation and matching stay script-driven, writing
+results into the lab DB, while the app is exercised for what prod will actually
+do at scale — import, export rendering, serving large accounts.
+
+**Prices** are Cloud Billing Catalog list prices for us-central1, pulled
+2026-09-02, at 730 h/month.
+
+| item | spec | $/month |
+|---|---|---|
+| VM | e2-standard-4 (4 vCPU / 16 GB), on-demand | 97.84 |
+| disk | 100 GB pd-balanced | 10.00 |
+| external IPv4 | in use | 3.65 |
+| snapshots | weekly, ~4 retained | ~2 |
+| internet egress | ~5 GB/month of batch uploads | ~0.60 |
+| prefill bucket | ~1.3 GB, 3 versions retained | <0.10 |
+| DNS | record at the registrar | 0 |
+| **total, running** | | **~$115** |
+| **total, VM stopped** | disk + IP + snapshots + bucket | **~$16** |
+
+VM alternatives (add ~$16.50 for everything else): e2-highmem-2 (2 vCPU /
+16 GB) $66.00 — same RAM, half the CPU, and the August export incident was
+CPU-bound; e2-standard-4 Spot $58.71 — can be stopped at any time, the disk
+survives but running imports don't; e2-standard-4 with a 1-year commitment
+$61.64 — only once the box has proven long-lived. Resizing is a stop/start,
+so nothing is locked in. Prod, for comparison, is an e2-medium with a 50 GB
+disk and an IP, ~$33/month. Access layer: a firewall allowlist, an IAP TCP
+tunnel or Tailscale cost $0; IAP in front of HTTPS needs a load balancer at
+~$18/month and is not worth it here.
+
+Unit prices behind the table: E2 $0.02181/vCPU-h + $0.00292/GB-h (Spot
+$0.01309 / $0.00175); pd-balanced $0.10/GiB-mo (pd-standard $0.04, pd-ssd
+$0.17); standard snapshot $0.05/GiB-mo (archive $0.019); in-use external IP
+$0.005/h; internet egress $0.12/GiB, ingress free; GCS Standard regional
+$0.02/GiB-mo (first 5 GB free), Class A ops $0.005/1K, Class B $0.0004/1K;
+bucket-to-VM transfer inside a region free; KMS $0.03 per 10K operations.
+
+**Sizing.** 387M tokens of text is ~1.2 GB raw; Postgres with 9M node rows and
+indexes lands around 6–10 GB; the parquet snapshot a few GB; one extraction
+sweep's batch payload 1.2 GB; OS and conda ~10 GB. 100 GB is comfortable,
+50 GB tight. Egress is only batch uploads (extraction 1.2 GB, aggregation
+19 MB, chunk × chunk matching 47 MB); result downloads and the archive
+snapshot are ingress. A heavy month with several sweeps stays under $4.
+
+**Bucket.** All 734 bundles are ~1.3 GB (compact rows ~1.2 GB across the whole
+archive, profiles and intentions ~40 MB). Three retained versions ≈ 4 GB,
+inside the free tier and $0.08/month without it. A refresh writes 734 objects
+and each signup reads one, inside the free operation tiers. The bucket goes in
+us-central1 next to prod so hydration transfer is free; prod's only hydration
+cost is KMS, ~$0.04 for a 14K-node account.
+
+**What dominates.** LLM spend, not GCP: $46–155 per full-archive pass (§11).
+Running, the lab's infra is about one full-archive pass per month; stopped,
+about a seventh of one.
+
+---
+
+## 13. Reproduction
 
 See `README.md` in this directory for commands. Artifacts and rendered prompts
 are gitignored by design; regenerate them from the snapshot. Key scripts:
