@@ -296,8 +296,46 @@ Priority tiers by follower count: top 10 = $2.59 · top 100 (≥8,639 followers,
   on node `token_count` alone under-counts chunks made of many short tweets
   (each entry carries ~5.6 stored units of `[timestamp]` scaffolding); ignoring
   it put one chunk 5K tokens over Haiku's window.
-- **Prompt caching buys nothing here.** Every corpus is unique; the only shared
-  prefix is the ~1.4K-token template, below the cacheable minimum.
+- **Prompt caching buys nothing for extraction.** Every corpus is unique; the
+  only shared prefix is the ~1.4K-token template, below the cacheable minimum.
+  (It *can* help matching, where the anchor account repeats — but see §11, where
+  it stops paying once intentions are aggregated.)
+- **Batch is slow and opaque, and that shapes iteration.** A 3-request Anthropic
+  batch was still `in_progress` after 26 minutes (Anthropic's guidance is most
+  finish within an hour, ceiling 24h; OpenAI's completion window is fixed at
+  `24h`). Nothing errors, nothing reports progress beyond request counts. For
+  the tight experiment loop, sync calls returned in 23–30 s, so **iterate on
+  sync and reserve batch for the committed production sweep**.
+- **Batch API hard limits** (both providers), the ones that actually bind:
+
+  | | Anthropic | OpenAI |
+  |---|---|---|
+  | requests/batch | 100,000 | 50,000 |
+  | input file size | 256 MB | 200 MB |
+  | completion window | up to 24h | fixed `24h` |
+  | batch creation rate | — | 2,000/hour |
+  | results retained | 29 days | — |
+  | caching inside a batch | supported | TTL won't survive it |
+
+- **Per-model batch queue caps (`TPD`) are a real ceiling at archive scale.**
+  `gpt-5.6-luna` 10M TPM / 1B tokens-per-day batch queue; `gpt-5.6-sol` and
+  `-terra` 4M TPM / 200M TPD. So luna absorbs a whole-archive job in a day where
+  sol/terra would need ~2 days for extraction alone.
+- **Plan submissions from payload, not request count.** At ~3.05 chars/token
+  plus 2.2% JSONL escaping:
+
+  | job | tokens | payload | requests | OpenAI batches | days @1B TPD |
+  |---|---|---|---|---|---|
+  | extraction, whole archive | 391M | 1,219 MB | 4,278 | 7 | 0.39 |
+  | aggregation, 1 call/account | 6M | 19 MB | 734 | 1 | 0.01 |
+  | matching, exhaustive pairwise (raw) | 4,440M | 13,840 MB | 269,011 | **70** | **4.44** |
+  | matching, exhaustive pairwise (agg) | 753M | 2,347 MB | 269,011 | 12 | 0.75 |
+  | matching, coarse pass (300-tok sig) | 188M | 586 MB | 269,011 | 6 | 0.19 |
+  | matching, chunk x chunk N=15 (agg) | 15M | 47 MB | 120 | **1** | 0.01 |
+
+  Every job is size-bound, never request-bound. The spread is the argument for
+  chunk x chunk on operational grounds alone: 1 submission and hours, versus 70
+  submissions and ~4.5 days of queue for the raw pairwise sweep.
 - The backend container mounts only `backend/`, so files written elsewhere in
   `/app` are lost on recreate. Copy results out before `docker compose up -d`.
 
@@ -542,17 +580,39 @@ ratio and, more importantly, whether dedupe preserves the idiomatic themes or
 regresses toward the generic. That is the single highest-value unmeasured
 number in this study.
 
-### Caching
+### Caching — a possibility, not a recommendation
 
-Prefix caching helps matching (unlike extraction, where every corpus is unique).
-Anchor each pair on the *larger* account and sweep triangularly so the biggest
-lists sit in the cacheable prefix: **72% input reduction**, $889 -> $251 sync.
-The win concentrates in the few huge accounts, so **process dense accounts
-first**. Only the prefix is cacheable — the other account's list differs every
-request — so ~half the payload is irreducible. Practical constraint: OpenAI's
-auto-cache TTL is minutes while batch runs async over hours, so cached-sync
-($251) competes with uncached-batch ($444) rather than composing with it;
-Anthropic supports caching inside batches, so on Opus the two do compose.
+Recorded because it was measured, and because it *would* matter on a pairwise
+route. It is **not** part of any architecture recommended above, and it does not
+survive aggregation.
+
+Unlike extraction (every corpus unique), matching repeats one side of each
+request, so the anchor account is cacheable. Anchoring the *larger* account and
+sweeping triangularly puts the biggest lists in the cacheable prefix:
+
+| | raw intentions | aggregated |
+|---|---|---|
+| uncached batch | $444 | **$123.75** |
+| cached sync | **$251** | $184.71 |
+
+**On raw intentions it wins (72% input reduction); on aggregated intentions it
+loses.** The entire benefit came from size skew — a handful of enormous accounts
+anchored many times — and aggregation flattens every account to ~1,300 tokens,
+removing the skew and the reason dense-first ordering helped. So "process dense
+accounts first" is a raw-intentions optimisation specifically, with a short
+shelf life.
+
+Three further limits: only the prefix is cacheable (the other account's list
+differs every request), so ~half the payload is irreducible; OpenAI's auto-cache
+TTL is minutes while batch runs async over hours, so cached-**sync** competes
+with uncached-**batch** rather than composing with it (Anthropic's caching does
+compose inside batches); and sync at luna's 10M TPM needs ~7.4 hours of wall
+clock for the raw sweep.
+
+**When it would be worth revisiting:** a pairwise route on raw intentions, on
+Anthropic (where caching and batch compose), or any future design where one side
+of the comparison is large and repeated. On the chunk x chunk route it is
+irrelevant — 120 calls with no repeated prefix.
 
 ### Assumptions behind these figures
 
