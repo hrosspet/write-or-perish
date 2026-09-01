@@ -1089,7 +1089,7 @@ function AdminPanel() {
                   <span style={{ color: "var(--text-muted)" }}>—</span>
                 )}
                 {u.intentions && (
-                  <div style={{ fontSize: "0.8em", color: u.intentions.state === "generating" ? "var(--warning)" : "var(--text-muted)" }}
+                  <div style={{ color: u.intentions.state === "generating" ? "var(--warning)" : "var(--text-muted)" }}
                        title={u.intentions.last_created_at ? `latest intentions version ${u.intentions.last_created_at}` : "intentions batch in flight (persisted; survives restarts)"}>
                     {u.intentions.state === "generating"
                       ? <>⏳ intentions{u.intentions.versions ? ` (${u.intentions.versions} so far)` : ""}</>
