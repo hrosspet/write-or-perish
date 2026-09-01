@@ -1066,7 +1066,7 @@ function AdminPanel() {
               >
                 {u.profile?.state === "complete" && (
                   <span style={{ color: "var(--success)" }}>
-                    ✓ {u.profile.versions} {u.profile.versions === 1 ? "version" : "versions"}
+                    ✓ profile v{u.profile.versions}
                   </span>
                 )}
                 {u.profile?.state === "generating" && u.profile.waiting === "inactive" && (
