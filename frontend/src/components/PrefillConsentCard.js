@@ -4,8 +4,11 @@ import api from "../api";
 
 /**
  * "Start from your tweets?" — the opt-in for seeding a fresh account from
- * its own public tweets (Community Archive) and generating the first
- * profile from them.
+ * its own public tweets (Community Archive) and drafting its first
+ * artifacts (profile, intentions, …) from them. The consent is scoped to
+ * ARTIFACTS from the public data, with profile/intentions as examples —
+ * not to one specific artifact — so new derived artifacts don't need a
+ * fresh ask (wording decision 2026-09-01).
  *
  * Design rules (decided 2026-08-27):
  *  - Shown only to X-login users who haven't answered and haven't been
@@ -77,7 +80,7 @@ export default function PrefillConsentCard({ style, delayHint }) {
           lineHeight: 1.7, color: "var(--text-secondary)",
         }}>
           {answered === "yes"
-            ? "Noted. We'll seed your Loore from your public tweets and have a first profile waiting when you come in."
+            ? "Noted. We'll seed your Loore from your public tweets and have first drafts of your artifacts — like your profile and intentions — waiting when you come in."
             : "Noted. You'll start from a blank page — you can always seed from your tweets later, from Settings."}
         </p>
       ) : (
@@ -94,9 +97,11 @@ export default function PrefillConsentCard({ style, delayHint }) {
             lineHeight: 1.7, color: "var(--text-secondary)", marginBottom: "1.4rem",
           }}>
             With your okay, we'll bring in your <strong style={{ fontWeight: 400, color: "var(--text-primary)" }}>public tweets</strong> as
-            @{user.username}, keep them private in your Loore, and write a first
-            version of your profile from them — so you don't begin from a blank page.
-            Only your own public posts; nothing is published.
+            @{user.username}, keep them private in your Loore, and write first
+            drafts of your artifacts from them — like your profile and your
+            intentions — so you don't begin from a blank page. Only your own
+            public posts; nothing is published, and every draft is yours to
+            edit or delete.
           </p>
           <div style={{ display: "flex", gap: "0.7rem" }}>
             <button
