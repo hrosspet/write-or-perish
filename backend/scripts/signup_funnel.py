@@ -22,7 +22,9 @@ Buckets (lifetime, humans only):
 "own nodes" = node_type='user', not deleted, not imported (origin IS NULL
 AND source_key IS NULL; origin catches split-import segments source_key
 used to miss).
-"last seen" = max(own node, any API call, notification read, changelog read,
+"last seen" = max(own node, user-initiated API call (conversation /
+transcription / tts / embedding_query — automation cost rows don't count),
+notification read, changelog read,
 last user-requested magic link, user.last_seen_at, artifact view). Still a
 floor for history: last_seen_at only exists since the 2026-08-29 deploy
 (#272) and artifact_view since 2026-09-01, so older visits that left no
@@ -163,12 +165,20 @@ def main():
               AND source_key IS NULL AND origin IS NULL
             ORDER BY user_id, created_at
         """)}
+        # last_at / active_days count only user-initiated request types —
+        # everything else in api_cost_log is automation (pre-fill, batch
+        # profiles, embeddings, summaries) and says nothing about the
+        # person being there (mirrors utils/activity.py). spend stays total.
         calls = {r["user_id"]: r for r in q("""
             SELECT user_id,
                    COUNT(*) FILTER (WHERE request_type = 'conversation') AS n_conv,
                    MIN(created_at) FILTER (WHERE request_type = 'conversation') AS first_conv,
-                   MAX(created_at) AS last_at,
-                   COUNT(DISTINCT created_at::date) AS active_days,
+                   MAX(created_at) FILTER (WHERE request_type IN
+                       ('conversation', 'transcription', 'tts',
+                        'embedding_query')) AS last_at,
+                   COUNT(DISTINCT created_at::date) FILTER (WHERE request_type IN
+                       ('conversation', 'transcription', 'tts',
+                        'embedding_query')) AS active_days,
                    SUM(cost_microdollars) AS cost
             FROM api_cost_log GROUP BY user_id
         """)}
@@ -214,6 +224,8 @@ def main():
               AND source_key IS NULL AND origin IS NULL
             UNION
             SELECT user_id, created_at::date FROM api_cost_log
+            WHERE request_type IN ('conversation', 'transcription', 'tts',
+                                   'embedding_query')
         """):
             active_days[r["user_id"]].add(r["day"])
 
@@ -278,7 +290,10 @@ def main():
                     "{}x{}".format(k, n) for k, (n, _) in sorted(
                         views.items(), key=lambda kv: kv[1][1], reverse=True)),
                 "last_seen_path": u["last_seen_path"] or "",
-                "deactivated": u["deactivated_at"] is not None,
+                # toggle re-approval never clears deactivated_at, so the
+                # tombstone alone is stale history — require both.
+                "deactivated": (u["deactivated_at"] is not None
+                                and not u["approved"]),
                 "terms_after_d": days(u["created_at"], u["accepted_terms_at"]),
                 "first_node_after_d": days(u["created_at"],
                                            o["first_at"] if o else None),
