@@ -337,7 +337,117 @@ Priority tiers by follower count: top 10 = $2.59 · top 100 (≥8,639 followers,
 
 ---
 
-## 11. Reproduction
+## 11. Matching: cost ceilings and candidate architectures
+
+Extraction is linear in accounts; **matching is quadratic**. Rough ceilings for
+the 734-account archive (269,011 account pairs, raw unaggregated intentions,
+measured per-intention size: 100 tok o200k / 150.6 tok Opus 4.8):
+
+| approach | calls | input | luna batch | opus-4.8 batch |
+|---|---|---|---|---|
+| exhaustive pairwise, raw | 269,011 | 4.44B | $493 | $17,672 |
+| …with prefix caching, dense-first, sync | 269,011 | 1.25B | $251 (sync) | — |
+| exhaustive pairwise, aggregated | 269,011 | 0.75B | $124 | — |
+| coarse pass on 300-tok signatures | 269,011 | 188M | **$25** | — |
+| **N=15 chunk x chunk (raw)** | **120** | **96M** | **$20** | **$373** |
+| whole archive in one window (aggregated) | 1 | 0.95M | $0.47 | $8.44 |
+| cluster-pair triage (200 clusters) | 19,900 | — | $3.32 | — |
+| random control, 10k pairs | 10,000 | — | $4.60 | — |
+
+Scaling of the exhaustive route (luna batch): 734 accounts $493 · 1,468
+$1,973 · 2,936 $7,893 · 7,340 $49,342. Doubling the pool quadruples the bill —
+exhaustive pairwise works once, at today's size, and never again.
+
+### Why similarity-ANN is the wrong prefilter
+
+The obvious shortlist — embed intentions, cosine top-k, judge the shortlist —
+retrieves **topical neighbours**. But the target is *complementarity*, not
+similarity, and the valuable matches are cross-domain: one person's constraint
+meeting another's unrelated capability. Those sit far apart in embedding space
+by construction. So a similarity filter doesn't merely lose recall, it
+systematically removes the class of match that justifies an intention market,
+degrading the product to "here are people like you". Generating a "what would
+complement this?" query and embedding *that* relocates the hypothesis rather
+than removing it: it retrieves against a guess about the complement, and the
+guessable complements (wants-X / offers-X) are exactly the boring ones.
+
+Corollary for any LLM matching prompt: **instruct against similarity
+explicitly**. Asked "are these compatible?", a model will score topical overlap
+and reproduce the cosine filter in prose.
+
+### Candidate architectures (in preference order)
+
+**1. Chunk x chunk over the whole archive.** Partition accounts into N chunks
+and evaluate every chunk-pair, including self-pairs. Complete pair coverage
+**by construction** — every account pair co-occurs in exactly one call — so the
+only loss is *attentional* (does the model notice this pair inside an 800K-token
+call?), not combinatorial. Re-running with a different random partition gives
+each pair another independent chance, in different company, which is itself a
+serendipity generator. N=15 keeps pair size (~799K) inside a 1M window; N<=10
+overflows it. This is the route that makes Opus 4.8 affordable for full
+coverage. Amortisation: pairwise sends each account's list 733x, N-chunk ~N+1x.
+
+**2. Cluster-pair triage.** Cluster intentions into ~200 themes; reason about
+complementarity at the *cluster-pair* level (19,900 pairs, $3.32), then expand
+only promising cluster pairs into member pairs. Rationale: **people often hold
+similar intentions, so match them as groups** — one serendipitous connection
+discovered between two clusters yields many concrete member-level matches, which
+can then be ranked/filtered on profile compatibility. It also makes distance
+explicit and *searchable*: sample cluster pairs at all distances rather than
+only near ones, which is a structural way to hunt cross-domain matches instead
+of hoping they survive a similarity filter.
+
+**3. Learn the metric from an exhaustive pass.** Running the cheap exhaustive
+pass once yields ~269K LLM-judged pairs — a labelled dataset, free as a
+byproduct. Fit an asymmetric scorer (e.g. a bilinear form `score = aT W b`) over
+the existing embeddings so that "near" means *complementary* rather than
+*similar*. That gives a genuine complementarity-ANN, and it is the only route
+that stays roughly linear as the account pool grows. It can only be built after
+running exhaustive at least once — an argument for doing so while it is still
+cheap.
+
+**4. Coarse-to-fine cascade.** Exhaustive coarse pass on ~300-token account
+signatures tuned for *recall* ($25), then full intention lists on survivors
+(~$34 at 5% survival), then Opus re-rank on the top few hundred. Total ~$60.
+Caveat: compression is where serendipity dies — the surprising match usually
+turns on one specific detail, so keep signatures generous and stage 1
+permissive. A false positive costs $0.0001; a false negative is invisible
+forever.
+
+**5. Random control — not optional.** Reserve budget for uniformly random pairs
+(10,000 = $4.60). Any filter's false negatives are by definition the matches you
+never see, so a random sample is the *only* way to estimate what a heuristic
+misses. Establish the baseline against the exhaustive results now and keep it as
+a standing regression metric: a new filter must be shown not to lose surprising
+matches.
+
+Also: use embeddings **inverted** — not to retrieve near things, but to force
+sampling of pairs that are topically distant while sharing one facet.
+Embeddings as a diversity instrument rather than a retrieval one is the use that
+serves this goal.
+
+### Caching
+
+Prefix caching helps matching (unlike extraction, where every corpus is unique).
+Anchor each pair on the *larger* account and sweep triangularly so the biggest
+lists sit in the cacheable prefix: **72% input reduction**, $889 -> $251 sync.
+The win concentrates in the few huge accounts, so **process dense accounts
+first**. Only the prefix is cacheable — the other account's list differs every
+request — so ~half the payload is irreducible. Practical constraint: OpenAI's
+auto-cache TTL is minutes while batch runs async over hours, so cached-sync
+($251) competes with uncached-batch ($444) rather than composing with it;
+Anthropic supports caching inside batches, so on Opus the two do compose.
+
+### Assumptions behind these figures
+
+14 intentions/chunk (measured), ~100 o200k tokens per intention (measured),
+300 output tokens per pairwise match call, 200-token matching prompt, 5%
+survival at stage 1 (a guess — worth measuring on a few thousand pairs for ~$1;
+it swings the cascade total). Output volume is the least certain input: at 1,000
+tokens per match instead of 300, exhaustive pairwise on luna rises from $493 to
+~$706 batch.
+
+## 12. Reproduction
 
 See `README.md` in this directory for commands. Artifacts and rendered prompts
 are gitignored by design; regenerate them from the snapshot. Key scripts:
