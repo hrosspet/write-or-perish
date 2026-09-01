@@ -1235,8 +1235,12 @@ class TestOrigin:
 
         _make_node(alice, content="loore entry", token_count=100,
                    created_at=DEC_15)
-        _make_node(alice, content="a tweet", token_count=300,
-                   created_at=APR_18, origin="twitter")
+        # The tweet gets a reply so it renders as a full thread — a
+        # childless tweet root would render compactly (no header line).
+        tweet = _make_node(alice, content="a tweet", token_count=300,
+                           created_at=APR_18, origin="twitter")
+        _make_node(alice, parent_id=tweet.id, content="a reply",
+                   token_count=50, created_at=APR_19)
         _db.session.commit()
 
         result = _build(alice, filter_ai_usage=True, return_metadata=True)
@@ -1247,7 +1251,7 @@ class TestOrigin:
         assert "via loore" not in content
         assert content.count(" via ") == 1
         assert result["origin_stats"] == {
-            "loore": {"nodes": 1, "tokens": 100},
+            "loore": {"nodes": 2, "tokens": 150},
             "twitter": {"nodes": 1, "tokens": 300},
         }
 
@@ -1429,3 +1433,42 @@ class TestCompactTweetRendering:
         }
         # Oldest-first inside the run.
         assert content.index("tweet 0") < content.index("tweet 1")
+
+    def test_legacy_path_renders_flat_tweets_compact(self, app):
+        """The legacy authored_threads path (user dump /export/threads,
+        estimate route) collapses flat tweet runs the same way (#276)."""
+        alice = _make_user("alice")
+        _db.session.commit()
+        _make_node(alice, content="old tweet", token_count=3,
+                   created_at=APR_18, origin="twitter")
+        root = _make_node(alice, content="organic root", token_count=3,
+                          created_at=APR_19)
+        _make_node(alice, parent_id=root.id, content="a reply", token_count=3,
+                   created_at=APR_20)
+        _make_node(alice, content="new tweet", token_count=3,
+                   created_at=APR_22, origin="twitter")
+        _db.session.commit()
+
+        content = _build(alice, filter_ai_usage=True)  # legacy path
+        # Legacy renders oldest-first: run [old tweet], Thread 1, run [new].
+        assert content.count("# Tweets by alice") == 2
+        assert content.count("# Thread") == 1
+        assert "[2026-04-18 14:30] old tweet" in content
+        assert "[2026-04-22 12:00] new tweet" in content
+        assert "organic root" in content and "a reply" in content
+        assert (content.index("old tweet") < content.index("organic root")
+                < content.index("new tweet"))
+
+    def test_legacy_tweet_with_reply_keeps_full_rendering(self, app):
+        alice = _make_user("alice")
+        _db.session.commit()
+        tweet = _make_node(alice, content="engaged tweet", token_count=3,
+                           created_at=APR_18, origin="twitter")
+        _make_node(alice, parent_id=tweet.id, content="loore reply",
+                   token_count=3, created_at=APR_19)
+        _db.session.commit()
+
+        content = _build(alice, filter_ai_usage=True)
+        assert "# Thread 1" in content
+        assert "User (alice) via twitter - " in content
+        assert "# Tweets by" not in content
