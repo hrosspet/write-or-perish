@@ -78,7 +78,9 @@ from backend.utils.tokens import (  # noqa: E402
 from backend.utils.llm_batch import (  # noqa: E402
     batch_submit, batch_check_and_collect, apply_batch_key_override,
 )
-from backend.llm_providers import LLMProvider, PromptTooLongError  # noqa: E402
+from backend.llm_providers import (  # noqa: E402
+    LLMProvider, PromptTooLongError, fit_by_count,
+)
 # Cheap DB token estimate (sum of the user's AI-readable node token_counts —
 # no decryption, no export build), the same one the heartbeat/trigger checks
 # use to gate work.
@@ -185,13 +187,27 @@ def backfill_user(app, user, template, model_id, dry_run=False):
     max_export_tokens, chronological = _prompt_export_params(template)
     api_keys = get_api_keys_for_usage(app.config, "chat")
 
+    # Pre-size by token count: rebuilding the export after a reject costs
+    # minutes on a big corpus. The PromptTooLongError retry loop below
+    # stays as the backstop for count drift (tiktoken on OpenAI models).
+    limit = (app.config["SUPPORTED_MODELS"][model_id].get(
+        "context_window", 200_000) - BATCH_OUTPUT_TOKENS)
+    built, max_export_tokens, _real = fit_by_count(
+        model_id, api_keys, limit, max_export_tokens,
+        lambda b: _build_messages(user, template, b, chronological),
+        corpus_tokens=_count_total_eligible_tokens(user.id),
+        max_rounds=MAX_SIZING_ROUNDS)
+
     response = None
     for attempt in range(MAX_RETRIES + 1):
-        built = _build_messages(user, template, max_export_tokens, chronological)
+        if built is None:
+            built = _build_messages(user, template, max_export_tokens,
+                                    chronological)
         if built is None:
             print(f"  ! user {user.id}: no AI-readable archive, skipping")
             return
         messages, export, export_tokens = built
+        built = None  # a retry rebuilds at the reduced budget
         print(f"  user {user.id}: model={model_id}, export ~{export_tokens} "
               f"tokens (attempt {attempt + 1}, budget={max_export_tokens})")
         if dry_run:
@@ -291,24 +307,19 @@ def _dispatch_batch_user(app, user, template, model_id, cap_budget,
     limit = (app.config["SUPPORTED_MODELS"][model_id].get(
         "context_window", 200_000) - BATCH_OUTPUT_TOKENS)
 
-    budget, label, built, real = cap_budget, "full-cap", None, None
-    for _ in range(MAX_SIZING_ROUNDS):
-        built = _build_messages(user, template, budget, chronological)
-        if built is None:
-            print(f"  ! user {user.id}: no AI-readable archive, skipping")
-            return
-        real = LLMProvider.count_tokens(model_id, built[0], api_keys)
-        if real is None or real <= limit:
-            break
-        effective = min(budget, max(db_tokens, 1))
-        budget = max(int(effective * limit / real * 0.99), 10_000)
-        label = "count-calibrated"
-        print(f"  user {user.id}: counted {real} > {limit} limit "
-              f"(db_est={db_tokens}) — rebuilding at budget={budget}")
-    else:
-        print(f"  ✗ user {user.id}: still {real} > {limit} tokens after "
-              f"{MAX_SIZING_ROUNDS} sizing rounds — skipping, run sync")
+    try:
+        built, budget, real = fit_by_count(
+            model_id, api_keys, limit, cap_budget,
+            lambda b: _build_messages(user, template, b, chronological),
+            corpus_tokens=db_tokens, max_rounds=MAX_SIZING_ROUNDS)
+    except PromptTooLongError as e:
+        print(f"  ✗ user {user.id}: still {e.actual_tokens} > {limit} tokens "
+              f"after {MAX_SIZING_ROUNDS} sizing rounds — skipping, run sync")
         return
+    if built is None:
+        print(f"  ! user {user.id}: no AI-readable archive, skipping")
+        return
+    label = "full-cap" if budget == cap_budget else "count-calibrated"
 
     if dry_run:
         counted = "count unavailable" if real is None else f"counted {real}"

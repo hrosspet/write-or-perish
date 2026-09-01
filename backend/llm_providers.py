@@ -285,12 +285,16 @@ class LLMProvider:
         keep their prompt-too-long retry machinery as the backstop for
         that drift — this is a sizing aid, not a guarantee.
         """
-        config = current_app.config["SUPPORTED_MODELS"].get(model_id)
+        config = current_app.config.get("SUPPORTED_MODELS", {}).get(model_id)
         if not config:
             raise ValueError(f"Unsupported model: {model_id}")
         if config["provider"] == "anthropic":
             try:
-                client = Anthropic(api_key=api_keys["anthropic"])
+                # No SDK retries: this is a sizing aid — better to return
+                # None fast (callers keep their overflow backstops) than
+                # stall a build behind connection-error backoff.
+                client = Anthropic(api_key=api_keys["anthropic"],
+                                   max_retries=0)
                 system_param, anthropic_messages = \
                     LLMProvider._to_anthropic_params(messages)
                 return client.messages.count_tokens(
@@ -429,3 +433,56 @@ class LLMProvider:
             "tool_calls": tool_calls,
             "truncated": truncated,
         }
+
+
+def fit_by_count(model_id, api_keys, limit, budget, build_fn,
+                 corpus_tokens=None, max_rounds=4, safety=0.99,
+                 min_budget=10_000, first_built=None):
+    """Size a prompt BEFORE sending it: build at `budget`, count the real
+    tokens (LLMProvider.count_tokens — exact on Anthropic, tiktoken
+    estimate on OpenAI), and while the count exceeds `limit`, shrink the
+    budget by the reported ratio and rebuild. Rebuilding a large export
+    costs minutes on a 1M-token corpus, so the ratio-based shrink is
+    expected to converge in one rebuild; extra rounds only run if a
+    re-render measures unexpectedly hot.
+
+    Args:
+        limit: max input tokens (context window minus the output budget).
+        budget: initial export budget in the caller's stored-token units;
+                None means "build everything".
+        build_fn: build_fn(budget) -> a truthy tuple whose FIRST element
+                  is the messages list (callers append their own extras),
+                  or None/falsy when the user has no data.
+        corpus_tokens: the corpus's stored-token sum. The shrink scales
+                  min(budget, corpus) — scaling a budget larger than the
+                  corpus is a no-op that re-renders the identical export.
+        first_built: optional already-built result for round 1, so a
+                  caller that built the prompt to make other decisions
+                  doesn't pay a duplicate build.
+
+    Returns (built, budget, real_tokens). built is None when build_fn
+    produced nothing; real_tokens is None when counting was unavailable —
+    the caller's prompt-too-long retry machinery remains the backstop.
+    Raises PromptTooLongError when still over the limit after max_rounds.
+    """
+    real = None
+    for i in range(max_rounds):
+        if i == 0 and first_built is not None:
+            built = first_built
+        else:
+            built = build_fn(budget)
+        if not built:
+            return None, budget, None
+        real = LLMProvider.count_tokens(model_id, built[0], api_keys)
+        if not isinstance(real, int) or real <= limit:
+            return built, budget, real if isinstance(real, int) else None
+        effective = budget if budget is not None else float("inf")
+        if corpus_tokens:
+            effective = min(effective, max(corpus_tokens, 1))
+        if effective == float("inf"):
+            effective = real
+        budget = max(int(effective * limit / real * safety), min_budget)
+        logger.info(
+            "fit_by_count %s: counted %s > %s limit — rebuilding at "
+            "budget=%s", model_id, real, limit, budget)
+    raise PromptTooLongError(real, limit)

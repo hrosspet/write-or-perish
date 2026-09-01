@@ -140,7 +140,7 @@ def start_infer_intentions_impl(user_id):
     from backend.utils.api_keys import get_api_keys_for_usage
     from backend.utils.llm_batch import apply_batch_key_override
     from backend.utils.privacy import AI_ALLOWED
-    from backend.llm_providers import LLMProvider
+    from backend.llm_providers import fit_by_count
 
     user = User.query.get(user_id)
     if not user:
@@ -149,36 +149,25 @@ def start_infer_intentions_impl(user_id):
         raise RuntimeError(
             f"user {user_id} has default_ai_usage='{user.default_ai_usage}' "
             f"(opted out) — not sending their data to any LLM")
-    template, budget, chronological = _template_and_params()
+    template, cap, chronological = _template_and_params()
     config = current_app.config
     api_keys = get_api_keys_for_usage(config, "chat")
     batch_keys = apply_batch_key_override(api_keys, config)
 
+    from backend.tasks.recent_context import _count_total_eligible_tokens
     # The input must leave room for the response inside the context window.
     limit = (config["SUPPORTED_MODELS"][MODEL_ID].get("context_window",
                                                       1_000_000)
              - BATCH_OUTPUT_TOKENS)
-
-    label = "full-cap"
-    built = real = None
-    for _ in range(MAX_SIZING_ROUNDS):
-        built = _build_messages(user, template, budget, chronological)
-        if built is None:
-            raise RuntimeError(f"user {user_id}: no AI-readable archive")
-        real = LLMProvider.count_tokens(MODEL_ID, built[0], api_keys)
-        if real is None or real <= limit:
-            break
-        budget = _calibrated_budget(user, budget, real, limit)
-        label = "count-calibrated"
-        logger.info("intentions user %s: counted %s > %s limit — "
-                    "rebuilding at budget=%s", user_id, real, limit, budget)
-    else:
-        # Exact-ratio shrinking should converge in one rebuild; if it
-        # somehow didn't, submitting would just burn the batch's single
-        # overflow-resubmit backstop too.
-        raise RuntimeError(
-            f"user {user_id}: export still {real} > {limit} tokens after "
-            f"{MAX_SIZING_ROUNDS} sizing rounds")
+    built, budget, _real = fit_by_count(
+        MODEL_ID, api_keys, limit, cap,
+        lambda b: _build_messages(user, template, b, chronological),
+        corpus_tokens=_count_total_eligible_tokens(user.id),
+        max_rounds=MAX_SIZING_ROUNDS,
+        safety=config.get("RETRY_SAFETY_FACTOR", 0.99))
+    if built is None:
+        raise RuntimeError(f"user {user_id}: no AI-readable archive")
+    label = "full-cap" if budget == cap else "count-calibrated"
 
     return "batch", _submit(user, template, budget, chronological,
                             batch_keys, label, built=built)

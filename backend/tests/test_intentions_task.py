@@ -97,9 +97,45 @@ def test_sizing_that_never_converges_raises(app, wired, monkeypatch):  # noqa: F
                         staticmethod(lambda model_id, messages, keys: 2_000_000))
     u = _make_user("noel")
     _db.session.commit()
-    with pytest.raises(RuntimeError, match="sizing rounds"):
+    with pytest.raises(lp.PromptTooLongError):
         it.start_infer_intentions_impl(u.id)
     assert wired == []  # nothing submitted
+
+
+def test_fit_by_count_shrinks_and_reuses_first_built(app, monkeypatch):  # noqa: F811
+    """The shared sizing helper: reuses first_built (no duplicate build),
+    shrinks against min(budget, corpus), returns the rebuilt result."""
+    import backend.llm_providers as lp
+    counts = iter([400_000, 100_000])
+    monkeypatch.setattr(lp.LLMProvider, "count_tokens",
+                        staticmethod(lambda m, msgs, k: next(counts)))
+    builds = []
+
+    def build(budget):
+        builds.append(budget)
+        return ([{"role": "user", "content": [
+            {"type": "text", "text": f"P[{budget}]"}]}], budget)
+
+    built, budget, real = lp.fit_by_count(
+        "claude-opus-4.8", {}, 192_000, 90_000, build,
+        first_built=([{"role": "user", "content": [
+            {"type": "text", "text": "P[first]"}]}], "first"),
+        max_rounds=3, min_budget=5000)
+    # first_built counted (over) -> one rebuild at the shrunk budget
+    assert builds == [pytest.approx(90_000 * 192_000 / 400_000 * 0.99, abs=2)]
+    assert built[1] == builds[0] and budget == builds[0]
+    assert real == 100_000
+
+
+def test_fit_by_count_none_count_returns_first(app, monkeypatch):  # noqa: F811
+    import backend.llm_providers as lp
+    monkeypatch.setattr(lp.LLMProvider, "count_tokens",
+                        staticmethod(lambda m, msgs, k: None))
+    built, budget, real = lp.fit_by_count(
+        "claude-opus-4.8", {}, 192_000, 90_000,
+        lambda b: ([{"role": "user", "content": [
+            {"type": "text", "text": "P"}]}], b))
+    assert built is not None and budget == 90_000 and real is None
 
 
 def test_apply_intentions_item_saves_at_batch_price(app, wired):  # noqa: F811
