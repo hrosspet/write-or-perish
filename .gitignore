@@ -60,3 +60,15 @@ logs/
 experiments/prompt_rct/eval_prompts/
 # Staging-eval fixture (real content; never commit) — #155/#197
 staging_fixture*.json
+
+# Cheap-model intentions eval (experiments/cheap-model-intentions):
+# generated artifacts + rendered prompt contain a named person's corpus
+# and inferred profile — public repo, keep them local.
+intentions_*.txt
+experiments/cheap-model-intentions/*.json
+experiments/cheap-model-intentions/prompt.txt
+
+# Regenerable in ~4 min from the snapshot; lists 734 real accounts ranked for
+# profiling, so keep it out of the public repo.
+ca_token_census.tsv
+experiments/cheap-model-intentions/chunk_batch_state.json

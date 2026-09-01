@@ -210,6 +210,40 @@ class Config:
             "input_price_per_mtok": 3.00,
             "output_price_per_mtok": 15.00,
         },
+        # ── EXPERIMENT BRANCH ONLY (experiments/cheap-model-intentions) ──
+        # Two models cheaper than Opus 4.8, added to evaluate intentions
+        # inference on a Twitter pre-fill corpus. Do NOT merge to main
+        # without re-checking prices and deciding they should be
+        # user-selectable. Prices verified 2026-09-01.
+        #
+        # 200K context: the intentions export does NOT fit. fit_by_count
+        # pre-sizes the export down to ~32% of the corpus (newest first).
+        "claude-haiku-4.5": {
+            "provider": "anthropic",
+            "api_model": "claude-haiku-4-5",
+            "display_name": "Claude Haiku 4.5",
+            "context_window": 200000,
+            "max_output_tokens": 64000,
+            "input_price_per_mtok": 1.00,
+            "output_price_per_mtok": 5.00,
+        },
+        # 1.05M context: the full corpus fits in one call. OpenAI's
+        # long-context tier (input 2x / output 1.5x above 272K) always
+        # applies to this workload -> effective $0.40 / $1.80 per MTok.
+        # Measured: tiktoken o200k_base predicted the input token count to
+        # within 0.04% of OpenAI's reported usage, so no token_multiplier.
+        "gpt-5.6-luna": {
+            "provider": "openai",
+            "api_model": "gpt-5.6-luna",
+            "display_name": "GPT-5.6 Luna",
+            "context_window": 1050000,
+            "input_price_per_mtok": 0.20,
+            "output_price_per_mtok": 1.20,
+            "cached_input_multiplier": 0.10,
+            "long_context_threshold": 272000,
+            "long_context_input_multiplier": 2.0,
+            "long_context_output_multiplier": 1.5,
+        },
         "claude-opus-5": {
             "provider": "anthropic",
             "api_model": "claude-opus-5",
