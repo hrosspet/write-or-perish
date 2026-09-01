@@ -23,10 +23,14 @@ Buckets (lifetime, humans only):
 AND source_key IS NULL; origin catches split-import segments source_key
 used to miss).
 "last seen" = max(own node, any API call, notification read, changelog read,
-last magic-link request, user.last_seen_at, artifact view). Still a floor
-for history: last_seen_at only exists since the 2026-08-29 deploy (#272)
-and artifact_view since 2026-09-01, so older visits that left no other
-trace are invisible.
+last user-requested magic link, user.last_seen_at, artifact view). Still a
+floor for history: last_seen_at only exists since the 2026-08-29 deploy
+(#272) and artifact_view since 2026-09-01, so older visits that left no
+other trace are invisible.
+The magic-link columns keep the latest minted link (verify never clears
+them) and welcome emails mint 30-day links at approval time — an admin
+action, not a user one — so that term is dropped when its mint time
+matches approved_at or would land in the future.
 "returned" = any of those signals on a UTC day after the signup day.
 Spam-flagged accounts are excluded along with system accounts.
 
@@ -49,6 +53,9 @@ from backend import create_app  # noqa: E402
 from backend.extensions import db  # noqa: E402
 
 FIRST_REPLY_WINDOW = timedelta(minutes=15)
+# activate_and_welcome mints its magic link with this expiry (see
+# backend/routes/admin.py) — used to recognize welcome links.
+WELCOME_LINK_TTL = timedelta(days=30)
 
 
 def table(headers, rows, aligns=None):
@@ -219,12 +226,19 @@ def main():
             o = own.get(uid)
             c = calls.get(uid)
             n_own = o["n"] if o else 0
+            magic_seen = None
+            if u["magic_link_expires_at"]:
+                t_login = u["magic_link_expires_at"] - magic_ttl
+                t_welcome = u["magic_link_expires_at"] - WELCOME_LINK_TTL
+                is_welcome = u["approved_at"] is not None and abs(
+                    (t_welcome - u["approved_at"]).total_seconds()) < 3600
+                if not is_welcome and t_login <= now:
+                    magic_seen = t_login
             last_seen = max(filter(None, [
                 o["last_at"] if o else None,
                 c["last_at"] if c else None,
                 notif.get(uid), changelog.get(uid),
-                (u["magic_link_expires_at"] - magic_ttl)
-                if u["magic_link_expires_at"] else None,
+                magic_seen,
                 u["last_seen_at"], art_last.get(uid),
                 u["created_at"],
             ]))
