@@ -326,7 +326,12 @@ Priority tiers by follower count: top 10 = $2.59 · top 100 (≥8,639 followers,
 2. **gpt-5.6-luna chunked is the value pick** — ~92% of baseline coverage at
    ~3% of baseline cost. Haiku chunked is viable but ~5x luna's price for
    slightly worse coverage.
-3. **Build and evaluate the aggregation step** — the largest untested risk.
+3. **Measure the aggregation step next — it is now the critical path.** One
+   dedupe call on the reference account's 42 chunk-level intentions (~$0.01)
+   answers two questions the rest of the plan depends on: the real compression
+   ratio (is `~13/account` right?) and whether dedupe preserves specific,
+   idiomatic themes or regresses toward the generic. Every aggregated figure in
+   §11 rests on this, and §5 gives concrete reason to expect the regression.
 4. **Repeat for confidence before committing at scale**: 3 runs per condition
    across 2–3 corpora would settle whether 12/13 is stable. ~$2 of API spend.
 5. **Consider a two-tier policy**: cheap chunked pre-fill for everyone, Opus
@@ -334,6 +339,13 @@ Priority tiers by follower count: top 10 = $2.59 · top 100 (≥8,639 followers,
 6. Open: does the `distinct` criterion (not the numeric anchor) govern output
    count? Relaxing it is the clean single-variable test, and would show whether
    the cheap models' abstractness is a *merging* artifact.
+7. **Measure single-call attentional recall for chunk x chunk** (~$2): run one
+   chunk-pair, then exhaustive pairwise over the same accounts, and compare.
+   That fraction sets how many re-partition rounds are needed, which is the only
+   free variable in the chunk x chunk budget.
+8. Cost optimisation now belongs in **extraction**, not matching (see §11) —
+   and the earlier premise that matching cost would force compromises on
+   extraction quality no longer holds.
 
 ---
 
@@ -505,6 +517,30 @@ Full-pipeline totals (batch, whole archive):
 The shape this suggests: **cheap model where volume dominates (extraction),
 frontier model where judgment dominates (aggregation of heavy accounts, and
 matching)** — and the whole archive still lands under ~$155.
+
+**Extraction is the largest line item in every configuration** — the opposite of
+where this investigation started. It opened as "matching will be unaffordable,
+so extraction quality must be traded away"; it ends with matching costing
+$2–70 and extraction costing $43. Any further cost optimisation belongs in
+extraction, and the case for degrading extraction quality to fund matching has
+disappeared.
+
+**Prefer hierarchical merge for the heavy tail on quality grounds, not cost.**
+Everything downstream now rests on aggregation output, and a single call
+compressing 1,624 intentions to 13 is the most plausible place for that to break
+— §5 found cheap models already tend to sand off exactly the specific, idiomatic
+material that makes a match non-obvious. Fan-in 8 never asks any call for more
+than an 8:1 reduction, for ~13% more.
+
+**The `~13 per account` figure is an assumption, and the aggregated tables
+depend on it.** If real accounts carry 20–30 genuinely distinct intentions, the
+archive no longer fits one 1M window (0.95M is close to the limit already),
+chunk x chunk needs a larger N, and the pairwise figures scale accordingly.
+Cheapest way to find out: run the dedupe on the reference account's 42
+chunk-level intentions — about a cent — which yields both the real compression
+ratio and, more importantly, whether dedupe preserves the idiomatic themes or
+regresses toward the generic. That is the single highest-value unmeasured
+number in this study.
 
 ### Caching
 
