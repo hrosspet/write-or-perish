@@ -135,7 +135,6 @@ def start_infer_intentions_impl(user_id):
     from backend.utils.api_keys import get_api_keys_for_usage
     from backend.utils.llm_batch import apply_batch_key_override
     from backend.utils.privacy import AI_ALLOWED
-    from backend.utils.tokens import reduce_export_tokens
     from backend.llm_providers import LLMProvider, PromptTooLongError
     from backend.tasks.recent_context import _count_total_eligible_tokens
 
@@ -171,8 +170,7 @@ def start_infer_intentions_impl(user_id):
     try:
         result = LLMProvider.get_completion(MODEL_ID, messages, api_keys)
     except PromptTooLongError as e:
-        calibrated = reduce_export_tokens(
-            budget, e.actual_tokens, e.max_tokens, export_content=export)
+        calibrated = _calibrated_budget(user, budget, e.actual_tokens, e.max_tokens)
         logger.info("intentions user %s: probe real=%s > max=%s — batch budget=%s",
                     user_id, e.actual_tokens, e.max_tokens, calibrated)
         return "batch", _submit(user, template, calibrated, chronological,
@@ -197,6 +195,21 @@ def apply_intentions_item(user, item, result):
     logger.info("intentions user %s: saved v%s from batch (%s llm tokens, $%.4f)",
                 user.id, saved["version"], saved["llm_tokens"], saved["cost_usd"])
     return saved
+
+
+def _calibrated_budget(user, prior_budget, actual_tokens, max_tokens):
+    """Budget (in the export builder's DB chars/4 units) sized so the real
+    prompt fits. The binding quantity is min(prior budget, the corpus's DB
+    token sum) — scaling the raw budget is a no-op whenever the corpus is
+    smaller than it (user 110, 2026-09-01: 1M -> 661k budget re-rendered
+    the identical full export and overflowed again). Scale what was
+    actually used by the provider-reported ratio."""
+    from flask import current_app
+    from backend.tasks.recent_context import _count_total_eligible_tokens
+    safety = current_app.config.get("RETRY_SAFETY_FACTOR", 0.99)
+    effective = min(prior_budget or max_tokens,
+                    max(_count_total_eligible_tokens(user.id), 1))
+    return max(int(effective * max_tokens / actual_tokens * safety), 10_000)
 
 
 def _failed_item_tokens(provider_key, batch_id, custom_id, keys):
@@ -228,7 +241,6 @@ def handle_failed_intentions_item(user, item, job, keys):
     result. One calibrated resubmit — a new persisted job — sized from the
     provider's real token count when the error carries it (Anthropic does),
     else a 70% shrink. A resubmitted item that fails again gives up."""
-    from backend.utils.tokens import reduce_export_tokens
     if item.get("resubmitted"):
         logger.warning("intentions user %s: batch failed again after resubmit — giving up", user.id)
         return
@@ -237,11 +249,12 @@ def handle_failed_intentions_item(user, item, job, keys):
     actual, maximum = _failed_item_tokens(
         job.provider_key, job.batch_id, item["custom_id"], keys)
     if actual and maximum:
-        calibrated = reduce_export_tokens(prior, actual, maximum,
-                                          export_content=None)
+        calibrated = _calibrated_budget(user, prior, actual, maximum)
         label = f"real={actual} > max={maximum}"
     else:
-        calibrated = max(int(prior * 0.7), 10_000)
+        from backend.tasks.recent_context import _count_total_eligible_tokens
+        effective = min(prior, max(_count_total_eligible_tokens(user.id), 1))
+        calibrated = max(int(effective * 0.7), 10_000)
         label = "no token count in error — 70% shrink"
     logger.warning("intentions user %s: batch item failed (%s) — resubmitting once at budget=%s",
                    user.id, label, calibrated)

@@ -110,23 +110,32 @@ def _job_for(item):
     return j
 
 
-def test_failed_item_resubmits_calibrated_from_real_count(app, wired, monkeypatch):  # noqa: F811
+def test_failed_item_resubmits_calibrated_from_corpus_not_budget(app, wired, monkeypatch):  # noqa: F811
+    """User-110 regression: the corpus (560k DB units) was smaller than the
+    1M budget, so scaling the budget re-rendered the identical export. The
+    calibration must scale min(budget, corpus) by the real ratio."""
+    import backend.tasks.recent_context as rc
+    monkeypatch.setattr(rc, "_count_total_eligible_tokens", lambda uid: 560_000)
     u = _make_user("erin")
     _db.session.commit()
     item = {"custom_id": f"int-u{u.id}", "user_id": u.id, "kind": "intentions",
             "budget": 1_000_000, "resubmitted": False}
     job = _job_for(item)
-    monkeypatch.setattr(it, "_failed_item_tokens", lambda pk, bid, cid, keys: (2_300_000, 1_000_000))
+    monkeypatch.setattr(it, "_failed_item_tokens", lambda pk, bid, cid, keys: (1_496_460, 1_000_000))
     it.handle_failed_intentions_item(u, item, job, {})
     new = ProfileBatchJob.query.filter(ProfileBatchJob.batch_id != "b-old").one()
     assert new.items[0]["resubmitted"] is True
-    assert new.items[0]["budget"] < 500_000  # scaled by the real overflow ratio, not 70%
+    # min(1M, 560k) * (1M / 1.49646M) * 0.99 ≈ 370k — STRICTLY below the corpus,
+    # so the export actually shrinks this time.
+    assert 350_000 < new.items[0]["budget"] < 560_000
     # A failure of the resubmitted item gives up (no third job).
     it.handle_failed_intentions_item(u, new.items[0], new, {})
     assert ProfileBatchJob.query.count() == 2
 
 
-def test_failed_item_falls_back_to_70pct_without_counts(app, wired, monkeypatch):  # noqa: F811
+def test_failed_item_falls_back_to_70pct_of_corpus_without_counts(app, wired, monkeypatch):  # noqa: F811
+    import backend.tasks.recent_context as rc
+    monkeypatch.setattr(rc, "_count_total_eligible_tokens", lambda uid: 560_000)
     u = _make_user("gita")
     _db.session.commit()
     item = {"custom_id": f"int-u{u.id}", "user_id": u.id, "kind": "intentions",
@@ -135,7 +144,7 @@ def test_failed_item_falls_back_to_70pct_without_counts(app, wired, monkeypatch)
     monkeypatch.setattr(it, "_failed_item_tokens", lambda pk, bid, cid, keys: (None, None))
     it.handle_failed_intentions_item(u, item, job, {})
     new = ProfileBatchJob.query.filter(ProfileBatchJob.batch_id != "b-old").one()
-    assert new.items[0]["budget"] == 700_000
+    assert new.items[0]["budget"] == int(560_000 * 0.7)
 
 
 def test_model_token_multiplier_scales_estimate_into_probe(app, wired, monkeypatch):  # noqa: F811
@@ -155,7 +164,8 @@ def test_model_token_multiplier_scales_estimate_into_probe(app, wired, monkeypat
         kind, ref = it.start_infer_intentions_impl(u.id)
     finally:
         del app.config["SUPPORTED_MODELS"]["claude-opus-4.8"]["token_multiplier"]
-    assert kind == "batch" and ref["item"]["budget"] < 1_000_000  # 600k > threshold: probed
+    # probed + calibrated against the corpus (300k DB units), not the 1M cap
+    assert kind == "batch" and ref["item"]["budget"] < 300_000
     o = _make_user("iris")  # no multiplier declared: 300k <= threshold, direct batch
     _db.session.commit()
     kind, ref = it.start_infer_intentions_impl(o.id)
