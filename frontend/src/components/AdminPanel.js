@@ -980,9 +980,9 @@ function AdminPanel() {
             <th style={{ border: "1px solid var(--border)", padding: "8px", width: "85px", whiteSpace: "nowrap" }}>Limit ($)</th>
             <th
               style={{ border: "1px solid var(--border)", padding: "8px", width: "150px", whiteSpace: "nowrap" }}
-              title="Profile chain: ✓ complete = one version, or the latest version is an integration; ⏳ generating = batch job in flight / rebuild requested / chain not yet integrated. 'pre-filled @handle' = bootstrapped from the Community Archive."
+              title="Pre-fill status: profile chain (✓ = at rest, ⏳ = batch in flight / rebuild requested), intentions runs, seed source, and tweet-seed consent."
             >
-              Profile
+              Pre-fill
             </th>
             <th
               style={{ border: "1px solid var(--border)", padding: "8px", width: "85px", whiteSpace: "nowrap" }}
@@ -1082,7 +1082,7 @@ function AdminPanel() {
                     style={{ color: u.profile.incomplete || u.profile.batch_attempts ? "var(--error)" : "var(--warning)" }}
                     title={u.profile.incomplete ? "Data remains after the latest version's cutoff and no batch job is in flight — the last chunk failed; the hourly seeder retries" : undefined}
                   >
-                    ⏳ {u.profile.incomplete ? "stuck" : "generating"}{u.profile.versions ? ` (${u.profile.versions} so far)` : ""}{u.profile.batch_attempts ? ` · ${u.profile.batch_attempts} failed` : ""}
+                    ⏳ {u.profile.incomplete ? "stuck" : "profile"}{u.profile.versions ? ` (${u.profile.versions} so far)` : ""}{u.profile.batch_attempts ? ` · ${u.profile.batch_attempts} failed` : ""}
                   </span>
                 )}
                 {(!u.profile || u.profile.state === "none") && (
