@@ -82,6 +82,31 @@ def _profile_status_map():
     return out
 
 
+def _intentions_status_map():
+    """{user_id: {state, versions, last_created_at}} for the Users-tab
+    Profile column: "generating" while a kind="intentions" batch item is
+    pending (persisted ProfileBatchJob — survives restarts), else
+    "complete" when at least one intentions artifact version exists."""
+    from backend.models import ProfileBatchJob, UserArtifact
+    pending_ids = set()
+    for job in ProfileBatchJob.query.filter_by(status="pending").all():
+        for item in job.items:
+            if item.get("kind") == "intentions":
+                pending_ids.add(item["user_id"])
+    rows = db.session.query(
+        UserArtifact.user_id, func.count(UserArtifact.id),
+        func.max(UserArtifact.created_at),
+    ).filter(UserArtifact.kind == "intentions").group_by(
+        UserArtifact.user_id).all()
+    out = {uid: {"state": "complete", "versions": n,
+                 "last_created_at": iso_utc(last)}
+           for uid, n, last in rows}
+    for uid in pending_ids:
+        entry = out.setdefault(uid, {"versions": 0, "last_created_at": None})
+        entry["state"] = "generating"
+    return out
+
+
 @admin_bp.route("/users", methods=["GET"])
 @login_required
 @admin_required
@@ -94,6 +119,7 @@ def list_users():
     now = datetime.utcnow()
     users = User.query.order_by(User.created_at.desc()).all()
     profile_status = _profile_status_map()
+    intentions_status = _intentions_status_map()
 
     # Aggregate total (all-time) spending per user in a single query
     spending_rows = db.session.query(
@@ -168,6 +194,7 @@ def list_users():
             "prefill_consent": user.prefill_consent,
             "prefill_consent_at": iso_utc(user.prefill_consent_at),
             "spam": bool(user.spam),
+            "intentions": intentions_status.get(user.id),
             "profile": profile_status.get(user.id) or {
                 "versions": 0,
                 "last_generation_type": None,

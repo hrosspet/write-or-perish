@@ -512,6 +512,46 @@ def test_prefill_complete_email_failure_does_not_break_poll(app, monkeypatch):
     assert User.query.get(u.id).profile_batch_pending is False
 
 
+def test_poll_routes_intentions_items_without_touching_profile_flags(app, monkeypatch):
+    """A kind="intentions" job rides the same poller but must not touch
+    profile_batch_pending / attempts, and its result goes to the
+    intentions apply fn."""
+    import backend.tasks.intentions as intentions_mod
+    u = _user()
+    item = {"custom_id": f"int-u{u.id}", "user_id": u.id, "kind": "intentions",
+            "budget": 1_000_000, "resubmitted": False}
+    job = ProfileBatchJob(provider_key="anthropic", batch_id="bi-1",
+                          status="pending", items=[item],
+                          submitted_at=datetime.utcnow())
+    db.session.add(job)
+    db.session.commit()
+    applied = []
+    monkeypatch.setattr(intentions_mod, "apply_intentions_item",
+                        lambda user, itm, res: applied.append((user.id, res["content"])))
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        {item["custom_id"]: {"content": "# Endorsed", "input_tokens": 1, "output_tokens": 1}},
+        {}, {}))
+    monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
+    pb._poll_profile_batches()
+    assert applied == [(u.id, "# Endorsed")]
+    fresh = User.query.get(u.id)
+    assert fresh.profile_batch_pending is False and (fresh.profile_batch_attempts or 0) == 0
+    assert ProfileBatchJob.query.get(job.id).status == "collected"
+    # Failed intentions item routes to the failure handler, not attempts.
+    job2 = ProfileBatchJob(provider_key="anthropic", batch_id="bi-2",
+                           status="pending", items=[dict(item)],
+                           submitted_at=datetime.utcnow())
+    db.session.add(job2)
+    db.session.commit()
+    failed = []
+    monkeypatch.setattr(intentions_mod, "handle_failed_intentions_item",
+                        lambda user, itm, job, keys: failed.append(user.id))
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: ({}, {}, {}))
+    pb._poll_profile_batches()
+    assert failed == [u.id]
+    assert (User.query.get(u.id).profile_batch_attempts or 0) == 0
+
+
 def test_poll_failed_item_bumps_attempts_and_clears_pending(app, monkeypatch):
     u = _user()
     prev = _prev_profile(u, datetime(2026, 5, 1))

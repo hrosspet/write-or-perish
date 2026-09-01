@@ -615,6 +615,7 @@ function AdminPanel() {
     if (p.status === "failed") return `Intentions failed: ${p.error}`;
     if (p.status === "completed") {
       const r = p.result || {};
+      if (r.stage === "batch submitted") return "Intentions: batch submitted — progress shows in the Profile column";
       return `Intentions v${r.version} saved (${r.model_id}, ${(r.llm_tokens || 0).toLocaleString()} tokens, $${(r.cost_usd || 0).toFixed(2)})`;
     }
     return null;
@@ -1086,6 +1087,14 @@ function AdminPanel() {
                 )}
                 {(!u.profile || u.profile.state === "none") && (
                   <span style={{ color: "var(--text-muted)" }}>—</span>
+                )}
+                {u.intentions && (
+                  <div style={{ fontSize: "0.8em", color: u.intentions.state === "generating" ? "var(--warning)" : "var(--text-muted)" }}
+                       title={u.intentions.last_created_at ? `latest intentions version ${u.intentions.last_created_at}` : "intentions batch in flight (persisted; survives restarts)"}>
+                    {u.intentions.state === "generating"
+                      ? <>⏳ intentions{u.intentions.versions ? ` (${u.intentions.versions} so far)` : ""}</>
+                      : <>✓ intentions v{u.intentions.versions}</>}
+                  </div>
                 )}
                 {u.prefilled_handle && (
                   <div style={{ color: "var(--text-muted)", fontSize: "0.85em" }}>
