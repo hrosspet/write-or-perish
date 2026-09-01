@@ -1089,11 +1089,13 @@ function AdminPanel() {
                   <span style={{ color: "var(--text-muted)" }}>—</span>
                 )}
                 {u.intentions && (
-                  <div style={{ color: u.intentions.state === "generating" ? "var(--warning)" : "var(--text-muted)" }}
-                       title={u.intentions.last_created_at ? `latest intentions version ${u.intentions.last_created_at}` : "intentions batch in flight (persisted; survives restarts)"}>
+                  <div style={{ color: u.intentions.state === "generating" ? "var(--warning)" : u.intentions.state === "failed" ? "var(--error)" : "var(--text-muted)" }}
+                       title={u.intentions.state === "failed" ? "The last intentions run gave up (batch failed twice) — check the worker log, then re-click Infer intentions" : u.intentions.last_created_at ? `latest intentions version ${u.intentions.last_created_at}` : "intentions batch in flight (persisted; survives restarts)"}>
                     {u.intentions.state === "generating"
                       ? <>⏳ intentions{u.intentions.versions ? ` (${u.intentions.versions} so far)` : ""}</>
-                      : <>✓ intentions v{u.intentions.versions}</>}
+                      : u.intentions.state === "failed"
+                        ? <>✗ intentions failed</>
+                        : <>✓ intentions v{u.intentions.versions}</>}
                   </div>
                 )}
                 {u.prefilled_handle && (

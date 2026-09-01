@@ -242,6 +242,13 @@ def handle_failed_intentions_item(user, item, job, keys):
     provider's real token count when the error carries it (Anthropic does),
     else a 70% shrink. A resubmitted item that fails again gives up."""
     if item.get("resubmitted"):
+        # Persist the terminal failure so the admin column can show it
+        # (otherwise the abandoned run is invisible — the job is marked
+        # collected and no artifact ever appears).
+        from backend.extensions import db
+        job.items = [{**i, "gave_up": True} if i.get("custom_id") == item.get("custom_id")
+                     else i for i in job.items]
+        db.session.commit()
         logger.warning("intentions user %s: batch failed again after resubmit — giving up", user.id)
         return
     template, cap, chronological = _template_and_params()

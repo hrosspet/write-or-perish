@@ -292,8 +292,25 @@ class TestProfileStatus:
         _db.session.commit()
         client = app.test_client()
         _login(client, adm.id)
+        gave = User(username="gave", approved=True)
+        recovered = User(username="recov", approved=True)
+        _db.session.add_all([gave, recovered]); _db.session.flush()
+        old = datetime(2026, 1, 1)
+        for u_, bid in ((gave, "bi-10"), (recovered, "bi-11")):
+            _db.session.add(ProfileBatchJob(
+                provider_key="anthropic", batch_id=bid, status="collected",
+                items=[{"custom_id": f"int-u{u_.id}", "user_id": u_.id,
+                        "kind": "intentions", "budget": 1, "resubmitted": True,
+                        "gave_up": True}],
+                submitted_at=old))
+        ra = UserArtifact(user_id=recovered.id, kind="intentions", title="Intentions",
+                          generated_by="m", tokens_used=1)
+        ra.set_content("y"); _db.session.add(ra)  # artifact postdates the give-up
+        _db.session.commit()
         rows = {u["username"]: u for u in client.get("/api/admin/users").json["users"]}
         assert rows["gen"]["intentions"]["state"] == "generating"
+        assert rows["gave"]["intentions"]["state"] == "failed"
+        assert rows["recov"]["intentions"]["state"] == "complete"
         assert rows["donei"]["intentions"] == {"state": "complete", "versions": 1,
                                                "last_created_at": rows["donei"]["intentions"]["last_created_at"]}
         assert rows["donei"]["intentions"]["last_created_at"] is not None

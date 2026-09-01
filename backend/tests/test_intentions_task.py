@@ -128,9 +128,11 @@ def test_failed_item_resubmits_calibrated_from_corpus_not_budget(app, wired, mon
     # min(1M, 560k) * (1M / 1.49646M) * 0.99 ≈ 370k — STRICTLY below the corpus,
     # so the export actually shrinks this time.
     assert 350_000 < new.items[0]["budget"] < 560_000
-    # A failure of the resubmitted item gives up (no third job).
+    # A failure of the resubmitted item gives up (no third job) and the
+    # give-up is persisted on the item for the admin column.
     it.handle_failed_intentions_item(u, new.items[0], new, {})
     assert ProfileBatchJob.query.count() == 2
+    assert ProfileBatchJob.query.get(new.id).items[0]["gave_up"] is True
 
 
 def test_failed_item_falls_back_to_70pct_of_corpus_without_counts(app, wired, monkeypatch):  # noqa: F811

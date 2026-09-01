@@ -85,22 +85,34 @@ def _profile_status_map():
 def _intentions_status_map():
     """{user_id: {state, versions, last_created_at}} for the Users-tab
     Profile column: "generating" while a kind="intentions" batch item is
-    pending (persisted ProfileBatchJob — survives restarts), else
-    "complete" when at least one intentions artifact version exists."""
+    pending (persisted ProfileBatchJob — survives restarts); "failed" when
+    the latest run gave up (overflow twice / batch error) and no artifact
+    version postdates it; else "complete" when at least one intentions
+    artifact version exists."""
     from backend.models import ProfileBatchJob, UserArtifact
-    pending_ids = set()
-    for job in ProfileBatchJob.query.filter_by(status="pending").all():
+    pending_ids, gave_up_at = set(), {}
+    for job in ProfileBatchJob.query.order_by(ProfileBatchJob.submitted_at).all():
         for item in job.items:
-            if item.get("kind") == "intentions":
+            if item.get("kind") != "intentions":
+                continue
+            if job.status == "pending":
                 pending_ids.add(item["user_id"])
+            elif item.get("gave_up"):
+                gave_up_at[item["user_id"]] = job.submitted_at
     rows = db.session.query(
         UserArtifact.user_id, func.count(UserArtifact.id),
         func.max(UserArtifact.created_at),
     ).filter(UserArtifact.kind == "intentions").group_by(
         UserArtifact.user_id).all()
+    last_artifact = {uid: last for uid, _, last in rows}
     out = {uid: {"state": "complete", "versions": n,
                  "last_created_at": iso_utc(last)}
            for uid, n, last in rows}
+    for uid, when in gave_up_at.items():
+        newer = last_artifact.get(uid)
+        if newer is None or newer < when:
+            entry = out.setdefault(uid, {"versions": 0, "last_created_at": None})
+            entry["state"] = "failed"
     for uid in pending_ids:
         entry = out.setdefault(uid, {"versions": 0, "last_created_at": None})
         entry["state"] = "generating"
