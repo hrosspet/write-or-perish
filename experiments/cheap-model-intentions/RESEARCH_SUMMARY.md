@@ -358,6 +358,41 @@ Scaling of the exhaustive route (luna batch): 734 accounts $493 · 1,468
 $1,973 · 2,936 $7,893 · 7,340 $49,342. Doubling the pool quadruples the bill —
 exhaustive pairwise works once, at today's size, and never again.
 
+### The same ceilings on AGGREGATED intentions (~13/account)
+
+9,542 intentions total; 1,300 tok/account (luna) / 1,958 (Opus); 0.95M / 1.44M
+archive-wide.
+
+| approach | calls | input | luna batch | opus-4.8 batch |
+|---|---|---|---|---|
+| exhaustive pairwise | 269,011 | 753M | $123.75 | $3,777 |
+| …with prefix caching (sync) | 269,011 | 439M | $184.71 | — |
+| chunk x chunk **N=2** (pair 954K) | 3 | 3M | **$0.59** | **$11** |
+| chunk x chunk N=3 (pair 636K) | 6 | 4M | $0.81 | $15 |
+| chunk x chunk N=5 (pair 382K) | 15 | 6M | $1.25 | $23 |
+| chunk x chunk N=8 (pair 239K) | 36 | 9M | $1.03 | $36 |
+| chunk x chunk N=15 (pair 127K) | 120 | 15M | $2.11 | $70 |
+| whole archive in ONE window | 1 | 1M | **$0.24** | **$4** |
+| cluster-pair triage (200 clusters) | 19,900 | 19M | $3.32 | — |
+| random control, 10k pairs | 10,000 | 28M | $4.60 | $140 |
+
+Three consequences of aggregating first:
+
+- **Caching stops paying.** $184.71 cached-sync vs $123.75 uncached-batch — now
+  *worse*. The 72% saving on raw came almost entirely from size skew (a few
+  enormous accounts anchored many times); uniform 1,300-token lists remove the
+  skew and with it the reason dense-first ordering helped. Dense-first is a
+  raw-intentions optimisation specifically.
+- **Opus 4.8 becomes the default rather than the aspiration** — $11–70 for
+  complete pair coverage. The question flips from "can we afford Opus?" to "how
+  many independent re-partition rounds do we want?" (50 rounds of N=5 on Opus
+  ~$1,150; 100 rounds on luna ~$125). Since attentional recall is chunk x
+  chunk's only real loss and re-partitioning is the fix, buying dozens of rounds
+  beats any single-pass optimisation.
+- **The random control becomes a major line item** — $140 on Opus, twice the
+  entire N=15 sweep. Verifying what you missed costs more than the search.
+  Run the control on luna even when the main sweep is on Opus.
+
 ### Why similarity-ANN is the wrong prefilter
 
 The obvious shortlist — embed intentions, cosine top-k, judge the shortlist —
@@ -425,6 +460,51 @@ Also: use embeddings **inverted** — not to retrieve near things, but to force
 sampling of pairs that are topically distant while sharing one facet.
 Embeddings as a diversity instrument rather than a retrieval one is the use that
 serves this goal.
+
+### Aggregation (the dedupe step) — costed
+
+Simplest shape: one call per account, "dedupe this list of intentions", raw list
+in, ~13 out.
+
+| | input | output | sync | batch |
+|---|---|---|---|---|
+| gpt-5.6-luna | 6.10M | 0.95M | $2.36 | **$1.18** |
+| claude-opus-4.8 | 9.13M | 1.44M | $81.57 | **$40.79** |
+
+Output is roughly half the bill in both cases — you are generating 13 full
+intention blocks per account, not a short verdict.
+
+**The workload is extremely skewed, and that is the exploitable fact.** Median
+account has only **28** raw intentions (a light 28 -> 13 dedupe); p90 is 196;
+the max is 1,624. Only **67 accounts (9%) exceed 200** raw intentions and only 4
+exceed 1,000 — yet those 67 hold **47% of all raw intentions**. So:
+
+| aggregation strategy | batch |
+|---|---|
+| all luna | $1.18 |
+| all Opus 4.8 | $40.79 |
+| **luna on the 667 light accounts, Opus on the 67 heavy** | **$13.10** |
+
+The mixed split puts frontier judgment exactly where the compression is hard
+(1,624 -> 13 is a 125:1 squeeze) and cheap inference where it is trivial, for a
+third of the all-Opus price.
+
+**Hierarchical merge** (fan-in 8: merge chunk outputs in groups, then a final
+pass) costs only ~13% more — luna $1.34, Opus $45.85 batch, 902 calls — and
+avoids asking any single call for a 125:1 compression. Worth preferring for the
+heavy tail even though single-pass is nominally cheaper.
+
+Full-pipeline totals (batch, whole archive):
+
+| pipeline | extract | aggregate | match | **total** |
+|---|---|---|---|---|
+| all-luna | $42.96 | $1.18 | $2.11 (N=15) | **$46.25** |
+| luna extract + mixed aggregate + Opus match (N=5) | $42.96 | $13.10 | $23.00 | **$79.06** |
+| luna extract + Opus aggregate + Opus match (N=15) | $42.96 | $40.79 | $70.00 | **$153.75** |
+
+The shape this suggests: **cheap model where volume dominates (extraction),
+frontier model where judgment dominates (aggregation of heavy accounts, and
+matching)** — and the whole archive still lands under ~$155.
 
 ### Caching
 
