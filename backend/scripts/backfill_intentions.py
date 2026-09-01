@@ -19,17 +19,14 @@ Two modes:
     overflows; the loop reads the provider's real token count from the
     rejection and shrinks proportionally until it fits.
   * --batch — one Batch API request PER USER (~50% cheaper, async, <=24h SLA).
-    A batch request can't retry-shrink mid-flight, and our chars/4 estimate
-    runs far under reality, so sizing is driven by a cheap DB token estimate
-    (sum of the user's AI-readable node token_counts — the heartbeat estimate):
-      - estimate <= --probe-threshold (default 600k): likely fits the context,
-        so submit the batch directly at the full cap. If one overflows it's
-        reported (our DB estimate + the real count from the failure) for a
-        sync re-run — never silently lost.
-      - estimate > threshold: send ONE sync "calibration probe" at the full
-        budget first. It overflows, the rejected 400 is NOT billed and carries
-        the REAL token count for free, which sizes the batch export to fit.
-    A probe that unexpectedly fits is saved synchronously (full price).
+    A batch request can't retry-shrink mid-flight, so sizing happens BEFORE
+    submit against the provider's token count (LLMProvider.count_tokens:
+    Anthropic's free/unbilled counting endpoint; a tiktoken estimate for
+    OpenAI models): the built prompt is counted and — when it exceeds the
+    context window — the export budget is shrunk by the real ratio and
+    rebuilt until it fits. No billed sync probe. If a batch item still
+    overflows anyway (count drift), it's reported (our DB estimate + the
+    real count from the failure) for a sync re-run — never silently lost.
 
 Non-destructive: each run creates a new artifact version; prior content stays
 in the artifact's history.
@@ -94,10 +91,8 @@ PROMPT_FILE = "intentions_detection.txt"
 KIND = "intentions"
 MAX_RETRIES = 3
 BATCH_OUTPUT_TOKENS = 8192  # output cap — ample for a ~14-item intentions list
-# In --batch mode, only spend a sync calibration probe on users whose cheap DB
-# token estimate exceeds this; smaller users are likely to fit the context at
-# the full cap, so we submit their batch directly and report if one overflows.
-PROBE_THRESHOLD_TOKENS = 560_000
+# --batch mode: count -> shrink -> rebuild rounds before giving up on a user.
+MAX_SIZING_ROUNDS = 4
 
 
 def _resolve_model(app, user, override):
@@ -253,10 +248,12 @@ def _failed_batch_tokens(provider_key, batch_id, custom_id, keys):
 
 
 def _submit_batch_for(app, user, template, model_id, budget, chronological,
-                      batch_keys, db_tokens, pending, est_label):
-    """Build the export at `budget`, submit a one-user batch, and record it in
-    `pending` (with db_tokens, for failure reporting)."""
-    built = _build_messages(user, template, budget, chronological)
+                      batch_keys, db_tokens, pending, est_label, built=None):
+    """Build the export at `budget` (or reuse `built` from the sizing loop),
+    submit a one-user batch, and record it in `pending` (with db_tokens, for
+    failure reporting)."""
+    if built is None:
+        built = _build_messages(user, template, budget, chronological)
     if built is None:
         print(f"  ! user {user.id}: no AI-readable archive, skipping")
         return
@@ -280,67 +277,54 @@ def _submit_batch_for(app, user, template, model_id, budget, chronological,
           f"db_est={db_tokens})")
 
 
-def _dispatch_batch_user(app, user, template, model_id, probe_budget,
-                         chronological, probe_threshold, api_keys, batch_keys,
+def _dispatch_batch_user(app, user, template, model_id, cap_budget,
+                         chronological, api_keys, batch_keys,
                          dry_run, pending):
-    """Per-user batch dispatch. A cheap DB token estimate decides the path:
-    small archives (<= threshold) go straight to a full-cap batch — likely to
-    fit the context; large ones first spend a free sync calibration probe (its
-    rejected 400 carries the real token count) so the batch is sized to fit.
-    A probe that unexpectedly fits is saved synchronously (full price)."""
+    """Per-user batch dispatch: build at the prompt's cap, count the real
+    tokens (free/exact on Anthropic, tiktoken estimate on OpenAI), and —
+    when over the context limit — shrink the export budget by the real
+    ratio (against min(budget, corpus DB sum), so the shrink actually
+    bites when the corpus is smaller than the budget) and rebuild until it
+    fits. A None count (endpoint down, tiktoken missing) submits at the
+    cap and relies on the overflow report + sync re-run as backstop."""
     db_tokens = _count_total_eligible_tokens(user.id)
+    limit = (app.config["SUPPORTED_MODELS"][model_id].get(
+        "context_window", 200_000) - BATCH_OUTPUT_TOKENS)
 
-    if db_tokens <= probe_threshold:
-        # Likely fits the context at the full cap — skip the probe.
-        if dry_run:
-            print(f"  user {user.id}: db_est={db_tokens} <= {probe_threshold} "
-                  f"— [dry-run] would batch directly at the full cap")
+    budget, label, built, real = cap_budget, "full-cap", None, None
+    for _ in range(MAX_SIZING_ROUNDS):
+        built = _build_messages(user, template, budget, chronological)
+        if built is None:
+            print(f"  ! user {user.id}: no AI-readable archive, skipping")
             return
-        _submit_batch_for(app, user, template, model_id, probe_budget,
-                          chronological, batch_keys, db_tokens, pending,
-                          est_label="full-cap")
+        real = LLMProvider.count_tokens(model_id, built[0], api_keys)
+        if real is None or real <= limit:
+            break
+        effective = min(budget, max(db_tokens, 1))
+        budget = max(int(effective * limit / real * 0.99), 10_000)
+        label = "count-calibrated"
+        print(f"  user {user.id}: counted {real} > {limit} limit "
+              f"(db_est={db_tokens}) — rebuilding at budget={budget}")
+    else:
+        print(f"  ✗ user {user.id}: still {real} > {limit} tokens after "
+              f"{MAX_SIZING_ROUNDS} sizing rounds — skipping, run sync")
         return
 
-    # Large archive — calibration probe first.
-    built = _build_messages(user, template, probe_budget, chronological)
-    if built is None:
-        print(f"  ! user {user.id}: no AI-readable archive, skipping")
-        return
-    messages, export, est = built
     if dry_run:
-        print(f"  user {user.id}: db_est={db_tokens} > {probe_threshold} — "
-              f"[dry-run] would probe (export ~{est}) then batch")
+        counted = "count unavailable" if real is None else f"counted {real}"
+        print(f"  user {user.id}: db_est={db_tokens}, {counted} — [dry-run] "
+              f"would batch at budget={budget} ({label})")
         return
-    try:
-        result = LLMProvider.get_completion(model_id, messages, api_keys)
-    except PromptTooLongError as e:
-        # Free 400 — calibrate the batch export to the real token count, exactly
-        # as the sync path's shrink does (no extra margin). A rare overflow is
-        # reported and recoverable via --collect / a sync re-run.
-        batch_budget = reduce_export_tokens(
-            probe_budget, e.actual_tokens, e.max_tokens, export_content=export)
-        print(f"  user {user.id}: probe real={e.actual_tokens} > {e.max_tokens} "
-              f"max (db_est={db_tokens}) — batch budget={batch_budget}")
-        _submit_batch_for(app, user, template, model_id, batch_budget,
-                          chronological, batch_keys, db_tokens, pending,
-                          est_label="calibrated")
-        return
-
-    # Probe fit despite the large estimate — already have the answer.
-    in_t, out_t = result.get("input_tokens", 0), result.get("output_tokens", 0)
-    version, cost, total = _save_intentions(
-        user, model_id, result["content"], in_t, out_t,
-        result["total_tokens"], batch=False)
-    print(f"  ✓ user {user.id}: fit in one sync call, saved intentions v{version} "
-          f"({len(result['content'])} chars, llm_tokens={total}, "
-          f"cost=${cost / 1e6:.4f}, full price)")
+    _submit_batch_for(app, user, template, model_id, budget,
+                      chronological, batch_keys, db_tokens, pending,
+                      est_label=label, built=built)
 
 
 def run_batch(app, users, template, model_override, dry_run,
-              poll_interval, max_wait, probe_threshold):
+              poll_interval, max_wait):
     api_keys = get_api_keys_for_usage(app.config, "chat")
     batch_keys = apply_batch_key_override(api_keys, app.config)
-    probe_budget, chronological = _prompt_export_params(template)
+    cap_budget, chronological = _prompt_export_params(template)
 
     pending = {}  # user_id -> {user, model_id, custom_id, provider_key, batch_id, db_tokens}
     for user in users:
@@ -348,8 +332,8 @@ def run_batch(app, users, template, model_override, dry_run,
         if not _eligible(app, user, model_id):
             continue
         try:
-            _dispatch_batch_user(app, user, template, model_id, probe_budget,
-                                 chronological, probe_threshold, api_keys,
+            _dispatch_batch_user(app, user, template, model_id, cap_budget,
+                                 chronological, api_keys,
                                  batch_keys, dry_run, pending)
         except Exception as e:  # noqa: BLE001 — isolate per-user failures
             db.session.rollback()
@@ -397,7 +381,7 @@ def run_batch(app, users, template, model_override, dry_run,
                 pending.pop(uid)
             elif not still:
                 # Batch ended but this request produced no result — most likely
-                # an overflow on a small (no-probe) user. Report our cheap DB
+                # an overflow the pre-submit count missed. Report our cheap DB
                 # estimate plus the real count from the failure, if available.
                 actual, errmsg = _failed_batch_tokens(
                     info["provider_key"], info["batch_id"],
@@ -493,18 +477,13 @@ def main():
                          f"preferred_model, else {DEFAULT_MODEL}).")
     ap.add_argument("--batch", action="store_true",
                     help="Submit via the Batch API (~50%% cheaper, async): one "
-                         "right-sized batch per user, after a free sync probe.")
+                         "batch per user, sized by a free provider token "
+                         "count before submit.")
     ap.add_argument("--poll-interval", type=int, default=30,
                     help="Seconds between batch status polls (--batch).")
     ap.add_argument("--max-wait", type=int, default=3600,
                     help="Max seconds to poll before printing batch IDs and "
                          "exiting (--batch).")
-    ap.add_argument("--probe-threshold", type=int,
-                    default=PROBE_THRESHOLD_TOKENS,
-                    help="(--batch) Only spend a sync calibration probe on "
-                         "users whose cheap DB token estimate exceeds this; "
-                         "smaller users batch directly at the full cap "
-                         f"(default {PROBE_THRESHOLD_TOKENS}).")
     ap.add_argument("--collect", nargs="+", metavar="BATCH_ID", default=None,
                     help="Recover a crashed/timed-out --batch run: fetch these "
                          "batch ids and save their results (user read from each "
@@ -536,7 +515,7 @@ def main():
 
         if args.batch:
             run_batch(app, users, template, args.model, args.dry_run,
-                      args.poll_interval, args.max_wait, args.probe_threshold)
+                      args.poll_interval, args.max_wait)
         else:
             for user in users:
                 model_id = _resolve_model(app, user, args.model)
