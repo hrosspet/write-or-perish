@@ -241,6 +241,102 @@ class LLMProvider:
         return e
 
     @staticmethod
+    def _to_anthropic_params(messages: list):
+        """OpenAI-style messages -> (system_param, anthropic_messages).
+
+        System messages collapse into the separate 'system' parameter.
+        Content blocks are passed through as-is (#187): block boundaries
+        and any cache_control markers placed upstream must survive —
+        flattening to a string would erase the cache breakpoints.
+        """
+        system_messages = [m for m in messages if m.get("role") == "system"]
+        system_text = "\n\n".join([
+            m["content"][0]["text"] if isinstance(m.get("content"), list) else m["content"]
+            for m in system_messages
+            if m.get("content")
+        ])
+        anthropic_messages = []
+        for msg in messages:
+            if msg["role"] in ["user", "assistant"]:
+                content = msg["content"]
+                if isinstance(content, list) and len(content) > 0:
+                    if not (isinstance(content[0], dict)
+                            and "text" in content[0]):
+                        content = str(content)
+                anthropic_messages.append({
+                    "role": msg["role"],
+                    "content": content
+                })
+        system_param = [{"type": "text", "text": system_text}] if system_text else []
+        return system_param, anthropic_messages
+
+    @staticmethod
+    def count_tokens(model_id: str, messages: list, api_keys: dict) -> int:
+        """Input token count for `messages` as they would be sent by
+        get_completion, so callers can size a request BEFORE submitting —
+        instead of burning a billed sync probe or a batch round-trip on
+        an overflow rejection. Returns None when counting isn't possible
+        (unknown provider, tiktoken unavailable/failed).
+
+        Anthropic: exact — the free, unbilled /v1/messages/count_tokens
+        endpoint. OpenAI: an estimate — client-side tiktoken (OpenAI has
+        no counting endpoint); a model tiktoken doesn't know falls back
+        to o200k_base, which can drift on new tokenizers. Callers MUST
+        keep their prompt-too-long retry machinery as the backstop for
+        that drift — this is a sizing aid, not a guarantee.
+        """
+        config = current_app.config.get("SUPPORTED_MODELS", {}).get(model_id)
+        if not config:
+            raise ValueError(f"Unsupported model: {model_id}")
+        if config["provider"] == "anthropic":
+            try:
+                # No SDK retries: this is a sizing aid — better to return
+                # None fast (callers keep their overflow backstops) than
+                # stall a build behind connection-error backoff.
+                client = Anthropic(api_key=api_keys["anthropic"],
+                                   max_retries=0)
+                system_param, anthropic_messages = \
+                    LLMProvider._to_anthropic_params(messages)
+                return client.messages.count_tokens(
+                    model=config["api_model"],
+                    system=system_param,
+                    messages=anthropic_messages,
+                ).input_tokens
+            except Exception:
+                logger.warning(
+                    "count_tokens failed for %s; caller falls back to its "
+                    "estimate", model_id, exc_info=True)
+                return None
+        if config["provider"] == "openai":
+            try:
+                import tiktoken
+                try:
+                    enc = tiktoken.encoding_for_model(config["api_model"])
+                except KeyError:
+                    enc = tiktoken.get_encoding("o200k_base")
+                total = 0
+                for m in messages:
+                    content = m.get("content")
+                    if isinstance(content, list):
+                        text = "".join(
+                            b.get("text", "") for b in content
+                            if isinstance(b, dict))
+                    else:
+                        text = content or ""
+                    # disallowed_special=(): user corpora may contain
+                    # literal special-token strings; count them as text
+                    # rather than raising.
+                    total += len(enc.encode(text, disallowed_special=()))
+                    total += 4  # per-message wrapper overhead (approx.)
+                return total
+            except Exception:
+                logger.warning(
+                    "tiktoken count failed for %s; caller falls back to "
+                    "its estimate", model_id, exc_info=True)
+                return None
+        return None
+
+    @staticmethod
     def _call_anthropic(model: str, messages: list, api_key: str,
                         max_tokens: int = None, tools: list = None) -> dict:
         """
@@ -261,34 +357,8 @@ class LLMProvider:
         """
         client = Anthropic(api_key=api_key)
 
-        # Extract system messages
-        system_messages = [m for m in messages if m.get("role") == "system"]
-        system_text = "\n\n".join([
-            m["content"][0]["text"] if isinstance(m.get("content"), list) else m["content"]
-            for m in system_messages
-            if m.get("content")
-        ])
-
-        # Convert remaining messages to Anthropic format. Content blocks
-        # are passed through as-is (#187): block boundaries and any
-        # cache_control markers placed upstream must survive — flattening
-        # to a string would erase the cache breakpoints.
-        anthropic_messages = []
-        for msg in messages:
-            if msg["role"] in ["user", "assistant"]:
-                content = msg["content"]
-                if isinstance(content, list) and len(content) > 0:
-                    if not (isinstance(content[0], dict)
-                            and "text" in content[0]):
-                        content = str(content)
-                anthropic_messages.append({
-                    "role": msg["role"],
-                    "content": content
-                })
-
-        # Make API call
-        # System parameter must be a list of content blocks
-        system_param = [{"type": "text", "text": system_text}] if system_text else []
+        system_param, anthropic_messages = \
+            LLMProvider._to_anthropic_params(messages)
 
         if max_tokens is None:
             max_tokens = DEFAULT_MAX_OUTPUT_TOKENS
@@ -363,3 +433,56 @@ class LLMProvider:
             "tool_calls": tool_calls,
             "truncated": truncated,
         }
+
+
+def fit_by_count(model_id, api_keys, limit, budget, build_fn,
+                 corpus_tokens=None, max_rounds=4, safety=0.99,
+                 min_budget=10_000, first_built=None):
+    """Size a prompt BEFORE sending it: build at `budget`, count the real
+    tokens (LLMProvider.count_tokens — exact on Anthropic, tiktoken
+    estimate on OpenAI), and while the count exceeds `limit`, shrink the
+    budget by the reported ratio and rebuild. Rebuilding a large export
+    costs minutes on a 1M-token corpus, so the ratio-based shrink is
+    expected to converge in one rebuild; extra rounds only run if a
+    re-render measures unexpectedly hot.
+
+    Args:
+        limit: max input tokens (context window minus the output budget).
+        budget: initial export budget in the caller's stored-token units;
+                None means "build everything".
+        build_fn: build_fn(budget) -> a truthy tuple whose FIRST element
+                  is the messages list (callers append their own extras),
+                  or None/falsy when the user has no data.
+        corpus_tokens: the corpus's stored-token sum. The shrink scales
+                  min(budget, corpus) — scaling a budget larger than the
+                  corpus is a no-op that re-renders the identical export.
+        first_built: optional already-built result for round 1, so a
+                  caller that built the prompt to make other decisions
+                  doesn't pay a duplicate build.
+
+    Returns (built, budget, real_tokens). built is None when build_fn
+    produced nothing; real_tokens is None when counting was unavailable —
+    the caller's prompt-too-long retry machinery remains the backstop.
+    Raises PromptTooLongError when still over the limit after max_rounds.
+    """
+    real = None
+    for i in range(max_rounds):
+        if i == 0 and first_built is not None:
+            built = first_built
+        else:
+            built = build_fn(budget)
+        if not built:
+            return None, budget, None
+        real = LLMProvider.count_tokens(model_id, built[0], api_keys)
+        if not isinstance(real, int) or real <= limit:
+            return built, budget, real if isinstance(real, int) else None
+        effective = budget if budget is not None else float("inf")
+        if corpus_tokens:
+            effective = min(effective, max(corpus_tokens, 1))
+        if effective == float("inf"):
+            effective = real
+        budget = max(int(effective * limit / real * safety), min_budget)
+        logger.info(
+            "fit_by_count %s: counted %s > %s limit — rebuilding at "
+            "budget=%s", model_id, real, limit, budget)
+    raise PromptTooLongError(real, limit)

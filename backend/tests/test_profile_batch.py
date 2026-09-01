@@ -63,6 +63,11 @@ def app(monkeypatch):
     # No real keys in the test app — the network boundary is mocked anyway.
     monkeypatch.setattr(pb, "get_api_keys_for_usage",
                         lambda *a, **k: {"anthropic": "k", "openai": "k"})
+    # Pre-submit sizing count: default to "unavailable" so existing tests
+    # exercise the fall-through (submit at the calibrated budget as before).
+    import backend.llm_providers as lp
+    monkeypatch.setattr(lp.LLMProvider, "count_tokens",
+                        staticmethod(lambda model_id, messages, keys: None))
     with app.app_context():
         db.create_all()
         yield app
@@ -131,6 +136,36 @@ def test_build_next_request_chunk(app, monkeypatch):
     assert "NEW DATA" in text and "PREVIOUS PROFILE" in text
     # Regression: Anthropic rejects custom_id with colons (must match pattern)
     assert CUSTOM_ID_RE.match(req["request"]["custom_id"])
+
+
+def test_build_next_request_shrinks_oversized_chunk_before_submit(app, monkeypatch):
+    """Pre-submit sizing: an over-limit token count shrinks the chunk
+    budget and rebuilds BEFORE submitting, instead of burning a batch
+    attempt on the provider's overflow rejection."""
+    u = _user()
+    _prev_profile(u, datetime(2026, 5, 1))
+    db.session.commit()
+    budgets = []
+
+    def export(user, max_tokens=None, **kw):
+        budgets.append(max_tokens)
+        return {"content": f"DATA[{max_tokens}]", "token_count": 90000,
+                "latest_node_created_at": datetime(2026, 6, 1)}
+
+    monkeypatch.setattr(pb._exports, "build_user_export_content", export)
+    monkeypatch.setattr(pb._exports, "build_update_template", lambda uid: (
+        "T {existing_profile}|{new_data}|{source_tokens_past}"
+        "|{source_tokens_new}|{ratio_percent}"))
+    import backend.llm_providers as lp
+    counts = iter([400_000, 100_000])  # over the 200k window, then fits
+    monkeypatch.setattr(lp.LLMProvider, "count_tokens",
+                        staticmethod(lambda m, msgs, k: next(counts)))
+
+    req = pb._build_next_profile_request(u)
+
+    assert len(budgets) == 2 and budgets[1] < budgets[0]
+    text = req["request"]["messages"][0]["content"][0]["text"]
+    assert f"DATA[{budgets[1]}]" in text  # the SHRUNK chunk is submitted
 
 
 def test_build_next_request_uses_engaged_scope(app, monkeypatch):

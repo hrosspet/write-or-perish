@@ -1,5 +1,5 @@
-"""Admin "Infer intentions" (batch-first): sizing/probe/submit, collect,
-saving, and the pinned-model / opt-out guards."""
+"""Admin "Infer intentions" (batch-first): count-based sizing/submit,
+collect, saving, and the pinned-model / opt-out guards."""
 
 
 import pytest
@@ -34,6 +34,14 @@ def wired(app, monkeypatch, tmp_path):  # noqa: F811
         submitted.append(by_provider) or {"anthropic": f"b-{len(submitted)}"}))
     monkeypatch.setattr(lb, "apply_batch_key_override", lambda keys, cfg: keys)
     monkeypatch.setattr(rc, "_count_total_eligible_tokens", lambda uid: 1000)
+    # Default: the counted prompt fits the context comfortably.
+    import backend.llm_providers as lp
+    monkeypatch.setattr(lp.LLMProvider, "count_tokens",
+                        staticmethod(lambda model_id, messages, keys: 500_000))
+    # The sizing loop must never fall back to a billed completion.
+    monkeypatch.setattr(lp.LLMProvider, "get_completion", staticmethod(
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("sync completion must not be called"))))
     return submitted
 
 
@@ -51,41 +59,83 @@ def test_small_corpus_submits_batch_directly_and_persists_job(app, wired, monkey
                           "kind": "intentions", "budget": 1000000, "resubmitted": False}]
 
 
-def test_large_corpus_probes_then_calibrates(app, wired, monkeypatch):  # noqa: F811
+def test_oversized_count_shrinks_budget_then_submits(app, wired, monkeypatch):  # noqa: F811
+    """Sizing via the free count endpoint: an over-limit count shrinks the
+    export budget by the real ratio (against min(budget, corpus)) and the
+    rebuilt prompt is submitted — no billed probe, no batch round-trip."""
     import backend.tasks.recent_context as rc
     import backend.llm_providers as lp
     monkeypatch.setattr(rc, "_count_total_eligible_tokens", lambda uid: 900_000)
-
-    def too_long(model_id, messages, keys):
-        raise lp.PromptTooLongError(actual_tokens=1_400_000, max_tokens=1_000_000)
-
-    monkeypatch.setattr(lp.LLMProvider, "get_completion", staticmethod(too_long))
+    counts = iter([1_400_000, 800_000])
+    monkeypatch.setattr(lp.LLMProvider, "count_tokens",
+                        staticmethod(lambda model_id, messages, keys: next(counts)))
     u = _make_user("bob")
     _db.session.commit()
     kind, ref = it.start_infer_intentions_impl(u.id)
     assert kind == "batch"
     budget = ref["item"]["budget"]
-    assert budget is not None and budget < 1_000_000  # calibrated below the cap
+    # min(1M, 900k corpus) * (1M - 8192)/1.4M * 0.99 ≈ 631k
+    assert budget is not None and 600_000 < budget < 700_000
+    assert APICostLog.query.count() == 0  # counting is free — nothing billed
 
 
-def test_probe_that_fits_saves_sync_full_price(app, wired, monkeypatch):  # noqa: F811
-    import backend.tasks.recent_context as rc
+def test_count_unavailable_falls_back_to_full_cap_batch(app, wired, monkeypatch):  # noqa: F811
+    """A None count (endpoint down, tiktoken missing) submits at the full
+    cap — the poller's overflow-resubmit backstop handles any overflow."""
     import backend.llm_providers as lp
-    monkeypatch.setattr(rc, "_count_total_eligible_tokens", lambda uid: 900_000)
-    monkeypatch.setattr(lp.LLMProvider, "get_completion", staticmethod(
-        lambda model_id, messages, keys: {"content": "# Endorsed\\n...",
-                                          "input_tokens": 500_000, "output_tokens": 2_000,
-                                          "total_tokens": 502_000}))
+    monkeypatch.setattr(lp.LLMProvider, "count_tokens",
+                        staticmethod(lambda model_id, messages, keys: None))
     u = _make_user("carol")
     _db.session.commit()
-    kind, result = it.start_infer_intentions_impl(u.id)
-    assert kind == "done" and result["version"] == 1 and result["batch"] is False
-    log = APICostLog.query.filter_by(user_id=u.id, request_type="intentions_infer").one()
-    assert log.model_id == "claude-opus-4.8"
-    assert log.cost_microdollars == int(500_000 * 5.0 + 2_000 * 25.0)  # full price, no long-context tier
-    art = UserArtifact.query.filter_by(user_id=u.id, kind="intentions").one()
-    assert art.generated_by == "claude-opus-4.8" and art.get_content().startswith("# Endorsed")
-    assert wired == []  # no batch submitted
+    kind, ref = it.start_infer_intentions_impl(u.id)
+    assert kind == "batch" and ref["item"]["budget"] == 1_000_000
+
+
+def test_sizing_that_never_converges_raises(app, wired, monkeypatch):  # noqa: F811
+    import backend.llm_providers as lp
+    monkeypatch.setattr(lp.LLMProvider, "count_tokens",
+                        staticmethod(lambda model_id, messages, keys: 2_000_000))
+    u = _make_user("noel")
+    _db.session.commit()
+    with pytest.raises(lp.PromptTooLongError):
+        it.start_infer_intentions_impl(u.id)
+    assert wired == []  # nothing submitted
+
+
+def test_fit_by_count_shrinks_and_reuses_first_built(app, monkeypatch):  # noqa: F811
+    """The shared sizing helper: reuses first_built (no duplicate build),
+    shrinks against min(budget, corpus), returns the rebuilt result."""
+    import backend.llm_providers as lp
+    counts = iter([400_000, 100_000])
+    monkeypatch.setattr(lp.LLMProvider, "count_tokens",
+                        staticmethod(lambda m, msgs, k: next(counts)))
+    builds = []
+
+    def build(budget):
+        builds.append(budget)
+        return ([{"role": "user", "content": [
+            {"type": "text", "text": f"P[{budget}]"}]}], budget)
+
+    built, budget, real = lp.fit_by_count(
+        "claude-opus-4.8", {}, 192_000, 90_000, build,
+        first_built=([{"role": "user", "content": [
+            {"type": "text", "text": "P[first]"}]}], "first"),
+        max_rounds=3, min_budget=5000)
+    # first_built counted (over) -> one rebuild at the shrunk budget
+    assert builds == [pytest.approx(90_000 * 192_000 / 400_000 * 0.99, abs=2)]
+    assert built[1] == builds[0] and budget == builds[0]
+    assert real == 100_000
+
+
+def test_fit_by_count_none_count_returns_first(app, monkeypatch):  # noqa: F811
+    import backend.llm_providers as lp
+    monkeypatch.setattr(lp.LLMProvider, "count_tokens",
+                        staticmethod(lambda m, msgs, k: None))
+    built, budget, real = lp.fit_by_count(
+        "claude-opus-4.8", {}, 192_000, 90_000,
+        lambda b: ([{"role": "user", "content": [
+            {"type": "text", "text": "P"}]}], b))
+    assert built is not None and budget == 90_000 and real is None
 
 
 def test_apply_intentions_item_saves_at_batch_price(app, wired):  # noqa: F811
@@ -147,31 +197,6 @@ def test_failed_item_falls_back_to_70pct_of_corpus_without_counts(app, wired, mo
     it.handle_failed_intentions_item(u, item, job, {})
     new = ProfileBatchJob.query.filter(ProfileBatchJob.batch_id != "b-old").one()
     assert new.items[0]["budget"] == int(560_000 * 0.7)
-
-
-def test_model_token_multiplier_scales_estimate_into_probe(app, wired, monkeypatch):  # noqa: F811
-    """A model that declares token_multiplier (new-generation tokenizers)
-    has its DB estimate scaled before the probe-threshold check; Opus 4.8
-    declares none, so the same estimate goes straight to a full-cap batch."""
-    import backend.tasks.recent_context as rc
-    import backend.llm_providers as lp
-    monkeypatch.setattr(rc, "_count_total_eligible_tokens", lambda uid: 300_000)
-    monkeypatch.setattr(lp.LLMProvider, "get_completion", staticmethod(
-        lambda model_id, messages, keys: (_ for _ in ()).throw(
-            lp.PromptTooLongError(actual_tokens=1_400_000, max_tokens=1_000_000))))
-    u = _make_user("hana")
-    _db.session.commit()
-    app.config["SUPPORTED_MODELS"]["claude-opus-4.8"]["token_multiplier"] = 2.0
-    try:
-        kind, ref = it.start_infer_intentions_impl(u.id)
-    finally:
-        del app.config["SUPPORTED_MODELS"]["claude-opus-4.8"]["token_multiplier"]
-    # probed + calibrated against the corpus (300k DB units), not the 1M cap
-    assert kind == "batch" and ref["item"]["budget"] < 300_000
-    o = _make_user("iris")  # no multiplier declared: 300k <= threshold, direct batch
-    _db.session.commit()
-    kind, ref = it.start_infer_intentions_impl(o.id)
-    assert kind == "batch" and ref["item"]["budget"] == 1_000_000
 
 
 def test_opted_out_user_refused(app, wired):  # noqa: F811

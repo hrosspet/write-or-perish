@@ -212,42 +212,52 @@ def generate_user_profile(self, user_id: int, model_id: str):
                 "profile_generation.txt", user_id=user_id
             )
 
-            prompt_tokens = approximate_token_count(prompt_template)
-            max_export_tokens = None  # Send entire archive; let retry loop converge
-
             api_keys = get_api_keys_for_usage(flask_app.config, 'chat')
+
+            model_cfg = flask_app.config["SUPPORTED_MODELS"][model_id]
+            limit = (model_cfg.get("context_window", 200000)
+                     - min(model_cfg.get("max_output_tokens",
+                                         DEFAULT_MAX_OUTPUT_TOKENS),
+                           DEFAULT_MAX_OUTPUT_TOKENS))
+
+            def _build(budget):
+                # Filter by AI usage: only nodes with ai_usage chat/train
+                export = build_user_export_content(
+                    user, max_tokens=budget, filter_ai_usage=True)
+                if not export:
+                    return None
+                return ([{"role": "user", "content": [
+                    {"type": "text",
+                     "text": prompt_template.replace(
+                         "{user_export}", export)}]}], export)
+
+            # Pre-size by token count: building this export costs minutes
+            # on a large corpus, so a reject-rebuild cycle is the expensive
+            # path — count first (free), shrink once by the real ratio.
+            # The PromptTooLongError retry below stays as the backstop.
+            self.update_state(state='PROGRESS', meta={
+                'progress': 45, 'status': 'Preparing prompt'})
+            from backend.llm_providers import fit_by_count
+            built, max_export_tokens, _real = fit_by_count(
+                model_id, api_keys, limit, None, _build,
+                corpus_tokens=_estimate_source_tokens(user),
+                safety=flask_app.config.get("RETRY_SAFETY_FACTOR", 0.99))
+            if built is None:
+                raise ValueError("No writing found to analyze")
 
             MAX_RETRIES = 3
             for attempt in range(MAX_RETRIES + 1):
-                # Filter by AI usage to only include nodes where ai_usage is 'chat' or 'train'
-                user_export = build_user_export_content(user, max_tokens=max_export_tokens, filter_ai_usage=True)
-
-                if not user_export:
-                    raise ValueError("No writing found to analyze")
-
-                export_tokens = approximate_token_count(user_export)
-                logger.info(f"User export built for user {user_id}, length: {len(user_export)} characters, ~{export_tokens} tokens (attempt {attempt + 1})")
-
-                # Step 2: Build final prompt (45% progress)
-                self.update_state(state='PROGRESS', meta={'progress': 45, 'status': 'Preparing prompt'})
-
-                # Replace placeholder with user export
-                final_prompt = prompt_template.replace("{user_export}", user_export)
-
-                # Step 3: Build messages (50% progress)
-                self.update_state(state='PROGRESS', meta={'progress': 50, 'status': 'Building context'})
-
-                messages = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": final_prompt
-                            }
-                        ]
-                    }
-                ]
+                if built is None:
+                    built = _build(max_export_tokens)
+                    if built is None:
+                        raise ValueError("No writing found to analyze")
+                messages, user_export = built
+                built = None  # a retry rebuilds at the reduced budget
+                logger.info(
+                    f"User export built for user {user_id}, length: "
+                    f"{len(user_export)} characters, "
+                    f"~{approximate_token_count(user_export)} tokens "
+                    f"(attempt {attempt + 1})")
 
                 # Step 4: Call LLM API (60% -> 90% progress)
                 self.update_state(state='PROGRESS', meta={'progress': 60, 'status': 'Generating profile'})
@@ -348,8 +358,37 @@ def _call_llm_with_retries(self, model_id, prompt_text, user_id,
                             max_tokens=None):
     """Call LLM with retry logic for prompt-too-long errors.
 
+    Before the first call, the prompt is counted (LLMProvider.count_tokens
+    — free/exact on Anthropic, tiktoken estimate on OpenAI) and truncated
+    to fit, so an oversized prompt is fixed up front instead of through
+    reject round-trips. The truncation is the same proportional string cut
+    the reject branch performs; that branch stays as the backstop for
+    count drift.
+
     Returns (response_dict, profile_text, input_tokens, output_tokens).
     """
+    from flask import current_app
+    model_cfg = current_app.config.get(
+        "SUPPORTED_MODELS", {}).get(model_id) or {}
+    out_tokens = min(max_tokens or DEFAULT_MAX_OUTPUT_TOKENS,
+                     model_cfg.get("max_output_tokens",
+                                   DEFAULT_MAX_OUTPUT_TOKENS))
+    limit = model_cfg.get("context_window", 200000) - out_tokens
+    safety = current_app.config.get("RETRY_SAFETY_FACTOR", 0.99)
+    for _ in range(3):
+        if not model_cfg:
+            break
+        real = LLMProvider.count_tokens(
+            model_id, [{"role": "user", "content": [
+                {"type": "text", "text": prompt_text}]}], api_keys)
+        if not isinstance(real, int) or real <= limit:
+            break
+        logger.info(
+            f"Prompt for user {user_id} counted {real} > {limit} limit — "
+            f"truncating before the first call")
+        prompt_text = prompt_text[:int(len(prompt_text)
+                                       * limit / real * safety)]
+
     max_export_tokens = None
     MAX_RETRIES = 3
     for attempt in range(MAX_RETRIES + 1):

@@ -234,17 +234,59 @@ def _build_next_profile_request(user):
         or _exports._has_more_source_after(user, chunk["latest_node_created_at"]))
 
     if big_enough:
-        if is_first_initial:
-            gen_template = _exports._load_prompt(
-                "profile_generation.txt", user_id=user.id)
-            prompt = gen_template.replace(
-                "{user_export}", _exports.chunk_content_for_prompt(chunk))
-            generation_type = "iterative"
-        else:
-            prompt = _exports.build_chunk_prompt(
+        def _prompt_for(chunk):
+            if is_first_initial:
+                gen_template = _exports._load_prompt(
+                    "profile_generation.txt", user_id=user.id)
+                return gen_template.replace(
+                    "{user_export}",
+                    _exports.chunk_content_for_prompt(chunk)), "iterative"
+            return _exports.build_chunk_prompt(
                 _exports.build_update_template(user.id), prev.get_content(),
-                cumulative, chunk, prev.source_origin_stats)
-            generation_type = "update"
+                cumulative, chunk, prev.source_origin_stats), "update"
+
+        prompt, generation_type = _prompt_for(chunk)
+
+        # Pre-submit sizing check (shared fit_by_count): count the prompt
+        # (free/exact on Anthropic, tiktoken estimate on OpenAI) and
+        # shrink the chunk BEFORE submitting, instead of burning a batch
+        # attempt on an overflow rejection and retrying at the same wrong
+        # budget. The count can only bind when the calibration ratio is
+        # badly off (typically chunk 1 of a hot-tokenizer model on a
+        # 200k-window); a None count, an empty rebuild, or non-convergence
+        # falls through to the existing failed-item/attempts machinery.
+        from backend.llm_providers import fit_by_count, PromptTooLongError
+        cfg = current_app.config["SUPPORTED_MODELS"].get(model_id) or {}
+        limit = (cfg.get("context_window", 200_000)
+                 - DEFAULT_MAX_OUTPUT_TOKENS)
+
+        def _msgs(text):
+            return [{"role": "user", "content": [
+                {"type": "text", "text": text}]}]
+
+        def _built_at(b):
+            c = _exports.build_user_export_content(
+                user, max_tokens=b, filter_ai_usage=True,
+                created_after=cutoff, chronological_order=True,
+                return_metadata=True, include_strategy="engaged_threads")
+            if not c or not c.get("content"):
+                return None
+            p, g = _prompt_for(c)
+            return _msgs(p), c, p, g
+
+        try:
+            fitted, _budget, _real = fit_by_count(
+                model_id, get_api_keys_for_usage(current_app.config, "chat"),
+                limit, budget, _built_at, max_rounds=3, min_budget=5000,
+                first_built=(_msgs(prompt), chunk, prompt, generation_type))
+            if fitted is not None:
+                _m, chunk, prompt, generation_type = fitted
+        except PromptTooLongError:
+            logger.warning(
+                "User %s: chunk still over the context limit after sizing "
+                "rounds — submitting; the failed-item machinery handles "
+                "the overflow", user.id)
+
         latest_ts = chunk["latest_node_created_at"]
         # NB: Anthropic requires custom_id to match ^[a-zA-Z0-9_-]{1,64}$ —
         # no colons. Underscore-delimited, parsed nowhere (routing is by exact

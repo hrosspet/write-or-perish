@@ -176,6 +176,52 @@ def _filtered_children(node, filter_ai_usage, created_before, included_ids,
     return sorted(children, key=lambda c: c.created_at)
 
 
+class _CompactTweetRun:
+    """Buffers consecutive flat imported-tweet entries and renders each run
+    as one compact section (#276): a `# Tweets by <user> ...` header, then
+    one `[YYYY-MM-DD HH:MM] text` entry per tweet. Shared by the
+    incremental and legacy render loops. Tweets never carry pinned
+    artifacts or {quote:ID} placeholders, so the compact line skips those
+    lookups."""
+
+    def __init__(self, export_lines, username):
+        self.lines = export_lines
+        self.username = username
+        self.run = []
+
+    def add(self, node):
+        self.run.append(node)
+
+    def flush(self):
+        if not self.run:
+            return
+        self.lines.append(
+            f"# Tweets by {self.username} (imported from Twitter/X) — "
+            f"{len(self.run)} tweets"
+        )
+        self.lines.append("")
+        for tweet in self.run:
+            ts = tweet.created_at.strftime("%Y-%m-%d %H:%M")
+            self.lines.append(f"[{ts}] {tweet.get_content()}")
+            self.lines.append("")
+        self.lines.append("---")
+        self.lines.append("")
+        self.run.clear()
+
+
+def _is_flat_tweet_root(node, filter_ai_usage, created_before):
+    """Legacy-path compact eligibility (#276): an alive root tweet with no
+    renderable children is a one-node "thread" whose scaffolding dominates
+    its text. Children are checked against the render filters but NOT the
+    budget selection, mirroring the incremental path (a tweet someone
+    engaged with is threaded content even if the budget excluded the
+    reply)."""
+    return (node.origin == "twitter" and node.parent_id is None
+            and node.deleted_at is None
+            and not _filtered_children(node, filter_ai_usage, created_before,
+                                       None, keep_tombstones=True))
+
+
 def _artifact_ref_lines(node):
     """Reference lines for whatever context artifacts are pinned on *node*.
 
@@ -874,6 +920,25 @@ def _build_user_export_incremental(
         if r.id in entry_nodes_by_id
     ]
 
+    # Compact rendering for flat imported-tweet corpora (#276): the
+    # Twitter importers create every tweet as its own root node, so each
+    # one is a one-node "thread" whose per-thread scaffolding (Thread
+    # header, Started line, node header, separators) costs several times
+    # the tweet's own text in real model tokens (~4.8x the stored token
+    # units on a 13k-tweet corpus; ~2.2x with this compact form). Runs of
+    # consecutive such entries render as a `[YYYY-MM-DD HH:MM] text` list
+    # under one section header carrying the shared metadata (author,
+    # origin) instead of per-thread blocks. Threaded content keeps the
+    # full rendering — a tweet that has in-scope children (someone
+    # engaged with it in Loore) is threaded content, not a flat run.
+    # Tweets never carry pinned artifacts or {quote:ID} placeholders, so
+    # the compact line skips those lookups.
+    compact_ids = {
+        r.id for r in entry_rows
+        if r.origin == "twitter" and r.parent_id is None
+        and not children_by_parent.get(r.id)
+    }
+
     # Build the export content using Markdown format
     export_lines = []
     export_lines.append("# Loore - Thread Export")
@@ -902,7 +967,16 @@ def _build_user_export_incremental(
             export_lines.append("")
 
     prefetch_children(entry_nodes)
-    for thread_num, entry in enumerate(entry_nodes, 1):
+
+    compact_run = _CompactTweetRun(export_lines, user.username)
+    thread_num = 0
+    for entry in entry_nodes:
+        if entry.id in compact_ids:
+            compact_run.add(entry)
+            continue
+        compact_run.flush()
+        thread_num += 1
+
         if entry.parent_id is not None:
             top_started = _entry_point_top_level_started(entry, user.id)
             export_lines.append(_format_preamble(top_started))
@@ -928,6 +1002,8 @@ def _build_user_export_incremental(
         export_lines.append(thread_text)
         export_lines.append("---")
         export_lines.append("")
+
+    compact_run.flush()
 
     export_lines.append("*End of Export*")
     content = "\n".join(export_lines)
@@ -1338,9 +1414,18 @@ def build_user_export_content(
             export_lines.append("===")
             export_lines.append("")
 
-    # Process each thread
+    # Process each thread. Flat imported tweets render as compact runs
+    # (#276), same as the incremental path; threaded content keeps the
+    # full per-thread rendering.
     prefetch_children(top_level_nodes)
-    for thread_num, node in enumerate(top_level_nodes, 1):
+    compact_run = _CompactTweetRun(export_lines, user.username)
+    thread_num = 0
+    for node in top_level_nodes:
+        if _is_flat_tweet_root(node, filter_ai_usage, created_before):
+            compact_run.add(node)
+            continue
+        compact_run.flush()
+        thread_num += 1
         export_lines.append(f"# Thread {thread_num}")
         export_lines.append(f"**Started:** {node.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
         export_lines.append("")
@@ -1360,6 +1445,8 @@ def build_user_export_content(
 
         export_lines.append("---")
         export_lines.append("")
+
+    compact_run.flush()
 
     # Add footer
     export_lines.append("*End of Export*")
