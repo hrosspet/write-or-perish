@@ -138,22 +138,25 @@ def test_failed_item_falls_back_to_70pct_without_counts(app, wired, monkeypatch)
     assert new.items[0]["budget"] == 700_000
 
 
-def test_prefilled_account_estimate_scaled_into_probe(app, wired, monkeypatch):  # noqa: F811
-    """A 20k-tweet CA pre-fill: DB estimate ~200k (chars/4) is really ~600k+
-    — the x3 tweet scaling must push it over the probe threshold instead of
-    submitting a full-cap batch that overflows (user 110, 2026-08-31)."""
+def test_model_token_multiplier_scales_estimate_into_probe(app, wired, monkeypatch):  # noqa: F811
+    """A model that declares token_multiplier (new-generation tokenizers)
+    has its DB estimate scaled before the probe-threshold check; Opus 4.8
+    declares none, so the same estimate goes straight to a full-cap batch."""
     import backend.tasks.recent_context as rc
     import backend.llm_providers as lp
-    monkeypatch.setattr(rc, "_count_total_eligible_tokens", lambda uid: 200_000)
+    monkeypatch.setattr(rc, "_count_total_eligible_tokens", lambda uid: 300_000)
     monkeypatch.setattr(lp.LLMProvider, "get_completion", staticmethod(
         lambda model_id, messages, keys: (_ for _ in ()).throw(
             lp.PromptTooLongError(actual_tokens=1_400_000, max_tokens=1_000_000))))
     u = _make_user("hana")
-    u.prefilled_handle = "hana"
     _db.session.commit()
-    kind, ref = it.start_infer_intentions_impl(u.id)
-    assert kind == "batch" and ref["item"]["budget"] < 1_000_000  # probed + calibrated
-    o = _make_user("iris")  # organic account, same estimate: no scaling, direct batch
+    app.config["SUPPORTED_MODELS"]["claude-opus-4.8"]["token_multiplier"] = 2.0
+    try:
+        kind, ref = it.start_infer_intentions_impl(u.id)
+    finally:
+        del app.config["SUPPORTED_MODELS"]["claude-opus-4.8"]["token_multiplier"]
+    assert kind == "batch" and ref["item"]["budget"] < 1_000_000  # 600k > threshold: probed
+    o = _make_user("iris")  # no multiplier declared: 300k <= threshold, direct batch
     _db.session.commit()
     kind, ref = it.start_infer_intentions_impl(o.id)
     assert kind == "batch" and ref["item"]["budget"] == 1_000_000

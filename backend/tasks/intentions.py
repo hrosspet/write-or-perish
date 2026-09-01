@@ -35,13 +35,6 @@ PROMPT_FILE = "intentions_detection_public.txt"
 KIND = "intentions"
 BATCH_OUTPUT_TOKENS = 8192     # ample for a ~14-item intentions list
 PROBE_THRESHOLD_TOKENS = 560_000
-# Stored token_counts are chars/4-ish; on tweet corpora the real tokenizer
-# runs ~3x that (Rich: 6.26M chars -> 4.93M real = 3.1x; config's Sol note:
-# 3.2x). Pre-filled accounts are tweet corpora, so their DB estimate is
-# scaled by this before the probe-threshold check — otherwise a 20k-tweet
-# account sails under the threshold and straight into a context overflow
-# (user 110, 2026-08-31). Heuristic — tune if measurements say otherwise.
-TWEET_TOKEN_UNDERESTIMATE = 3.0
 
 
 def _template_and_params():
@@ -157,9 +150,13 @@ def start_infer_intentions_impl(user_id):
     config = current_app.config
     batch_keys = apply_batch_key_override(
         get_api_keys_for_usage(config, "chat"), config)
-    db_tokens = _count_total_eligible_tokens(user.id)
-    if user.prefilled_handle:
-        db_tokens = int(db_tokens * TWEET_TOKEN_UNDERESTIMATE)
+    # Stored token_counts are chars/4-ish; a model whose tokenizer runs
+    # hotter declares token_multiplier in SUPPORTED_MODELS (e.g. Sol 2.0
+    # / measured 3.2x on tweets). Opus 4.8 declares none -> no scaling.
+    # Mis-sizing is self-healing anyway: an overflowing batch item is
+    # unbilled and resubmitted once, calibrated from the real count.
+    multiplier = config["SUPPORTED_MODELS"][MODEL_ID].get("token_multiplier", 1.0)
+    db_tokens = int(_count_total_eligible_tokens(user.id) * multiplier)
 
     if db_tokens <= PROBE_THRESHOLD_TOKENS:
         return "batch", _submit(user, template, budget, chronological,
