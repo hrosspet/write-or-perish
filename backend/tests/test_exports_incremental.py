@@ -1324,3 +1324,108 @@ def test_export_render_does_not_lazy_load_children_per_node(app):
         event.remove(_db.engine, "after_cursor_execute", after)
     assert "tweet 59" in out["content"] and "reply 2" in out["content"]
     assert n_child_queries[0] == 0, n_child_queries[0]
+
+
+# ── Compact rendering for flat tweet corpora (#276) ──────────────────────
+
+class TestCompactTweetRendering:
+    """Runs of childless root nodes with origin="twitter" render as a
+    compact `[YYYY-MM-DD HH:MM] text` list instead of one full per-thread
+    block per tweet (#276). Threaded/organic content keeps the full
+    rendering."""
+
+    def test_flat_tweet_corpus_renders_compact(self, app):
+        alice = _make_user("alice")
+        _db.session.commit()
+        _make_node(alice, content="first tweet", token_count=3,
+                   created_at=APR_18, origin="twitter")
+        _make_node(alice, content="second tweet", token_count=3,
+                   created_at=APR_19, origin="twitter")
+        _db.session.commit()
+
+        content = _build(alice, filter_ai_usage=True,
+                         include_strategy="engaged_threads")
+        assert ("# Tweets by alice (imported from Twitter/X) — 2 tweets"
+                in content)
+        assert "[2026-04-18 14:30] first tweet" in content
+        assert "[2026-04-19 11:00] second tweet" in content
+        # No per-thread scaffolding for the flat run.
+        assert "# Thread" not in content
+        assert "via twitter" not in content
+        # Default (unbudgeted engaged) order is newest-first.
+        assert content.index("second tweet") < content.index("first tweet")
+
+    def test_tweet_with_reply_keeps_full_rendering(self, app):
+        alice = _make_user("alice")
+        _db.session.commit()
+        root = _make_node(alice, content="engaged tweet", token_count=3,
+                          created_at=APR_18, origin="twitter")
+        _make_node(alice, parent_id=root.id, content="a loore reply",
+                   token_count=3, created_at=APR_19)
+        _db.session.commit()
+
+        content = _build(alice, filter_ai_usage=True,
+                         include_strategy="engaged_threads")
+        assert "# Thread 1" in content
+        assert "User (alice) via twitter - " in content
+        assert "engaged tweet" in content and "a loore reply" in content
+        assert "# Tweets by" not in content
+
+    def test_mixed_corpus_interleaves_runs_and_threads(self, app):
+        alice = _make_user("alice")
+        _db.session.commit()
+        _make_node(alice, content="old tweet", token_count=3,
+                   created_at=APR_18, origin="twitter")
+        _make_node(alice, content="organic thought", token_count=3,
+                   created_at=APR_19)
+        _make_node(alice, content="new tweet", token_count=3,
+                   created_at=APR_20, origin="twitter")
+        _db.session.commit()
+
+        content = _build(alice, filter_ai_usage=True,
+                         include_strategy="engaged_threads")
+        # Newest-first: run [new tweet], Thread 1 (organic), run [old tweet].
+        assert content.count("# Tweets by alice") == 2
+        assert content.count("# Thread") == 1
+        assert "# Thread 1" in content
+        assert (content.index("new tweet") < content.index("organic thought")
+                < content.index("old tweet"))
+
+    def test_loore_leaf_root_not_compacted(self, app):
+        alice = _make_user("alice")
+        _db.session.commit()
+        _make_node(alice, content="a lone loore note", token_count=3,
+                   created_at=APR_18)
+        _db.session.commit()
+
+        content = _build(alice, filter_ai_usage=True,
+                         include_strategy="engaged_threads")
+        assert "# Thread 1" in content
+        assert "# Tweets by" not in content
+
+    def test_budgeted_chronological_window_metadata(self, app):
+        """The chunked profile loop's cursor semantics survive compact
+        rendering: budget window selects oldest-first, metadata reflects
+        the selected rows only."""
+        alice = _make_user("alice")
+        _db.session.commit()
+        for i, ts in enumerate([APR_18, APR_19, APR_20, APR_22]):
+            _make_node(alice, content=f"tweet {i}", token_count=100,
+                       created_at=ts, origin="twitter")
+        _db.session.commit()
+
+        result = _build(alice, max_tokens=350, filter_ai_usage=True,
+                        chronological_order=True, return_metadata=True,
+                        include_strategy="engaged_threads")
+        content = result["content"]
+        # Strict-fit window: 350 - 100 header reserve = 250 → two
+        # 100-token tweets fit, the third would overshoot.
+        assert "[2026-04-18 14:30] tweet 0" in content
+        assert "[2026-04-19 11:00] tweet 1" in content
+        assert "tweet 2" not in content and "tweet 3" not in content
+        assert result["latest_node_created_at"] == APR_19
+        assert result["origin_stats"] == {
+            "twitter": {"nodes": 2, "tokens": 200},
+        }
+        # Oldest-first inside the run.
+        assert content.index("tweet 0") < content.index("tweet 1")

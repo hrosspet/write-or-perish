@@ -874,6 +874,25 @@ def _build_user_export_incremental(
         if r.id in entry_nodes_by_id
     ]
 
+    # Compact rendering for flat imported-tweet corpora (#276): the
+    # Twitter importers create every tweet as its own root node, so each
+    # one is a one-node "thread" whose per-thread scaffolding (Thread
+    # header, Started line, node header, separators) costs several times
+    # the tweet's own text in real model tokens (~4.8x the stored token
+    # units on a 13k-tweet corpus; ~2.2x with this compact form). Runs of
+    # consecutive such entries render as a `[YYYY-MM-DD HH:MM] text` list
+    # under one section header carrying the shared metadata (author,
+    # origin) instead of per-thread blocks. Threaded content keeps the
+    # full rendering — a tweet that has in-scope children (someone
+    # engaged with it in Loore) is threaded content, not a flat run.
+    # Tweets never carry pinned artifacts or {quote:ID} placeholders, so
+    # the compact line skips those lookups.
+    compact_ids = {
+        r.id for r in entry_rows
+        if r.origin == "twitter" and r.parent_id is None
+        and not children_by_parent.get(r.id)
+    }
+
     # Build the export content using Markdown format
     export_lines = []
     export_lines.append("# Loore - Thread Export")
@@ -902,7 +921,33 @@ def _build_user_export_incremental(
             export_lines.append("")
 
     prefetch_children(entry_nodes)
-    for thread_num, entry in enumerate(entry_nodes, 1):
+
+    compact_run = []
+
+    def _flush_compact_run():
+        if not compact_run:
+            return
+        export_lines.append(
+            f"# Tweets by {user.username} (imported from Twitter/X) — "
+            f"{len(compact_run)} tweets"
+        )
+        export_lines.append("")
+        for tweet in compact_run:
+            ts = tweet.created_at.strftime("%Y-%m-%d %H:%M")
+            export_lines.append(f"[{ts}] {tweet.get_content()}")
+            export_lines.append("")
+        export_lines.append("---")
+        export_lines.append("")
+        compact_run.clear()
+
+    thread_num = 0
+    for entry in entry_nodes:
+        if entry.id in compact_ids:
+            compact_run.append(entry)
+            continue
+        _flush_compact_run()
+        thread_num += 1
+
         if entry.parent_id is not None:
             top_started = _entry_point_top_level_started(entry, user.id)
             export_lines.append(_format_preamble(top_started))
@@ -928,6 +973,8 @@ def _build_user_export_incremental(
         export_lines.append(thread_text)
         export_lines.append("---")
         export_lines.append("")
+
+    _flush_compact_run()
 
     export_lines.append("*End of Export*")
     content = "\n".join(export_lines)
