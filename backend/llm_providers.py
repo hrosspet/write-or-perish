@@ -241,6 +241,98 @@ class LLMProvider:
         return e
 
     @staticmethod
+    def _to_anthropic_params(messages: list):
+        """OpenAI-style messages -> (system_param, anthropic_messages).
+
+        System messages collapse into the separate 'system' parameter.
+        Content blocks are passed through as-is (#187): block boundaries
+        and any cache_control markers placed upstream must survive —
+        flattening to a string would erase the cache breakpoints.
+        """
+        system_messages = [m for m in messages if m.get("role") == "system"]
+        system_text = "\n\n".join([
+            m["content"][0]["text"] if isinstance(m.get("content"), list) else m["content"]
+            for m in system_messages
+            if m.get("content")
+        ])
+        anthropic_messages = []
+        for msg in messages:
+            if msg["role"] in ["user", "assistant"]:
+                content = msg["content"]
+                if isinstance(content, list) and len(content) > 0:
+                    if not (isinstance(content[0], dict)
+                            and "text" in content[0]):
+                        content = str(content)
+                anthropic_messages.append({
+                    "role": msg["role"],
+                    "content": content
+                })
+        system_param = [{"type": "text", "text": system_text}] if system_text else []
+        return system_param, anthropic_messages
+
+    @staticmethod
+    def count_tokens(model_id: str, messages: list, api_keys: dict) -> int:
+        """Input token count for `messages` as they would be sent by
+        get_completion, so callers can size a request BEFORE submitting —
+        instead of burning a billed sync probe or a batch round-trip on
+        an overflow rejection. Returns None when counting isn't possible
+        (unknown provider, tiktoken unavailable/failed).
+
+        Anthropic: exact — the free, unbilled /v1/messages/count_tokens
+        endpoint. OpenAI: an estimate — client-side tiktoken (OpenAI has
+        no counting endpoint); a model tiktoken doesn't know falls back
+        to o200k_base, which can drift on new tokenizers. Callers MUST
+        keep their prompt-too-long retry machinery as the backstop for
+        that drift — this is a sizing aid, not a guarantee.
+        """
+        config = current_app.config["SUPPORTED_MODELS"].get(model_id)
+        if not config:
+            raise ValueError(f"Unsupported model: {model_id}")
+        if config["provider"] == "anthropic":
+            try:
+                client = Anthropic(api_key=api_keys["anthropic"])
+                system_param, anthropic_messages = \
+                    LLMProvider._to_anthropic_params(messages)
+                return client.messages.count_tokens(
+                    model=config["api_model"],
+                    system=system_param,
+                    messages=anthropic_messages,
+                ).input_tokens
+            except Exception:
+                logger.warning(
+                    "count_tokens failed for %s; caller falls back to its "
+                    "estimate", model_id, exc_info=True)
+                return None
+        if config["provider"] == "openai":
+            try:
+                import tiktoken
+                try:
+                    enc = tiktoken.encoding_for_model(config["api_model"])
+                except KeyError:
+                    enc = tiktoken.get_encoding("o200k_base")
+                total = 0
+                for m in messages:
+                    content = m.get("content")
+                    if isinstance(content, list):
+                        text = "".join(
+                            b.get("text", "") for b in content
+                            if isinstance(b, dict))
+                    else:
+                        text = content or ""
+                    # disallowed_special=(): user corpora may contain
+                    # literal special-token strings; count them as text
+                    # rather than raising.
+                    total += len(enc.encode(text, disallowed_special=()))
+                    total += 4  # per-message wrapper overhead (approx.)
+                return total
+            except Exception:
+                logger.warning(
+                    "tiktoken count failed for %s; caller falls back to "
+                    "its estimate", model_id, exc_info=True)
+                return None
+        return None
+
+    @staticmethod
     def _call_anthropic(model: str, messages: list, api_key: str,
                         max_tokens: int = None, tools: list = None) -> dict:
         """
@@ -261,34 +353,8 @@ class LLMProvider:
         """
         client = Anthropic(api_key=api_key)
 
-        # Extract system messages
-        system_messages = [m for m in messages if m.get("role") == "system"]
-        system_text = "\n\n".join([
-            m["content"][0]["text"] if isinstance(m.get("content"), list) else m["content"]
-            for m in system_messages
-            if m.get("content")
-        ])
-
-        # Convert remaining messages to Anthropic format. Content blocks
-        # are passed through as-is (#187): block boundaries and any
-        # cache_control markers placed upstream must survive — flattening
-        # to a string would erase the cache breakpoints.
-        anthropic_messages = []
-        for msg in messages:
-            if msg["role"] in ["user", "assistant"]:
-                content = msg["content"]
-                if isinstance(content, list) and len(content) > 0:
-                    if not (isinstance(content[0], dict)
-                            and "text" in content[0]):
-                        content = str(content)
-                anthropic_messages.append({
-                    "role": msg["role"],
-                    "content": content
-                })
-
-        # Make API call
-        # System parameter must be a list of content blocks
-        system_param = [{"type": "text", "text": system_text}] if system_text else []
+        system_param, anthropic_messages = \
+            LLMProvider._to_anthropic_params(messages)
 
         if max_tokens is None:
             max_tokens = DEFAULT_MAX_OUTPUT_TOKENS

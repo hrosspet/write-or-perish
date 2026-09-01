@@ -3,15 +3,15 @@ pre-filled account from its PUBLIC tweets, via the Batch API (~50%
 cheaper), using the public fork of the tested intentions_detection prompt.
 
 Mirrors the --batch mode of backend/scripts/backfill_intentions.py. A batch
-can't retry-shrink mid-flight, so sizing happens BEFORE submit:
-  * cheap DB token estimate <= PROBE_THRESHOLD: the corpus comfortably fits
-    the 1M context at the prompt's own budget — submit the batch directly.
-  * estimate > threshold: one sync calibration probe at full budget; its
-    "prompt too long" rejection is unbilled and carries the provider's real
-    token count, which sizes the batch export (newest kept, oldest cut) to
-    fit. A probe that unexpectedly fits is saved synchronously (full price).
-If the batch item itself still overflows, it is resubmitted once, calibrated
-from the reported count.
+can't retry-shrink mid-flight, so sizing happens BEFORE submit, against the
+provider's EXACT count: Anthropic's count_tokens endpoint is free and
+unbilled, so the built prompt is counted first and — when it exceeds the
+context window — the export budget is shrunk by the real ratio (newest
+kept, oldest cut) and rebuilt until it fits. No billed sync probe, no
+"probe unexpectedly fit and got saved at full price" branch, no batch
+round-trip burned on an overflow rejection. If the batch item still
+overflows anyway (count drift), it is resubmitted once, calibrated from
+the reported count — kept as a backstop.
 
 Model is PINNED to claude-opus-4-8 (flat pricing across the 1M window; the
 prompt was tested on it) — deliberately no preferred_model override, so
@@ -34,7 +34,10 @@ MODEL_ID = "claude-opus-4.8"  # pinned (config key; api_model is claude-opus-4-8
 PROMPT_FILE = "intentions_detection_public.txt"
 KIND = "intentions"
 BATCH_OUTPUT_TOKENS = 8192     # ample for a ~14-item intentions list
-PROBE_THRESHOLD_TOKENS = 560_000
+# count -> shrink -> rebuild rounds before giving up. The shrink scales by
+# the provider-reported ratio, so round 2 already lands under the limit;
+# more rounds only run if the re-render measures unexpectedly hot.
+MAX_SIZING_ROUNDS = 4
 
 
 def _template_and_params():
@@ -92,17 +95,19 @@ def _save(user, content, input_tokens, output_tokens, total_tokens, batch):
             "llm_tokens": total_tokens, "batch": batch}
 
 
-def _submit(user, template, budget, chronological, keys, label):
-    """Build at `budget`, submit a one-user batch, and PERSIST it as a
-    ProfileBatchJob whose item is tagged kind="intentions" — the beat
-    poller (poll_profile_batches) collects and saves it, so the flight
-    survives worker restarts and deploys."""
+def _submit(user, template, budget, chronological, keys, label, built=None):
+    """Build at `budget` (or reuse `built` from the sizing loop), submit a
+    one-user batch, and PERSIST it as a ProfileBatchJob whose item is
+    tagged kind="intentions" — the beat poller (poll_profile_batches)
+    collects and saves it, so the flight survives worker restarts and
+    deploys."""
     from datetime import datetime
     from flask import current_app
     from backend.extensions import db
     from backend.models import ProfileBatchJob
     from backend.utils.llm_batch import batch_submit
-    built = _build_messages(user, template, budget, chronological)
+    if built is None:
+        built = _build_messages(user, template, budget, chronological)
     if built is None:
         raise RuntimeError(f"user {user.id}: no AI-readable archive")
     messages, _, est = built
@@ -127,16 +132,15 @@ def _submit(user, template, budget, chronological, keys, label):
 
 
 def start_infer_intentions_impl(user_id):
-    """Size (maybe probe) and submit. Returns ("done", result) when the
-    probe unexpectedly fit (saved synchronously), else ("batch", ref) with
-    the persisted job's coordinates."""
+    """Size against the provider's exact token count (free — see module
+    docstring) and submit. Returns ("batch", ref) with the persisted
+    job's coordinates."""
     from flask import current_app
     from backend.models import User
     from backend.utils.api_keys import get_api_keys_for_usage
     from backend.utils.llm_batch import apply_batch_key_override
     from backend.utils.privacy import AI_ALLOWED
-    from backend.llm_providers import LLMProvider, PromptTooLongError
-    from backend.tasks.recent_context import _count_total_eligible_tokens
+    from backend.llm_providers import LLMProvider
 
     user = User.query.get(user_id)
     if not user:
@@ -147,39 +151,37 @@ def start_infer_intentions_impl(user_id):
             f"(opted out) — not sending their data to any LLM")
     template, budget, chronological = _template_and_params()
     config = current_app.config
-    batch_keys = apply_batch_key_override(
-        get_api_keys_for_usage(config, "chat"), config)
-    # Stored token_counts are chars/4-ish; a model whose tokenizer runs
-    # hotter declares token_multiplier in SUPPORTED_MODELS (e.g. Sol 2.0
-    # / measured 3.2x on tweets). Opus 4.8 declares none -> no scaling.
-    # Mis-sizing is self-healing anyway: an overflowing batch item is
-    # unbilled and resubmitted once, calibrated from the real count.
-    multiplier = config["SUPPORTED_MODELS"][MODEL_ID].get("token_multiplier", 1.0)
-    db_tokens = int(_count_total_eligible_tokens(user.id) * multiplier)
-
-    if db_tokens <= PROBE_THRESHOLD_TOKENS:
-        return "batch", _submit(user, template, budget, chronological,
-                                batch_keys, "full-cap")
-
-    # Large corpus — free sync calibration probe (rejected 400 isn't billed).
     api_keys = get_api_keys_for_usage(config, "chat")
-    built = _build_messages(user, template, budget, chronological)
-    if built is None:
-        raise RuntimeError(f"user {user_id}: no AI-readable archive")
-    messages, export, _ = built
-    try:
-        result = LLMProvider.get_completion(MODEL_ID, messages, api_keys)
-    except PromptTooLongError as e:
-        calibrated = _calibrated_budget(user, budget, e.actual_tokens, e.max_tokens)
-        logger.info("intentions user %s: probe real=%s > max=%s — batch budget=%s",
-                    user_id, e.actual_tokens, e.max_tokens, calibrated)
-        return "batch", _submit(user, template, calibrated, chronological,
-                                batch_keys, "calibrated")
-    # Probe fit — we already paid full price for the answer; save it.
-    return "done", _save(user, result["content"],
-                         result.get("input_tokens", 0),
-                         result.get("output_tokens", 0),
-                         result["total_tokens"], batch=False)
+    batch_keys = apply_batch_key_override(api_keys, config)
+
+    # The input must leave room for the response inside the context window.
+    limit = (config["SUPPORTED_MODELS"][MODEL_ID].get("context_window",
+                                                      1_000_000)
+             - BATCH_OUTPUT_TOKENS)
+
+    label = "full-cap"
+    built = real = None
+    for _ in range(MAX_SIZING_ROUNDS):
+        built = _build_messages(user, template, budget, chronological)
+        if built is None:
+            raise RuntimeError(f"user {user_id}: no AI-readable archive")
+        real = LLMProvider.count_tokens(MODEL_ID, built[0], api_keys)
+        if real is None or real <= limit:
+            break
+        budget = _calibrated_budget(user, budget, real, limit)
+        label = "count-calibrated"
+        logger.info("intentions user %s: counted %s > %s limit — "
+                    "rebuilding at budget=%s", user_id, real, limit, budget)
+    else:
+        # Exact-ratio shrinking should converge in one rebuild; if it
+        # somehow didn't, submitting would just burn the batch's single
+        # overflow-resubmit backstop too.
+        raise RuntimeError(
+            f"user {user_id}: export still {real} > {limit} tokens after "
+            f"{MAX_SIZING_ROUNDS} sizing rounds")
+
+    return "batch", _submit(user, template, budget, chronological,
+                            batch_keys, label, built=built)
 
 
 def apply_intentions_item(user, item, result):
@@ -274,20 +276,17 @@ def handle_failed_intentions_item(user, item, job, keys):
 
 @celery.task(bind=True, name="backend.tasks.intentions.infer_intentions")
 def infer_intentions(self, user_id):
-    """Sizes (maybe probes) and submits, then ends — collection is the
-    beat poller's job, so nothing is lost to worker restarts. The admin
-    row's persistent state lives in the Users-tab Profile column."""
+    """Sizes (via free exact count) and submits, then ends — collection
+    is the beat poller's job, so nothing is lost to worker restarts. The
+    admin row's persistent state lives in the Users-tab Profile column."""
     with flask_app.app_context():
         try:
             self.update_state(state="PROGRESS", meta={
                 "user_id": user_id, "stage": "sizing + submitting batch",
                 "done": None, "total": None})
-            kind, payload = start_infer_intentions_impl(user_id)
+            _kind, payload = start_infer_intentions_impl(user_id)
         except Exception:
             logger.exception("Infer intentions failed for user %s", user_id)
             raise
-        if kind == "done":
-            return {"user_id": user_id, "stage": "done", "model_id": MODEL_ID,
-                    "total": None, **payload}
         return {"user_id": user_id, "stage": "batch submitted",
                 "batch_id": payload["batch_id"], "total": None}
