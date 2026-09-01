@@ -153,7 +153,7 @@ Users have a `plan` column (string, max 16 chars) on the User model. The plan co
 
 **Age restriction** - Set explicit minimum age for the service (16 is GDPR default in CZ) and add to terms
 
-**Backup documentation** - Document what's backed up, retention period, encryption status, and how long deleted data persists in backups
+✅ **Backup documentation** - COMPLETED (runbook): `docs/RUNBOOKS.md` → "Backups and restore" documents what's backed up, the locked 30-day retention, encryption status, and that deleted data persists in backups for up to 31 days. Terms text still needs to reference it.
 
 **Cookie / tracking disclosure** - Disclose cookie usage (session cookies at minimum); may need cookie banner for EU compliance
 
@@ -233,7 +233,7 @@ Users have a `plan` column (string, max 16 chars) on the User model. The plan co
 
 **Automated Dependabot PRs** - Set up GitHub Dependabot to automatically create PRs for dependency updates (complement to existing Safety checks)
 
-**Database backup and restore automation** - Daily backups with tested restore procedures to prevent data loss
+✅ **Database backup and restore automation** - COMPLETED: nightly `pg_dump` + media sync to GCS with locked 30-day retention (`scripts/backup.sh`, systemd timer installed by `deploy.sh`, restore procedure + quarterly restore test in `docs/RUNBOOKS.md`)
 
 **Health check endpoints** - `/health` and `/ready` endpoints for load balancer and monitoring to detect unhealthy instances
 
@@ -413,7 +413,7 @@ Based on current project state, dependencies, and strategic value, here's the re
 5. **Logging infrastructure with structured logs** - Add JSON logging with request IDs for debugging
 6. **Error monitoring with Sentry** - Integrate Sentry for both backend and frontend error tracking
 7. **Health check endpoints** - `/health` and `/ready` for monitoring and load balancer health checks
-8. **Database backup and restore automation** - Automated daily backups with tested restore procedures
+8. ✅ **Database backup and restore automation** - COMPLETED: nightly `pg_dump` + media → GCS, locked 30-day retention, restore runbook
 9. **Dependabot configuration** - Enable GitHub Dependabot for automated dependency update PRs
 
 **Deliverable:** Solid foundation with actual tests running in existing CI pipeline, monitoring, and development environment

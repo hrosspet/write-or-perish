@@ -32,7 +32,7 @@ Feature 1 (Journaling) is production-ready and significantly expanded — see FO
 | Voice workflow | Unified agentic Voice mode with AI tool use, resilient recording (recovered sessions keep their pre-resume audio), todo management, section-aware TTS chapters with in-player navigation |
 | AI features | Iterative profile generation, hierarchical context freshness, customizable system prompts |
 | Search & navigation | Cmd+K global search, pin-to-profile, data import from Claude |
-| DevOps | CI/CD pipeline, Docker Compose local dev + staging, automated deployment |
+| DevOps | CI/CD pipeline, Docker Compose local dev + staging, automated deployment, nightly backups (pg_dump + media → GCS, locked 30-day retention, restore runbook) |
 | Testing | Privacy tests only (~3 backend test files), frontend placeholder only |
 
 ### Blockers Before Expanding Alpha (~10 new users)
@@ -144,7 +144,7 @@ Feature 1 (Journaling) is production-ready and significantly expanded — see FO
 7. Jurisdiction & governing law (Czech Republic / EU)
 8. GDPR rights section (access, rectification, erasure, portability, complaint to ÚOOÚ)
 9. Age restriction (16 minimum for CZ GDPR)
-10. Backup details documentation
+10. Backup details documentation (runbook exists in `docs/RUNBOOKS.md`; terms text pending)
 11. Content moderation policy
 12. Link to full OpenAI Content Sharing Agreement
 13. License versioning (v2.0 already in use — maintain going forward)
