@@ -863,7 +863,10 @@ not replay on an empty database (`flask init-db && flask db stamp head` works);
 `psql -c "A; B"` is one transaction; worker threads need their own app context
 for the provider layer; the provider layer clamps output at 10K tokens;
 `force_parquet` is overridden whenever the live archive holds more rows than the
-snapshot (24 of 64 imports went through REST). Import at scale was a non-event.
+snapshot (24 of 64 imports went through REST); Ubuntu 24.04 creates home
+directories as 750, so nginx (www-data) cannot read a build under `~` until
+`chmod o+x ~` — HTML still arrives via the Flask proxy, every asset 500s, the
+page is a dark screen. Import at scale was a non-event.
 
 ---
 
