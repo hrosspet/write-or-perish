@@ -832,6 +832,27 @@ reflective artifact. (iv) luna for volume, Opus for judgment on consensus pairs.
 "quality over quantity" (≈12/call) and the app's 10K output clamp (truncated one
 exhaustive run at 49).
 
+**Cost breakdown** (from the output files; `pilot_costs.py` reproduces it):
+
+| frame | stage | model | calls | input tok | output tok | USD |
+|---|---|---|---|---|---|---|
+| reflective | extract (64 accounts) | luna | 172 | 14.2M | 338K | 3.25 |
+| reflective | aggregate (64) | luna | 64 | 233K | 213K | 0.30 |
+| reflective | aggregate (48) | Opus 4.8 | 48 | 277K | 171K | 5.67 |
+| reflective | match | luna | 24 | 1.85M | 94K | 0.48 |
+| reflective | match | Opus 4.8 | 3 | 302K | 13K | 1.83 |
+| prosaic | extract (48) | luna | 130 | 10.8M | 148K | 2.33 |
+| prosaic | aggregate (48) | luna | 48 | 104K | 96K | 0.14 |
+| prosaic | match | luna | 10 | 396K | 49K | 0.14 |
+| prosaic | match | Opus 4.8 | 2 | 129K | 8K | 0.84 |
+
+Unit costs for estimating reruns (sync prices; Batch halves them): extraction
+$0.046/account median on luna in either frame (2.7 chunks of ~86K tokens);
+aggregation $0.005/account on luna, $0.116 on Opus; one match call at N=16 costs
+$0.013 on luna and $0.40 on Opus, at N=48 $0.029 / $1.04. Per distinct match,
+luna lands at $0.001–0.002 and Opus at $0.02–0.06. Extraction is 84% of the
+luna bill; Opus aggregation is 68% of the Anthropic bill.
+
 **Caveats.** One community, 64 accounts, one night, one rater; Opus aggregation
 and the prosaic frame on 48 accounts only; slice-period metadata recorded but not
 yet used for matching; profiles, the largest accounts and prod untouched.
