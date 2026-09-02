@@ -106,6 +106,55 @@ def test_preselect_includes_replies_in_foreign_threads(app):
         assert bob_root.id not in ids
 
 
+def test_preselect_walks_foreign_chains_and_stops_at_own_nodes(app):
+    """The thread walk (2026-09-02, replaced the recursive CTE) lists only
+    OTHER authors' nodes; the user's own are matched by user_id. It must
+    still reach: foreign chains under an own node, own nodes buried under
+    foreign chains (and the foreign sub-threads under those), and nodes
+    below a foreign node the viewer can't see. Unrelated threads stay out.
+    """
+    from datetime import datetime
+    from backend.routes.export_data import _preselect_node_ids
+    with app.app_context():
+        alice = User.query.filter_by(username="alice").first()
+        bob = User.query.filter_by(username="bob").first()
+
+        root = _mk_node(alice, content="alice root")
+        # foreign → foreign → own → foreign: the walk must not stop at the
+        # first foreign level, and must resume under alice's buried reply.
+        f1 = _mk_node(bob, parent=root, human_owner=alice, content="llm 1")
+        f2 = _mk_node(bob, parent=f1, human_owner=alice, content="llm 2")
+        own_deep = _mk_node(alice, parent=f2, content="alice deep")
+        f3 = _mk_node(bob, parent=own_deep, human_owner=alice, content="llm 3")
+        # A foreign node alice can't see (bob's private reply in her
+        # thread) is walked THROUGH: alice's reply under it and the
+        # foreign sub-thread under that are still in scope.
+        hidden = _mk_node(bob, parent=root, content="bob private aside")
+        own_under_hidden = _mk_node(alice, parent=hidden,
+                                    content="alice under hidden")
+        f_under_hidden = _mk_node(bob, parent=own_under_hidden,
+                                  human_owner=alice, content="llm 4")
+        # Soft-deleted foreign node: walked through, and itself listed as
+        # a tombstone because alice human-owns it (§5a).
+        gone = _mk_node(bob, parent=root, human_owner=alice, content="gone")
+        gone.deleted_at = datetime(2026, 1, 1)
+        _db.session.commit()
+        after_gone = _mk_node(bob, parent=gone, human_owner=alice,
+                              content="llm after gone")
+        # Bob's own thread, untouched by alice: out of scope entirely.
+        bob_root = _mk_node(bob, content="bob root")
+        bob_child = _mk_node(bob, parent=bob_root, content="bob child")
+
+        ids = set(_preselect_node_ids(alice.id, budget=10_000))
+        assert ids == {
+            root.id, f1.id, f2.id, own_deep.id, f3.id,
+            own_under_hidden.id, f_under_hidden.id,
+            gone.id, after_gone.id,
+        }
+        assert hidden.id not in ids
+        assert bob_root.id not in ids and bob_child.id not in ids
+
+
 # ── #104: max_tokens forwarded to the provider ───────────────────────────
 
 def test_call_llm_with_retries_forwards_max_tokens(app):
