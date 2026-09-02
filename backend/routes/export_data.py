@@ -614,32 +614,73 @@ def _thread_has_alive_node(root_id):
     ).scalar()
 
 
+# Per-query id-list size for the level-batched thread walk. Keeps each
+# statement small on SQLite (old builds cap bound variables at 999) and
+# cheap to plan on Postgres.
+_WALK_CHUNK = 900
+
+
+def _foreign_thread_node_ids(user_id):
+    """IDs of nodes by OTHER authors inside the user's thread trees.
+
+    A user's thread trees are every node they authored plus all
+    descendants (#110: seeded from every authored node, not just their
+    top-level threads, so replies inside other users' threads count).
+    The authored half needs no id list — callers match it with
+    ``Node.user_id == user_id`` — so this walks only the other authors'
+    nodes: LLM replies, other people's comments, and the sub-threads
+    under them. Soft-deleted nodes are walked through; visibility is the
+    caller's filter.
+
+    Level 1 is a plain join (children of any authored node), which the
+    planner estimates from real column stats. Deeper levels are walked
+    with one ``parent_id IN (...)`` seek per level, and a level stops at
+    the next authored node because that node is its own seed. On a
+    user/LLM alternating thread the walk ends after two levels.
+
+    This replaced a recursive CTE on 2026-09-02: Postgres cannot
+    estimate a recursive work table (it assumes 10x the seed), so on a
+    260k-row table it chose a hash join fed by a full sequential scan of
+    ``node`` for EVERY recursion level — a 120-level thread meant 31
+    million rows scanned per call, 8.5 s on prod, on every thread open
+    and every LLM reply.
+    """
+    parent = db.aliased(Node)
+    frontier = [
+        row[0] for row in
+        db.session.query(Node.id)
+        .join(parent, Node.parent_id == parent.id)
+        .filter(parent.user_id == user_id, Node.user_id != user_id)
+    ]
+    seen = set(frontier)
+    while frontier:
+        next_level = []
+        for i in range(0, len(frontier), _WALK_CHUNK):
+            chunk = frontier[i:i + _WALK_CHUNK]
+            next_level.extend(
+                row[0] for row in
+                db.session.query(Node.id).filter(
+                    Node.parent_id.in_(chunk), Node.user_id != user_id,
+                )
+                if row[0] not in seen
+            )
+        seen.update(next_level)
+        frontier = next_level
+    return seen
+
+
 def _preselect_node_ids(user_id, budget, filter_ai_usage=False,
                         created_before=None, created_after=None,
                         chronological_order=False):
     """Select node IDs that fit within a token budget using a SQL window function.
 
-    Uses a recursive CTE to find all descendants of the user's top-level
-    threads, then filters to accessible nodes only.  Returns a list of
-    node IDs ordered by created_at (direction controlled by
-    chronological_order).  No nodes are loaded or decrypted.
+    Covers the user's thread trees — their own nodes plus other authors'
+    nodes under them (see _foreign_thread_node_ids) — filtered to
+    accessible nodes only.  Returns a list of node IDs ordered by
+    created_at (direction controlled by chronological_order).  No nodes
+    are loaded or decrypted.
     """
-    # Recursive CTE: all node IDs in the user's thread trees. Seeded
-    # from EVERY node the user authored — not just their top-level
-    # threads — so replies they wrote inside other users' threads (and
-    # the sub-threads under them) are included too (#110). Overlapping
-    # subtrees are harmless: membership is checked with IN. Visibility/
-    # privacy is enforced below by _export_visible_filter.
-    base = db.session.query(Node.id).filter(
-        Node.user_id == user_id,
-    ).cte(name="thread_nodes", recursive=True)
-
-    thread_child = db.aliased(Node, flat=True)
-    recursive = db.session.query(thread_child.id).join(
-        base, thread_child.parent_id == base.c.id
-    )
-    thread_cte = base.union_all(recursive)
-
+    foreign_ids = sorted(_foreign_thread_node_ids(user_id))
     sort_order = (
         Node.created_at.asc() if chronological_order
         else Node.created_at.desc()
@@ -648,8 +689,13 @@ def _preselect_node_ids(user_id, budget, filter_ai_usage=False,
         order_by=sort_order
     ).label("cumul")
 
-    inner = db.session.query(Node.id, cumul).filter(
-        Node.id.in_(db.session.query(thread_cte.c.id)),
+    # token_count and created_at ride along in the window subquery so the
+    # budget cut and the final ordering need no second join back to node
+    # (which the planner ran as another full scan).
+    inner = db.session.query(
+        Node.id, Node.token_count, Node.created_at, cumul,
+    ).filter(
+        or_(Node.user_id == user_id, Node.id.in_(foreign_ids)),
         # Includes soft-deleted user-owned nodes so they can render as
         # tombstones in the export tree (§5a).
         _export_visible_filter(Node, user_id),
@@ -666,9 +712,11 @@ def _preselect_node_ids(user_id, budget, filter_ai_usage=False,
     return [
         row[0] for row in
         db.session.query(inner.c.id).filter(
-            inner.c.cumul - func.coalesce(
-                Node.token_count, 0) < budget
-        ).join(Node, Node.id == inner.c.id).all()
+            inner.c.cumul - func.coalesce(inner.c.token_count, 0) < budget
+        ).order_by(
+            inner.c.created_at.asc() if chronological_order
+            else inner.c.created_at.desc()
+        ).all()
     ]
 
 
