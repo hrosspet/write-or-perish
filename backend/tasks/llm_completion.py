@@ -25,6 +25,7 @@ from backend.utils.quotes import (
     resolve_ext_quotes, has_ext_quotes, find_ext_quote_ids,
 )
 from backend.utils.node_split import NODE_CHAR_CAP
+from backend.utils.session_helpers import chain_has_agentic_prompt
 from backend.utils.timefmt import local_stamp, strip_edge_timestamps
 from backend.utils.api_keys import determine_api_key_type, get_api_keys_for_usage
 from backend.utils.cost import calculate_llm_cost_microdollars
@@ -686,12 +687,13 @@ def _get_previous_source_mode(node_chain):
 
 
 def _is_agentic_prompt(node_chain):
-    """Check if this conversation has an agentic prompt (voice/textmode)."""
-    for node in node_chain:
-        prompt = node.get_artifact("prompt") if hasattr(node, 'get_artifact') else None
-        if prompt is not None and prompt.prompt_key in ('voice', 'textmode'):
-            return True
-    return False
+    """Check if this conversation has an agentic prompt (voice/textmode).
+
+    Reads each node's prompt key via Node.get_prompt_key(): the stamped
+    column (kept when a per-thread edit detaches the prompt reference),
+    else the linked prompt's key for roots attached before the stamp.
+    """
+    return chain_has_agentic_prompt(node_chain)
 
 
 def _find_pending_todo_draft(node_chain, user_id):

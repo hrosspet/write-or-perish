@@ -329,6 +329,16 @@ class Node(db.Model):
     # Tool call metadata for LLM nodes (JSON list of tool call logs)
     tool_calls_meta = db.Column(db.Text, nullable=True)
 
+    # Session kind of an agentic thread root: the UserPrompt.prompt_key
+    # ('voice' / 'textmode') the prompt was attached under. Stamped by
+    # attach_context_artifacts and KEPT when a per-thread prompt edit
+    # detaches the prompt reference (nodes.py detach_prompt). Agentic
+    # detection (tools, proposal parsing, mode notes) reads this via
+    # get_prompt_key() — before this column it read only the linked prompt,
+    # so detaching silently turned the thread non-agentic and the model
+    # wrote its tool calls as prose. None on ordinary nodes.
+    prompt_key = db.Column(db.String(64), nullable=True)
+
     # Within-turn retrieval chaining (#158): when a text-mode LLM node makes
     # a retrieval tool call, it is finalized as an interim node and a
     # continuation node is created to hold the answer. This self-FK links the
@@ -382,6 +392,17 @@ class Node(db.Model):
     def is_system_prompt(self):
         """True when this node carries a prompt artifact."""
         return self.has_artifact("prompt")
+
+    def get_prompt_key(self):
+        """The prompt key this node was started under, or None.
+
+        The stamped column first (survives a detached reference); else the
+        linked prompt's key, for roots attached before the column existed.
+        """
+        if self.prompt_key:
+            return self.prompt_key
+        prompt = self.get_artifact("prompt")
+        return prompt.prompt_key if prompt is not None else None
 
     def get_artifact_row(self, artifact_type):
         """Return the NodeContextArtifact row for *artifact_type*, or None."""

@@ -10,16 +10,16 @@ from backend.utils.placeholders import UserExportValidationError
 from backend.utils.context_artifacts import attach_context_artifacts
 from backend.utils.session_helpers import (
     ancestors_have_prompt, is_llm_node, create_llm_placeholder_node,
+    AGENTIC_PROMPT_KEYS,
 )
 
 voice_bp = Blueprint("voice", __name__)
 
 PROMPT_KEY = 'voice'
-# Keys that share the unified agentic.txt template. Any of these counts
-# as "an agentic prompt is already attached" when walking ancestry, so
-# bridging a text thread into voice mode (or vice-versa) doesn't append
+# AGENTIC_PROMPT_KEYS (voice + textmode share agentic.txt): any of them
+# counts as "an agentic prompt is already attached" when walking ancestry,
+# so bridging a text thread into voice mode (or vice-versa) doesn't append
 # a second prompt node.
-AGENTIC_PROMPT_KEYS = ('voice', 'textmode')
 
 
 @voice_bp.route("/from-node/<int:node_id>", methods=["POST"])
