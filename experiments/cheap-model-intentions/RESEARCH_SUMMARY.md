@@ -867,6 +867,66 @@ snapshot (24 of 64 imports went through REST). Import at scale was a non-event.
 
 ---
 
+### Ideas and follow-ups after the pilot (2026-09-02)
+
+**Connection graph as context for every introduction.** Before surfacing a
+match we need to know whether the two people are already connected — mutuals,
+one-way follow, or strangers — because that sets how spammy an introduction
+would feel. A match between mutuals may still be worth surfacing (the feed is a
+poor channel; two people who follow each other can easily not know they hold
+complementary intentions), but that needs checking rather than assuming. The
+nightly parquet snapshot carries only `profiles` and `tweets`; the Community
+Archive's REST API exposes follower/following tables for archived accounts —
+verify coverage, then make "connection status" a field on every match and a
+dimension of the qualitative eval (do introductions between strangers land
+differently from those between mutuals?).
+
+**Getting more matches out of one window: rerun on a cached prefix, or
+paginate.** §13 showed the per-call yield is a budget, not a fraction of the
+window. Two ways to draw more from the same input without re-partitioning:
+
+1. *Rerun, relying on non-determinism.* Temperature is not a knob any more:
+   the app's provider layer sets none, Anthropic 4.7+ / Sonnet 5 reject
+   `temperature`/`top_p` (400), and OpenAI's reasoning-class models accept only
+   the default. The variance we get is inherent and already large (Jaccard
+   0.09–0.21 between identical reruns). Independent reruns at N=16 accumulated
+   11 → 22 → 27 distinct pairs, so the marginal distinct yield visibly decays by
+   the third run.
+2. *Paginate.* Append the pairs already found (ids only, ~10 tokens per pair,
+   so a 40-pair list is ~400 tokens) **after** the cached prefix and ask for
+   further matches. No duplicates by construction; relevance is expected to
+   decline page by page, which is itself the stopping signal (a page returning
+   fewer than k pairs, or Opus re-judging the page below a bar).
+
+Economics, from the measured N=48 call (118K input, ~3.5K output plain /
+~6.5K exhaustive):
+
+| | luna | Opus 4.8 |
+|---|---|---|
+| uncached call, plain | $0.028 | $0.68 |
+| cached rerun (reads at 0.10x) | $0.0066 | $0.15 |
+| speed-up per rerun | 4.2x | 4.5x |
+| cache write premium | none (OpenAI auto-cache, prefix ≥1024 tok) | 1.25x (5-min TTL) or 2x (1-h TTL) |
+| reruns to break even on the write | first rerun pays | ~0.3 (5-min) / ~1.1 (1-h) |
+
+So caching pays from the first rerun on both providers; after it, **output
+tokens become the dominant cost** (64% of a cached luna call), which is what
+pagination and exhaustive prompting spend. Ten paginated pages over one
+48-window cost about $0.09 on luna, comparable to the six-call chunk × chunk
+round ($0.06) that found 61 pairs — the yield of pagination is the unmeasured
+number, and the experiment costs under $0.20. The two methods compose:
+paginate inside each chunk-pair window. Constraint: OpenAI's auto-cache TTL
+does not survive a batch, so pagination is a sync loop (fine, pages are seconds
+apart); Anthropic caching composes with batch.
+
+**Lesson on sizing comparison runs.** The Opus 4.8 aggregation was run on 48
+accounts ($5.67, the night's single largest line) when 16 ($1.9) would have
+answered both questions it was for — the compression ratio with a frontier
+model, and whether better-merged lists match better. Size a comparison run to
+the question, not to whatever else is running in parallel.
+
+---
+
 ## 14. Reproduction
 
 See `README.md` in this directory for commands. Artifacts and rendered prompts
