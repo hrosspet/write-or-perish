@@ -251,6 +251,24 @@ function NavBar({ onNewEntryClick }) {
         </div>
         )}
 
+        {/* Reflect — the home page, same destination as the logo. The logo
+            alone wasn't reading as a link, so the way back to the three
+            writing modes gets a named button too. */}
+        {(!user || user.approved) && (
+          <Link
+            to="/"
+            style={{
+              ...linkStyle("/"),
+              color:
+                currentPath === "/" || currentPath === "/landing"
+                  ? "var(--accent)"
+                  : "var(--text-muted)",
+            }}
+          >
+            Reflect
+          </Link>
+        )}
+
         {/* Artifacts — plain link into the documents workspace. It lands on
             Profile, where the ArtifactsNav bubble row cross-links Todo and
             every other artifact (one click each). Logged-out visitors see
