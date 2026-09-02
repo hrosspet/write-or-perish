@@ -85,6 +85,9 @@ def search():
             Node.human_owner_id == current_user.id,
         ),
         ~Node.id.in_(db.session.query(prompt_node_ids)),
+        # ...and roots whose per-thread edit detached that link but kept
+        # the prompt_key stamp: still prompt text, not the user's writing.
+        Node.prompt_key.is_(None),
     )
 
     # Date filters (SQL-level, fast)

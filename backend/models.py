@@ -390,8 +390,13 @@ class Node(db.Model):
 
     @property
     def is_system_prompt(self):
-        """True when this node carries a prompt artifact."""
-        return self.has_artifact("prompt")
+        """True when this node is an agentic session's system prompt: it
+        links a UserPrompt version, or carries the prompt_key stamp left
+        behind when a per-thread edit detached that link. Display code
+        (Log / dashboard cards, the mode badge, search exclusion) keys off
+        this; use has_artifact("prompt") when the question is whether the
+        content still resolves from a linked version."""
+        return self.get_prompt_key() is not None
 
     def get_prompt_key(self):
         """The prompt key this node was started under, or None.

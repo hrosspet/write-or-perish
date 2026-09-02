@@ -343,13 +343,15 @@ def _system_prompt_fields(n):
             "prompt_version_number": _prompt_version_number(prompt),
             "context_artifacts": _context_artifact_fields(n),
         }
-    # No prompt artifact, but other context artifacts may still exist
-    # (e.g. after a per-thread prompt edit detached the prompt artifact)
+    # No linked prompt version. A root whose per-thread edit detached the
+    # link keeps its prompt_key stamp: still the session's system prompt
+    # (mode badge, Log preview), just with no title/version to show. Its
+    # other context artifacts (pinned profile etc.) may still exist too.
     artifacts = _context_artifact_fields(n)
     return {
-        "is_system_prompt": False,
+        "is_system_prompt": n.is_system_prompt,
         "prompt_title": None,
-        "prompt_key": None,
+        "prompt_key": n.get_prompt_key(),
         "user_prompt_id": None,
         "prompt_version_number": None,
         "context_artifacts": artifacts if artifacts else None,

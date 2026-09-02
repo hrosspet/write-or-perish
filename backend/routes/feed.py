@@ -179,10 +179,7 @@ def get_feed():
         display_node = node
         prompt_key = None
         if node.is_system_prompt:
-            prompt = node.get_artifact("prompt")
-            if prompt is None and node.user_prompt:
-                prompt = node.user_prompt  # legacy fallback
-            prompt_key = prompt.prompt_key if prompt else None
+            prompt_key = node.get_prompt_key()
             display_node = first_child_map.get(node.id, node)
         elif node.deleted_at is not None:
             display_node = newest_nodes.get(newest_map.get(node.id), node)

@@ -299,5 +299,6 @@ def test_system_node_text_edit_with_detach_copies_content(app, alice):
     })
     assert resp.status_code == 200
     refreshed = Node.query.get(node.id)
-    assert not refreshed.is_system_prompt
+    assert not refreshed.has_artifact("prompt")     # link gone
+    assert refreshed.is_system_prompt               # still the session root (stamp)
     assert refreshed.get_content() == "my own instructions"

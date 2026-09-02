@@ -52,10 +52,7 @@ def _serialize_node_for_list(node):
     display_node = node
     prompt_key = None
     if node.is_system_prompt:
-        prompt = node.get_artifact("prompt")
-        if prompt is None and node.user_prompt:
-            prompt = node.user_prompt  # legacy fallback
-        prompt_key = prompt.prompt_key if prompt else None
+        prompt_key = node.get_prompt_key()
         first_child = Node.query.filter_by(parent_id=node.id).order_by(Node.created_at.asc()).first()
         if first_child:
             display_node = first_child

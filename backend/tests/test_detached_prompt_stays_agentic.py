@@ -63,7 +63,11 @@ def _make_app():
         return User.query.get(int(user_id))
 
     from backend.routes.nodes import nodes_bp
+    from backend.routes.feed import feed_bp
+    from backend.routes.search import search_bp
     app.register_blueprint(nodes_bp, url_prefix="/nodes")
+    app.register_blueprint(feed_bp, url_prefix="/api")
+    app.register_blueprint(search_bp, url_prefix="/api")
     return app
 
 
@@ -210,7 +214,8 @@ def test_detach_keeps_thread_agentic(app, alice):
     assert resp.status_code == 200
 
     refreshed = Node.query.get(root.id)
-    assert not refreshed.is_system_prompt               # reference gone
+    assert not refreshed.has_artifact("prompt")         # reference gone
+    assert refreshed.is_system_prompt                   # still the session root
     assert refreshed.get_content().startswith("You are Loore, but terser")
     assert refreshed.prompt_key == "textmode"           # stamped on the way out
     assert refreshed.get_prompt_key() == "textmode"
@@ -234,7 +239,8 @@ def test_detach_keeps_existing_stamp(app, alice):
     })
     assert resp.status_code == 200
     refreshed = Node.query.get(root.id)
-    assert not refreshed.is_system_prompt
+    assert not refreshed.has_artifact("prompt")
+    assert refreshed.is_system_prompt
     assert refreshed.prompt_key == "voice"
     assert _is_agentic([refreshed])
 
@@ -277,3 +283,63 @@ def test_ordinary_nodes_are_not_agentic(app, alice):
     assert root.get_prompt_key() is None
     assert not _is_agentic([root, child])
     assert not _ancestors_have_prompt(child, alice)
+
+
+# ── Display consumers follow the stamp ───────────────────────────────────
+
+
+def _detach(app, alice, root, text="You are Loore, but terser. {user_profile}"):
+    client = app.test_client()
+    _login(client, alice)
+    resp = client.put(f"/nodes/{root.id}", json={
+        "content": text, "privacy_level": "private", "ai_usage": "chat",
+        "detach_prompt": True,
+    })
+    assert resp.status_code == 200
+    return client
+
+
+def test_detached_root_serializes_as_system_prompt(app, alice):
+    """GET /nodes/<id> keeps is_system_prompt + prompt_key for a detached
+    root (the thread view's mode badge), with no title/version to show."""
+    prompt = _make_prompt(alice, "textmode")
+    root = _make_node(alice)
+    _link_prompt(root, prompt)
+    client = _detach(app, alice, root)
+
+    resp = client.get(f"/nodes/{root.id}")
+    assert resp.status_code == 200
+    assert resp.json["is_system_prompt"] is True
+    assert resp.json["prompt_key"] == "textmode"
+    assert resp.json["prompt_title"] is None
+    assert resp.json["user_prompt_id"] is None
+
+
+def test_log_card_for_detached_root_keeps_badge_and_preview(app, alice):
+    """The Log card of a detached root still carries the mode badge and
+    previews the first reply, not the prompt text."""
+    prompt = _make_prompt(alice, "textmode")
+    root = _make_node(alice)
+    _link_prompt(root, prompt)
+    child = _make_node(alice, parent_id=root.id, content="first reply")
+    _db.session.commit()
+    client = _detach(app, alice, root)
+
+    resp = client.get("/api/feed")
+    assert resp.status_code == 200
+    card = next(c for c in resp.json["nodes"] if c["thread_root_id"] == root.id)
+    assert card["prompt_key"] == "textmode"
+    assert card["id"] == child.id
+
+
+def test_search_excludes_detached_root(app, alice):
+    prompt = _make_prompt(alice, "textmode")
+    root = _make_node(alice)
+    _link_prompt(root, prompt)
+    child = _make_node(alice, parent_id=root.id, content="terser is the word")
+    _db.session.commit()
+    client = _detach(app, alice, root)
+
+    resp = client.get("/api/search?q=terser")
+    assert resp.status_code == 200
+    assert [r["id"] for r in resp.json["results"]] == [child.id]
