@@ -43,6 +43,7 @@ Write or Perish evolves from journaling app to **distributed intelligence networ
 - ✅ **Version history** — All artifacts versioned behind the scenes (not yet exposed in UI)
 - ✅ **Personal Log** — Private chronological view of all your entries
 - ✅ **Issue-close notifications** (#236) — When a GitHub issue you submitted via Loore is fixed (or declined), you learn it in-app through the dev-update channel, targeted to you alone; v0 of the automated issue→fix→verify loop (#237)
+- ✅ **Apply settings to replies** — Changing an entry's privacy or AI usage when it has replies offers "this node only" or "this node and all my replies" (your own entries and AI responses you requested; other people's replies untouched)
 
 **In Progress:**
 - 🔧 **Text mode** — Non-voice agentic interaction for text-first users (last major feature before wider alpha)
