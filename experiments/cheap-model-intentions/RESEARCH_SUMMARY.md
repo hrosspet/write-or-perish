@@ -919,6 +919,24 @@ paginate inside each chunk-pair window. Constraint: OpenAI's auto-cache TTL
 does not survive a batch, so pagination is a sync loop (fine, pages are seconds
 apart); Anthropic caching composes with batch.
 
+**Two routes to more matches per window, one empirical question.** The axes
+are orthogonal: *how* to draw more (independent resampling vs pagination) and
+*where* to run (sync with a cached prefix vs Batch). Pagination is sequential,
+so it is sync-only. Resampling can go either way. On OpenAI, Batch and the
+auto-cache do not compose (the cache does not survive the queue), so for luna
+the choice is cached sync ($0.0066 per rerun at N=48) vs Batch ($0.014). On
+Anthropic they do compose: the Batch discount (50% on everything) stacks with
+cache reads (0.1x), but hits inside a batch are **best-effort** — the docs quote
+30–98% hit rates depending on traffic — because requests are processed
+concurrently and the entry lives 5 minutes (1 hour with the extended TTL) from
+its last use, not for the batch's 24-hour window. Recipe from the docs: identical
+`cache_control` in every request, a steady stream so entries don't expire, and
+the 1-hour TTL for batches. Opus 4.8 at N=48 per rerun: sync uncached $0.68,
+sync cached $0.15, Batch uncached $0.34, Batch with a cache hit ≈ $0.07 (after
+one 2x write). Which route yields more *distinct* matches per dollar is
+unmeasured; the experiment is ten cached resamples vs ten paginated pages over
+the same window, unioned, with an Opus re-judge of a sample — under $0.30 on luna.
+
 **Lesson on sizing comparison runs.** The Opus 4.8 aggregation was run on 48
 accounts ($5.67, the night's single largest line) when 16 ($1.9) would have
 answered both questions it was for — the compression ratio with a frontier
