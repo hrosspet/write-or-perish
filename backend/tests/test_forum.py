@@ -554,3 +554,59 @@ def test_llm_generation_allowed_on_own_public_reply(app):
     reply = _mk_node("visitor", "public reply", parent=pub)
     r = client.post(f"/api/nodes/{reply.id}/llm", json={})
     assert r.status_code == 202  # accepted — generation enqueued
+
+
+# ── Log: batched display-node lookups + one DEK prefetch per page ────────
+
+def test_feed_prefetches_every_preview_and_batches_per_card_lookups(app, monkeypatch):
+    """The Log decrypted one preview per card inside its loop (a cold
+    worker paid ~80 ms of KMS latency per card, in sequence) and ran a
+    query per card for first-child / newest-descendant / child count.
+    Now: pick display nodes with batched queries, one prefetch, serialize."""
+    from datetime import datetime
+    from sqlalchemy import event
+    from backend.models import NodeContextArtifact, UserPrompt
+    from backend.routes import feed as feed_mod
+    author = User.query.filter_by(username="author").first()
+
+    plain = _mk_node("author", "plain root", privacy="private")
+    _mk_node("author", "plain reply", parent=plain, privacy="private")
+    # System-prompt root: the card previews its first alive child.
+    sys_root = _mk_node("author", "system prompt text", privacy="private")
+    prompt = UserPrompt(user_id=author.id, prompt_key="agentic", title="Agentic")
+    prompt.set_content("system prompt text")
+    _db.session.add(prompt)
+    _db.session.flush()
+    _db.session.add(NodeContextArtifact(node=sys_root, artifact_type="prompt", artifact_id=prompt.id))
+    _db.session.commit()
+    _mk_node("author", "first child of prompt", parent=sys_root, privacy="private")
+    _mk_node("author", "second child of prompt", parent=sys_root, privacy="private")
+    # Soft-deleted root with a live reply (§4a Case 2): previews the reply.
+    gone = _mk_node("author", "deleted root", privacy="private")
+    _mk_node("author", "live reply under deleted", parent=gone, privacy="private")
+    gone.deleted_at = datetime(2026, 1, 1)
+    _db.session.commit()
+
+    seen = []
+    monkeypatch.setattr(feed_mod, "prefetch_deks", lambda texts: seen.append(sorted(texts)) or 0)
+    per_card = []
+
+    def after(conn, cursor, statement, params, context, executemany):
+        if "FROM node" in statement and "IN (" not in statement and (
+                "node.parent_id = " in statement or "node.id = " in statement):
+            per_card.append(statement)
+    event.listen(_db.engine, "after_cursor_execute", after)
+    try:
+        r = _client_for(app, "author").get("/api/feed?page=1&per_page=20")
+    finally:
+        event.remove(_db.engine, "after_cursor_execute", after)
+    assert r.status_code == 200
+    cards = {c["thread_root_id"]: c for c in r.get_json()["nodes"]}
+    assert cards[plain.id]["preview"] == "plain root" and cards[plain.id]["child_count"] == 1
+    assert cards[sys_root.id]["preview"] == "first child of prompt"
+    assert cards[sys_root.id]["prompt_key"] == "agentic" and cards[sys_root.id]["child_count"] == 2
+    assert cards[gone.id]["preview"] == "live reply under deleted"
+    assert cards[gone.id]["id"] != gone.id and cards[gone.id]["child_count"] == 1
+    # Exactly the three previews went to the prefetch, once, before serializing.
+    assert seen == [sorted(["plain root", "first child of prompt", "live reply under deleted"])]
+    assert per_card == [], per_card
