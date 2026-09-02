@@ -1,10 +1,11 @@
-import React, { useState, forwardRef, useImperativeHandle, useEffect, useCallback } from "react";
+import React, { useState, useRef, forwardRef, useImperativeHandle, useEffect, useCallback } from "react";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 import { useDraft } from "../hooks/useDraft";
 import { useUser } from "../contexts/UserContext";
 import StreamingMicButton from "./StreamingMicButton";
 import PrivacySelector from "./PrivacySelector";
 import RegenerateTtsDialog from "./RegenerateTtsDialog";
+import ApplyToRepliesDialog from "./ApplyToRepliesDialog";
 import SplitContentDialog, { NODE_CHAR_CAP } from "./SplitContentDialog";
 import PublicReplyDialog, { PUBLIC_REPLY_ACK_KEY } from "./PublicReplyDialog";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
@@ -14,7 +15,7 @@ import useSubmitShortcut from "../hooks/useSubmitShortcut";
 
 const NodeForm = forwardRef(
   (
-    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false, aiUsageFromGlobalDefault = false },
+    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false, aiUsageFromGlobalDefault = false, hasChildren = false },
     ref
   ) => {
     const { user } = useUser();
@@ -29,6 +30,12 @@ const NodeForm = forwardRef(
     // When editing an entry that has generated TTS, ask whether to keep or
     // regenerate the now-stale audio before saving (#66).
     const [showTtsDialog, setShowTtsDialog] = useState(false);
+    // Editing a node that has replies and changing its privacy / AI usage:
+    // ask whether the change is for this node only or also for the user's
+    // replies below it, before saving. pendingResumeRef carries the TTS
+    // choice already made so the resumed save keeps it.
+    const [showScopeDialog, setShowScopeDialog] = useState(false);
+    const pendingResumeRef = useRef({});
 
     // Per-entry character cap: oversized new entries are split
     // server-side into serially connected entries after explicit
@@ -312,7 +319,7 @@ const NodeForm = forwardRef(
       setContent("");
     };
 
-    const handleSubmit = async (event, regenerateTts, splitConfirmed, publicConfirmed) => {
+    const handleSubmit = async (event, regenerateTts, splitConfirmed, publicConfirmed, applyToReplies) => {
       event && event.preventDefault();
       // Validate: require content or audio
       if (!editMode && uploadedFile) {
@@ -331,6 +338,22 @@ const NodeForm = forwardRef(
         && content !== initialContent
       ) {
         setShowTtsDialog(true);
+        return;
+      }
+
+      // Changing privacy / AI usage on a node that has replies: ask whether
+      // the change is for this node only or also for the user's replies.
+      // `applyToReplies` is undefined on the initial submit (→ open the
+      // dialog) and a boolean once the user has chosen.
+      if (
+        editMode && nodeId && hasChildren && applyToReplies === undefined
+        && (
+          (initialPrivacyLevel != null && privacyLevel !== initialPrivacyLevel)
+          || (initialAiUsage != null && aiUsage !== initialAiUsage)
+        )
+      ) {
+        pendingResumeRef.current = { regenerateTts };
+        setShowScopeDialog(true);
         return;
       }
 
@@ -461,6 +484,9 @@ const NodeForm = forwardRef(
             // actually edited; a privacy/AI-usage-only save keeps it.
             ...(detachPrompt && content !== initialContent && { detach_prompt: true }),
             ...(regenerateTts && { regenerate_tts: true }),
+            // Cascade the privacy / AI-usage change to the user's replies
+            // (chosen in ApplyToRepliesDialog).
+            ...(applyToReplies && { apply_to_descendants: true }),
           });
         } else if (uploadedFile) {
           // Upload audio file
@@ -1015,6 +1041,21 @@ const NodeForm = forwardRef(
           setShowTtsDialog(false);
           // Resume the save with the user's choice (no event object).
           handleSubmit(null, regenerate);
+        }}
+      />
+      <ApplyToRepliesDialog
+        open={showScopeDialog}
+        privacyChanged={initialPrivacyLevel != null && privacyLevel !== initialPrivacyLevel}
+        aiUsageChanged={initialAiUsage != null && aiUsage !== initialAiUsage}
+        onClose={() => setShowScopeDialog(false)}
+        onChoice={(applyToReplies) => {
+          setShowScopeDialog(false);
+          // Resume the save with the scope chosen, keeping any TTS choice
+          // already made (no event object).
+          handleSubmit(
+            null, pendingResumeRef.current.regenerateTts,
+            undefined, undefined, applyToReplies,
+          );
         }}
       />
       <PublicReplyDialog

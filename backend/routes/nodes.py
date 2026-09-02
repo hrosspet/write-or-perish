@@ -815,6 +815,7 @@ def update_node(node_id):
             "char_cap": NODE_CHAR_CAP,
         }), 422
 
+    old_privacy, old_ai_usage = node.privacy_level, node.ai_usage
     # Handle privacy settings updates (optional)
     if "privacy_level" in data:
         privacy_level = data["privacy_level"]
@@ -831,6 +832,12 @@ def update_node(node_id):
         if not validate_ai_usage(ai_usage):
             return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
         node.ai_usage = ai_usage
+
+    # Settings that actually changed here are the only ones a requested
+    # cascade carries to the user's replies: a reply keeps its own privacy
+    # when only AI usage was changed on this node, and vice versa.
+    privacy_changed = "privacy_level" in data and node.privacy_level != old_privacy
+    ai_usage_changed = "ai_usage" in data and node.ai_usage != old_ai_usage
 
     # Resolved text BEFORE any artifact change: for a system node this is
     # the pinned prompt's content, which is also what the editor showed.
@@ -886,6 +893,19 @@ def update_node(node_id):
         # edited text — chunk windowing and update gates sum this column.
         from backend.utils.tokens import approximate_token_count as _atc_upd
         node.token_count = _atc_upd(new_content)
+
+    # Optional cascade, chosen in the edit dialog when the node has replies:
+    # the same privacy / AI-usage change applied to every alive reply below
+    # it that the user may edit (own nodes, LLM nodes they are the human
+    # owner of). Other users' replies are untouched.
+    cascaded = []
+    if data.get("apply_to_descendants") and (privacy_changed or ai_usage_changed):
+        from backend.utils.node_settings import apply_settings_to_descendants
+        cascaded = apply_settings_to_descendants(
+            node, current_user.id,
+            privacy_level=node.privacy_level if privacy_changed else None,
+            ai_usage=node.ai_usage if ai_usage_changed else None,
+        )
     try:
         db.session.commit()
     except Exception as e:
@@ -898,12 +918,21 @@ def update_node(node_id):
             or "privacy_level" in data):
         from backend.utils.public_cache import invalidate_for_node
         invalidate_for_node(node)
+        # That already covers the thread-root pages every cascaded reply
+        # lives under; add the replies' own id URLs.
+        if cascaded and privacy_changed:
+            from backend.utils.public_cache import invalidate
+            invalidate(*[f"/node/{n.id}" for n in cascaded])
 
     # Own fields only. The UI merges these into the node it already holds
     # (or refetches the focal node when it edited an ancestor/child), so
     # re-serializing the whole thread here was pure waste: one full
     # subtree walk and a KMS unwrap per descendant on every save.
-    return jsonify({"message": "Node updated", "node": _focal_own_fields(node)}), 200
+    return jsonify({
+        "message": "Node updated",
+        "node": _focal_own_fields(node),
+        "descendants_updated": len(cascaded),
+    }), 200
 
 # Retrieve a node with its full content (the highlighted node) plus previews of its children.
 _ARTIFACT_MODELS = {

@@ -515,6 +515,15 @@ function NodeDetail({ nodeIdOverride }) {
     setShowEditOverlay(false);
     setEditTarget(null);
 
+    // Privacy / AI usage cascaded to the user's replies as well.
+    const cascaded = data?.descendants_updated || 0;
+    if (cascaded) {
+      addToast(
+        `Applied to ${cascaded} repl${cascaded === 1 ? "y" : "ies"} too`,
+        3000,
+      );
+    }
+
     if (!wasFocal) {
       // Non-focal edit: refetch the focal node so the edited
       // ancestor/child reflects new content. No auto-LLM trigger —
@@ -531,7 +540,15 @@ function NodeDetail({ nodeIdOverride }) {
     // PUT returns the node's own fields only (no ancestors/children —
     // re-serializing the thread on every save was the slow part); the
     // tree we already hold is unchanged by an edit, so merge.
-    const updated = data.node ? { ...node, ...data.node } : { ...node, content: data.content };
+    let updated = data.node ? { ...node, ...data.node } : { ...node, content: data.content };
+    if (cascaded) {
+      // The replies' settings changed too — the tree we hold is stale.
+      try {
+        updated = await api.get(`/nodes/${id}`).then((r) => r.data);
+      } catch (err) {
+        console.error(err);
+      }
+    }
     setNode(updated);
     const editedIsLlm = updated.node_type === "llm" || !!updated.llm_model;
     if (editedIsLlm) return;
@@ -1156,6 +1173,12 @@ function NodeDetail({ nodeIdOverride }) {
             initialAiUsage: editTarget.ai_usage,
             detachPrompt: !!editTarget.context_artifacts?.prompt,
             hasGeneratedTts: !!editTarget.has_tts,
+            // Drives the "apply to replies too?" choice on a privacy /
+            // AI-usage change (same test as the delete dialog).
+            hasChildren: !!(
+              editTarget.child_count > 0
+              || (editTarget.children && editTarget.children.length > 0)
+            ),
             onSuccess: handleEditSuccess,
           }}
         />
