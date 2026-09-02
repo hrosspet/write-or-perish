@@ -809,3 +809,50 @@ def test_cleanup_purge_clears_continuation_references(app, alice):
     _db.session.commit()
     assert Node.query.get(cid) is None
     assert Node.query.get(interim.id).continuation_node_id is None
+
+
+# ── Render-set prefetch + slim PUT (perf, 2026-09-02) ───────────────────
+
+def test_get_node_prefetches_deks_for_ancestors_and_subtree(app, alice, monkeypatch):
+    """GET /nodes/<id> collects the whole render set (ancestor chain +
+    full subtree, not siblings) and hands its ciphertexts to one batched
+    DEK prefetch before serializing anything."""
+    from backend.utils import encryption
+    root = _make_node(alice, content="root")
+    focal = _make_node(alice, parent=root, content="focal")
+    sibling = _make_node(alice, parent=root, content="sibling")
+    child = _make_node(alice, parent=focal, content="child")
+    grandchild = _make_node(alice, parent=child, content="grandchild")
+    seen = []
+    monkeypatch.setattr(encryption, "prefetch_deks",
+                        lambda texts: seen.append(list(texts)) or 0)
+
+    client = app.test_client()
+    _login(client, alice)
+    resp = client.get(f"/nodes/{focal.id}")
+    assert resp.status_code == 200
+    assert len(seen) == 1
+    assert set(seen[0]) == {"root", "focal", "child", "grandchild"}
+    assert "sibling" not in seen[0]
+    # The tree itself is unchanged, and the ancestor's child_count comes
+    # from the batched count query (root has focal + sibling).
+    assert [a["id"] for a in resp.json["ancestors"]] == [root.id]
+    assert resp.json["ancestors"][0]["child_count"] == 2
+    assert resp.json["child_count"] == 1
+    assert resp.json["children"][0]["children"][0]["id"] == grandchild.id
+
+
+def test_update_node_returns_own_fields_without_the_tree(app, alice):
+    root = _make_node(alice, content="root")
+    n = _make_node(alice, parent=root, content="before")
+    _make_node(alice, parent=n, content="child")
+    client = app.test_client()
+    _login(client, alice)
+    resp = client.put(f"/nodes/{n.id}", json={"content": "after"})
+    assert resp.status_code == 200
+    node = resp.json["node"]
+    assert node["id"] == n.id
+    assert node["content"] == "after"
+    assert node["privacy_level"] == "private"
+    assert node["parent_user_id"] == alice.id
+    assert "children" not in node and "ancestors" not in node

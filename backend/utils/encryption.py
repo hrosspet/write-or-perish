@@ -12,6 +12,7 @@ Format: ENC:v2:<base64-wrapped-dek>:<base64(nonce + ciphertext + tag)>
 Legacy format (v1) is still supported for decryption only.
 """
 import base64
+import binascii
 import logging
 import os
 import re
@@ -182,6 +183,87 @@ def _unwrap_dek(wrapped_dek: bytes) -> bytes:
     dek = response.plaintext
     _cache_put(cache_key, dek)
     return dek
+
+
+# ---------------------------------------------------------------------------
+# Batched DEK unwrapping
+#
+# One KMS decrypt is ~80 ms from the prod VM whatever the transport (measured
+# 2026-09-02: REST and gRPC both 60–120 ms, while a raw HTTPS request to the
+# same endpoint is 22 ms — the latency is inside KMS). A cold thread open
+# paid that per node, in sequence. The calls are pure waiting, so N of them
+# in flight cost about one: 8 unwraps went 672 ms → 115 ms on the 2-vCPU VM.
+#
+# The executor is created lazily, after gunicorn has forked. Under the gevent
+# worker its "threads" are greenlets on the request loop (the REST client
+# goes through `requests`, which gevent makes cooperative); in Celery they
+# are real threads parked on sockets. Either way no CPU is involved.
+#
+# INTRODUCED CONSTANT: 8 in flight per process. Not tuned beyond the
+# measurement above; KMS quota is 60k ops/min, so there is headroom to
+# raise it if deep subtrees still feel slow.
+# ---------------------------------------------------------------------------
+DEK_PREFETCH_CONCURRENCY = 8
+_unwrap_pool = None
+_unwrap_pool_lock = threading.Lock()
+
+
+def _get_unwrap_pool():
+    global _unwrap_pool
+    if _unwrap_pool is None:
+        with _unwrap_pool_lock:
+            if _unwrap_pool is None:
+                from concurrent.futures import ThreadPoolExecutor
+                _unwrap_pool = ThreadPoolExecutor(
+                    max_workers=DEK_PREFETCH_CONCURRENCY,
+                    thread_name_prefix="dek-unwrap",
+                )
+    return _unwrap_pool
+
+
+def wrapped_dek_of(ciphertext):
+    """The KMS-wrapped DEK inside a v2 envelope, or None for anything
+    else (plaintext, v1 direct-KMS blobs, None, malformed)."""
+    if not isinstance(ciphertext, str) or not ciphertext.startswith(ENCRYPTED_PREFIX_V2):
+        return None
+    wrapped_b64 = ciphertext[len(ENCRYPTED_PREFIX_V2):].split(":", 1)[0]
+    try:
+        return base64.b64decode(wrapped_b64, validate=True) or None
+    except (ValueError, binascii.Error):
+        return None
+
+
+def _unwrap_quietly(wrapped_dek):
+    """Best-effort unwrap for the prefetch pool: a failure here is
+    swallowed so the serial decrypt that follows raises (and logs) the
+    way it always has, instead of the prefetch changing error behaviour."""
+    try:
+        _unwrap_dek(wrapped_dek)
+    except Exception as e:  # noqa: BLE001 — deliberately best-effort
+        logger.debug("DEK prefetch failed (serial path will retry): %s", str(e)[:120])
+
+
+def prefetch_deks(ciphertexts):
+    """Unwrap, concurrently, every DEK among *ciphertexts* that is not in
+    the cache yet, so the decrypt_content() calls that follow are cache
+    hits. Duplicates collapse (many rows share a DEK only if they were
+    encrypted together, but the check is free). Returns the number of KMS
+    calls issued."""
+    if not is_encryption_enabled():
+        return 0
+    missing = {}
+    for ciphertext in ciphertexts:
+        wrapped = wrapped_dek_of(ciphertext)
+        if wrapped is None:
+            continue
+        key = base64.b64encode(wrapped).decode("ascii")
+        if key not in missing and _cache_get(key) is None:
+            missing[key] = wrapped
+    if not missing:
+        return 0
+    # list() waits for every unwrap; failures were swallowed per item.
+    list(_get_unwrap_pool().map(_unwrap_quietly, missing.values()))
+    return len(missing)
 
 
 def is_encrypted(value) -> bool:

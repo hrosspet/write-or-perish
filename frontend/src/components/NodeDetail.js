@@ -528,7 +528,10 @@ function NodeDetail({ nodeIdOverride }) {
       return;
     }
 
-    const updated = data.node ? data.node : { ...node, content: data.content };
+    // PUT returns the node's own fields only (no ancestors/children —
+    // re-serializing the thread on every save was the slow part); the
+    // tree we already hold is unchanged by an edit, so merge.
+    const updated = data.node ? { ...node, ...data.node } : { ...node, content: data.content };
     setNode(updated);
     const editedIsLlm = updated.node_type === "llm" || !!updated.llm_model;
     if (editedIsLlm) return;
