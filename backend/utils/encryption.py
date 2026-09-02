@@ -34,7 +34,11 @@ NONCE_SIZE = 12
 
 # In-memory LRU cache for unwrapped DEKs: wrapped_dek_b64 -> dek_bytes
 # Avoids repeated KMS calls for the same wrapped DEK.
-_DEK_CACHE_MAX = 4096
+# Sized so a whole budgeted export / profile chunk (5–7k nodes of short
+# imported posts at 100k tokens) stays cached between the export's quote
+# pre-pass and its render; at 4096 those chunks were unwrapped twice.
+# ~150 bytes per entry → ~10 MB when full. FIFO, not true LRU.
+_DEK_CACHE_MAX = 65536
 _dek_cache = {}
 _dek_cache_order = []
 _dek_cache_lock = threading.Lock()

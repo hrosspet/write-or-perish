@@ -12,6 +12,7 @@ from backend.utils.quotes import (
     resolve_quotes_for_export, resolve_ext_quotes, has_ext_quotes
 )
 from backend.utils.timefmt import iso_utc
+from backend.utils.encryption import prefetch_deks
 from backend.utils.spend import require_spend_headroom
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import subqueryload
@@ -148,6 +149,42 @@ def prefetch_children(nodes, batch=500):
             next_level.extend(k for k in kids if k.id not in seen)
             seen.update(k.id for k in kids)
         level = next_level
+
+
+# Nodes per DEK-prefetch window. Must stay well under the DEK cache size
+# (encryption._DEK_CACHE_MAX, 4096): every DEK unwrapped for a window has
+# to survive in the LRU until that window is rendered, and rendering also
+# decrypts quotes and artifacts on the side. INTRODUCED CONSTANT.
+DEK_PREFETCH_WINDOW = 1000
+
+
+def iter_with_dek_prefetch(roots, window=DEK_PREFETCH_WINDOW):
+    """Yield *roots* in order, unwrapping the DEKs of each upcoming window
+    of subtrees (roots plus their already-loaded ``children``) in one
+    concurrent batch first.
+
+    Rendering decrypts one node at a time, and a cold KMS unwrap is
+    ~80 ms from the prod VM (2026-09-02), so a 5k-node profile chunk
+    spent ~7 minutes waiting on KMS in sequence. Windows keep the
+    prefetched DEKs inside the LRU cache; a root's subtree is never
+    split across windows. Call after prefetch_children(roots) — walking
+    ``children`` here must not lazy-load.
+    """
+    batch, texts = [], []
+    for root in roots:
+        batch.append(root)
+        stack = [root]
+        while stack:
+            n = stack.pop()
+            texts.append(n.content)
+            stack.extend(n.children)
+        if len(texts) >= window:
+            prefetch_deks(texts)
+            yield from batch
+            batch, texts = [], []
+    if batch:
+        prefetch_deks(texts)
+        yield from batch
 
 
 def _filtered_children(node, filter_ai_usage, created_before, included_ids,
@@ -871,6 +908,12 @@ def _build_user_export_incremental(
             key=lambda n: n.created_at,
             reverse=not chronological_order,
         )
+        # The resolver loop below decrypts every selected node, one KMS
+        # unwrap each on a cold worker (~80 ms; a 5k-node profile chunk
+        # waited ~7 minutes here, then again at render time once the
+        # 4k-entry DEK cache had cycled). One concurrent batch up front;
+        # the render loop's windowed prefetch then finds them cached.
+        prefetch_deks(n.content for n in selected_nodes)
 
         resolver = ExportQuoteResolver(
             user.id, budget,
@@ -1018,7 +1061,7 @@ def _build_user_export_incremental(
 
     compact_run = _CompactTweetRun(export_lines, user.username)
     thread_num = 0
-    for entry in entry_nodes:
+    for entry in iter_with_dek_prefetch(entry_nodes):
         if entry.id in compact_ids:
             compact_run.add(entry)
             continue
@@ -1252,6 +1295,12 @@ def build_user_export_content(
             key=lambda n: n.created_at,
             reverse=not chronological_order,
         )
+        # The resolver loop below decrypts every selected node, one KMS
+        # unwrap each on a cold worker (~80 ms; a 5k-node profile chunk
+        # waited ~7 minutes here, then again at render time once the
+        # 4k-entry DEK cache had cycled). One concurrent batch up front;
+        # the render loop's windowed prefetch then finds them cached.
+        prefetch_deks(n.content for n in selected_nodes)
 
         # Create resolver with adjusted token budget
         resolver = ExportQuoteResolver(
@@ -1468,7 +1517,7 @@ def build_user_export_content(
     prefetch_children(top_level_nodes)
     compact_run = _CompactTweetRun(export_lines, user.username)
     thread_num = 0
-    for node in top_level_nodes:
+    for node in iter_with_dek_prefetch(top_level_nodes):
         if _is_flat_tweet_root(node, filter_ai_usage, created_before):
             compact_run.add(node)
             continue
