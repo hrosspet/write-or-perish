@@ -177,7 +177,7 @@ function NavBar({ onNewEntryClick }) {
         display: "flex",
         alignItems: "center",
         zIndex: 1000,
-        padding: "0 24px",
+        padding: "0 clamp(14px, 4vw, 24px)",
       }}
     >
       <Link
@@ -194,6 +194,8 @@ function NavBar({ onNewEntryClick }) {
           display: "flex",
           alignItems: "center",
           gap: "10px",
+          whiteSpace: "nowrap",
+          flexShrink: 0,
         }}
       >
         <img
@@ -204,7 +206,16 @@ function NavBar({ onNewEntryClick }) {
         Loore
       </Link>
 
-      <div style={{ display: "flex", alignItems: "center", gap: "clamp(0.8rem, 2vw, 1.8rem)" }}>
+      {/* The links tighten up on narrow screens so the group keeps a
+          clear gap from the logo instead of running into it. */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "clamp(0.55rem, 2vw, 1.8rem)",
+          marginLeft: "clamp(1.1rem, 5vw, 2.5rem)",
+        }}
+      >
         {currentPath !== '/voice' && <GlobalAudioPlayer />}
 
         {/* About dropdown — logged-out visitors only. For logged-in users
