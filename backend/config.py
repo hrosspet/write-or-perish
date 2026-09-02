@@ -118,8 +118,8 @@ class Config:
     # Sources:
     #   Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
     #   OpenAI:    https://developers.openai.com/api/docs/pricing
-    PRICING_VERSION = "3"
-    PRICING_UPDATED_AT = "2026-07-14"
+    PRICING_VERSION = "4"
+    PRICING_UPDATED_AT = "2026-09-02"
 
     # Supported models configuration (single source of truth for all model metadata)
     SUPPORTED_MODELS = {
@@ -254,6 +254,20 @@ class Config:
             "context_window": 1000000,
             "input_price_per_mtok": 5.00,
             "output_price_per_mtok": 25.00,
+        },
+        "claude-fable-5.1": {
+            "provider": "anthropic",
+            "api_model": "claude-fable-5-1",
+            "display_name": "Claude Fable 5.1",
+            "context_window": 1000000,
+            # Assumed same tier as Fable 5 ($10/$50); re-check against the
+            # Anthropic pricing page when the entry is confirmed.
+            "input_price_per_mtok": 10.00,
+            "output_price_per_mtok": 50.00,
+            # New-generation tokenizer: ~2 chars/token on real corpora
+            # (tweets measured at 3.2x the chars/4 estimate). Scales the
+            # stored chars/4 token counts when sizing profile chunks.
+            "token_multiplier": 2.0,
         },
         "claude-fable-5": {
             "provider": "anthropic",
