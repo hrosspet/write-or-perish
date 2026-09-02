@@ -5,6 +5,7 @@ from backend.models import (
     UserRecentContext, UserArtifact,
 )
 from backend.extensions import db
+from sqlalchemy import func
 from backend.utils.timefmt import iso_utc
 from datetime import datetime
 from openai import OpenAI
@@ -887,10 +888,114 @@ def update_node(node_id):
         from backend.utils.public_cache import invalidate_for_node
         invalidate_for_node(node)
 
-    node = get_node(node.id)[0].get_json()  # to find all ancestors and children... / [0] is the actual node (wrapped in Response), [1] is the response code
-    return jsonify({"message": "Node updated", "node": node}), 200
+    # Own fields only. The UI merges these into the node it already holds
+    # (or refetches the focal node when it edited an ancestor/child), so
+    # re-serializing the whole thread here was pure waste: one full
+    # subtree walk and a KMS unwrap per descendant on every save.
+    return jsonify({"message": "Node updated", "node": _focal_own_fields(node)}), 200
 
 # Retrieve a node with its full content (the highlighted node) plus previews of its children.
+_ARTIFACT_MODELS = {
+    "prompt": UserPrompt,
+    "profile": UserProfile,
+    "todo": UserTodo,
+    "recent_context": UserRecentContext,
+    "user_artifact": UserArtifact,
+}
+
+
+def _child_counts(node_ids):
+    """{parent_id: number of child rows} for *node_ids* in one query —
+    the same number as ``len(node.children)`` (tombstones included)
+    without loading a full row per child."""
+    if not node_ids:
+        return {}
+    return dict(
+        db.session.query(Node.parent_id, func.count(Node.id))
+        .filter(Node.parent_id.in_(node_ids))
+        .group_by(Node.parent_id).all()
+    )
+
+
+def _render_set_ciphertexts(nodes):
+    """Every encrypted blob that serializing *nodes* will decrypt: the
+    nodes' own content plus the context artifacts pinned to them.
+
+    Also hands each node its ``context_artifacts`` rows and pulls the
+    artifacts themselves into the identity map in bulk, so the per-node
+    ``.query.get()`` calls in _context_artifact_fields become free.
+    """
+    from sqlalchemy.orm.attributes import set_committed_value
+    from backend.models import NodeContextArtifact
+    texts = [n.content for n in nodes]
+    rows_by_node = {n.id: [] for n in nodes}
+    ids = list(rows_by_node)
+    for start in range(0, len(ids), 900):
+        for row in NodeContextArtifact.query.filter(
+                NodeContextArtifact.node_id.in_(ids[start:start + 900])).all():
+            rows_by_node[row.node_id].append(row)
+    wanted = {}
+    for n in nodes:
+        rows = rows_by_node[n.id]
+        set_committed_value(n, "context_artifacts", rows)
+        for row in rows:
+            wanted.setdefault(row.artifact_type, set()).add(row.artifact_id)
+    for artifact_type, artifact_ids in wanted.items():
+        model = _ARTIFACT_MODELS.get(artifact_type)
+        if model is not None:
+            texts.extend(
+                a.content for a in
+                model.query.filter(model.id.in_(list(artifact_ids))).all()
+            )
+    return texts
+
+
+def _focal_own_fields(node):
+    """The focal node's own serialized fields — everything GET /nodes/<id>
+    returns except the tree (ancestors, children, child_count). Shared
+    with PUT, whose response used to re-run the whole GET (subtree walk,
+    every descendant decrypted) only for the UI to keep the node's own
+    fields and refetch the rest."""
+    data = {
+        "id": node.id,
+        "content": node.get_content(),
+        "node_type": node.node_type,
+        "created_at": iso_utc(node.created_at),
+        "updated_at": iso_utc(node.updated_at),
+        "permalink": (
+            f"/@{node.user.username}/{node.public_slug}"
+            if node.public_slug and node.user else None),
+        "user": {
+            "id": node.user.id,
+            "username": node.user.username,
+        },
+        # Include human owner ID for LLM nodes (so frontend can check edit/delete permission)
+        "parent_user_id": node.human_owner_id if node.node_type == "llm" else (node.parent.user_id if node.parent else None),
+        # Privacy settings
+        "privacy_level": node.privacy_level,
+        "ai_usage": node.ai_usage,
+        # Pin-to-profile
+        "pinned_at": iso_utc(node.pinned_at),
+        "llm_model": node.llm_model,
+        "origin": node.origin,
+        "llm_task_status": node.llm_task_status,
+        "has_original_audio": bool(node.audio_original_url or node.streaming_transcription),
+        # Whether this node has GENERATED TTS audio (distinct from an
+        # original voice recording). Drives the "regenerate audio?" edit
+        # prompt (#66).
+        "has_tts": bool(node.audio_tts_url),
+    }
+    # Include tool call metadata for LLM nodes
+    if node.tool_calls_meta:
+        import json as _json
+        try:
+            data["tool_calls_meta"] = _json.loads(node.tool_calls_meta)
+        except (ValueError, TypeError):
+            pass
+    data.update(_system_prompt_fields(node))
+    return data
+
+
 @nodes_bp.route("/<int:node_id>", methods=["GET"])
 @login_required
 def get_node(node_id):
@@ -909,6 +1014,29 @@ def get_node(node_id):
     if not can_user_access_node(node, current_user.id):
         return jsonify({"error": "Not authorized to access this node"}), 403
 
+    # Know the whole render set before touching any content: the ancestor
+    # chain (one PK lookup per level) and the full subtree (one query per
+    # level via prefetch_children instead of a lazy `children` load per
+    # node). Then unwrap every DEK the serializers below will need in one
+    # concurrent batch — a cold open used to pay ~80 ms of KMS latency per
+    # node, in sequence, and a leaf of a 120-deep thread has 120 ancestors.
+    from backend.routes.export_data import prefetch_children
+    from backend.utils.encryption import prefetch_deks
+    ancestor_nodes = []
+    current = node.parent
+    while current:
+        ancestor_nodes.append(current)
+        current = current.parent
+    prefetch_children([node])
+    render_set = list(ancestor_nodes)
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        render_set.append(n)
+        stack.extend(n.children)
+    ancestor_child_counts = _child_counts([a.id for a in ancestor_nodes])
+    prefetch_deks(_render_set_ciphertexts(render_set))
+
     # Compute descendant counts once for the entire subtree.
     compute_descendant_counts(node)
 
@@ -919,8 +1047,7 @@ def get_node(node_id):
     # never had access to) are omitted entirely.
     from backend.utils.serialization import serialize_node_status
     ancestors = []
-    current = node.parent
-    while current:
+    for current in ancestor_nodes:
         status = serialize_node_status(current, current_user.id)
         if status is None:  # alive + accessible
             ancestor_content = current.get_content()
@@ -939,7 +1066,7 @@ def get_node(node_id):
                 "content": ancestor_content,
                 "preview": make_preview(ancestor_content),
                 "node_type": current.node_type,
-                "child_count": len(current.children),
+                "child_count": ancestor_child_counts.get(current.id, 0),
                 "created_at": iso_utc(current.created_at),
                 "user_id": current.user_id,
                 "parent_user_id": ancestor_parent_user_id,
@@ -958,7 +1085,7 @@ def get_node(node_id):
         elif status.get("deleted"):
             ancestor_data = {
                 **status,
-                "child_count": len(current.children),
+                "child_count": ancestor_child_counts.get(current.id, 0),
                 "ai_usage": current.ai_usage,
                 "privacy_level": current.privacy_level,
             }
@@ -967,7 +1094,6 @@ def get_node(node_id):
         # else: status.get('inaccessible') — skip entirely (no leak of
         # structural fact "something is here" to a viewer who never had
         # access).
-        current = current.parent
 
     # Filter children by privacy. Tombstones the viewer had pre-deletion
     # access to are included; serialize_node_recursive renders them with
@@ -1002,45 +1128,11 @@ def get_node(node_id):
         ) if serialized is not None
     ]
     node_data = {
-        "id": node.id,
-        "content": node.get_content(),
-        "node_type": node.node_type,
+        **_focal_own_fields(node),
         "child_count": len(serialized_children),
         "ancestors": ancestors,
         "children": serialized_children,
-        "created_at": iso_utc(node.created_at),
-        "updated_at": iso_utc(node.updated_at),
-        "permalink": (
-            f"/@{node.user.username}/{node.public_slug}"
-            if node.public_slug and node.user else None),
-        "user": {
-            "id": node.user.id,
-            "username": node.user.username,
-        },
-        # Include human owner ID for LLM nodes (so frontend can check edit/delete permission)
-        "parent_user_id": node.human_owner_id if node.node_type == "llm" else (node.parent.user_id if node.parent else None),
-        # Privacy settings
-        "privacy_level": node.privacy_level,
-        "ai_usage": node.ai_usage,
-        # Pin-to-profile
-        "pinned_at": iso_utc(node.pinned_at),
-        "llm_model": node.llm_model,
-        "origin": node.origin,
-        "llm_task_status": node.llm_task_status,
-        "has_original_audio": bool(node.audio_original_url or node.streaming_transcription),
-        # Whether this node has GENERATED TTS audio (distinct from an
-        # original voice recording). Drives the "regenerate audio?" edit
-        # prompt (#66).
-        "has_tts": bool(node.audio_tts_url),
     }
-    # Include tool call metadata for LLM nodes
-    if node.tool_calls_meta:
-        import json as _json
-        try:
-            node_data["tool_calls_meta"] = _json.loads(node.tool_calls_meta)
-        except (ValueError, TypeError):
-            pass
-    node_data.update(_system_prompt_fields(node))
     return jsonify(node_data), 200
 
 # Resolve {quote:ID} placeholders in a node's content for frontend rendering.
