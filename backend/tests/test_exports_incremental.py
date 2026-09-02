@@ -1472,3 +1472,53 @@ class TestCompactTweetRendering:
         assert "# Thread 1" in content
         assert "User (alice) via twitter - " in content
         assert "# Tweets by" not in content
+
+
+# ── Windowed DEK prefetch (2026-09-02) ───────────────────────────────────
+
+def test_iter_with_dek_prefetch_keeps_order_and_windows_by_subtree(app, monkeypatch):
+    from backend.routes import export_data
+    from backend.routes.export_data import iter_with_dek_prefetch, prefetch_children
+    u = _make_user("w")
+    roots = []
+    for i in range(5):
+        r = _make_node(u, content=f"root {i}", token_count=1)
+        for j in range(2):
+            _make_node(u, parent_id=r.id, content=f"child {i}.{j}", token_count=1)
+        roots.append(r)
+    _db.session.commit()
+    batches = []
+    monkeypatch.setattr(export_data, "prefetch_deks", lambda texts: batches.append(sorted(texts)) or 0)
+    prefetch_children(roots)
+
+    out = list(iter_with_dek_prefetch(roots, window=4))
+    assert out == roots  # order untouched
+    # 3 nodes per root, window closes at >= 4: two roots per window, then one.
+    assert [len(b) for b in batches] == [6, 6, 3]
+    assert batches[0] == sorted(["root 0", "child 0.0", "child 0.1", "root 1", "child 1.0", "child 1.1"])
+    assert batches[2] == sorted(["root 4", "child 4.0", "child 4.1"])
+
+
+def test_export_render_prefetches_deks_for_every_rendered_node(app, monkeypatch):
+    """The export renderer used to decrypt one node at a time (~80 ms of
+    KMS latency each on a cold worker). Every rendered node's ciphertext
+    must reach the batched prefetch before rendering starts."""
+    from datetime import datetime, timedelta
+    from backend.routes import export_data
+    u = _make_user("pf")
+    base = datetime(2026, 8, 1)
+    for i in range(20):
+        _make_node(u, content=f"tweet {i}", created_at=base + timedelta(minutes=i), token_count=5)
+    root = _make_node(u, content="root", created_at=base + timedelta(days=1), token_count=5)
+    child = _make_node(u, parent_id=root.id, content="reply", created_at=base + timedelta(days=1, minutes=1), token_count=5)
+    _make_node(u, parent_id=child.id, content="reply 2", created_at=base + timedelta(days=1, minutes=2), token_count=5)
+    _db.session.commit()
+    _db.session.expire_all()
+    seen = []
+    monkeypatch.setattr(export_data, "prefetch_deks", lambda texts: seen.extend(texts) or 0)
+
+    out = export_data.build_user_export_content(
+        u, max_tokens=100000, filter_ai_usage=True, chronological_order=True,
+        return_metadata=True, include_strategy="engaged_threads")
+    assert "tweet 19" in out["content"] and "reply 2" in out["content"]
+    assert set(seen) == {f"tweet {i}" for i in range(20)} | {"root", "reply", "reply 2"}

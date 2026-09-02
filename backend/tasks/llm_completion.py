@@ -650,6 +650,22 @@ def get_user_ai_preferences_content(user_id, pinned_node=None):
     return None
 
 
+def _load_node_chain(parent_node):
+    """Root-first ancestor chain ending at *parent_node*, with every
+    node's DEK unwrapped in one concurrent batch. The message builder
+    decrypts each node of the chain; on a cold Celery worker a 120-deep
+    thread paid ~80 ms of KMS latency per node, in sequence, before the
+    model was even called."""
+    from backend.utils.encryption import prefetch_deks
+    node_chain = []
+    current = parent_node
+    while current:
+        node_chain.insert(0, current)
+        current = current.parent
+    prefetch_deks(n.content for n in node_chain)
+    return node_chain
+
+
 def _get_previous_source_mode(node_chain):
     """Find the source_mode of the most recent LLM node in the chain.
 
@@ -2132,11 +2148,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             llm_node.llm_task_progress = 20
             db.session.commit()
 
-            node_chain = []
-            current = parent_node
-            while current:
-                node_chain.insert(0, current)
-                current = current.parent
+            node_chain = _load_node_chain(parent_node)
 
             # Step 2: Build messages array
             self.update_state(state='PROGRESS', meta={'progress': 30, 'status': 'Preparing messages'})

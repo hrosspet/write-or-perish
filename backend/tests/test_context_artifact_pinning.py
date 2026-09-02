@@ -74,6 +74,7 @@ from backend.models import (  # noqa: E402
     Node, NodeContextArtifact,
 )
 from backend.tasks.llm_completion import (  # noqa: E402
+    _load_node_chain,
     get_user_profile_content,
     get_user_recent_content,
     get_user_todo_content,
@@ -465,3 +466,31 @@ class TestAttachPinsOnlyReferencedTypes:
         from backend.utils.prompts import load_default_prompt
         for key in ("textmode", "voice"):
             assert "{user_todo}" not in load_default_prompt(key)
+
+
+# ── Chain DEK prefetch (2026-09-02) ──────────────────────────────────────
+
+def test_load_node_chain_is_root_first_and_prefetches_every_dek(app, monkeypatch):
+    """The message builder decrypts each ancestor; on a cold worker a deep
+    thread paid one KMS round trip per node in sequence. The chain loader
+    hands every node's ciphertext to one batched prefetch first."""
+    from backend.utils import encryption
+    u = _user()
+    root = Node(user_id=u.id, node_type="user")
+    root.set_content("root")
+    db.session.add(root)
+    db.session.flush()
+    mid = Node(user_id=u.id, node_type="llm", parent_id=root.id)
+    mid.set_content("mid")
+    db.session.add(mid)
+    db.session.flush()
+    leaf = Node(user_id=u.id, node_type="user", parent_id=mid.id)
+    leaf.set_content("leaf")
+    db.session.add(leaf)
+    db.session.commit()
+    seen = []
+    monkeypatch.setattr(encryption, "prefetch_deks", lambda texts: seen.append(list(texts)) or 0)
+
+    chain = _load_node_chain(leaf)
+    assert [n.id for n in chain] == [root.id, mid.id, leaf.id]
+    assert seen == [["root", "mid", "leaf"]]
