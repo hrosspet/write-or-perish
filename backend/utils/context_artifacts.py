@@ -41,15 +41,20 @@ def attach_context_artifacts(node_id, user_id, prompt_record=None):
     Should be called right after the system node is flushed (so node_id
     is valid) and before the session is committed.
     """
+    node = Node.query.get(node_id)
     if prompt_record is not None:
         db.session.add(NodeContextArtifact(
             node_id=node_id,
             artifact_type="prompt",
             artifact_id=prompt_record.id,
         ))
+        # Stamp the session kind on the node itself so it outlives the
+        # reference: a per-thread prompt edit deletes the row (nodes.py
+        # detach_prompt) and the thread must stay agentic afterwards.
+        if node is not None:
+            node.prompt_key = prompt_record.prompt_key
         content = prompt_record.get_content() or ""
     else:
-        node = Node.query.get(node_id)
         content = (node.get_content() or "") if node else ""
 
     sync_context_artifacts(node_id, user_id, content)

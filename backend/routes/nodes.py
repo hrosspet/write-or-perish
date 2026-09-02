@@ -845,6 +845,15 @@ def update_node(node_id):
     # content takes effect.
     if data.get("detach_prompt") and content_changed:
         from backend.models import NodeContextArtifact
+        # Keep the session kind: the reference goes, but tools, proposal
+        # parsing and mode notes are gated on the prompt key
+        # (_is_agentic_prompt / ancestors_have_prompt), which lives in
+        # node.prompt_key. Roots attached before that column existed get
+        # stamped now, from the row being removed.
+        if not node.prompt_key:
+            linked = node.get_artifact("prompt")
+            if linked is not None:
+                node.prompt_key = linked.prompt_key
         NodeContextArtifact.query.filter_by(
             node_id=node.id, artifact_type="prompt"
         ).delete()
