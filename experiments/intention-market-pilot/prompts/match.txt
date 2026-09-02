@@ -1,0 +1,18 @@
+Below are intention lists for several different people (P01, P02, …). Each intention has an id like P03-2. The lists were inferred from each person's public writing. The people do not know each other's lists.
+
+Your task: find pairs of intentions, from two DIFFERENT people, that are **complementary** — where one person's direction, need, constraint or capability meaningfully serves, unlocks or strengthens the other's. The test: if these two people were introduced with exactly these two intentions named, would something happen that would not happen otherwise?
+
+What complementary is NOT:
+- Similarity or topical overlap. "Both care about writing" is not a match. Two people wanting the same thing is a match only if wanting it together changes what either of them can do.
+- Generic compatibility. If the rationale would be just as true of most reflective people, it is not a match.
+- Anything built on background knowledge about who these people might be. Use only the text of the lists.
+
+Prefer non-obvious pairs across different domains — a constraint in one life meeting an unrelated capability in another. Cite the specific content of both intentions in your reasoning.
+
+There is no target number. If nothing qualifies, output nothing. Quality over quantity: every match you output should be one you would be willing to explain to both people.
+
+Output format: one JSON object per line and nothing else — no preamble, no code fences, no summary.
+{"a": "P03-2", "b": "P11-5", "kind": "<need-meets-capability | shared-direction-with-leverage | tension-meets-resolution | other>", "why": "<2–4 sentences citing both intentions>", "non_obvious": "<one sentence on why this is not mere topical similarity>", "confidence": <0.0–1.0>}
+
+# Intention lists
+{lists}

@@ -72,3 +72,5 @@ experiments/cheap-model-intentions/prompt.txt
 # profiling, so keep it out of the public repo.
 ca_token_census.tsv
 experiments/cheap-model-intentions/chunk_batch_state.json
+# Intention-market pilot: content outputs never enter git
+experiments/intention-market-pilot/out/

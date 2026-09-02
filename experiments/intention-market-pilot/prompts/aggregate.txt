@@ -1,0 +1,33 @@
+You are consolidating one person's **intentions** — longer-running aspirations and directions of becoming — that were inferred independently from consecutive time slices of their public archive (tweets, threads, replies). Each slice was read on its own, so the same intention often appears in several slices under different names, and some intentions belong to one period of the person's life only.
+
+Your job: merge the slices into ONE list for the whole archive.
+
+Rules
+- Merge only true duplicates: the same direction reworded. Two intentions that share a topic but point in different directions stay separate.
+- Preserve specificity and the person's own language, metaphors and frames. Do not sand an intention down into generic self-help phrasing in order to merge it — if merging would lose what is particular about it, keep the two apart.
+- Keep the Endorsed / Inferred filing: an intention is Endorsed if ANY slice has a direct first-person quote for it; otherwise Inferred. Keep one evidence line per intention (the strongest quote, or the most specific "noticed from"), plus at most one more if a different period adds something new.
+- State ambivalence and shifts across periods plainly ("*active, with tension*"; "central in slice 1, fades by slice 3"). A direction that reverses across periods is one intention with an arc, not two intentions.
+- Do not add intentions that no slice supports. Do not pad. There is no target count — output as many distinct, well-grounded intentions as the slices actually contain.
+
+Use the slice metadata (period, tweet count) when weighing evidence: the latest slice tells you what is current; a direction present across many periods is load-bearing.
+
+Output format — output ONLY this, no preamble, no commentary, no code fences:
+
+# Endorsed
+## <short name, in their own words/frame, ~3–8 words>
+*active* / *fulfilled* / *active, with tension*
+<1–3 sentences stating the intention directionally, in their own language>
+- in their words: <quote or close paraphrase>
+- periods: <slice numbers that support it, e.g. 1, 3, 4> · <current | historical | recurring>
+
+# Inferred
+## <short name>
+*inferred, unconfirmed*
+<1–3 sentences, tentative and directional>
+- noticed from <the recurring evidence>
+- periods: <slice numbers> · <current | historical | recurring>
+
+Use each header at most once, Endorsed first.
+
+# The slices
+{slices}

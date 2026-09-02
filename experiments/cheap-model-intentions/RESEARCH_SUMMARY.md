@@ -410,7 +410,7 @@ the aggregated intentions must carry a last-seen period; and the trajectory
 inferences that distinguished the baseline in §5 are exactly the ones that need
 the old slices, so "latest only" has a quality cost as well as a recall cost.
 
-**Whether the intentions definition is right for matching at all.** The
+**Whether the intentions definition is right for matching at all** *(pilot answer in §13)*. The
 intentions prompt was designed for the reflective side of Loore: its
 definition of an intention and its level of abstraction are chosen to help one
 person gain clarity about their own life. Nothing here tests whether that is
@@ -751,7 +751,102 @@ about a seventh of one.
 
 ---
 
-## 13. Reproduction
+## 13. Pilot on the lab (2026-09-02): does single-window matching find anything?
+
+Overnight run on `lab.loore.org`, script-driven (`experiments/intention-market-pilot/`),
+answering the three scope questions of §10: enough matches cheaply, are they any
+good, is the abstraction level right. Numbers only here; the private report holds
+the content.
+
+**Setup.** 64 middle-tier accounts (100K–400K export tokens, outside the top 20 by
+followers, seeded shuffle), imported through the app's Community Archive pre-fill
+path (0 failures, 311K nodes, ~4 min). Extraction chunked at ~100K tokens with the
+public prompt (302 chunks, median 4/account, 0 truncations) on gpt-5.6-luna; a
+second **prosaic frame** (what the person is building / looking for / offering /
+stuck on) on 48 accounts. Aggregation on luna (both frames) and Opus 4.8 (48,
+default frame), with slice metadata (period, tweet count) in the prompt. Matching:
+one call over all lists in a window, complementarity-not-similarity prompt, people
+anonymised, every returned id checked. Whole night: **$6.65 OpenAI + $8.34
+Anthropic** (502 calls).
+
+**1. Per-call yield is flat in window size.**
+
+| window (people) | plain prompt, matches/call | "be exhaustive", matches/call |
+|---|---|---|
+| 16 | 10–13 (3 runs) | 44 |
+| 32 | 11 | — |
+| 48 | 11–12 (3 runs) | 41 |
+| 64 | 11 | 37 |
+
+Output tokens are flat too (~3.5K plain, ~6.5K exhaustive). The model returns a
+budget of matches, not a fraction of the window; the plain prompt's "quality over
+quantity" sets that budget at about a dozen, the exhaustive wording at about forty.
+Opus 4.8: 9 → 17 from N=16 to N=48 (plain), 20 exhaustive at N=16 — more restrained,
+better calibrated (mean confidence 0.55 vs luna's uninformative 0.89).
+
+**2. Matches accumulate with calls, so small windows win at equal cost.**
+
+| method over the same 48 people (luna, plain) | calls | tokens | distinct pairs | people-pairs | people unmatched |
+|---|---|---|---|---|---|
+| one 48-window, 3 passes | 3 | 353K | 30 | 27 | 23 / 48 |
+| chunk × chunk, 3 groups of 16 | 6 | 351K | **61** | **52** | **8 / 48** |
+| chunk × chunk, prosaic frame | 6 | ~190K | 61 | 54 | 2 / 48 |
+| chunk × chunk over 64, 4 groups | 10 | ~590K | 99 | 86 | 9 / 64 |
+
+Run-to-run overlap on identical lists is low (2–4 shared pairs between runs of
+10–13, Jaccard 0.09–0.21) and luna vs Opus share **zero** intention pairs at N=16
+(3 shared people-pairs). Single passes sample the match space; unions across
+windows and models are the census. Pairs found by ≥2 independent windows: 8
+(default) and 9 (prosaic) over 48 people; **10 people-pairs matched under both
+frames**, the top one by 7 windows in total.
+
+**3. Frames.** Same 16 people: default 11–13 matches, prosaic 13. Prosaic lists are
+half the size (median 12 vs 23 per account), 78% Endorsed vs 56%, half the tokens,
+and cover the people the default frame never matched (3 of 16 unmatched in every
+default run, all matched under prosaic). Qualitatively (n = 1 rater, ~80 matches
+read in full): prosaic matches are more actionable, default matches more
+cross-domain; about a third of plain-prompt matches in either frame are topical
+overlap presented as complementarity; the exhaustive tail stays grounded but
+hub intentions appear (max degree 5–7 vs ≤2 plain). No invented ids: 2 bad ids
+in ~40 runs.
+
+**4. Aggregation, the number §11 depends on.**
+
+| | assumed | luna, default | Opus 4.8, default | luna, prosaic |
+|---|---|---|---|---|
+| intentions per account (median) | ~13 | 23 | 20 | 12 |
+| raw → aggregated ratio (median) | — | 1.23 | 1.42 | 1.31 |
+| tokens per aggregated list | ~1.3K | 2.4K | 2.4K | 1.3K |
+
+The default frame's whole archive (734 × 2.4K ≈ 1.8M tokens) does **not** fit one
+1M window; the prosaic frame's (≈ 0.95M) is borderline. Raw chunk-level lists as
+match input gave 10 vs 11–13 for aggregated: aggregation loses nothing. Opus-aggregated
+lists as input gave a modest gain (15 vs 11–13 at N=16; 14 vs 11–12 at N=48).
+
+**Conclusions.** (i) Chunk × chunk with small groups and several re-partition
+rounds, unioned and ranked by votes, is the architecture — measured, not argued.
+(ii) Vote count across windows/models is the quality signal; model confidence is
+not. (iii) Extract a prosaic asks-and-offers layer for the market alongside the
+reflective artifact. (iv) luna for volume, Opus for judgment on consensus pairs.
+(v) Two output-length anchors found and must be set deliberately: the prompt's
+"quality over quantity" (≈12/call) and the app's 10K output clamp (truncated one
+exhaustive run at 49).
+
+**Caveats.** One community, 64 accounts, one night, one rater; Opus aggregation
+and the prosaic frame on 48 accounts only; slice-period metadata recorded but not
+yet used for matching; profiles, the largest accounts and prod untouched.
+
+**Infra findings while provisioning the lab** (the reason the lab exists):
+`migrations/env.py` + `alembic.ini` are gitignored and the migration chain does
+not replay on an empty database (`flask init-db && flask db stamp head` works);
+`psql -c "A; B"` is one transaction; worker threads need their own app context
+for the provider layer; the provider layer clamps output at 10K tokens;
+`force_parquet` is overridden whenever the live archive holds more rows than the
+snapshot (24 of 64 imports went through REST). Import at scale was a non-event.
+
+---
+
+## 14. Reproduction
 
 See `README.md` in this directory for commands. Artifacts and rendered prompts
 are gitignored by design; regenerate them from the snapshot. Key scripts:
