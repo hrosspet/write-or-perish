@@ -8,7 +8,9 @@ from flask import current_app
 
 
 # Anthropic prompt-caching multipliers on the input price (#187):
-# cache reads bill at 0.1x, cache writes (5-min TTL) at 1.25x.
+# cache reads bill at 0.1x, cache writes (5-min TTL) at 1.25x. A model
+# entry may override the read multiplier via "cache_read_multiplier"
+# (Fable 5.1 reads at 0.025x per the Anthropic pricing page).
 CACHE_READ_MULTIPLIER = 0.1
 CACHE_WRITE_MULTIPLIER = 1.25
 
@@ -66,9 +68,11 @@ def calculate_llm_cost_microdollars(model_id, input_tokens, output_tokens,
         output_price *= config.get("long_context_output_multiplier", 1)
     cached_subset = min(cached_input_tokens or 0, input_tokens)
     cached_multiplier = config.get("cached_input_multiplier", 0.5)
+    cache_read_multiplier = config.get(
+        "cache_read_multiplier", CACHE_READ_MULTIPLIER)
     cost = ((input_tokens - cached_subset) * input_price
             + cached_subset * input_price * cached_multiplier
-            + cache_read_tokens * input_price * CACHE_READ_MULTIPLIER
+            + cache_read_tokens * input_price * cache_read_multiplier
             + cache_write_tokens * input_price * CACHE_WRITE_MULTIPLIER
             + output_tokens * output_price)
     if batch:

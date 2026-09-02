@@ -260,10 +260,12 @@ class Config:
             "api_model": "claude-fable-5-1",
             "display_name": "Claude Fable 5.1",
             "context_window": 1000000,
-            # Assumed same tier as Fable 5 ($10/$50); re-check against the
-            # Anthropic pricing page when the entry is confirmed.
+            # Verified 2026-09-02 on the Anthropic pricing page.
             "input_price_per_mtok": 10.00,
             "output_price_per_mtok": 50.00,
+            # Cache hits on Fable 5.1 bill at 0.025x base input ($0.25/MTok),
+            # not the 0.1x every other Anthropic model uses.
+            "cache_read_multiplier": 0.025,
             # New-generation tokenizer: ~2 chars/token on real corpora
             # (tweets measured at 3.2x the chars/4 estimate). Scales the
             # stored chars/4 token counts when sizing profile chunks.

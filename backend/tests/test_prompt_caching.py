@@ -54,6 +54,16 @@ SUPPORTED_MODELS = {
         "provider": "anthropic", "api_model": "claude-opus-4-6",
         "input_price_per_mtok": 5.00, "output_price_per_mtok": 25.00,
     },
+    "claude-fable-5": {
+        "provider": "anthropic", "api_model": "claude-fable-5",
+        "input_price_per_mtok": 10.00, "output_price_per_mtok": 50.00,
+    },
+    # Mirrors backend/config.py: Fable 5.1 cache reads at 0.025x.
+    "claude-fable-5.1": {
+        "provider": "anthropic", "api_model": "claude-fable-5-1",
+        "input_price_per_mtok": 10.00, "output_price_per_mtok": 50.00,
+        "cache_read_multiplier": 0.025,
+    },
 }
 
 
@@ -97,6 +107,22 @@ def test_cost_cache_multipliers(app):
             cache_read_tokens=900_000, cache_write_tokens=50_000)
         assert mixed == (round(100_000 * 5 + 10_000 * 25
                                + 900_000 * 5 * 0.1 + 50_000 * 5 * 1.25))
+
+
+def test_cost_cache_read_multiplier_override(app):
+    # Fable 5.1 cache hits bill at 0.025x base input (pricing page,
+    # 2026-09-02) instead of the 0.1x module default; the model entry
+    # overrides it via cache_read_multiplier. Writes stay at 1.25x.
+    with app.app_context():
+        read = calculate_llm_cost_microdollars(
+            "claude-fable-5.1", 0, 0, cache_read_tokens=1_000_000)
+        assert read == 250_000
+        write = calculate_llm_cost_microdollars(
+            "claude-fable-5.1", 0, 0, cache_write_tokens=1_000_000)
+        assert write == 12_500_000
+        # Models without the override keep the module default.
+        assert calculate_llm_cost_microdollars(
+            "claude-fable-5", 0, 0, cache_read_tokens=1_000_000) == 1_000_000
 
 
 def test_gated_voice_tools_warm_matches_generation():
