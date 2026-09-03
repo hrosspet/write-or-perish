@@ -159,18 +159,17 @@ Landed (PR #285):
   (the old residual-of-the-multiplier figure) carry no family and are
   ignored; every user re-measures on their next chunk from the family
   prior.
-- **One-time catch-up on deploy.** Every account whose last update left a
-  sub-minimum tail unread (the old deferral did this after most
-  multi-chunk updates) now has unread data older than its latest version,
-  so the continue rule runs one update for it at the next heartbeat /
-  seed pass: one chunk call plus one integration call per account,
-  regardless of the interval and 80k gates. Expect a burst of roughly two
-  LLM calls per active profiled account in the first hours after deploy.
-  `PROFILE_UPDATES_PAUSED` holds it back if it should be staged.
-- Versions saved before `source_rendered_at` existed use their save time
-  as the continue-rule boundary, so a node written during such a
-  version's generation reads as unfinished once (until the next update
-  sets the render time). New versions have no such edge.
+- **Versions saved before `source_rendered_at` existed** (every chain at
+  deploy time) do not continue on their own: an organic account's
+  leftover tail (the old sizing deferred one after most updates) is
+  folded into its next gate-triggered update, which covers everything
+  unread anyway — no catch-up burst. Pinned (pre-filled) accounts never
+  grow, so their legacy tip continues from its save time, as the old
+  pinned special case did: their unread tail is picked up at the next
+  seed pass as one chunk plus an integration. A batch chunk in flight
+  across the deploy takes its submission time as its render time and the
+  chain keeps going. From the first post-deploy version on, every
+  account follows the one rule.
 - Repair: `python backend/scripts/replan_tail.py --all-prefilled` (dry
   run) on prod, then `--user xiq --apply --seed` per account. The revert
   copy re-tips the chain; the continue rule and the planner do the rest;
