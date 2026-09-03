@@ -624,6 +624,21 @@ def _select_incremental_rows(user_id, filter_ai_usage=False,
     return list(rows_by_id.values())
 
 
+def count_remaining_units(user_id, created_after=None, filter_ai_usage=True):
+    """Stored content units (Node.token_count) still ahead of the profile
+    chunk loop after ``created_after``: the sum over exactly the rows the
+    incremental export window draws from (anchor scope plus climb-up
+    ancestors and climb-down descendants, tombstones included, the same
+    filters), so the plan made from this figure and the window it
+    produces agree. The chunk planner calls it before every chunk
+    (docs/design/chunk-planner.md). No node is loaded or decrypted.
+    """
+    rows = _select_incremental_rows(
+        user_id, filter_ai_usage=filter_ai_usage,
+        created_after=created_after)
+    return sum((r.token_count or 0) for r in rows)
+
+
 def _thread_has_alive_node(root_id):
     """Per-thread skip rule (§5a): does the subtree rooted at *root_id*
     contain any node with deleted_at IS NULL?
@@ -899,12 +914,21 @@ def _build_user_export_incremental(
         )
         cumulative = 0
         selected_ids = []
+        edge_ts = None
         for r in ordered:
             tk = r.token_count or 0
             if cumulative + tk > budget and cumulative > 0:
-                break
+                # A window ends between two rows; when the boundary
+                # falls inside a run of rows sharing one timestamp, take
+                # the whole run. The next window resumes at
+                # `created_at > cutoff`, so a row left behind on the
+                # cutoff's own second would never be read by any chunk
+                # (tweets carry second precision, so ties are reachable).
+                if r.created_at != edge_ts:
+                    break
             selected_ids.append(r.id)
             cumulative += tk
+            edge_ts = r.created_at
 
         if not selected_ids:
             return None
@@ -1130,6 +1154,11 @@ def _build_user_export_incremental(
         return {
             "content": content,
             "token_count": approximate_token_count(content),
+            # Stored units (Node.token_count) of the window's own rows:
+            # the figure the chunk planner balances on and the divisor
+            # of the per-user tokens-per-unit ratio. `token_count` above
+            # is the RENDERED chars/4 and includes scaffolding.
+            "unit_count": sum((r.token_count or 0) for r in meta_rows),
             "latest_node_created_at": latest_ts,
             "earliest_node_created_at": earliest_ts,
             "node_count": len(meta_rows),
@@ -1196,7 +1225,9 @@ def build_user_export_content(
         chronological_order: If True and max_tokens is set, select oldest
                            nodes first (for iterative profile building).
         return_metadata: If True, return a dict with `content`,
-                        `token_count`, `latest_node_created_at`,
+                        `token_count` (rendered chars/4), `unit_count`
+                        (stored Node.token_count sum of the included
+                        rows), `latest_node_created_at`,
                         `earliest_node_created_at`, `node_count`, and
                         `node_ids` (set of included node IDs; when
                         max_tokens is set this reflects the

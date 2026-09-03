@@ -114,12 +114,14 @@ class User(db.Model, UserMixin):
     profile_force_batch = db.Column(
         db.Boolean, nullable=False, default=False,
         server_default=db.text("false"))
-    # Observed tokenizer calibration for profile chunks: actual model input
-    # tokens / our estimate (chars/4 × the model's token_multiplier) on the
-    # last chunk call. Null until the first chunk lands. Used to shrink or
-    # grow the next chunk's budget so chunks land near CHUNK_BUDGET real
-    # tokens (and below long-context pricing tiers).
+    # Measured billed input tokens per stored content unit (Node.token_count)
+    # on the user's last profile chunk, tagged with the tokenizer family it
+    # was measured on (backend/tasks/exports.TOKENIZER_FAMILIES). The chunk
+    # planner reads it only for the real-token cap check; chunk balance is
+    # in units and never depends on it. Null until the first chunk lands;
+    # a ratio without a family (or on another family) counts as unmeasured.
     profile_token_ratio = db.Column(db.Float, nullable=True)
+    profile_token_ratio_family = db.Column(db.String(16), nullable=True)
     # Community Archive handle this account was pre-filled from (admin
     # cold-start bootstrap); null for organically-grown accounts.
     prefilled_handle = db.Column(db.String(64), nullable=True)

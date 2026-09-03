@@ -29,7 +29,9 @@ from sqlalchemy import func, or_
 from backend.celery_app import celery, flask_app
 from backend.extensions import db
 from backend.models import User, UserProfile, Node, ProfileBatchJob
-from backend.llm_providers import DEFAULT_MAX_OUTPUT_TOKENS
+from backend.llm_providers import DEFAULT_MAX_OUTPUT_TOKENS, model_input_cap
+from backend.utils.chunk_plan import (
+    UPDATE_THRESHOLD_UNITS, next_window_budget, max_units_for_cap)
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.llm_batch import (
     batch_submit, batch_check_and_collect, apply_batch_key_override)
@@ -43,8 +45,8 @@ from backend.tasks import exports as _exports
 
 logger = get_task_logger(__name__)
 
-# Mirror maybe_trigger_incremental_profile_update's gates (exports.py).
-THRESHOLD_TOKENS = 80000
+# Mirror maybe_trigger_incremental_profile_update's gates (exports.py);
+# the volume threshold is UPDATE_THRESHOLD_UNITS (backend/utils/chunk_plan).
 MIN_INACTIVITY = timedelta(minutes=30)
 MIN_INTERVAL = timedelta(hours=1)
 
@@ -134,20 +136,6 @@ def _new_token_count(user, cutoff):
     return q.scalar()
 
 
-def _remaining_token_count(user, cutoff):
-    """Stored tokens the chunk builder still has ahead of it: nodes CREATED
-    after the cutoff, in the profile's anchor scope. Not _new_token_count —
-    that keys on updated_at (organic "new activity"), and imported tweets
-    all carry the import time there, so a pre-filled corpus reads as
-    entirely unprocessed forever."""
-    return db.session.query(func.coalesce(func.sum(Node.token_count), 0)).filter(
-        or_(Node.user_id == user.id, Node.human_owner_id == user.id),
-        Node.ai_usage.in_(['chat', 'train']),
-        Node.deleted_at.is_(None),
-        Node.created_at > cutoff,
-    ).scalar() or 0
-
-
 def _should_seed(user):
     """Whether the user has crossed the trigger gates right now. Mirrors
     maybe_trigger_incremental_profile_update (inactivity, interval, tokens)
@@ -163,19 +151,14 @@ def _should_seed(user):
     if last_node and (datetime.utcnow() - last_node.created_at) < MIN_INACTIVITY:
         return False
     latest = _latest_non_integration_profile(user.id)
-    # Pinned (pre-filled) accounts: a chain with at least one more full
-    # minimum chunk beyond its cutoff is a rebuild in progress and must
-    # continue regardless of the interval / 80k-new-token gates — those
-    # measure organic growth, and a pre-filled corpus never grows. Without
-    # this, a chunk lost to a worker restart (2026-08-27, MarvinKeilbach)
-    # stalls the account forever. A tail smaller than a minimum chunk is
-    # NOT chased: it waits for more data like everyone else's (uneven
-    # chunks distort the iterative update more than an unused tail).
-    if (user.profile_force_batch and latest is not None
-            and latest.source_data_cutoff is not None):
-        _, min_chunk = _exports.chunk_budget_for(user, _model_for(user))
-        if _remaining_token_count(user, latest.source_data_cutoff) >= min_chunk:
-            return True
+    # An unfinished chain — data beyond the cutoff that is OLDER than the
+    # version (a pre-fill or import still being folded in, a chunk lost to
+    # a worker restart: 2026-08-27, MarvinKeilbach) — continues regardless
+    # of the interval / volume gates, which measure organic growth. The
+    # continue rule of docs/design/chunk-planner.md: it replaces the
+    # pinned-account special case and never leaves a tail unread.
+    if latest is not None and _exports.should_continue_chain(user, latest):
+        return True
     if latest:
         if (datetime.utcnow() - latest.created_at) < MIN_INTERVAL:
             return False
@@ -186,7 +169,7 @@ def _should_seed(user):
         new_tokens = _new_token_count(user, cutoff)
     else:
         new_tokens = _new_token_count(user, None)
-    return new_tokens >= THRESHOLD_TOKENS
+    return new_tokens >= UPDATE_THRESHOLD_UNITS
 
 
 def _build_next_profile_request(user):
@@ -210,113 +193,87 @@ def _build_next_profile_request(user):
     cutoff = prev.source_data_cutoff if prev else None
     cumulative = (prev.source_tokens_used or 0) if prev else 0
 
-    # engaged_threads: profiles read the user's full conversational
-    # scope — own threads AND replies in other users' threads (#110).
-    # This also routes from-scratch builds (cutoff=None) through the
-    # incremental machinery, which renders budget windows correctly via
-    # entry-point preambles; the legacy authored_threads path silently
-    # returned None whenever no thread *root* fit the budget window.
-    budget, min_chunk = _exports.chunk_budget_for(user, model_id)
-    chunk = _exports.build_user_export_content(
-        user, max_tokens=budget, filter_ai_usage=True,
-        created_after=cutoff, chronological_order=True, return_metadata=True,
-        include_strategy="engaged_threads")
+    # The remainder after the cutoff, summed in the export window's own
+    # scope, is planned into equal chunks (docs/design/chunk-planner.md):
+    # the chunk COUNT is rounded, so a remainder of any size is covered
+    # with no leftover tail, and the model's real-token cap only ever
+    # raises the count. Nothing is deferred to "the next update cycle" —
+    # a pre-filled corpus never gets one. The export reads the engaged
+    # scope — own threads AND replies in other users' threads (#110) —
+    # and from-scratch builds (cutoff=None) go through the same
+    # incremental machinery.
+    remaining = _exports.count_remaining_units(user.id, cutoff)
+    if remaining > 0:
+        cfg = current_app.config["SUPPORTED_MODELS"].get(model_id) or {}
+        input_cap = model_input_cap(cfg, DEFAULT_MAX_OUTPUT_TOKENS)
+        rho = _exports.tokens_per_unit(user, model_id)
+        k, size, budget = next_window_budget(
+            remaining, max_units=max_units_for_cap(input_cap, rho))
+        logger.info(
+            f"User {user.id}: batch chunk plan — {remaining} units remain "
+            f"after {cutoff}: {k} chunk(s) of {size:.0f}, window budget "
+            f"{budget} (cap {input_cap} tokens at {rho:.2f} tokens/unit)")
+        is_first_initial = prev is None
 
-    have_chunk = bool(chunk and chunk.get("content"))
-    is_first_initial = prev is None
-    # Tail-aware threshold: defer only a genuine corpus tail. A chunk
-    # can re-measure below MIN_CHUNK_TOKENS while being a full budget
-    # window (rendered chars/4 vs stored token_count unit mismatch);
-    # if data remains beyond it, process it anyway.
-    big_enough = have_chunk and (
-        is_first_initial
-        or chunk["token_count"] >= min_chunk
-        or _exports._has_more_source_after(user, chunk["latest_node_created_at"]))
-
-    if big_enough:
         def _prompt_for(chunk):
             if is_first_initial:
                 gen_template = _exports._load_prompt(
                     "profile_generation.txt", user_id=user.id)
                 return gen_template.replace(
-                    "{user_export}",
-                    _exports.chunk_content_for_prompt(chunk)), "iterative"
+                    "{user_export}", _exports.chunk_content_for_prompt(chunk))
             return _exports.build_chunk_prompt(
                 _exports.build_update_template(user.id), prev.get_content(),
-                cumulative, chunk, prev.source_origin_stats), "update"
+                cumulative, chunk, prev.source_origin_stats)
 
-        prompt, generation_type = _prompt_for(chunk)
-
-        # Pre-submit sizing check (shared fit_by_count): count the prompt
-        # (free/exact on Anthropic, tiktoken estimate on OpenAI) and
-        # shrink the chunk BEFORE submitting, instead of burning a batch
-        # attempt on an overflow rejection and retrying at the same wrong
-        # budget. The count can only bind when the calibration ratio is
-        # badly off (typically chunk 1 of a hot-tokenizer model on a
-        # 200k-window); a None count, an empty rebuild, or non-convergence
-        # falls through to the existing failed-item/attempts machinery.
-        from backend.llm_providers import fit_by_count, PromptTooLongError
-        cfg = current_app.config["SUPPORTED_MODELS"].get(model_id) or {}
-        limit = (cfg.get("context_window", 200_000)
-                 - DEFAULT_MAX_OUTPUT_TOKENS)
-
-        def _msgs(text):
-            return [{"role": "user", "content": [
-                {"type": "text", "text": text}]}]
-
-        def _built_at(b):
-            c = _exports.build_user_export_content(
-                user, max_tokens=b, filter_ai_usage=True,
-                created_after=cutoff, chronological_order=True,
-                return_metadata=True, include_strategy="engaged_threads")
-            if not c or not c.get("content"):
-                return None
-            p, g = _prompt_for(c)
-            return _msgs(p), c, p, g
-
-        try:
-            fitted, _budget, _real = fit_by_count(
-                model_id, get_api_keys_for_usage(current_app.config, "chat"),
-                limit, budget, _built_at, max_rounds=3, min_budget=5000,
-                first_built=(_msgs(prompt), chunk, prompt, generation_type))
-            if fitted is not None:
-                _m, chunk, prompt, generation_type = fitted
-        except PromptTooLongError:
-            logger.warning(
-                "User %s: chunk still over the context limit after sizing "
-                "rounds — submitting; the failed-item machinery handles "
-                "the overflow", user.id)
-
-        latest_ts = chunk["latest_node_created_at"]
-        # NB: Anthropic requires custom_id to match ^[a-zA-Z0-9_-]{1,64}$ —
-        # no colons. Underscore-delimited, parsed nowhere (routing is by exact
-        # match against the stored items), so the format is free to change.
-        cid = f"profile_{user.id}_{prev_id or 0}_chunk"
-        return {
-            "provider": provider,
-            "request": {
-                "custom_id": cid, "model_id": model_id,
-                "api_model": api_model,
-                "messages": [{"role": "user", "content": [
-                    {"type": "text", "text": prompt}]}],
-                "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
-            },
-            "meta": {
-                "custom_id": cid, "user_id": user.id, "kind": "chunk",
-                "prev_profile_id": prev_id,
-                "generation_type": generation_type,
-                "prev_cumulative": cumulative,
-                "origin_stats": _exports.merge_origin_stats(
-                    prev.source_origin_stats if prev else None,
-                    chunk.get("origin_stats")),
-                "source_data_cutoff": (
-                    latest_ts.isoformat() if latest_ts else None),
-                "model_id": model_id,
-                # chars/4 of the prompt: calibrates the next chunk's budget
-                # against the provider-reported input_tokens (_apply_result).
-                "prompt_tokens_est": _exports.approximate_token_count(prompt),
-            },
-        }
+        # Pre-submit sizing (shared build_fitted_chunk): count the prompt
+        # and shrink the window BEFORE submitting, instead of burning a
+        # batch attempt on an overflow rejection. A window still over the
+        # cap after the sizing rounds is submitted; the failed-item /
+        # attempts machinery handles the overflow.
+        fitted = _exports.build_fitted_chunk(
+            user, model_id, get_api_keys_for_usage(current_app.config, "chat"),
+            input_cap, cutoff, budget, remaining, _prompt_for)
+        if fitted is not None:
+            chunk, prompt = fitted
+            if not is_first_initial:
+                generation_type = "update"
+            elif k == 1:
+                generation_type = "initial"   # the whole corpus in one chunk
+            else:
+                generation_type = "iterative"
+            latest_ts = chunk["latest_node_created_at"]
+            # NB: Anthropic requires custom_id to match ^[a-zA-Z0-9_-]{1,64}$ —
+            # no colons. Underscore-delimited, parsed nowhere (routing is by
+            # exact match against the stored items), so the format is free to
+            # change.
+            cid = f"profile_{user.id}_{prev_id or 0}_chunk"
+            return {
+                "provider": provider,
+                "request": {
+                    "custom_id": cid, "model_id": model_id,
+                    "api_model": api_model,
+                    "messages": [{"role": "user", "content": [
+                        {"type": "text", "text": prompt}]}],
+                    "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+                },
+                "meta": {
+                    "custom_id": cid, "user_id": user.id, "kind": "chunk",
+                    "prev_profile_id": prev_id,
+                    "generation_type": generation_type,
+                    "prev_cumulative": cumulative,
+                    "origin_stats": _exports.merge_origin_stats(
+                        prev.source_origin_stats if prev else None,
+                        chunk.get("origin_stats")),
+                    "source_data_cutoff": (
+                        latest_ts.isoformat() if latest_ts else None),
+                    "model_id": model_id,
+                    # Stored units of the window: advances the profile's
+                    # cumulative figure and, against the provider-reported
+                    # input_tokens, calibrates the user's tokens-per-unit
+                    # ratio for the next cap check (_apply_result).
+                    "chunk_units": chunk["unit_count"],
+                },
+            }
 
     # No (full-size) new data → integrate the chain if there are ≥2 versions
     # and we haven't already integrated this tip.
@@ -387,7 +344,12 @@ def _apply_result(user, item, result, submitted_at):
             user.profile_batch_attempts = 0
             return None
         else:
-            cumulative = item["prev_cumulative"] + response["input_tokens"]
+            # Cumulative coverage in stored units. An item submitted before
+            # the planner carries no unit count and accumulates the billed
+            # input tokens it was built with (the legacy figure).
+            units = item.get("chunk_units")
+            cumulative = item["prev_cumulative"] + (
+                units if units else response["input_tokens"])
             profile = _exports._save_profile(
                 user, item["model_id"], response["content"], response,
                 source_tokens_used=cumulative, source_data_cutoff=cutoff,
@@ -404,13 +366,13 @@ def _apply_result(user, item, result, submitted_at):
                 user.profile_needs_full_regen = False
             logger.info(
                 f"User {user.id}: saved batch chunk profile {profile.id}")
-        if item.get("prompt_tokens_est"):
+        if item.get("chunk_units"):
             observed = _exports.record_token_ratio(
-                user, item["model_id"], item["prompt_tokens_est"],
+                user, item["model_id"], item["chunk_units"],
                 response.get("input_tokens"))
             if observed is not None:
-                logger.info(f"User {user.id}: batch chunk tokenizer "
-                            f"calibration actual/estimated={observed}")
+                logger.info(f"User {user.id}: batch chunk calibration "
+                            f"{observed} billed tokens per unit")
         user.profile_batch_attempts = 0
         return _build_next_profile_request(user)
 

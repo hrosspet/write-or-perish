@@ -60,3 +60,28 @@ def test_cap_forced_split_applies_to_the_whole_remainder():
     assert k == 7
     assert size == pytest.approx(500_000 / 7)
     assert size <= 80_000
+
+
+def test_next_window_budget_over_asks_only_the_final_chunk():
+    from backend.utils.chunk_plan import (
+        next_window_budget, FINAL_CHUNK_OVERASK_UNITS)
+    # Mid-remainder windows ask for the planned size.
+    assert next_window_budget(350_000, target=100_000) == (4, 87_500, 87_500)
+    # The final window over-asks so the builder's header allowance and
+    # strict fit cannot leave a sliver behind.
+    assert next_window_budget(95_000, target=T) == (
+        1, 95_000, 95_000 + FINAL_CHUNK_OVERASK_UNITS)
+    assert next_window_budget(0) == (0, 0, 0)
+    # A cap-forced split changes the budget the way it changes the plan.
+    assert next_window_budget(130_000, target=T, max_units=100_000) == (
+        2, 65_000, 65_000)
+
+
+def test_max_units_for_cap():
+    from backend.utils.chunk_plan import max_units_for_cap, CAP_MARGIN
+    assert max_units_for_cap(272_000, 2.0) == pytest.approx(
+        (1 - CAP_MARGIN) * 272_000 / 2)
+    assert max_units_for_cap(272_000, 2.0, margin=0) == 136_000
+    # Unknown cap or ratio: no cap on the plan.
+    assert max_units_for_cap(None, 2.0) is None
+    assert max_units_for_cap(272_000, 0) is None

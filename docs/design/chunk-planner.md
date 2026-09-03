@@ -1,8 +1,11 @@
 # Design: equal-chunk planning for profile generation
 
-**Status:** groundwork landed (pure planner + tests, boundary-tie fix,
-dry-run script). Wiring into the chunk loops, the seeding rule and the
-tokenizer-family config is the next PR. Date: 2026-09-03.
+**Status:** wired (PR #285). The planner sizes every chunk in both
+pipelines, the continue rule replaces the pinned-account special case and
+the minimum-chunk deferral, tokenizer families replace `token_multiplier`,
+and `backend/scripts/replan_tail.py` repairs pre-filled accounts whose
+chain stopped short. Remaining: the staging canary and the prod repair
+run (see Rollout). Date: 2026-09-03.
 **Related:** issue #259 (chunks crossing Sol's 272k pricing tier), the
 2026-08-27 tail commits c385a45 / bcac412.
 
@@ -69,8 +72,9 @@ k = max(k, ceil(R·ρ / room))                   # cap only ever raises k
 - The final chunk (k = 1) must ask for the whole remainder: the export
   builder keeps a header allowance out of the budget, so a window lands
   slightly short of S.
-- Windows include every node sharing the boundary timestamp (fixed in
-  `_preselect_node_ids`), or a node on the cutoff's second is never read.
+- Windows include every node sharing the boundary timestamp (the
+  incremental window's budget loop and `_preselect_node_ids` alike), or a
+  node on the cutoff's second is never read.
 
 **Continue rule** (replaces the pinned-account special case and the
 minimum-chunk deferral): remaining data *older* than the last version is
@@ -96,27 +100,74 @@ exact o200k counts, no LLM calls, profile assumed 8k tokens).
 
 ## Changes
 
-Done in this PR:
-- `backend/utils/chunk_plan.py` — `plan_chunks`, `CHUNK_TARGET_UNITS`;
-  re-exported from `backend/tasks/exports.py`. Tests in
+Landed (PR #285):
+- `backend/utils/chunk_plan.py` — `plan_chunks`, `next_window_budget`
+  (the final window over-asks by `FINAL_CHUNK_OVERASK_UNITS`),
+  `max_units_for_cap`; the constants `CHUNK_TARGET_UNITS` (T),
+  `UPDATE_THRESHOLD_UNITS` (the 80k organic gate, formerly four copies in
+  three files) and `CAP_MARGIN` (μ). Tests in
   `backend/tests/test_chunk_planner.py`.
-- `backend/routes/export_data.py` — `_preselect_node_ids` includes
-  boundary-timestamp ties.
-- `backend/scripts/simulate_chunk_plan.py` — dry run, `--today` replays
-  the current sizing.
+- `backend/routes/export_data.py` — the incremental window's budget loop
+  takes every row sharing the boundary timestamp (`_preselect_node_ids`
+  had the same fix, but the chunk loop renders through the incremental
+  path); the window reports `unit_count`; `count_remaining_units` sums
+  the remainder over exactly the rows the window draws from.
+- `backend/llm_providers.py` — `model_input_cap` (window minus output,
+  `max_input_tokens`, `long_context_threshold`, whichever binds first);
+  `fit_by_count(strict=False)` returns the last build instead of raising.
+- `backend/tasks/exports.py` — `_chunked_profile_loop` plans every window
+  (`count_remaining_units` → `next_window_budget` → `build_fitted_chunk`,
+  the real-count check shared with the batch builder); no
+  `MIN_CHUNK_TOKENS`, no `_has_more_source_after`; `_do_initial_generation`
+  goes through the same loop (a corpus that plans into one chunk is saved
+  as "initial"; `_single_pass_generation` is gone); tokenizer families,
+  `TOKENS_PER_UNIT_PRIOR` by content class, `tokens_per_unit`,
+  `record_token_ratio` (billed input tokens per unit, family-tagged);
+  `should_continue_chain`; `build_chunk_prompt` in units on both sides;
+  `source_tokens_used` is cumulative units; the sync heartbeat applies the
+  continue rule before its interval gate.
+- `backend/tasks/profile_batch.py` — `_build_next_profile_request` plans
+  the same way; `_should_seed` uses the continue rule; batch items carry
+  `chunk_units` (a pre-planner item without it still accumulates its
+  billed tokens); `_remaining_token_count` is gone.
+- `backend/config.py` — `tokenizer_family` on every model,
+  `max_input_tokens: 922000` on the 1.05M-window OpenAI models,
+  `token_multiplier` removed. `backend/models.py` —
+  `User.profile_token_ratio_family` (migration auto-generates on deploy).
+- `backend/routes/admin.py` — the users list marks a chain "stuck" by the
+  continue rule.
+- `backend/scripts/replan_tail.py` — repair for pre-filled accounts (dry
+  run by default; `--apply`, `--seed`).
+  `backend/scripts/simulate_chunk_plan.py` — dry run on the wired code.
 
-Next PR:
-- `_chunked_profile_loop`, `_iterative_generation`,
-  `_build_next_profile_request`: size by `plan_chunks` over the remainder
-  (same node scope as the window), final chunk takes everything, delete
-  the `MIN_CHUNK_TOKENS` deferral; `fit_by_count` limit from the pricing
-  tier plus a per-model max-input figure (Sol 922k).
-- `_should_seed`: the continue rule.
-- `build_chunk_prompt`: both share terms in units; `source_tokens_used`
-  becomes cumulative units (changes the profile header's token figure).
-- Config/models: `token_multiplier` → tokenizer family + family prior;
-  Opus 4.8 joins the new family; the user ratio gains a family tag.
-- One module for T, the threshold and μ (four copies in three files today).
-- Repair script for prefilled accounts: branch from the latest chain
-  version whose remainder plans into ≥ 1 full chunk, rebuild, re-integrate.
-- Local Docker → staging canary on one pinned account → prod.
+## Rollout
+
+- Deploy: the auto-generated migration adds
+  `user.profile_token_ratio_family`. Existing `profile_token_ratio` values
+  (the old residual-of-the-multiplier figure) carry no family and are
+  ignored; every user re-measures on their next chunk from the family
+  prior.
+- **One-time catch-up on deploy.** Every account whose last update left a
+  sub-minimum tail unread (the old deferral did this after most
+  multi-chunk updates) now has unread data older than its latest version,
+  so the continue rule runs one update for it at the next heartbeat /
+  seed pass: one chunk call plus one integration call per account,
+  regardless of the interval and 80k gates. Expect a burst of roughly two
+  LLM calls per active profiled account in the first hours after deploy.
+  `PROFILE_UPDATES_PAUSED` holds it back if it should be staged.
+- Known edge of the continue rule: a node written while the user's own
+  update is generating (after the window's cutoff, before the version is
+  saved) reads as unfinished and gets a small chunk of its own at the
+  next pass.
+- Repair: `python backend/scripts/replan_tail.py --all-prefilled` (dry
+  run) on prod, then `--user xiq --apply --seed` per account. The revert
+  copy re-tips the chain; the continue rule and the planner do the rest;
+  the old versions stay as history.
+- Then the staging canary on one pinned account, then prod.
+
+## Watch
+
+- The tree header's index path grows with depth (about 300 chars per node
+  at depth 120). Check nothing parses it, then shorten it.
+- Claude-new tweet priors are estimated from o200k counts; the first
+  measured chunk replaces them.
