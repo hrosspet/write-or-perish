@@ -118,11 +118,31 @@ class Config:
     # Sources:
     #   Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
     #   OpenAI:    https://developers.openai.com/api/docs/pricing
-    PRICING_VERSION = "4"
-    PRICING_UPDATED_AT = "2026-09-02"
+    PRICING_VERSION = "5"
+    PRICING_UPDATED_AT = "2026-09-03"
 
     # Supported models configuration (single source of truth for all model metadata)
     SUPPORTED_MODELS = {
+        "gpt-6-astra": {
+            "provider": "openai",
+            "api_model": "gpt-6-astra",
+            "display_name": "GPT-6 Astra",
+            "context_window": 1050000,
+            # Verified 2026-09-03 on the OpenAI pricing page.
+            "input_price_per_mtok": 10.00,
+            "output_price_per_mtok": 50.00,
+            # OpenAI auto-cache discount: GPT-6 Astra caches at 90% off
+            "cached_input_multiplier": 0.10,
+            "long_context_threshold": 272000,
+            "long_context_input_multiplier": 2.0,
+            "long_context_output_multiplier": 1.5,
+            # ASSUMED same new-generation tokenizer as gpt-5.6-sol (~2
+            # chars/token); not measured on GPT-6. The per-user observed
+            # calibration (User.profile_token_ratio) corrects the residual
+            # after the first chunk, so a wrong guess costs at most one
+            # mis-sized chunk.
+            "token_multiplier": 2.0,
+        },
         "gpt-5.6-sol": {
             "provider": "openai",
             "api_model": "gpt-5.6-sol",
