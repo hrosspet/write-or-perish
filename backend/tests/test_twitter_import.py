@@ -32,6 +32,7 @@ sys.modules.setdefault("celery.utils.log", MagicMock())
 sys.modules.setdefault("celery.result", MagicMock())
 sys.modules.setdefault("ffmpeg", MagicMock())
 
+from datetime import datetime  # noqa: E402
 import pytest  # noqa: E402
 from flask import Flask  # noqa: E402
 
@@ -41,7 +42,7 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
 
 import flask_login as _real_flask_login          # noqa: E402
 from backend.extensions import db as _db         # noqa: E402
-from backend.models import User, Node            # noqa: E402
+from backend.models import User, Node, UserProfile  # noqa: E402
 import backend.models as _real_backend_models    # noqa: E402
 from backend.utils import twitter_archive as ta  # noqa: E402
 
@@ -475,6 +476,43 @@ def test_import_handoff_routes_batch_users_to_seeder(app, monkeypatch):
     v = _make_user("syncy")
     _db.session.commit()
     assert import_data._maybe_update_profile_after_import(v.id, None, 50000) == "sync-task"
+
+
+def test_every_importer_shares_the_batch_aware_hand_off(app, monkeypatch):
+    """The ChatGPT, Claude and markdown importers used to dispatch the
+    synchronous task directly; they now go through the same hand-off as
+    the Twitter path, so a batch-selected account (all of prod with
+    PROFILE_USE_BATCH on) never lands on the full-price path."""
+    from backend.routes import import_data
+    import backend.tasks.exports as ex
+    sync = MagicMock(return_value="sync-task")
+    monkeypatch.setattr(ex, "maybe_trigger_profile_update", sync)
+    hand_off = import_data._hand_off_profile_update_after_import
+
+    app.config["PROFILE_USE_BATCH"] = True
+    u = _make_user("global_batch")
+    _db.session.commit()
+    # Below the import threshold: nothing, on either path.
+    assert hand_off(u, None, False, 9_999) is None
+    assert User.query.get(u.id).profile_needs_full_regen is False
+    # Incremental import on batch: the seeder's gates pick it up; no flag.
+    tip = UserProfile(user_id=u.id, generated_by="m", tokens_used=0,
+                      generation_type="update", source_data_cutoff=datetime(2026, 1, 1))
+    tip.set_content("P")
+    _db.session.add(tip)
+    _db.session.commit()
+    assert hand_off(u, tip, False, 50_000) is None
+    assert User.query.get(u.id).profile_needs_full_regen is False
+    # A rewind past the cutoff, or no profile at all: the regen flag.
+    assert hand_off(u, tip, True, 50_000) is None
+    assert User.query.get(u.id).profile_needs_full_regen is True
+    assert sync.call_count == 0
+
+    app.config["PROFILE_USE_BATCH"] = False
+    v = _make_user("plain_sync")
+    _db.session.commit()
+    assert hand_off(v, None, True, 50_000) == "sync-task"
+    assert sync.call_args.kwargs == {"force_full_regen": True}
 
 
 def test_prefill_impl_imports_pins_batch_and_reports(app, monkeypatch):

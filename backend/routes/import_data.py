@@ -567,16 +567,10 @@ def confirm_import():
                         approximate_token_count(f.get('content', ''))
                         for f in files_sorted
                     )
-                    if total_imported_tokens >= 10000:
-                        from backend.tasks.exports import (
-                            maybe_trigger_profile_update
-                        )
-                        profile_update_task_id = (
-                            maybe_trigger_profile_update(
-                                current_user.id,
-                                force_full_regen=needs_full_regen,
-                            )
-                        )
+                    profile_update_task_id = (
+                        _hand_off_profile_update_after_import(
+                            user_obj, latest_profile, needs_full_regen,
+                            total_imported_tokens))
             except Exception as e:
                 current_app.logger.warning(
                     f"Auto-trigger profile update failed: {e}"
@@ -1009,16 +1003,10 @@ def confirm_claude_import():
                         for msg in conv.get('messages', [])
                         if msg.get('text')
                     )
-                    if total_imported_tokens >= 10000:
-                        from backend.tasks.exports import (
-                            maybe_trigger_profile_update
-                        )
-                        profile_update_task_id = (
-                            maybe_trigger_profile_update(
-                                current_user.id,
-                                force_full_regen=needs_full_regen,
-                            )
-                        )
+                    profile_update_task_id = (
+                        _hand_off_profile_update_after_import(
+                            user_obj, latest_profile, needs_full_regen,
+                            total_imported_tokens))
             except Exception as e:
                 current_app.logger.warning(
                     f"Auto-trigger profile update failed: {e}"
@@ -1195,31 +1183,44 @@ def _maybe_update_profile_after_import(user_id, earliest_ts, imported_tokens):
             from backend.tasks.exports import revert_profile_for_import
             revert_profile_for_import(user_id, earliest_ts)
             db.session.commit()
-        if imported_tokens >= 10000:
-            from backend.tasks.profile_batch import use_batch_for_user
-            if use_batch_for_user(user_obj, current_app.config):
-                # Batch users are driven by the hourly seeder, never the
-                # synchronous (full-price) path. A from-scratch build or a
-                # rewind past the cutoff is requested via the regen flag;
-                # an incremental update is picked up once the seeder's
-                # token gate is crossed.
-                if needs_full_regen or latest_profile is None:
-                    user_obj.profile_needs_full_regen = True
-                    db.session.commit()
-                current_app.logger.info(
-                    f"User {user_id}: import handed to the batch profile "
-                    f"pipeline (full_regen={needs_full_regen or latest_profile is None})"
-                )
-                return None
-            from backend.tasks.exports import maybe_trigger_profile_update
-            return maybe_trigger_profile_update(
-                user_id, force_full_regen=needs_full_regen,
-            )
+        return _hand_off_profile_update_after_import(
+            user_obj, latest_profile, needs_full_regen, imported_tokens)
     except Exception as e:
         current_app.logger.warning(
             f"Auto-trigger profile update failed: {e}"
         )
     return None
+
+
+def _hand_off_profile_update_after_import(user_obj, latest_profile,
+                                          needs_full_regen, imported_tokens):
+    """Hand an import's profile update to the pipeline the account is on.
+    Shared by every importer (Twitter, ChatGPT, Claude, markdown), so none
+    of them can send a batch-selected account down the synchronous
+    full-price path.
+
+    Batch users are driven by the seeder, never the synchronous path: a
+    from-scratch build or a rewind past the cutoff is requested via the
+    regen flag; an incremental update is picked up once the seeder's
+    gates are crossed. Sync users dispatch the task directly. Nothing
+    happens below 10k imported tokens. Returns a task id or None."""
+    if imported_tokens < 10000:
+        return None
+    from backend.tasks.profile_batch import use_batch_for_user
+    if use_batch_for_user(user_obj, current_app.config):
+        full = bool(needs_full_regen or latest_profile is None)
+        if full:
+            user_obj.profile_needs_full_regen = True
+            db.session.commit()
+        current_app.logger.info(
+            f"User {user_obj.id}: import handed to the batch profile "
+            f"pipeline (full_regen={full})"
+        )
+        return None
+    from backend.tasks.exports import maybe_trigger_profile_update
+    return maybe_trigger_profile_update(
+        user_obj.id, force_full_regen=needs_full_regen,
+    )
 
 
 def _tweet_source_key(tweet_data):
@@ -1744,16 +1745,10 @@ def confirm_chatgpt_import():
                         for msg in conv.get('messages', [])
                         if msg.get('text')
                     )
-                    if total_imported_tokens >= 10000:
-                        from backend.tasks.exports import (
-                            maybe_trigger_profile_update
-                        )
-                        profile_update_task_id = (
-                            maybe_trigger_profile_update(
-                                current_user.id,
-                                force_full_regen=needs_full_regen,
-                            )
-                        )
+                    profile_update_task_id = (
+                        _hand_off_profile_update_after_import(
+                            user_obj, latest_profile, needs_full_regen,
+                            total_imported_tokens))
             except Exception as e:
                 current_app.logger.warning(
                     f"Auto-trigger profile update failed: {e}"
