@@ -1,0 +1,62 @@
+"""plan_chunks: equal chunks over a remainder, no leftover tail, cap only
+raises the count (design note 2026-09-03)."""
+import pytest
+
+from backend.utils.chunk_plan import plan_chunks
+
+
+T = 90_000
+
+
+def test_example_from_the_design_note():
+    # 350k of pre-fill data: not 3 x 100k + 50k left over, but 4 x 87.5k.
+    k, size = plan_chunks(350_000, target=100_000)
+    assert k == 4
+    assert size == 87_500
+
+
+def test_round_half_up_not_bankers():
+    assert plan_chunks(350_000, target=100_000)[0] == 4  # 3.5 -> 4
+    assert plan_chunks(250_000, target=100_000)[0] == 3  # 2.5 -> 3
+
+
+def test_rounds_down_below_half():
+    k, size = plan_chunks(340_000, target=100_000)
+    assert k == 3
+    assert size == pytest.approx(113_333.3)
+
+
+def test_single_chunk_takes_the_whole_remainder():
+    assert plan_chunks(95_000, target=T) == (1, 95_000)
+    assert plan_chunks(130_000, target=T) == (1, 130_000)   # 1.44 -> 1
+    assert plan_chunks(40_000, target=T) == (1, 40_000)     # tiny corpus
+
+
+def test_zero_remainder():
+    assert plan_chunks(0) == (0, 0)
+    assert plan_chunks(None) == (0, 0)
+
+
+def test_every_chunk_inside_the_guaranteed_band():
+    for remaining in range(1, 2_000_000, 7_919):
+        k, size = plan_chunks(remaining, target=T)
+        if k >= 2:
+            assert T * (1 - 1 / (2 * k)) <= size < T * (1 + 1 / (2 * k))
+        assert size * k == pytest.approx(remaining)  # full coverage
+
+
+def test_cap_only_raises_the_count():
+    # A single 130k chunk would render past the cap that allows 100k units.
+    k, size = plan_chunks(130_000, target=T, max_units=100_000)
+    assert k == 2
+    assert size == 65_000
+    # Cap looser than the plan: unchanged.
+    assert plan_chunks(350_000, target=100_000, max_units=200_000) == (4, 87_500)
+
+
+def test_cap_forced_split_applies_to_the_whole_remainder():
+    # 5 chunks would be 100k each; the cap allows 80k -> 7 equal chunks.
+    k, size = plan_chunks(500_000, target=100_000, max_units=80_000)
+    assert k == 7
+    assert size == pytest.approx(500_000 / 7)
+    assert size <= 80_000

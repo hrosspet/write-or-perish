@@ -73,6 +73,11 @@ def chunk_budget_for(user, model_id, base_budget=CHUNK_BUDGET):
             max(int(MIN_CHUNK_TOKENS / ratio), 1000))
 
 
+# Equal-chunk planner (design note 2026-09-03): pure arithmetic in
+# backend/utils/chunk_plan.py; re-exported here for the chunk loops.
+from backend.utils.chunk_plan import CHUNK_TARGET_UNITS, plan_chunks  # noqa: F401,E402
+
+
 def record_token_ratio(user, model_id, estimated_prompt_tokens,
                        actual_input_tokens):
     """Store actual/estimated for the chunk just sent. ``estimated`` is the

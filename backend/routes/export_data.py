@@ -746,15 +746,26 @@ def _preselect_node_ids(user_id, budget, filter_ai_usage=False,
 
     inner = inner.subquery()
 
-    return [
-        row[0] for row in
-        db.session.query(inner.c.id).filter(
-            inner.c.cumul - func.coalesce(inner.c.token_count, 0) < budget
-        ).order_by(
-            inner.c.created_at.asc() if chronological_order
-            else inner.c.created_at.desc()
-        ).all()
-    ]
+    selected = db.session.query(inner.c.id, inner.c.created_at).filter(
+        inner.c.cumul - func.coalesce(inner.c.token_count, 0) < budget
+    ).order_by(
+        inner.c.created_at.asc() if chronological_order
+        else inner.c.created_at.desc()
+    ).all()
+    if not selected:
+        return []
+    ids = [row[0] for row in selected]
+    # A budget window ends between two nodes; when several nodes share
+    # the boundary timestamp, take them all. The next window starts at
+    # `created_at > cutoff`, so a node left behind on the same second as
+    # the cutoff node would never be read by any chunk (tweets carry
+    # second precision, so ties are reachable).
+    edge_ts = selected[-1][1]
+    seen = set(ids)
+    ties = db.session.query(inner.c.id).filter(
+        inner.c.created_at == edge_ts, inner.c.id.notin_(ids)).all()
+    ids.extend(row[0] for row in ties if row[0] not in seen)
+    return ids
 
 
 def get_raw_data_date_range(user_id, max_tokens=10000, created_before=None):
