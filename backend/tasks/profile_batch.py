@@ -365,9 +365,11 @@ def _apply_result(user, item, result, submitted_at):
                 generation_type=item["generation_type"],
                 parent_profile_id=item["prev_profile_id"], batch=True,
                 source_origin_stats=item.get("origin_stats"),
+                # An item submitted before render times were recorded was
+                # rendered right before its submission.
                 source_rendered_at=(
                     datetime.fromisoformat(item["rendered_at"])
-                    if item.get("rendered_at") else None))
+                    if item.get("rendered_at") else submitted_at))
             # mirror PR #181: a from-scratch full regen is no longer needed
             # once its first chunk is committed. Only a from-scratch chunk
             # (prev_profile_id None) satisfies the flag — a flag set while

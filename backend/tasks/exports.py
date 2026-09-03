@@ -204,15 +204,25 @@ def should_continue_chain(user, latest_profile):
     "stuck" flag. It replaces the pinned-account special case and the
     minimum-chunk deferral.
 
-    The boundary is ``source_rendered_at``; versions saved before that
-    column existed fall back to their save time, which can read a node
-    written during their generation as unfinished — once, until their
-    next update sets the render time.
+    The boundary is ``source_rendered_at``. A version saved before that
+    column existed cannot tell its leftover (the old sizing deferred a
+    sub-minimum tail after most updates) from growth, so it does not
+    continue on its own: the account's next gate-triggered update covers
+    everything unread anyway. The exception is a pinned (pre-filled)
+    account, which never grows organically and whose leftover would
+    otherwise wait forever — it continues from the version's save time,
+    as the old pinned special case did. Transitional: every version
+    saved from now on carries a render time.
     """
     cutoff = getattr(latest_profile, "source_data_cutoff", None)
-    boundary = (getattr(latest_profile, "source_rendered_at", None)
-                or latest_profile.created_at)
-    if cutoff is None or boundary is None:
+    if cutoff is None:
+        return False
+    boundary = getattr(latest_profile, "source_rendered_at", None)
+    if boundary is None:
+        if not getattr(user, "profile_force_batch", False):
+            return False
+        boundary = latest_profile.created_at
+    if boundary is None:
         return False
     from sqlalchemy import or_
     from backend.models import Node

@@ -145,3 +145,21 @@ def test_plan_repair_reports_complete_and_missing_chains(app):
     _tweets(u, datetime(2025, 1, 1), 10, 1000)
     _chain(u, [datetime(2025, 1, 10)])
     assert rt.plan_repair(u)["status"].startswith("complete")
+
+
+def test_apply_branch_stamps_a_render_time_on_legacy_versions(app):
+    """Branching from a version that predates render times makes the
+    repair moment the boundary, so the tail counts as unfinished even on
+    an unpinned account."""
+    u = User(username="legacy", plan="alpha", twitter_id=None, approved=True)
+    _db.session.add(u)
+    _db.session.commit()
+    _tweets(u, datetime(2025, 1, 1), 200, 1000)
+    v = _chain(u, [datetime(2025, 1, 1) + timedelta(days=99)])
+    v[0].source_rendered_at = None
+    _db.session.commit()
+    from backend.tasks.exports import should_continue_chain
+    assert should_continue_chain(u, v[0]) is False          # unpinned legacy: waits
+    copy = rt.apply_branch(u, v[0])
+    assert copy.source_rendered_at is not None
+    assert should_continue_chain(u, copy) is True            # the repair is the trigger

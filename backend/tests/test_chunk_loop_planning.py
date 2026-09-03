@@ -247,6 +247,7 @@ def test_sync_heartbeat_continues_an_unfinished_chain(app, monkeypatch):
     prof = UserProfile(user_id=u.id, generated_by="m", tokens_used=0,
                        generation_type="update", source_tokens_used=100,
                        source_data_cutoff=datetime(2026, 5, 1),
+                       source_rendered_at=now - timedelta(minutes=45),
                        created_at=now - timedelta(minutes=40))
     prof.set_content("P")
     node = Node(user_id=u.id, node_type="user", ai_usage="chat", token_count=300,
@@ -339,6 +340,10 @@ def test_continue_rule_boundary_is_the_render_time(app):
     # written before the render → unfinished chain
     assert exports.should_continue_chain(
         u, version(now - timedelta(minutes=5), now - timedelta(minutes=1))) is True
-    # legacy row: save time is the boundary
+    # legacy row (no render time): an organic account waits for its next
+    # gate-triggered update; a pinned one continues from the save time
+    assert exports.should_continue_chain(
+        u, version(None, now - timedelta(minutes=5))) is False
+    u.profile_force_batch = True
     assert exports.should_continue_chain(
         u, version(None, now - timedelta(minutes=5))) is True

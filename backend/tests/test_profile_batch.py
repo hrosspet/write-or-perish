@@ -88,11 +88,12 @@ def _user(**kw):
     return u
 
 
-def _prev_profile(user, cutoff, source_tokens=1000, gen_type="update"):
+def _prev_profile(user, cutoff, source_tokens=1000, gen_type="update",
+                  rendered_at=None):
     p = UserProfile(
         user_id=user.id, generated_by="test-model", tokens_used=0,
         generation_type=gen_type, source_tokens_used=source_tokens,
-        source_data_cutoff=cutoff)
+        source_data_cutoff=cutoff, source_rendered_at=rendered_at)
     p.set_content("PREVIOUS PROFILE")
     db.session.add(p)
     db.session.flush()
@@ -1032,7 +1033,8 @@ def test_unfinished_chain_seeds_regardless_of_interval_and_volume(app):
     now = datetime.utcnow()
     for pinned in (True, False):
         u = _user(profile_force_batch=pinned)
-        prev = _prev_profile(u, datetime(2026, 5, 1), gen_type="iterative")
+        prev = _prev_profile(u, datetime(2026, 5, 1), gen_type="iterative",
+                             rendered_at=now - timedelta(minutes=45))
         prev.created_at = now - timedelta(minutes=40)   # inside MIN_INTERVAL
         db.session.commit()
         assert pb._should_seed(u) is False               # nothing beyond the cutoff
@@ -1077,7 +1079,7 @@ def test_should_continue_chain_uses_created_at_not_updated_at(app):
     db.session.commit()
 
     def version(cutoff, created):
-        p = _prev_profile(u, cutoff)
+        p = _prev_profile(u, cutoff, rendered_at=created)
         p.created_at = created
         db.session.flush()
         return p
@@ -1087,3 +1089,37 @@ def test_should_continue_chain_uses_created_at_not_updated_at(app):
     assert rule(u, version(datetime(2026, 1, 25), datetime(2026, 1, 26))) is False  # nothing beyond the cutoff
     assert rule(u, version(datetime(2026, 1, 15), datetime(2026, 1, 18))) is False  # Jan 20 is newer than the version
     assert rule(u, version(None, datetime(2026, 1, 25))) is False               # no cutoff: nothing to continue
+
+
+def test_legacy_versions_continue_only_on_pinned_accounts(app):
+    """A version saved before render times existed: an organic account's
+    leftover waits for its next gate-triggered update (no catch-up burst
+    on deploy); a pinned account continues from the save time, as the old
+    special case did."""
+    now = datetime.utcnow()
+    for pinned, expected in ((False, False), (True, True)):
+        u = _user(profile_force_batch=pinned)
+        prev = _prev_profile(u, datetime(2026, 5, 1), gen_type="iterative")   # no render time
+        prev.created_at = now - timedelta(hours=2)
+        node = _seed_node(u, 3000)
+        node.created_at = now - timedelta(hours=3)                            # beyond the cutoff, before the save
+        db.session.commit()
+        assert pb._exports.should_continue_chain(u, prev) is expected
+
+
+def test_apply_result_legacy_item_takes_its_submission_time_as_render_time(app, monkeypatch):
+    """A chunk in flight across the deploy carries no rendered_at; it was
+    rendered right before submission, so the saved version gets the
+    job's submitted_at and a pre-fill chain in progress keeps going."""
+    u = _user(profile_force_batch=True)
+    db.session.commit()
+    submitted = datetime.utcnow() - timedelta(hours=1)
+    monkeypatch.setattr(pb._exports, "build_user_export_content", MagicMock(return_value=None))
+    item = {"custom_id": "x", "user_id": u.id, "kind": "chunk",
+            "prev_profile_id": None, "generation_type": "iterative",
+            "prev_cumulative": 0, "origin_stats": None,
+            "source_data_cutoff": "2026-06-01T00:00:00", "model_id": "test-model",
+            "prompt_tokens_est": 1000}
+    result = {"content": "P", "input_tokens": 100, "output_tokens": 5, "total_tokens": 105}
+    pb._apply_result(u, item, result, submitted)
+    assert UserProfile.query.filter_by(user_id=u.id).one().source_rendered_at == submitted
