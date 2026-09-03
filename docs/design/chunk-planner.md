@@ -77,9 +77,16 @@ k = max(k, ceil(R·ρ / room))                   # cap only ever raises k
   node on the cutoff's second is never read.
 
 **Continue rule** (replaces the pinned-account special case and the
-minimum-chunk deferral): remaining data *older* than the last version is
-an unfinished chain → continue regardless of thresholds; remaining data
-*newer* than it is organic growth → the 80k gate applies.
+minimum-chunk deferral): remaining data that already *existed when the
+last version's window was rendered* (`UserProfile.source_rendered_at`)
+is an unfinished chain → continue regardless of thresholds; remaining
+data *written after the render* is organic growth → the 80k gate
+applies. One function, `should_continue_chain`, at three call sites: the
+seeding gates (batch seeder, sync heartbeat), the step after every saved
+chunk in both pipelines — so a user writing during their own update ends
+the run at the planned chunks instead of adding a small chunk per
+iteration — and the admin "stuck" flag. Versions saved before the column
+existed fall back to their save time as the boundary.
 
 **Proportionality** in the update prompt: both terms in units
 (`U_new / (U_past + U_new)`). Today past is billed tokens and new is
@@ -123,17 +130,22 @@ Landed (PR #285):
   as "initial"; `_single_pass_generation` is gone); tokenizer families,
   `TOKENS_PER_UNIT_PRIOR` by content class, `tokens_per_unit`,
   `record_token_ratio` (billed input tokens per unit, family-tagged);
-  `should_continue_chain`; `build_chunk_prompt` in units on both sides;
-  `source_tokens_used` is cumulative units; the sync heartbeat applies the
-  continue rule before its interval gate.
+  `should_continue_chain` (boundary = the version's render time, applied
+  at the seeding gate and after every saved chunk); `build_chunk_prompt`
+  in units on both sides; `source_tokens_used` is cumulative units; the
+  sync heartbeat applies the continue rule before its interval gate.
 - `backend/tasks/profile_batch.py` — `_build_next_profile_request` plans
-  the same way; `_should_seed` uses the continue rule; batch items carry
-  `chunk_units` (a pre-planner item without it still accumulates its
-  billed tokens); `_remaining_token_count` is gone.
+  the same way (`allow_chunk=False` after a saved chunk when only growth
+  remains → integration); `_should_seed` uses the continue rule; batch
+  items carry `chunk_units` and `rendered_at` (a pre-planner item without
+  them still accumulates its billed tokens); `_remaining_token_count` is
+  gone.
 - `backend/config.py` — `tokenizer_family` on every model,
   `max_input_tokens: 922000` on the 1.05M-window OpenAI models,
   `token_multiplier` removed. `backend/models.py` —
-  `User.profile_token_ratio_family` (migration auto-generates on deploy).
+  `User.profile_token_ratio_family`, `UserProfile.source_rendered_at`
+  (migrations auto-generate on deploy); revert copies (import revert,
+  repair script) carry the reverted-to version's render time.
 - `backend/routes/admin.py` — the users list marks a chain "stuck" by the
   continue rule.
 - `backend/scripts/replan_tail.py` — repair for pre-filled accounts (dry
@@ -155,10 +167,10 @@ Landed (PR #285):
   regardless of the interval and 80k gates. Expect a burst of roughly two
   LLM calls per active profiled account in the first hours after deploy.
   `PROFILE_UPDATES_PAUSED` holds it back if it should be staged.
-- Known edge of the continue rule: a node written while the user's own
-  update is generating (after the window's cutoff, before the version is
-  saved) reads as unfinished and gets a small chunk of its own at the
-  next pass.
+- Versions saved before `source_rendered_at` existed use their save time
+  as the continue-rule boundary, so a node written during such a
+  version's generation reads as unfinished once (until the next update
+  sets the render time). New versions have no such edge.
 - Repair: `python backend/scripts/replan_tail.py --all-prefilled` (dry
   run) on prod, then `--user xiq --apply --seed` per account. The revert
   copy re-tips the chain; the continue rule and the planner do the rest;

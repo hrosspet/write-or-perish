@@ -172,11 +172,15 @@ def _should_seed(user):
     return new_tokens >= UPDATE_THRESHOLD_UNITS
 
 
-def _build_next_profile_request(user):
+def _build_next_profile_request(user, allow_chunk=True):
     """Build the request for the user's CURRENT step, or None if there's
     nothing to do. Mirrors the 'what's next' decision of
     _do_initial_generation / _do_incremental_update / _chunked_profile_loop /
     _do_integration, but produces a batch request instead of calling the LLM.
+
+    allow_chunk=False skips straight to the integration decision: the
+    poller passes it after a saved chunk when only data newer than that
+    chunk's render remains (organic growth waits for the seeding gates).
 
     Returns {"provider", "request", "meta"} or None.
     """
@@ -202,7 +206,7 @@ def _build_next_profile_request(user):
     # scope — own threads AND replies in other users' threads (#110) —
     # and from-scratch builds (cutoff=None) go through the same
     # incremental machinery.
-    remaining = _exports.count_remaining_units(user.id, cutoff)
+    remaining = _exports.count_remaining_units(user.id, cutoff) if allow_chunk else 0
     if remaining > 0:
         cfg = current_app.config["SUPPORTED_MODELS"].get(model_id) or {}
         input_cap = model_input_cap(cfg, DEFAULT_MAX_OUTPUT_TOKENS)
@@ -230,6 +234,7 @@ def _build_next_profile_request(user):
         # batch attempt on an overflow rejection. A window still over the
         # cap after the sizing rounds is submitted; the failed-item /
         # attempts machinery handles the overflow.
+        rendered_at = datetime.utcnow()
         fitted = _exports.build_fitted_chunk(
             user, model_id, get_api_keys_for_usage(current_app.config, "chat"),
             input_cap, cutoff, budget, remaining, _prompt_for)
@@ -266,6 +271,10 @@ def _build_next_profile_request(user):
                         chunk.get("origin_stats")),
                     "source_data_cutoff": (
                         latest_ts.isoformat() if latest_ts else None),
+                    # When the window was rendered: the saved version's
+                    # continue-rule boundary (data written after it is
+                    # organic growth).
+                    "rendered_at": rendered_at.isoformat(),
                     "model_id": model_id,
                     # Stored units of the window: advances the profile's
                     # cumulative figure and, against the provider-reported
@@ -355,7 +364,10 @@ def _apply_result(user, item, result, submitted_at):
                 source_tokens_used=cumulative, source_data_cutoff=cutoff,
                 generation_type=item["generation_type"],
                 parent_profile_id=item["prev_profile_id"], batch=True,
-                source_origin_stats=item.get("origin_stats"))
+                source_origin_stats=item.get("origin_stats"),
+                source_rendered_at=(
+                    datetime.fromisoformat(item["rendered_at"])
+                    if item.get("rendered_at") else None))
             # mirror PR #181: a from-scratch full regen is no longer needed
             # once its first chunk is committed. Only a from-scratch chunk
             # (prev_profile_id None) satisfies the flag — a flag set while
@@ -374,7 +386,10 @@ def _apply_result(user, item, result, submitted_at):
                 logger.info(f"User {user.id}: batch chunk calibration "
                             f"{observed} billed tokens per unit")
         user.profile_batch_attempts = 0
-        return _build_next_profile_request(user)
+        # Next step: another chunk only over data that existed when this
+        # chunk's window was rendered; growth since waits for the gates.
+        return _build_next_profile_request(
+            user, allow_chunk=_exports.should_continue_chain(user, profile))
 
     # integration (parent_profile_id is the chain tip, unique per run,
     # but scope by submission time anyway for consistency)

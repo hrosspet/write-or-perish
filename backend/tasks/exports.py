@@ -190,22 +190,29 @@ def count_remaining_units(user_id, created_after=None):
 def should_continue_chain(user, latest_profile):
     """The continue rule (docs/design/chunk-planner.md): AI-readable data in
     the profile's scope that lies beyond the latest version's cutoff but
-    was created BEFORE that version is an unfinished chain — a pre-fill or
-    an import still being folded in, a chunk lost to a worker restart —
-    and the next chunk runs regardless of the interval and volume gates,
-    which measure organic growth. Data created after the version is
-    growth and waits for those gates.
+    already EXISTED when that version's window was rendered is an
+    unfinished chain — a pre-fill or an import still being folded in, the
+    rest of a multi-chunk update, a chunk lost to a worker restart — and
+    the next chunk runs regardless of the interval and volume gates, which
+    measure organic growth. Data written after the render is growth and
+    waits for those gates.
 
-    Replaces the pinned-account special case and the minimum-chunk
-    deferral: a remainder of any size is planned into full chunks, so a
-    pre-filled corpus no longer ends months before its newest tweets.
+    One rule, three call sites: the seeding gates (batch seeder, sync
+    heartbeat), the step after every saved chunk in both pipelines (so
+    writing during a chunk's generation ends the run at the planned
+    chunks instead of adding a small one per cycle), and the admin
+    "stuck" flag. It replaces the pinned-account special case and the
+    minimum-chunk deferral.
 
-    Known edge: a node the user writes while their own update is
-    generating (between the window's cutoff and the version's save) also
-    reads as unfinished and gets a small chunk of its own at the next pass.
+    The boundary is ``source_rendered_at``; versions saved before that
+    column existed fall back to their save time, which can read a node
+    written during their generation as unfinished — once, until their
+    next update sets the render time.
     """
     cutoff = getattr(latest_profile, "source_data_cutoff", None)
-    if cutoff is None or latest_profile.created_at is None:
+    boundary = (getattr(latest_profile, "source_rendered_at", None)
+                or latest_profile.created_at)
+    if cutoff is None or boundary is None:
         return False
     from sqlalchemy import or_
     from backend.models import Node
@@ -215,7 +222,7 @@ def should_continue_chain(user, latest_profile):
         Node.ai_usage.in_(AI_ALLOWED),
         Node.deleted_at.is_(None),
         Node.created_at > cutoff,
-        Node.created_at < latest_profile.created_at,
+        Node.created_at < boundary,
     ).first() is not None
 
 
@@ -471,10 +478,12 @@ def _call_llm_with_retries(self, model_id, prompt_text, user_id,
 def _save_profile(user, model_id, profile_text, response,
                    source_tokens_used, source_data_cutoff,
                    generation_type, parent_profile_id=None, batch=False,
-                   source_origin_stats=None):
+                   source_origin_stats=None, source_rendered_at=None):
     """Save a new UserProfile and log API cost. Returns the profile.
 
-    batch=True records the Batch API discount in the cost log (issue #173)."""
+    batch=True records the Batch API discount in the cost log (issue #173).
+    source_rendered_at: when the window this version covers was rendered
+    (the continue rule's boundary between unfinished chain and growth)."""
     from backend.utils.privacy import PrivacyLevel
 
     input_tokens = response.get("input_tokens", 0)
@@ -501,6 +510,7 @@ def _save_profile(user, model_id, profile_text, response,
         source_tokens_used=source_tokens_used,
         source_data_cutoff=source_data_cutoff,
         source_origin_stats=source_origin_stats,
+        source_rendered_at=source_rendered_at,
         generation_type=generation_type,
         parent_profile_id=parent_profile_id,
     )
@@ -567,6 +577,7 @@ def revert_profile_for_import(user_id, earliest_imported_created_at):
         source_tokens_used=valid_profile.source_tokens_used,
         source_data_cutoff=valid_profile.source_data_cutoff,
         source_origin_stats=valid_profile.source_origin_stats,
+        source_rendered_at=valid_profile.source_rendered_at,
         generation_type="revert",
         parent_profile_id=valid_profile.id,
     )
@@ -1105,8 +1116,19 @@ def _chunked_profile_loop(self, user, model_id, update_template,
     cumulative_origin_stats = initial_origin_stats
     current_cutoff = initial_cutoff
     chunk_num = 0
+    saved = None   # the version saved by the previous iteration
 
     while True:
+        # After a saved chunk, go on only over data that existed when its
+        # window was rendered; anything written since is organic growth
+        # and waits for the gates (the caller's gate decided the first
+        # step). Otherwise a user writing during their own update would
+        # add a small chunk per iteration until they stopped.
+        if saved is not None and not should_continue_chain(user, saved):
+            logger.info(
+                f"User {user.id}: only data newer than the last window "
+                f"remains — ending the run at {chunk_num} chunk(s)")
+            break
         remaining = count_remaining_units(user.id, current_cutoff)
         if remaining <= 0:
             break
@@ -1135,6 +1157,7 @@ def _chunked_profile_loop(self, user, model_id, update_template,
                 update_template, current_profile_content,
                 cumulative_units, chunk, cumulative_origin_stats)
 
+        rendered_at = datetime.utcnow()
         fitted = build_fitted_chunk(
             user, model_id, api_keys, input_cap, current_cutoff, budget,
             remaining, _prompt_for)
@@ -1166,11 +1189,13 @@ def _chunked_profile_loop(self, user, model_id, update_template,
                              else generation_type),
             parent_profile_id=current_profile_id,
             source_origin_stats=cumulative_origin_stats,
+            source_rendered_at=rendered_at,
         )
 
         current_profile_content = response["content"]
         current_profile_id = profile.id
         current_cutoff = latest_ts
+        saved = profile
 
         # After the first committed chunk, a from-scratch full regen is no
         # longer needed: chunk 1 is the oldest data, so the chronological

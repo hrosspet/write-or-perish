@@ -109,6 +109,7 @@ def apply_branch(user, version):
         source_tokens_used=version.source_tokens_used,
         source_data_cutoff=version.source_data_cutoff,
         source_origin_stats=version.source_origin_stats,
+        source_rendered_at=version.source_rendered_at,
         generation_type="revert",
         parent_profile_id=version.id,
     )

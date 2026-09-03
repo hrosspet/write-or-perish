@@ -72,11 +72,22 @@ def _window(units, day):
             "latest_node_created_at": datetime(2026, 1, day)}
 
 
+def _node(user, units, created_at):
+    n = Node(user_id=user.id, human_owner_id=user.id, node_type="user",
+             ai_usage="chat", token_count=units, created_at=created_at,
+             updated_at=created_at)
+    n.set_content("x")
+    _db.session.add(n)
+    _db.session.commit()
+    return n
+
+
 def _run_loop(exports, monkeypatch, user, remainders, windows,
-              input_tokens=1000, **kw):
-    """Drive _chunked_profile_loop with the remainder sums and the export
-    windows scripted. Returns (result, budgets asked of the builder,
-    prompts sent to the LLM)."""
+              input_tokens=1000, on_llm_call=None, **kw):
+    """Drive _chunked_profile_loop with the export windows scripted and,
+    unless ``remainders`` is None, the remainder sums too (None leaves
+    count_remaining_units and the continue rule on the real test DB).
+    Returns (result, budgets asked of the builder, prompts sent)."""
     budgets, prompts, windows = [], [], list(windows)
 
     def export(u, max_tokens=None, **k):
@@ -85,12 +96,17 @@ def _run_loop(exports, monkeypatch, user, remainders, windows,
 
     def llm(task, model_id, prompt, user_id, keys, **k):
         prompts.append(prompt)
+        if on_llm_call:
+            on_llm_call()
         return {"content": f"PROFILE {len(prompts)}", "input_tokens": input_tokens,
                 "output_tokens": 5, "total_tokens": input_tokens + 5}
 
     monkeypatch.setattr(exports, "build_user_export_content", export)
-    monkeypatch.setattr(exports, "count_remaining_units",
-                        MagicMock(side_effect=list(remainders)))
+    if remainders is not None:
+        monkeypatch.setattr(exports, "count_remaining_units",
+                            MagicMock(side_effect=list(remainders)))
+        monkeypatch.setattr(exports, "should_continue_chain",
+                            lambda u, p: True)
     monkeypatch.setattr(exports, "_call_llm_with_retries", llm)
     import backend.llm_providers as lp
     monkeypatch.setattr(lp.LLMProvider, "count_tokens",
@@ -247,3 +263,82 @@ def test_sync_heartbeat_continues_an_unfinished_chain(app, monkeypatch):
     _db.session.commit()
     assert exports.maybe_trigger_incremental_profile_update(u) is None
     assert len(calls) == 1
+
+
+def _window_for(nodes):
+    units = sum(n.token_count for n in nodes)
+    return {"content": f"W{units}", "token_count": units, "unit_count": units,
+            "latest_node_created_at": max(n.created_at for n in nodes)}
+
+
+def test_run_ends_when_only_data_written_after_the_render_remains(app, monkeypatch):
+    """A node written while a chunk is generating (after its window was
+    rendered) is organic growth: the run ends at the planned chunks, and
+    the seed gate does not chase the node either — it waits for the 80k
+    gate like any other new writing."""
+    import backend.tasks.exports as exports
+    u = _user()
+    a = _node(u, 60_000, datetime(2026, 1, 1))
+    b = _node(u, 60_000, datetime(2026, 1, 2))
+    written = []
+
+    def write_during_generation():
+        written.append(_node(u, 500, datetime.utcnow()))
+
+    (pid, n, covered), budgets, _ = _run_loop(
+        exports, monkeypatch, u, remainders=None, windows=[_window_for([a, b])],
+        on_llm_call=write_during_generation,
+        initial_profile_content="BASE", generation_type="update")
+
+    assert (n, covered) == (1, 120_000)
+    tip = UserProfile.query.get(pid)
+    assert tip.source_rendered_at is not None
+    assert tip.source_rendered_at < written[0].created_at
+    assert exports.count_remaining_units(u.id, tip.source_data_cutoff) == 500  # unread...
+    assert exports.should_continue_chain(u, tip) is False                     # ...but growth
+
+
+def test_run_continues_over_data_that_existed_at_the_render(app, monkeypatch):
+    """The rest of a multi-chunk remainder existed before the first window
+    was rendered, so the run goes on to the planned second chunk."""
+    import backend.tasks.exports as exports
+    u = _user()
+    a = _node(u, 90_000, datetime(2026, 1, 1))
+    b = _node(u, 90_000, datetime(2026, 1, 2))
+    (pid, n, covered), budgets, _ = _run_loop(
+        exports, monkeypatch, u, remainders=None,
+        windows=[_window_for([a]), _window_for([b])],
+        initial_profile_content="BASE", generation_type="update")
+    assert (n, covered) == (2, 180_000)
+    assert budgets[0] == 90_000
+    tip = UserProfile.query.get(pid)
+    assert exports.count_remaining_units(u.id, tip.source_data_cutoff) == 0
+
+
+def test_continue_rule_boundary_is_the_render_time(app):
+    """Unread data counts as an unfinished chain only if it existed when the
+    version's window was rendered; a legacy version without a render time
+    falls back to its save time."""
+    import backend.tasks.exports as exports
+    now = datetime.utcnow()
+    u = _user()
+    _node(u, 500, now - timedelta(minutes=10))     # beyond the cutoff
+
+    def version(rendered_at, created_at):
+        p = UserProfile(user_id=u.id, generated_by="m", tokens_used=0,
+                        generation_type="update", source_data_cutoff=now - timedelta(days=1),
+                        source_rendered_at=rendered_at, created_at=created_at)
+        p.set_content("P")
+        _db.session.add(p)
+        _db.session.flush()
+        return p
+
+    # written between the render and the save → growth
+    assert exports.should_continue_chain(
+        u, version(now - timedelta(minutes=20), now - timedelta(minutes=5))) is False
+    # written before the render → unfinished chain
+    assert exports.should_continue_chain(
+        u, version(now - timedelta(minutes=5), now - timedelta(minutes=1))) is True
+    # legacy row: save time is the boundary
+    assert exports.should_continue_chain(
+        u, version(None, now - timedelta(minutes=5))) is True

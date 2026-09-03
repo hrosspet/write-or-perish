@@ -904,6 +904,7 @@ def test_apply_duplicate_item_does_not_advance_chain(app, monkeypatch):
     u = _user()
     db.session.commit()
     _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "should_continue_chain", lambda user, p: True)
     monkeypatch.setattr(pb._exports, "build_user_export_content", MagicMock(
         return_value=_chunk("MORE", latest=datetime(2026, 7, 1))))
     monkeypatch.setattr(pb._exports, "build_update_template", lambda uid: (
@@ -921,6 +922,56 @@ def test_apply_duplicate_item_does_not_advance_chain(app, monkeypatch):
     twin = pb._apply_result(u, item, result, submitted_at)
     assert twin is None
     assert UserProfile.query.filter_by(user_id=u.id).count() == 1
+
+
+def test_apply_result_chunks_again_only_over_data_that_existed_at_the_render(
+        app, monkeypatch):
+    """After a saved chunk the poller goes on to another chunk only if
+    unread data existed when that chunk's window was rendered; a node
+    written during the batch turnaround is organic growth, so the chain
+    integrates (or ends) and the node waits for the seeding gates."""
+    monkeypatch.setattr(pb._exports, "build_integration_messages",
+                        lambda uid, pid: (None, None))
+    rendered = datetime.utcnow() - timedelta(hours=2)
+    result = {"content": "P", "input_tokens": 100, "output_tokens": 5, "total_tokens": 105}
+
+    def run(user, node_at):
+        node = _seed_node(user, 500)
+        node.created_at = node_at
+        db.session.commit()
+        item = {"custom_id": "x", "user_id": user.id, "kind": "chunk",
+                "prev_profile_id": None, "generation_type": "iterative",
+                "prev_cumulative": 0, "origin_stats": None,
+                "source_data_cutoff": (rendered - timedelta(days=1)).isoformat(),
+                "rendered_at": rendered.isoformat(),
+                "model_id": "test-model", "chunk_units": 1000}
+        monkeypatch.setattr(pb._exports, "build_user_export_content",
+                            MagicMock(return_value=_chunk("MORE", units=500)))
+        nxt = pb._apply_result(user, item, result, rendered)
+        saved = UserProfile.query.filter_by(user_id=user.id).one()
+        assert saved.source_rendered_at == rendered
+        return nxt
+
+    # Written during the turnaround (after the render): no next chunk;
+    # a one-version chain has nothing to integrate either.
+    assert run(_user(), rendered + timedelta(minutes=10)) is None
+    # Existed before the render: the chain goes on.
+    nxt = run(_user(), rendered - timedelta(minutes=10))
+    assert nxt is not None and nxt["meta"]["kind"] == "chunk"
+    assert nxt["meta"]["rendered_at"] is not None
+
+
+def test_build_next_request_without_chunks_goes_to_integration(app, monkeypatch):
+    u = _user()
+    root = _prev_profile(u, datetime(2026, 4, 1), gen_type="iterative")
+    tip = _prev_profile(u, datetime(2026, 5, 1))
+    tip.parent_profile_id = root.id
+    db.session.commit()
+    _remaining(monkeypatch, 90000)          # data remains...
+    monkeypatch.setattr(pb._exports, "build_integration_messages", lambda uid, pid: (
+        [{"role": "user", "content": [{"type": "text", "text": "INTEG"}]}], [root, tip]))
+    req = pb._build_next_profile_request(u, allow_chunk=False)   # ...but is growth
+    assert req["meta"]["kind"] == "integration"
 
 
 def test_batch_lock_skips_when_held(app, monkeypatch):

@@ -69,6 +69,7 @@ def _chain(user, cutoffs):
                         generation_type="iterative" if i == 0 else "update",
                         source_tokens_used=(i + 1) * 60_000,
                         source_data_cutoff=cutoff,
+                        source_rendered_at=datetime(2026, 8, 1 + i) - timedelta(hours=1),
                         parent_profile_id=parent.id if parent else None,
                         created_at=datetime(2026, 8, 1 + i))
         p.set_content(f"V{i}")
@@ -121,6 +122,7 @@ def test_plan_and_apply_re_tips_the_chain(app, monkeypatch):
     copy = rt.apply_branch(u, version)
     assert copy.generation_type == "revert" and copy.parent_profile_id == v[1].id
     assert copy.source_data_cutoff == v[1].source_data_cutoff
+    assert copy.source_rendered_at == v[1].source_rendered_at
     assert copy.get_content() == "V1"
 
     # The copy is now the chain tip: the continue rule fires (the tail is
