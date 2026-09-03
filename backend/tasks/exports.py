@@ -535,68 +535,83 @@ def _save_profile(user, model_id, profile_text, response,
     return new_profile
 
 
-def revert_profile_for_import(user_id, earliest_imported_created_at):
-    """Revert to the last valid profile instead of full regen on import.
-
-    Finds the latest non-integration profile whose source_data_cutoff
-    <= earliest_imported_created_at and creates a "revert" copy.
-    If no valid profile exists, falls back to profile_needs_full_regen.
-    """
+def retip_profile_chain(user_id, version):
+    """Make ``version`` the chain tip again by writing a "revert" copy of
+    it, stamped with the present moment as its render time. Everything
+    unread as of now — the range that later versions had covered, freshly
+    imported data, organic writing since — then counts as the unfinished
+    chain: the seeder / heartbeat continues from here and the planner
+    covers it to the end in equal chunks. The superseded versions stay as
+    history. Used by imports and by the repair script."""
     from backend.utils.privacy import PrivacyLevel
+    copy = UserProfile(
+        user_id=user_id,
+        generated_by=version.generated_by,
+        tokens_used=0,
+        privacy_level=PrivacyLevel.PRIVATE,
+        ai_usage=version.ai_usage,
+        source_tokens_used=version.source_tokens_used,
+        source_data_cutoff=version.source_data_cutoff,
+        source_origin_stats=version.source_origin_stats,
+        source_rendered_at=datetime.utcnow(),
+        generation_type="revert",
+        parent_profile_id=version.id,
+    )
+    copy.set_content(version.get_content())
+    db.session.add(copy)
+    db.session.flush()
+    logger.info(
+        "User %d: profile chain re-tipped at version %d (cutoff=%s)",
+        user_id, version.id, version.source_data_cutoff)
+    return copy
 
+
+def revert_profile_for_import(user_id, earliest_imported_created_at):
+    """Invalidate only the profile versions an import touches.
+
+    A version is invalid when its window would have held the imported
+    data: its cutoff is later than the earliest imported timestamp. The
+    latest version whose cutoff is at or before that timestamp is still
+    valid and becomes the chain tip again (``retip_profile_chain``); the
+    newer versions are superseded and the chain is regenerated from there
+    to the end. When no version is valid — the import predates the
+    chain's root, or no version carries a cutoff — the whole chain is
+    invalidated and a from-scratch build is flagged.
+
+    Returns ``("full", None)`` (flag set), ``("revert", copy)`` or
+    ``("none", tip)`` when nothing is invalidated: no parseable timestamp,
+    or the import is newer than the tip's cutoff.
+    """
     profiles = UserProfile.query.filter(
         UserProfile.user_id == user_id,
         UserProfile.generation_type != 'integration'
     ).order_by(UserProfile.created_at.desc()).all()
 
+    def _flag_full():
+        user = User.query.get(user_id)
+        if user:
+            user.profile_needs_full_regen = True
+        return "full", None
+
     if not profiles:
-        # No profiles at all — nothing to revert to
-        user = User.query.get(user_id)
-        if user:
-            user.profile_needs_full_regen = True
-        return
+        return _flag_full()
+    if earliest_imported_created_at is None:
+        return "none", profiles[0]
 
-    # Find the latest profile with cutoff <= earliest imported timestamp
-    valid_profile = None
-    for p in profiles:
-        if (p.source_data_cutoff
-                and p.source_data_cutoff <= earliest_imported_created_at):
-            valid_profile = p
-            break  # profiles are ordered desc, so first match is latest
-
-    if valid_profile is None:
-        # All profiles are invalidated
-        user = User.query.get(user_id)
-        if user:
-            user.profile_needs_full_regen = True
-        return
-
-    # If the valid profile is already the latest, no revert needed
-    if valid_profile.id == profiles[0].id:
-        return
-
-    # Create a revert profile copying the valid version's content. A revert
-    # reproduces that prior version, so it carries the same ai_usage rather
-    # than a fresh default (#191).
-    new_profile = UserProfile(
-        user_id=user_id,
-        generated_by=valid_profile.generated_by,
-        tokens_used=0,
-        privacy_level=PrivacyLevel.PRIVATE,
-        ai_usage=valid_profile.ai_usage,
-        source_tokens_used=valid_profile.source_tokens_used,
-        source_data_cutoff=valid_profile.source_data_cutoff,
-        source_origin_stats=valid_profile.source_origin_stats,
-        source_rendered_at=valid_profile.source_rendered_at,
-        generation_type="revert",
-        parent_profile_id=valid_profile.id,
-    )
-    new_profile.set_content(valid_profile.get_content())
-    db.session.add(new_profile)
+    valid = next(
+        (p for p in profiles
+         if p.source_data_cutoff
+         and p.source_data_cutoff <= earliest_imported_created_at),
+        None)
+    if valid is None:
+        return _flag_full()
+    if valid.id == profiles[0].id:
+        return "none", valid
     logger.info(
-        "Reverted user %d profile to version %d (cutoff=%s)",
-        user_id, valid_profile.id, valid_profile.source_data_cutoff
-    )
+        "User %d: import dated %s invalidates %d profile version(s) after "
+        "version %d", user_id, earliest_imported_created_at,
+        sum(1 for p in profiles if p.created_at > valid.created_at), valid.id)
+    return "revert", retip_profile_chain(user_id, valid)
 
 
 @celery.task(base=ProfileGenerationTask, bind=True)

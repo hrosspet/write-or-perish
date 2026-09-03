@@ -149,8 +149,19 @@ Landed (PR #285):
 - `backend/routes/admin.py` — the users list marks a chain "stuck" by the
   continue rule.
 - `backend/scripts/replan_tail.py` — repair for pre-filled accounts (dry
-  run by default; `--apply`, `--seed`).
+  run by default; `--apply`, `--seed`); re-tips through
+  `retip_profile_chain`, the helper imports use.
   `backend/scripts/simulate_chunk_plan.py` — dry run on the wired code.
+- Imports (`backend/routes/import_data.py`, one hand-off for every
+  importer): `revert_profile_for_import` invalidates only the versions
+  whose cutoff is later than the earliest imported timestamp and re-tips
+  the chain at the latest still-valid one (a revert copy stamped with the
+  import moment, so the continue rule regenerates from there to the end);
+  older than the root → from-scratch; newer than the tip → a ≥10k-token
+  import re-tips and continues now, a smaller one waits for the gates.
+  Batch accounts are seeded immediately, never sent to the synchronous
+  path. The "(Re-)Generate Profile" navbar item and its
+  `/export/update_profile` route are removed.
 
 ## Rollout
 

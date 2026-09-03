@@ -95,30 +95,11 @@ def plan_repair(user):
 
 
 def apply_branch(user, version):
-    """Write the revert copy that makes ``version`` the chain tip (same row
-    shape as revert_profile_for_import). Its render time is the repair
-    moment when the version predates render times: everything unread as
-    of now counts as the unfinished chain, whether or not the account is
-    pinned."""
-    from datetime import datetime
+    """Re-tip the chain at ``version`` (a revert copy stamped with the
+    repair moment, see backend.tasks.exports.retip_profile_chain)."""
     from backend.extensions import db
-    from backend.models import UserProfile
-    from backend.utils.privacy import PrivacyLevel
-    copy = UserProfile(
-        user_id=user.id,
-        generated_by=version.generated_by,
-        tokens_used=0,
-        privacy_level=PrivacyLevel.PRIVATE,
-        ai_usage=version.ai_usage,
-        source_tokens_used=version.source_tokens_used,
-        source_data_cutoff=version.source_data_cutoff,
-        source_origin_stats=version.source_origin_stats,
-        source_rendered_at=version.source_rendered_at or datetime.utcnow(),
-        generation_type="revert",
-        parent_profile_id=version.id,
-    )
-    copy.set_content(version.get_content())
-    db.session.add(copy)
+    from backend.tasks.exports import retip_profile_chain
+    copy = retip_profile_chain(user.id, version)
     db.session.commit()
     return copy
 

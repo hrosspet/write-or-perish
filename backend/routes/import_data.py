@@ -532,36 +532,16 @@ def confirm_import():
                 user_obj = User.query.get(current_user.id)
                 if (user_obj and (user_obj.plan or "free")
                         in User.VOICE_MODE_PLANS):
-                    latest_profile = UserProfile.query.filter_by(
-                        user_id=current_user.id
-                    ).order_by(UserProfile.created_at.desc()).first()
-                    cutoff = (latest_profile.source_data_cutoff
-                              if latest_profile else None)
-
-                    needs_full_regen = False
                     earliest_ts = None
-                    if cutoff:
-                        for f in files_sorted:
-                            raw_ts = f.get('modified_at', '')
-                            if raw_ts:
-                                try:
-                                    ts = datetime.fromisoformat(raw_ts)
-                                    if ts < cutoff:
-                                        needs_full_regen = True
-                                    if (earliest_ts is None
-                                            or ts < earliest_ts):
-                                        earliest_ts = ts
-                                except (ValueError, TypeError):
-                                    pass
-
-                    if needs_full_regen:
-                        from backend.tasks.exports import (
-                            revert_profile_for_import
-                        )
-                        revert_profile_for_import(
-                            user_obj.id, earliest_ts
-                        )
-                        db.session.commit()
+                    for f in files_sorted:
+                        raw_ts = f.get('modified_at', '')
+                        if raw_ts:
+                            try:
+                                ts = datetime.fromisoformat(raw_ts)
+                                if earliest_ts is None or ts < earliest_ts:
+                                    earliest_ts = ts
+                            except (ValueError, TypeError):
+                                pass
 
                     total_imported_tokens = sum(
                         approximate_token_count(f.get('content', ''))
@@ -569,8 +549,7 @@ def confirm_import():
                     )
                     profile_update_task_id = (
                         _hand_off_profile_update_after_import(
-                            user_obj, latest_profile, needs_full_regen,
-                            total_imported_tokens))
+                            user_obj, earliest_ts, total_imported_tokens))
             except Exception as e:
                 current_app.logger.warning(
                     f"Auto-trigger profile update failed: {e}"
@@ -960,42 +939,20 @@ def confirm_claude_import():
                 user_obj = User.query.get(current_user.id)
                 if (user_obj and (user_obj.plan or "free")
                         in User.VOICE_MODE_PLANS):
-                    latest_profile = UserProfile.query.filter_by(
-                        user_id=current_user.id
-                    ).order_by(UserProfile.created_at.desc()).first()
-                    cutoff = (latest_profile.source_data_cutoff
-                              if latest_profile else None)
-
-                    needs_full_regen = False
                     earliest_ts = None
-                    if cutoff:
-                        for conv in conversations_sorted:
-                            for msg in conv.get('messages', []):
-                                raw_ts = msg.get('created_at', '')
-                                if raw_ts:
-                                    try:
-                                        raw_ts = raw_ts.replace(
-                                            'Z', '+00:00'
-                                        )
-                                        ts = datetime.fromisoformat(
-                                            raw_ts
-                                        ).replace(tzinfo=None)
-                                        if ts < cutoff:
-                                            needs_full_regen = True
-                                        if (earliest_ts is None
-                                                or ts < earliest_ts):
-                                            earliest_ts = ts
-                                    except (ValueError, TypeError):
-                                        pass
-
-                    if needs_full_regen:
-                        from backend.tasks.exports import (
-                            revert_profile_for_import
-                        )
-                        revert_profile_for_import(
-                            user_obj.id, earliest_ts
-                        )
-                        db.session.commit()
+                    for conv in conversations_sorted:
+                        for msg in conv.get('messages', []):
+                            raw_ts = msg.get('created_at', '')
+                            if raw_ts:
+                                try:
+                                    raw_ts = raw_ts.replace('Z', '+00:00')
+                                    ts = datetime.fromisoformat(
+                                        raw_ts
+                                    ).replace(tzinfo=None)
+                                    if earliest_ts is None or ts < earliest_ts:
+                                        earliest_ts = ts
+                                except (ValueError, TypeError):
+                                    pass
 
                     total_imported_tokens = sum(
                         approximate_token_count(msg.get('text', ''))
@@ -1005,8 +962,7 @@ def confirm_claude_import():
                     )
                     profile_update_task_id = (
                         _hand_off_profile_update_after_import(
-                            user_obj, latest_profile, needs_full_regen,
-                            total_imported_tokens))
+                            user_obj, earliest_ts, total_imported_tokens))
             except Exception as e:
                 current_app.logger.warning(
                     f"Auto-trigger profile update failed: {e}"
@@ -1168,23 +1124,13 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
 
 
 def _maybe_update_profile_after_import(user_id, earliest_ts, imported_tokens):
-    """Revert the profile if imported data predates its cutoff, then
-    trigger an update when enough new tokens landed. Best-effort."""
+    """Twitter path: same hand-off as every other importer. Best-effort."""
     try:
         user_obj = User.query.get(user_id)
         if not user_obj or (user_obj.plan or "free") not in User.VOICE_MODE_PLANS:
             return None
-        latest_profile = UserProfile.query.filter_by(
-            user_id=user_id
-        ).order_by(UserProfile.created_at.desc()).first()
-        cutoff = latest_profile.source_data_cutoff if latest_profile else None
-        needs_full_regen = bool(cutoff and earliest_ts and earliest_ts < cutoff)
-        if needs_full_regen:
-            from backend.tasks.exports import revert_profile_for_import
-            revert_profile_for_import(user_id, earliest_ts)
-            db.session.commit()
         return _hand_off_profile_update_after_import(
-            user_obj, latest_profile, needs_full_regen, imported_tokens)
+            user_obj, earliest_ts, imported_tokens)
     except Exception as e:
         current_app.logger.warning(
             f"Auto-trigger profile update failed: {e}"
@@ -1192,35 +1138,62 @@ def _maybe_update_profile_after_import(user_id, earliest_ts, imported_tokens):
     return None
 
 
-def _hand_off_profile_update_after_import(user_obj, latest_profile,
-                                          needs_full_regen, imported_tokens):
-    """Hand an import's profile update to the pipeline the account is on.
-    Shared by every importer (Twitter, ChatGPT, Claude, markdown), so none
-    of them can send a batch-selected account down the synchronous
-    full-price path.
+# An import below this many tokens that invalidates nothing waits for the
+# regular gates like organic writing; at or above it the chain is
+# regenerated to the end right away.
+IMPORT_UPDATE_MIN_TOKENS = 10000
 
-    Batch users are driven by the seeder, never the synchronous path: a
-    from-scratch build or a rewind past the cutoff is requested via the
-    regen flag; an incremental update is picked up once the seeder's
-    gates are crossed. Sync users dispatch the task directly. Nothing
-    happens below 10k imported tokens. Returns a task id or None."""
-    if imported_tokens < 10000:
-        return None
-    from backend.tasks.profile_batch import use_batch_for_user
+
+def _hand_off_profile_update_after_import(user_obj, earliest_ts, imported_tokens):
+    """After an import, invalidate only the profile versions the imported
+    data touches and regenerate the chain from there to the end, on the
+    pipeline the account is on. Shared by every importer (Twitter,
+    ChatGPT, Claude, markdown).
+
+    - Data older than a version's cutoff invalidates that version
+      (``revert_profile_for_import``): the latest still-valid version
+      becomes the tip again and the chain continues from it. Older than
+      the whole chain: a from-scratch build.
+    - Data newer than the tip invalidates nothing; at or above
+      ``IMPORT_UPDATE_MIN_TOKENS`` the tip is re-tipped so the chain
+      continues over the import now, below that it waits for the gates.
+    - No profile yet: a from-scratch build at or above the threshold.
+
+    Batch users (all of prod with ``PROFILE_USE_BATCH``) get an immediate
+    seed — the seeder's gates and the continue rule take it from there —
+    and never the synchronous full-price task; sync users dispatch it
+    directly. Returns a task id or None."""
+    from backend.tasks.exports import (
+        revert_profile_for_import, retip_profile_chain,
+        maybe_trigger_profile_update)
+    from backend.tasks.profile_batch import (
+        use_batch_for_user, seed_profile_batch_for_user)
+
+    tip = UserProfile.query.filter(
+        UserProfile.user_id == user_obj.id,
+        UserProfile.generation_type != 'integration'
+    ).order_by(UserProfile.created_at.desc()).first()
+    if tip is None:
+        if imported_tokens < IMPORT_UPDATE_MIN_TOKENS:
+            return None
+        user_obj.profile_needs_full_regen = True
+        action = "full"
+    else:
+        action, version = revert_profile_for_import(user_obj.id, earliest_ts)
+        if action == "none":
+            if imported_tokens < IMPORT_UPDATE_MIN_TOKENS:
+                return None
+            retip_profile_chain(user_obj.id, version)
+    db.session.commit()
+
     if use_batch_for_user(user_obj, current_app.config):
-        full = bool(needs_full_regen or latest_profile is None)
-        if full:
-            user_obj.profile_needs_full_regen = True
-            db.session.commit()
         current_app.logger.info(
             f"User {user_obj.id}: import handed to the batch profile "
-            f"pipeline (full_regen={full})"
-        )
+            f"pipeline ({action}); seeding now")
+        seed_profile_batch_for_user.delay(user_obj.id)
         return None
-    from backend.tasks.exports import maybe_trigger_profile_update
     return maybe_trigger_profile_update(
-        user_obj.id, force_full_regen=needs_full_regen,
-    )
+        user_obj.id, force_full_regen=(action == "full"))
 
 
 def _tweet_source_key(tweet_data):
@@ -1705,39 +1678,17 @@ def confirm_chatgpt_import():
                 user_obj = User.query.get(current_user.id)
                 if (user_obj and (user_obj.plan or "free")
                         in User.VOICE_MODE_PLANS):
-                    latest_profile = UserProfile.query.filter_by(
-                        user_id=current_user.id
-                    ).order_by(UserProfile.created_at.desc()).first()
-                    cutoff = (latest_profile.source_data_cutoff
-                              if latest_profile else None)
-
-                    needs_full_regen = False
                     earliest_ts = None
-                    if cutoff:
-                        for conv in conversations_sorted:
-                            for msg in conv.get('messages', []):
-                                raw_ts = msg.get('created_at', '')
-                                if raw_ts:
-                                    try:
-                                        ts = datetime.fromisoformat(
-                                            raw_ts
-                                        )
-                                        if ts < cutoff:
-                                            needs_full_regen = True
-                                        if (earliest_ts is None
-                                                or ts < earliest_ts):
-                                            earliest_ts = ts
-                                    except (ValueError, TypeError):
-                                        pass
-
-                    if needs_full_regen:
-                        from backend.tasks.exports import (
-                            revert_profile_for_import
-                        )
-                        revert_profile_for_import(
-                            user_obj.id, earliest_ts
-                        )
-                        db.session.commit()
+                    for conv in conversations_sorted:
+                        for msg in conv.get('messages', []):
+                            raw_ts = msg.get('created_at', '')
+                            if raw_ts:
+                                try:
+                                    ts = datetime.fromisoformat(raw_ts)
+                                    if earliest_ts is None or ts < earliest_ts:
+                                        earliest_ts = ts
+                                except (ValueError, TypeError):
+                                    pass
 
                     total_imported_tokens = sum(
                         approximate_token_count(msg.get('text', ''))
@@ -1747,8 +1698,7 @@ def confirm_chatgpt_import():
                     )
                     profile_update_task_id = (
                         _hand_off_profile_update_after_import(
-                            user_obj, latest_profile, needs_full_regen,
-                            total_imported_tokens))
+                            user_obj, earliest_ts, total_imported_tokens))
             except Exception as e:
                 current_app.logger.warning(
                     f"Auto-trigger profile update failed: {e}"

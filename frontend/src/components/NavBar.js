@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { useUser } from "../contexts/UserContext";
 import { useTheme } from "../contexts/ThemeContext";
 import GlobalAudioPlayer from "./GlobalAudioPlayer";
@@ -13,7 +13,6 @@ function NavBar({ onNewEntryClick }) {
   const { user, setUser } = useUser();
   const { theme, toggleTheme } = useTheme();
   const location = useLocation();
-  const navigate = useNavigate();
   const [aboutOpen, setAboutOpen] = useState(false);
   const [overflowOpen, setOverflowOpen] = useState(false);
   const aboutRef = useRef(null);
@@ -25,32 +24,12 @@ function NavBar({ onNewEntryClick }) {
     return localStorage.getItem('loore_craft_mode') === 'true';
   });
 
-  // Profile generation state — read from backend task_id OR localStorage
-  const [generatingProfile, setGeneratingProfile] = useState(() => {
-    return !!(localStorage.getItem('loore_profile_task_id')
-      || (user && user.profile_generation_task_id));
-  });
-
-  // Sync craft mode, model preference, and profile generation when user loads
+  // Sync craft mode when user loads
   useEffect(() => {
     if (user && user.craft_mode !== undefined) {
       setCraftMode(user.craft_mode);
     }
-    // Sync profile generation state from backend (cross-browser persistence)
-    if (user && user.profile_generation_task_id) {
-      localStorage.setItem('loore_profile_task_id', user.profile_generation_task_id);
-      setGeneratingProfile(true);
-    } else if (user && !user.profile_generation_task_id && !localStorage.getItem('loore_profile_task_id')) {
-      setGeneratingProfile(false);
-    }
   }, [user]);
-
-  // Listen for profile generation completion (dispatched by ProfilePage)
-  useEffect(() => {
-    const handler = () => setGeneratingProfile(false);
-    window.addEventListener('loore_profile_done', handler);
-    return () => window.removeEventListener('loore_profile_done', handler);
-  }, []);
 
   const toggleCraftMode = async () => {
     const newValue = !craftMode;
@@ -67,24 +46,6 @@ function NavBar({ onNewEntryClick }) {
       } catch (e) {
         // Silently fall back to localStorage — backend may not support craft_mode yet
       }
-    }
-  };
-
-  // Profile generation handler — navigate to /profile after starting
-  const handleGenerateProfile = async () => {
-    if (generatingProfile) return;
-    setGeneratingProfile(true);
-    try {
-      const res = await api.post("/export/update_profile", { model: user?.preferred_model, force_full_regen: true });
-      localStorage.setItem('loore_profile_task_id', res.data.task_id);
-      window.dispatchEvent(new CustomEvent('loore_profile_started', {
-        detail: { taskId: res.data.task_id }
-      }));
-      setOverflowOpen(false);
-      navigate('/profile');
-    } catch (err) {
-      console.error("Profile generation error:", err);
-      setGeneratingProfile(false);
     }
   };
 
@@ -384,18 +345,6 @@ function NavBar({ onNewEntryClick }) {
                         <Link to="/prompts" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
                           Prompts
                         </Link>
-                        <button
-                          onClick={handleGenerateProfile}
-                          disabled={generatingProfile}
-                          style={{
-                            ...dropdownItemStyle,
-                            color: "var(--text-muted)",
-                            cursor: generatingProfile ? "not-allowed" : "pointer",
-                            opacity: generatingProfile ? 0.6 : 1,
-                          }}
-                        >
-                          {generatingProfile ? "Generating profile..." : "(Re-)Generate Profile"}
-                        </button>
                       </>
                     )}
 

@@ -457,62 +457,106 @@ def test_community_archive_keyset_paging_and_export_shape(monkeypatch):
     assert row["is_reply"] and row["full_text"] == "hi"
 
 
-def test_import_handoff_routes_batch_users_to_seeder(app, monkeypatch):
-    """A batch-pinned user never gets the synchronous profile task after an
-    import; the from-scratch build is requested via the regen flag."""
-    from backend.routes import import_data
-    u = _make_user("batchy")
-    u.profile_force_batch = True
+def _chain(user, cutoffs):
+    """Non-integration versions one day apart, then an integration."""
+    versions, parent = [], None
+    for i, cutoff in enumerate(cutoffs):
+        p = UserProfile(user_id=user.id, generated_by="m", tokens_used=0,
+                        generation_type="iterative" if i == 0 else "update",
+                        source_data_cutoff=cutoff,
+                        parent_profile_id=parent.id if parent else None,
+                        created_at=datetime(2026, 8, 1 + i))
+        p.set_content(f"V{i}")
+        _db.session.add(p)
+        _db.session.flush()
+        versions.append(p)
+        parent = p
+    integ = UserProfile(user_id=user.id, generated_by="m", tokens_used=0,
+                        generation_type="integration",
+                        source_data_cutoff=parent.source_data_cutoff,
+                        parent_profile_id=parent.id,
+                        created_at=datetime(2026, 8, 1 + len(cutoffs)))
+    integ.set_content("I")
+    _db.session.add(integ)
     _db.session.commit()
+    return versions
+
+
+def _tip(user):
+    return (UserProfile.query.filter(UserProfile.user_id == user.id,
+                                     UserProfile.generation_type != "integration")
+            .order_by(UserProfile.created_at.desc()).first())
+
+
+def test_import_invalidates_only_the_versions_it_touches(app, monkeypatch):
+    """An import dated between two cutoffs supersedes the versions built
+    after it, re-tips the chain at the last still-valid version (a revert
+    copy stamped with the import moment) and hands the account to its
+    pipeline to regenerate from there to the end. Shared by every importer."""
+    from backend.routes import import_data
     import backend.tasks.exports as ex
+    import backend.tasks.profile_batch as pb
     sync = MagicMock(return_value="sync-task")
     monkeypatch.setattr(ex, "maybe_trigger_profile_update", sync)
-
-    assert import_data._maybe_update_profile_after_import(u.id, None, 50000) is None
-    assert sync.call_count == 0
-    assert User.query.get(u.id).profile_needs_full_regen is True
-
-    # Non-batch users keep the existing synchronous dispatch.
-    v = _make_user("syncy")
-    _db.session.commit()
-    assert import_data._maybe_update_profile_after_import(v.id, None, 50000) == "sync-task"
-
-
-def test_every_importer_shares_the_batch_aware_hand_off(app, monkeypatch):
-    """The ChatGPT, Claude and markdown importers used to dispatch the
-    synchronous task directly; they now go through the same hand-off as
-    the Twitter path, so a batch-selected account (all of prod with
-    PROFILE_USE_BATCH on) never lands on the full-price path."""
-    from backend.routes import import_data
-    import backend.tasks.exports as ex
-    sync = MagicMock(return_value="sync-task")
-    monkeypatch.setattr(ex, "maybe_trigger_profile_update", sync)
+    seed = MagicMock()
+    monkeypatch.setattr(pb.seed_profile_batch_for_user, "delay", seed)
     hand_off = import_data._hand_off_profile_update_after_import
+    cutoffs = [datetime(2026, 1, 10), datetime(2026, 2, 10), datetime(2026, 3, 10)]
 
+    # Batch account (prod): re-tip at v1, seed now, no full regen.
     app.config["PROFILE_USE_BATCH"] = True
-    u = _make_user("global_batch")
+    u = _make_user("batch_import")
     _db.session.commit()
-    # Below the import threshold: nothing, on either path.
-    assert hand_off(u, None, False, 9_999) is None
+    v = _chain(u, cutoffs)
+    assert hand_off(u, datetime(2026, 1, 20), 2_000) is None   # size is irrelevant to invalidation
+    tip = _tip(u)
+    assert tip.generation_type == "revert" and tip.parent_profile_id == v[0].id
+    assert tip.source_data_cutoff == cutoffs[0] and tip.source_rendered_at is not None
     assert User.query.get(u.id).profile_needs_full_regen is False
-    # Incremental import on batch: the seeder's gates pick it up; no flag.
-    tip = UserProfile(user_id=u.id, generated_by="m", tokens_used=0,
-                      generation_type="update", source_data_cutoff=datetime(2026, 1, 1))
-    tip.set_content("P")
-    _db.session.add(tip)
-    _db.session.commit()
-    assert hand_off(u, tip, False, 50_000) is None
-    assert User.query.get(u.id).profile_needs_full_regen is False
-    # A rewind past the cutoff, or no profile at all: the regen flag.
-    assert hand_off(u, tip, True, 50_000) is None
-    assert User.query.get(u.id).profile_needs_full_regen is True
-    assert sync.call_count == 0
+    assert seed.call_args.args == (u.id,) and sync.call_count == 0
+    # v2 and v3 stay as history; the chain now walks copy → v1.
+    assert [p.id for p in ex._collect_iterative_chain(tip.id)] == [v[0].id, tip.id]
 
-    app.config["PROFILE_USE_BATCH"] = False
-    v = _make_user("plain_sync")
+    # Older than the chain's root: everything is invalid → from scratch.
+    w = _make_user("batch_root")
     _db.session.commit()
-    assert hand_off(v, None, True, 50_000) == "sync-task"
+    _chain(w, cutoffs)
+    assert hand_off(w, datetime(2025, 12, 1), 2_000) is None
+    assert User.query.get(w.id).profile_needs_full_regen is True
+    assert _tip(w).generation_type == "update"                  # nothing re-tipped
+
+    # Newer than the tip: nothing invalidated; a big import still
+    # continues the chain now, a small one waits for the gates.
+    x = _make_user("batch_newer")
+    _db.session.commit()
+    vx = _chain(x, cutoffs)
+    seed.reset_mock()
+    assert hand_off(x, datetime(2026, 4, 1), 5_000) is None
+    assert _tip(x).id == vx[2].id and seed.call_count == 0
+    assert hand_off(x, datetime(2026, 4, 1), 50_000) is None
+    assert _tip(x).generation_type == "revert" and _tip(x).parent_profile_id == vx[2].id
+    assert seed.call_count == 1
+
+    # No profile yet: from scratch at the threshold, nothing below it.
+    y = _make_user("batch_fresh")
+    _db.session.commit()
+    assert hand_off(y, None, 5_000) is None
+    assert User.query.get(y.id).profile_needs_full_regen is False
+    assert hand_off(y, None, 50_000) is None
+    assert User.query.get(y.id).profile_needs_full_regen is True
+
+    # Sync account: same decisions, dispatched directly.
+    app.config["PROFILE_USE_BATCH"] = False
+    z = _make_user("sync_import")
+    _db.session.commit()
+    vz = _chain(z, cutoffs)
+    assert hand_off(z, datetime(2026, 2, 20), 2_000) == "sync-task"
+    assert sync.call_args.kwargs == {"force_full_regen": False}
+    assert _tip(z).parent_profile_id == vz[1].id
+    assert hand_off(z, datetime(2025, 1, 1), 2_000) == "sync-task"
     assert sync.call_args.kwargs == {"force_full_regen": True}
+    # The Twitter wrapper goes through the same hand-off.
+    assert import_data._maybe_update_profile_after_import(z.id, None, 50_000) == "sync-task"
 
 
 def test_prefill_impl_imports_pins_batch_and_reports(app, monkeypatch):

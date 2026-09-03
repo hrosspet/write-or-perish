@@ -122,7 +122,7 @@ def test_plan_and_apply_re_tips_the_chain(app, monkeypatch):
     copy = rt.apply_branch(u, version)
     assert copy.generation_type == "revert" and copy.parent_profile_id == v[1].id
     assert copy.source_data_cutoff == v[1].source_data_cutoff
-    assert copy.source_rendered_at == v[1].source_rendered_at
+    assert copy.source_rendered_at > v[1].source_rendered_at   # stamped with the repair moment
     assert copy.get_content() == "V1"
 
     # The copy is now the chain tip: the continue rule fires (the tail is
