@@ -169,7 +169,16 @@ def _should_seed(user):
         new_tokens = _new_token_count(user, cutoff)
     else:
         new_tokens = _new_token_count(user, None)
-    return new_tokens >= UPDATE_THRESHOLD_UNITS
+    if new_tokens < UPDATE_THRESHOLD_UNITS:
+        return False
+    if _exports.profile_is_provisional(latest):
+        # The one side effect of this gate: a provisional first build
+        # (under a full chunk of data) is rebuilt from scratch now that a
+        # full chunk of writing exists, not patched — the request builder
+        # honours the flag and clears it once chunk 1 commits.
+        user.profile_needs_full_regen = True
+        db.session.commit()
+    return True
 
 
 def _build_next_profile_request(user, allow_chunk=True):

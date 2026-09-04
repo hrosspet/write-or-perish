@@ -525,17 +525,16 @@ def test_import_invalidates_only_the_versions_it_touches(app, monkeypatch):
     assert User.query.get(w.id).profile_needs_full_regen is True
     assert _tip(w).generation_type == "update"                  # nothing re-tipped
 
-    # Newer than the tip: nothing invalidated; a big import still
-    # continues the chain now, a small one waits for the gates.
+    # Newer than the tip: nothing invalidated, nothing started, whatever
+    # the size — the import is new data and counts toward the organic gate.
     x = _make_user("batch_newer")
     _db.session.commit()
     vx = _chain(x, cutoffs)
     seed.reset_mock()
-    assert hand_off(x, datetime(2026, 4, 1), 5_000) is None
-    assert _tip(x).id == vx[2].id and seed.call_count == 0
-    assert hand_off(x, datetime(2026, 4, 1), 50_000) is None
-    assert _tip(x).generation_type == "revert" and _tip(x).parent_profile_id == vx[2].id
-    assert seed.call_count == 1
+    for tokens in (5_000, 500_000):
+        assert hand_off(x, datetime(2026, 4, 1), tokens) is None
+        assert _tip(x).id == vx[2].id and seed.call_count == 0
+        assert User.query.get(x.id).profile_needs_full_regen is False
 
     # No profile yet: from scratch at the threshold, nothing below it.
     y = _make_user("batch_fresh")
@@ -555,8 +554,13 @@ def test_import_invalidates_only_the_versions_it_touches(app, monkeypatch):
     assert _tip(z).parent_profile_id == vz[1].id
     assert hand_off(z, datetime(2025, 1, 1), 2_000) == "sync-task"
     assert sync.call_args.kwargs == {"force_full_regen": True}
-    # The Twitter wrapper goes through the same hand-off.
-    assert import_data._maybe_update_profile_after_import(z.id, None, 50_000) == "sync-task"
+    # The Twitter wrapper goes through the same hand-off: nothing for an
+    # account whose profile the import leaves valid, a first build otherwise.
+    assert import_data._maybe_update_profile_after_import(z.id, None, 50_000) is None
+    fresh = _make_user("sync_fresh")
+    _db.session.commit()
+    assert import_data._maybe_update_profile_after_import(fresh.id, None, 50_000) == "sync-task"
+    assert sync.call_args.kwargs == {"force_full_regen": True}
 
 
 def test_prefill_impl_imports_pins_batch_and_reports(app, monkeypatch):

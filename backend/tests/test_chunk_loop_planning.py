@@ -347,3 +347,28 @@ def test_continue_rule_boundary_is_the_render_time(app):
     u.profile_force_batch = True
     assert exports.should_continue_chain(
         u, version(None, now - timedelta(minutes=5))) is True
+
+
+
+def test_sync_heartbeat_rebuilds_a_provisional_profile_from_scratch(app, monkeypatch):
+    """Same rule on the sync heartbeat: a 10k-unit first build plus 85k
+    organic units dispatches a from-scratch build, not an update."""
+    import backend.tasks.exports as exports
+    import backend.tasks.profile_batch as pb
+    monkeypatch.setattr(pb, "use_batch_for_user", lambda *a, **k: False)
+    calls = []
+    monkeypatch.setattr(exports, "maybe_trigger_profile_update",
+                        lambda uid, **k: calls.append(k) or "task")
+    now = datetime.utcnow()
+    for units, force in ((10_000, True), (90_000, False)):
+        u = _user(f"prov{units}")
+        prof = UserProfile(user_id=u.id, generated_by="m", tokens_used=0,
+                           generation_type="initial", source_tokens_used=units,
+                           source_data_cutoff=now - timedelta(days=30),
+                           source_rendered_at=now - timedelta(days=30),
+                           created_at=now - timedelta(days=30))
+        prof.set_content("P")
+        _db.session.add(prof)
+        _node(u, 85_000, now - timedelta(days=2))
+        assert exports.maybe_trigger_incremental_profile_update(u) == "task"
+        assert calls[-1] == {"force_full_regen": force}

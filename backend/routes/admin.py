@@ -43,7 +43,7 @@ def _profile_status_map():
         UserProfile.user_id).subquery()
     latest = {p.user_id: p for p in UserProfile.query.filter(
         UserProfile.id.in_(latest_ids)).all()}
-    from backend.tasks.exports import should_continue_chain
+    from backend.tasks.exports import should_continue_chain, profile_is_provisional
     users_by_id = {u.id: u for u in User.query.all()}
     out = {}
     for user_id, n in counts.items():
@@ -73,6 +73,9 @@ def _profile_status_map():
             "last_created_at": iso_utc(last.created_at) if last else None,
             "state": "generating" if (in_flight or not at_rest or stuck) else "complete",
             "incomplete": stuck and not waiting,
+            # A first build from under a full chunk of data: rebuilt from
+            # scratch, not updated, once the organic gate next trips.
+            "provisional": profile_is_provisional(last),
             "waiting": "inactive" if waiting else None,
             "batch_attempts": (u.profile_batch_attempts or 0) if u else 0,
         }

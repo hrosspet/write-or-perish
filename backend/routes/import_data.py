@@ -1138,9 +1138,9 @@ def _maybe_update_profile_after_import(user_id, earliest_ts, imported_tokens):
     return None
 
 
-# An import below this many tokens that invalidates nothing waits for the
-# regular gates like organic writing; at or above it the chain is
-# regenerated to the end right away.
+# An account with no profile yet gets its first build from an import of
+# at least this many tokens (a pre-fill or an early signup); below it the
+# regular gate on total data applies.
 IMPORT_UPDATE_MIN_TOKENS = 10000
 
 
@@ -1154,18 +1154,17 @@ def _hand_off_profile_update_after_import(user_obj, earliest_ts, imported_tokens
       (``revert_profile_for_import``): the latest still-valid version
       becomes the tip again and the chain continues from it. Older than
       the whole chain: a from-scratch build.
-    - Data newer than the tip invalidates nothing; at or above
-      ``IMPORT_UPDATE_MIN_TOKENS`` the tip is re-tipped so the chain
-      continues over the import now, below that it waits for the gates.
-    - No profile yet: a from-scratch build at or above the threshold.
+    - Data newer than the tip invalidates nothing and starts nothing: it
+      is new data like any other and counts toward the organic gate.
+    - No profile yet: a from-scratch build at or above
+      ``IMPORT_UPDATE_MIN_TOKENS`` (a pre-fill or an early signup).
 
     Batch users (all of prod with ``PROFILE_USE_BATCH``) get an immediate
     seed — the seeder's gates and the continue rule take it from there —
     and never the synchronous full-price task; sync users dispatch it
     directly. Returns a task id or None."""
     from backend.tasks.exports import (
-        revert_profile_for_import, retip_profile_chain,
-        maybe_trigger_profile_update)
+        revert_profile_for_import, maybe_trigger_profile_update)
     from backend.tasks.profile_batch import (
         use_batch_for_user, seed_profile_batch_for_user)
 
@@ -1179,11 +1178,9 @@ def _hand_off_profile_update_after_import(user_obj, earliest_ts, imported_tokens
         user_obj.profile_needs_full_regen = True
         action = "full"
     else:
-        action, version = revert_profile_for_import(user_obj.id, earliest_ts)
+        action, _version = revert_profile_for_import(user_obj.id, earliest_ts)
         if action == "none":
-            if imported_tokens < IMPORT_UPDATE_MIN_TOKENS:
-                return None
-            retip_profile_chain(user_obj.id, version)
+            return None
     db.session.commit()
 
     if use_batch_for_user(user_obj, current_app.config):

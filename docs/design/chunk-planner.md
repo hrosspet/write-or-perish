@@ -157,11 +157,15 @@ Landed (PR #285):
   whose cutoff is later than the earliest imported timestamp and re-tips
   the chain at the latest still-valid one (a revert copy stamped with the
   import moment, so the continue rule regenerates from there to the end);
-  older than the root → from-scratch; newer than the tip → a ≥10k-token
-  import re-tips and continues now, a smaller one waits for the gates.
-  Batch accounts are seeded immediately, never sent to the synchronous
-  path. The "(Re-)Generate Profile" navbar item and its
-  `/export/update_profile` route are removed.
+  older than the root → from-scratch; newer than the tip → nothing
+  starts, the import counts toward the organic gate; no profile yet → a
+  from-scratch build from a ≥10k-token import. Batch accounts are seeded
+  immediately, never sent to the synchronous path. The "(Re-)Generate
+  Profile" navbar item and its `/export/update_profile` route are removed.
+- Provisional first builds (`profile_is_provisional`: a generated version
+  with `source_tokens_used` under T): when the organic gate next trips,
+  both gates request a from-scratch build instead of an update to a thin
+  base. Not on the continue rule; never for a user-written profile.
 
 ## Rollout
 

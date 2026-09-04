@@ -179,6 +179,20 @@ def _estimate_source_tokens(user):
     return int(total or 0)
 
 
+def profile_is_provisional(profile):
+    """A generated profile that covers less than one full chunk of data
+    (``source_tokens_used`` below ``CHUNK_TARGET_UNITS``) is a provisional
+    first build — an early signup's or a small import's — not a base worth
+    patching. When the organic gate next trips, a full chunk of writing
+    exists, so the gates request a from-scratch build instead of an update
+    (both pipelines; the flag is cleared once chunk 1 commits). A
+    user-written profile is never provisional: it is the user's own words
+    and stays the base."""
+    if profile is None or profile.generated_by == "user":
+        return False
+    return (profile.source_tokens_used or 0) < CHUNK_TARGET_UNITS
+
+
 def count_remaining_units(user_id, created_after=None):
     """Units still ahead of the chunk loop after ``created_after``, summed in
     the export window's own scope (backend.routes.export_data). Thin wrapper
@@ -1489,7 +1503,8 @@ def maybe_trigger_incremental_profile_update(user):
             f"User {user.id}: triggering profile update — "
             f"{new_tokens} units >= {UPDATE_THRESHOLD_UNITS} threshold"
         )
-        force = user.profile_needs_full_regen
+        force = bool(user.profile_needs_full_regen
+                     or profile_is_provisional(latest_profile))
         return maybe_trigger_profile_update(
             user.id, force_full_regen=force
         )

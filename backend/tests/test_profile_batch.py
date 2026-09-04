@@ -1123,3 +1123,59 @@ def test_apply_result_legacy_item_takes_its_submission_time_as_render_time(app, 
     result = {"content": "P", "input_tokens": 100, "output_tokens": 5, "total_tokens": 105}
     pb._apply_result(u, item, result, submitted)
     assert UserProfile.query.filter_by(user_id=u.id).one().source_rendered_at == submitted
+
+
+
+def test_provisional_first_build_is_rebuilt_from_scratch_at_the_organic_gate(app):
+    """A generated profile covering under a full chunk of data (an early
+    signup's first build) is provisional: when the organic gate trips, the
+    seeder requests a from-scratch build instead of an update. Not on the
+    continue rule (a chain in progress), not for a user-written base, not
+    for a profile that already covers a full chunk."""
+    ex = pb._exports
+    now = datetime.utcnow()
+
+    def account(source_tokens, generated_by="test-model", pinned=False):
+        u = _user(profile_force_batch=pinned)
+        tip = _prev_profile(u, datetime(2026, 5, 1), source_tokens=source_tokens,
+                            gen_type="iterative", rendered_at=now - timedelta(days=2))
+        tip.generated_by = generated_by
+        tip.created_at = now - timedelta(days=2)
+        db.session.commit()
+        return u, tip
+
+    def organic(user, units):
+        """Written after the tip's render: growth, not an unfinished chain."""
+        n = _seed_node(user, units)
+        n.created_at = now - timedelta(days=1)
+        db.session.commit()
+
+    # 10k-unit profile + 85k organic units → seed AND flag a rebuild.
+    u, tip = account(10_000)
+    organic(u, 85_000)
+    assert ex.profile_is_provisional(tip) is True
+    assert pb._should_seed(u) is True
+    assert User.query.get(u.id).profile_needs_full_regen is True
+
+    # A full-chunk profile is a base worth updating.
+    v, tipv = account(90_000)
+    organic(v, 85_000)
+    assert ex.profile_is_provisional(tipv) is False
+    assert pb._should_seed(v) is True
+    assert User.query.get(v.id).profile_needs_full_regen is False
+
+    # The user's own words are never provisional.
+    w, tipw = account(0, generated_by="user")
+    organic(w, 85_000)
+    assert ex.profile_is_provisional(tipw) is False
+    assert pb._should_seed(w) is True
+    assert User.query.get(w.id).profile_needs_full_regen is False
+
+    # A chain in progress (data older than the render) continues; the
+    # provisional tip is not a reason to start over.
+    x, tipx = account(10_000, pinned=True)
+    older = _seed_node(x, 3_000)
+    older.created_at = now - timedelta(days=3)
+    db.session.commit()
+    assert pb._should_seed(x) is True
+    assert User.query.get(x.id).profile_needs_full_regen is False
