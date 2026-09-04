@@ -16,11 +16,11 @@ from backend.llm_providers import LLMProvider, PromptTooLongError
 from backend.utils.tokens import reduce_export_tokens, format_date_metadata
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import calculate_llm_cost_microdollars
+from backend.utils.chunk_plan import UPDATE_THRESHOLD_UNITS
 
 logger = get_task_logger(__name__)
 
 RECENT_CONTEXT_TOKEN_THRESHOLD = 10000
-PROFILE_UPDATE_TOKEN_THRESHOLD = 80000
 MIN_INACTIVITY = timedelta(minutes=5)
 MIN_GENERATION_INTERVAL = timedelta(minutes=5)
 
@@ -127,7 +127,7 @@ def _should_generate_recent_context(user):
     else:
         total_since_profile = _count_total_eligible_tokens(user_id)
 
-    if total_since_profile >= PROFILE_UPDATE_TOKEN_THRESHOLD:
+    if total_since_profile >= UPDATE_THRESHOLD_UNITS:
         logger.debug(
             f"User {user_id}: skipping recent context — profile update "
             f"imminent ({total_since_profile} tokens)"

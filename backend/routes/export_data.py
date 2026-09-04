@@ -624,6 +624,21 @@ def _select_incremental_rows(user_id, filter_ai_usage=False,
     return list(rows_by_id.values())
 
 
+def count_remaining_units(user_id, created_after=None, filter_ai_usage=True):
+    """Stored content units (Node.token_count) still ahead of the profile
+    chunk loop after ``created_after``: the sum over exactly the rows the
+    incremental export window draws from (anchor scope plus climb-up
+    ancestors and climb-down descendants, tombstones included, the same
+    filters), so the plan made from this figure and the window it
+    produces agree. The chunk planner calls it before every chunk
+    (docs/design/chunk-planner.md). No node is loaded or decrypted.
+    """
+    rows = _select_incremental_rows(
+        user_id, filter_ai_usage=filter_ai_usage,
+        created_after=created_after)
+    return sum((r.token_count or 0) for r in rows)
+
+
 def _thread_has_alive_node(root_id):
     """Per-thread skip rule (§5a): does the subtree rooted at *root_id*
     contain any node with deleted_at IS NULL?
@@ -746,15 +761,26 @@ def _preselect_node_ids(user_id, budget, filter_ai_usage=False,
 
     inner = inner.subquery()
 
-    return [
-        row[0] for row in
-        db.session.query(inner.c.id).filter(
-            inner.c.cumul - func.coalesce(inner.c.token_count, 0) < budget
-        ).order_by(
-            inner.c.created_at.asc() if chronological_order
-            else inner.c.created_at.desc()
-        ).all()
-    ]
+    selected = db.session.query(inner.c.id, inner.c.created_at).filter(
+        inner.c.cumul - func.coalesce(inner.c.token_count, 0) < budget
+    ).order_by(
+        inner.c.created_at.asc() if chronological_order
+        else inner.c.created_at.desc()
+    ).all()
+    if not selected:
+        return []
+    ids = [row[0] for row in selected]
+    # A budget window ends between two nodes; when several nodes share
+    # the boundary timestamp, take them all. The next window starts at
+    # `created_at > cutoff`, so a node left behind on the same second as
+    # the cutoff node would never be read by any chunk (tweets carry
+    # second precision, so ties are reachable).
+    edge_ts = selected[-1][1]
+    seen = set(ids)
+    ties = db.session.query(inner.c.id).filter(
+        inner.c.created_at == edge_ts, inner.c.id.notin_(ids)).all()
+    ids.extend(row[0] for row in ties if row[0] not in seen)
+    return ids
 
 
 def get_raw_data_date_range(user_id, max_tokens=10000, created_before=None):
@@ -888,12 +914,21 @@ def _build_user_export_incremental(
         )
         cumulative = 0
         selected_ids = []
+        edge_ts = None
         for r in ordered:
             tk = r.token_count or 0
             if cumulative + tk > budget and cumulative > 0:
-                break
+                # A window ends between two rows; when the boundary
+                # falls inside a run of rows sharing one timestamp, take
+                # the whole run. The next window resumes at
+                # `created_at > cutoff`, so a row left behind on the
+                # cutoff's own second would never be read by any chunk
+                # (tweets carry second precision, so ties are reachable).
+                if r.created_at != edge_ts:
+                    break
             selected_ids.append(r.id)
             cumulative += tk
+            edge_ts = r.created_at
 
         if not selected_ids:
             return None
@@ -1119,6 +1154,11 @@ def _build_user_export_incremental(
         return {
             "content": content,
             "token_count": approximate_token_count(content),
+            # Stored units (Node.token_count) of the window's own rows:
+            # the figure the chunk planner balances on and the divisor
+            # of the per-user tokens-per-unit ratio. `token_count` above
+            # is the RENDERED chars/4 and includes scaffolding.
+            "unit_count": sum((r.token_count or 0) for r in meta_rows),
             "latest_node_created_at": latest_ts,
             "earliest_node_created_at": earliest_ts,
             "node_count": len(meta_rows),
@@ -1185,7 +1225,9 @@ def build_user_export_content(
         chronological_order: If True and max_tokens is set, select oldest
                            nodes first (for iterative profile building).
         return_metadata: If True, return a dict with `content`,
-                        `token_count`, `latest_node_created_at`,
+                        `token_count` (rendered chars/4), `unit_count`
+                        (stored Node.token_count sum of the included
+                        rows), `latest_node_created_at`,
                         `earliest_node_created_at`, `node_count`, and
                         `node_ids` (set of included node IDs; when
                         max_tokens is set this reflects the
@@ -1699,109 +1741,6 @@ def estimate_profile_tokens():
         "model": model_id,
         "has_content": True
     }), 200
-
-@export_bp.route("/export/update_profile", methods=["POST"])
-@login_required
-@require_spend_headroom
-def update_profile():
-    """
-    Unified endpoint for initial profile generation and incremental updates.
-
-    Finds the latest profile; if one exists, dispatches an incremental update.
-    Otherwise dispatches initial generation (possibly iterative).
-
-    Request body:
-        { "model": "claude-opus-5" }  (optional)
-
-    Returns:
-        { "task_id": "...", "status": "pending", "is_update": bool }
-    """
-    from backend.tasks.exports import update_user_profile
-
-    data = request.get_json() or {}
-    model_id = data.get("model")
-    force_full_regen = data.get("force_full_regen", False)
-
-    if not model_id:
-        model_id = current_app.config.get(
-            "DEFAULT_LLM_MODEL", "claude-opus-5"
-        )
-
-    if force_full_regen:
-        from backend.extensions import db as _db_flag
-        current_user.profile_needs_full_regen = True
-        _db_flag.session.commit()
-
-    if model_id not in current_app.config["SUPPORTED_MODELS"]:
-        return jsonify({
-            "error": f"Unsupported model: {model_id}",
-            "supported_models": list(
-                current_app.config["SUPPORTED_MODELS"].keys()
-            )
-        }), 400
-
-    # Check concurrency guard
-    if current_user.profile_generation_task_id:
-        from backend.tasks.exports import _is_task_stale
-        if _is_task_stale(current_user):
-            current_user.profile_generation_task_id = None
-            current_user.profile_generation_task_dispatched_at = None
-            db.session.commit()
-        else:
-            return jsonify({
-                "task_id": current_user.profile_generation_task_id,
-                "status": "already_running",
-                "is_update": False,
-            }), 200
-
-    # Quick check for any writing
-    has_threads = Node.query.filter_by(
-        user_id=current_user.id, parent_id=None
-    ).first() is not None
-    if not has_threads:
-        return jsonify({
-            "error": "No writing found to analyze."
-        }), 400
-
-    # Find latest non-integration profile
-    latest_profile = UserProfile.query.filter(
-        UserProfile.user_id == current_user.id,
-        UserProfile.generation_type != 'integration'
-    ).order_by(UserProfile.created_at.desc()).first()
-
-    # Determine if full regen is needed
-    needs_full_regen = False
-    if latest_profile:
-        if current_user.profile_needs_full_regen:
-            needs_full_regen = True
-        elif latest_profile.source_data_cutoff is None:
-            # Old profile without cutoff metadata — must regenerate
-            needs_full_regen = True
-
-    prev_id = None if needs_full_regen else (
-        latest_profile.id if latest_profile else None
-    )
-    is_update = prev_id is not None
-
-    task = update_user_profile.delay(current_user.id, model_id, prev_id)
-
-    # Set concurrency guard
-    from backend.extensions import db as _db
-    current_user.profile_generation_task_id = task.id
-    current_user.profile_generation_task_dispatched_at = datetime.utcnow()
-    _db.session.commit()
-
-    current_app.logger.info(
-        f"Enqueued profile {'update' if is_update else 'generation'} "
-        f"task {task.id} for user {current_user.id}"
-    )
-
-    return jsonify({
-        "task_id": task.id,
-        "status": "pending",
-        "is_update": is_update,
-    }), 202
-
 
 @export_bp.route("/export/integrate_profile", methods=["POST"])
 @login_required

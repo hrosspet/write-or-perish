@@ -18,6 +18,29 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_OUTPUT_TOKENS = 10000
 
 
+def model_input_cap(model_cfg, max_output_tokens=None):
+    """Input tokens one prompt may carry on this model — the tightest of:
+
+    - the context window minus the output reserve (both labs count input
+      and output in one window);
+    - ``max_input_tokens``, the provider's hard input ceiling where it is
+      below that (OpenAI reserves its full 128k max output out of the
+      window whatever you request, so a 1.05M-window model takes 922k);
+    - ``long_context_threshold``, the pricing tier above which the whole
+      request is repriced (OpenAI: 272k input → ×2 input, ×1.5 output).
+      The profile pipeline never plans a prompt across it (#259).
+    """
+    cfg = model_cfg or {}
+    out = min(max_output_tokens or DEFAULT_MAX_OUTPUT_TOKENS,
+              cfg.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS))
+    cap = cfg.get("context_window", 200_000) - out
+    for key in ("max_input_tokens", "long_context_threshold"):
+        value = cfg.get(key)
+        if value:
+            cap = min(cap, int(value))
+    return cap
+
+
 class PromptTooLongError(Exception):
     """Raised when the prompt exceeds the model's context window."""
 
@@ -437,7 +460,7 @@ class LLMProvider:
 
 def fit_by_count(model_id, api_keys, limit, budget, build_fn,
                  corpus_tokens=None, max_rounds=4, safety=0.99,
-                 min_budget=10_000, first_built=None):
+                 min_budget=10_000, first_built=None, strict=True):
     """Size a prompt BEFORE sending it: build at `budget`, count the real
     tokens (LLMProvider.count_tokens — exact on Anthropic, tiktoken
     estimate on OpenAI), and while the count exceeds `limit`, shrink the
@@ -463,7 +486,11 @@ def fit_by_count(model_id, api_keys, limit, budget, build_fn,
     Returns (built, budget, real_tokens). built is None when build_fn
     produced nothing; real_tokens is None when counting was unavailable —
     the caller's prompt-too-long retry machinery remains the backstop.
-    Raises PromptTooLongError when still over the limit after max_rounds.
+    Raises PromptTooLongError when still over the limit after max_rounds;
+    with ``strict=False`` it returns the last build instead (real_tokens
+    then exceeds ``limit``; ``budget`` is the next budget it would have
+    tried, not the one that build rendered at) so a caller with its own
+    call-time backstop keeps the closest-fitting build rather than none.
     """
     real = None
     for i in range(max_rounds):
@@ -485,4 +512,9 @@ def fit_by_count(model_id, api_keys, limit, budget, build_fn,
         logger.info(
             "fit_by_count %s: counted %s > %s limit — rebuilding at "
             "budget=%s", model_id, real, limit, budget)
-    raise PromptTooLongError(real, limit)
+    if strict:
+        raise PromptTooLongError(real, limit)
+    logger.warning(
+        "fit_by_count %s: still %s > %s limit after %s rounds — returning "
+        "the last build", model_id, real, limit, max_rounds)
+    return built, budget, real

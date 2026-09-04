@@ -43,8 +43,7 @@ def _profile_status_map():
         UserProfile.user_id).subquery()
     latest = {p.user_id: p for p in UserProfile.query.filter(
         UserProfile.id.in_(latest_ids)).all()}
-    from backend.tasks.exports import chunk_budget_for
-    from backend.tasks.profile_batch import _remaining_token_count, _model_for
+    from backend.tasks.exports import should_continue_chain, profile_is_provisional
     users_by_id = {u.id: u for u in User.query.all()}
     out = {}
     for user_id, n in counts.items():
@@ -53,16 +52,14 @@ def _profile_status_map():
         in_flight = bool(u and (u.profile_batch_pending or u.profile_needs_full_regen))
         at_rest = last is not None and (
             last.generation_type == "integration" or last.parent_profile_id is None)
-        # A chain whose latest version is a root chunk is only at rest if
-        # less than a full minimum chunk remains beyond its cutoff (a
-        # small tail legitimately waits for more data). A full chunk's
-        # worth unprocessed with nothing in flight = a stuck rebuild
+        # A chain whose latest version is a root chunk is at rest only
+        # if nothing OLDER than that version remains beyond its cutoff:
+        # such data is an unfinished chain (the continue rule the seeder
+        # applies), and with nothing in flight it is a stuck rebuild
         # (e.g. its batch failed) that ✓ would otherwise hide.
         stuck = False
-        if (at_rest and last.generation_type != "integration" and u
-                and last.source_data_cutoff is not None):
-            _, min_chunk = chunk_budget_for(u, _model_for(u))
-            stuck = _remaining_token_count(u, last.source_data_cutoff) >= min_chunk
+        if at_rest and last.generation_type != "integration" and u:
+            stuck = should_continue_chain(u, last)
         # Nothing in flight and the account can't be seeded: the hourly
         # seeder only walks approved users (budget guard), so a pre-filled
         # Inactive account with a rebuild requested (regen flag) or a
@@ -76,6 +73,9 @@ def _profile_status_map():
             "last_created_at": iso_utc(last.created_at) if last else None,
             "state": "generating" if (in_flight or not at_rest or stuck) else "complete",
             "incomplete": stuck and not waiting,
+            # A first build from under a full chunk of data: rebuilt from
+            # scratch, not updated, once the organic gate next trips.
+            "provisional": profile_is_provisional(last),
             "waiting": "inactive" if waiting else None,
             "batch_attempts": (u.profile_batch_attempts or 0) if u else 0,
         }

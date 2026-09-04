@@ -114,12 +114,14 @@ class User(db.Model, UserMixin):
     profile_force_batch = db.Column(
         db.Boolean, nullable=False, default=False,
         server_default=db.text("false"))
-    # Observed tokenizer calibration for profile chunks: actual model input
-    # tokens / our estimate (chars/4 × the model's token_multiplier) on the
-    # last chunk call. Null until the first chunk lands. Used to shrink or
-    # grow the next chunk's budget so chunks land near CHUNK_BUDGET real
-    # tokens (and below long-context pricing tiers).
+    # Measured billed input tokens per stored content unit (Node.token_count)
+    # on the user's last profile chunk, tagged with the tokenizer family it
+    # was measured on (backend/tasks/exports.TOKENIZER_FAMILIES). The chunk
+    # planner reads it only for the real-token cap check; chunk balance is
+    # in units and never depends on it. Null until the first chunk lands;
+    # a ratio without a family (or on another family) counts as unmeasured.
     profile_token_ratio = db.Column(db.Float, nullable=True)
+    profile_token_ratio_family = db.Column(db.String(16), nullable=True)
     # Community Archive handle this account was pre-filled from (admin
     # cold-start bootstrap); null for organically-grown accounts.
     prefilled_handle = db.Column(db.String(64), nullable=True)
@@ -656,6 +658,13 @@ class UserProfile(db.Model):
     source_tokens_used = db.Column(db.Integer, nullable=True, default=0)
     # Timestamp cursor: created_at of last included Node
     source_data_cutoff = db.Column(db.DateTime, nullable=True)
+    # When the window this version covers was rendered. The continue rule
+    # (backend/tasks/exports.should_continue_chain) treats unread data that
+    # existed at that moment as an unfinished chain and data written after
+    # it as organic growth, so writing during a version's own generation
+    # never produces a stray small chunk. Null on versions saved before the
+    # column existed (the rule falls back to created_at) and on integrations.
+    source_rendered_at = db.Column(db.DateTime, nullable=True)
     # Cumulative {origin: {"nodes": n, "tokens": t}} over every chunk
     # that fed this profile (NULL origin keyed "loore"). Lets an update
     # tell the model the base was e.g. 100% public tweets while the new

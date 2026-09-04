@@ -1522,3 +1522,71 @@ def test_export_render_prefetches_deks_for_every_rendered_node(app, monkeypatch)
         return_metadata=True, include_strategy="engaged_threads")
     assert "tweet 19" in out["content"] and "reply 2" in out["content"]
     assert set(seen) == {f"tweet {i}" for i in range(20)} | {"root", "reply", "reply 2"}
+
+
+class TestPlannerWindowMetadata:
+    """The chunk planner's contract with the incremental window
+    (docs/design/chunk-planner.md): a window never splits a timestamp,
+    reports its own stored units, and `count_remaining_units` sums the
+    same rows the windows draw from."""
+
+    def test_window_takes_every_row_sharing_the_boundary_timestamp(self, app):
+        from backend.routes.export_data import build_user_export_content
+        alice = _make_user("alice")
+        _db.session.commit()
+        ts = APR_07 + timedelta(days=1)
+        a = _make_node(alice, content="a", token_count=1000, created_at=ts)
+        b = _make_node(alice, content="b", token_count=1000, created_at=ts)
+        c = _make_node(alice, content="c", token_count=1000,
+                       created_at=ts + timedelta(seconds=1))
+        _db.session.commit()
+
+        # Budget for one row: the strict fit alone would stop after `a`,
+        # and a resume at created_at > ts would never read `b`.
+        result = build_user_export_content(
+            alice, filter_ai_usage=True, created_after=APR_07,
+            max_tokens=1100, chronological_order=True, return_metadata=True)
+        assert result["node_ids"] == {a.id, b.id}
+        assert result["unit_count"] == 2000
+        assert result["latest_node_created_at"] == ts
+
+        result2 = build_user_export_content(
+            alice, filter_ai_usage=True,
+            created_after=result["latest_node_created_at"],
+            max_tokens=1100, chronological_order=True, return_metadata=True)
+        assert result2["node_ids"] == {c.id}
+        assert result2["unit_count"] == 1000
+
+    def test_count_remaining_units_matches_the_windows(self, app):
+        from backend.routes.export_data import (
+            build_user_export_content, count_remaining_units)
+        alice, bob = _make_user("alice"), _make_user("bob")
+        _db.session.commit()
+        nodes = [
+            _make_node(alice, content=f"n{i}", token_count=1000,
+                       created_at=APR_07 + timedelta(days=i + 1))
+            for i in range(3)
+        ]
+        _make_node(alice, content="opted out", token_count=999,
+                   ai_usage="none", created_at=APR_18)          # not AI-readable
+        _make_node(bob, content="someone else", token_count=999,
+                   created_at=APR_18)                           # not in scope
+        _db.session.commit()
+
+        assert count_remaining_units(alice.id, APR_07) == 3000
+        assert count_remaining_units(alice.id, None) == 3000
+        assert count_remaining_units(alice.id, nodes[0].created_at) == 2000
+
+        # Walking the windows to exhaustion covers exactly that sum.
+        covered, cutoff = 0, APR_07
+        while True:
+            w = build_user_export_content(
+                alice, filter_ai_usage=True, created_after=cutoff,
+                max_tokens=1100, chronological_order=True,
+                return_metadata=True)
+            if not w:
+                break
+            covered += w["unit_count"]
+            cutoff = w["latest_node_created_at"]
+        assert covered == 3000
+        assert count_remaining_units(alice.id, cutoff) == 0

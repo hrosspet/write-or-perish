@@ -32,13 +32,13 @@ Write or Perish evolves from journaling app to **distributed intelligence networ
 - ✅ **Text + voice journaling** — Write or speak your thoughts, with resilient voice recording that survives interruptions and tab closures without dropping the pre-interruption audio
 - ✅ **Tree-structured conversations with AI** — Hierarchical threads with multiple LLM models (GPT-5.4, Claude 4.6 Sonnet/Opus) and up to 1M context windows
 - ✅ **Agentic Voice workflow** — Single voice-first mode where AI actively helps during conversation: creates and manages todos, proposes changes, creates GitHub issues — all hands-free
-- ✅ **AI-generated user profile** — Automatic analysis of your full writing archive, kept fresh as you add new entries
+- ✅ **AI-generated user profile** — Automatic analysis of your full writing archive, kept fresh as you add new entries. The archive is read in equal planned chunks that always reach your newest entries (PR #285, `docs/design/chunk-planner.md`): a pre-filled or imported archive is folded in to the end instead of leaving a tail for a "next update" that never comes, and the chunk size respects each model's input cap and pricing tier. A first profile appears after ~5k units of writing and is rebuilt from scratch at each step of a small ladder until it covers a full chunk; from there on it is updated incrementally
 - ✅ **Todo management** — AI-proposed actionable tasks with collapsible nested lists, arising naturally from voice and text conversations
 - ✅ **Global search (Cmd+K)** — Search across all entries with date filtering
 - ✅ **Text-to-speech** — Listen to any entry or your AI profile read aloud, with section-aware chapters: markdown headings become navigable chapters with a live now-playing indicator and a jump-to-chapter dropdown
 - ✅ **Audio download** — Download voice sessions as mp3
 - ✅ **Customizable AI prompts** — View and edit the system prompts that guide AI behavior, with per-thread overrides
-- ✅ **Data import** — Import conversation history from Claude
+- ✅ **Data import** — Import conversation history from Claude, ChatGPT, an X/Twitter archive or markdown files. An import invalidates only the profile versions whose window would have held the imported data and regenerates the chain from the last still-valid version to the end; data newer than the profile is treated like any other new writing
 - ✅ **Pin to profile** — Curate your profile by pinning selected entries
 - ✅ **Version history** — All artifacts versioned behind the scenes (not yet exposed in UI)
 - ✅ **Personal Log** — Private chronological view of all your entries

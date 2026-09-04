@@ -78,10 +78,18 @@ def test_full_regen_clears_flag_after_first_chunk(app, monkeypatch):
     chunk = {
         "content": "the user's oldest writing",
         "token_count": 90000,
+        "unit_count": 90000,
         "latest_node_created_at": datetime(2025, 2, 11, 10, 26, 14),
     }
     monkeypatch.setattr(exports, "build_user_export_content",
                         MagicMock(side_effect=[chunk, None]))
+    # The planner's remainder: more than one chunk's worth (so chunk 1 is
+    # an iterative root, not a single-chunk "initial"), then nothing.
+    monkeypatch.setattr(exports, "count_remaining_units",
+                        MagicMock(side_effect=[200_000, 0]))
+    import backend.llm_providers as lp
+    monkeypatch.setattr(lp.LLMProvider, "count_tokens",
+                        staticmethod(lambda m, msgs, k: None))
     monkeypatch.setattr(exports, "_call_llm_with_retries",
                         MagicMock(return_value={
                             "content": "PROFILE v1",

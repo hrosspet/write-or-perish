@@ -122,6 +122,23 @@ class Config:
     PRICING_UPDATED_AT = "2026-09-03"
 
     # Supported models configuration (single source of truth for all model metadata)
+    #
+    # Profile-chunk sizing keys (docs/design/chunk-planner.md):
+    #   tokenizer_family  — which BPE the model bills with: "claude_old"
+    #                       (Opus ≤ 4.6, Sonnet 4.6, Haiku 4.5), "claude_new"
+    #                       (introduced with Opus 4.7: Opus 4.7/4.8/5, Sonnet 5,
+    #                       Fable 5/5.1; 1.0–1.35× the old family), "o200k"
+    #                       (GPT-5.x; tiktoken o200k_base matches billing).
+    #                       Chunk balance is in stored content units and does
+    #                       not depend on the family; the family only selects
+    #                       the prior for the real-token cap check and tags the
+    #                       per-user measured ratio.
+    #   max_input_tokens  — the provider's hard input ceiling when it sits
+    #                       below the context window: OpenAI reserves its full
+    #                       128k max output out of the window whatever is
+    #                       requested, so a 1.05M window takes 922k of input.
+    #   long_context_threshold — the pricing tier; the profile pipeline never
+    #                       plans a prompt across it (#259).
     SUPPORTED_MODELS = {
         "gpt-6-astra": {
             "provider": "openai",
@@ -144,8 +161,10 @@ class Config:
             "token_multiplier": 2.0,
         },
         "gpt-5.6-sol": {
+            "tokenizer_family": "o200k",
             "provider": "openai",
             "api_model": "gpt-5.6-sol",
+            "max_input_tokens": 922000,
             "display_name": "GPT-5.6 Sol",
             "context_window": 1050000,
             # Lowered 2026-08-25 (was 5.00 / 30.00); promotional pricing
@@ -157,14 +176,12 @@ class Config:
             "long_context_threshold": 272000,
             "long_context_input_multiplier": 2.0,
             "long_context_output_multiplier": 1.5,
-            # New-generation tokenizer: ~2 chars/token on real corpora
-            # (tweets measured at 3.2x the chars/4 estimate). Scales the
-            # stored chars/4 token counts when sizing profile chunks.
-            "token_multiplier": 2.0,
         },
         "gpt-5.5": {
+            "tokenizer_family": "o200k",
             "provider": "openai",
             "api_model": "gpt-5.5",
+            "max_input_tokens": 922000,
             "display_name": "GPT-5.5",
             "context_window": 1050000,
             "input_price_per_mtok": 5.00,
@@ -176,8 +193,10 @@ class Config:
             "long_context_output_multiplier": 1.5,
         },
         "gpt-5.4": {
+            "tokenizer_family": "o200k",
             "provider": "openai",
             "api_model": "gpt-5.4",
+            "max_input_tokens": 922000,
             "display_name": "GPT-5.4",
             "context_window": 1050000,
             "input_price_per_mtok": 2.50,
@@ -187,6 +206,7 @@ class Config:
             "long_context_output_multiplier": 1.5,
         },
         "gpt-5": {
+            "tokenizer_family": "o200k",
             "provider": "openai",
             "api_model": "gpt-5",
             "display_name": "GPT-5",
@@ -196,6 +216,7 @@ class Config:
             "deprecated": True,
         },
         "gpt-5.1": {
+            "tokenizer_family": "o200k",
             "provider": "openai",
             "api_model": "gpt-5.1",
             "display_name": "GPT-5.1",
@@ -205,6 +226,7 @@ class Config:
             "deprecated": True,
         },
         "gpt-5.2": {
+            "tokenizer_family": "o200k",
             "provider": "openai",
             "api_model": "gpt-5.2",
             "display_name": "GPT-5.2",
@@ -214,6 +236,7 @@ class Config:
             "deprecated": True,
         },
         "claude-sonnet-4.5": {
+            "tokenizer_family": "claude_old",
             "provider": "anthropic",
             "api_model": "claude-sonnet-4-5-20250929",
             "display_name": "Claude 4.5 Sonnet",
@@ -223,6 +246,7 @@ class Config:
             "deprecated": True,
         },
         "claude-sonnet-4.6": {
+            "tokenizer_family": "claude_old",
             "provider": "anthropic",
             "api_model": "claude-sonnet-4-6",
             "display_name": "Claude 4.6 Sonnet",
@@ -231,18 +255,16 @@ class Config:
             "output_price_per_mtok": 15.00,
         },
         "claude-opus-5": {
+            "tokenizer_family": "claude_new",
             "provider": "anthropic",
             "api_model": "claude-opus-5",
             "display_name": "Claude Opus 5",
             "context_window": 1000000,
             "input_price_per_mtok": 5.00,
             "output_price_per_mtok": 25.00,
-            # New-generation tokenizer: ~2 chars/token on real corpora
-            # (tweets measured at 3.2x the chars/4 estimate). Scales the
-            # stored chars/4 token counts when sizing profile chunks.
-            "token_multiplier": 2.0,
         },
         "claude-opus-4.5": {
+            "tokenizer_family": "claude_old",
             "provider": "anthropic",
             "api_model": "claude-opus-4-5-20251101",
             "display_name": "Claude 4.5 Opus",
@@ -252,6 +274,7 @@ class Config:
             "deprecated": True,
         },
         "claude-opus-4.6": {
+            "tokenizer_family": "claude_old",
             "provider": "anthropic",
             "api_model": "claude-opus-4-6",
             "display_name": "Claude 4.6 Opus",
@@ -260,6 +283,7 @@ class Config:
             "output_price_per_mtok": 25.00,
         },
         "claude-opus-4.8": {
+            "tokenizer_family": "claude_new",
             "provider": "anthropic",
             "api_model": "claude-opus-4-8",
             "display_name": "Claude 4.8 Opus",
@@ -268,6 +292,7 @@ class Config:
             "output_price_per_mtok": 25.00,
         },
         "claude-opus-4.7": {
+            "tokenizer_family": "claude_new",
             "provider": "anthropic",
             "api_model": "claude-opus-4-7",
             "display_name": "Claude 4.7 Opus",
@@ -276,6 +301,7 @@ class Config:
             "output_price_per_mtok": 25.00,
         },
         "claude-fable-5.1": {
+            "tokenizer_family": "claude_new",
             "provider": "anthropic",
             "api_model": "claude-fable-5-1",
             "display_name": "Claude Fable 5.1",
@@ -286,24 +312,18 @@ class Config:
             # Cache hits on Fable 5.1 bill at 0.025x base input ($0.25/MTok),
             # not the 0.1x every other Anthropic model uses.
             "cache_read_multiplier": 0.025,
-            # New-generation tokenizer: ~2 chars/token on real corpora
-            # (tweets measured at 3.2x the chars/4 estimate). Scales the
-            # stored chars/4 token counts when sizing profile chunks.
-            "token_multiplier": 2.0,
         },
         "claude-fable-5": {
+            "tokenizer_family": "claude_new",
             "provider": "anthropic",
             "api_model": "claude-fable-5",
             "display_name": "Claude Fable 5",
             "context_window": 1000000,
             "input_price_per_mtok": 10.00,
             "output_price_per_mtok": 50.00,
-            # New-generation tokenizer: ~2 chars/token on real corpora
-            # (tweets measured at 3.2x the chars/4 estimate). Scales the
-            # stored chars/4 token counts when sizing profile chunks.
-            "token_multiplier": 2.0,
         },
         "claude-opus-3": {
+            "tokenizer_family": "claude_old",
             "provider": "anthropic",
             "api_model": "claude-3-opus-20240229",
             "display_name": "Claude 3 Opus",
