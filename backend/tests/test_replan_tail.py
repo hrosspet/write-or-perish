@@ -168,3 +168,24 @@ def test_apply_branch_stamps_a_render_time_on_legacy_versions(app):
     copy = rt.apply_branch(u, v[0])
     assert copy.source_rendered_at is not None
     assert should_continue_chain(u, copy) is True            # the repair is the trigger
+
+
+def test_plan_repair_falls_back_to_a_from_scratch_rebuild(app):
+    u = User(username="scrygl", plan="alpha", twitter_id=None, approved=True,
+             prefilled_handle="scrygl", profile_force_batch=True)
+    _db.session.add(u)
+    _db.session.commit()
+    # 60 days × 1,000 units; the old build saved one chunk over the first
+    # 40 days and deferred the 20k tail. No version plans into the band
+    # (20k after the only version), but the whole corpus is one chunk.
+    _tweets(u, datetime(2025, 1, 1), 60, 1000)
+    v = _chain(u, [datetime(2025, 1, 1) + timedelta(days=39)])
+
+    plan = rt.plan_repair(u)
+    assert plan["status"] == "rebuild"
+    assert plan["tail"] == 20_000 and plan["total"] == 60_000
+    assert plan["plan"] == (1, 60_000)
+    assert [s.id for s in plan["superseded"]] == [v[0].id]
+
+    rt.apply_rebuild(u)
+    assert User.query.get(u.id).profile_needs_full_regen is True

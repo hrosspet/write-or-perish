@@ -24,6 +24,18 @@ use — which becomes the chain tip: the continue rule then seeds the
 account, the planner covers the remainder in equal chunks, and the chain
 re-integrates. The superseded versions stay as history.
 
+When NO version qualifies — the tail is under the band and so is every
+remainder up the chain (a small corpus whose old build left a deferred
+tail behind one chunk) — the repair is a from-scratch rebuild: the whole
+corpus planned from the beginning is even by construction (one chunk, or
+equal chunks), where the pipeline on its own would fold the tail in as
+one tiny update plus an integration. Applying sets
+``profile_needs_full_regen``, which the batch seeder honours; the old
+chain stays as unchained history.
+
+Output lists only the accounts a repair applies to, with a one-line tally
+of the rest; ``--verbose`` prints every account.
+
 Dry run by default: prints every account's chain, tail and plan, and
 writes nothing. --apply writes the revert rows; --seed also dispatches
 an immediate batch seed for each applied account (pinned accounts only
@@ -86,8 +98,13 @@ def plan_repair(user):
     choice = choose_branch(versions)
     out = {"tip": tip, "tail": tail, "versions": versions, "choice": choice}
     if choice is None:
-        out["status"] = (f"no version plans into chunks within "
-                         f"{CHUNK_BAND:.0%} of T — corpus too small")
+        # No branch point makes the tail even; the whole corpus from the
+        # beginning is even by construction (the planner's own plan).
+        total = count_remaining_units(user.id, None)
+        out["status"] = "rebuild"
+        out["total"] = total
+        out["plan"] = plan_chunks(total)
+        out["superseded"] = [v for v, _ in versions]
     elif choice[0].id == tip.id:
         out["status"] = ("tail already plans into full chunks — the continue "
                          "rule picks it up; nothing to write")
@@ -108,6 +125,16 @@ def apply_branch(user, version):
     return copy
 
 
+def apply_rebuild(user):
+    """Request a from-scratch build: the flag overrides the seeding gates,
+    the request builder ignores the existing chain, and chunk 1 clears it
+    once committed (backend.tasks.profile_batch). The old chain stays as
+    unchained history."""
+    from backend.extensions import db
+    user.profile_needs_full_regen = True
+    db.session.commit()
+
+
 def _fmt_version(v, remaining):
     k, size = plan_chunks(remaining)
     cutoff = v.source_data_cutoff.strftime("%Y-%m-%d") if v.source_data_cutoff else "—"
@@ -122,9 +149,13 @@ def main():
     ap.add_argument("--all-prefilled", action="store_true",
                     help="every account with a prefilled_handle")
     ap.add_argument("--apply", action="store_true",
-                    help="write the revert rows (default: dry run)")
+                    help="write the revert rows / set the rebuild flags "
+                         "(default: dry run)")
     ap.add_argument("--seed", action="store_true",
                     help="with --apply: dispatch an immediate batch seed")
+    ap.add_argument("--verbose", "-v", action="store_true",
+                    help="print every account (default: only the accounts "
+                         "a repair applies to, plus a tally of the rest)")
     args = ap.parse_args()
     if not args.user and not args.all_prefilled:
         ap.error("give --user NAME (repeatable) or --all-prefilled")
@@ -144,8 +175,14 @@ def main():
                 users.append(u)
 
         applied = []
+        tally = {}
         for user in users:
             plan = plan_repair(user)
+            status = plan["status"]
+            actionable = status in ("branch", "rebuild")
+            if not actionable and not args.verbose:
+                tally[status] = tally.get(status, 0) + 1
+                continue
             print(f"@{user.username} (id {user.id}, pinned={user.profile_force_batch}, "
                   f"handle={user.prefilled_handle}, in flight={user.profile_batch_pending})")
             if "versions" in plan:
@@ -153,22 +190,38 @@ def main():
                       f"{plan['tip'].source_data_cutoff:%Y-%m-%d}")
                 for v, remaining in plan["versions"]:
                     print(_fmt_version(v, remaining))
-            print(f"  → {plan['status']}")
-            if plan.get("status") != "branch":
+            print(f"  → {status}")
+            if not actionable:
                 print()
                 continue
-            version, k, size = plan["choice"]
-            print(f"    branch from v{version.id} (cutoff "
-                  f"{version.source_data_cutoff:%Y-%m-%d}): {k} chunk(s) of "
-                  f"{size:,.0f} units; supersedes "
-                  f"{len(plan['superseded'])} version(s)")
+            if status == "branch":
+                version, k, size = plan["choice"]
+                print(f"    branch from v{version.id} (cutoff "
+                      f"{version.source_data_cutoff:%Y-%m-%d}): {k} chunk(s) of "
+                      f"{size:,.0f} units; supersedes "
+                      f"{len(plan['superseded'])} version(s)")
+            else:
+                k, size = plan["plan"]
+                print(f"    rebuild from scratch: {plan['total']:,} units → "
+                      f"{k} chunk(s) of {size:,.0f}; supersedes the whole "
+                      f"chain ({len(plan['superseded'])} version(s))")
             if args.apply:
                 if user.profile_batch_pending:
                     print("    SKIPPED: a batch step is in flight")
-                else:
-                    copy = apply_branch(user, version)
+                elif status == "branch":
+                    copy = apply_branch(user, plan["choice"][0])
                     print(f"    wrote revert v{copy.id} → chain tip")
                     applied.append(user)
+                else:
+                    apply_rebuild(user)
+                    print("    set profile_needs_full_regen → from-scratch build")
+                    applied.append(user)
+            print()
+
+        if tally:
+            print(f"nothing to do for {sum(tally.values())} account(s): "
+                  + "; ".join(f"{n} × {st}" for st, n in
+                              sorted(tally.items(), key=lambda kv: -kv[1])))
             print()
 
         if args.apply and args.seed:
