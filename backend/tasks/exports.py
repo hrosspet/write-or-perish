@@ -28,6 +28,7 @@ logger = get_task_logger(__name__)
 # module and are re-exported here for the chunk loops and the batch builder.
 from backend.utils.chunk_plan import (  # noqa: E402,F401
     CHUNK_TARGET_UNITS, UPDATE_THRESHOLD_UNITS, CAP_MARGIN,
+    PROVISIONAL_THRESHOLDS, next_build_threshold,
     plan_chunks, next_window_budget, max_units_for_cap)
 
 # Tokenizer families: which BPE a model bills with (config
@@ -181,16 +182,29 @@ def _estimate_source_tokens(user):
 
 def profile_is_provisional(profile):
     """A generated profile that covers less than one full chunk of data
-    (``source_tokens_used`` below ``CHUNK_TARGET_UNITS``) is a provisional
-    first build — an early signup's or a small import's — not a base worth
-    patching. When the organic gate next trips, a full chunk of writing
-    exists, so the gates request a from-scratch build instead of an update
-    (both pipelines; the flag is cleared once chunk 1 commits). A
-    user-written profile is never provisional: it is the user's own words
-    and stays the base."""
+    (``source_tokens_used`` below ``CHUNK_TARGET_UNITS``) is provisional —
+    an early signup's or a small import's build — not a base worth
+    patching: it is replaced from scratch each time the account's total
+    data crosses the next step of the provisional ladder
+    (``provisional_build_due``), the earlier versions staying as history,
+    unchained. A user-written profile is never provisional: it is the
+    user's own words and stays the base."""
     if profile is None or profile.generated_by == "user":
         return False
     return (profile.source_tokens_used or 0) < CHUNK_TARGET_UNITS
+
+
+def provisional_build_due(user, latest_profile):
+    """Whether an account with no profile, or a provisional one, has
+    crossed the next step of the provisional ladder (5k, 10k, 15k, 25k,
+    50k, then T) with its total AI-readable units — the from-scratch build
+    that replaces the current version is due. Both seeding gates apply it
+    in place of the 80k incremental gate while the profile is provisional.
+    Returns (due, total_units, threshold)."""
+    covered = (latest_profile.source_tokens_used or 0) if latest_profile else 0
+    threshold = next_build_threshold(covered)
+    total = _estimate_source_tokens(user)
+    return (threshold is not None and total >= threshold), total, threshold
 
 
 def count_remaining_units(user_id, created_after=None):
@@ -1469,6 +1483,23 @@ def maybe_trigger_incremental_profile_update(user):
         if (datetime.utcnow() - latest_profile.created_at) < MIN_INTERVAL:
             return None
 
+    # No profile, or a provisional one: the ladder decides, and every
+    # build is from scratch (the earlier provisional versions stay as
+    # history, unchained).
+    if latest_profile is None or profile_is_provisional(latest_profile):
+        due, total, threshold = provisional_build_due(user, latest_profile)
+        if not due:
+            logger.debug(
+                f"User {user.id}: {total} units, next provisional build at "
+                f"{threshold}")
+            return None
+        logger.info(
+            f"User {user.id}: {total} units >= {threshold} — "
+            f"{'first' if latest_profile is None else 'next provisional'} "
+            f"build from scratch")
+        return maybe_trigger_profile_update(user.id, force_full_regen=True)
+
+    if latest_profile:
         cutoff = latest_profile.source_data_cutoff
         from sqlalchemy import func, or_
         q = db.session.query(
@@ -1487,26 +1518,14 @@ def maybe_trigger_incremental_profile_update(user):
             # never checked — otherwise a hand-written profile with almost no
             # data gets needlessly overwritten by an LLM generation.
             new_tokens = q.scalar()
-    else:
-        # No profile exists: check total eligible tokens
-        from sqlalchemy import func, or_
-        new_tokens = db.session.query(
-            func.coalesce(func.sum(Node.token_count), 0)
-        ).filter(
-            or_(Node.user_id == user.id,
-                Node.human_owner_id == user.id),
-            Node.ai_usage.in_(['chat', 'train']),
-        ).scalar()
 
     if new_tokens >= UPDATE_THRESHOLD_UNITS:
         logger.info(
             f"User {user.id}: triggering profile update — "
             f"{new_tokens} units >= {UPDATE_THRESHOLD_UNITS} threshold"
         )
-        force = bool(user.profile_needs_full_regen
-                     or profile_is_provisional(latest_profile))
         return maybe_trigger_profile_update(
-            user.id, force_full_regen=force
+            user.id, force_full_regen=user.profile_needs_full_regen
         )
 
     logger.debug(

@@ -85,3 +85,15 @@ def test_max_units_for_cap():
     # Unknown cap or ratio: no cap on the plan.
     assert max_units_for_cap(None, 2.0) is None
     assert max_units_for_cap(272_000, 0) is None
+
+
+def test_next_build_threshold_walks_the_provisional_ladder():
+    from backend.utils.chunk_plan import next_build_threshold, PROVISIONAL_THRESHOLDS
+    assert PROVISIONAL_THRESHOLDS == (5_000, 10_000, 15_000, 25_000, 50_000)
+    assert next_build_threshold(0) == 5_000        # the minimum for any profile
+    assert next_build_threshold(None) == 5_000
+    assert next_build_threshold(7_000) == 10_000
+    assert next_build_threshold(10_000) == 15_000  # a step is crossed strictly
+    assert next_build_threshold(26_000) == 50_000
+    assert next_build_threshold(60_000) == T       # the first non-provisional build
+    assert next_build_threshold(T) is None         # from here the 80k gate applies

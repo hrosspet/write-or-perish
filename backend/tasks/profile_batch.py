@@ -159,26 +159,24 @@ def _should_seed(user):
     # pinned-account special case and never leaves a tail unread.
     if latest is not None and _exports.should_continue_chain(user, latest):
         return True
-    if latest:
-        if (datetime.utcnow() - latest.created_at) < MIN_INTERVAL:
-            return False
-        # Null cutoff (e.g. a user-written profile): nothing has been folded in
-        # yet, so all eligible data counts as new — measure it instead of
-        # force-seeding (mirrors maybe_trigger_incremental_profile_update).
-        cutoff = latest.source_data_cutoff
-        new_tokens = _new_token_count(user, cutoff)
-    else:
-        new_tokens = _new_token_count(user, None)
-    if new_tokens < UPDATE_THRESHOLD_UNITS:
+    if latest and (datetime.utcnow() - latest.created_at) < MIN_INTERVAL:
         return False
-    if _exports.profile_is_provisional(latest):
-        # The one side effect of this gate: a provisional first build
-        # (under a full chunk of data) is rebuilt from scratch now that a
-        # full chunk of writing exists, not patched — the request builder
-        # honours the flag and clears it once chunk 1 commits.
-        user.profile_needs_full_regen = True
-        db.session.commit()
-    return True
+    if latest is None or _exports.profile_is_provisional(latest):
+        # No profile, or a provisional one: the ladder (5k, 10k, 15k, 25k,
+        # 50k, then T) decides, and the build is from scratch — the one
+        # side effect of this gate is the regen flag, which the request
+        # builder honours and clears once chunk 1 commits. The earlier
+        # provisional versions stay as history, unchained.
+        due, _total, _threshold = _exports.provisional_build_due(user, latest)
+        if due:
+            user.profile_needs_full_regen = True
+            db.session.commit()
+        return due
+    # Null cutoff (e.g. a user-written profile): nothing has been folded in
+    # yet, so all eligible data counts as new — measure it instead of
+    # force-seeding (mirrors maybe_trigger_incremental_profile_update).
+    new_tokens = _new_token_count(user, latest.source_data_cutoff)
+    return new_tokens >= UPDATE_THRESHOLD_UNITS
 
 
 def _build_next_profile_request(user, allow_chunk=True):

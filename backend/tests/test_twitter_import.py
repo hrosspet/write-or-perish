@@ -525,24 +525,26 @@ def test_import_invalidates_only_the_versions_it_touches(app, monkeypatch):
     assert User.query.get(w.id).profile_needs_full_regen is True
     assert _tip(w).generation_type == "update"                  # nothing re-tipped
 
-    # Newer than the tip: nothing invalidated, nothing started, whatever
-    # the size — the import is new data and counts toward the organic gate.
+    # Newer than the tip: nothing invalidated and nothing re-tipped; the
+    # seeding gate is evaluated right away (an immediate seed, whose gates
+    # decide) instead of at the next hourly beat.
     x = _make_user("batch_newer")
     _db.session.commit()
     vx = _chain(x, cutoffs)
     seed.reset_mock()
     for tokens in (5_000, 500_000):
         assert hand_off(x, datetime(2026, 4, 1), tokens) is None
-        assert _tip(x).id == vx[2].id and seed.call_count == 0
+        assert _tip(x).id == vx[2].id
         assert User.query.get(x.id).profile_needs_full_regen is False
+    assert seed.call_count == 2
 
-    # No profile yet: from scratch at the threshold, nothing below it.
+    # No profile yet: same — the ladder in the seeder's gate decides.
     y = _make_user("batch_fresh")
     _db.session.commit()
-    assert hand_off(y, None, 5_000) is None
-    assert User.query.get(y.id).profile_needs_full_regen is False
+    seed.reset_mock()
     assert hand_off(y, None, 50_000) is None
-    assert User.query.get(y.id).profile_needs_full_regen is True
+    assert seed.call_args.args == (y.id,)
+    assert User.query.get(y.id).profile_needs_full_regen is False
 
     # Sync account: same decisions, dispatched directly.
     app.config["PROFILE_USE_BATCH"] = False
@@ -554,13 +556,15 @@ def test_import_invalidates_only_the_versions_it_touches(app, monkeypatch):
     assert _tip(z).parent_profile_id == vz[1].id
     assert hand_off(z, datetime(2025, 1, 1), 2_000) == "sync-task"
     assert sync.call_args.kwargs == {"force_full_regen": True}
-    # The Twitter wrapper goes through the same hand-off: nothing for an
-    # account whose profile the import leaves valid, a first build otherwise.
-    assert import_data._maybe_update_profile_after_import(z.id, None, 50_000) is None
+    # Nothing invalidated on a sync account: the heartbeat's gate runs now.
+    heartbeat = MagicMock(return_value="gated")
+    monkeypatch.setattr(ex, "maybe_trigger_incremental_profile_update", heartbeat)
+    assert hand_off(z, datetime(2026, 9, 1), 50_000) == "gated"
+    assert heartbeat.call_args.args[0].id == z.id
+    # The Twitter wrapper goes through the same hand-off.
     fresh = _make_user("sync_fresh")
     _db.session.commit()
-    assert import_data._maybe_update_profile_after_import(fresh.id, None, 50_000) == "sync-task"
-    assert sync.call_args.kwargs == {"force_full_regen": True}
+    assert import_data._maybe_update_profile_after_import(fresh.id, None, 50_000) == "gated"
 
 
 def test_prefill_impl_imports_pins_batch_and_reports(app, monkeypatch):

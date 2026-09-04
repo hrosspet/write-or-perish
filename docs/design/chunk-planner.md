@@ -157,15 +157,20 @@ Landed (PR #285):
   whose cutoff is later than the earliest imported timestamp and re-tips
   the chain at the latest still-valid one (a revert copy stamped with the
   import moment, so the continue rule regenerates from there to the end);
-  older than the root → from-scratch; newer than the tip → nothing
-  starts, the import counts toward the organic gate; no profile yet → a
-  from-scratch build from a ≥10k-token import. Batch accounts are seeded
-  immediately, never sent to the synchronous path. The "(Re-)Generate
-  Profile" navbar item and its `/export/update_profile` route are removed.
-- Provisional first builds (`profile_is_provisional`: a generated version
-  with `source_tokens_used` under T): when the organic gate next trips,
-  both gates request a from-scratch build instead of an update to a thin
-  base. Not on the continue rule; never for a user-written profile.
+  older than the root → from-scratch; otherwise nothing is invalidated
+  and the account's seeding gate is evaluated right away instead of at
+  the next hourly beat. Batch accounts are seeded immediately, never sent
+  to the synchronous path. The "(Re-)Generate Profile" navbar item and its
+  `/export/update_profile` route are removed.
+- Provisional ladder (`PROVISIONAL_THRESHOLDS` = 5k, 10k, 15k, 25k, 50k,
+  then T; `next_build_threshold`, `provisional_build_due`): while an
+  account has no profile or a provisional one (`profile_is_provisional`:
+  a generated version with `source_tokens_used` under T), both seeding
+  gates rebuild it from scratch, unchained, each time the total
+  AI-readable units cross the next step above the current coverage; 5k
+  is the minimum for any profile, the build at T the first
+  non-provisional one, after which the 80k incremental gate applies. Not
+  on the continue rule; never for a user-written profile.
 
 ## Rollout
 

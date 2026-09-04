@@ -1179,3 +1179,48 @@ def test_provisional_first_build_is_rebuilt_from_scratch_at_the_organic_gate(app
     db.session.commit()
     assert pb._should_seed(x) is True
     assert User.query.get(x.id).profile_needs_full_regen is False
+
+
+def test_provisional_ladder_drives_first_builds_and_rebuilds(app):
+    """No profile, or a provisional one: the seeder fires a from-scratch
+    build each time the account's total units cross the next ladder step
+    (5k, 10k, 15k, 25k, 50k, then T); between steps nothing happens."""
+    ex = pb._exports
+    now = datetime.utcnow()
+
+    def write(user, units):
+        n = _seed_node(user, units)
+        n.created_at = now - timedelta(days=1)
+        db.session.commit()
+
+    # A new signup: nothing at 4k, the first build at 5k.
+    u = _user()
+    db.session.commit()
+    write(u, 4_000)
+    assert pb._should_seed(u) is False
+    write(u, 1_000)
+    assert pb._should_seed(u) is True
+    assert User.query.get(u.id).profile_needs_full_regen is True
+    assert ex.provisional_build_due(u, None) == (True, 5_000, 5_000)
+
+    # A provisional profile covering 7k: the next step is 10k.
+    v = _user()
+    tip = _prev_profile(v, datetime(2026, 5, 1), source_tokens=7_000,
+                        gen_type="initial", rendered_at=now - timedelta(days=2))
+    tip.created_at = now - timedelta(days=2)
+    write(v, 9_000)
+    assert pb._should_seed(v) is False
+    assert ex.provisional_build_due(v, tip) == (False, 9_000, 10_000)
+    write(v, 1_000)
+    assert pb._should_seed(v) is True
+    assert User.query.get(v.id).profile_needs_full_regen is True   # from scratch, unchained
+
+    # Covering 60k: the next build is the first full one at T.
+    w = _user()
+    tipw = _prev_profile(w, datetime(2026, 5, 1), source_tokens=60_000,
+                         gen_type="initial", rendered_at=now - timedelta(days=2))
+    tipw.created_at = now - timedelta(days=2)
+    write(w, 89_000)
+    assert pb._should_seed(w) is False
+    write(w, 1_000)
+    assert pb._should_seed(w) is True

@@ -22,6 +22,26 @@ CHUNK_TARGET_UNITS = 90_000
 # backend/tasks/exports.py.
 UPDATE_THRESHOLD_UNITS = 80_000
 
+# Provisional ladder: an account whose profile covers less than T (or has
+# none) gets a from-scratch build each time its total AI-readable units
+# cross the next step — 5k is the minimum for any profile at all — and
+# the build at T is the first non-provisional one; from there the 80k
+# incremental gate takes over. The earlier provisional versions stay in
+# the database but are never chained to.
+PROVISIONAL_THRESHOLDS = (5_000, 10_000, 15_000, 25_000, 50_000)
+
+
+def next_build_threshold(covered_units):
+    """The total-units mark at which the next from-scratch build is due
+    for an account whose profile (if any) covers ``covered_units`` and is
+    still provisional: the first ladder step above the coverage, then T.
+    None once the coverage reaches T — the incremental gate applies."""
+    for step in PROVISIONAL_THRESHOLDS + (CHUNK_TARGET_UNITS,):
+        if step > (covered_units or 0):
+            return step
+    return None
+
+
 # μ: fraction of the model's input cap held back when the planner turns
 # the cap into a maximum chunk size, covering ratio drift between one
 # chunk and the next (tokens per unit moved 2.39 → 1.61 → 1.77 across
