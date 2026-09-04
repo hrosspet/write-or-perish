@@ -598,8 +598,11 @@ def revert_profile_for_import(user_id, earliest_imported_created_at):
     """Invalidate only the profile versions an import touches.
 
     A version is invalid when its window would have held the imported
-    data: its cutoff is later than the earliest imported timestamp. The
-    latest version whose cutoff is at or before that timestamp is still
+    data: its cutoff is at or later than the earliest imported timestamp
+    (a window takes every node on its cutoff's own second and the next
+    one starts strictly after it, so a node imported onto that second
+    belongs to this version, not a later one). The latest version of the
+    CURRENT chain whose cutoff is strictly before that timestamp is still
     valid and becomes the chain tip again (``retip_profile_chain``); the
     newer versions are superseded and the chain is regenerated from there
     to the end. When no version is valid — the import predates the
@@ -623,22 +626,28 @@ def revert_profile_for_import(user_id, earliest_imported_created_at):
 
     if not profiles:
         return _flag_full()
+    tip = profiles[0]
     if earliest_imported_created_at is None:
-        return "none", profiles[0]
+        return "none", tip
 
+    # Walk the CURRENT chain (tip -> root), not every version the account
+    # ever had: provisional-ladder builds and older from-scratch rebuilds
+    # stay in the table unchained, and re-tipping at one of those would
+    # continue the chain from a base the pipeline already discarded.
+    chain = list(reversed(_collect_iterative_chain(tip.id)))   # tip first
     valid = next(
-        (p for p in profiles
+        (p for p in chain
          if p.source_data_cutoff
-         and p.source_data_cutoff <= earliest_imported_created_at),
+         and p.source_data_cutoff < earliest_imported_created_at),
         None)
     if valid is None:
         return _flag_full()
-    if valid.id == profiles[0].id:
+    if valid.id == tip.id:
         return "none", valid
     logger.info(
         "User %d: import dated %s invalidates %d profile version(s) after "
         "version %d", user_id, earliest_imported_created_at,
-        sum(1 for p in profiles if p.created_at > valid.created_at), valid.id)
+        sum(1 for p in chain if p.created_at > valid.created_at), valid.id)
     return "revert", retip_profile_chain(user_id, valid)
 
 

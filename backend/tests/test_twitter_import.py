@@ -788,3 +788,47 @@ def test_prefill_falls_back_to_rest_when_snapshot_lags(app, tmp_path, monkeypatc
     result = imports_mod.prefill_community_archive_impl(u.id, "MarvinKeilbach", {})
     assert result["source"] == "rest" and result["created"] == 2
     assert result["account_num_tweets"] == 13762
+
+
+def test_import_revert_walks_the_current_chain_not_all_history(app, monkeypatch):
+    """Ladder history: a provisional v_a (parent None) superseded by a
+    from-scratch v_b (parent None, the tip). An import dated between their
+    cutoffs is older than the CURRENT chain's root, so it flags a
+    from-scratch build; re-tipping at the stale provisional would continue
+    the chain from a base the ladder already discarded. And a version
+    whose cutoff falls ON the earliest imported second is invalid too: the
+    next window starts strictly after the cutoff, so that node would never
+    be read by any later chunk."""
+    from backend.routes import import_data
+    import backend.tasks.exports as ex
+    import backend.tasks.profile_batch as pb
+    seed = MagicMock()
+    monkeypatch.setattr(pb.seed_profile_batch_for_user, "delay", seed)
+    app.config["PROFILE_USE_BATCH"] = True
+    u = _make_user("ladder_import")
+    _db.session.commit()
+    va = UserProfile(user_id=u.id, generated_by="m", tokens_used=0,
+                     generation_type="initial", source_tokens_used=5_000,
+                     source_data_cutoff=datetime(2026, 1, 10),
+                     parent_profile_id=None, created_at=datetime(2026, 8, 1))
+    va.set_content("PROVISIONAL")
+    vb = UserProfile(user_id=u.id, generated_by="m", tokens_used=0,
+                     generation_type="initial", source_tokens_used=100_000,
+                     source_data_cutoff=datetime(2026, 3, 10),
+                     parent_profile_id=None, created_at=datetime(2026, 8, 2))
+    vb.set_content("FULL")
+    _db.session.add_all([va, vb])
+    _db.session.commit()
+
+    import_data._hand_off_profile_update_after_import(u, datetime(2026, 2, 1), 2_000)
+    assert User.query.get(u.id).profile_needs_full_regen is True
+    assert _tip(u).id == vb.id                                   # nothing re-tipped
+    assert seed.call_args.args == (u.id,)
+
+    # Cutoff exactly on the earliest imported second: that version is invalid.
+    w = _make_user("edge_second")
+    _db.session.commit()
+    v = _chain(w, [datetime(2026, 1, 10), datetime(2026, 2, 10, 12, 0, 0), datetime(2026, 3, 10)])
+    assert ex.revert_profile_for_import(w.id, datetime(2026, 2, 10, 12, 0, 0))[0] == "revert"
+    _db.session.commit()
+    assert _tip(w).parent_profile_id == v[0].id                 # re-tipped BEFORE the equal cutoff
