@@ -49,8 +49,13 @@ def test_choose_branch_takes_the_latest_full_chunk_version():
     # The exgenesis shape under the old sizing: 9 versions, a 44k tail.
     tip_first = [("v9", 44_336), ("v8", 115_602), ("v7", 187_130), ("v6", 258_658)]
     version, k, size = rt.choose_branch(tip_first, target=T)
-    assert version == "v8"          # 44k is under 0.75 T; 115.6k plans into one full chunk
-    assert (k, size) == (1, 115_602)
+    # 44k is under 0.75 T; 115.6k plans into ONE chunk at 128 % of T, over
+    # the band; 187k plans into two of 93.6k, in the band.
+    assert version == "v7"
+    assert (k, size) == (2, 93_565)
+    # The upper edge: a k = 1 remainder qualifies up to 1.25 T inclusive.
+    assert rt.choose_branch([("v9", 112_500), ("v8", 200_000)], target=T)[0] == "v9"
+    assert rt.choose_branch([("v9", 130_000), ("v8", 220_000)], target=T)[0] == "v8"
     # A tail that already plans into a full chunk keeps the tip.
     assert rt.choose_branch([("v9", 70_000), ("v8", 140_000)], target=T)[0] == "v9"
     # A remainder that plans into several chunks qualifies by the band floor.

@@ -15,8 +15,10 @@ so the tail is folded in with even weight.
 Per account: walk the non-integration chain back from its tip; for every
 version measure the units remaining after its cutoff (the export
 window's own scope) and plan them; pick the LATEST version whose plan
-yields chunks of at least FULL_CHUNK_FRACTION x CHUNK_TARGET_UNITS (the
-lower edge of the band the planner guarantees for k >= 2). Branching
+yields chunks within CHUNK_BAND of CHUNK_TARGET_UNITS either way (the
++-25 % band the planner guarantees for k >= 2; a k = 1 plan runs from
+0.5 T to 1.5 T, and a tail at the top of that range would become one
+oversized chunk). Branching
 writes a "revert" copy of that version — the mechanism imports already
 use — which becomes the chain tip: the continue rule then seeds the
 account, the planner covers the remainder in equal chunks, and the chain
@@ -40,20 +42,22 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from backend.utils.chunk_plan import CHUNK_TARGET_UNITS, plan_chunks  # noqa: E402
 
-# A branch point must plan into chunks at least this fraction of T: the
-# floor of the size band the planner guarantees from k = 2 up (±25 %).
-# Below it the tail would become one undersized update.
-FULL_CHUNK_FRACTION = 0.75
+# A branch point must plan into chunks within this fraction of T either
+# way: the band the planner guarantees from k = 2 up (±25 %). Below it
+# the tail would become one undersized update; above it (a k = 1 plan
+# can run to 1.5 T) one oversized chunk.
+CHUNK_BAND = 0.25
 
 
 def choose_branch(versions_with_remaining, target=CHUNK_TARGET_UNITS):
     """``versions_with_remaining``: [(version, remaining_units)] ordered tip
     first. Returns (version, k, size) for the LATEST version whose remainder
-    plans into chunks of at least FULL_CHUNK_FRACTION x target, or None when
-    no version qualifies (the whole corpus is smaller than that)."""
+    plans into chunks within CHUNK_BAND of target either way, or None when
+    no version qualifies (the whole corpus is smaller than the band's
+    floor)."""
     for version, remaining in versions_with_remaining:
         k, size = plan_chunks(remaining, target=target)
-        if k and size >= FULL_CHUNK_FRACTION * target:
+        if k and abs(size - target) <= CHUNK_BAND * target:
             return version, k, size
     return None
 
@@ -82,8 +86,8 @@ def plan_repair(user):
     choice = choose_branch(versions)
     out = {"tip": tip, "tail": tail, "versions": versions, "choice": choice}
     if choice is None:
-        out["status"] = (f"no version plans into a chunk >= "
-                         f"{FULL_CHUNK_FRACTION:.0%} of T — corpus too small")
+        out["status"] = (f"no version plans into chunks within "
+                         f"{CHUNK_BAND:.0%} of T — corpus too small")
     elif choice[0].id == tip.id:
         out["status"] = ("tail already plans into full chunks — the continue "
                          "rule picks it up; nothing to write")
