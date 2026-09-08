@@ -34,7 +34,7 @@ from backend.constants import SOFT_DELETE_GRACE_DAYS
 from backend.extensions import db
 from backend.models import (
     Node, NodeVersion, NodeTranscriptChunk, TTSChunk, Draft,
-    NodeContextArtifact,
+    NodeContextArtifact, Thread,
 )
 
 logger = get_task_logger(__name__)
@@ -55,6 +55,10 @@ def _full_purge(node):
     Draft.query.filter_by(llm_node_id=node.id).delete()
 
     NodeContextArtifact.query.filter_by(node_id=node.id).delete()
+    # The thread's user-given name (root rows only; no-op elsewhere). Kept
+    # through the content wipe — it names the thread, whose replies may
+    # still be alive — and goes with the root's row.
+    Thread.query.filter_by(root_node_id=node.id).delete()
 
     Node.query.filter_by(linked_node_id=node.id).update(
         {"linked_node_id": None}

@@ -1,5 +1,6 @@
-"""Tests for the Log thread name: PUT /nodes/<root>/thread-name and the
-`thread_name` field on Log cards.
+"""Tests for the Log thread name: PUT /nodes/<root>/thread-name (a Thread
+row keyed by the root node, name encrypted) and the `thread_name` field on
+Log cards.
 
 Patterned after test_node_deletion.py: sqlite in-memory, minimal Flask
 app, ENCRYPTION_DISABLED.
@@ -29,7 +30,7 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
 
 import flask_login as _real_flask_login  # noqa: E402
 from backend.extensions import db as _db  # noqa: E402
-from backend.models import User, Node  # noqa: E402
+from backend.models import User, Node, Thread  # noqa: E402
 import backend.models as _real_backend_models  # noqa: E402
 
 
@@ -130,6 +131,13 @@ def _rename(client, node_id, name):
     return client.put(f"/nodes/{node_id}/thread-name", json={"thread_name": name})
 
 
+def _stored_name(root_id):
+    """Decrypted name from the thread table, or None when there is no row."""
+    _db.session.expire_all()
+    row = _db.session.get(Thread, root_id)
+    return row.get_name() if row is not None else None
+
+
 def _feed_card(client, root_id):
     resp = client.get("/api/feed")
     assert resp.status_code == 200
@@ -147,7 +155,7 @@ def test_owner_names_thread_and_log_card_carries_it(app, alice):
     assert resp.status_code == 200
     assert resp.json["thread_name"] == "Teplárna plan"
 
-    assert _db.session.get(Node, root.id).thread_name == "Teplárna plan"
+    assert _stored_name(root.id) == "Teplárna plan"
     assert _feed_card(client, root.id)["thread_name"] == "Teplárna plan"
 
 
@@ -167,7 +175,7 @@ def test_empty_string_clears_name(app, alice):
     resp = _rename(client, root.id, "")
     assert resp.status_code == 200
     assert resp.json["thread_name"] is None
-    assert _db.session.get(Node, root.id).thread_name is None
+    assert _stored_name(root.id) is None
     assert _feed_card(client, root.id)["thread_name"] is None
 
 
@@ -178,7 +186,7 @@ def test_whitespace_is_trimmed_and_blank_clears(app, alice):
 
     assert _rename(client, root.id, "  padded  ").json["thread_name"] == "padded"
     assert _rename(client, root.id, "   ").json["thread_name"] is None
-    assert _db.session.get(Node, root.id).thread_name is None
+    assert _stored_name(root.id) is None
 
 
 def test_missing_body_field_clears(app, alice):
@@ -215,7 +223,7 @@ def test_name_over_limit_rejected(app, alice):
     resp = _rename(client, root.id, "x" * 121)
     assert resp.status_code == 400
     assert resp.json["max_length"] == 120
-    assert _db.session.get(Node, root.id).thread_name is None
+    assert _stored_name(root.id) is None
 
     assert _rename(client, root.id, "x" * 120).status_code == 200
 
@@ -236,7 +244,7 @@ def test_reply_cannot_be_named(app, alice):
 
     resp = _rename(client, reply.id, "Nope")
     assert resp.status_code == 400
-    assert _db.session.get(Node, reply.id).thread_name is None
+    assert _stored_name(reply.id) is None
 
 
 # ── Authorization ────────────────────────────────────────────────────────
@@ -248,7 +256,7 @@ def test_other_user_gets_403(app, alice, bob):
 
     resp = _rename(client, root.id, "Mine now")
     assert resp.status_code == 403
-    assert _db.session.get(Node, root.id).thread_name is None
+    assert _stored_name(root.id) is None
 
 
 def test_anonymous_rejected(app, alice):
@@ -262,3 +270,46 @@ def test_unknown_node_404(app, alice):
     client = app.test_client()
     _login(client, alice)
     assert _rename(client, 999999, "Ghost").status_code == 404
+
+
+# ── Storage ──────────────────────────────────────────────────────────────
+
+def test_renaming_twice_keeps_one_row(app, alice):
+    root = _make_node(alice)
+    client = app.test_client()
+    _login(client, alice)
+    _rename(client, root.id, "First")
+    _rename(client, root.id, "Second")
+    assert Thread.query.filter_by(root_node_id=root.id).count() == 1
+    assert _stored_name(root.id) == "Second"
+
+
+def test_name_goes_through_content_encryption(app, alice, monkeypatch):
+    """The name is user-authored text: it must be stored via the same
+    envelope helpers as content and decrypted on the way out. Encryption
+    is disabled in tests, so route the helpers through a marker instead."""
+    monkeypatch.setattr(_real_backend_models, "encrypt_content",
+                        lambda p: "ENC:" + p)
+    monkeypatch.setattr(_real_backend_models, "decrypt_content",
+                        lambda c: c[4:] if c.startswith("ENC:") else c)
+    root = _make_node(alice)
+    client = app.test_client()
+    _login(client, alice)
+
+    assert _rename(client, root.id, "Secret label").status_code == 200
+    _db.session.expire_all()
+    assert _db.session.get(Thread, root.id).name == "ENC:Secret label"
+    assert _feed_card(client, root.id)["thread_name"] == "Secret label"
+
+
+def test_deleting_root_removes_thread_row(app, alice):
+    """ORM delete of the root (the hard-purge path) takes the name with
+    it — no orphan rows, no FK error."""
+    root = _make_node(alice)
+    client = app.test_client()
+    _login(client, alice)
+    _rename(client, root.id, "Named")
+
+    _db.session.delete(_db.session.get(Node, root.id))
+    _db.session.commit()
+    assert _db.session.get(Thread, root.id) is None

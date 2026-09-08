@@ -355,13 +355,6 @@ class Node(db.Model):
     pinned_at = db.Column(db.DateTime, nullable=True)
     pinned_by = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
 
-    # User-given thread name, set on the thread ROOT only (PUT
-    # /nodes/<root>/thread-name). The Log card shows it in place of the
-    # entry's own first-line title; NULL means "no name, show the title".
-    # Plaintext on purpose: it is a short label like UserArtifact.title,
-    # not content, and encrypting it would add a KMS unwrap per Log card.
-    thread_name = db.Column(db.String(120), nullable=True)
-
     # Soft-delete: non-NULL means scheduled for cleanup after SOFT_DELETE_GRACE_DAYS.
     deleted_at = db.Column(db.DateTime, nullable=True, index=True)
 
@@ -554,6 +547,51 @@ class NodeContextArtifact(db.Model):
             name='uq_node_artifact_type_id',
         ),
     )
+
+
+class Thread(db.Model):
+    """Thread-level metadata, keyed by the thread's ROOT node (a thread is
+    its root). Today that is the user-given name the Log card shows in
+    place of the entry's own first-line title.
+
+    Kept off the node table on purpose: a name belongs to the thread, not
+    to a node, and a node column would carry it on every row while leaving
+    "root only" to the routes. This table makes the ownership explicit and
+    gives later thread metadata (tags, archive state, …) a home without
+    widening the hot node table.
+
+    A row exists only while the thread has a name — clearing the name
+    deletes the row. The name is user-authored text, so it is KMS-envelope
+    encrypted like content; the feed batches its DEK unwrap with the page's
+    preview DEKs (one extra unwrap per NAMED thread on a Log page).
+    """
+    __tablename__ = "thread"
+    root_node_id = db.Column(
+        db.Integer, db.ForeignKey("node.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    # Encrypted (see set_name / get_name). Plaintext length is capped by
+    # the route (THREAD_NAME_MAX_LEN), not the column.
+    name = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # ORM delete of the root removes the row (one SELECT per purged root
+    # — no passive_deletes, so it also holds where FK enforcement is off,
+    # e.g. sqlite tests); the DB cascade covers bulk deletes that bypass
+    # the ORM (delete_my_data).
+    root = db.relationship(
+        "Node",
+        backref=db.backref(
+            "thread", uselist=False, cascade="all, delete-orphan",
+        ),
+    )
+
+    def set_name(self, plaintext: str):
+        self.name = encrypt_content(plaintext)
+
+    def get_name(self) -> str:
+        return decrypt_content(self.name)
 
 
 class NodeVersion(db.Model):

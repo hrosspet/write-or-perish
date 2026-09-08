@@ -2,7 +2,7 @@ from flask import Blueprint, request, jsonify, current_app
 from flask_login import login_required, current_user
 from backend.models import (
     Node, NodeVersion, UserPrompt, UserProfile, UserTodo,
-    UserRecentContext, UserArtifact,
+    UserRecentContext, UserArtifact, Thread,
 )
 from backend.extensions import db
 from sqlalchemy import func
@@ -2670,14 +2670,14 @@ THREAD_NAME_MAX_LEN = 120
 def set_thread_name(node_id):
     """Name a thread for the Log. Body: {"thread_name": "..."}.
 
-    The name lives on the thread ROOT (the Log card's thread_root_id);
-    naming a reply is rejected. Empty or whitespace-only clears the name
-    so the card falls back to the entry's own first-line title.
+    The name is a Thread row keyed by the ROOT node (the Log card's
+    thread_root_id); naming a reply is rejected. Empty or whitespace-only
+    clears the name (deletes the row) so the card falls back to the
+    entry's own first-line title.
 
-    Only thread_name is written: updated_at is pinned to its current value
-    so a rename does not bump the root's timestamp. That timestamp is what
-    the Log's "newest node" jump and the profile freshness gates read, and
-    a label change is not new writing.
+    The node row itself is never written, so a rename does not bump the
+    root's updated_at — that timestamp drives the Log's "newest node"
+    jump and the profile freshness gates, and a label is not new writing.
     """
     node = Node.query.get_or_404(node_id)
 
@@ -2699,10 +2699,15 @@ def set_thread_name(node_id):
             "max_length": THREAD_NAME_MAX_LEN,
         }), 400
 
-    Node.query.filter(Node.id == node.id).update(
-        {"thread_name": name, "updated_at": node.updated_at},
-        synchronize_session=False,
-    )
+    row = db.session.get(Thread, node.id)
+    if name is None:
+        if row is not None:
+            db.session.delete(row)
+    else:
+        if row is None:
+            row = Thread(root_node_id=node.id)
+            db.session.add(row)
+        row.set_name(name)
     db.session.commit()
 
     return jsonify({"thread_name": name}), 200

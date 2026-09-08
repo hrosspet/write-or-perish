@@ -1,6 +1,6 @@
 from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
-from backend.models import Node, User
+from backend.models import Node, User, Thread
 from backend.extensions import db
 from backend.utils.privacy import (
     PrivacyLevel,
@@ -174,6 +174,13 @@ def get_feed():
         .group_by(Node.parent_id).all()
     ) if root_ids else {}
 
+    # User-given thread names live in the thread table, keyed by root;
+    # one query for the page.
+    thread_rows = {
+        t.root_node_id: t
+        for t in Thread.query.filter(Thread.root_node_id.in_(root_ids)).all()
+    } if root_ids else {}
+
     cards = []
     for node in items:
         display_node = node
@@ -185,10 +192,13 @@ def get_feed():
             display_node = newest_nodes.get(newest_map.get(node.id), node)
         cards.append((node, display_node, prompt_key))
 
-    # Phase 2 — one concurrent KMS batch for every preview on the page.
-    # Decrypting inside the loop cost a cold worker ~80 ms per card, in
-    # sequence (~1.6 s for a page of 20).
-    prefetch_deks(display_node.content for _, display_node, _ in cards)
+    # Phase 2 — one concurrent KMS batch for every preview (and thread
+    # name) on the page. Decrypting inside the loop cost a cold worker
+    # ~80 ms per card, in sequence (~1.6 s for a page of 20).
+    prefetch_deks(
+        [display_node.content for _, display_node, _ in cards]
+        + [t.name for t in thread_rows.values()]
+    )
 
     # Phase 3 — serialize (previews are cache hits now).
     nodes_list = []
@@ -204,8 +214,11 @@ def get_feed():
             "id": display_node.id,
             "thread_root_id": node.id,
             "newest_node_id": newest_map.get(node.id, display_node.id),
-            # Lives on the root (the thread), never on the display node.
-            "thread_name": node.thread_name,
+            # Keyed by the root (the thread), never by the display node.
+            "thread_name": (
+                thread_rows[node.id].get_name()
+                if node.id in thread_rows else None
+            ),
             "preview": make_preview(display_node.get_content()),
             "node_type": display_node.node_type,
             "child_count": alive_child_counts.get(node.id, 0),

@@ -2,7 +2,7 @@ from flask import Blueprint, jsonify, Response, request, current_app
 from flask_login import login_required, current_user
 from backend.models import (
     Node, NodeVersion, UserProfile, UserPrompt, UserTodo,
-    UserArtifact,
+    UserArtifact, Thread,
 )
 from backend.extensions import db
 from backend.utils.tokens import approximate_token_count, get_model_context_window
@@ -1966,9 +1966,15 @@ def get_profile_status(task_id):
 @login_required
 def delete_my_data():
     try:
-        # Delete all node versions first, then nodes.
+        # Delete all node versions and thread names first, then nodes.
+        # (The thread FK cascades on Postgres; explicit so it also holds
+        # where FK enforcement is off, e.g. sqlite tests.)
+        own_node_ids = db.session.query(Node.id).filter_by(user_id=current_user.id)
         NodeVersion.query.filter(
-            NodeVersion.node_id.in_(db.session.query(Node.id).filter_by(user_id=current_user.id))
+            NodeVersion.node_id.in_(own_node_ids)
+        ).delete(synchronize_session=False)
+        Thread.query.filter(
+            Thread.root_node_id.in_(own_node_ids)
         ).delete(synchronize_session=False)
         Node.query.filter_by(user_id=current_user.id).delete(synchronize_session=False)
         db.session.commit()
