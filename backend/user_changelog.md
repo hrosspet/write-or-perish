@@ -20,13 +20,6 @@ Authoring rules:
   get their section in the commit that turns them ON, not at merge.
 -->
 
-<!-- id: rename-threads -->
-## 2026-09-08 — Name your threads in the Log
-
-When a day has several entries, their cards in the Log can look alike — especially voice notes, which all start with a timestamp. You can now give any thread a name of your own: open the card's "⋮" menu and choose **Rename thread**.
-
-The name replaces the entry's first line on the card, so scrolling the Log tells you at a glance what each thread is about. Clear the name to go back to the entry's own title.
-
 <!-- id: claude-opus-5 -->
 ## 2026-07-24 — A new model to talk to: Claude Opus 5
 
