@@ -2658,6 +2658,56 @@ def unpin_node(node_id):
     return jsonify({"message": "Node unpinned"}), 200
 
 
+# ---------------------------------------------------------------------------
+# Thread name (Log card label)
+# ---------------------------------------------------------------------------
+
+THREAD_NAME_MAX_LEN = 120
+
+
+@nodes_bp.route("/<int:node_id>/thread-name", methods=["PUT"])
+@login_required
+def set_thread_name(node_id):
+    """Name a thread for the Log. Body: {"thread_name": "..."}.
+
+    The name lives on the thread ROOT (the Log card's thread_root_id);
+    naming a reply is rejected. Empty or whitespace-only clears the name
+    so the card falls back to the entry's own first-line title.
+
+    Only thread_name is written: updated_at is pinned to its current value
+    so a rename does not bump the root's timestamp. That timestamp is what
+    the Log's "newest node" jump and the profile freshness gates read, and
+    a label change is not new writing.
+    """
+    node = Node.query.get_or_404(node_id)
+
+    owner_id = node.human_owner_id or node.user_id
+    if owner_id != current_user.id:
+        return jsonify({"error": "Only the owner can rename this thread"}), 403
+
+    if node.parent_id is not None:
+        return jsonify({"error": "Only a thread root can be named"}), 400
+
+    data = request.get_json(silent=True) or {}
+    raw = data.get("thread_name")
+    if raw is not None and not isinstance(raw, str):
+        return jsonify({"error": "thread_name must be a string"}), 400
+    name = (raw or "").strip() or None
+    if name is not None and len(name) > THREAD_NAME_MAX_LEN:
+        return jsonify({
+            "error": f"Thread name is limited to {THREAD_NAME_MAX_LEN} characters",
+            "max_length": THREAD_NAME_MAX_LEN,
+        }), 400
+
+    Node.query.filter(Node.id == node.id).update(
+        {"thread_name": name, "updated_at": node.updated_at},
+        synchronize_session=False,
+    )
+    db.session.commit()
+
+    return jsonify({"thread_name": name}), 200
+
+
 @nodes_bp.route("/<int:node_id>", methods=["DELETE"])
 @login_required
 def delete_node(node_id):

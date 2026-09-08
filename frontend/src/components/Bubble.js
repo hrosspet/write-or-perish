@@ -4,6 +4,20 @@ import NodeFooter from './NodeFooter';
 import MarkdownBody from './MarkdownBody';
 import BubbleKebabMenu from './BubbleKebabMenu';
 
+/**
+ * Split preview/content text into the card's title (first line, leading
+ * "# " stripped) and body (the rest). Shared with the Log's rename dialog
+ * so its placeholder shows exactly the title the card would fall back to.
+ */
+export function splitPreview(text) {
+  const displayText = (text || "").replace(/^#\s+/, '');
+  const firstNewline = displayText.indexOf('\n');
+  return {
+    title: firstNewline > 0 ? displayText.substring(0, firstNewline) : displayText,
+    body: firstNewline > 0 ? displayText.substring(firstNewline + 1).trim() : '',
+  };
+}
+
 const tombstoneStyle = {
   fontFamily: 'var(--sans)',
   fontSize: '0.95rem',
@@ -53,13 +67,17 @@ const Bubble = ({
   // Use full content if available; otherwise use preview.
   const text = node.content || node.preview || "";
 
-  // Strip leading "# " from title for cleaner display
-  const displayText = text.replace(/^#\s+/, '');
+  // Extract title (first line, "# " stripped) and body (rest)
+  const { title, body } = splitPreview(text);
 
-  // Extract title (first line) and body (rest)
-  const firstNewline = displayText.indexOf('\n');
-  const title = firstNewline > 0 ? displayText.substring(0, firstNewline) : displayText;
-  const body = firstNewline > 0 ? displayText.substring(firstNewline + 1).trim() : '';
+  // A user-given thread name (Log cards; the feed serializes it from the
+  // thread root) takes the title slot and the entry's own first line is
+  // skipped. When that first line was the whole preview, it moves into
+  // the body instead — otherwise a named one-line entry would show
+  // nothing but its name.
+  const threadName = (node.thread_name || "").trim();
+  const heading = threadName || title;
+  const previewBody = threadName && !body ? title : body;
 
   // Only offer expand when there's full content AND the collapsed preview
   // actually hides something: title past 120 chars, body past 250 chars,
@@ -168,12 +186,12 @@ const Bubble = ({
             fontFamily: "var(--sans)",
             fontSize: "1rem",
             color: "var(--text-primary)",
-            marginBottom: body ? "0.6rem" : "0",
+            marginBottom: previewBody ? "0.6rem" : "0",
             fontWeight: 400,
           }}>
-            {title.length > 120 ? title.substring(0, 120) + "..." : title}
+            {heading.length > 120 ? heading.substring(0, 120) + "..." : heading}
           </div>
-          {body && (
+          {previewBody && (
             <div style={{
               fontFamily: "var(--sans)",
               fontSize: "0.92rem",
@@ -185,7 +203,7 @@ const Bubble = ({
               WebkitLineClamp: 2,
               WebkitBoxOrient: "vertical",
             }}>
-              {body.length > 250 ? body.substring(0, 250) + "..." : body}
+              {previewBody.length > 250 ? previewBody.substring(0, 250) + "..." : previewBody}
             </div>
           )}
         </>

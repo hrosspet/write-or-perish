@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import api from "../api";
-import Bubble from "./Bubble";
+import Bubble, { splitPreview } from "./Bubble";
 import DeleteConfirmDialog from "./DeleteConfirmDialog";
+import RenameThreadDialog from "./RenameThreadDialog";
 import { useToast } from "../contexts/ToastContext";
 
 function Feed({ onSearchClick }) {
@@ -13,6 +14,8 @@ function Feed({ onSearchClick }) {
   const [hasMore, setHasMore] = useState(false);
   const [page, setPage] = useState(1);
   const [deleteTarget, setDeleteTarget] = useState(null);
+  const [renameTarget, setRenameTarget] = useState(null);
+  const [renaming, setRenaming] = useState(false);
   const { addToast } = useToast();
   const navigate = useNavigate();
 
@@ -73,6 +76,32 @@ function Feed({ onSearchClick }) {
 
   const handleDeleteThread = (cardNode) => {
     setDeleteTarget(cardNode);
+  };
+
+  const handleCloseRename = useCallback(() => setRenameTarget(null), []);
+
+  // Empty name = clear it; the card then falls back to the entry's own
+  // title. The name lives on the thread root (see thread_root_id note
+  // in handleConfirmDeleteThread).
+  const handleSaveThreadName = (name) => {
+    if (!renameTarget) return;
+    const targetId = renameTarget.thread_root_id || renameTarget.id;
+    setRenaming(true);
+    api.put(`/nodes/${targetId}/thread-name`, { thread_name: name })
+      .then(response => {
+        const saved = (response.data && response.data.thread_name) || null;
+        setFeedNodes(prev => prev.map(card => (
+          card.id === renameTarget.id ? { ...card, thread_name: saved } : card
+        )));
+        setRenameTarget(null);
+      })
+      .catch(err => {
+        console.error(err);
+        const msg = (err.response && err.response.data && err.response.data.error)
+          || "Error renaming thread.";
+        addToast(msg, 4000);
+      })
+      .finally(() => setRenaming(false));
   };
 
   const handleConfirmDeleteThread = ({ withDescendants }) => {
@@ -177,11 +206,18 @@ function Feed({ onSearchClick }) {
               key={node.id}
               node={node}
               onClick={handleBubbleClick}
-              actions={[{
-                label: 'Delete thread',
-                action: () => handleDeleteThread(node),
-                color: 'var(--accent)',
-              }]}
+              actions={[
+                {
+                  label: 'Rename thread',
+                  action: () => setRenameTarget(node),
+                  color: 'var(--text-primary)',
+                },
+                {
+                  label: 'Delete thread',
+                  action: () => handleDeleteThread(node),
+                  color: 'var(--accent)',
+                },
+              ]}
             />
           ))}
         </div>
@@ -195,6 +231,14 @@ function Feed({ onSearchClick }) {
           Load more...
         </div>
       )}
+      <RenameThreadDialog
+        open={renameTarget !== null}
+        currentName={renameTarget ? renameTarget.thread_name : ""}
+        fallbackTitle={renameTarget ? splitPreview(renameTarget.preview).title : ""}
+        saving={renaming}
+        onClose={handleCloseRename}
+        onSave={handleSaveThreadName}
+      />
       <DeleteConfirmDialog
         open={deleteTarget !== null}
         mode="thread"

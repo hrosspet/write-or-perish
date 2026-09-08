@@ -355,6 +355,13 @@ class Node(db.Model):
     pinned_at = db.Column(db.DateTime, nullable=True)
     pinned_by = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
 
+    # User-given thread name, set on the thread ROOT only (PUT
+    # /nodes/<root>/thread-name). The Log card shows it in place of the
+    # entry's own first-line title; NULL means "no name, show the title".
+    # Plaintext on purpose: it is a short label like UserArtifact.title,
+    # not content, and encrypting it would add a KMS unwrap per Log card.
+    thread_name = db.Column(db.String(120), nullable=True)
+
     # Soft-delete: non-NULL means scheduled for cleanup after SOFT_DELETE_GRACE_DAYS.
     deleted_at = db.Column(db.DateTime, nullable=True, index=True)
 

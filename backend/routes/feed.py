@@ -204,6 +204,8 @@ def get_feed():
             "id": display_node.id,
             "thread_root_id": node.id,
             "newest_node_id": newest_map.get(node.id, display_node.id),
+            # Lives on the root (the thread), never on the display node.
+            "thread_name": node.thread_name,
             "preview": make_preview(display_node.get_content()),
             "node_type": display_node.node_type,
             "child_count": alive_child_counts.get(node.id, 0),
