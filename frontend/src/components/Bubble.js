@@ -6,15 +6,19 @@ import BubbleKebabMenu from './BubbleKebabMenu';
 
 /**
  * Split preview/content text into the card's title (first line, leading
- * "# " stripped) and body (the rest). Shared with the Log's rename dialog
- * so its placeholder shows exactly the title the card would fall back to.
+ * "# " stripped) and body (the rest). `isHeading` says whether that first
+ * line was a markdown heading. Shared with the Log's rename dialog so its
+ * placeholder shows exactly the title the card would fall back to.
  */
 export function splitPreview(text) {
-  const displayText = (text || "").replace(/^#\s+/, '');
+  const raw = text || "";
+  const isHeading = /^#\s+/.test(raw);
+  const displayText = raw.replace(/^#\s+/, '');
   const firstNewline = displayText.indexOf('\n');
   return {
     title: firstNewline > 0 ? displayText.substring(0, firstNewline) : displayText,
     body: firstNewline > 0 ? displayText.substring(firstNewline + 1).trim() : '',
+    isHeading,
   };
 }
 
@@ -68,16 +72,16 @@ const Bubble = ({
   const text = node.content || node.preview || "";
 
   // Extract title (first line, "# " stripped) and body (rest)
-  const { title, body } = splitPreview(text);
+  const { title, body, isHeading } = splitPreview(text);
 
   // A user-given thread name (Log cards; the feed serializes it from the
-  // thread root) takes the title slot and the entry's own first line is
-  // skipped. When that first line was the whole preview, it moves into
-  // the body instead — otherwise a named one-line entry would show
-  // nothing but its name.
+  // thread root) takes the title slot. The entry's own first line is
+  // skipped only when it was a markdown heading — the name replaces that
+  // title. Plain text has no title to replace, so all of it stays as the
+  // body.
   const threadName = (node.thread_name || "").trim();
   const heading = threadName || title;
-  const previewBody = threadName && !body ? title : body;
+  const previewBody = threadName && !isHeading ? text.trim() : body;
 
   // Only offer expand when there's full content AND the collapsed preview
   // actually hides something: title past 120 chars, body past 250 chars,
