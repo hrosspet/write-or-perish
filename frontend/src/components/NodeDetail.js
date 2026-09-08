@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate, useSearchParams, Link } from "react-router-dom";
-import { FaThumbtack, FaMicrophone } from "react-icons/fa";
+import { FaThumbtack, FaMicrophone, FaSpinner } from "react-icons/fa";
 import NodeFooter from "./NodeFooter";
 import SpeakerIcon from "./SpeakerIcon";
 import DownloadAudioIcon from "./DownloadAudioIcon";
@@ -116,7 +116,6 @@ function NodeDetail({ nodeIdOverride }) {
   // LLM completion polling - enabled automatically when llmTaskNodeId is set
   const {
     status: llmStatus,
-    progress: llmProgress,
     data: llmData,
     error: llmError
   } = useAsyncTaskPolling(
@@ -1006,14 +1005,17 @@ function NodeDetail({ nodeIdOverride }) {
         </NodeFooter>
         {showCraftBar && (
           <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-            <button onClick={handleLLMResponse} disabled={!!llmTaskNodeId}>
-              {llmTaskNodeId && llmStatus === 'processing' && llmProgress > 0
-                ? `Generating... ${llmProgress}%`
-                : llmTaskNodeId && llmStatus === 'pending'
-                ? "Waiting for AI..."
-                : llmTaskNodeId
-                ? "Generating..."
-                : "LLM Response"}
+            <button
+              onClick={handleLLMResponse}
+              disabled={!!llmTaskNodeId}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}
+            >
+              {llmTaskNodeId ? (
+                <>
+                  <FaSpinner className="spin" aria-hidden="true" />
+                  {llmStatus === 'pending' ? 'Waiting for AI…' : 'Generating…'}
+                </>
+              ) : 'LLM Response'}
             </button>
             <ModelSelector
               nodeId={node.id}
@@ -1025,14 +1027,12 @@ function NodeDetail({ nodeIdOverride }) {
         {llmTaskNodeId && !showCraftBar && (
           <div style={{
             marginTop: '8px',
+            display: 'flex', alignItems: 'center', gap: '8px',
             fontFamily: 'var(--sans)', fontSize: '0.78rem', fontWeight: 300,
             color: 'var(--text-muted)',
           }}>
-            {llmStatus === 'processing' && llmProgress > 0
-              ? `Generating… ${llmProgress}%`
-              : llmStatus === 'pending'
-              ? 'Waiting for AI…'
-              : 'Generating…'}
+            <FaSpinner className="spin" aria-hidden="true" />
+            {llmStatus === 'pending' ? 'Waiting for AI…' : 'Generating…'}
           </div>
         )}
       </div>
