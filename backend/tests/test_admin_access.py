@@ -184,6 +184,37 @@ class TestCacheHitRate:
         rows = {u["id"]: u for u in client.get("/api/admin/users").get_json()["users"]}
         assert abs(rows[admin.id]["cache_hit_rate"] - 7_808 / 7_993) < 1e-9
 
+    def test_turns_before_caching_launch_are_excluded(self, app, users):
+        """The window starts at PROMPT_CACHE_SINCE (2026-06-25): earlier
+        turns could not have been served from cache, so counting them
+        only drags the rate down. Here they would halve 90% to 45%."""
+        from datetime import timedelta
+        from backend.routes.admin import PROMPT_CACHE_SINCE
+        admin = users["renamed_admin"]
+        with app.app_context():
+            _db.session.add_all([
+                APICostLog(user_id=admin.id, model_id="claude-opus-4.6",
+                           request_type="conversation", input_tokens=1_000_000,
+                           cache_read_tokens=0, cache_write_tokens=0,
+                           cost_microdollars=1,
+                           created_at=PROMPT_CACHE_SINCE - timedelta(seconds=1)),
+                APICostLog(user_id=admin.id, model_id="claude-opus-4.6",
+                           request_type="conversation", input_tokens=1_000_000,
+                           cache_read_tokens=900_000, cache_write_tokens=100_000,
+                           cost_microdollars=1,
+                           created_at=PROMPT_CACHE_SINCE),
+            ])
+            _db.session.commit()
+
+        client = app.test_client()
+        _login(client, admin.id)
+        payload = client.get("/api/admin/users").get_json()
+        rows = {u["id"]: u for u in payload["users"]}
+
+        assert rows[admin.id]["cache_hit_rate"] == 0.9
+        assert rows[admin.id]["cache_input_tokens"] == 1_000_000
+        assert payload["cache_since"].startswith("2026-06-25T15:00:00")
+
 
 class TestProfileStatus:
     """Admin list shows whether a profile chain is at rest (one version, or

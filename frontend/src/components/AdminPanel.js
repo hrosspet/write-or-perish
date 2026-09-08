@@ -516,6 +516,9 @@ function AdminPanel() {
   const [activeTab, setActiveTab] = useState("users");
   const [users, setUsers] = useState([]);
   const [allowedPlans, setAllowedPlans] = useState([]);
+  // Start of the cache hit-rate window (ISO, from the backend) — the
+  // column only counts turns since prompt caching launched.
+  const [cacheSince, setCacheSince] = useState(null);
   const [error, setError] = useState("");
   const [newHandle, setNewHandle] = useState("");
   const [newHandleError, setNewHandleError] = useState("");
@@ -539,6 +542,10 @@ function AdminPanel() {
     }
   };
 
+  // "2026-06-25" from the ISO timestamp; the fallback only shows before
+  // the first /admin/users response lands.
+  const cacheSinceLabel = cacheSince ? cacheSince.slice(0, 10) : "caching launched";
+
   const fetchUsers = async () => {
     try {
       const response = await api.get("/admin/users");
@@ -552,6 +559,9 @@ function AdminPanel() {
       setLimitEdits(edits);
       if (response.data.allowed_plans) {
         setAllowedPlans(response.data.allowed_plans);
+      }
+      if (response.data.cache_since) {
+        setCacheSince(response.data.cache_since);
       }
     } catch (err) {
       console.error(err);
@@ -986,7 +996,7 @@ function AdminPanel() {
             </th>
             <th
               style={{ border: "1px solid var(--border)", padding: "8px", width: "85px", whiteSpace: "nowrap" }}
-              title="Prompt-cache hit-rate over conversation turns (all-time): input tokens served from cache ÷ total prompt input. Covers both Anthropic and OpenAI caching."
+              title={`Prompt-cache hit-rate over conversation turns since ${cacheSinceLabel} (when prompt caching launched): input tokens served from cache ÷ total prompt input. Covers both Anthropic and OpenAI caching.`}
             >
               Cache
             </th>
@@ -1116,8 +1126,8 @@ function AdminPanel() {
                 style={{ border: "1px solid var(--border)", padding: "8px", width: "85px", whiteSpace: "nowrap" }}
                 title={
                   u.cache_hit_rate == null
-                    ? "No conversation prompt input yet"
-                    : `${(u.cache_served_tokens || 0).toLocaleString()} of ${(u.cache_input_tokens || 0).toLocaleString()} prompt-input tokens served from cache`
+                    ? `No conversation prompt input since ${cacheSinceLabel}`
+                    : `${(u.cache_served_tokens || 0).toLocaleString()} of ${(u.cache_input_tokens || 0).toLocaleString()} prompt-input tokens served from cache since ${cacheSinceLabel}`
                 }
               >
                 {u.cache_hit_rate == null

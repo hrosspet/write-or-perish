@@ -15,6 +15,15 @@ logger = logging.getLogger(__name__)
 
 admin_bp = Blueprint("admin_bp", __name__)
 
+# Prompt caching went live on 2026-06-25: Anthropic caching plus the
+# cache_read_tokens accounting merged at 13:56 UTC (#198, a54ce29) and
+# OpenAI cached-input accounting at 14:52 UTC (#199, b87d37b), each
+# auto-deployed to prod within minutes. Conversation turns logged before
+# that have no served-from-cache tokens by construction, so counting them
+# only drags every user's hit-rate down — the admin cache column starts
+# here (15:00 UTC, when the second deploy had landed).
+PROMPT_CACHE_SINCE = datetime(2026, 6, 25, 15, 0)
+
 # Decorator to check that the current user is an admin. Keyed on the
 # is_admin column (matching nodes.py/sse.py), NOT the username — usernames
 # are renamable, and #91 made 'hrosspet' reserved, so a username-keyed check
@@ -154,13 +163,15 @@ def list_users():
     # is the full prompt size, so hit-rate = served / total prompt input works
     # for both (OpenAI has no separate "write" concept). Scoped to
     # request_type='conversation' so embeddings/transcription/profile/warm
-    # don't dilute the denominator. NULLs are ignored by SUM.
+    # don't dilute the denominator, and to turns since PROMPT_CACHE_SINCE
+    # so pre-caching history doesn't either. NULLs are ignored by SUM.
     cache_rows = db.session.query(
         APICostLog.user_id,
         func.sum(APICostLog.cache_read_tokens).label("served"),
         func.sum(APICostLog.input_tokens).label("prompt_input"),
     ).filter(
-        APICostLog.request_type == "conversation"
+        APICostLog.request_type == "conversation",
+        APICostLog.created_at >= PROMPT_CACHE_SINCE,
     ).group_by(APICostLog.user_id).all()
     cache_map = {
         row.user_id: (row.served or 0, row.prompt_input or 0)
@@ -188,9 +199,10 @@ def list_users():
             "deactivated_at": iso_utc(user.deactivated_at),
             "total_spending_usd": total_microdollars / 1_000_000,
             "current_month_spending_usd": month_microdollars / 1_000_000,
-            # Prompt-cache hit-rate over conversation turns (all-time): null
-            # when the user has no conversation prompt input yet. Raw sums
-            # included so the UI can show the breakdown on hover.
+            # Prompt-cache hit-rate over conversation turns since
+            # PROMPT_CACHE_SINCE: null when the user has no conversation
+            # prompt input in that window. Raw sums included so the UI can
+            # show the breakdown on hover.
             "cache_hit_rate": cache_hit_rate,
             "cache_served_tokens": cache_served,
             "cache_input_tokens": prompt_input,
@@ -223,6 +235,8 @@ def list_users():
         })
     return jsonify({
         "users": user_list,
+        # Start of the cache hit-rate window, for the column's tooltip.
+        "cache_since": iso_utc(PROMPT_CACHE_SINCE),
         "allowed_plans": sorted(User.ALLOWED_PLANS),
         "per_user_limit_default_usd": config.get(
             "PER_USER_MONTHLY_LIMIT_USD") or 0,
