@@ -966,10 +966,24 @@ def save_streaming_as_node(session_id):
 
     Request body:
     {
-        "content": "optional edited content"  // If not provided, uses draft.content
+        "content": "optional edited content",  // If not provided, uses draft.content
+        "agentic": false,        // new threads only: parent the entry under a
+                                 // system node carrying the textmode prompt,
+                                 // exactly like POST /textmode/start does
+        "auto_generate": false,  // create + enqueue an LLM reply after the
+                                 // entry (spend cap honored, like /textmode/start)
+        "model": "optional model id for auto_generate"
     }
 
-    Returns: The created node data
+    Returns: The created node data. With the flags above it also carries
+    `conversation_id` (the system node) and `llm_node_id` / `task_id` (the
+    placeholder), or `spend_capped: true` when the cap skipped the reply.
+
+    The flags exist so a recorded entry behaves like a typed one: Text mode
+    is agentic, and before them a recording on the Write page produced a
+    bare node with no system prompt and no reply (auto-generate was
+    silently ignored), while the same words typed went through
+    /textmode/start and got both.
     """
     draft = Draft.query.filter_by(
         session_id=session_id,
@@ -984,15 +998,65 @@ def save_streaming_as_node(session_id):
 
     data = request.get_json() or {}
     content = data.get("content", draft.get_content())
+    agentic = bool(data.get("agentic", False))
+    auto_generate = bool(data.get("auto_generate", False))
+    model_id = data.get("model")
+
+    privacy_level = draft.privacy_level or "private"
+    ai_usage = draft.ai_usage or "none"
+
+    if agentic and draft.parent_id is not None:
+        return jsonify({
+            "error": "agentic applies to new threads only (draft has a parent)",
+        }), 400
+    if (agentic or auto_generate) and ai_usage == "none":
+        # Same contract as /textmode/start: an AI reply / agentic prompt
+        # contradicts ai_usage 'none'. The frontend gates on this too.
+        return jsonify({
+            "error": "agentic / auto_generate require ai_usage of 'chat' or 'train'",
+        }), 400
+    if auto_generate:
+        if not model_id:
+            # Walks ancestry from the parent (if any) → user.preferred_model
+            # → DEFAULT, same as /textmode/start and /nodes/<id>/llm.
+            parent_node = Node.query.get(draft.parent_id) if draft.parent_id else None
+            model_id = pick_model_for_generation(parent_node, current_user)
+        if model_id not in current_app.config["SUPPORTED_MODELS"]:
+            return jsonify({"error": f"Unsupported model: {model_id}"}), 400
+
+    # Agentic new thread: system node with the textmode prompt pinned,
+    # mirroring textmode.start_conversation. The user's entry then hangs
+    # under it so the thread is an agentic session (tools, profile, todo
+    # context) from its first turn.
+    user_parent_id = draft.parent_id
+    system_node = None
+    if agentic:
+        from backend.utils.prompts import get_user_prompt_record
+        from backend.utils.context_artifacts import attach_context_artifacts
+        prompt_record = get_user_prompt_record(current_user.id, "textmode")
+        system_node = Node(
+            user_id=current_user.id,
+            human_owner_id=current_user.id,
+            parent_id=None,
+            node_type="user",
+            privacy_level=privacy_level,
+            ai_usage=ai_usage,
+        )
+        db.session.add(system_node)
+        db.session.flush()
+        attach_context_artifacts(
+            system_node.id, current_user.id, prompt_record=prompt_record,
+        )
+        user_parent_id = system_node.id
 
     # Create the node
     node = Node(
         user_id=current_user.id,
         human_owner_id=current_user.id,
-        parent_id=draft.parent_id,
+        parent_id=user_parent_id,
         node_type="user",
-        privacy_level=draft.privacy_level or "private",
-        ai_usage=draft.ai_usage or "none",
+        privacy_level=privacy_level,
+        ai_usage=ai_usage,
         transcription_status="completed",
         streaming_transcription=True  # Mark as having chunked audio
     )
@@ -1002,9 +1066,12 @@ def save_streaming_as_node(session_id):
     db.session.add(node)
     db.session.flush()
     # Per-node cap: split very long transcripts into a serial chain
-    # (audio stays on this head node).
+    # (audio stays on this head node). An LLM reply chains after the
+    # tip so its context walk sees the whole transcript (as the Voice
+    # path's _start_server_side_llm_chain does).
     from backend.utils.node_split import split_node_into_chain
-    split_node_into_chain(node)
+    _split_parts = split_node_into_chain(node)
+    tip_node = _split_parts[-1] if _split_parts else node
     db.session.commit()
 
     # Move audio files from drafts folder to nodes folder
@@ -1028,11 +1095,45 @@ def save_streaming_as_node(session_id):
         f"Saved streaming session {session_id} as node {node.id}"
     )
 
-    return jsonify({
+    response = {
         "id": node.id,
+        "user_node_id": node.id,
+        "tip_id": tip_node.id,
         "content": node.get_content(),
         "parent_id": node.parent_id,
         "privacy_level": node.privacy_level,
         "ai_usage": node.ai_usage,
         "created_at": node.created_at.isoformat() + "Z"
-    }), 201
+    }
+    if system_node is not None:
+        response["conversation_id"] = system_node.id
+
+    if auto_generate:
+        # The entry (and its audio) is already saved above: the user's
+        # writing is never blocked by the cap or by a placeholder error,
+        # only the reply is skipped — same stance as /textmode/start.
+        from backend.utils.spend import user_is_capped
+        if user_is_capped(current_user):
+            response["spend_capped"] = True
+        else:
+            from backend.utils.llm_nodes import create_llm_placeholder
+            from backend.utils.placeholders import UserExportValidationError
+            from backend.utils.node_deletion import ParentDeletedError
+            try:
+                llm_node, task_id = create_llm_placeholder(
+                    tip_node.id, model_id, current_user.id,
+                    privacy_level=privacy_level,
+                    ai_usage=ai_usage,
+                    source_mode="textmode",
+                )
+                db.session.commit()
+                response["llm_node_id"] = llm_node.id
+                response["task_id"] = task_id
+            except (UserExportValidationError, ParentDeletedError) as e:
+                db.session.rollback()
+                current_app.logger.warning(
+                    f"save-as-node: LLM reply skipped for node {node.id}: {e}"
+                )
+                response["llm_error"] = str(e)
+
+    return jsonify(response), 201

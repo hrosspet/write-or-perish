@@ -362,7 +362,10 @@ const NodeForm = forwardRef(
       // edits and custom-submit conversations can't, so they get a
       // plain error instead.
       if (content.length > NODE_CHAR_CAP && !uploadedFile) {
-        if (editMode || onSubmitOverride) {
+        // A recorded transcript (streamingSessionId) saves through
+        // save-as-node, which splits server-side, even on a custom-submit
+        // page — only typed custom submits and edits get the hard error.
+        if (editMode || (onSubmitOverride && !streamingSessionId)) {
           setError(
             `This entry is ${content.length.toLocaleString()} characters — ` +
             `above the ${NODE_CHAR_CAP.toLocaleString()}-character limit. ` +
@@ -393,16 +396,23 @@ const NodeForm = forwardRef(
         let response;
 
         // Custom submit (e.g. /textmode/start). Skips /nodes/ POST entirely
-        // and still handles draft cleanup + onSuccess for the caller.
-        if (onSubmitOverride && !editMode && !uploadedFile && !streamingSessionId) {
+        // and still handles draft cleanup + onSuccess for the caller. A
+        // recorded entry (transcript held in a streaming draft, audio
+        // attached) goes through the same override with its session id,
+        // so the page applies one policy to typed and recorded entries —
+        // previously it bypassed the override and landed as a bare node
+        // with no system prompt and no auto-generated reply.
+        if (onSubmitOverride && !editMode && !uploadedFile) {
           const data = await onSubmitOverride({
             content,
             parent_id: parentId,
             privacy_level: privacyLevel,
             ai_usage: aiUsage,
+            streaming_session_id: streamingSessionId || undefined,
           });
           deleteDraft();
           setHasDraft(false);
+          setStreamingSessionId(null);
           // Spend cap: backend kept the system + user nodes but skipped the
           // LLM placeholder (e.g. /textmode/start). Surface the banner.
           if (data && data.spend_capped) {
@@ -462,14 +472,32 @@ const NodeForm = forwardRef(
 
         // Handle streaming transcription completion - draft exists, create node from it
         if (streamingSessionId) {
-          // Save the streaming draft as a node with any edits the user made
+          // Save the streaming draft as a node with any edits the user made.
+          // Top-level entries carry the same decisions the typed paths make
+          // below: Agentic Reply → textmode system node (like
+          // /textmode/start), Auto-generate → LLM reply (like the
+          // /nodes/<id>/llm follow-up). Replies (parentId) send neither —
+          // NodeDetail fires auto-generate for those itself.
+          const topLevelWithAi = !parentId && aiUsage !== 'none';
           const response = await api.post(`/drafts/streaming/${streamingSessionId}/save-as-node`, {
-            content
+            content,
+            ...(topLevelWithAi && useAgenticPrompt && { agentic: true }),
+            ...(topLevelWithAi && useAutoGenerate && allowAgenticPrompt
+              && { auto_generate: true }),
           });
           deleteDraft();
           setHasDraft(false);
           setStreamingSessionId(null);
-          onSuccess(response.data);
+          if (response.data.spend_capped) {
+            try {
+              window.dispatchEvent(new CustomEvent('loore:spend-capped', {}));
+            } catch (e) { /* no-op */ }
+          }
+          // Land on the entry; ?awaitLlm hands a pending reply to NodeDetail.
+          onSuccess({
+            ...response.data,
+            ...(response.data.llm_node_id && { awaitLlm: response.data.llm_node_id }),
+          });
           setLoading(false);
           return;
         }

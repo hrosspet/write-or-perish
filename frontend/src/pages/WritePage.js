@@ -12,20 +12,30 @@ export default function WritePage() {
   const { addToast } = useToast();
   const craftMode = !!user?.craft_mode;
 
-  const handleSubmit = async ({ content, privacy_level, ai_usage }) => {
+  // Text mode is agentic: every entry that starts here gets the textmode
+  // system prompt and honours the auto-generate preference — typed
+  // (`/textmode/start`) and recorded alike. A recorded entry arrives with
+  // `streaming_session_id`: its transcript and audio live in a streaming
+  // draft, so it is saved through save-as-node with the same two
+  // decisions (`agentic`, `auto_generate`) instead of the bare node it
+  // used to become.
+  const handleSubmit = async ({
+    content, privacy_level, ai_usage, streaming_session_id,
+  }) => {
     // Auto-generate requires AI-allowed ai_usage. Craft-mode users who
     // switch ai_usage to 'none' (or anything outside AI_ALLOWED) get a
-    // graceful fallback to a plain entry (POST /nodes/) instead of the
-    // agentic /textmode/start flow — no LLM fires, the note is saved,
-    // user lands on the new node.
+    // graceful fallback to a plain entry instead of the agentic flow —
+    // no LLM fires, the note is saved, user lands on the new node.
     if (!isAiAllowed(ai_usage)) {
       addToast(
         'Turning off auto-generate. AI usage on some nodes is turned off.',
         8000,
       );
-      const res = await api.post('/nodes/', {
-        content, privacy_level, ai_usage,
-      });
+      const res = streaming_session_id
+        ? await api.post(`/drafts/streaming/${streaming_session_id}/save-as-node`, {
+          content,
+        })
+        : await api.post('/nodes/', { content, privacy_level, ai_usage });
       return { id: res.data.id };
     }
     // Respect the user's auto-generate preference from the very first
@@ -33,9 +43,16 @@ export default function WritePage() {
     // inline toggle and NodeForm's craft-mode toggle, so there's one
     // "auto-generate after submit" preference across the app. Default
     // true on a fresh install (matches the backend default). When off,
-    // /textmode/start creates the thread without firing an LLM reply.
+    // the thread is created without firing an LLM reply.
     const stored = localStorage.getItem('loore_auto_generate');
     const autoGenerate = stored === null ? true : stored === 'true';
+    if (streaming_session_id) {
+      const res = await api.post(
+        `/drafts/streaming/${streaming_session_id}/save-as-node`,
+        { content, agentic: true, auto_generate: autoGenerate },
+      );
+      return res.data;
+    }
     const res = await api.post('/textmode/start', {
       content, privacy_level, ai_usage, auto_generate: autoGenerate,
     });
