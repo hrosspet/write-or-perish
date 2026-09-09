@@ -4,7 +4,9 @@ from flask import current_app
 
 from backend.models import Node, User
 from backend.extensions import db
-from backend.utils.placeholders import validate_user_export_placeholders
+from backend.utils.placeholders import (
+    check_user_export_plan, validate_user_export_placeholders,
+)
 
 
 _MAX_ANCESTRY_HOPS = 1000
@@ -104,8 +106,21 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     # Pre-flight: validate any {user_export} placeholders in the parent's
     # content. Misconfigured placeholders previously fell back silently
     # to "no token cap" and cost real $$$ on a single request.
+    parent_content = parent.get_content()
     validate_user_export_placeholders(
-        parent.get_content(), user_id=human_owner_id,
+        parent_content, user_id=human_owner_id,
+    )
+    # Plan gate: an uncapped export in the parent entry is refused here
+    # for non-Pro users, before any node exists. A placeholder inherited
+    # from an older message or the thread's system prompt is caught by
+    # the same rule inside generate_llm_response, where the chain is
+    # already decrypted (re-decrypting every ancestor here would add a
+    # KMS unwrap per node per turn).
+    owner = User.query.get(human_owner_id)
+    check_user_export_plan(
+        parent_content,
+        unrestricted_allowed=bool(owner and owner.has_unrestricted_export),
+        user_id=human_owner_id,
     )
 
     llm_user = User.query.filter_by(username=model_id).first()

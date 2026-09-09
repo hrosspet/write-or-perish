@@ -148,6 +148,77 @@ def validate_user_export_placeholders(text, *, user_id=None, log=None):
             )
 
 
+# Plan gate for the archive export. A {user_export} with no token
+# budget (or a budget above this cap) loads the whole archive into the
+# prompt on every reply — $4-5 per request on a large archive — so it is
+# a Pro-plan feature. Everyone else must cap it. The cap is the value
+# Peter set on 2026-09-09; it is not derived from anything.
+FREE_USER_EXPORT_TOKEN_CAP = 100_000
+
+USER_EXPORT_EXAMPLE = (
+    "{user_export?max_export_tokens=" + str(FREE_USER_EXPORT_TOKEN_CAP) + "}"
+)
+
+
+def unrestricted_export_message():
+    """User-facing text for a refused unrestricted {user_export}. Used
+    as the HTTP 400 body / toast and as the failed node's error."""
+    return (
+        "{user_export} without a token limit loads your whole archive "
+        "into every reply and is available on the Pro plan. On your "
+        "plan, add a limit of up to "
+        f"{FREE_USER_EXPORT_TOKEN_CAP:,} tokens, e.g. {USER_EXPORT_EXAMPLE}"
+    )
+
+
+def export_budget_allowed(max_export_tokens, *, unrestricted_allowed):
+    """Whether an export with this parsed budget may run.
+
+    `max_export_tokens` is the output of parse_max_export_tokens: None
+    means no (valid) cap, i.e. the full archive. Entitled users may run
+    anything; others need a cap within FREE_USER_EXPORT_TOKEN_CAP.
+    0 (export disabled) is always fine.
+    """
+    if unrestricted_allowed:
+        return True
+    if max_export_tokens is None:
+        return False
+    return max_export_tokens <= FREE_USER_EXPORT_TOKEN_CAP
+
+
+def check_user_export_plan(text, *, unrestricted_allowed, user_id=None,
+                           log=None):
+    """Refuse {user_export} placeholders in `text` that this user's plan
+    may not run (see export_budget_allowed). Raises
+    UserExportValidationError with the user-facing message, so callers
+    treat it exactly like a malformed placeholder: abort before any LLM
+    node is created or any spend happens.
+
+    No-op for entitled users or text without the placeholder. Every
+    placeholder is checked, not just the first: the task resolves the
+    first one in chain order, and which node comes first is not known
+    at the single-node call sites.
+    """
+    if unrestricted_allowed or not text:
+        return
+    log = log if log is not None else _default_logger
+    for match in USER_EXPORT_PATTERN.finditer(text):
+        placeholder = match.group(0)
+        params = parse_placeholder_params(placeholder)
+        budget = parse_max_export_tokens(
+            params.get("max_export_tokens"),
+            user_id=user_id, placeholder=placeholder, log=log,
+        )
+        if not export_budget_allowed(
+                budget, unrestricted_allowed=unrestricted_allowed):
+            log.warning(
+                "Refused unrestricted {user_export} for user_id=%s: "
+                "placeholder=%r budget=%r cap=%s",
+                user_id, placeholder, budget, FREE_USER_EXPORT_TOKEN_CAP,
+            )
+            raise UserExportValidationError(unrestricted_export_message())
+
+
 def parse_max_export_tokens(raw, *, user_id=None, placeholder=None,
                             log=None):
     """Parse the `max_export_tokens` value from a {user_export} placeholder.

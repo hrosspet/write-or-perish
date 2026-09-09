@@ -33,9 +33,12 @@ from backend.utils.tool_meta import update_tool_meta, parse_github_issue
 from backend.utils.privacy import AI_ALLOWED
 from backend.utils.placeholders import (
     USER_EXPORT_PATTERN,
+    UserExportValidationError,
+    export_budget_allowed,
     parse_placeholder_params,
     parse_days,
     parse_max_export_tokens,
+    unrestricted_export_message,
     warn_unknown_user_export_keys,
 )
 
@@ -2392,6 +2395,27 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     placeholder=export_placeholder_match,
                     log=logger,
                 )
+                # Plan gate on the EFFECTIVE placeholder (first alive node
+                # in chain order — an older message or the thread's
+                # system prompt, which the pre-flight in
+                # create_llm_placeholder cannot see without decrypting
+                # every ancestor). Refused before any export is built:
+                # the node fails with the user-facing message, which the
+                # thread page and voice hook toast from llm_task_error.
+                export_owner = User.query.get(user_id)
+                if not export_budget_allowed(
+                        max_export_tokens,
+                        unrestricted_allowed=bool(
+                            export_owner
+                            and export_owner.has_unrestricted_export)):
+                    logger.warning(
+                        "Refused unrestricted {user_export} in task for "
+                        "user_id=%s node=%s placeholder=%r budget=%r",
+                        user_id, export_node.id if export_node else None,
+                        export_placeholder_match, max_export_tokens,
+                    )
+                    raise UserExportValidationError(
+                        unrestricted_export_message())
 
             # Determine which API key to use based on ai_usage settings
             key_type = determine_api_key_type(node_chain, logger=logger)

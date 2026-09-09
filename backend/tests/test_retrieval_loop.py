@@ -868,7 +868,9 @@ def test_user_export_deduped_to_first_occurrence(app, monkeypatch):
     monkeypatch.setattr(_llm_task_mod, "build_user_export_content",
                         lambda *a, **k: MARKER)
 
-    alice = _mk_user("alice", approved=True, plan="alpha",
+    # Pro: an uncapped {user_export} is refused for other plans (see
+    # check_user_export_plan); this test is about dedup, not the gate.
+    alice = _mk_user("alice", approved=True, plan="pro",
                      external_content_enabled=True)
     llm_user = _mk_user("gpt-5", twitter_id="llm-gpt-5")
     prompt = UserPrompt(user_id=alice.id, prompt_key="textmode", title="P",

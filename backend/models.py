@@ -160,6 +160,18 @@ class User(db.Model, UserMixin):
             return True
         return (self.plan or "free") in self.VOICE_MODE_PLANS
 
+    # Plans that may run {user_export} with no token budget (the full
+    # archive on every reply). Others must cap it — see
+    # backend/utils/placeholders.py check_user_export_plan.
+    UNRESTRICTED_EXPORT_PLANS = {"pro"}
+
+    @property
+    def has_unrestricted_export(self):
+        """Whether this user may run an uncapped {user_export}."""
+        if self.is_admin:
+            return True
+        return (self.plan or "free") in self.UNRESTRICTED_EXPORT_PLANS
+
     def get_id(self):
         return str(self.id)
 

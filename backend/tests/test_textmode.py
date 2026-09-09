@@ -121,7 +121,8 @@ def _login(client, user_id):
 
 
 def _make_user(username, **kwargs):
-    u = User(username=username, approved=True, plan="alpha", **kwargs)
+    kwargs.setdefault("plan", "alpha")
+    u = User(username=username, approved=True, **kwargs)
     _db.session.add(u)
     _db.session.flush()
     return u
@@ -957,3 +958,70 @@ class TestGetPreviousSourceMode:
         _db.session.commit()
 
         assert fn([root, llm_no_mode]) is None
+
+
+# ── {user_export} plan gate ─────────────────────────────────────────────
+
+class TestUserExportPlanGate:
+    """An uncapped {user_export} is refused for non-Pro users before any
+    LLM node exists. The entry itself is always kept: /textmode/start
+    answers 202 with `llm_error` instead of an LLM node (it used to 500
+    and roll the entry back)."""
+
+    UNCAPPED = "Who am I? {user_export}"
+    CAPPED = "Who am I? {user_export?max_export_tokens=100000}"
+
+    def _start(self, app, user, content):
+        client = app.test_client()
+        _db.session.commit()
+        _login(client, user.id)
+        return client.post(
+            "/api/textmode/start",
+            json={"content": content, "model": "gpt-5"},
+        )
+
+    def test_alpha_uncapped_keeps_entry_skips_reply(self, app):
+        alice = _make_user("alice", plan="alpha")
+        resp = self._start(app, alice, self.UNCAPPED)
+        assert resp.status_code == 202
+        data = resp.get_json()
+        assert "llm_node_id" not in data
+        assert "Pro" in data["llm_error"]
+        assert "{user_export?max_export_tokens=100000}" in data["llm_error"]
+        user_node = Node.query.get(data["user_node_id"])
+        assert user_node is not None
+        assert user_node.get_content() == self.UNCAPPED
+        assert Node.query.filter_by(node_type="llm").count() == 0
+
+    def test_free_uncapped_refused(self, app):
+        bob = _make_user("bob", plan="free")
+        data = self._start(app, bob, self.UNCAPPED).get_json()
+        assert "llm_error" in data and "llm_node_id" not in data
+
+    def test_alpha_capped_runs(self, app):
+        alice = _make_user("alice", plan="alpha")
+        data = self._start(app, alice, self.CAPPED).get_json()
+        assert "llm_node_id" in data and "llm_error" not in data
+
+    def test_pro_uncapped_runs(self, app):
+        pat = _make_user("pat", plan="pro")
+        data = self._start(app, pat, self.UNCAPPED).get_json()
+        assert "llm_node_id" in data and "llm_error" not in data
+
+    def test_admin_uncapped_runs(self, app):
+        root = _make_user("root", plan="alpha", is_admin=True)
+        data = self._start(app, root, self.UNCAPPED).get_json()
+        assert "llm_node_id" in data and "llm_error" not in data
+
+    def test_reply_route_answers_400_and_no_node(self, app):
+        """/nodes/<id>/llm is the in-thread reply path; it already
+        surfaces UserExportValidationError as 400 → toast."""
+        alice = _make_user("alice", plan="alpha")
+        entry = _make_node(alice, content=self.UNCAPPED)
+        _db.session.commit()
+        client = app.test_client()
+        _login(client, alice.id)
+        resp = client.post(f"/api/nodes/{entry.id}/llm", json={})
+        assert resp.status_code == 400
+        assert "Pro" in resp.get_json()["error"]
+        assert Node.query.filter_by(node_type="llm").count() == 0

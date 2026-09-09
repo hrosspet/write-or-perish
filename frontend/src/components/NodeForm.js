@@ -9,6 +9,7 @@ import ApplyToRepliesDialog from "./ApplyToRepliesDialog";
 import SplitContentDialog, { NODE_CHAR_CAP } from "./SplitContentDialog";
 import PublicReplyDialog, { PUBLIC_REPLY_ACK_KEY } from "./PublicReplyDialog";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
+import { useToast } from "../contexts/ToastContext";
 import api from "../api";
 import { uploadFileInChunks } from "../utils/chunkedUpload";
 import useSubmitShortcut from "../hooks/useSubmitShortcut";
@@ -20,6 +21,7 @@ const NodeForm = forwardRef(
   ) => {
     const { user } = useUser();
     const isOnline = useOnlineStatus();
+    const { addToast } = useToast();
     const [content, setContent] = useState(initialContent || "");
     const [error, setError] = useState("");
     const [loading, setLoading] = useState(false);
@@ -420,6 +422,9 @@ const NodeForm = forwardRef(
               window.dispatchEvent(new CustomEvent('loore:spend-capped', {}));
             } catch (e) { /* no-op */ }
           }
+          // The entry was saved but the reply was refused (e.g. an
+          // uncapped {user_export} on a non-Pro plan): say why.
+          if (data && data.llm_error) addToast(data.llm_error, 10000);
           onSuccess(data);
           setLoading(false);
           return;
@@ -451,6 +456,7 @@ const NodeForm = forwardRef(
               window.dispatchEvent(new CustomEvent('loore:spend-capped', {}));
             } catch (e) { /* no-op */ }
           }
+          if (res.data.llm_error) addToast(res.data.llm_error, 10000);
           if (res.data.llm_node_id) {
             // Land on the USER node so the entry gets its own URL/history
             // step; ?awaitLlm hands the pending LLM response to NodeDetail's

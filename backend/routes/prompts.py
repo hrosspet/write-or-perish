@@ -3,6 +3,10 @@ from flask_login import login_required, current_user
 from backend.models import UserPrompt
 from backend.extensions import db
 from backend.utils.timefmt import iso_utc
+from backend.utils.placeholders import (
+    UserExportValidationError, check_user_export_plan,
+    validate_user_export_placeholders,
+)
 from backend.utils.prompts import (
     PROMPT_DEFAULTS, load_default_prompt, default_prompt_hash,
 )
@@ -136,6 +140,20 @@ def update_prompt(prompt_key):
 
     if content is None or not content.strip():
         return jsonify({"error": "Content is required"}), 400
+
+    # A saved prompt runs on every thread started under it, so check its
+    # {user_export} placeholders here as well as at generation time:
+    # unknown keys, and the plan gate on an uncapped export. Raises with
+    # the user-facing message the page shows as a toast.
+    try:
+        validate_user_export_placeholders(content, user_id=current_user.id)
+        check_user_export_plan(
+            content,
+            unrestricted_allowed=current_user.has_unrestricted_export,
+            user_id=current_user.id,
+        )
+    except UserExportValidationError as e:
+        return jsonify({"error": str(e)}), 400
 
     meta = PROMPT_DEFAULTS[prompt_key]
     prompt = UserPrompt(

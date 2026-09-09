@@ -6,6 +6,7 @@ from backend.models import Node
 from backend.extensions import db
 from backend.utils.timefmt import iso_utc
 from backend.utils.prompts import get_user_prompt_record
+from backend.utils.placeholders import UserExportValidationError
 from backend.utils.llm_nodes import (
     create_llm_placeholder, pick_model_for_generation,
 )
@@ -147,12 +148,29 @@ def start_conversation():
     # 3. Placeholder LLM node and enqueue task — unless the caller
     # explicitly opted out (Agentic Reply ON + Auto-generate OFF).
     if auto_generate:
-        llm_node, task_id = create_llm_placeholder(
-            user_node.id, model_id, current_user.id,
-            privacy_level=privacy_level,
-            ai_usage=ai_usage,
-            source_mode='textmode',
-        )
+        # A refused {user_export} (malformed, or uncapped on a non-Pro
+        # plan) skips only the reply: the system + user nodes are kept,
+        # like the spend-cap branch above, and the message travels as
+        # `llm_error` for the frontend to toast. Before this, the error
+        # escaped as a 500 and the entry was rolled back.
+        try:
+            llm_node, task_id = create_llm_placeholder(
+                user_node.id, model_id, current_user.id,
+                privacy_level=privacy_level,
+                ai_usage=ai_usage,
+                source_mode='textmode',
+            )
+        except UserExportValidationError as e:
+            db.session.commit()
+            current_app.logger.warning(
+                f"textmode/start: LLM reply skipped for node "
+                f"{user_node.id}: {e}"
+            )
+            return jsonify({
+                "conversation_id": system_node.id,
+                "user_node_id": user_node.id,
+                "llm_error": str(e),
+            }), 202
         db.session.commit()
         return jsonify({
             "conversation_id": system_node.id,
@@ -243,13 +261,25 @@ def add_message(conversation_id):
     db.session.add(user_node)
     db.session.flush()
 
-    # Create placeholder LLM node and enqueue task
-    llm_node, task_id = create_llm_placeholder(
-        user_node.id, model_id, current_user.id,
-        privacy_level=privacy_level,
-        ai_usage=ai_usage,
-        source_mode='textmode',
-    )
+    # Create placeholder LLM node and enqueue task. Same stance as
+    # /start: a refused {user_export} keeps the message, skips the reply.
+    try:
+        llm_node, task_id = create_llm_placeholder(
+            user_node.id, model_id, current_user.id,
+            privacy_level=privacy_level,
+            ai_usage=ai_usage,
+            source_mode='textmode',
+        )
+    except UserExportValidationError as e:
+        db.session.commit()
+        current_app.logger.warning(
+            f"textmode/message: LLM reply skipped for node "
+            f"{user_node.id}: {e}"
+        )
+        return jsonify({
+            "user_node_id": user_node.id,
+            "llm_error": str(e),
+        }), 202
 
     return jsonify({
         "user_node_id": user_node.id,
