@@ -4,6 +4,8 @@ import { useUser } from "../contexts/UserContext";
 import { useTheme } from "../contexts/ThemeContext";
 import GlobalAudioPlayer from "./GlobalAudioPlayer";
 import CraftIcon from "./CraftIcon";
+import CraftModeDialog from "./CraftModeDialog";
+import { useToast } from "../contexts/ToastContext";
 import api from "../api";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL;
@@ -13,6 +15,10 @@ const aboutPaths = ["/why-loore", "/vision", "/how-to"];
 function NavBar({ onNewEntryClick }) {
   const { user, loading: userLoading, setUser } = useUser();
   const { theme, toggleTheme } = useTheme();
+  const { addToast } = useToast();
+  const [craftDialogOpen, setCraftDialogOpen] = useState(false);
+  // True from "Turn on" until the one-shot glow on the craft items ends.
+  const [craftGlow, setCraftGlow] = useState(false);
   const location = useLocation();
   const [aboutOpen, setAboutOpen] = useState(false);
   const [overflowOpen, setOverflowOpen] = useState(false);
@@ -32,8 +38,7 @@ function NavBar({ onNewEntryClick }) {
     }
   }, [user]);
 
-  const toggleCraftMode = async () => {
-    const newValue = !craftMode;
+  const setCraftModeValue = async (newValue) => {
     setCraftMode(newValue);
     localStorage.setItem('loore_craft_mode', String(newValue));
 
@@ -48,6 +53,28 @@ function NavBar({ onNewEntryClick }) {
         // Silently fall back to localStorage — backend may not support craft_mode yet
       }
     }
+  };
+
+  // Turning craft mode ON goes through a confirmation (CraftModeDialog);
+  // turning it OFF is a plain flip.
+  const handleCraftToggleClick = () => {
+    if (craftMode) {
+      setCraftModeValue(false);
+      addToast('Craft mode off.');
+      return;
+    }
+    setOverflowOpen(false);
+    setCraftDialogOpen(true);
+  };
+
+  const confirmCraftMode = () => {
+    setCraftDialogOpen(false);
+    setCraftModeValue(true);
+    // Reopen the menu the user came from: the three new items and the
+    // flipped toggle are the immediate, visible result of the choice.
+    setOverflowOpen(true);
+    setCraftGlow(true);
+    addToast('Craft mode on. Its controls carry the sliders icon.', 5000);
   };
 
   // When "Write" is clicked:
@@ -129,7 +156,13 @@ function NavBar({ onNewEntryClick }) {
     transition: "color 0.2s ease",
   };
 
+  // The craft-only items sit in a wrapper with a 4px side margin (room for
+  // the one-shot glow inside the card); 4px less padding keeps their icons
+  // flush with the toggle's.
+  const craftItemStyle = { ...dropdownItemStyle, padding: "10px 12px" };
+
   return (
+    <>
     <nav
       style={{
         position: "fixed",
@@ -327,37 +360,6 @@ function NavBar({ onNewEntryClick }) {
                       Import data
                     </Link>
 
-                    {/* Craft mode items. Each carries the same icon as
-                        the toggle below, so a user who turned craft mode
-                        on and forgot can tie these entries back to the
-                        switch (alpha feedback 2026-09-05). */}
-                    {craftMode && (
-                      <>
-                        <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
-                        <button onClick={handleWriteClick} style={dropdownItemStyle}>
-                          <span style={craftItemLabelStyle}><CraftIcon />Write new entry</span>
-                        </button>
-                        <button onClick={() => {
-                          setOverflowOpen(false);
-                          api.get("/export/threads", { responseType: "blob" })
-                            .then((res) => {
-                              const url = window.URL.createObjectURL(new Blob([res.data]));
-                              const a = document.createElement("a");
-                              a.href = url;
-                              a.download = `loore-export-${new Date().toISOString().slice(0, 10)}.txt`;
-                              a.click();
-                              window.URL.revokeObjectURL(url);
-                            })
-                            .catch((err) => console.error("Export failed:", err));
-                        }} style={dropdownItemStyle}>
-                          <span style={craftItemLabelStyle}><CraftIcon />Export data</span>
-                        </button>
-                        <Link to="/prompts" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
-                          <span style={craftItemLabelStyle}><CraftIcon />Prompts</span>
-                        </Link>
-                      </>
-                    )}
-
                     {/* Bottom section */}
                     <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
 
@@ -382,35 +384,6 @@ function NavBar({ onNewEntryClick }) {
                         My public page
                       </Link>
                     )}
-
-                    {/* Craft mode toggle */}
-                    <button
-                      onClick={toggleCraftMode}
-                      title="Shows extra controls: privacy & AI usage per entry, auto-generate toggle, model picker, prompt editing, export."
-                      style={{ ...dropdownItemStyle, display: "flex", justifyContent: "space-between", alignItems: "center" }}
-                    >
-                      <span style={craftItemLabelStyle}><CraftIcon />Craft mode</span>
-                      <div style={{
-                        width: "32px",
-                        height: "18px",
-                        borderRadius: "9px",
-                        background: craftMode ? "var(--accent)" : "var(--border)",
-                        position: "relative",
-                        transition: "background 0.2s ease",
-                      }}>
-                        <div style={{
-                          width: "14px",
-                          height: "14px",
-                          borderRadius: "50%",
-                          background: "var(--text-primary)",
-                          position: "absolute",
-                          top: "2px",
-                          left: craftMode ? "16px" : "2px",
-                          transition: "left 0.2s ease",
-                        }} />
-                      </div>
-                    </button>
-
                     {/* Theme toggle */}
                     <button
                       onClick={toggleTheme}
@@ -450,6 +423,74 @@ function NavBar({ onNewEntryClick }) {
                         }} />
                       </div>
                     </button>
+
+                    {/* Craft mode toggle. With the mode on, a divider above it
+                        groups the toggle with the craft-only items below. */}
+                    {craftMode && (
+                      <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
+                    )}
+                    <button
+                      onClick={handleCraftToggleClick}
+                      title="Shows extra controls: privacy & AI usage per entry, auto-generate toggle, model picker, prompt editing, export."
+                      style={{ ...dropdownItemStyle, display: "flex", justifyContent: "space-between", alignItems: "center" }}
+                    >
+                      <span style={craftItemLabelStyle}><CraftIcon />Craft mode</span>
+                      <div style={{
+                        width: "32px",
+                        height: "18px",
+                        borderRadius: "9px",
+                        background: craftMode ? "var(--accent)" : "var(--border)",
+                        position: "relative",
+                        transition: "background 0.2s ease",
+                      }}>
+                        <div style={{
+                          width: "14px",
+                          height: "14px",
+                          borderRadius: "50%",
+                          background: "var(--text-primary)",
+                          position: "absolute",
+                          top: "2px",
+                          left: craftMode ? "16px" : "2px",
+                          transition: "left 0.2s ease",
+                        }} />
+                      </div>
+                    </button>
+
+                    {/* Craft-only items, right under the toggle so switching
+                        off only collapses what sits below it. Each carries the
+                        toggle's icon, so a user who turned craft mode on and
+                        forgot can tie them back to the switch (alpha feedback 2026-09-05). */}
+                    {craftMode && (
+                      <>
+                        <div
+                          className={craftGlow ? "craft-glow" : undefined}
+                          onAnimationEnd={() => setCraftGlow(false)}
+                          style={{ margin: "0 4px" }}
+                        >
+                        <button onClick={handleWriteClick} style={craftItemStyle}>
+                          <span style={craftItemLabelStyle}><CraftIcon />Write new entry</span>
+                        </button>
+                        <button onClick={() => {
+                          setOverflowOpen(false);
+                          api.get("/export/threads", { responseType: "blob" })
+                            .then((res) => {
+                              const url = window.URL.createObjectURL(new Blob([res.data]));
+                              const a = document.createElement("a");
+                              a.href = url;
+                              a.download = `loore-export-${new Date().toISOString().slice(0, 10)}.txt`;
+                              a.click();
+                              window.URL.revokeObjectURL(url);
+                            })
+                            .catch((err) => console.error("Export failed:", err));
+                        }} style={craftItemStyle}>
+                          <span style={craftItemLabelStyle}><CraftIcon />Export data</span>
+                        </button>
+                        <Link to="/prompts" onClick={() => setOverflowOpen(false)} style={craftItemStyle}>
+                          <span style={craftItemLabelStyle}><CraftIcon />Prompts</span>
+                        </Link>
+                        </div>
+                      </>
+                    )}
                   </>
                 )}
 
@@ -490,6 +531,12 @@ function NavBar({ onNewEntryClick }) {
         )}
       </div>
     </nav>
+    <CraftModeDialog
+      open={craftDialogOpen}
+      onClose={() => setCraftDialogOpen(false)}
+      onConfirm={confirmCraftMode}
+    />
+    </>
   );
 }
 

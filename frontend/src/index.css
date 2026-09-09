@@ -105,6 +105,32 @@ html, body, button, input, textarea, a {
   50% { opacity: 0.3; }
 }
 
+/* One-shot glow on the craft-only block of the ⋮ menu, played when the
+   menu reopens right after "Turn on" in the craft-mode dialog: the new
+   items light up, then settle into the menu. */
+.craft-glow {
+  border-radius: 6px;
+  background: var(--bg-card);
+  animation: craft-glow 2.4s ease-out forwards;
+}
+@keyframes craft-glow {
+  0%, 55% {
+    box-shadow:
+      0 0 12px 2px var(--accent),
+      0 0 28px 6px color-mix(in srgb, var(--accent) 60%, transparent),
+      0 0 52px 10px var(--accent-glow);
+  }
+  100% {
+    box-shadow:
+      0 0 0 0 transparent,
+      0 0 0 0 transparent,
+      0 0 0 0 transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .craft-glow { animation-duration: 1.2s; }
+}
+
 a:link {
   color: var(--accent);
 }
