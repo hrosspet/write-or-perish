@@ -2,6 +2,7 @@ import React, { useState, useCallback, useRef, useEffect } from "react";
 import { Link, useNavigate, useLocation } from "react-router-dom";
 import { useUser } from "../contexts/UserContext";
 import ModelSelector from "../components/ModelSelector";
+import CraftIcon from "../components/CraftIcon";
 import api from "../api";
 import useSubmitShortcut from "../hooks/useSubmitShortcut";
 
@@ -34,6 +35,7 @@ export default function AccountPage() {
   const [publicSideSaving, setPublicSideSaving] = useState(false);
   const [externalContentSaving, setExternalContentSaving] = useState(false);
   const [aiUsageSaving, setAiUsageSaving] = useState(false);
+  const [craftSaving, setCraftSaving] = useState(false);
 
   const usernameValid = (val) => {
     const v = val.trim();
@@ -362,6 +364,33 @@ export default function AccountPage() {
         </select>
         <div style={helperStyle}>
           Controls how AI can use your new entries by default.
+        </div>
+      </div>
+
+      {/* The craft-mode switch also lives in the ⋮ menu; this row is the
+          place a user who turned it on and forgot can find out what it
+          does and switch it off. Anchor for deep links: /account#craft */}
+      <div id="craft" style={{ ...rowStyle, scrollMarginTop: "72px" }}>
+        <div style={{ ...labelStyle, display: "flex", alignItems: "center", gap: "8px" }}>
+          <CraftIcon />Craft mode
+        </div>
+        <select
+          value={user.craft_mode ? "on" : "off"}
+          disabled={craftSaving}
+          onChange={(e) =>
+            saveField("craft_mode", e.target.value === "on", setCraftSaving)
+          }
+          style={selectStyle}
+        >
+          <option value="off">Off</option>
+          <option value="on">On</option>
+        </select>
+        <div style={helperStyle}>
+          Shows extra controls for people who want to steer the details:
+          privacy and AI usage on each entry, the auto-generate switch and
+          model picker on threads, audio upload, prompt editing and data
+          export. Off is the simpler Loore. Menu items and controls added
+          by craft mode carry the sliders icon.
         </div>
       </div>
 

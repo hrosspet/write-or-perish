@@ -3,6 +3,7 @@ import { Link, useLocation } from "react-router-dom";
 import { useUser } from "../contexts/UserContext";
 import { useTheme } from "../contexts/ThemeContext";
 import GlobalAudioPlayer from "./GlobalAudioPlayer";
+import CraftIcon from "./CraftIcon";
 import api from "../api";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL;
@@ -108,6 +109,9 @@ function NavBar({ onNewEntryClick }) {
     boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
     zIndex: 1001,
   };
+
+  // Icon + text row inside a menu item; matches the theme toggle's layout.
+  const craftItemLabelStyle = { display: "flex", alignItems: "center", gap: "8px" };
 
   const dropdownItemStyle = {
     display: "block",
@@ -320,28 +324,15 @@ function NavBar({ onNewEntryClick }) {
                       Import data
                     </Link>
 
-                    {/* Craft mode items. The heading says why these three
-                        exist: an alpha user had craft mode on without
-                        knowing it, and the items looked like plain menu
-                        entries. */}
+                    {/* Craft mode items. Each carries the same icon as
+                        the toggle below, so a user who turned craft mode
+                        on and forgot can tie these entries back to the
+                        switch (alpha feedback 2026-09-05). */}
                     {craftMode && (
                       <>
                         <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
-                        <div
-                          style={{
-                            padding: "6px 16px 2px",
-                            fontFamily: "var(--sans)",
-                            fontWeight: 300,
-                            fontSize: "0.72rem",
-                            letterSpacing: "0.04em",
-                            color: "var(--accent-dim)",
-                            userSelect: "none",
-                          }}
-                        >
-                          Craft mode
-                        </div>
                         <button onClick={handleWriteClick} style={dropdownItemStyle}>
-                          Write new entry
+                          <span style={craftItemLabelStyle}><CraftIcon />Write new entry</span>
                         </button>
                         <button onClick={() => {
                           setOverflowOpen(false);
@@ -356,10 +347,10 @@ function NavBar({ onNewEntryClick }) {
                             })
                             .catch((err) => console.error("Export failed:", err));
                         }} style={dropdownItemStyle}>
-                          Export data
+                          <span style={craftItemLabelStyle}><CraftIcon />Export data</span>
                         </button>
                         <Link to="/prompts" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
-                          Prompts
+                          <span style={craftItemLabelStyle}><CraftIcon />Prompts</span>
                         </Link>
                       </>
                     )}
@@ -395,7 +386,7 @@ function NavBar({ onNewEntryClick }) {
                       title="Shows extra controls: privacy & AI usage per entry, auto-generate toggle, model picker, prompt editing, export."
                       style={{ ...dropdownItemStyle, display: "flex", justifyContent: "space-between", alignItems: "center" }}
                     >
-                      <span>Craft mode</span>
+                      <span style={craftItemLabelStyle}><CraftIcon />Craft mode</span>
                       <div style={{
                         width: "32px",
                         height: "18px",
