@@ -356,7 +356,7 @@ function AdminActivity() {
             <thead>
               <tr>
                 <th style={th}>user</th>
-                <th style={th} title="Seeded from X API / Community Archive; ✗ = declined tweet seed">seed</th>
+                <th style={th} title="Seeded from X API / Community Archive; ✓ = opted in to tweet seed, ✗ = declined">seed</th>
                 <th style={th} title="Activation (approved) — everything on this tab counts from here">activated</th>
                 <th style={th} title="Last authenticated request (5-min resolution) and the area they were in">last seen</th>
                 <th style={th} title={`One cell per day (oldest → newest). Filled = wrote or asked that day; · = voice. Grey = before activation.`}>{data.days.length}d</th>
@@ -380,6 +380,7 @@ function AdminActivity() {
                   <td style={cell}>{u.username}</td>
                   <td style={cell}>
                     {u.seeded === "x" ? "X" : u.seeded === "ca" ? "CA" : "—"}
+                    {u.prefill_consent === "yes" && <span title="opted in to tweet seed" style={{ color: "var(--success)" }}> ✓</span>}
                     {u.prefill_consent === "no" && <span title="declined tweet seed" style={{ color: "var(--text-muted)" }}> ✗</span>}
                   </td>
                   <td style={cell} title={u.activated_at || ""}>{relTime(u.activated_at) || "—"}</td>
