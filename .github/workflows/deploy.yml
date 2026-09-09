@@ -25,7 +25,12 @@ jobs:
           cache-dependency-path: backend/requirements.txt
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        # `update` may fail on a third-party repo preinstalled on the runner
+        # image (Google Chrome "Hash Sum mismatch", 2026-09-09) while the
+        # Ubuntu indexes are fine; only the install itself must succeed.
+        run: |
+          sudo apt-get update || true
+          sudo apt-get install -y ffmpeg
 
       - name: Install Python dependencies
         run: |
