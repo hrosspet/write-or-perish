@@ -205,3 +205,133 @@ def test_opted_out_user_refused(app, wired):  # noqa: F811
     _db.session.commit()
     with pytest.raises(RuntimeError, match="opted out"):
         it.start_infer_intentions_impl(u.id)
+
+
+# ── Sync mode ("run now") + cancel ──────────────────────────────────────────
+
+def test_sync_mode_calls_model_once_and_saves_at_full_price(app, wired, monkeypatch):  # noqa: F811
+    import backend.llm_providers as lp
+    calls = []
+    monkeypatch.setattr(lp.LLMProvider, "get_completion", staticmethod(
+        lambda model_id, messages, keys, **kw: (calls.append((model_id, kw)) or {
+            "content": "# Endorsed\nY", "total_tokens": 101_000,
+            "input_tokens": 100_000, "output_tokens": 1_000})))
+    u = _make_user("hana")
+    _db.session.commit()
+    stages = []
+    saved = it.run_infer_intentions_sync_impl(u.id, progress=stages.append)
+    assert saved["batch"] is False and saved["version"] == 1
+    assert calls == [("claude-opus-4.8", {"max_tokens": it.BATCH_OUTPUT_TOKENS})]
+    assert stages and "synchronously" in stages[0]
+    log = APICostLog.query.filter_by(user_id=u.id, request_type="intentions_infer").one()
+    assert log.cost_microdollars == int(100_000 * 5.0 + 1_000 * 25.0)  # full price
+    assert UserArtifact.query.filter_by(user_id=u.id, kind="intentions").count() == 1
+    assert wired == []                                # nothing submitted
+    assert ProfileBatchJob.query.count() == 0         # nothing persisted
+
+
+def test_sync_mode_retries_smaller_on_prompt_too_long(app, wired, monkeypatch):  # noqa: F811
+    import backend.llm_providers as lp
+    budgets = []
+
+    def completion(model_id, messages, keys, **kw):
+        text = messages[0]["content"][0]["text"]
+        budgets.append(text)
+        if len(budgets) == 1:
+            raise lp.PromptTooLongError(1_200_000, 1_000_000)
+        return {"content": "ok", "total_tokens": 10, "input_tokens": 9, "output_tokens": 1}
+    monkeypatch.setattr(lp.LLMProvider, "get_completion", staticmethod(completion))
+    u = _make_user("ivan")
+    _db.session.commit()
+    saved = it.run_infer_intentions_sync_impl(u.id)
+    assert saved["version"] == 1 and len(budgets) == 2
+    # The retry rebuilt the export at a smaller budget than the first call.
+    first = int(budgets[0].split("EXPORT[")[1].split("]")[0])
+    second = int(budgets[1].split("EXPORT[")[1].split("]")[0])
+    assert second < first
+
+
+def test_sync_mode_refuses_opted_out_user(app, wired):  # noqa: F811
+    u = _make_user("jo")
+    u.default_ai_usage = "none"
+    _db.session.commit()
+    with pytest.raises(RuntimeError, match="opted out"):
+        it.run_infer_intentions_sync_impl(u.id)
+
+
+def test_cancel_marks_job_and_calls_provider(app, wired, monkeypatch):  # noqa: F811
+    u = _make_user("kim")
+    _db.session.commit()
+    item = {"custom_id": f"int-u{u.id}", "user_id": u.id, "kind": "intentions",
+            "budget": 1_000_000, "resubmitted": False}
+    job = _job_for(item)
+    cancelled = []
+    monkeypatch.setattr(it, "_provider_cancel",
+                        lambda pk, bid, keys: cancelled.append((pk, bid)) or None)
+    out = it.cancel_pending_intentions(u.id)
+    assert out == {"cancelled": 1, "errors": []}
+    assert cancelled == [("anthropic", "b-old")]
+    job = ProfileBatchJob.query.get(job.id)
+    assert job.status == "cancelled" and job.collected_at is not None
+    assert job.items[0]["cancelled"] is True
+    # Idempotent: nothing left to cancel.
+    assert it.cancel_pending_intentions(u.id) == {"cancelled": 0, "errors": []}
+    assert it.pending_intentions_jobs(u.id) == []
+
+
+def test_cancel_marks_job_even_when_provider_cancel_fails(app, wired, monkeypatch):  # noqa: F811
+    u = _make_user("lea")
+    _db.session.commit()
+    job = _job_for({"custom_id": f"int-u{u.id}", "user_id": u.id, "kind": "intentions",
+                    "budget": 1_000_000, "resubmitted": False})
+    monkeypatch.setattr(it, "_provider_cancel", lambda pk, bid, keys: "boom")
+    out = it.cancel_pending_intentions(u.id)
+    assert out["cancelled"] == 1 and out["errors"] == ["b-old: boom"]
+    assert ProfileBatchJob.query.get(job.id).status == "cancelled"
+
+
+def test_cancel_never_touches_profile_jobs_or_other_users(app, wired, monkeypatch):  # noqa: F811
+    u = _make_user("mia")
+    other = _make_user("noa")
+    _db.session.commit()
+    from datetime import datetime
+    _db.session.add(ProfileBatchJob(
+        provider_key="anthropic", batch_id="b-profile", status="pending",
+        items=[{"custom_id": f"u{u.id}-c1", "user_id": u.id, "kind": "chunk"}],
+        submitted_at=datetime.utcnow()))
+    _db.session.add(ProfileBatchJob(
+        provider_key="anthropic", batch_id="b-other", status="pending",
+        items=[{"custom_id": f"int-u{other.id}", "user_id": other.id, "kind": "intentions"}],
+        submitted_at=datetime.utcnow()))
+    _db.session.commit()
+    monkeypatch.setattr(it, "_provider_cancel", lambda pk, bid, keys: None)
+    assert it.cancel_pending_intentions(u.id) == {"cancelled": 0, "errors": []}
+    assert ProfileBatchJob.query.filter_by(status="pending").count() == 2
+
+
+def test_poller_skips_job_cancelled_mid_poll(app, wired, monkeypatch):  # noqa: F811
+    """The provider round-trip in the poller can overlap an admin cancel:
+    the refreshed row must be skipped — no collect, no overflow-resubmit."""
+    import backend.tasks.profile_batch as pb
+    u = _make_user("oli")
+    _db.session.commit()
+    job = _job_for({"custom_id": f"int-u{u.id}", "user_id": u.id, "kind": "intentions",
+                    "budget": 1_000_000, "resubmitted": False})
+
+    def check_and_cancel_meanwhile(batch_ids, keys):
+        # Simulate the admin clicking Cancel while the provider call runs.
+        from backend.extensions import db
+        row = ProfileBatchJob.query.get(job.id)
+        row.status = "cancelled"
+        db.session.commit()
+        return {}, {}, {}  # ended, item failed → would otherwise resubmit
+    monkeypatch.setattr(pb, "batch_check_and_collect", check_and_cancel_meanwhile)
+    monkeypatch.setattr(pb, "get_api_keys_for_usage", lambda cfg, usage: {})
+    monkeypatch.setattr(pb, "apply_batch_key_override", lambda keys, cfg: keys)
+    resubmits = []
+    monkeypatch.setattr(it, "handle_failed_intentions_item",
+                        lambda *a, **k: resubmits.append(a))
+    pb._poll_profile_batches()
+    assert resubmits == []
+    assert ProfileBatchJob.query.get(job.id).status == "cancelled"
+    assert wired == []

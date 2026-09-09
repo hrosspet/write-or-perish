@@ -637,6 +637,12 @@ def _poll_profile_batches():
             continue
         if job.provider_key in still_pending:
             continue  # not ended yet
+        # An admin "Cancel batch" may have landed while the provider call
+        # above was in flight: re-read the row, and never collect (or
+        # overflow-resubmit) a job that is no longer pending.
+        db.session.refresh(job)
+        if job.status != "pending":
+            continue
 
         for item in job.items:
             user = User.query.get(item["user_id"])

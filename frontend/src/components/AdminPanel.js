@@ -513,6 +513,13 @@ function AdminFeedback() {
   );
 }
 
+// Compact secondary action inside a status cell (in-flight intentions line).
+const smallActionStyle = {
+  padding: "2px 8px",
+  fontSize: "0.85em",
+  borderRadius: "4px",
+};
+
 function AdminPanel() {
   const [activeTab, setActiveTab] = useState("users");
   const [users, setUsers] = useState([]);
@@ -590,12 +597,60 @@ function AdminPanel() {
   const patchIntent = (userId, patch) =>
     setIntent((prev) => ({ ...prev, [userId]: { ...(prev[userId] || {}), ...patch } }));
 
-  const inferIntentions = async (userId) => {
+  // mode: "batch" (default, ~50% cheaper, hours) | "sync" (full price, minutes).
+  // cancelPending: cancel the user's in-flight batch first, then start.
+  const inferIntentions = async (userId, mode = "batch", cancelPending = false) => {
     try {
-      const res = await api.post(`/admin/users/${userId}/infer_intentions`);
-      patchIntent(userId, { taskId: res.data.task_id, status: "queued", error: null, result: null });
+      const res = await api.post(`/admin/users/${userId}/infer_intentions`, {
+        mode, cancel_pending: cancelPending,
+      });
+      patchIntent(userId, {
+        taskId: res.data.task_id, mode, status: "queued", error: null, result: null,
+        cancelled: res.data.cancelled || 0,
+        cancelErrors: res.data.errors || [],
+      });
+      if (res.data.cancelled) refreshStatuses();
     } catch (err) {
       patchIntent(userId, { error: err.response?.data?.error || "Error starting intentions run." });
+    }
+  };
+
+  const cancelIntentions = async (userId) => {
+    try {
+      const res = await api.post(`/admin/users/${userId}/cancel_intentions`);
+      patchIntent(userId, {
+        taskId: null, status: null, result: null, mode: null,
+        error: res.data.cancelled ? null : res.data.message,
+        cancelled: res.data.cancelled || 0,
+        cancelErrors: res.data.errors || [],
+      });
+      refreshStatuses();
+    } catch (err) {
+      patchIntent(userId, { error: err.response?.data?.error || "Error cancelling the batch." });
+    }
+  };
+
+  // Re-read only the pipeline state of each row (profile chain, intentions,
+  // batch flags) so the Profile column moves on its own while something is
+  // in flight — without resetting the spend-limit inputs the way fetchUsers does.
+  const refreshStatuses = async () => {
+    try {
+      const response = await api.get("/admin/users");
+      const byId = {};
+      response.data.users.forEach((u) => { byId[u.id] = u; });
+      setUsers((prev) => prev.map((u) => {
+        const fresh = byId[u.id];
+        if (!fresh) return u;
+        return {
+          ...u,
+          profile: fresh.profile,
+          intentions: fresh.intentions,
+          profile_batch_pending: fresh.profile_batch_pending,
+          profile_force_batch: fresh.profile_force_batch,
+        };
+      }));
+    } catch (err) {
+      console.error(err);
     }
   };
 
@@ -609,6 +664,9 @@ function AdminPanel() {
         try {
           const res = await api.get(`/admin/prefill/status/${p.taskId}`);
           patchIntent(Number(userId), res.data);
+          // The row's persistent state (⏳ / ✓ in the Profile column) comes
+          // from the users list — pull it as soon as the task settles.
+          if (res.data.status === "completed" || res.data.status === "failed") refreshStatuses();
         } catch (err) {
           patchIntent(Number(userId), { status: "failed", error: "Status check failed." });
         }
@@ -618,18 +676,51 @@ function AdminPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [intent]);
 
+  // Live Profile column: while any row has a batch in flight, re-read the
+  // pipeline state every 30 s (the poller collects batches on a ~60 s beat)
+  // and tick the clock the elapsed labels are computed from.
+  const [now, setNow] = useState(() => Date.now());
+  const anyInFlight = users.some(
+    (u) => u.intentions?.state === "generating" || u.profile?.state === "generating"
+  );
+  useEffect(() => {
+    if (!anyInFlight) return undefined;
+    const timer = setInterval(() => {
+      setNow(Date.now());
+      refreshStatuses();
+    }, 30000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anyInFlight]);
+
+  const elapsedLabel = (iso) => {
+    if (!iso) return null;
+    const mins = Math.max(0, Math.round((now - new Date(iso).getTime()) / 60000));
+    if (mins < 1) return "just now";
+    if (mins < 60) return `${mins} min`;
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return m ? `${h} h ${m} min` : `${h} h`;
+  };
+
   const intentLabel = (p) => {
     if (!p) return null;
-    if (p.error && !p.status) return p.error;
-    if (p.status === "queued") return "Intentions: queued…";
-    if (p.status === "running") return `Intentions: ${p.stage || "running"}…`;
-    if (p.status === "failed") return `Intentions failed: ${p.error}`;
-    if (p.status === "completed") {
+    const cancelNote = p.cancelled
+      ? `Batch cancelled${p.cancelErrors?.length ? ` (provider said: ${p.cancelErrors.join("; ")})` : ""}`
+      : null;
+    const kind = p.mode === "sync" ? "Intentions (now)" : "Intentions";
+    let main = null;
+    if (p.error && !p.status) main = p.error;
+    else if (p.status === "queued") main = `${kind}: queued…`;
+    else if (p.status === "running") main = `${kind}: ${p.stage || "running"}…`;
+    else if (p.status === "failed") main = `${kind} failed: ${p.error}`;
+    else if (p.status === "completed") {
       const r = p.result || {};
-      if (r.stage === "batch submitted") return "Intentions: batch submitted — progress shows in the Profile column";
-      return `Intentions v${r.version} saved (${r.model_id}, ${(r.llm_tokens || 0).toLocaleString()} tokens, $${(r.cost_usd || 0).toFixed(2)})`;
+      if (r.stage === "batch submitted") main = "Intentions: batch submitted — the Profile column follows it from here";
+      else main = `Intentions v${r.version} saved${r.mode === "sync" ? " now" : ""} (${r.model_id}, ${(r.llm_tokens || 0).toLocaleString()} tokens, $${(r.cost_usd || 0).toFixed(2)})`;
     }
-    return null;
+    if (!main && !cancelNote) return null;
+    return [cancelNote, main].filter(Boolean).join(" · ");
   };
 
   const buildProfile = async (userId) => {
@@ -1099,14 +1190,38 @@ function AdminPanel() {
                 {(!u.profile || u.profile.state === "none") && (
                   <span style={{ color: "var(--text-muted)" }}>—</span>
                 )}
-                {u.intentions && (
-                  <div style={{ color: u.intentions.state === "generating" ? "var(--warning)" : u.intentions.state === "failed" ? "var(--error)" : "var(--text-muted)" }}
-                       title={u.intentions.state === "failed" ? "The last intentions run gave up (batch failed twice) — check the worker log, then re-click Infer intentions" : u.intentions.last_created_at ? `latest intentions version ${u.intentions.last_created_at}` : "intentions batch in flight (persisted; survives restarts)"}>
-                    {u.intentions.state === "generating"
-                      ? <>⏳ intentions{u.intentions.versions ? ` (${u.intentions.versions} so far)` : ""}</>
-                      : u.intentions.state === "failed"
-                        ? <>✗ intentions failed</>
-                        : <>✓ intentions v{u.intentions.versions}</>}
+                {u.intentions && u.intentions.state === "generating" && (
+                  <div style={{ color: "var(--warning)" }}
+                       title={`Intentions batch ${u.intentions.batch?.batch_id || ""} submitted ${u.intentions.batch?.submitted_at || ""} — persisted, survives restarts; the poller collects it on a ~60 s beat, the provider's SLA is 24 h`}>
+                    ⏳ intentions batch{u.intentions.batch?.resubmitted ? " (resubmitted)" : ""}
+                    {u.intentions.batch?.submitted_at ? ` · ${elapsedLabel(u.intentions.batch.submitted_at)}` : ""}
+                    {u.intentions.versions ? ` · v${u.intentions.versions} so far` : ""}
+                    <div style={{ display: "flex", gap: "4px", marginTop: "3px" }}>
+                      <button
+                        onClick={() => cancelIntentions(u.id)}
+                        disabled={["queued", "running"].includes(intent[u.id]?.status)}
+                        style={smallActionStyle}
+                        title="Cancel the in-flight batch (provider-side, best effort — an item already being processed may still bill) and forget it here"
+                      >
+                        Cancel batch
+                      </button>
+                      <button
+                        onClick={() => inferIntentions(u.id, "sync", true)}
+                        disabled={["queued", "running"].includes(intent[u.id]?.status)}
+                        style={{ ...smallActionStyle, color: "var(--accent)", borderColor: "var(--accent)" }}
+                        title="Cancel the in-flight batch, then run the same inference synchronously: full price instead of the batch discount, saved within minutes"
+                      >
+                        Cancel, run now
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {u.intentions && u.intentions.state !== "generating" && (
+                  <div style={{ color: u.intentions.state === "failed" ? "var(--error)" : "var(--text-muted)" }}
+                       title={u.intentions.state === "failed" ? "The last intentions run gave up (batch failed twice) — check the worker log, then re-run (batch or now)" : u.intentions.last_created_at ? `latest intentions version ${u.intentions.last_created_at}` : undefined}>
+                    {u.intentions.state === "failed"
+                      ? <>✗ intentions failed</>
+                      : <>✓ intentions v{u.intentions.versions}</>}
                   </div>
                 )}
                 {u.prefilled_handle && (
@@ -1172,13 +1287,28 @@ function AdminPanel() {
                 >
                   Build profile
                 </button>{" "}
-                <button
-                  onClick={() => inferIntentions(u.id)}
-                  disabled={["queued", "running"].includes(intent[u.id]?.status)}
-                  title="Generate the Intentions artifact from this account's public tweets (public fork of the intentions prompt; whole corpus, oldest data trimmed until it fits the context)"
-                >
-                  Infer intentions
-                </button>{" "}
+                <span style={{ display: "inline-flex", verticalAlign: "middle" }}>
+                  <button
+                    onClick={() => inferIntentions(u.id, "batch")}
+                    disabled={["queued", "running"].includes(intent[u.id]?.status) || u.intentions?.state === "generating"}
+                    style={{ borderTopRightRadius: 0, borderBottomRightRadius: 0 }}
+                    title={u.intentions?.state === "generating"
+                      ? "A batch is already in flight — cancel it in the Profile column first"
+                      : "Generate the Intentions artifact from this account's public tweets via the Batch API: ~50% cheaper, but it can sit for hours (24 h SLA). Progress shows in the Profile column."}
+                  >
+                    Infer intentions
+                  </button>
+                  <button
+                    onClick={() => inferIntentions(u.id, "sync")}
+                    disabled={["queued", "running"].includes(intent[u.id]?.status) || u.intentions?.state === "generating"}
+                    style={{ borderTopLeftRadius: 0, borderBottomLeftRadius: 0, borderLeft: 0, color: "var(--accent)" }}
+                    title={u.intentions?.state === "generating"
+                      ? "A batch is already in flight — use “Cancel, run now” in the Profile column"
+                      : "Same inference, run synchronously right now: full price instead of the batch discount, saved within minutes. For when the person is waiting."}
+                  >
+                    Run now
+                  </button>
+                </span>{" "}
                 <button
                   onClick={() => toggleSpam(u.id)}
                   title={u.spam ? "Unmark as spam" : "Mark as spam (hides the row behind the eye toggle; does not deactivate)"}

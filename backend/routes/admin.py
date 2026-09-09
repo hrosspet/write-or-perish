@@ -99,13 +99,16 @@ def _intentions_status_map():
     version postdates it; else "complete" when at least one intentions
     artifact version exists."""
     from backend.models import ProfileBatchJob, UserArtifact
-    pending_ids, gave_up_at = set(), {}
+    pending, gave_up_at = {}, {}
     for job in ProfileBatchJob.query.order_by(ProfileBatchJob.submitted_at).all():
         for item in job.items:
             if item.get("kind") != "intentions":
                 continue
             if job.status == "pending":
-                pending_ids.add(item["user_id"])
+                pending[item["user_id"]] = {
+                    "batch_id": job.batch_id,
+                    "submitted_at": iso_utc(job.submitted_at),
+                    "resubmitted": bool(item.get("resubmitted"))}
             elif item.get("gave_up"):
                 gave_up_at[item["user_id"]] = job.submitted_at
     rows = db.session.query(
@@ -122,9 +125,10 @@ def _intentions_status_map():
         if newer is None or newer < when:
             entry = out.setdefault(uid, {"versions": 0, "last_created_at": None})
             entry["state"] = "failed"
-    for uid in pending_ids:
+    for uid, flight in pending.items():
         entry = out.setdefault(uid, {"versions": 0, "last_created_at": None})
         entry["state"] = "generating"
+        entry["batch"] = flight   # so the row can show how long it's been in flight
     return out
 
 
@@ -295,15 +299,46 @@ def build_profile(user_id):
 def infer_intentions_route(user_id):
     """Generate the intentions artifact from a pre-filled account's public
     tweets (public fork of the tested intentions_detection prompt; whole
-    corpus, newest-kept shrink loop). Returns {"task_id"} — poll
+    corpus, newest-kept shrink loop).
+
+    JSON body (all optional):
+      mode: "batch" (default; ~50% cheaper, collected by the poller,
+            can take hours) | "sync" (one synchronous call at full price,
+            saved within minutes — for when the person is waiting).
+      cancel_pending: true — cancel this user's in-flight intentions
+            batch first (provider-side + job row), then start the run.
+    Returns {"task_id", "mode", "cancelled"} — poll
     /admin/prefill/status/<task_id>."""
     from backend.utils.privacy import AI_ALLOWED
     user = User.query.get_or_404(user_id)
     if user.default_ai_usage not in AI_ALLOWED:
         return jsonify({"error": "User has opted out of AI usage."}), 400
-    from backend.tasks.intentions import infer_intentions
-    task = infer_intentions.delay(user.id)
-    return jsonify({"task_id": task.id}), 202
+    data = request.get_json(silent=True) or {}
+    mode = data.get("mode") or "batch"
+    if mode not in ("batch", "sync"):
+        return jsonify({"error": "mode must be 'batch' or 'sync'."}), 400
+    from backend.tasks.intentions import infer_intentions, cancel_pending_intentions
+    cancelled = {"cancelled": 0, "errors": []}
+    if data.get("cancel_pending"):
+        cancelled = cancel_pending_intentions(user.id)
+    task = infer_intentions.delay(user.id, mode)
+    return jsonify({"task_id": task.id, "mode": mode, **cancelled}), 202
+
+
+@admin_bp.route("/users/<int:user_id>/cancel_intentions", methods=["POST"])
+@login_required
+@admin_required
+def cancel_intentions_route(user_id):
+    """Cancel this user's in-flight intentions batch(es): provider-side
+    (best-effort — items already being processed may still bill) and the
+    persisted job row, so the poller never collects or resubmits it.
+    Returns {"cancelled": n, "errors": [..]}."""
+    User.query.get_or_404(user_id)
+    from backend.tasks.intentions import cancel_pending_intentions
+    result = cancel_pending_intentions(user_id)
+    if not result["cancelled"]:
+        return jsonify({**result, "message": "No intentions batch is in flight."}), 200
+    return jsonify(result), 200
 
 
 @admin_bp.route("/users/<int:user_id>/toggle_spam", methods=["POST"])
