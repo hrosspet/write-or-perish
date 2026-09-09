@@ -169,6 +169,20 @@ button:hover {
 button:active {
   background-color: var(--accent-glow);
 }
+/* A disabled button must look disabled: no global rule existed, so
+   buttons that were unclickable looked identical to live ones (admin
+   "Infer intentions" while a batch was in flight). Inline opacity set by
+   a component still wins over this. */
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+button:disabled:hover,
+button:disabled:active {
+  background-color: transparent;
+  border-color: var(--border);
+  color: var(--text-secondary);
+}
 
 /* Search highlight */
 mark {
