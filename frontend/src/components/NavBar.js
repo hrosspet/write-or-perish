@@ -376,6 +376,7 @@ function NavBar({ onNewEntryClick }) {
                     {/* Craft mode toggle */}
                     <button
                       onClick={toggleCraftMode}
+                      title="Shows extra controls: privacy & AI usage per entry, auto-generate toggle, model picker, prompt editing, export."
                       style={{ ...dropdownItemStyle, display: "flex", justifyContent: "space-between", alignItems: "center" }}
                     >
                       <span>Craft mode</span>
