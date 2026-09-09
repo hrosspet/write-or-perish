@@ -320,10 +320,26 @@ function NavBar({ onNewEntryClick }) {
                       Import data
                     </Link>
 
-                    {/* Craft mode items */}
+                    {/* Craft mode items. The heading says why these three
+                        exist: an alpha user had craft mode on without
+                        knowing it, and the items looked like plain menu
+                        entries. */}
                     {craftMode && (
                       <>
                         <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
+                        <div
+                          style={{
+                            padding: "6px 16px 2px",
+                            fontFamily: "var(--sans)",
+                            fontWeight: 300,
+                            fontSize: "0.72rem",
+                            letterSpacing: "0.04em",
+                            color: "var(--accent-dim)",
+                            userSelect: "none",
+                          }}
+                        >
+                          Craft mode
+                        </div>
                         <button onClick={handleWriteClick} style={dropdownItemStyle}>
                           Write new entry
                         </button>
