@@ -11,7 +11,7 @@ const backendUrl = process.env.REACT_APP_BACKEND_URL;
 const aboutPaths = ["/why-loore", "/vision", "/how-to"];
 
 function NavBar({ onNewEntryClick }) {
-  const { user, setUser } = useUser();
+  const { user, loading: userLoading, setUser } = useUser();
   const { theme, toggleTheme } = useTheme();
   const location = useLocation();
   const [aboutOpen, setAboutOpen] = useState(false);
@@ -184,8 +184,11 @@ function NavBar({ onNewEntryClick }) {
         {currentPath !== '/voice' && <GlobalAudioPlayer />}
 
         {/* About dropdown — logged-out visitors only. For logged-in users
-            the three pages live in the overflow menu below. */}
-        {!user && (
+            the three pages live in the overflow menu below. Not while the
+            session is still loading: user is null then too, and About
+            flashed in the bar on every reload before the ⋮ menu took
+            its place (alpha report 2026-09-05). */}
+        {!user && !userLoading && (
         <div ref={aboutRef} style={{ position: "relative" }}>
           <button
             onClick={() => setAboutOpen(!aboutOpen)}
