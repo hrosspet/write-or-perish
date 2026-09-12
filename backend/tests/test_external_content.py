@@ -57,6 +57,7 @@ def app():
     app.config["SECRET_KEY"] = "test-secret"
     app.config["TESTING"] = True
     app.config["OPENAI_API_KEY_CHAT"] = "fake-key"
+    app.config["CLIPPER_ENABLED"] = True
     _db.init_app(app)
     login_manager = LoginManager(app)
 
@@ -393,3 +394,16 @@ def test_token_routes_need_a_session(app):
     assert _no_session(app, "get", "/api/external/tokens").status_code == 401
     assert _no_session(app, "post", "/api/external/tokens",
                        json={}).status_code == 401
+
+
+def test_clipper_env_gated(app, client):
+    assert client.get("/api/external/clipper/status").get_json() == {
+        "configured": True}
+    app.config["CLIPPER_ENABLED"] = False
+    try:
+        assert client.get("/api/external/clipper/status").get_json() == {
+            "configured": False}
+        res = client.post("/api/external/tokens", json={})
+        assert res.status_code == 503
+    finally:
+        app.config["CLIPPER_ENABLED"] = True

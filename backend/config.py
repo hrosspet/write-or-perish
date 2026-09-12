@@ -93,6 +93,12 @@ class Config:
     # toggle itself) without a deploy.
     SHARE_V1 = os.environ.get(
         "SHARE_V1", "true").lower() in ("1", "true", "yes")
+    # Chrome clipper (#232): gates the card on the Import page and the
+    # minting of personal API tokens, the way X_CLIENT_ID gates the X
+    # bookmarks connect flow. Existing tokens keep working when the flag
+    # is off; only new ones can't be made.
+    CLIPPER_ENABLED = os.environ.get(
+        "CLIPPER_ENABLED", "false").lower() in ("1", "true", "yes")
 
     # --- Dev-update channel: changelog + notifications + polls (#207) ---
     # Intrinsically quiet (nothing shows unless something is unread), so it

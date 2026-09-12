@@ -66,6 +66,7 @@ export default function ExternalImport() {
   const [caUsername, setCaUsername] = useState('');
   const [caStatus, setCaStatus] = useState(null);
   const [xStatus, setXStatus] = useState(null);
+  const [clipperStatus, setClipperStatus] = useState(null);
   const [xSyncMsg, setXSyncMsg] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -74,17 +75,20 @@ export default function ExternalImport() {
   const [tokens, setTokens] = useState([]);
   const [newToken, setNewToken] = useState(null);  // {id, token}: plaintext, shown once
   const [tokenMsg, setTokenMsg] = useState(null);
+  const [addressCopied, setAddressCopied] = useState(false);
   const fileRef = useRef(null);
   const pollRef = useRef(null);
 
   const refresh = async () => {
     try {
-      const [itemsRes, xRes] = await Promise.all([
+      const [itemsRes, xRes, clipperRes] = await Promise.all([
         api.get('/external/items', { params: { per_page: 1 } }),
         api.get('/external/twitter/status'),
+        api.get('/external/clipper/status'),
       ]);
       setCounts(itemsRes.data.counts || {});
       setXStatus(xRes.data);
+      setClipperStatus(clipperRes.data);
     } catch (e) { /* page still works without counts */ }
   };
 
@@ -112,6 +116,18 @@ export default function ExternalImport() {
       setTokenMsg(e.response?.data?.error || 'Could not create a token.');
     }
     setBusy(false);
+  };
+
+  // Chrome refuses to open chrome:// pages from a web page (link or
+  // window.open), so the address is copy-to-paste instead of a link.
+  const copyExtensionsAddress = async () => {
+    try {
+      await navigator.clipboard.writeText('chrome://extensions');
+      setAddressCopied(true);
+      setTimeout(() => setAddressCopied(false), 1500);
+    } catch (e) {
+      setAddressCopied(false);
+    }
   };
 
   const revokeToken = async (id) => {
@@ -353,18 +369,31 @@ export default function ExternalImport() {
         )}
       </div>
 
+      {clipperStatus && clipperStatus.configured && (
       <div style={cardStyle}>
         <h3 style={titleStyle}>Chrome clipper</h3>
         <p style={helpStyle}>
           Save any open tab into your references with one key press. The
-          extension reads the page in your browser, sends the text here,
-          and closes the tab. Tweets land as bookmarks; everything else as
-          a clipped page. Clips are references, not your writing: they are
-          searchable and quotable, and never enter your profile.
+          extension reads the page in your browser, sends the text to
+          Loore, and closes the tab. Clips are references, not your
+          writing: they are searchable and quotable, and never enter your
+          profile.
         </p>
         <p style={helpStyle}>
-          Install: open <code style={codeStyle}>chrome://extensions</code>,
-          turn on Developer mode, choose “Load unpacked” and pick the{' '}
+          Install: open{' '}
+          <code
+            onClick={copyExtensionsAddress}
+            title="Click to copy, then paste into the address bar"
+            style={{
+              ...codeStyle, cursor: 'pointer',
+              color: addressCopied ? 'var(--success)' : codeStyle.color,
+            }}
+          >
+            chrome://extensions
+          </code>
+          {' '}(click to copy, then paste it into the address bar: Chrome
+          does not open its own pages from links), turn on Developer mode,
+          choose “Load unpacked” and pick the{' '}
           <code style={codeStyle}>extension/</code> folder of the Loore
           repository. Then paste a token below into the extension’s options.
           A token can only add references; it cannot read anything.
@@ -399,6 +428,7 @@ export default function ExternalImport() {
           </p>
         )}
       </div>
+      )}
 
       <NewTokenDialog
         token={newToken ? newToken.token : null}

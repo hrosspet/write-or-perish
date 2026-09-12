@@ -423,6 +423,18 @@ def clip_status():
 
 # ── Personal API tokens ──────────────────────────────────────────────────
 
+def _clipper_configured():
+    return bool(current_app.config.get("CLIPPER_ENABLED"))
+
+
+@external_bp.route("/clipper/status", methods=["GET"])
+@login_required
+def clipper_status():
+    """Whether the Import page shows the Chrome clipper card (env-gated
+    like the X connect flow)."""
+    return jsonify({"configured": _clipper_configured()}), 200
+
+
 def _serialize_token(t):
     return {
         "id": t.id, "name": t.name, "prefix": t.prefix, "scope": t.scope,
@@ -444,6 +456,9 @@ def list_tokens():
 @login_required
 def create_token():
     """Mint a token. The plaintext is returned ONCE, in this response."""
+    if not _clipper_configured():
+        return jsonify({"error": (
+            "The Chrome clipper is not enabled (set CLIPPER_ENABLED).")}), 503
     data = request.get_json(silent=True) or {}
     name = (data.get("name") or "Chrome clipper").strip()[:64]
     active = ApiToken.query.filter_by(
