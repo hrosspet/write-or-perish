@@ -386,15 +386,26 @@ def test_collector_leaves_a_failed_item_stale_and_waits_on_pending(
     assert APICostLog.query.count() == 0
 
 
-def test_collector_abandons_a_batch_stuck_past_its_max_age(app, monkeypatch):
+def _raise_not_found(ids, keys):
+    raise RuntimeError("404: no such batch")
+
+
+@pytest.mark.parametrize("check", [
+    lambda ids, keys: ({}, dict(ids), {}),  # provider still says pending
+    _raise_not_found,                       # we can't read it at all
+])
+def test_collector_abandons_a_batch_it_cannot_close_past_max_age(
+        app, monkeypatch, check):
+    """The providers end a batch themselves at 24h, so the age backstop
+    is for a batch we can no longer read — the raising case must reach
+    it too, or a lost batch id blocks the user's resubmission forever."""
     user = User.query.first()
     _mk_item(user.id, "a")
     stuck = _pending_job(
         user, datetime.utcnow(), batch_id="stuck",
         submitted_at=datetime.utcnow() - _digest.BATCH_JOB_MAX_AGE
-        - timedelta(hours=1))
-    monkeypatch.setattr(_digest, "batch_check_and_collect",
-                        lambda ids, keys: ({}, dict(ids), {}))
+        - timedelta(minutes=1))
+    monkeypatch.setattr(_digest, "batch_check_and_collect", check)
 
     assert _digest._collect_digest_batches() == {"collected": 0,
                                                  "abandoned": 1}
@@ -403,3 +414,16 @@ def test_collector_abandons_a_batch_stuck_past_its_max_age(app, monkeypatch):
     # ...which frees the user for the next nightly sweep.
     assert user.id not in _digest._users_in_pending_batches()
     assert _digest.digest_is_stale(user.id) is True
+
+
+def test_collector_keeps_a_young_unreadable_batch_pending(app, monkeypatch):
+    """A transient read failure on a fresh batch is retried next tick,
+    not written off."""
+    user = User.query.first()
+    _mk_item(user.id, "a")
+    job = _pending_job(user, datetime.utcnow())
+    monkeypatch.setattr(_digest, "batch_check_and_collect", _raise_not_found)
+
+    assert _digest._collect_digest_batches() == {"collected": 0,
+                                                 "abandoned": 0}
+    assert ExternalDigestBatchJob.query.get(job.id).status == "pending"

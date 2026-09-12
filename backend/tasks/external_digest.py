@@ -55,10 +55,13 @@ NIGHTLY_DIGEST_LOCAL_HOUR = 4
 # Output cap for a digest request. Real digests run ~2k tokens; this is
 # headroom, matching the direct path's provider default.
 DIGEST_MAX_TOKENS = 10000
-# A batch the provider hasn't ended by this age is written off: the job
-# is marked abandoned and its users, still stale, are resubmitted by the
-# next sweep. Comfortably past the providers' 24h completion window.
-BATCH_JOB_MAX_AGE = timedelta(hours=48)
+# Backstop for a batch we can no longer READ (lost batch id, revoked
+# key): once it is older than this, the job is marked abandoned so its
+# users, still stale, are resubmitted by the next sweep. A slow batch
+# never needs this — both providers end a batch themselves at 24h
+# (OpenAI `expired`, Anthropic `ended` with expired items) and the
+# collector treats that as ended. So: the 24h window plus polling slack.
+BATCH_JOB_MAX_AGE = timedelta(hours=25)
 
 # Corpus caps for the digest prompt. Most recent items first; each item
 # rendered compactly. ~1500 items x ~300 chars ≈ 450k chars worst case,
@@ -354,11 +357,14 @@ def _collect_digest_batches():
         except Exception:
             logger.exception("Collect failed for external-digest batch %s",
                              job.batch_id)
-            continue
+            # Unreadable, not merely unfinished — the case the age
+            # backstop exists for, so it must apply here too.
+            still_pending = {job.provider_key: job.batch_id}
+            results = {}
         if still_pending:
             if now - job.submitted_at > BATCH_JOB_MAX_AGE:
                 logger.error(
-                    "External-digest batch %s still pending after %s; "
+                    "External-digest batch %s not ended after %s; "
                     "abandoning (%d users stay stale for the next sweep)",
                     job.batch_id, BATCH_JOB_MAX_AGE, len(job.items))
                 job.status = "abandoned"
