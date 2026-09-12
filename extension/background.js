@@ -79,10 +79,10 @@ async function clip(tab, closeAfter) {
   const data = await res.json();
   await setLast({
     ok: true, at: Date.now(), url: page.url, title: page.title,
-    created: data.created, source: data.source, truncated: !!data.truncated,
-    chars: page.content.length,
+    created: data.created, updated: !!data.updated, source: data.source,
+    truncated: !!data.truncated, chars: page.content.length,
   });
-  await badge(data.created ? '✓' : '=', '#5a8f5a');
+  await badge(data.created || data.updated ? '✓' : '=', '#5a8f5a');
   if (closeAfter) {
     try { await chrome.tabs.remove(tab.id); } catch (e) { /* already gone */ }
   }
