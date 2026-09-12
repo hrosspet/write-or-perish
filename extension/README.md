@@ -18,6 +18,9 @@ and quotable in conversations, and it never enters your profile.
   link card, photo alt text, expanded links. They are stored as
   `twitter_bookmark` items keyed by tweet id, so a clipped tweet and the same
   tweet arriving through the bookmark sync are one row.
+- **PDFs** opened in Chrome's viewer: the link only, titled from the file
+  name (or the PDF's own title when Chrome shows one). The text is not
+  extracted.
 - Content is capped at 100,000 characters, the same bound as a Loore entry.
 
 ## Install (unpacked)
@@ -57,7 +60,7 @@ stored truncated, say), the stored text is replaced with the fuller one.
 
 - X keeps `t.co` redirects in link hrefs and shows a possibly elided URL as
   text; the clip records the text as shown.
-- Pages Chrome forbids scripts on (`chrome://`, the Web Store, PDFs viewed
-  natively) cannot be captured.
+- Pages Chrome forbids scripts on (`chrome://`, the Web Store) cannot be
+  captured.
 - The `web_clip` author is the byline when Readability finds one, else the
   site's hostname.
