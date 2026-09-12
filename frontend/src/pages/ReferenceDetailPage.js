@@ -8,7 +8,8 @@ import DeleteConfirmDialog from '../components/DeleteConfirmDialog';
 import { useToast } from '../contexts/ToastContext';
 import { formatDate } from '../utils/date';
 import TweetEmbed from '../components/TweetEmbed';
-import { bodyWithoutTitle, sourceLabel, tweetId } from '../utils/references';
+import YouTubeEmbed from '../components/YouTubeEmbed';
+import { bodyWithoutTitle, sourceLabel, tweetId, youtubeVideo } from '../utils/references';
 
 // The focal card of a thread (NodeDetail's highlightedTextStyle), so a
 // reference opens the way a node does.
@@ -52,6 +53,7 @@ function ReferenceDetailPage() {
   const [deleting, setDeleting] = useState(false);
   // For tweets: the embed's state decides whether the stored text is
   // the main body (embed unavailable) or a disclosure under the embed.
+  // A YouTube iframe cannot report failure, so it counts as shown.
   const [embedStatus, setEmbedStatus] = useState('loading');
   const [showStored, setShowStored] = useState(false);
   const [marking, setMarking] = useState(false);
@@ -105,6 +107,9 @@ function ReferenceDetailPage() {
   if (error) return <div style={{ padding: '20px', color: 'var(--accent)' }}>{error}</div>;
   if (!item) return <div style={{ padding: '20px', color: 'var(--text-muted)' }}>Loading...</div>;
 
+  const video = youtubeVideo(item);
+  const embedShown = video || (tweetId(item) && embedStatus === 'shown');
+
   const actions = [
     ...(item.url ? [{
       label: 'Open source',
@@ -153,7 +158,8 @@ function ReferenceDetailPage() {
         {tweetId(item) && (
           <TweetEmbed tweetId={tweetId(item)} onStatus={setEmbedStatus} />
         )}
-        {tweetId(item) && embedStatus === 'shown' ? (
+        {video && <YouTubeEmbed videoId={video.id} start={video.start} />}
+        {embedShown ? (
           <div style={{ marginTop: '10px' }}>
             <button
               type="button"
@@ -178,6 +184,8 @@ function ReferenceDetailPage() {
         ) : (
           // Pages, and tweets whose embed is still loading or unavailable
           // (deleted tweet, blocked script, offline): the stored text.
+          // The stored text also carries the video description, whose
+          // chapter list the toggle above reveals.
           <div style={{
             fontFamily: 'var(--sans)', fontSize: '0.95rem', fontWeight: 300,
             color: 'var(--text-secondary)', lineHeight: 1.7,

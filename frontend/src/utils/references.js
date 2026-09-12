@@ -10,6 +10,7 @@ export const SOURCE_LABEL = {
 };
 
 export function sourceLabel(item) {
+  if (youtubeVideo(item)) return 'Video';
   return SOURCE_LABEL[item.source] || item.source;
 }
 
@@ -49,4 +50,37 @@ export function bodyWithoutTitle(item) {
 export function tweetId(item) {
   if (item.source !== 'twitter_bookmark' && item.source !== 'community_archive') return null;
   return item.external_id || null;
+}
+
+const YOUTUBE_HOSTS = new Set(['youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com', 'youtu.be', 'www.youtube-nocookie.com']);
+const YOUTUBE_ID_RE = /^[A-Za-z0-9_-]{11}$/;
+
+// "1h2m3s", "90s", "90" → seconds; anything else → 0.
+function startSeconds(t) {
+  if (!t) return 0;
+  if (/^\d+$/.test(t)) return parseInt(t, 10);
+  const m = t.match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/);
+  if (!m || !m[0]) return 0;
+  return (parseInt(m[1] || 0, 10) * 3600) + (parseInt(m[2] || 0, 10) * 60) + parseInt(m[3] || 0, 10);
+}
+
+// A web clip of a YouTube watch page: { id, start } for the player
+// (start in seconds when the saved URL carried t=). Null for everything
+// else, including channel pages and playlists without a video.
+export function youtubeVideo(item) {
+  if (!item || item.source !== 'web_clip' || !item.url) return null;
+  let u;
+  try { u = new URL(item.url); } catch (e) { return null; }
+  if (!YOUTUBE_HOSTS.has(u.hostname.toLowerCase())) return null;
+  let id = null;
+  if (u.hostname.toLowerCase() === 'youtu.be') {
+    id = u.pathname.slice(1).split('/')[0];
+  } else if (u.pathname === '/watch') {
+    id = u.searchParams.get('v');
+  } else {
+    const m = u.pathname.match(/^\/(?:embed|shorts|live|v)\/([^/]+)/);
+    id = m ? m[1] : null;
+  }
+  if (!id || !YOUTUBE_ID_RE.test(id)) return null;
+  return { id, start: startSeconds(u.searchParams.get('t') || u.searchParams.get('start')) };
 }

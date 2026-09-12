@@ -6,7 +6,8 @@ import { useTheme } from '../contexts/ThemeContext';
  * (#232). The stored text stays the searchable copy and what the AI
  * reads; this is for the reader, who wants the images and the video.
  *
- * This is Loore's one third-party call from the browser: viewing a
+ * Loore makes third-party calls from the browser only on a reference
+ * page the user opened (this, and YouTubeEmbed for videos): viewing a
  * tweet reference loads X's script and an iframe from X, so X learns
  * the viewer's IP and which tweet was opened. `dnt` asks X not to use
  * it for ad targeting. Nothing is loaded anywhere else in Loore, and
