@@ -1491,3 +1491,28 @@ class PollDraftBatchJob(db.Model):
     submitted_at = db.Column(
         db.DateTime, nullable=False, default=datetime.utcnow)
     collected_at = db.Column(db.DateTime, nullable=True)
+
+
+class ExternalDigestBatchJob(db.Model):
+    """A submitted provider batch carrying nightly external-digest
+    rebuilds — one request per user whose saved references changed.
+    Nothing waits on a digest (it rebuilds at ~4am local), so it rides
+    the Batch API (~50% cheaper). Mirrors PollDraftBatchJob: per-item
+    routing metadata lives in `items` (keyed by custom_id); the beat
+    collector retrieves results and saves each digest artifact.
+    """
+    __tablename__ = "external_digest_batch_job"
+
+    id = db.Column(db.Integer, primary_key=True)
+    # "anthropic" | "openai:<api_model>"
+    provider_key = db.Column(db.String(64), nullable=False)
+    batch_id = db.Column(db.String(255), nullable=False, index=True)
+    # "pending" | "collected" | "abandoned" (never ended within the
+    # collector's patience — the user reads as stale and is resubmitted)
+    status = db.Column(db.String(16), nullable=False, default="pending")
+    # List of per-item dicts: {custom_id, user_id, model_id, corpus_at
+    # (ISO, the corpus state the prompt rendered), total_items}
+    items = db.Column(db.JSON, nullable=False, default=list)
+    submitted_at = db.Column(
+        db.DateTime, nullable=False, default=datetime.utcnow)
+    collected_at = db.Column(db.DateTime, nullable=True)

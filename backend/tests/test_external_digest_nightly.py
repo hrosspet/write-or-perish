@@ -5,9 +5,12 @@ fire once a night per user — not once per saved reference. Riding
 individual saves cost $26 in a single day of clipping (30 rebuilds x
 ~77k input tokens on a flagship model), which is what this gate prevents.
 
-Covers: the staleness definition, the not-stale skip, the corpus-state
-timestamp, and the nightly fan-out (own-night gate, one dispatch however
-many references arrived). LLM + celery glue stubbed.
+Covers: the staleness definition, the direct path's not-stale skip and
+corpus-state timestamp, the nightly batch submit (own-night gate, one
+request however many references arrived, no double-submit while a batch
+is pending) and the collector (batch pricing, corpus-state timestamp,
+failed items left stale, stuck batches abandoned). LLM/batch/celery glue
+stubbed.
 """
 import os
 import sys
@@ -32,7 +35,7 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
 
 from backend.extensions import db as _db  # noqa: E402
 from backend.models import (  # noqa: E402
-    APICostLog, ExternalItem, User, UserArtifact,
+    APICostLog, ExternalDigestBatchJob, ExternalItem, User, UserArtifact,
 )
 
 
@@ -46,8 +49,15 @@ def _make_app():
     app.config["SUPPORTED_MODELS"] = {
         "claude-opus-5": {
             "provider": "anthropic",
+            "api_model": "claude-opus-5-20260101",
             "input_price_per_mtok": 5.0,
             "output_price_per_mtok": 25.0,
+        },
+        "gpt-6-astra": {
+            "provider": "openai",
+            "api_model": "gpt-6-astra",
+            "input_price_per_mtok": 10.0,
+            "output_price_per_mtok": 50.0,
         },
     }
     _db.init_app(app)
@@ -216,10 +226,31 @@ def test_rebuild_stamps_the_corpus_state_not_the_finish_time(
     assert _digest.digest_is_stale(uid) is True
 
 
-def test_nightly_sweep_dispatches_once_per_night_in_the_users_own_night(
+def _stub_batch_submit(monkeypatch, batch_id="batch_1"):
+    """batch_submit stand-in: records what was submitted and answers with
+    one batch id per provider key, the way llm_batch keys them."""
+    submitted = []
+
+    def fake_submit(requests_by_provider, api_keys, phase=None):
+        submitted.append(requests_by_provider)
+        ids = {}
+        for provider, reqs in requests_by_provider.items():
+            if provider == "anthropic":
+                ids["anthropic"] = f"{batch_id}-anthropic"
+            else:
+                for req in reqs:
+                    key = f"openai:{req['api_model']}"
+                    ids[key] = f"{batch_id}-{req['api_model']}"
+        return ids
+    monkeypatch.setattr(_digest, "batch_submit", fake_submit)
+    return submitted
+
+
+def test_nightly_sweep_submits_one_batch_request_per_stale_user_in_their_night(
         app, monkeypatch):
     """However many references arrived during the day, the user's corpus
-    is digested once — and only while it is night where they are."""
+    is one batch request — only while it is night where they are, and
+    never while a batch of theirs is still pending."""
     night_tz = _tz_at_hour(_digest.NIGHTLY_DIGEST_LOCAL_HOUR)
     day_tz = _tz_at_hour((_digest.NIGHTLY_DIGEST_LOCAL_HOUR + 12) % 24)
 
@@ -228,7 +259,11 @@ def test_nightly_sweep_dispatches_once_per_night_in_the_users_own_night(
     day_user = User(username="daytime", timezone=day_tz)
     current_user_ = User(username="unchanged", timezone=night_tz)
     quiet_user = User(username="no-references", timezone=night_tz)
-    _db.session.add_all([day_user, current_user_, quiet_user])
+    in_flight_user = User(username="already-submitted", timezone=night_tz)
+    oai_user = User(username="openai-user", timezone=night_tz,
+                    preferred_model="gpt-6-astra")
+    _db.session.add_all([day_user, current_user_, quiet_user,
+                         in_flight_user, oai_user])
     _db.session.commit()
 
     for i in range(20):  # a day of clipping
@@ -238,12 +273,133 @@ def test_nightly_sweep_dispatches_once_per_night_in_the_users_own_night(
              fetched_at=datetime.utcnow() - timedelta(hours=3))
     _mk_digest(current_user_.id,
                created_at=datetime.utcnow() - timedelta(hours=2))
+    _mk_item(in_flight_user.id, "f1")
+    _db.session.add(ExternalDigestBatchJob(
+        provider_key="anthropic", batch_id="older", items=[{
+            "custom_id": f"external-digest-{in_flight_user.id}",
+            "user_id": in_flight_user.id, "model_id": "claude-opus-5",
+            "corpus_at": datetime.utcnow().isoformat(), "total_items": 1,
+        }]))
+    _mk_item(oai_user.id, "o1")
+    _db.session.commit()
 
-    dispatched = []
-    fake_task = MagicMock()
-    fake_task.apply_async = lambda args, countdown: dispatched.append(args[0])
-    monkeypatch.setattr(_digest, "rebuild_external_digest", fake_task)
-
+    submitted = _stub_batch_submit(monkeypatch)
     result = _digest.sweep_external_digests()
-    assert result == {"status": "ok", "dispatched": 1}
-    assert dispatched == [night_user.id]
+    assert result == {"status": "ok", "submitted": 2}
+
+    # One submit call, grouped by provider, one request per user.
+    assert len(submitted) == 1
+    by_provider = submitted[0]
+    assert [r["custom_id"] for r in by_provider["anthropic"]] == [
+        f"external-digest-{night_user.id}"]
+    assert [r["custom_id"] for r in by_provider["openai"]] == [
+        f"external-digest-{oai_user.id}"]
+    prompt = by_provider["anthropic"][0]["messages"][0]["content"]
+    assert "The corpus holds 20 saved items" in prompt
+    assert by_provider["openai"][0]["api_model"] == "gpt-6-astra"
+
+    # Each provider batch persisted with its own routing metadata.
+    jobs = {j.provider_key: j for j in ExternalDigestBatchJob.query.filter_by(
+        status="pending").all() if j.batch_id != "older"}
+    assert set(jobs) == {"anthropic", "openai:gpt-6-astra"}
+    assert jobs["anthropic"].items[0]["user_id"] == night_user.id
+    assert jobs["openai:gpt-6-astra"].items[0]["model_id"] == "gpt-6-astra"
+
+    # Nothing is billed at submit time, and the sync path was not used.
+    assert APICostLog.query.count() == 0
+
+    # A second sweep in the same hour submits nothing: everyone stale is
+    # now in a pending batch.
+    assert _digest.sweep_external_digests() == {"status": "ok",
+                                                "submitted": 0}
+    assert len(submitted) == 1
+
+
+def _pending_job(user, corpus_at, provider_key="anthropic",
+                 batch_id="batch_x", submitted_at=None):
+    job = ExternalDigestBatchJob(
+        provider_key=provider_key, batch_id=batch_id, items=[{
+            "custom_id": f"external-digest-{user.id}",
+            "user_id": user.id, "model_id": "claude-opus-5",
+            "corpus_at": corpus_at.isoformat(), "total_items": 1,
+        }])
+    if submitted_at is not None:
+        job.submitted_at = submitted_at
+    _db.session.add(job)
+    _db.session.commit()
+    return job
+
+
+def test_collector_saves_batch_results_at_batch_price_and_corpus_time(
+        app, monkeypatch):
+    user = User.query.first()
+    _mk_item(user.id, "a")
+    corpus_at = datetime.utcnow()
+    job = _pending_job(user, corpus_at)
+    _mk_item(user.id, "saved-while-batch-ran")  # newer than corpus_at
+
+    def fake_collect(batch_ids, api_keys):
+        assert batch_ids == {"anthropic": "batch_x"}
+        return ({f"external-digest-{user.id}": {
+            "content": "# Topics\n- batch built", "input_tokens": 1000,
+            "output_tokens": 100}}, {}, {})
+    monkeypatch.setattr(_digest, "batch_check_and_collect", fake_collect)
+
+    assert _digest._collect_digest_batches() == {"collected": 1,
+                                                 "abandoned": 0}
+    artifact = UserArtifact.latest_for(user.id, _digest.DIGEST_KIND)
+    assert artifact.get_content() == "# Topics\n- batch built"
+    assert artifact.created_at == corpus_at
+    log = APICostLog.query.one()
+    assert log.request_type == "external_digest"
+    # 1000 in x $5 + 100 out x $25 = 7500 microdollars, halved for batch.
+    assert log.cost_microdollars == 3750
+    _db.session.expire_all()
+    assert ExternalDigestBatchJob.query.get(job.id).status == "collected"
+    # The item saved mid-batch is not in this digest: still stale.
+    assert _digest.digest_is_stale(user.id) is True
+
+
+def test_collector_leaves_a_failed_item_stale_and_waits_on_pending(
+        app, monkeypatch):
+    user = User.query.first()
+    _mk_item(user.id, "a")
+    job = _pending_job(user, datetime.utcnow())
+
+    # Still processing: nothing changes.
+    monkeypatch.setattr(_digest, "batch_check_and_collect",
+                        lambda ids, keys: ({}, dict(ids), {}))
+    assert _digest._collect_digest_batches() == {"collected": 0,
+                                                 "abandoned": 0}
+    assert ExternalDigestBatchJob.query.get(job.id).status == "pending"
+
+    # Ended without a result for our item (errored/expired at the
+    # provider): the job closes, the user stays stale for the next sweep.
+    monkeypatch.setattr(_digest, "batch_check_and_collect",
+                        lambda ids, keys: ({}, {}, {}))
+    assert _digest._collect_digest_batches() == {"collected": 1,
+                                                 "abandoned": 0}
+    _db.session.expire_all()
+    assert ExternalDigestBatchJob.query.get(job.id).status == "collected"
+    assert UserArtifact.latest_for(user.id, _digest.DIGEST_KIND) is None
+    assert _digest.digest_is_stale(user.id) is True
+    assert APICostLog.query.count() == 0
+
+
+def test_collector_abandons_a_batch_stuck_past_its_max_age(app, monkeypatch):
+    user = User.query.first()
+    _mk_item(user.id, "a")
+    stuck = _pending_job(
+        user, datetime.utcnow(), batch_id="stuck",
+        submitted_at=datetime.utcnow() - _digest.BATCH_JOB_MAX_AGE
+        - timedelta(hours=1))
+    monkeypatch.setattr(_digest, "batch_check_and_collect",
+                        lambda ids, keys: ({}, dict(ids), {}))
+
+    assert _digest._collect_digest_batches() == {"collected": 0,
+                                                 "abandoned": 1}
+    _db.session.expire_all()
+    assert ExternalDigestBatchJob.query.get(stuck.id).status == "abandoned"
+    # ...which frees the user for the next nightly sweep.
+    assert user.id not in _digest._users_in_pending_batches()
+    assert _digest.digest_is_stale(user.id) is True

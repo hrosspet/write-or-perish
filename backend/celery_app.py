@@ -84,6 +84,13 @@ celery.conf.update(
             'task': 'backend.tasks.external_digest.sweep_external_digests',
             'schedule': 3600.0,  # hourly; the task itself gates on local 4am
         },
+        # The sweep submits digests as a provider batch (~50% cheaper);
+        # this collects finished batches. Nobody waits on a digest, so a
+        # slow poll is fine. No-op when nothing is pending.
+        'collect-external-digest-batches': {
+            'task': 'backend.tasks.external_digest.collect_external_digest_batches',
+            'schedule': 600.0,  # every 10 min
+        },
     },
 )
 
