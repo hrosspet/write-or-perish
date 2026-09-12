@@ -6,6 +6,7 @@ import BubbleKebabMenu from '../components/BubbleKebabMenu';
 import ReferenceFooter from '../components/ReferenceFooter';
 import DeleteConfirmDialog from '../components/DeleteConfirmDialog';
 import ReferenceEditForm from '../components/ReferenceEditForm';
+import NodeFormModal from '../components/NodeFormModal';
 import RegenerateTtsDialog from '../components/RegenerateTtsDialog';
 import SpeakerIcon from '../components/SpeakerIcon';
 import { useToast } from '../contexts/ToastContext';
@@ -162,21 +163,13 @@ function ReferenceDetailPage() {
         gap: '16px',
         marginBottom: '12px',
       }}>
-        <div style={{ display: 'flex', alignItems: 'center' }}>
-          <h2 style={{
-            fontFamily: 'var(--serif)',
-            fontWeight: 300,
-            fontSize: '1.8rem',
-            color: 'var(--text-primary)',
-            margin: 0,
-          }}>Reference</h2>
-          <SpeakerIcon
-            itemId={item.id}
-            content={item.title ? `# ${item.title}\n${item.content || ''}` : item.content}
-            isPublic={false}
-            onTtsGenerated={() => setItem((prev) => (prev ? { ...prev, has_tts: true } : prev))}
-          />
-        </div>
+        <h2 style={{
+          fontFamily: 'var(--serif)',
+          fontWeight: 300,
+          fontSize: '1.8rem',
+          color: 'var(--text-primary)',
+          margin: 0,
+        }}>Reference</h2>
         <Link
           to="/references"
           style={{
@@ -188,25 +181,27 @@ function ReferenceDetailPage() {
         </Link>
       </div>
       <div style={cardStyle}>
-        <BubbleKebabMenu visible={!editing} items={actions} />
-        {editing ? (
-          <ReferenceEditForm
-            key={item.id}
-            item={item}
-            saving={saving}
-            onSave={saveEdit}
-            onCancel={() => setEditing(false)}
-          />
-        ) : (
-        <>
-        {item.title && (
-          <h1 style={{
-            fontFamily: 'var(--serif)', fontWeight: 400, fontSize: '1.5rem',
-            color: 'var(--text-primary)', margin: '0 0 0.8rem 0', lineHeight: 1.3,
-          }}>
-            {item.title}
-          </h1>
-        )}
+        <BubbleKebabMenu visible={true} items={actions} />
+        {/* The title row carries the speaker (a tweet has no title: the
+            icon then stands alone at the top of the card). */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '2px', margin: '0 0 0.8rem 0' }}>
+          {item.title && (
+            <h1 style={{
+              fontFamily: 'var(--serif)', fontWeight: 400, fontSize: '1.5rem',
+              color: 'var(--text-primary)', margin: 0, lineHeight: 1.3,
+            }}>
+              {item.title}
+            </h1>
+          )}
+          <span style={{ display: 'flex', alignItems: 'center', color: 'var(--text-muted)', fontSize: '1rem' }}>
+            <SpeakerIcon
+              itemId={item.id}
+              content={item.title ? `# ${item.title}\n${item.content || ''}` : item.content}
+              isPublic={false}
+              onTtsGenerated={() => setItem((prev) => (prev ? { ...prev, has_tts: true } : prev))}
+            />
+          </span>
+        </div>
         {tweetId(item) && (
           <TweetEmbed tweetId={tweetId(item)} onStatus={setEmbedStatus} />
         )}
@@ -244,8 +239,6 @@ function ReferenceDetailPage() {
           }}>
             <MarkdownBody>{bodyWithoutTitle(item)}</MarkdownBody>
           </div>
-        )}
-        </>
         )}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
           <ReferenceFooter item={item} />
@@ -285,6 +278,17 @@ function ReferenceDetailPage() {
           </button>
         </div>
       </div>
+      {editing && (
+        <NodeFormModal title="Edit Reference" onClose={() => setEditing(false)}>
+          <ReferenceEditForm
+            key={item.id}
+            item={item}
+            saving={saving}
+            onSave={saveEdit}
+            onCancel={() => setEditing(false)}
+          />
+        </NodeFormModal>
+      )}
       <RegenerateTtsDialog
         open={!!pendingEdit}
         onClose={() => setPendingEdit(null)}

@@ -1,7 +1,10 @@
 import React, { useEffect } from "react";
 import NodeForm from "./NodeForm";
 
-function NodeFormModal({ title, onClose, nodeFormProps }) {
+// The edit / reply modal shell: overlay, card, close button, Escape. Hosts
+// a NodeForm by default, or whatever editor is passed as children (the
+// reference page's title + text form), so every edit dialog looks alike.
+function NodeFormModal({ title, onClose, nodeFormProps, children }) {
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.key === "Escape") {
@@ -67,7 +70,7 @@ function NodeFormModal({ title, onClose, nodeFormProps }) {
         }}>
           {title}
         </h2>
-        <NodeForm {...nodeFormProps} />
+        {children || <NodeForm {...nodeFormProps} />}
       </div>
     </div>
   );

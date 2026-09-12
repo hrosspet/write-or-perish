@@ -24,9 +24,9 @@ const buttonStyle = (primary) => ({
 });
 
 /**
- * Inline editor for a saved reference's title and text (#232), the
- * reference-page counterpart of editing a node. Cmd/Ctrl+Enter saves,
- * Escape cancels. The text has the same per-entry cap as a node; over
+ * Editor for a saved reference's title and text (#232), shown in the
+ * same NodeFormModal as a node edit. Cmd/Ctrl+Enter saves; the modal
+ * handles Escape. The text has the same per-entry cap as a node; over
  * it, Save is disabled and the count says why.
  */
 function ReferenceEditForm({ item, saving, onSave, onCancel }) {
@@ -50,12 +50,8 @@ function ReferenceEditForm({ item, saving, onSave, onCancel }) {
     if (el) el.focus();
   }, []);
 
-  const onKeyDown = (e) => {
-    if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
-  };
-
   return (
-    <div onKeyDown={onKeyDown}>
+    <div>
       <input
         type="text"
         value={title}
