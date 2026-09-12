@@ -470,3 +470,27 @@ def test_item_routes_are_owner_only(app, client):
     assert client.delete(f"/api/external/items/{their_id}").status_code == 404
     with app.app_context():
         assert ExternalItem.query.get(their_id) is not None
+
+
+def test_mark_read_is_explicit_idempotent_and_reversible(app, client):
+    with app.app_context():
+        uid = User.query.first().id
+        _upsert_items(uid, "web_clip", [
+            {"external_id": "r" * 64, "content": "to read", "title": "T",
+             "author_handle": None, "url": None, "posted_at": None}])
+        item_id = ExternalItem.query.one().id
+
+    # Opening the page does not mark it read.
+    assert client.get(f"/api/external/items/{item_id}").get_json()["read_at"] is None
+
+    first = client.post(f"/api/external/items/{item_id}/read").get_json()
+    assert first["read_at"] is not None
+    # Marking again keeps the original timestamp.
+    again = client.post(f"/api/external/items/{item_id}/read").get_json()
+    assert again["read_at"] == first["read_at"]
+    listed = client.get("/api/external/items").get_json()["items"][0]
+    assert listed["read_at"] == first["read_at"]
+    assert listed["surfaced_count"] == 0 and listed["last_surfaced_at"] is None
+
+    assert client.delete(f"/api/external/items/{item_id}/read").get_json()["read_at"] is None
+    assert client.post("/api/external/items/999/read").status_code == 404

@@ -123,7 +123,7 @@ function ReferencesPage() {
               node={asCardNode(item)}
               onClick={handleCardClick}
               footer={<ReferenceFooter item={item} />}
-              tag={sourceLabel(item)}
+              tag={item.read_at ? `Read · ${sourceLabel(item)}` : sourceLabel(item)}
               actions={[
                 ...(item.url ? [{
                   label: 'Open source',

@@ -1147,6 +1147,10 @@ class ExternalItem(db.Model):
     surfaced_count = db.Column(db.Integer, nullable=False, default=0,
                                server_default="0")
     last_surfaced_at = db.Column(db.DateTime, nullable=True)
+    # Set only by the user's own "Mark as read" — never by opening the
+    # page (a skim is not a read) and never by the AI surfacing it (that
+    # is surfaced_count above). Null = unread.
+    read_at = db.Column(db.DateTime, nullable=True)
 
     user = db.relationship("User", backref="external_items")
 

@@ -52,6 +52,12 @@ def _serialize_item(item):
         "url": item.url,
         "posted_at": iso_utc(item.posted_at) if item.posted_at else None,
         "fetched_at": iso_utc(item.fetched_at),
+        # The user's own mark (see ExternalItem.read_at) and the AI's
+        # surfacing history — two different things, shown side by side.
+        "read_at": iso_utc(item.read_at) if item.read_at else None,
+        "surfaced_count": item.surfaced_count or 0,
+        "last_surfaced_at": (iso_utc(item.last_surfaced_at)
+                             if item.last_surfaced_at else None),
     }
 
 
@@ -116,6 +122,27 @@ def delete_item(item_id):
     db.session.delete(item)
     db.session.commit()
     return jsonify({"deleted": True, "id": item_id}), 200
+
+
+@external_bp.route("/items/<int:item_id>/read", methods=["POST", "DELETE"])
+@login_required
+def mark_item_read(item_id):
+    """POST marks the reference read (idempotent: an already-read item
+    keeps its original read_at); DELETE clears the mark."""
+    item = ExternalItem.query.filter_by(
+        id=item_id, user_id=current_user.id).first()
+    if item is None:
+        return jsonify({"error": "not found"}), 404
+    if request.method == "POST":
+        if item.read_at is None:
+            item.read_at = datetime.utcnow()
+    else:
+        item.read_at = None
+    db.session.commit()
+    return jsonify({
+        "id": item.id,
+        "read_at": iso_utc(item.read_at) if item.read_at else None,
+    }), 200
 
 
 @external_bp.route("/community-archive/fetch", methods=["POST"])

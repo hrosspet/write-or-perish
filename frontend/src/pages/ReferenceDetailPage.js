@@ -6,6 +6,7 @@ import BubbleKebabMenu from '../components/BubbleKebabMenu';
 import ReferenceFooter from '../components/ReferenceFooter';
 import DeleteConfirmDialog from '../components/DeleteConfirmDialog';
 import { useToast } from '../contexts/ToastContext';
+import { formatDate } from '../utils/date';
 import TweetEmbed from '../components/TweetEmbed';
 import { bodyWithoutTitle, sourceLabel, tweetId } from '../utils/references';
 
@@ -53,6 +54,7 @@ function ReferenceDetailPage() {
   // the main body (embed unavailable) or a disclosure under the embed.
   const [embedStatus, setEmbedStatus] = useState('loading');
   const [showStored, setShowStored] = useState(false);
+  const [marking, setMarking] = useState(false);
 
   useEffect(() => {
     setItem(null);
@@ -84,6 +86,20 @@ function ReferenceDetailPage() {
           || 'Error deleting reference.', 4000);
       })
       .finally(() => setDeleting(false));
+  };
+
+  // Only the user marks a reference read. Opening the page is not a
+  // read (a skim is not a read), and the AI surfacing it is tracked
+  // separately as surfaced_count.
+  const toggleRead = () => {
+    setMarking(true);
+    const req = item.read_at
+      ? api.delete(`/external/items/${item.id}/read`)
+      : api.post(`/external/items/${item.id}/read`);
+    req
+      .then((res) => setItem((prev) => ({ ...prev, read_at: res.data.read_at })))
+      .catch(() => addToast('Could not update the read mark.', 4000))
+      .finally(() => setMarking(false));
   };
 
   if (error) return <div style={{ padding: '20px', color: 'var(--accent)' }}>{error}</div>;
@@ -169,9 +185,41 @@ function ReferenceDetailPage() {
             <MarkdownBody>{bodyWithoutTitle(item)}</MarkdownBody>
           </div>
         )}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
           <ReferenceFooter item={item} />
-          <span style={{ ...tagStyle, marginTop: '12px' }}>{sourceLabel(item)}</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '12px' }}>
+            {item.read_at && <span style={tagStyle}>Read</span>}
+            <span style={tagStyle}>{sourceLabel(item)}</span>
+          </div>
+        </div>
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          flexWrap: 'wrap', gap: '8px', marginTop: '14px',
+          paddingTop: '12px', borderTop: '1px solid var(--border)',
+        }}>
+          <span style={{
+            fontFamily: 'var(--sans)', fontSize: '0.78rem', fontWeight: 300,
+            color: 'var(--text-muted)',
+          }}>
+            {item.surfaced_count
+              ? `Shown by Loore ${item.surfaced_count}× · last ${formatDate(item.last_surfaced_at)}`
+              : 'Not yet shown by Loore in a conversation'}
+            {item.read_at ? ` · you read it ${formatDate(item.read_at)}` : ''}
+          </span>
+          <button
+            type="button"
+            onClick={toggleRead}
+            disabled={marking}
+            style={{
+              padding: '6px 14px', borderRadius: '6px', cursor: 'pointer',
+              fontFamily: 'var(--sans)', fontSize: '0.82rem', fontWeight: 400,
+              background: item.read_at ? 'none' : 'var(--accent)',
+              border: item.read_at ? '1px solid var(--border)' : '1px solid var(--accent)',
+              color: item.read_at ? 'var(--text-muted)' : 'var(--bg-deep)',
+            }}
+          >
+            {item.read_at ? 'Mark as unread' : 'Mark as read'}
+          </button>
         </div>
       </div>
       <DeleteConfirmDialog
