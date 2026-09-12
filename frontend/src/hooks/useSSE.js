@@ -422,7 +422,7 @@ export function useDraftTranscriptionSSE(sessionId, options = {}) {
  * @param {number} entityId - Node or Profile ID to subscribe to
  * @param {Object} options
  * @param {boolean} options.enabled - Whether to connect
- * @param {string} options.entityType - 'node' (default) or 'profile'
+ * @param {string} options.entityType - 'node' (default), 'profile' or 'item' (saved reference)
  * @param {Function} options.onChunkReady - Called when an audio chunk is ready
  * @param {Function} options.onAllComplete - Called when all chunks are done
  */
@@ -451,7 +451,9 @@ export function useTTSStreamSSE(entityId, options = {}) {
   const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
   const ssePathSegment = entityType === 'profile'
     ? `profiles/${entityId}`
-    : `nodes/${entityId}`;
+    : entityType === 'item'
+      ? `items/${entityId}`
+      : `nodes/${entityId}`;
   const url = entityId ? `${backendUrl}/api/sse/${ssePathSegment}/tts-stream` : null;
 
   // Debug: log SSE URL changes

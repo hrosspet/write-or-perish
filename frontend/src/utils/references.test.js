@@ -1,4 +1,4 @@
-import { sourceLabel, youtubeVideo } from './references';
+import { bodyWithoutTitle, sourceLabel, youtubeVideo } from './references';
 
 const clip = (url) => ({ source: 'web_clip', url });
 
@@ -34,5 +34,16 @@ describe('sourceLabel', () => {
     expect(sourceLabel(clip('https://www.youtube.com/watch?v=dQw4w9WgXcQ'))).toBe('Video');
     expect(sourceLabel(clip('https://example.com/post'))).toBe('Page');
     expect(sourceLabel({ source: 'twitter_bookmark' })).toBe('Tweet');
+  });
+});
+
+describe('bodyWithoutTitle', () => {
+  it('drops a leading heading that repeats the title', () => {
+    const item = { title: 'Edit and TTS test', content: '# Edit and TTS test\n\nBody text.' };
+    expect(bodyWithoutTitle(item)).toBe('\nBody text.');
+  });
+  it('keeps a heading that differs from the title, and everything without a title', () => {
+    expect(bodyWithoutTitle({ title: 'Other', content: '# A heading\n\nBody.' })).toBe('# A heading\n\nBody.');
+    expect(bodyWithoutTitle({ title: null, content: '# A heading\n\nBody.' })).toBe('# A heading\n\nBody.');
   });
 });

@@ -5,6 +5,9 @@ import MarkdownBody from '../components/MarkdownBody';
 import BubbleKebabMenu from '../components/BubbleKebabMenu';
 import ReferenceFooter from '../components/ReferenceFooter';
 import DeleteConfirmDialog from '../components/DeleteConfirmDialog';
+import ReferenceEditForm from '../components/ReferenceEditForm';
+import RegenerateTtsDialog from '../components/RegenerateTtsDialog';
+import SpeakerIcon from '../components/SpeakerIcon';
 import { useToast } from '../contexts/ToastContext';
 import { formatDate } from '../utils/date';
 import TweetEmbed from '../components/TweetEmbed';
@@ -57,6 +60,12 @@ function ReferenceDetailPage() {
   const [embedStatus, setEmbedStatus] = useState('loading');
   const [showStored, setShowStored] = useState(false);
   const [marking, setMarking] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  // An edit that changes the text of a reference with generated audio:
+  // ask keep-or-regenerate first, as a node edit does (#66). The pending
+  // edit waits here for the answer.
+  const [pendingEdit, setPendingEdit] = useState(null);
 
   useEffect(() => {
     setItem(null);
@@ -104,6 +113,30 @@ function ReferenceDetailPage() {
       .finally(() => setMarking(false));
   };
 
+  const saveEdit = ({ title, content }, regenerateTts) => {
+    const textChanged = content.trim() !== (item.content || '').trim();
+    if (item.has_tts && textChanged && regenerateTts === undefined) {
+      setPendingEdit({ title, content });
+      return;
+    }
+    setSaving(true);
+    api.put(`/external/items/${item.id}`, {
+      title,
+      content,
+      ...(regenerateTts && { regenerate_tts: true }),
+    })
+      .then((res) => {
+        setItem(res.data);
+        setEditing(false);
+        addToast('Reference updated', 3000);
+      })
+      .catch((err) => {
+        addToast((err.response && err.response.data && err.response.data.error)
+          || 'Error saving reference.', 4000);
+      })
+      .finally(() => setSaving(false));
+  };
+
   if (error) return <div style={{ padding: '20px', color: 'var(--accent)' }}>{error}</div>;
   if (!item) return <div style={{ padding: '20px', color: 'var(--text-muted)' }}>Loading...</div>;
 
@@ -116,6 +149,7 @@ function ReferenceDetailPage() {
       action: () => window.open(item.url, '_blank', 'noopener,noreferrer'),
       color: 'var(--text-primary)',
     }] : []),
+    { label: 'Edit', action: () => setEditing(true), color: 'var(--text-primary)' },
     { label: 'Delete', action: () => setDeleting(true), color: 'var(--accent)' },
   ];
 
@@ -128,13 +162,21 @@ function ReferenceDetailPage() {
         gap: '16px',
         marginBottom: '12px',
       }}>
-        <h2 style={{
-          fontFamily: 'var(--serif)',
-          fontWeight: 300,
-          fontSize: '1.8rem',
-          color: 'var(--text-primary)',
-          margin: 0,
-        }}>Reference</h2>
+        <div style={{ display: 'flex', alignItems: 'center' }}>
+          <h2 style={{
+            fontFamily: 'var(--serif)',
+            fontWeight: 300,
+            fontSize: '1.8rem',
+            color: 'var(--text-primary)',
+            margin: 0,
+          }}>Reference</h2>
+          <SpeakerIcon
+            itemId={item.id}
+            content={item.title ? `# ${item.title}\n${item.content || ''}` : item.content}
+            isPublic={false}
+            onTtsGenerated={() => setItem((prev) => (prev ? { ...prev, has_tts: true } : prev))}
+          />
+        </div>
         <Link
           to="/references"
           style={{
@@ -146,7 +188,17 @@ function ReferenceDetailPage() {
         </Link>
       </div>
       <div style={cardStyle}>
-        <BubbleKebabMenu visible={true} items={actions} />
+        <BubbleKebabMenu visible={!editing} items={actions} />
+        {editing ? (
+          <ReferenceEditForm
+            key={item.id}
+            item={item}
+            saving={saving}
+            onSave={saveEdit}
+            onCancel={() => setEditing(false)}
+          />
+        ) : (
+        <>
         {item.title && (
           <h1 style={{
             fontFamily: 'var(--serif)', fontWeight: 400, fontSize: '1.5rem',
@@ -193,6 +245,8 @@ function ReferenceDetailPage() {
             <MarkdownBody>{bodyWithoutTitle(item)}</MarkdownBody>
           </div>
         )}
+        </>
+        )}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
           <ReferenceFooter item={item} />
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '12px' }}>
@@ -213,6 +267,7 @@ function ReferenceDetailPage() {
               ? `Shown by Loore ${item.surfaced_count}× · last ${formatDate(item.last_surfaced_at)}`
               : 'Not yet shown by Loore in a conversation'}
             {item.read_at ? ` · you read it ${formatDate(item.read_at)}` : ''}
+            {item.edited_at ? ` · edited ${formatDate(item.edited_at)}` : ''}
           </span>
           <button
             type="button"
@@ -230,6 +285,15 @@ function ReferenceDetailPage() {
           </button>
         </div>
       </div>
+      <RegenerateTtsDialog
+        open={!!pendingEdit}
+        onClose={() => setPendingEdit(null)}
+        onChoice={(regenerate) => {
+          const edit = pendingEdit;
+          setPendingEdit(null);
+          if (edit) saveEdit(edit, regenerate);
+        }}
+      />
       <DeleteConfirmDialog
         open={deleting}
         mode="reference"

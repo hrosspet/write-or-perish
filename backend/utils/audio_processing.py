@@ -434,3 +434,24 @@ def _split_at_word(text, max_chars):
     for sep in ('\n', '\t'):
         best = max(best, chunk.rfind(sep))
     return best + 1 if best > 0 else max_chars
+
+
+def tts_chapters(chunks):
+    """Chapter list for generated TTS audio (#145), from an entity's
+    TTSChunk rows in chunk order: the first chunk of each markdown section
+    with its cumulative start time (sum of prior chunk durations), so the
+    player can seek within the merged file or the chunked queue alike.
+    A single untitled section is not a chapter list — returns []."""
+    chapters, elapsed, seen = [], 0.0, set()
+    for chunk in chunks:
+        key = chunk.section_index
+        if key is not None and key not in seen:
+            seen.add(key)
+            chapters.append({
+                "section_index": key,
+                "title": chunk.section_title or "Introduction",
+                "chunk_index": chunk.chunk_index,
+                "start_time": round(elapsed, 2),
+            })
+        elapsed += chunk.duration or 0.0
+    return chapters if len(chapters) > 1 else []

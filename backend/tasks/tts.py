@@ -15,7 +15,7 @@ import os
 from datetime import datetime
 
 from backend.celery_app import celery, flask_app
-from backend.models import Node, UserProfile, TTSChunk, APICostLog
+from backend.models import Node, UserProfile, ExternalItem, TTSChunk, APICostLog
 from backend.extensions import db
 from backend.utils.audio_processing import section_aware_chunk_text
 from backend.utils.api_keys import get_openai_chat_key
@@ -107,19 +107,95 @@ class TTSTask(Task):
                     logger.error(f"TTS generation failed for node {node_id}: {exc}")
 
 
-class ProfileTTSTask(Task):
-    """Custom task class with error handling for UserProfiles."""
+class EntityTTSTask(Task):
+    """Task base for entities other than nodes: marks the row failed when
+    the task dies. Subclasses name the model."""
+    entity_cls = None
+    entity_label = "entity"
 
     def on_failure(self, exc, task_id, args, kwargs, einfo):
-        """Called when task fails."""
-        profile_id = args[0] if args else None
-        if profile_id:
+        entity_id = args[0] if args else None
+        if entity_id:
             with flask_app.app_context():
-                profile = UserProfile.query.get(profile_id)
-                if profile:
-                    profile.tts_task_status = 'failed'
+                entity = self.entity_cls.query.get(entity_id)
+                if entity:
+                    entity.tts_task_status = 'failed'
                     db.session.commit()
-                    logger.error(f"TTS generation failed for profile {profile_id}: {exc}")
+                    logger.error(
+                        f"TTS generation failed for {self.entity_label} "
+                        f"{entity_id}: {exc}")
+
+
+class ProfileTTSTask(EntityTTSTask):
+    entity_cls = UserProfile
+    entity_label = "profile"
+
+
+class ItemTTSTask(EntityTTSTask):
+    entity_cls = ExternalItem
+    entity_label = "reference"
+
+
+def _run_entity_tts(task, entity_cls, entity_id, text_of, subdir,
+                    chunk_fk_attr, label, audio_storage_root,
+                    requesting_user_id):
+    """The whole TTS task for an entity that has no original recording
+    (profiles, saved references): spend gate, status bookkeeping, the
+    shared chunk generator, and failure marking. ``text_of(entity)``
+    returns the text to speak; ``subdir(entity)`` the path under
+    ``user/<uid>/``."""
+    logger.info(f"Starting TTS generation task for {label} {entity_id}")
+    with flask_app.app_context():
+        entity = entity_cls.query.get(entity_id)
+        if not entity:
+            raise ValueError(f"{entity_cls.__name__} {entity_id} not found")
+
+        from backend.utils.spend import user_is_capped
+        if user_is_capped(requesting_user_id or entity.user_id):
+            logger.warning(
+                "User %s is spend-capped; skipping %s TTS",
+                requesting_user_id or entity.user_id, label)
+            entity.tts_task_status = 'failed'
+            db.session.commit()
+            return
+
+        entity.tts_task_status = 'processing'
+        entity.tts_task_progress = 10
+        db.session.commit()
+
+        try:
+            if entity.audio_tts_url:
+                logger.info(f"TTS already available for {label} {entity_id}")
+                entity.tts_task_status = 'completed'
+                entity.tts_task_progress = 100
+                db.session.commit()
+                return {'status': 'completed', 'tts_url': entity.audio_tts_url}
+
+            text = text_of(entity)
+            if not text:
+                raise ValueError("No content to generate TTS for")
+
+            target_dir = (Path(audio_storage_root)
+                          / f"user/{entity.user_id}/{subdir(entity)}")
+            url = _generate_tts_chunks(
+                task, entity, text, target_dir, audio_storage_root,
+                chunk_fk_attr, f"{label} {entity_id}",
+                requesting_user_id=requesting_user_id)
+
+            entity.audio_tts_url = url
+            entity.tts_task_status = 'completed'
+            entity.tts_task_progress = 100
+            db.session.commit()
+            logger.info(f"TTS generation successful for {label} {entity_id}")
+            return {'status': 'completed', 'tts_url': url}
+
+        except Exception as e:
+            logger.error(
+                f"TTS generation error for {label} {entity_id}: {e}",
+                exc_info=True)
+            entity.tts_task_status = 'failed'
+            db.session.commit()
+            raise
 
 
 def _generate_tts_chunks(task, entity, text, target_dir, audio_storage_root,
@@ -454,82 +530,34 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str,
 def generate_tts_audio_for_profile(self, profile_id: int,
                                    audio_storage_root: str,
                                    requesting_user_id: int = None):
-    """
-    Asynchronously generate TTS audio for a user profile.
+    """Asynchronously generate TTS audio for a user profile."""
+    result = _run_entity_tts(
+        self, UserProfile, profile_id,
+        text_of=lambda p: p.get_content() or "",
+        subdir=lambda p: f"profile/{p.id}",
+        chunk_fk_attr='profile_id', label="profile",
+        audio_storage_root=audio_storage_root,
+        requesting_user_id=requesting_user_id)
+    return {'profile_id': profile_id, **result} if result else None
 
-    Args:
-        profile_id: Database ID of the user profile
-        audio_storage_root: Root directory for audio storage
-        requesting_user_id: ID of the user who requested TTS (for cost attribution)
-    """
-    logger.info(f"Starting TTS generation task for profile {profile_id}")
 
-    with flask_app.app_context():
-        profile = UserProfile.query.get(profile_id)
-        if not profile:
-            raise ValueError(f"UserProfile {profile_id} not found")
+@celery.task(base=ItemTTSTask, bind=True)
+def generate_tts_audio_for_item(self, item_id: int, audio_storage_root: str,
+                                requesting_user_id: int = None):
+    """Generate TTS for a saved reference (#232), read as title then text."""
+    def text_of(item):
+        text = (item.get_content() or "").strip()
+        title = (item.title or "").strip()
+        if title and not text.lower().startswith(title.lower()):
+            # Speak the title first unless the text already opens with it
+            # (Readability keeps it as the first heading).
+            text = f"# {title}\n\n{text}"
+        return text
 
-        from backend.utils.spend import user_is_capped
-        if user_is_capped(requesting_user_id or profile.user_id):
-            logger.warning(
-                "User %s is spend-capped; skipping profile TTS",
-                requesting_user_id or profile.user_id)
-            profile.tts_task_status = 'failed'
-            db.session.commit()
-            return
-
-        profile.tts_task_status = 'processing'
-        profile.tts_task_progress = 10
-        db.session.commit()
-
-        try:
-            if profile.audio_tts_url:
-                logger.info(
-                    f"TTS already available for profile {profile_id}"
-                )
-                profile.tts_task_status = 'completed'
-                profile.tts_task_progress = 100
-                db.session.commit()
-                return {
-                    'profile_id': profile_id,
-                    'status': 'completed',
-                    'tts_url': profile.audio_tts_url
-                }
-
-            text = profile.get_content() or ""
-            if not text:
-                raise ValueError("No content to generate TTS for")
-
-            target_dir = (
-                Path(audio_storage_root)
-                / f"user/{profile.user_id}/profile/{profile.id}"
-            )
-
-            url = _generate_tts_chunks(
-                self, profile, text, target_dir, audio_storage_root,
-                'profile_id', f"profile {profile_id}",
-                requesting_user_id=requesting_user_id
-            )
-
-            profile.audio_tts_url = url
-            profile.tts_task_status = 'completed'
-            profile.tts_task_progress = 100
-            db.session.commit()
-
-            logger.info(
-                f"TTS generation successful for profile {profile_id}"
-            )
-            return {
-                'profile_id': profile_id,
-                'status': 'completed',
-                'tts_url': url
-            }
-
-        except Exception as e:
-            logger.error(
-                f"TTS generation error for profile {profile_id}: {e}",
-                exc_info=True
-            )
-            profile.tts_task_status = 'failed'
-            db.session.commit()
-            raise
+    result = _run_entity_tts(
+        self, ExternalItem, item_id, text_of=text_of,
+        subdir=lambda i: f"item/{i.id}",
+        chunk_fk_attr='item_id', label="reference",
+        audio_storage_root=audio_storage_root,
+        requesting_user_id=requesting_user_id)
+    return {'item_id': item_id, **result} if result else None

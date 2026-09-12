@@ -1151,6 +1151,17 @@ class ExternalItem(db.Model):
     # page (a skim is not a read) and never by the AI surfacing it (that
     # is surfaced_count above). Null = unread.
     read_at = db.Column(db.DateTime, nullable=True)
+    # Set when the user edits the title or text by hand. An edited
+    # reference is the user's copy: a later re-clip or sync must not
+    # replace its text, however much longer the fresh capture is.
+    edited_at = db.Column(db.DateTime, nullable=True)
+    # Generated speech, the same shape as Node / UserProfile so the TTS
+    # task, SSE stream and SpeakerIcon treat a reference as one more
+    # entity. Nothing here is ever an original recording.
+    audio_tts_url = db.Column(db.String, nullable=True)
+    tts_task_id = db.Column(db.String(255), nullable=True)
+    tts_task_status = db.Column(db.String(20), nullable=True)
+    tts_task_progress = db.Column(db.Integer, default=0)
 
     user = db.relationship("User", backref="external_items")
 
@@ -1310,6 +1321,7 @@ class TTSChunk(db.Model):
     # Which node or profile this TTS chunk belongs to (one must be set)
     node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=True)
     profile_id = db.Column(db.Integer, db.ForeignKey("user_profile.id"), nullable=True)
+    item_id = db.Column(db.Integer, db.ForeignKey("external_item.id"), nullable=True)
     # Zero-based index of the chunk
     chunk_index = db.Column(db.Integer, nullable=False)
     # Chapter metadata (#145): which markdown section this chunk belongs
@@ -1328,11 +1340,13 @@ class TTSChunk(db.Model):
     # Relationships
     node = db.relationship("Node", backref="tts_chunks")
     profile = db.relationship("UserProfile", backref="tts_chunks")
+    item = db.relationship("ExternalItem", backref="tts_chunks")
 
     # Unique constraints: one chunk per index per node/profile
     __table_args__ = (
         db.UniqueConstraint('node_id', 'chunk_index', name='uq_node_tts_chunk_index'),
         db.UniqueConstraint('profile_id', 'chunk_index', name='uq_profile_tts_chunk_index'),
+        db.UniqueConstraint('item_id', 'chunk_index', name='uq_item_tts_chunk_index'),
     )
 
 

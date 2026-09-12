@@ -2867,27 +2867,7 @@ def get_tts_chapters(node_id):
         return jsonify({"error": "Unauthorized"}), 403
 
     from backend.models import TTSChunk
+    from backend.utils.audio_processing import tts_chapters
     chunks = TTSChunk.query.filter_by(node_id=node_id).order_by(
         TTSChunk.chunk_index).all()
-    if not chunks:
-        return jsonify({"chapters": []}), 200
-
-    chapters = []
-    elapsed = 0.0
-    seen_sections = set()
-    for chunk in chunks:
-        key = chunk.section_index
-        if key is not None and key not in seen_sections:
-            seen_sections.add(key)
-            chapters.append({
-                "section_index": key,
-                "title": chunk.section_title or "Introduction",
-                "chunk_index": chunk.chunk_index,
-                "start_time": round(elapsed, 2),
-            })
-        elapsed += chunk.duration or 0.0
-
-    # A single untitled section = no real chapters — don't render a list
-    if len(chapters) <= 1:
-        return jsonify({"chapters": []}), 200
-    return jsonify({"chapters": chapters}), 200
+    return jsonify({"chapters": tts_chapters(chunks)}), 200

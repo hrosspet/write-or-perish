@@ -39,7 +39,9 @@ export function asCardNode(item) {
 export function bodyWithoutTitle(item) {
   const content = item.content || '';
   if (!item.title) return content;
-  const m = content.match(/^\s*#{1,6}\s+(.+?)\s*\n?/);
+  // Whole first line: a lazy `.+?` here matched one character and the
+  // comparison never succeeded, so the title showed twice.
+  const m = content.match(/^\s*#{1,6}[ \t]+([^\n]+?)[ \t]*(?:\n|$)/);
   if (m && m[1].trim().toLowerCase() === item.title.trim().toLowerCase()) {
     return content.slice(m[0].length);
   }
