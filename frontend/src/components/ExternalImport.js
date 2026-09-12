@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import api from '../api';
 import { useUser } from '../contexts/UserContext';
+import NewTokenDialog from './NewTokenDialog';
 
 /**
  * References import (#155 / Download substrate): Community Archive
@@ -73,7 +74,6 @@ export default function ExternalImport() {
   const [tokens, setTokens] = useState([]);
   const [newToken, setNewToken] = useState(null);  // {id, token}: plaintext, shown once
   const [tokenMsg, setTokenMsg] = useState(null);
-  const [copied, setCopied] = useState(false);
   const fileRef = useRef(null);
   const pollRef = useRef(null);
 
@@ -104,7 +104,6 @@ export default function ExternalImport() {
   const createToken = async () => {
     setBusy(true);
     setTokenMsg(null);
-    setCopied(false);
     try {
       const res = await api.post('/external/tokens', { name: 'Chrome clipper' });
       setNewToken({ id: res.data.id, token: res.data.token });
@@ -127,15 +126,6 @@ export default function ExternalImport() {
       setTokenMsg(e.response?.data?.error || 'Could not revoke the token.');
     }
     setBusy(false);
-  };
-
-  const copyToken = async () => {
-    try {
-      await navigator.clipboard.writeText(newToken.token);
-      setCopied(true);
-    } catch (e) {
-      setCopied(false);
-    }
   };
 
   const pollCounts = () => {
@@ -400,28 +390,6 @@ export default function ExternalImport() {
             ))}
           </div>
         )}
-        {newToken && (
-          <div style={{ ...tokenRowStyle, flexDirection: 'column', alignItems: 'stretch' }}>
-            <span style={{ color: 'var(--text-secondary)' }}>
-              Your new token. It is shown only once; paste it into the
-              extension now.
-            </span>
-            <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
-              <code style={{ ...codeStyle, wordBreak: 'break-all', flex: '1 1 260px' }}>
-                {newToken.token}
-              </code>
-              <button onClick={copyToken} style={{ ...ghostButtonStyle, padding: '4px 10px' }}>
-                {copied ? 'Copied' : 'Copy'}
-              </button>
-              <button
-                onClick={() => setNewToken(null)}
-                style={{ ...ghostButtonStyle, padding: '4px 10px' }}
-              >
-                Done
-              </button>
-            </div>
-          </div>
-        )}
         <button onClick={createToken} disabled={busy} style={buttonStyle}>
           Create token
         </button>
@@ -431,6 +399,11 @@ export default function ExternalImport() {
           </p>
         )}
       </div>
+
+      <NewTokenDialog
+        token={newToken ? newToken.token : null}
+        onClose={() => setNewToken(null)}
+      />
     </div>
   );
 }
