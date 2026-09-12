@@ -1,5 +1,6 @@
 import React from 'react';
 import MarkdownBody from './MarkdownBody';
+import { formatDate } from '../utils/date';
 
 const SOURCE_LABELS = {
   community_archive: 'Community Archive',
@@ -26,7 +27,7 @@ const ExternalQuoteBubble = ({ quote }) => {
   const truncatedText = text.length > 500 ? text.substring(0, 500) + '...' : text;
   const sourceLabel = SOURCE_LABELS[quote.source] || quote.source;
   const postedAt = quote.posted_at
-    ? new Date(quote.posted_at).toLocaleDateString()
+    ? formatDate(quote.posted_at, { relative: false })
     : null;
 
   const open = () => {

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { FaTimesCircle, FaFilter, FaCaretDown, FaCaretUp, FaEye, FaEyeSlash } from "react-icons/fa";
 import api from "../api";
+import { formatDate, formatDateTime } from "../utils/date";
 
 // Small header toggle that hides rows with $0 in its column.
 function ZeroFilterToggle({ active, onToggle, label }) {
@@ -490,7 +491,7 @@ function AdminFeedback() {
               <strong>{f.username || `user ${f.user_id}`}</strong>
               <span style={{ color: "var(--text-muted)", fontSize: "0.8rem" }}>
                 {f.category} · {f.source} ·{" "}
-                {f.created_at ? new Date(f.created_at).toLocaleDateString() : ""}
+                {formatDate(f.created_at, { relative: false })}
               </span>
               <span style={{ flex: 1 }} />
               <select
@@ -1162,7 +1163,7 @@ function AdminPanel() {
                 style={{ border: "1px solid var(--border)", padding: "8px", width: "150px", whiteSpace: "nowrap", fontSize: "0.9em" }}
                 title={
                   u.profile?.last_created_at
-                    ? `Latest version: ${u.profile.last_generation_type} at ${new Date(u.profile.last_created_at).toLocaleString()}`
+                    ? `Latest version: ${u.profile.last_generation_type} at ${formatDateTime(u.profile.last_created_at)}`
                     : "No profile yet"
                 }
               >
@@ -1232,7 +1233,7 @@ function AdminPanel() {
                 {u.prefill_consent && (
                   <div
                     style={{ color: u.prefill_consent === "yes" ? "var(--success)" : "var(--text-muted)", fontSize: "0.85em" }}
-                    title={u.prefill_consent_at ? `answered ${new Date(u.prefill_consent_at).toLocaleString()}` : undefined}
+                    title={u.prefill_consent_at ? `answered ${formatDateTime(u.prefill_consent_at)}` : undefined}
                   >
                     {u.prefill_consent === "yes" ? "✓ opted in to tweet seed" : "✗ declined tweet seed"}
                   </div>

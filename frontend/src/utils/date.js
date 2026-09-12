@@ -8,7 +8,15 @@
 // value is always interpreted as UTC and then rendered in the browser's local
 // timezone.
 
-const DATE_OPTS = { month: 'short', day: 'numeric', year: 'numeric' };
+// Dates render as yyyy/mm/dd everywhere (footers, Log cards, version
+// lists) — one unambiguous, sortable form instead of locale-dependent
+// "9/12/2026" vs "12/9/2026" vs "Sep 12, 2026".
+const pad2 = (n) => String(n).padStart(2, '0');
+
+/** Local-time yyyy/mm/dd for an already-parsed Date. */
+export function formatYmd(d) {
+  return `${d.getFullYear()}/${pad2(d.getMonth() + 1)}/${pad2(d.getDate())}`;
+}
 
 /**
  * Parse an ISO timestamp into a Date, defensively treating marker-less strings
@@ -31,7 +39,7 @@ export function parseTimestamp(iso) {
 
 /**
  * Date-only formatter with relative "today"/"yesterday" wording for recent
- * dates, falling back to "Mon D, YYYY".
+ * dates, falling back to "yyyy/mm/dd".
  *
  * @param {string|Date} iso
  * @param {object} [opts]
@@ -51,11 +59,12 @@ export function formatDate(iso, opts = {}) {
     yesterday.setDate(yesterday.getDate() - 1);
     if (d.toDateString() === yesterday.toDateString()) return 'yesterday';
   }
-  return d.toLocaleDateString('en-US', DATE_OPTS);
+  return formatYmd(d);
 }
 
 /**
- * Full date + time formatter (locale-aware), e.g. used for node footers.
+ * Date + time formatter, "yyyy/mm/dd HH:MM" in local time (24-hour, no
+ * seconds), e.g. used for node footers and Log cards.
  *
  * @param {string|Date} iso
  * @param {object} [opts]
@@ -66,5 +75,5 @@ export function formatDateTime(iso, opts = {}) {
   if (!iso) return fallback;
   const d = parseTimestamp(iso);
   if (isNaN(d.getTime())) return fallback;
-  return d.toLocaleString();
+  return `${formatYmd(d)} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
