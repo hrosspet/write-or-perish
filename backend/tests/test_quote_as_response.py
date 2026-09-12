@@ -133,6 +133,28 @@ def test_resolve_ext_quotes_llm_and_human_formats(app):
     assert "the saved tweet text" in human_text
 
 
+def test_resolve_ext_quotes_carries_read_and_verdict_to_the_model(app):
+    """A thread that continues after the quote: the model sees whether the
+    user read the pick and how they rated it; unread/unrated stay silent."""
+    uid = User.query.filter_by(username="tester").first().id
+    item = _mk_item(uid, "a quoted pick")
+    marker = f"{{quote_ext:{item.id}}}"
+
+    llm_text, _ = resolve_ext_quotes(marker, uid, for_llm=True)
+    assert ' read="' not in llm_text
+    assert ' verdict="' not in llm_text
+
+    item.read_at = datetime(2026, 9, 13, 7, 45)
+    item.feedback = "bad"
+    _db.session.commit()
+    llm_text, _ = resolve_ext_quotes(marker, uid, for_llm=True)
+    assert ' read="2026-09-13"' in llm_text
+    assert ' verdict="bad"' in llm_text
+    # The human-readable rendering (exports) stays as it was.
+    human_text, _ = resolve_ext_quotes(marker, uid, for_llm=False)
+    assert "verdict" not in human_text
+
+
 def test_get_ext_quote_data_carries_owner_and_read_mark(app):
     uid = User.query.filter_by(username="tester").first().id
     item = _mk_item(uid, "unread so far")

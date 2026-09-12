@@ -137,9 +137,18 @@ def resolve_ext_quotes(content: str, user_id: int,
             title_attr = f' title="{title}"' if title else ""
             posted_attr = (f' posted_at="{d["posted_at"][:10]}"'
                            if d.get("posted_at") else "")
+            # The user's own marks on this pick, so a thread that
+            # continues after the quote knows whether they read it and
+            # how they rated it (the same two facts search previews
+            # carry). Absent attributes mean unread / unrated.
+            read_attr = (f' read="{d["read_at"][:10]}"'
+                         if d.get("read_at") else "")
+            verdict_attr = (f' verdict="{d["feedback"]}"'
+                            if d.get("feedback") else "")
             return (
                 f'<quoted_reference id="{item_id}" source="{d["source"]}" '
-                f'author="{author}"{title_attr}{posted_attr}>\n'
+                f'author="{author}"{title_attr}{posted_attr}'
+                f'{read_attr}{verdict_attr}>\n'
                 f'{d["content"]}\n</quoted_reference>')
         posted = f' ({d["posted_at"][:10]})' if d.get("posted_at") else ""
         label = f'"{title}" from {author}' if title else f"from {author}"
