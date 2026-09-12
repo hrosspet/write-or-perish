@@ -22,6 +22,7 @@ from backend.utils.privacy import (
     validate_ai_usage,
     get_default_privacy_settings,
     can_user_access_node,
+    can_user_view_tombstone,
     can_user_edit_node,
     PrivacyLevel,
     AIUsage
@@ -1240,6 +1241,82 @@ def get_children(node_id):
         "node_type": child.node_type,
     } for child in children]
     return jsonify({"children": children_list}), 200
+
+# Titles for in-text links to other nodes (`https://loore.org/node/123`).
+# MarkdownBody swaps a bare node URL for the target's title; this is the
+# batch lookup behind it. One request per rendered body, ids deduplicated
+# and capped, DEKs unwrapped in one concurrent batch like the Log page.
+NODE_TITLES_MAX_IDS = 50
+
+
+def node_link_title(node):
+    """The text a link to *node* should show: the user-given thread name
+    when the node is a named thread's root, else the first line of its
+    content stripped of markdown markers (the same rule the Log card and
+    the public article page use)."""
+    from backend.utils.public_html import split_title
+    thread = getattr(node, "thread", None)
+    if thread is not None:
+        name = (thread.get_name() or "").strip()
+        if name:
+            return name
+    title, _ = split_title(node.get_content())
+    return title
+
+
+@nodes_bp.route("/titles", methods=["GET"])
+@login_required
+def get_node_titles():
+    """Resolve `?ids=1,2,3` to `{"titles": {"1": {"title": ...}, "2": null}}`.
+
+    null means the viewer cannot see the node (missing, or private to
+    someone else) — the client shows "[Node inaccessible]", so the
+    response never reveals whether the id exists. A soft-deleted node the
+    viewer could see before deletion comes back as `{"deleted": true}`,
+    the same distinction the quote resolver draws."""
+    from backend.utils.encryption import prefetch_deks
+    raw = request.args.get("ids", "")
+    ids = []
+    for part in raw.split(","):
+        part = part.strip()
+        if part.isdigit() and int(part) not in ids:
+            ids.append(int(part))
+    ids = ids[:NODE_TITLES_MAX_IDS]
+    if not ids:
+        return jsonify({"titles": {}}), 200
+
+    nodes = {n.id: n for n in Node.query.filter(Node.id.in_(ids)).all()}
+    visible = [
+        nodes[i] for i in ids
+        if i in nodes and can_user_access_node(nodes[i], current_user.id)
+    ]
+    deleted = {
+        i for i in ids
+        if i in nodes and nodes[i].deleted_at is not None
+        and can_user_view_tombstone(nodes[i], current_user.id)
+    }
+    threads = {
+        t.root_node_id: t
+        for t in Thread.query.filter(
+            Thread.root_node_id.in_([n.id for n in visible])
+        ).all()
+    } if visible else {}
+    prefetch_deks(
+        [n.content for n in visible if n.id not in threads]
+        + [t.name for t in threads.values()]
+    )
+    titles = {}
+    for i in ids:
+        node = nodes.get(i)
+        if i in deleted:
+            titles[str(i)] = {"id": i, "deleted": True, "title": None}
+            continue
+        if node is None or node not in visible:
+            titles[str(i)] = None
+            continue
+        titles[str(i)] = {"id": i, "title": node_link_title(node)}
+    return jsonify({"titles": titles}), 200
+
 
 @nodes_bp.route("/models", methods=["GET"])
 @login_required

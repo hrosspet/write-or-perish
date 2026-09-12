@@ -1,6 +1,8 @@
 import React from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { useInRouterContext, useNavigate } from 'react-router-dom';
+import { parseNodeLink, fetchNodeTitle, cachedNodeTitle } from '../utils/nodeLinks';
 
 /**
  * The app never renders raw HTML (no rehype-raw), so anything the markdown
@@ -92,6 +94,77 @@ function replaceCheckboxes(children, renderToggle) {
   return { children: mapped, found };
 }
 
+const linkStyle = { color: 'var(--accent)', textDecoration: 'underline' };
+
+/**
+ * True when a link's visible text is just its own URL — a bare
+ * `https://loore.org/node/123` the user pasted (remark-gfm autolinks it) or
+ * `[url](url)`. Only those get their text replaced by the node's title; a
+ * link the author gave their own words keeps them.
+ */
+function isBareUrlLink(children, href) {
+  const text = extractText(children).trim().replace(/\/$/, '');
+  return text === href.replace(/\/$/, '');
+}
+
+const unavailableLinkStyle = {
+  ...linkStyle,
+  color: 'var(--text-muted)',
+  fontStyle: 'italic',
+};
+
+/**
+ * A link to another Loore node, shown as that node's title. While the title
+ * loads (one batched request per render pass, cached afterwards) the raw URL
+ * stays. A node the viewer cannot see renders as "[Node inaccessible]" and a
+ * deleted one as "[Node deleted]" — the same tombstone vocabulary as the
+ * thread view — muted but still a link, so the URL survives in the tooltip.
+ * Navigates in-app; modifier clicks keep the browser's open-in-new-tab
+ * behaviour.
+ */
+function NodeLink({ nodeId, href, children, onNavigate, ...props }) {
+  const [record, setRecord] = React.useState(() => cachedNodeTitle(nodeId));
+  React.useEffect(() => {
+    let alive = true;
+    if (record === undefined) {
+      fetchNodeTitle(nodeId).then((r) => { if (alive) setRecord(r); });
+    }
+    return () => { alive = false; };
+  }, [nodeId, record]);
+  let label = children;
+  let style = linkStyle;
+  if (record === null) {
+    label = '[Node inaccessible]';
+    style = unavailableLinkStyle;
+  } else if (record && record.deleted) {
+    label = '[Node deleted]';
+    style = unavailableLinkStyle;
+  } else if (record && record.title) {
+    label = record.title;
+  }
+  return (
+    <a
+      href={`/node/${nodeId}`}
+      className="loore-node-link"
+      title={label !== children ? href : undefined}
+      style={style}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (e.defaultPrevented || e.button !== 0
+            || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        e.preventDefault();
+        onNavigate(`/node/${nodeId}`);
+      }}
+      {...props}
+    >{label}</a>
+  );
+}
+
+function RoutedNodeLink(props) {
+  const navigate = useNavigate();
+  return <NodeLink onNavigate={navigate} {...props} />;
+}
+
 /**
  * Inline "add a task here" input row, shown below a checklist item when its
  * hover "+" is clicked. Type + Enter inserts; Esc / blur-when-empty cancels.
@@ -141,6 +214,9 @@ function AddTaskInput({ onSubmit, onCancel }) {
 // source line break renders literally — unreadable on narrow screens.
 const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText = false, onCheckboxToggle, onAddTask, onInternalLinkClick }) => {
   const [addingAfter, setAddingAfter] = React.useState(null);
+  // MarkdownBody renders inside the app's BrowserRouter, but unit tests and
+  // any future router-less host must not crash on useNavigate.
+  const inRouter = useInRouterContext();
   const components = {
     h1: ({ node, children, ...props }) => (
       <h1 style={{ fontFamily: 'var(--serif)', fontSize: '2.2em', fontWeight: 700, lineHeight: 1.2, margin: '1.2em 0 0.4em', color: 'var(--text-primary)' }} {...props}>{children}</h1>
@@ -341,6 +417,16 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText =
         <code className={className} {...props}>{children}</code>
       ),
     a: ({ node, children, href, ...props }) => {
+      const nodeId = href ? parseNodeLink(href) : null;
+      if (nodeId !== null && isBareUrlLink(children, href)) {
+        if (onInternalLinkClick) {
+          return <NodeLink nodeId={nodeId} href={href} onNavigate={onInternalLinkClick} {...props}>{children}</NodeLink>;
+        }
+        if (inRouter) {
+          return <RoutedNodeLink nodeId={nodeId} href={href} {...props}>{children}</RoutedNodeLink>;
+        }
+        return <NodeLink nodeId={nodeId} href={href} onNavigate={(to) => { window.location.assign(to); }} {...props}>{children}</NodeLink>;
+      }
       if (onInternalLinkClick && href && href.startsWith('/')) {
         return (
           <a
