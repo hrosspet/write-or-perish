@@ -857,9 +857,11 @@ def _retrieval_injection_text(tr, with_labels=False):
             q_text, resolved = resolve_ext_quotes(
                 "{quote_ext:%d}" % ref_id, reader_id, for_llm=True)
         else:
+            reader = User.query.get(reader_id)
             q_text, resolved = resolve_quotes(
                 "{quote:%d}" % ref_id, reader_id, for_llm=True,
-                max_depth=QUOTE_PULL_DEPTH)
+                max_depth=QUOTE_PULL_DEPTH,
+                tz_name=reader.timezone if reader else None)
         if not resolved:
             return None
         if len(q_text) > MAX_QUOTE_PULL_CHARS:
@@ -2680,7 +2682,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             )
                         # Resolve {quote:ID} placeholders if present
                         if needs_quotes and has_quotes(message_text):
-                            message_text, resolved_ids = resolve_quotes(message_text, user_id, for_llm=True)
+                            message_text, resolved_ids = resolve_quotes(
+                                message_text, user_id, for_llm=True, tz_name=user_tz)
                             if resolved_ids:
                                 logger.info(f"Resolved quotes for node IDs: {resolved_ids}")
                         # Resolve {quote_ext:ID} (saved references) inline —

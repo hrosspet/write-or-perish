@@ -99,6 +99,7 @@ class TestResolveQuotes:
                 "content": "Quoted content here",
                 "username": "alice",
                 "user_id": 2,
+                "created_at": "2026-03-31T11:22:00Z",
             }
         }
 
@@ -109,6 +110,30 @@ class TestResolveQuotes:
         assert "Quoted content here" in result
         assert 'id="10"' in result
         assert 'author="alice"' in result
+        # The quote's only temporal anchor: rendered like the thread's
+        # message stamps (UTC when no timezone is given).
+        assert 'created_at="2026-03-31 11:22 UTC"' in result
+
+    @patch('backend.utils.quotes.get_quote_data')
+    def test_llm_format_stamp_in_owner_timezone(self, mock_get_quote_data):
+        """The creation stamp follows the conversation owner's timezone."""
+        mock_get_quote_data.return_value = {
+            10: {"id": 10, "content": "x", "username": "alice", "user_id": 2,
+                 "created_at": "2026-03-31T11:22:00Z"}
+        }
+        result, _ = resolve_quotes("{quote:10}", user_id=1, for_llm=True,
+                                   tz_name="Europe/Prague")
+        assert 'created_at="2026-03-31 13:22 CEST"' in result
+
+    @patch('backend.utils.quotes.get_quote_data')
+    def test_llm_format_without_timestamp(self, mock_get_quote_data):
+        """A missing created_at omits the attribute rather than lying."""
+        mock_get_quote_data.return_value = {
+            10: {"id": 10, "content": "x", "username": "alice", "user_id": 2}
+        }
+        result, _ = resolve_quotes("{quote:10}", user_id=1, for_llm=True)
+        assert '<quoted_node id="10" author="alice">' in result
+        assert "created_at" not in result
 
     @patch('backend.utils.quotes.get_quote_data')
     def test_inaccessible_quote(self, mock_get_quote_data):
@@ -176,14 +201,14 @@ class TestResolveQuotes:
     def test_human_readable_format(self, mock_get_quote_data):
         """Test human-readable format (for_llm=False)."""
         mock_get_quote_data.return_value = {
-            10: {"id": 10, "content": "Quoted text", "username": "alice", "user_id": 1}
+            10: {"id": 10, "content": "Quoted text", "username": "alice", "user_id": 1,
+                 "created_at": "2026-03-31T11:22:00Z"}
         }
 
         content = "See {quote:10}"
         result, _ = resolve_quotes(content, user_id=1, for_llm=False)
 
-        assert "--- Quoted from @alice" in result
-        assert "node #10" in result
+        assert "--- Quoted from @alice (node #10, 2026-03-31 11:22 UTC) ---" in result
         assert "--- End quote ---" in result
 
 
@@ -432,6 +457,7 @@ class TestResolveQuotesForExport:
         # Configure the mock Node in backend.models
         self.mock_node = MagicMock()
         self.mock_node.user.username = "alice"
+        self.mock_node.created_at = datetime(2026, 3, 31, 11, 22)
         mock_models.Node.query.get.return_value = self.mock_node
 
     def teardown_method(self):
@@ -453,8 +479,7 @@ class TestResolveQuotesForExport:
         result = resolve_quotes_for_export(content, node_id=1, embedded_quotes=embedded_quotes, user_id=1)
 
         assert "This is the quoted content" in result
-        assert "--- Quoted from @alice" in result
-        assert "node #10" in result
+        assert "--- Quoted from @alice (node #10, 2026-03-31 11:22 UTC) ---" in result
 
     def test_reference_quote_rendered(self):
         """Test that non-embedded quotes show reference marker."""

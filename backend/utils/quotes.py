@@ -17,7 +17,7 @@ from datetime import datetime
 from typing import Tuple, List, Dict, Optional, Set
 from celery.utils.log import get_task_logger
 
-from backend.utils.timefmt import iso_utc
+from backend.utils.timefmt import iso_utc, local_stamp
 
 logger = get_task_logger(__name__)
 
@@ -84,6 +84,20 @@ def get_ext_quote_data(item_ids: List[int], user_id: int) -> Dict[int, Optional[
     return result
 
 
+def quote_stamp(iso: Optional[str], tz_name: Optional[str] = None) -> Optional[str]:
+    """Render an ``iso_utc`` string as ``YYYY-MM-DD HH:MM TZ`` in ``tz_name``
+    (UTC when unset) — the same rendering thread messages carry, minus the
+    brackets, so a quoted node's date reads like its neighbours' (#130).
+    Returns ``None`` when there is no timestamp to render."""
+    if not iso:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return local_stamp(dt, tz_name).strip("[]")
+
+
 def resolve_ext_quotes(content: str, user_id: int,
                        for_llm: bool = False) -> Tuple[str, List[int]]:
     """Replace {quote_ext:ID} placeholders with the saved reference's
@@ -114,10 +128,12 @@ def resolve_ext_quotes(content: str, user_id: int,
         title = d.get("title")
         if for_llm:
             title_attr = f' title="{title}"' if title else ""
+            posted_attr = (f' posted_at="{d["posted_at"][:10]}"'
+                           if d.get("posted_at") else "")
             return (
                 f'<quoted_reference id="{item_id}" source="{d["source"]}" '
-                f'author="{author}"{title_attr}>\n{d["content"]}\n'
-                f'</quoted_reference>')
+                f'author="{author}"{title_attr}{posted_attr}>\n'
+                f'{d["content"]}\n</quoted_reference>')
         posted = f' ({d["posted_at"][:10]})' if d.get("posted_at") else ""
         label = f'"{title}" from {author}' if title else f"from {author}"
         return (f'\n--- Saved reference {label}{posted} ---\n'
@@ -200,7 +216,8 @@ def resolve_quotes(
     user_id: int,
     for_llm: bool = False,
     max_depth: int = DEFAULT_MAX_DEPTH,
-    _seen_ids: Optional[Set[int]] = None
+    _seen_ids: Optional[Set[int]] = None,
+    tz_name: Optional[str] = None,
 ) -> Tuple[str, List[int]]:
     """
     Replace {quote:ID} placeholders with quoted node content, recursively.
@@ -212,6 +229,9 @@ def resolve_quotes(
                  if False, use human-readable format
         max_depth: Maximum recursion depth (default 3). Set to 1 for no recursion.
         _seen_ids: Internal - tracks visited node IDs to prevent cycles
+        tz_name: IANA timezone the quoted node's creation time is rendered
+                 in (UTC when unset) — pass the conversation owner's so it
+                 matches the thread's message stamps
 
     Returns:
         Tuple of (resolved_content, list_of_quoted_node_ids)
@@ -278,16 +298,24 @@ def resolve_quotes(
                 user_id,
                 for_llm=for_llm,
                 max_depth=max_depth - 1,
-                _seen_ids=new_seen
+                _seen_ids=new_seen,
+                tz_name=tz_name,
             )
             resolved_ids.extend(nested_ids)
 
+        stamp = quote_stamp(data.get("created_at"), tz_name)
         if for_llm:
-            # XML format for clear LLM context
-            return f'<quoted_node id="{node_id}" author="{username}">\n{node_content}\n</quoted_node>'
+            # XML format for clear LLM context. The creation stamp is the
+            # quote's only temporal anchor — without it the model can't
+            # place the quoted entry in time relative to the thread.
+            stamp_attr = f' created_at="{stamp}"' if stamp else ""
+            return (f'<quoted_node id="{node_id}" author="{username}"{stamp_attr}>\n'
+                    f'{node_content}\n</quoted_node>')
         else:
             # Human-readable format for exports
-            return f'\n--- Quoted from @{username} (node #{node_id}) ---\n{node_content}\n--- End quote ---\n'
+            when = f", {stamp}" if stamp else ""
+            return (f'\n--- Quoted from @{username} (node #{node_id}{when}) ---\n'
+                    f'{node_content}\n--- End quote ---\n')
 
     resolved_content = re.sub(QUOTE_PLACEHOLDER_PATTERN, replace_quote, content)
     return resolved_content, resolved_ids
@@ -828,7 +856,11 @@ def resolve_quotes_for_export(
             from backend.models import Node
             quoted_node = Node.query.get(quoted_id)
             username = quoted_node.user.username if quoted_node and quoted_node.user else "Unknown"
-            return f'\n--- Quoted from @{username} (node #{quoted_id}) ---\n{embedded_content}\n--- End quote ---\n'
+            stamp = quote_stamp(
+                iso_utc(quoted_node.created_at) if quoted_node else None)
+            when = f", {stamp}" if stamp else ""
+            return (f'\n--- Quoted from @{username} (node #{quoted_id}{when}) ---\n'
+                    f'{embedded_content}\n--- End quote ---\n')
         else:
             # Resolved by reference - the quoted node is elsewhere in the export
             return f'[See node #{quoted_id} in export]'

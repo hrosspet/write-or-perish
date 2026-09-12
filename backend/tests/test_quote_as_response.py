@@ -7,6 +7,7 @@ sync (credit saving). No network — all local.
 """
 import os
 import sys
+from datetime import datetime
 from unittest.mock import MagicMock
 
 os.environ["ENCRYPTION_DISABLED"] = "true"
@@ -113,6 +114,8 @@ def test_find_and_has_ext_quotes():
 def test_resolve_ext_quotes_llm_and_human_formats(app):
     uid = User.query.filter_by(username="tester").first().id
     item = _mk_item(uid, "the saved tweet text")
+    item.posted_at = datetime(2026, 1, 2, 9, 0)
+    _db.session.commit()
 
     llm_text, ids = resolve_ext_quotes(
         f"look: {{quote_ext:{item.id}}}", uid, for_llm=True)
@@ -120,6 +123,9 @@ def test_resolve_ext_quotes_llm_and_human_formats(app):
     assert "<quoted_reference" in llm_text
     assert "the saved tweet text" in llm_text
     assert '@visa' in llm_text
+    # The posted date is the reference's temporal anchor for the model,
+    # the same one the human-readable format already carries.
+    assert 'posted_at="2026-01-02"' in llm_text
 
     human_text, _ = resolve_ext_quotes(
         f"look: {{quote_ext:{item.id}}}", uid, for_llm=False)
