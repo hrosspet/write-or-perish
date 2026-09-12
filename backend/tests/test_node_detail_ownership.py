@@ -233,3 +233,16 @@ def test_llm_child_parent_user_id_uses_human_owner(app, alice, llm_user):
     )
     # The LLM acts as parent → parent_user_id = LLM's human_owner_id.
     assert grand_payload["parent_user_id"] == alice.id
+
+
+def test_private_node_of_another_user_is_indistinguishable_from_missing(app, alice, bob):
+    """A private id must not be confirmed as taken: the same 404 body as a
+    nonexistent id, never a 403."""
+    secret = _make_node(bob, content="bob's secret", privacy_level="private")
+    client = app.test_client()
+    _login(client, alice)
+    denied = client.get(f"/nodes/{secret.id}")
+    missing = client.get("/nodes/999999")
+    assert denied.status_code == 404
+    assert missing.status_code == 404
+    assert denied.get_json() == missing.get_json()

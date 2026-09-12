@@ -152,10 +152,10 @@ function NodeDetail({ nodeIdOverride }) {
       })
       .catch((err) => {
         console.error(err);
-        if (err.response && err.response.status === 404) {
-          setError("This node no longer exists or was deleted.");
-        } else if (err.response && err.response.status === 403) {
-          setError("You don't have access to this node.");
+        // 404 covers missing, deleted and not-shared-with-you alike (the
+        // backend never says which), so the message has to as well.
+        if (err.response && (err.response.status === 404 || err.response.status === 403)) {
+          setError("This node doesn't exist, was deleted, or isn't shared with you.");
         } else {
           setError("Error fetching node details.");
         }

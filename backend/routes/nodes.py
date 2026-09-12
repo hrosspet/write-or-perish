@@ -1051,9 +1051,12 @@ def get_node(node_id):
     if node.deleted_at is not None:
         return jsonify({"error": "Node not found"}), 404
 
-    # Check if user has permission to access this node
+    # A node the viewer cannot see is indistinguishable from one that does
+    # not exist: same status, same body. A 403 here would confirm that a
+    # private id is taken (the SSR /node/<id> shell and the in-text link
+    # titles already collapse the two).
     if not can_user_access_node(node, current_user.id):
-        return jsonify({"error": "Not authorized to access this node"}), 403
+        return jsonify({"error": "Node not found"}), 404
 
     # Know the whole render set before touching any content: the ancestor
     # chain (one PK lookup per level) and the full subtree (one query per

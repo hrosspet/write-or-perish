@@ -242,13 +242,15 @@ class TestPublicDashboardPrivacy:
 class TestNodeDetailPrivacy:
     """GET /api/nodes/<id> should return 403 for private nodes of other users."""
 
-    def test_returns_403_for_other_users_private_node(self, app, data):
+    def test_returns_404_for_other_users_private_node(self, app, data):
+        # Not 403: that would confirm the id exists. Same body as a
+        # nonexistent node.
         client = app.test_client()
         _login(client, data["alice_id"])
 
         resp = client.get(f"/api/nodes/{data['bob_private_id']}")
-        assert resp.status_code == 403
-        assert "Not authorized" in resp.json["error"]
+        assert resp.status_code == 404
+        assert resp.json["error"] == "Node not found"
 
     def test_owner_can_access_own_private_node(self, app, data):
         client = app.test_client()
