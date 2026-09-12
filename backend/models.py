@@ -1187,6 +1187,10 @@ class ExternalAccount(db.Model):
     # refresh-token family died). Nightly sync skips revoked accounts; the
     # import page shows a reconnect state; a successful reconnect clears it.
     revoked_at = db.Column(db.DateTime, nullable=True)
+    # How many items the last successful sync created. The import page
+    # reports THIS after a manual sync — diffing item counts around a
+    # background task raced its per-page commits and under-reported.
+    last_sync_created = db.Column(db.Integer, nullable=True)
 
     user = db.relationship("User", backref="external_accounts")
 

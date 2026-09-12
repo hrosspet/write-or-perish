@@ -17,6 +17,7 @@ from backend.celery_app import celery, flask_app
 from backend.extensions import db
 from backend.models import APICostLog, ExternalAccount, ExternalItem
 from backend.utils.cost import X_REQUEST_COST_MICRODOLLARS
+from backend.utils.notifications import notify_user
 from backend.utils.external_content import (
     ca_fetch_tweets, ca_lookup_account, x_fetch_bookmark_pages,
     x_refresh_access_token,
@@ -86,6 +87,10 @@ def fetch_community_archive(self, user_id, username, max_items=2000):
                 "created": created, "skipped": skipped}
 
 
+# Import page anchor of the X Bookmarks card (ExternalImport.js).
+X_RECONNECT_LINK = "/import#x-bookmarks"
+
+
 def _mark_revoked(account, why):
     """X rejected the account's tokens — user revoked the app, or the
     rotating refresh-token family died. Park the account (nightly sync
@@ -95,6 +100,20 @@ def _mark_revoked(account, why):
     db.session.commit()
     logger.warning("X account for user %s marked revoked (%s)",
                    account.user_id, why)
+    # The nightly sync fails silently otherwise — the user only learns
+    # bookmarks stopped arriving if they happen to open the import page.
+    # notify_user commits (and rolls back on failure), hence AFTER the
+    # revoked_at commit above. The reconnect callback marks it read.
+    notify_user(
+        account.user_id,
+        type="x_disconnected",
+        title="X disconnected — bookmark sync paused",
+        body=("X stopped accepting Loore's access"
+              + (f" to @{account.handle}" if account.handle else "")
+              + ". Your nightly bookmark sync is paused until you "
+              "reconnect on the Import page."),
+        link=X_RECONNECT_LINK,
+    )
     return {"status": "revoked"}
 
 
@@ -162,6 +181,7 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
                 return _mark_revoked(account, "bookmarks fetch HTTP 401")
             raise
         account.last_synced_at = datetime.utcnow()
+        account.last_sync_created = created
         if requests_made:
             db.session.add(APICostLog(
                 user_id=user_id,

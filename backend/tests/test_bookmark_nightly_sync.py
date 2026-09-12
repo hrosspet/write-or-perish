@@ -30,7 +30,7 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
 
 from backend.extensions import db as _db  # noqa: E402
 from backend.models import (  # noqa: E402
-    User, ExternalAccount, APICostLog,
+    User, ExternalAccount, APICostLog, UserNotification,
 )
 
 
@@ -141,6 +141,33 @@ def test_dead_refresh_grant_marks_revoked(app, monkeypatch):
     assert result["status"] == "revoked"
     _db.session.expire_all()
     assert ExternalAccount.query.get(account.id).revoked_at is not None
+
+
+def test_revocation_notifies_user_with_reconnect_link(app, monkeypatch):
+    """A parked account must not fail silently: the user gets one targeted
+    notification (deduped per unread) pointing at the Import page's X card."""
+    uid = User.query.first().id
+    _mk_account(uid)
+
+    def dead_refresh(client_id, refresh_token):
+        raise _http_error(401)
+    monkeypatch.setattr(_sync_mod, "x_refresh_access_token", dead_refresh)
+
+    _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    notices = UserNotification.query.filter_by(
+        user_id=uid, type="x_disconnected").all()
+    assert len(notices) == 1
+    assert notices[0].status == "unread"
+    assert notices[0].link == "/import#x-bookmarks"
+    assert "@tester" in notices[0].body
+
+    # A second failing run (revoked accounts are skipped, but a stale
+    # dispatch could still land) must not stack a second notice.
+    ExternalAccount.query.filter_by(user_id=uid).one().revoked_at = None
+    _db.session.commit()
+    _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    assert UserNotification.query.filter_by(
+        user_id=uid, type="x_disconnected").count() == 1
 
 
 def test_transient_refresh_error_does_not_revoke(app, monkeypatch):
@@ -267,3 +294,22 @@ def test_successful_sync_logs_api_cost(app, monkeypatch):
         user_id=uid, request_type="x_bookmark_sync").one()
     assert log.cost_microdollars == 2 * _sync_mod.X_REQUEST_COST_MICRODOLLARS
     assert log.model_id == "x-api/bookmarks"
+
+
+def test_successful_sync_records_created_count(app, monkeypatch):
+    """The import page reports the task's own count after a manual sync
+    (diffing item counts around the running task under-reported)."""
+    uid = User.query.first().id
+    account = _mk_account(uid, expired=False)
+
+    def pages(token, x_user_id, max_items=800):
+        yield [{"external_id": f"n{i}", "content": "t", "author_handle": "x",
+                "url": None, "posted_at": None} for i in range(3)]
+        yield [{"external_id": "n0", "content": "t", "author_handle": "x",
+                "url": None, "posted_at": None}]  # known -> stop
+    monkeypatch.setattr(_sync_mod, "x_fetch_bookmark_pages", pages)
+    monkeypatch.setattr(_sync_mod, "_post_import", lambda *a: None)
+
+    _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    _db.session.expire_all()
+    assert ExternalAccount.query.get(account.id).last_sync_created == 3

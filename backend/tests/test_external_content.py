@@ -182,8 +182,50 @@ def test_twitter_connect_env_gated(app, client):
         "/api/external/twitter/connect").status_code == 503
     status = client.get("/api/external/twitter/status").get_json()
     assert status == {"configured": False, "connected": False,
-                      "revoked": False,
-                      "handle": None, "last_synced_at": None}
+                      "revoked": False, "handle": None,
+                      "last_synced_at": None, "last_sync_created": None}
+
+
+def test_twitter_reconnect_clears_disconnected_notice(app, client,
+                                                       monkeypatch):
+    """Reconnecting answers the "X disconnected" notice — it must not keep
+    surfacing in the updates window after the user already fixed it."""
+    from backend.models import ExternalAccount, UserNotification
+    from backend.routes import external as ext
+    app.config["X_CLIENT_ID"] = "client-id"
+    app.config["X_REDIRECT_URI"] = "http://localhost/cb"
+    uid = User.query.first().id
+    account = ExternalAccount(user_id=uid, provider="twitter",
+                              revoked_at=datetime.utcnow())
+    account.set_tokens("old", "old")
+    _db.session.add(account)
+    _db.session.add(UserNotification(
+        user_id=uid, type="x_disconnected", title="X disconnected",
+        link="/import#x-bookmarks"))
+    _db.session.commit()
+
+    def fake_post(url, **kw):
+        r = MagicMock()
+        r.json.return_value = {"access_token": "new", "refresh_token": "r",
+                               "expires_in": 7200}
+        return r
+
+    def fake_get(url, **kw):
+        r = MagicMock()
+        r.json.return_value = {"data": {"id": "42", "username": "tester"}}
+        return r
+    monkeypatch.setattr(ext.requests, "post", fake_post)
+    monkeypatch.setattr(ext.requests, "get", fake_get)
+    with client.session_transaction() as sess:
+        sess["x_oauth"] = {"verifier": "v", "state": "s"}
+
+    resp = client.get("/api/external/twitter/callback?state=s&code=c")
+    assert resp.status_code == 302 and "x_connect=ok" in resp.location
+    _db.session.expire_all()
+    assert ExternalAccount.query.get(account.id).revoked_at is None
+    notice = UserNotification.query.filter_by(
+        user_id=uid, type="x_disconnected").one()
+    assert notice.status == "read" and notice.read_at is not None
 
 
 def test_ca_fetch_requires_username(app, client):
