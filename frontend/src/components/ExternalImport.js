@@ -259,7 +259,7 @@ export default function ExternalImport() {
         fontFamily: 'var(--serif)', fontWeight: 300, fontSize: '1.5rem',
         color: 'var(--text-primary)', margin: '0 0 4px 0',
       }}>
-        References
+        Import References
       </h2>
       <p style={helpStyle}>
         Content you've saved elsewhere, made searchable next to your own
