@@ -80,6 +80,12 @@ def get_ext_quote_data(item_ids: List[int], user_id: int) -> Dict[int, Optional[
             "title": item.title,
             "url": item.url,
             "posted_at": iso_utc(item.posted_at) if item.posted_at else None,
+            # The reference's owner and their own read mark: the quote
+            # bubble offers "Mark as read" only to the owner (the read
+            # endpoint is owner-only), so a viewer of a public node just
+            # sees the quote.
+            "user_id": item.user_id,
+            "read_at": iso_utc(item.read_at) if item.read_at else None,
         }
     return result
 

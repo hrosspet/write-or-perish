@@ -133,6 +133,19 @@ def test_resolve_ext_quotes_llm_and_human_formats(app):
     assert "the saved tweet text" in human_text
 
 
+def test_get_ext_quote_data_carries_owner_and_read_mark(app):
+    uid = User.query.filter_by(username="tester").first().id
+    item = _mk_item(uid, "unread so far")
+    data = get_ext_quote_data([item.id], uid)[item.id]
+    assert data["user_id"] == uid
+    assert data["read_at"] is None
+
+    item.read_at = datetime(2026, 3, 4, 10, 30)
+    _db.session.commit()
+    data = get_ext_quote_data([item.id], uid)[item.id]
+    assert data["read_at"].startswith("2026-03-04T10:30")
+
+
 def test_resolve_ext_quotes_owner_only(app):
     rival_id = User.query.filter_by(username="rival").first().id
     tester_id = User.query.filter_by(username="tester").first().id

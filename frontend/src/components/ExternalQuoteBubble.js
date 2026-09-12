@@ -1,6 +1,9 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
+import api from '../api';
 import MarkdownBody from './MarkdownBody';
 import { formatDate } from '../utils/date';
+import { useUser } from '../contexts/UserContext';
+import { useToast } from '../contexts/ToastContext';
 
 const SOURCE_LABELS = {
   community_archive: 'Community Archive',
@@ -13,8 +16,21 @@ const SOURCE_LABELS = {
  * (tweet/bookmark) — the quote-as-response rendering. Content comes
  * verbatim from the server-resolved external item, never from LLM text.
  * Clicking opens the original post.
+ *
+ * The reference's owner also gets the same read toggle as the reference
+ * page (POST/DELETE /external/items/<id>/read), so a recommendation can
+ * be marked read right where Loore surfaced it. Only the user marks a
+ * reference read — the AI quoting it is tracked separately as surfacing.
  */
 const ExternalQuoteBubble = ({ quote }) => {
+  const userCtx = useUser();
+  const currentUser = userCtx ? userCtx.user : null;
+  const { addToast } = useToast();
+  const [readAt, setReadAt] = useState(quote ? quote.read_at : null);
+  const [marking, setMarking] = useState(false);
+  const serverReadAt = quote ? quote.read_at : null;
+  useEffect(() => { setReadAt(serverReadAt); }, [serverReadAt]);
+
   if (!quote) {
     return (
       <div style={notAccessibleStyle}>
@@ -29,9 +45,22 @@ const ExternalQuoteBubble = ({ quote }) => {
   const postedAt = quote.posted_at
     ? formatDate(quote.posted_at, { relative: false })
     : null;
+  const mine = !!currentUser && quote.user_id === currentUser.id;
 
   const open = () => {
     if (quote.url) window.open(quote.url, '_blank', 'noopener,noreferrer');
+  };
+
+  const toggleRead = (e) => {
+    e.stopPropagation();
+    setMarking(true);
+    const req = readAt
+      ? api.delete(`/external/items/${quote.id}/read`)
+      : api.post(`/external/items/${quote.id}/read`);
+    req
+      .then((res) => setReadAt(res.data.read_at))
+      .catch(() => addToast('Could not update the read mark.', 4000))
+      .finally(() => setMarking(false));
   };
 
   return (
@@ -48,7 +77,24 @@ const ExternalQuoteBubble = ({ quote }) => {
         </MarkdownBody>
       </div>
       <div style={footerStyle}>
-        {postedAt && <span>{postedAt}</span>}
+        <span>{postedAt}</span>
+        {mine && (
+          <span style={readSlotStyle}>
+            {readAt && (
+              <span style={readTagStyle} title={`You read it ${formatDate(readAt)}`}>
+                Read
+              </span>
+            )}
+            <button
+              type="button"
+              className="ext-quote-read-toggle"
+              onClick={toggleRead}
+              disabled={marking}
+            >
+              {readAt ? 'Mark as unread' : 'Mark as read'}
+            </button>
+          </span>
+        )}
       </div>
     </div>
   );
@@ -82,9 +128,29 @@ const contentStyle = {
 
 const footerStyle = {
   display: 'flex',
-  gap: '12px',
+  justifyContent: 'space-between',
+  alignItems: 'center',
+  flexWrap: 'wrap',
+  gap: '8px 12px',
   fontSize: '0.8em',
   color: 'var(--text-muted)',
+};
+
+const readSlotStyle = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '10px',
+  marginLeft: 'auto',
+};
+
+// Same "Read" mark as the reference page, scaled to the footer.
+const readTagStyle = {
+  fontFamily: 'var(--sans)',
+  fontSize: '0.8em',
+  fontWeight: 500,
+  textTransform: 'uppercase',
+  letterSpacing: '0.08em',
+  color: 'var(--accent-dim)',
 };
 
 const notAccessibleStyle = {

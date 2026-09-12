@@ -274,3 +274,38 @@ code {
 .loore-md .loore-add-task:focus {
   opacity: 1;
 }
+
+/* "Mark as read" inside a quoted reference (ExternalQuoteBubble). A text
+   link in the footer rather than a button: the quote itself is the click
+   target that opens the original post, so the toggle must read as a small
+   aside, not compete with it. Hover/focus underline the label; the global
+   button hover fill is switched off here. */
+.ext-quote-read-toggle {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  font-family: var(--sans);
+  font-size: inherit;
+  font-weight: 400;
+  color: var(--text-muted);
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 3px;
+  transition: color 0.15s ease, text-decoration-color 0.15s ease;
+}
+.ext-quote-read-toggle:hover,
+.ext-quote-read-toggle:focus-visible {
+  background: none;
+  border: 0;
+  color: var(--accent);
+  text-decoration-color: currentColor;
+}
+.ext-quote-read-toggle:active {
+  background: none;
+}
+.ext-quote-read-toggle:disabled:hover {
+  background: none;
+  border: 0;
+  color: var(--text-muted);
+}
