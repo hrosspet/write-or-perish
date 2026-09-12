@@ -8,9 +8,11 @@
 // value is always interpreted as UTC and then rendered in the browser's local
 // timezone.
 
-// Dates render as yyyy/mm/dd everywhere (footers, Log cards, version
-// lists) — one unambiguous, sortable form instead of locale-dependent
-// "9/12/2026" vs "12/9/2026" vs "Sep 12, 2026".
+// Date-only surfaces (version lists, search results, Commons) read as
+// "Sep 12, 2026"; date+time surfaces (node footers, Log cards) use the
+// compact, sortable "yyyy/mm/dd HH:MM" instead of locale-dependent
+// "9/12/2026, 2:05:30 PM".
+const DATE_OPTS = { month: 'short', day: 'numeric', year: 'numeric' };
 const pad2 = (n) => String(n).padStart(2, '0');
 
 /** Local-time yyyy/mm/dd for an already-parsed Date. */
@@ -39,7 +41,7 @@ export function parseTimestamp(iso) {
 
 /**
  * Date-only formatter with relative "today"/"yesterday" wording for recent
- * dates, falling back to "yyyy/mm/dd".
+ * dates, falling back to "Mon D, YYYY".
  *
  * @param {string|Date} iso
  * @param {object} [opts]
@@ -59,7 +61,7 @@ export function formatDate(iso, opts = {}) {
     yesterday.setDate(yesterday.getDate() - 1);
     if (d.toDateString() === yesterday.toDateString()) return 'yesterday';
   }
-  return formatYmd(d);
+  return d.toLocaleDateString('en-US', DATE_OPTS);
 }
 
 /**

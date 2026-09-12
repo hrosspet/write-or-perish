@@ -5,8 +5,8 @@ describe('date helpers', () => {
     expect(formatYmd(new Date(2026, 0, 5))).toBe('2026/01/05');
   });
 
-  test('formatDate renders yyyy/mm/dd for non-recent dates', () => {
-    expect(formatDate('2024-03-07T12:00:00Z', { relative: false })).toMatch(/^2024\/03\/0[78]$/);
+  test('formatDate renders "Mon D, YYYY" for non-recent dates', () => {
+    expect(formatDate('2024-03-07T12:00:00Z', { relative: false })).toMatch(/^Mar [78], 2024$/);
   });
 
   test('formatDate keeps relative wording for today', () => {
