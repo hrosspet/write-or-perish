@@ -92,16 +92,19 @@ function ReferencesPage() {
   return (
     <div style={{ padding: '3rem 2rem 4rem', maxWidth: '720px', margin: '0 auto' }}>
       <div style={{ marginBottom: '2.5rem' }}>
-        <h2 style={{
-          color: 'var(--text-primary)',
-          fontFamily: 'var(--serif)',
-          fontWeight: 300,
-          fontSize: '2rem',
-          margin: '0 0 0.8rem 0',
-        }}>
-          References
-        </h2>
-        <div style={{ width: '40px', height: '1px', backgroundColor: 'var(--accent)', opacity: 0.5 }} />
+        {/* The rule runs the width of the title, not the Log's 40px stub. */}
+        <div style={{ display: 'inline-block' }}>
+          <h2 style={{
+            color: 'var(--text-primary)',
+            fontFamily: 'var(--serif)',
+            fontWeight: 300,
+            fontSize: '2rem',
+            margin: '0 0 0.8rem 0',
+          }}>
+            References
+          </h2>
+          <div style={{ height: '1px', backgroundColor: 'var(--accent)', opacity: 0.5 }} />
+        </div>
       </div>
       {items.length === 0 ? (
         <p style={{
