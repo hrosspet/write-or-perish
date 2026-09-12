@@ -1139,6 +1139,9 @@ def _scan_proposal_statuses(node_chain):
                     verb = ("created" if entry.get("created")
                             else "updated")
                     notes.append(f"[Artifact '{kind}' was {verb}.]")
+                else:
+                    # A silent failure reads as success to the model.
+                    notes.append(_action_result_text(entry))
                 to_mark.append((node, name))
 
             elif name in RETRIEVAL_TOOLS and not reported:
@@ -2565,6 +2568,19 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                         message_text += (
                                             f"\n\n[share-proposal:"
                                             f"{node.id}]"
+                                        )
+                                    elif ename == "update_artifact":
+                                        # Durable record of the outcome.
+                                        # The within-turn result round is
+                                        # injected only into that turn's
+                                        # in-flight messages; without this
+                                        # the history shows "(updating your
+                                        # memory…)" and nothing else, and
+                                        # the model can't tell later
+                                        # whether its write landed.
+                                        message_text += (
+                                            "\n\n"
+                                            + _action_result_text(entry)
                                         )
                             except (json.JSONDecodeError, TypeError):
                                 pass

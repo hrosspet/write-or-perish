@@ -674,6 +674,26 @@ def test_scan_statuses_reports_artifact_tools_once(app):
         assert to_mark2 == []
 
 
+def test_scan_statuses_reports_artifact_failure(app):
+    """A failed update_artifact that never got a same-turn result round
+    (single-shot / budget-exhausted) must be reported, not swallowed —
+    silence reads as success to the model."""
+    with app.app_context():
+        uid = User.query.first().id
+        node = _node_with_meta(uid, [
+            {"name": "update_artifact", "status": "error",
+             "kind": "memory", "error": "Anchor text not found"},
+        ])
+        notes, to_mark = _scan_proposal_statuses([node])
+        assert notes == ["[update_artifact failed — Anchor text not found]"]
+        assert len(to_mark) == 1
+
+        _mark_status_reported(to_mark)
+        _db.session.commit()
+        notes2, _ = _scan_proposal_statuses([node])
+        assert notes2 == []
+
+
 # ── Pinning ──────────────────────────────────────────────────────────────
 
 def test_attach_pins_artifacts_and_node_resolves_them(app):

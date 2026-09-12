@@ -501,6 +501,40 @@ def test_textmode_action_tool_continues(app):
         m["text"] for m in _ScriptedProvider.calls[1]["messages"])
     assert "[update_artifact: artifact 'memory' created.]" in second_texts
 
+    # NEXT turn: the outcome is a durable part of the rendered history, not
+    # just that turn's in-flight injection — asked "did that save?", the
+    # model can answer from the record instead of "I got no feedback".
+    user2 = Node(user_id=alice.id, human_owner_id=alice.id,
+                 parent_id=final.id, node_type="user",
+                 privacy_level="private", ai_usage="chat")
+    user2.set_content("did that save?")
+    _db.session.add(user2)
+    _db.session.flush()
+    llm2 = Node(user_id=interim.user_id, human_owner_id=alice.id,
+                parent_id=user2.id, node_type="llm", llm_model="gpt-5",
+                llm_task_status="pending", privacy_level="private",
+                ai_usage="chat")
+    llm2.set_content("[LLM response generation pending...]")
+    _db.session.add(llm2)
+    _db.session.commit()
+
+    _ScriptedProvider.reset([_resp("Yes, it saved.")])
+    generate_llm_response(
+        _FakeSelf(), user2.id, llm2.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+    assert len(_ScriptedProvider.calls) == 1
+    history = _ScriptedProvider.calls[0]["messages"]
+    interim_msgs = [m for m in history
+                    if m["role"] == "assistant"
+                    and "Noting this milestone" in m["text"]]
+    assert len(interim_msgs) == 1
+    assert ("[update_artifact: artifact 'memory' created.]"
+            in interim_msgs[0]["text"])
+    # Already reported same-turn: the cross-turn scan adds no second note.
+    assert sum("artifact 'memory'" in m["text"].lower()
+               or "Artifact 'memory'" in m["text"] for m in history) == 1
+
 
 def test_continuation_terminal_failure_fails_continuation_node(
         app, monkeypatch):
