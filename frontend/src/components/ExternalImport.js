@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import api from '../api';
 import { useUser } from '../contexts/UserContext';
 import NewTokenDialog from './NewTokenDialog';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 
 /**
  * References import (#155 / Download substrate): Community Archive
@@ -74,6 +74,7 @@ const tokenRowStyle = {
 
 export default function ExternalImport() {
   const { user } = useUser();
+  const location = useLocation();
   const [counts, setCounts] = useState({});
   const [caUsername, setCaUsername] = useState('');
   const [caStatus, setCaStatus] = useState(null);
@@ -113,6 +114,15 @@ export default function ExternalImport() {
     refreshTokens();
     return () => pollRef.current && clearInterval(pollRef.current);
   }, []);
+
+  // The "X disconnected" notice links to /import#x-bookmarks. React Router
+  // doesn't scroll to hashes on SPA navigation, and the card only takes
+  // its final height once the status has loaded — so re-run on xStatus.
+  useEffect(() => {
+    if (!location.hash) return;
+    const el = document.getElementById(location.hash.slice(1));
+    if (el) el.scrollIntoView({ block: 'start' });
+  }, [location.hash, xStatus]);
 
   const createToken = async () => {
     setBusy(true);
@@ -205,7 +215,6 @@ export default function ExternalImport() {
     setBusy(true);
     setSyncing(true);
     setXSyncMsg(null);  // result text appears when the sync lands
-    const baselineCount = counts.twitter_bookmark || 0;
     const baselineSynced = xStatus?.last_synced_at || null;
     try {
       await api.post('/external/twitter/sync');
@@ -231,8 +240,9 @@ export default function ExternalImport() {
         if (xRes.data.last_synced_at
             && xRes.data.last_synced_at !== baselineSynced) {
           clearInterval(pollRef.current);
-          const created =
-            (itemsRes.data.counts?.twitter_bookmark || 0) - baselineCount;
+          // The task's own count. Diffing item counts raced the task's
+          // per-page commits (a 170-item sync once reported "100").
+          const created = xRes.data.last_sync_created ?? 0;
           setXSyncMsg(created > 0
             ? `Synced \u2014 ${created} new bookmark${created === 1 ? '' : 's'}.`
             : 'Synced \u2014 no new bookmarks.');
@@ -302,7 +312,7 @@ export default function ExternalImport() {
         {caStatus && <p style={{ ...helpStyle, margin: '10px 0 0 0' }}>{caStatus}</p>}
       </div>
 
-      <div style={cardStyle}>
+      <div id="x-bookmarks" style={{ ...cardStyle, scrollMarginTop: '72px' }}>
         <h3 style={titleStyle}>X Bookmarks</h3>
         {xStatus && xStatus.revoked ? (
           <>

@@ -23,6 +23,7 @@ from flask_login import current_user, login_required
 from backend.extensions import db
 from backend.models import (
     ApiToken, ExternalAccount, ExternalItem, ExternalItemEmbedding,
+    UserNotification,
 )
 from backend.utils.api_tokens import (
     SCOPE_EXTERNAL_WRITE, generate_api_token, token_or_login_required,
@@ -292,6 +293,8 @@ def twitter_status():
         "handle": account.handle if account else None,
         "last_synced_at": (iso_utc(account.last_synced_at)
                            if account and account.last_synced_at else None),
+        "last_sync_created": (account.last_sync_created
+                              if account else None),
     }), 200
 
 
@@ -375,6 +378,13 @@ def twitter_callback():
     account.external_user_id = me_data.get("id")
     account.handle = me_data.get("username")
     account.revoked_at = None  # fresh consent supersedes any revocation
+    # The "X disconnected" notice is answered by reconnecting — don't keep
+    # showing it in the updates window after the user already fixed it.
+    for notice in UserNotification.query.filter_by(
+            user_id=current_user.id, type="x_disconnected",
+            status="unread").all():
+        notice.status = "read"
+        notice.read_at = datetime.utcnow()
     from backend.models import APICostLog
     from backend.utils.cost import X_REQUEST_COST_MICRODOLLARS
     db.session.add(APICostLog(

@@ -162,6 +162,7 @@ function ChangelogItem({ section, onDone, onCloseModal }) {
 const NOTIFICATION_EYEBROWS = {
   fix_ready: "Your issue has been fixed",
   issue_declined: "Your issue — closed without a fix",
+  x_disconnected: "Action needed",
 };
 
 // What the item is announcing, stamped: "v7 · Aug 9, 2026", in the same
