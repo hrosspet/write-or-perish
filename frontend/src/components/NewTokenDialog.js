@@ -43,18 +43,49 @@ const bodyStyle = {
   marginBottom: "1rem",
 };
 
+// The token box is the one active element: the whole box copies on
+// click; the icon in its corner says so, and the copied state answers
+// the click in place: check icon, green border, and the hint line under
+// the box (same icon pair and colors as the share cards in
+// ProposalInline, so it reads as one family).
 const tokenBoxStyle = {
+  position: "relative",
   display: "block",
+  width: "100%",
+  boxSizing: "border-box",
+  textAlign: "left",
   fontFamily: "var(--mono, ui-monospace, monospace)",
   fontSize: "0.85rem",
+  lineHeight: 1.5,
   color: "var(--text-primary)",
   background: "var(--bg-deep)",
   border: "1px solid var(--border)",
   borderRadius: "8px",
-  padding: "12px 14px",
+  padding: "12px 40px 12px 14px",
   wordBreak: "break-all",
-  userSelect: "all",
+  cursor: "pointer",
+  marginBottom: "0.5rem",
+  transition: "border-color 0.15s ease",
+};
+
+const cornerStyle = {
+  position: "absolute",
+  top: "8px",
+  right: "8px",
+  display: "flex",
+  lineHeight: 0,
+  transition: "opacity 0.15s ease, color 0.15s ease",
+};
+
+const hintStyle = {
+  fontFamily: "var(--sans)",
+  fontSize: "0.82rem",
+  fontWeight: 300,
+  color: "var(--text-muted)",
+  lineHeight: 1.5,
+  margin: 0,
   marginBottom: "1.5rem",
+  minHeight: "1.2em",
 };
 
 const buttonRowStyle = {
@@ -93,8 +124,15 @@ const subStyle = {
  */
 function NewTokenDialog({ token, onClose }) {
   const [copied, setCopied] = useState(false);
+  const [hover, setHover] = useState(false);
 
   useEffect(() => { setCopied(false); }, [token]);
+
+  useEffect(() => {
+    if (!copied) return undefined;
+    const t = setTimeout(() => setCopied(false), 1500);
+    return () => clearTimeout(t);
+  }, [copied]);
 
   if (!token) return null;
 
@@ -107,6 +145,8 @@ function NewTokenDialog({ token, onClose }) {
     }
   };
 
+  const cornerColor = copied ? "var(--success)" : "var(--text-muted)";
+
   return (
     <div style={overlayStyle} role="dialog" aria-modal="true" aria-labelledby="new-token-title">
       <div style={cardStyle}>
@@ -117,15 +157,38 @@ function NewTokenDialog({ token, onClose }) {
           there is no way to see it again. If it gets lost, revoke it and
           create another.
         </div>
-        <code style={tokenBoxStyle}>{token}</code>
+        <button
+          type="button"
+          onClick={copy}
+          onMouseEnter={() => setHover(true)}
+          onMouseLeave={() => setHover(false)}
+          title="Copy token"
+          aria-label="Copy token to clipboard"
+          style={{
+            ...tokenBoxStyle,
+            borderColor: copied
+              ? "var(--success)"
+              : hover ? "var(--accent)" : "var(--border)",
+          }}
+        >
+          {token}
+          <span style={{ ...cornerStyle, color: cornerColor, opacity: copied || hover ? 1 : 0.6 }}>
+            {copied ? (
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M3 8.5 L6.5 12 L13 4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
+                <path d="M10.5 5.5 V4 A1.5 1.5 0 0 0 9 2.5 H4 A1.5 1.5 0 0 0 2.5 4 V9 A1.5 1.5 0 0 0 4 10.5 H5.5" stroke="currentColor" strokeWidth="1.2" />
+              </svg>
+            )}
+          </span>
+        </button>
+        <p style={{ ...hintStyle, color: copied ? "var(--success)" : "var(--text-muted)" }}>
+          {copied ? "Copied to your clipboard." : "Click the token to copy it."}
+        </p>
         <div style={buttonRowStyle}>
-          <button
-            onClick={copy}
-            style={{ ...buttonBaseStyle, color: "var(--accent)" }}
-          >
-            <div style={{ fontWeight: 500 }}>{copied ? "Copied" : "Copy token"}</div>
-            {!copied && <div style={subStyle}>Puts it on your clipboard.</div>}
-          </button>
           <button
             onClick={onClose}
             style={{ ...buttonBaseStyle, color: "var(--text-secondary)" }}
