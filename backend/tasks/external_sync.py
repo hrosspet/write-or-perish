@@ -8,7 +8,6 @@ OAuth account (pay-per-use X API; env-gated by X_CLIENT_ID). Refreshes
 the access token when expired.
 """
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 
 import requests
 from celery.utils.log import get_task_logger
@@ -18,22 +17,13 @@ from backend.extensions import db
 from backend.models import APICostLog, ExternalAccount, ExternalItem
 from backend.utils.cost import X_REQUEST_COST_MICRODOLLARS
 from backend.utils.notifications import notify_user
+from backend.utils.timefmt import user_local_hour
 from backend.utils.external_content import (
     ca_fetch_tweets, ca_lookup_account, x_fetch_bookmark_pages,
     x_refresh_access_token,
 )
 
 logger = get_task_logger(__name__)
-
-
-def _post_import(user_id, created):
-    """After any import/fetch/sync that created items: rebuild the digest
-    artifact (topic map the agent reads before searching). The embedding
-    sweep picks new items up on its own schedule."""
-    if not created:
-        return
-    from backend.tasks.external_digest import rebuild_external_digest
-    rebuild_external_digest.delay(user_id)
 
 
 def _upsert_items(user_id, source, items):
@@ -82,7 +72,6 @@ def fetch_community_archive(self, user_id, username, max_items=2000):
         logger.info(
             "Community Archive fetch for user %s @%s: %d new, %d known",
             user_id, username, created, skipped)
-        _post_import(user_id, created)
         return {"status": "ok", "username": username,
                 "created": created, "skipped": skipped}
 
@@ -196,7 +185,6 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
         logger.info("X bookmarks sync for user %s: %d new, %d known, "
                     "%d API requests", user_id, created, skipped,
                     requests_made)
-        _post_import(user_id, created)
         return {"status": "ok", "created": created, "skipped": skipped,
                 "requests": requests_made}
 
@@ -210,22 +198,15 @@ NIGHTLY_SYNC_LOCAL_HOUR = 3
 NIGHTLY_SYNC_MIN_GAP = timedelta(hours=20)
 
 
-def _user_local_hour(user):
-    tzname = (getattr(user, "timezone", None) or "UTC").strip() or "UTC"
-    try:
-        return datetime.now(ZoneInfo(tzname)).hour
-    except Exception:  # noqa: BLE001 — unknown zone name -> UTC
-        return datetime.utcnow().hour
-
-
 @celery.task(name='backend.tasks.external_sync.sync_all_twitter_bookmarks')
 def sync_all_twitter_bookmarks():
     """Hourly beat gate: dispatch bookmark syncs for connected, non-revoked
     X accounts whose user's LOCAL time is ~3am, so every user syncs in
-    their own night. Runs BEFORE anything context-side is rebuilt — X
-    activity alone warrants a digest/pre-selection refresh even when the
-    user hasn't touched Loore. Downstream chaining is per-user via
-    _post_import. No-op until X_CLIENT_ID is configured."""
+    their own night. Runs BEFORE anything context-side is rebuilt: the
+    external-digest sweep gates on local 4am, an hour later, so a night's
+    new bookmarks are already stored when the digest is rebuilt — X
+    activity alone warrants a refresh even when the user hasn't touched
+    Loore. No-op until X_CLIENT_ID is configured."""
     with flask_app.app_context():
         if not flask_app.config.get("X_CLIENT_ID"):
             return {"status": "not_configured"}
@@ -237,7 +218,7 @@ def sync_all_twitter_bookmarks():
         ).all()
         dispatched = 0
         for account in accounts:
-            if _user_local_hour(account.user) != NIGHTLY_SYNC_LOCAL_HOUR:
+            if user_local_hour(account.user) != NIGHTLY_SYNC_LOCAL_HOUR:
                 continue
             if (account.last_synced_at
                     and now - account.last_synced_at < NIGHTLY_SYNC_MIN_GAP):

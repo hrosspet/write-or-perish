@@ -257,9 +257,6 @@ def import_bookmarks_json():
     items = [n for n in (_normalize(e) for e in payload) if n]
     created, skipped = _upsert_items(
         current_user.id, "twitter_bookmark", items)
-    if created:
-        from backend.tasks.external_digest import rebuild_external_digest
-        rebuild_external_digest.delay(current_user.id)
     return jsonify({
         "created": created, "skipped": skipped,
         "unrecognized": len(payload) - len(items),
@@ -493,8 +490,6 @@ def clip():
         updated = _upgrade_clip(existing, content, title, author, posted_at)
         if updated:
             db.session.commit()
-            from backend.tasks.external_digest import rebuild_external_digest
-            rebuild_external_digest.delay(user.id)
         return jsonify({
             "created": False, "updated": updated, "id": existing.id,
             "source": source, "title": existing.title,
@@ -509,9 +504,6 @@ def clip():
     item.set_content(content)
     db.session.add(item)
     db.session.commit()
-
-    from backend.tasks.external_digest import rebuild_external_digest
-    rebuild_external_digest.delay(user.id)
     return jsonify({
         "created": True, "id": item.id, "source": source,
         "title": title, "truncated": truncated,

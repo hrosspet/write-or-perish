@@ -285,7 +285,6 @@ def test_successful_sync_logs_api_cost(app, monkeypatch):
         yield []  # stale page -> early stop; still a paid request
         raise AssertionError("third page must never be fetched")
     monkeypatch.setattr(_sync_mod, "x_fetch_bookmark_pages", two_pages)
-    monkeypatch.setattr(_sync_mod, "_post_import", lambda *a: None)
 
     result = _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
     assert result == {"status": "ok", "created": 1, "skipped": 0,
@@ -308,7 +307,6 @@ def test_successful_sync_records_created_count(app, monkeypatch):
         yield [{"external_id": "n0", "content": "t", "author_handle": "x",
                 "url": None, "posted_at": None}]  # known -> stop
     monkeypatch.setattr(_sync_mod, "x_fetch_bookmark_pages", pages)
-    monkeypatch.setattr(_sync_mod, "_post_import", lambda *a: None)
 
     _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
     _db.session.expire_all()

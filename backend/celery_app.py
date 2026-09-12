@@ -75,6 +75,15 @@ celery.conf.update(
             'task': 'backend.tasks.external_sync.sync_all_twitter_bookmarks',
             'schedule': 3600.0,  # hourly; the task itself gates on local 3am
         },
+        # Nightly external-references digest rebuild: an HOURLY gate that
+        # dispatches a user at local ~4am (an hour after the bookmark sync
+        # above) and only when their saved references changed since the
+        # last rebuild. The digest is ONE LLM call over the whole corpus,
+        # so it must never ride individual saves.
+        'sweep-external-digests': {
+            'task': 'backend.tasks.external_digest.sweep_external_digests',
+            'schedule': 3600.0,  # hourly; the task itself gates on local 4am
+        },
     },
 )
 
