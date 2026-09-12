@@ -1087,6 +1087,47 @@ def _action_result_text(tr):
     return f"[{name} failed — {tr.get('error', 'unknown error')}]"
 
 
+def _reference_marks_note(item_ids, user_id):
+    """The user's own marks on references the assistant quoted earlier in
+    this thread, as one bracketed note for the synthetic final user
+    message. Assistant turns keep their raw {quote_ext:ID} markers (they
+    are the model's own output and part of the cached prefix), so this is
+    the only place a continued conversation learns whether the user read
+    the pick and how they rated it. Returns None when nothing is marked.
+    """
+    if not item_ids:
+        return None
+    seen = []
+    for iid in item_ids:
+        if iid not in seen:
+            seen.append(iid)
+    items = ExternalItem.query.filter(
+        ExternalItem.id.in_(seen), ExternalItem.user_id == user_id).all()
+    by_id = {it.id: it for it in items}
+    marked, unmarked = [], 0
+    for iid in seen:
+        it = by_id.get(iid)
+        if it is None:
+            continue
+        parts = []
+        if it.read_at:
+            parts.append(f"read {it.read_at.strftime('%Y-%m-%d')}")
+        if it.feedback in ("good", "bad"):
+            parts.append(f"rated a {it.feedback} quote")
+        if not parts:
+            unmarked += 1
+            continue
+        who = f"@{it.author_handle}" if it.author_handle else it.source
+        marked.append(f"reference {it.id} ({who}) — " + ", ".join(parts))
+    if not marked:
+        return None
+    note = ("[The user's marks on references you quoted in this thread: "
+            + "; ".join(marked) + ".")
+    if unmarked:
+        note += " A quoted reference not listed here is unread and unrated."
+    return note + "]"
+
+
 def _scan_proposal_statuses(node_chain):
     """Walk all nodes and collect proposal/tool status notes to inject.
 
@@ -2511,6 +2552,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 system_msg_index = None
                 last_assistant_index = None
                 latest_user_msg_index = None
+                # References the assistant quoted in earlier turns, in
+                # order — collected here where the content is already
+                # decrypted (no second KMS pass), noted after the loop.
+                quoted_ext_ids = []
                 for node in node_chain:
                     author = node.user.username if node.user else "Unknown"
                     is_llm_node = node.node_type == "llm" or (node.llm_model is not None)
@@ -2547,6 +2592,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     if is_llm_node:
                         role = "assistant"
                         message_text = f"{time_prefix} {node_content}"
+                        if has_ext_quotes(node_content):
+                            quoted_ext_ids.extend(
+                                find_ext_quote_ids(node_content))
                         # Tag proposals with node ID for tracking
                         if is_agentic and node.tool_calls_meta:
                             try:
@@ -2781,6 +2829,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # it judges the archive is relevant — replacing the old
                 # always-on proactive notes-channel injection (#155 → #196
                 # loop). Nothing to inject here.
+
+                # The user's read marks / verdicts on references quoted
+                # earlier in the thread (see _reference_marks_note).
+                reference_marks = _reference_marks_note(
+                    quoted_ext_ids, user_id)
+                if reference_marks:
+                    agentic_notes.append(reference_marks)
 
                 if is_agentic and agentic_notes:
                     # Synthetic system-side note injected after the latest real

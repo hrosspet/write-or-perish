@@ -1083,6 +1083,75 @@ def test_search_preview_shows_users_read_mark(app, monkeypatch):
     assert "the user rated this a good quote" in round2
 
 
+def test_continued_thread_sees_read_mark_and_verdict_on_earlier_quote(app):
+    """After the assistant quoted a reference, the user marked it read and
+    rated it. The assistant turn keeps its raw {quote_ext:ID} marker, so
+    the next call carries the user's marks as a note in the synthetic
+    final user message; an unmarked quote adds no note."""
+    from datetime import datetime
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    item = _mk_external_item(alice.id, "a tweet the model picked", [0.9, 0.1])
+    other = _mk_external_item(alice.id, "another pick, untouched", [0.1, 0.9])
+    # Turn the placeholder into the completed quoting reply, then continue.
+    llm_node.set_content(
+        "I'd pick this one. {quote_ext:%d} And this. {quote_ext:%d}"
+        % (item.id, other.id))
+    llm_node.llm_task_status = "completed"
+    user2 = Node(user_id=alice.id, human_owner_id=alice.id,
+                 parent_id=llm_node.id, node_type="user",
+                 privacy_level="private", ai_usage="chat")
+    user2.set_content("why that one?")
+    _db.session.add(user2)
+    _db.session.flush()
+    llm2 = Node(user_id=llm_node.user_id, human_owner_id=alice.id,
+                parent_id=user2.id, node_type="llm", llm_model="gpt-5",
+                llm_task_status="pending", privacy_level="private",
+                ai_usage="chat")
+    llm2.set_content("[LLM response generation pending...]")
+    _db.session.add(llm2)
+    _db.session.commit()
+
+    _ScriptedProvider.reset([_resp("Because it fit.")])
+    result = generate_llm_response(
+        _FakeSelf(), user2.id, llm2.id, "gpt-5", alice.id,
+        source_mode="textmode")
+    assert result["status"] == "completed"
+    texts = [m["text"] for m in _ScriptedProvider.calls[0]["messages"]]
+    assert not any("marks on references" in t for t in texts)
+    # The assistant turn is sent with its own marker, not a resolved block.
+    assert any(("{quote_ext:%d}" % item.id) in t for t in texts)
+
+    item.read_at = datetime(2026, 9, 13, 7, 45)
+    item.feedback = "bad"
+    _db.session.commit()
+    llm3_parent = _fresh(llm2.id)
+    user3 = Node(user_id=alice.id, human_owner_id=alice.id,
+                 parent_id=llm3_parent.id, node_type="user",
+                 privacy_level="private", ai_usage="chat")
+    user3.set_content("and now?")
+    _db.session.add(user3)
+    _db.session.flush()
+    llm3 = Node(user_id=llm_node.user_id, human_owner_id=alice.id,
+                parent_id=user3.id, node_type="llm", llm_model="gpt-5",
+                llm_task_status="pending", privacy_level="private",
+                ai_usage="chat")
+    llm3.set_content("[LLM response generation pending...]")
+    _db.session.add(llm3)
+    _db.session.commit()
+
+    _ScriptedProvider.reset([_resp("Noted.")])
+    result = generate_llm_response(
+        _FakeSelf(), user3.id, llm3.id, "gpt-5", alice.id,
+        source_mode="textmode")
+    assert result["status"] == "completed"
+    msgs = _ScriptedProvider.calls[0]["messages"]
+    last = msgs[-1]
+    assert last["role"] == "user"
+    assert ("reference %d (@visa) — read 2026-09-13, rated a bad quote"
+            % item.id) in last["text"]
+    assert "not listed here is unread and unrated" in last["text"]
+
+
 def test_label_canonicalization_in_final_answer(app, monkeypatch):
     """A label quoted in the FINAL answer (no extra pull round left) is
     still canonicalized by _finalize."""
