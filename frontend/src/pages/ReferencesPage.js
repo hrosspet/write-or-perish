@@ -13,7 +13,7 @@ import { asCardNode, sourceLabel } from '../utils/references';
  * with the Log's cards. Mirrors Feed so the two read as one family;
  * cards open the reference page the way Log cards open a thread.
  */
-function ReferencesPage() {
+function ReferencesPage({ onSearchClick }) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -92,18 +92,53 @@ function ReferencesPage() {
   return (
     <div style={{ padding: '3rem 2rem 4rem', maxWidth: '720px', margin: '0 auto' }}>
       <div style={{ marginBottom: '2.5rem' }}>
-        {/* The rule runs the width of the title, not the Log's 40px stub. */}
-        <div style={{ display: 'inline-block' }}>
-          <h2 style={{
-            color: 'var(--text-primary)',
-            fontFamily: 'var(--serif)',
-            fontWeight: 300,
-            fontSize: '2rem',
-            margin: '0 0 0.8rem 0',
-          }}>
-            References
-          </h2>
-          <div style={{ height: '1px', backgroundColor: 'var(--accent)', opacity: 0.5 }} />
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+        }}>
+          {/* The rule runs the width of the title, not the Log's 40px stub. */}
+          <div style={{ display: 'inline-block' }}>
+            <h2 style={{
+              color: 'var(--text-primary)',
+              fontFamily: 'var(--serif)',
+              fontWeight: 300,
+              fontSize: '2rem',
+              margin: '0 0 0.8rem 0',
+            }}>
+              References
+            </h2>
+            <div style={{ height: '1px', backgroundColor: 'var(--accent)', opacity: 0.5 }} />
+          </div>
+          {onSearchClick && (
+            <button
+              type="button"
+              onClick={onSearchClick}
+              aria-label="Search your references"
+              title="Search your references (⌘K)"
+              style={{
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                color: 'var(--text-muted)',
+                // Larger tap target for mobile without shifting the layout.
+                padding: '8px',
+                margin: '-8px',
+                display: 'flex',
+                alignItems: 'center',
+                transition: 'color 0.15s ease',
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--accent)'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-muted)'; }}
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"
+                strokeLinejoin="round" aria-hidden="true">
+                <circle cx="11" cy="11" r="7" />
+                <line x1="20" y1="20" x2="16.05" y2="16.05" />
+              </svg>
+            </button>
+          )}
         </div>
       </div>
       {items.length === 0 ? (

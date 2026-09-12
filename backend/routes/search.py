@@ -3,8 +3,10 @@ from datetime import datetime
 
 from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
-from sqlalchemy import or_
-from backend.models import Node, NodeContextArtifact, User
+from sqlalchemy import func, or_
+from backend.models import (
+    ExternalItem, Node, NodeContextArtifact,
+)
 from backend.extensions import db
 from backend.utils.timefmt import iso_utc
 
@@ -58,6 +60,94 @@ def _snippet(text, keyword, context_chars=80):
     return prefix + ''.join(highlighted) + suffix
 
 
+def _parse_date_range(date_from, date_to):
+    """ISO 8601 'from'/'to' query params -> (datetime|None, datetime|None).
+
+    Raises ValueError with a user-facing message on a malformed value.
+    """
+    dt_from = dt_to = None
+    if date_from:
+        try:
+            dt_from = datetime.fromisoformat(date_from)
+        except ValueError:
+            raise ValueError("Invalid 'from' date format. Use ISO 8601.")
+    if date_to:
+        try:
+            dt_to = datetime.fromisoformat(date_to)
+        except ValueError:
+            raise ValueError("Invalid 'to' date format. Use ISO 8601.")
+    return dt_from, dt_to
+
+
+# A reference's date is when it was posted, or when it was saved if the
+# source has no post date (web clips). Used by both search modes so the
+# date filter means the same thing in either.
+_EXTERNAL_DATE = func.coalesce(ExternalItem.posted_at, ExternalItem.fetched_at)
+
+
+def _external_result(item, content, score, snippet=None):
+    """One saved reference in search-result shape (kind='external')."""
+    return {
+        "id": item.id,
+        "kind": "external",
+        "source": item.source,
+        "author_handle": item.author_handle,
+        "title": item.title,
+        "external_url": item.url,
+        "preview": content[:200] + ("..." if len(content) > 200 else ""),
+        "snippet": snippet,
+        "created_at": iso_utc(item.posted_at or item.fetched_at),
+        "score": score,
+    }
+
+
+def _external_keyword_search(q, dt_from, dt_to, page, per_page):
+    """Keyword search over the user's saved references (scope=external).
+
+    Same shape as the archive keyword search: decrypt, match
+    diacritics-insensitively in memory (title counts too — a clip's
+    title is often the only place its subject is named), paginate.
+    Ordered newest-saved first, as the References page is.
+    """
+    query = ExternalItem.query.filter(ExternalItem.user_id == current_user.id)
+    if dt_from is not None:
+        query = query.filter(_EXTERNAL_DATE >= dt_from)
+    if dt_to is not None:
+        query = query.filter(_EXTERNAL_DATE <= dt_to)
+    items = query.order_by(ExternalItem.id.desc()).all()
+
+    start = (page - 1) * per_page
+    if not q:
+        total = len(items)
+        page_items = [(i, i.get_content() or "")
+                      for i in items[start:start + per_page]]
+    else:
+        q_normalized = _strip_diacritics(q).lower()
+        matches = []
+        for item in items:
+            content = item.get_content() or ""
+            haystack = f"{item.title or ''}\n{content}"
+            if q_normalized in _strip_diacritics(haystack).lower():
+                matches.append((item, content))
+        total = len(matches)
+        page_items = matches[start:start + per_page]
+
+    results = [
+        _external_result(item, content, 1.0,
+                         snippet=_snippet(content, q) if q else None)
+        for item, content in page_items
+    ]
+    return jsonify({
+        "results": results,
+        "page": page,
+        "per_page": per_page,
+        "total": total,
+        "has_more": (start + per_page) < total,
+        "search_type": "keyword",
+        "scope": "external",
+    })
+
+
 @search_bp.route("/search", methods=["GET"])
 @login_required
 def search():
@@ -71,6 +161,16 @@ def search():
 
     if not q and not date_from and not date_to:
         return jsonify({"error": "Provide at least a keyword (q) or date range (from/to)."}), 400
+
+    try:
+        dt_from, dt_to = _parse_date_range(date_from, date_to)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    # scope=external searches saved references instead of the archive
+    # (the References page's search button); default is the archive.
+    if request.args.get("scope") == "external":
+        return _external_keyword_search(q, dt_from, dt_to, page, per_page)
 
     # Base query: user's own nodes + nodes where they are the human owner
     # Exclude system prompt nodes (content resolved from UserPrompt)
@@ -91,19 +191,10 @@ def search():
     )
 
     # Date filters (SQL-level, fast)
-    if date_from:
-        try:
-            dt_from = datetime.fromisoformat(date_from)
-            query = query.filter(Node.created_at >= dt_from)
-        except ValueError:
-            return jsonify({"error": "Invalid 'from' date format. Use ISO 8601."}), 400
-
-    if date_to:
-        try:
-            dt_to = datetime.fromisoformat(date_to)
-            query = query.filter(Node.created_at <= dt_to)
-        except ValueError:
-            return jsonify({"error": "Invalid 'to' date format. Use ISO 8601."}), 400
+    if dt_from is not None:
+        query = query.filter(Node.created_at >= dt_from)
+    if dt_to is not None:
+        query = query.filter(Node.created_at <= dt_to)
 
     if node_type:
         query = query.filter(Node.node_type == node_type)
@@ -199,19 +290,16 @@ def semantic_search():
     if not q:
         return jsonify({"error": "Provide a query (q)."}), 400
 
-    dt_from = dt_to = None
-    if request.args.get("from"):
-        try:
-            dt_from = datetime.fromisoformat(request.args["from"])
-        except ValueError:
-            return jsonify(
-                {"error": "Invalid 'from' date format. Use ISO 8601."}), 400
-    if request.args.get("to"):
-        try:
-            dt_to = datetime.fromisoformat(request.args["to"])
-        except ValueError:
-            return jsonify(
-                {"error": "Invalid 'to' date format. Use ISO 8601."}), 400
+    try:
+        dt_from, dt_to = _parse_date_range(
+            request.args.get("from"), request.args.get("to"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    # scope=external: saved references only (the References page's
+    # search). Default 'archive' ranks the user's nodes and, unless
+    # include_external=0, merges references in by score.
+    external_only = request.args.get("scope") == "external"
 
     api_key = get_openai_chat_key(current_app.config)
     if not api_key:
@@ -227,26 +315,28 @@ def semantic_search():
         db.session.rollback()
         return jsonify({"error": "Embedding the query failed."}), 502
 
-    emb_query = db.session.query(
-        NodeEmbedding.node_id, NodeEmbedding.vector
-    ).filter(NodeEmbedding.user_id == current_user.id)
-    if dt_from is not None or dt_to is not None:
-        emb_query = emb_query.join(Node, Node.id == NodeEmbedding.node_id)
-        if dt_from is not None:
-            emb_query = emb_query.filter(Node.created_at >= dt_from)
-        if dt_to is not None:
-            emb_query = emb_query.filter(Node.created_at <= dt_to)
-    rows = emb_query.all()
-
-    ranked = top_k_similar(query_vector, rows, k=limit, min_score=min_score)
+    ranked = []
+    if not external_only:
+        emb_query = db.session.query(
+            NodeEmbedding.node_id, NodeEmbedding.vector
+        ).filter(NodeEmbedding.user_id == current_user.id)
+        if dt_from is not None or dt_to is not None:
+            emb_query = emb_query.join(
+                Node, Node.id == NodeEmbedding.node_id)
+            if dt_from is not None:
+                emb_query = emb_query.filter(Node.created_at >= dt_from)
+            if dt_to is not None:
+                emb_query = emb_query.filter(Node.created_at <= dt_to)
+        rows = emb_query.all()
+        ranked = top_k_similar(
+            query_vector, rows, k=limit, min_score=min_score)
 
     # External references (#155 component 2) — included unless opted out
-    include_external = request.args.get(
+    include_external = external_only or request.args.get(
         "include_external", "1") not in ("0", "false")
     external_results = []
     if include_external:
-        from sqlalchemy import func
-        from backend.models import ExternalItem, ExternalItemEmbedding
+        from backend.models import ExternalItemEmbedding
         ext_query = db.session.query(
             ExternalItemEmbedding.item_id, ExternalItemEmbedding.vector
         ).filter(ExternalItemEmbedding.user_id == current_user.id)
@@ -254,12 +344,10 @@ def semantic_search():
             ext_query = ext_query.join(
                 ExternalItem,
                 ExternalItem.id == ExternalItemEmbedding.item_id)
-            ext_date = func.coalesce(
-                ExternalItem.posted_at, ExternalItem.fetched_at)
             if dt_from is not None:
-                ext_query = ext_query.filter(ext_date >= dt_from)
+                ext_query = ext_query.filter(_EXTERNAL_DATE >= dt_from)
             if dt_to is not None:
-                ext_query = ext_query.filter(ext_date <= dt_to)
+                ext_query = ext_query.filter(_EXTERNAL_DATE <= dt_to)
         ext_rows = ext_query.all()
         ext_ranked = top_k_similar(
             query_vector, ext_rows, k=limit, min_score=min_score)
@@ -273,20 +361,8 @@ def semantic_search():
             item = items_by_id.get(item_id)
             if item is None:
                 continue
-            content = item.get_content() or ""
-            external_results.append({
-                "id": item.id,
-                "kind": "external",
-                "source": item.source,
-                "author_handle": item.author_handle,
-                "title": item.title,
-                "external_url": item.url,
-                "preview": content[:200] + ("..." if len(content) > 200
-                                            else ""),
-                "snippet": None,
-                "created_at": iso_utc(item.posted_at or item.fetched_at),
-                "score": round(score, 4),
-            })
+            external_results.append(_external_result(
+                item, item.get_content() or "", round(score, 4)))
     nodes_by_id = {
         n.id: n for n in Node.query.filter(
             Node.id.in_([node_id for node_id, _ in ranked]),
@@ -327,6 +403,7 @@ def semantic_search():
         "results": merged,
         "total": len(merged),
         "mode": "semantic",
+        "scope": "external" if external_only else "archive",
     }), 200
 
 
