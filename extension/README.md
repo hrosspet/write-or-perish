@@ -36,9 +36,11 @@ and quotable in conversations, and it never enters your profile.
 - `Alt+Shift+K`: clip and keep the tab open.
 - `Cmd+W` as usual to discard a tab without clipping.
 
-The toolbar badge shows `✓` (saved), `=` (already saved earlier) or `!`
-(failed; open the popup to read why). Pressing twice on the same page is
-harmless: the server dedupes by canonical URL or tweet id.
+The toolbar badge shows `✓` (saved or updated), `=` (already saved earlier)
+or `!` (failed; open the popup to read why). Pressing twice on the same page
+is harmless: the server dedupes by canonical URL or tweet id. If the new
+capture has more text than the stored copy (a long post the X bookmark sync
+stored truncated, say), the stored text is replaced with the fuller one.
 
 ## Security model
 

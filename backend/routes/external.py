@@ -431,6 +431,30 @@ def _parse_posted_at(value):
         return None
 
 
+def _upgrade_clip(item, content, title, author, posted_at):
+    """Replace a known reference's text with a strictly longer capture.
+
+    Longer, not merely different: a re-clip whose extraction came back
+    short (a collapsed thread, a paywall interstitial) must not clobber
+    a good copy. Metadata is only filled in where it was missing. The
+    stale embedding is dropped so the nightly sweep re-embeds the new
+    text. Returns True when anything changed (one decrypt of the stored
+    text — a single user-initiated item, not a corpus loop).
+    """
+    if len(content) <= len(item.get_content() or ""):
+        return False
+    item.set_content(content)
+    item.fetched_at = datetime.utcnow()
+    if title and not item.title:
+        item.title = title
+    if author and not item.author_handle:
+        item.author_handle = author
+    if posted_at and not item.posted_at:
+        item.posted_at = posted_at
+    ExternalItemEmbedding.query.filter_by(item_id=item.id).delete()
+    return True
+
+
 @external_bp.route("/clip", methods=["POST"])
 @token_or_login_required(SCOPE_EXTERNAL_WRITE)
 def clip():
@@ -438,7 +462,11 @@ def clip():
 
     Body: {url, content, title?, author?, posted_at?}. The URL decides
     the source (see backend.utils.web_clip). Re-clipping a known URL is
-    a no-op 200 so the extension can be pressed twice safely.
+    a 200 so the extension can be pressed twice safely: a no-op when the
+    stored text is at least as long, otherwise the stored text is
+    replaced. The X bookmark sync stores the API's truncated `text` for
+    long posts; the extension reads the full rendered post, and the
+    reference should hold the fuller of the two.
     """
     from backend.utils.node_split import NODE_CHAR_CAP
     data = request.get_json(silent=True) or {}
@@ -449,28 +477,36 @@ def clip():
     if not isinstance(content, str) or not content.strip():
         return jsonify({"error": "content is required"}), 400
 
+    truncated = len(content) > NODE_CHAR_CAP
+    if truncated:
+        content = content[:NODE_CHAR_CAP]
+    content = content.strip()
+    title = (data.get("title") or "").strip()[:MAX_TITLE_CHARS] or None
+    author = (data.get("author") or "").strip().lstrip("@")[:64] or None
+    posted_at = _parse_posted_at(data.get("posted_at"))
+
     user = g.api_user
     source, external_id, canon = classify_clip(url)
     existing = ExternalItem.query.filter_by(
         user_id=user.id, source=source, external_id=external_id).first()
     if existing is not None:
+        updated = _upgrade_clip(existing, content, title, author, posted_at)
+        if updated:
+            db.session.commit()
+            from backend.tasks.external_digest import rebuild_external_digest
+            rebuild_external_digest.delay(user.id)
         return jsonify({
-            "created": False, "id": existing.id, "source": source,
-            "title": existing.title,
+            "created": False, "updated": updated, "id": existing.id,
+            "source": source, "title": existing.title,
+            "truncated": truncated if updated else False,
         }), 200
-
-    truncated = len(content) > NODE_CHAR_CAP
-    if truncated:
-        content = content[:NODE_CHAR_CAP]
-    title = (data.get("title") or "").strip()[:MAX_TITLE_CHARS] or None
-    author = (data.get("author") or "").strip().lstrip("@")[:64] or None
 
     item = ExternalItem(
         user_id=user.id, source=source, external_id=external_id,
         author_handle=author, title=title, url=canon,
-        posted_at=_parse_posted_at(data.get("posted_at")),
+        posted_at=posted_at,
     )
-    item.set_content(content.strip())
+    item.set_content(content)
     db.session.add(item)
     db.session.commit()
 

@@ -313,8 +313,8 @@ def test_clip_session_creates_then_dedupes(app, client):
     })
     assert again.status_code == 200
     assert again.get_json() == {
-        "created": False, "id": data["id"], "source": "web_clip",
-        "title": "A post"}
+        "created": False, "updated": False, "truncated": False,
+        "id": data["id"], "source": "web_clip", "title": "A post"}
     with app.app_context():
         item = ExternalItem.query.get(data["id"])
         assert item.url == "https://example.com/post"
@@ -323,6 +323,53 @@ def test_clip_session_creates_then_dedupes(app, client):
     listed = client.get("/api/external/items").get_json()
     assert listed["counts"] == {"web_clip": 1}
     assert listed["items"][0]["title"] == "A post"
+
+
+def test_clip_upgrades_stored_text_when_longer(app, client):
+    short = "What happens if Claude thinks you are Amanda?\n\n(See https://t.co/x"
+    long = short + "\n\nI couldn't jailbreak with it, but: would this get me " \
+        "different responses than anyone else?\n\nMain thread below!"
+    with app.app_context():
+        uid = User.query.first().id
+        # The nightly X sync stored the API's truncated text, no author.
+        item = ExternalItem(user_id=uid, source="twitter_bookmark",
+                            external_id="777", url="https://x.com/i/status/777")
+        item.set_content(short)
+        _db.session.add(item)
+        _db.session.flush()
+        _db.session.add(ExternalItemEmbedding(
+            item_id=item.id, user_id=uid, model="m", content_hash="h",
+            vector=b"\x00"))
+        _db.session.commit()
+        item_id = item.id
+    # A shorter or equal re-clip is the no-op it always was.
+    again = client.post("/api/external/clip", json={
+        "url": "https://x.com/fjzzq2002/status/777", "content": "  " + short})
+    assert again.status_code == 200
+    body = again.get_json()
+    assert body["created"] is False and body["updated"] is False
+    with app.app_context():
+        assert ExternalItem.query.get(item_id).get_content() == short
+        assert ExternalItemEmbedding.query.filter_by(item_id=item_id).count() == 1
+    # The extension reads the full rendered post: longer text replaces
+    # the stored copy, fills missing metadata, and drops the embedding
+    # so the sweep re-embeds.
+    up = client.post("/api/external/clip", json={
+        "url": "https://x.com/fjzzq2002/status/777", "content": long,
+        "author": "@fjzzq2002", "posted_at": "2026-08-06T22:30:24.000Z",
+    })
+    assert up.status_code == 200
+    body = up.get_json()
+    assert body["created"] is False and body["updated"] is True
+    assert body["id"] == item_id
+    with app.app_context():
+        item = ExternalItem.query.get(item_id)
+        assert item.get_content() == long
+        assert item.author_handle == "fjzzq2002"
+        assert item.posted_at.year == 2026
+        assert ExternalItemEmbedding.query.filter_by(item_id=item_id).count() == 0
+    listed = client.get("/api/external/items").get_json()
+    assert listed["counts"] == {"twitter_bookmark": 1}
 
 
 def test_clip_tweet_url_lands_as_bookmark(app, client):
