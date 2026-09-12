@@ -193,7 +193,9 @@ function ReferenceDetailPage() {
               {item.title}
             </h1>
           )}
-          <span style={{ display: 'flex', alignItems: 'center', color: 'var(--text-muted)', fontSize: '1rem' }}>
+          {/* Cormorant's glyphs sit below the line-box center; the nudge
+              puts the icon on the title's optical middle. */}
+          <span style={{ display: 'flex', alignItems: 'center', color: 'var(--text-muted)', fontSize: '1rem', position: 'relative', top: '0.18em' }}>
             <SpeakerIcon
               itemId={item.id}
               content={item.title ? `# ${item.title}\n${item.content || ''}` : item.content}
