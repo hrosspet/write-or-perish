@@ -77,7 +77,7 @@ const NodeFooter = ({ username, createdAt, childrenCount, humanOwnerUsername, ll
   );
 };
 
-const footerStyle = {
+export const footerStyle = {
   fontSize: "0.75rem",
   fontFamily: "var(--sans)",
   fontWeight: 300,

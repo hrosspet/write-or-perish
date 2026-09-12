@@ -22,6 +22,8 @@ import WritePage from "./pages/WritePage";
 import ProfilePage from "./pages/ProfilePage";
 import TodoPage from "./pages/TodoPage";
 import ImportPage from "./pages/ImportPage";
+import ReferencesPage from "./pages/ReferencesPage";
+import ReferenceDetailPage from "./pages/ReferenceDetailPage";
 import AccountPage from "./pages/AccountPage";
 import ArtifactsPage from "./pages/ArtifactsPage";
 import SharePage from "./pages/SharePage";
@@ -222,6 +224,8 @@ function App() {
           <Route path="/prompts" element={<ProtectedRoute><PromptsPage /></ProtectedRoute>} />
           <Route path="/prompts/:promptKey" element={<ProtectedRoute><PromptDetailPage /></ProtectedRoute>} />
           <Route path="/import" element={<ProtectedRoute><ImportPage /></ProtectedRoute>} />
+          <Route path="/references" element={<ProtectedRoute><ReferencesPage /></ProtectedRoute>} />
+          <Route path="/references/:id" element={<ProtectedRoute><ReferenceDetailPage /></ProtectedRoute>} />
           {/* AI preferences folded into the artifact model (#158 Slice 5);
               keep the old path working as a redirect. */}
           <Route path="/ai-preferences" element={<Navigate to="/artifacts/ai_preferences" replace />} />

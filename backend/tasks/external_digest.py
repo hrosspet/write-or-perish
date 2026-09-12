@@ -26,9 +26,9 @@ logger = get_task_logger(__name__)
 DIGEST_KIND = "external_digest"
 DIGEST_TITLE = "Saved References Digest"
 DIGEST_DESCRIPTION = (
-    "Topic map of the tweets and bookmarks {name} saved elsewhere — read "
-    "this before searching their saved references, to see what might be "
-    "there."
+    "Topic map of the tweets, bookmarks and web pages {name} saved "
+    "elsewhere — read this before searching their saved references, to "
+    "see what might be there."
 )
 
 # Corpus caps for the digest prompt. Most recent items first; each item
@@ -94,7 +94,11 @@ def rebuild_external_digest(self, user_id):
             stamp = (item.posted_at.strftime("%Y-%m-%d")
                      if item.posted_at else "?")
             author = item.author_handle or item.source
-            line = f"- @{author} ({stamp}): {snippet}"
+            if item.source != "web_clip":
+                author = f"@{author}"
+            if item.title:
+                snippet = f"{item.title} — {snippet}"[:ITEM_SNIPPET_CHARS]
+            line = f"- {author} ({stamp}): {snippet}"
             if used + len(line) > MAX_CORPUS_CHARS:
                 truncated = True
                 break

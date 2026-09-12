@@ -77,6 +77,7 @@ def get_ext_quote_data(item_ids: List[int], user_id: int) -> Dict[int, Optional[
             "content": item.get_content(),
             "source": item.source,
             "author_handle": item.author_handle,
+            "title": item.title,
             "url": item.url,
             "posted_at": iso_utc(item.posted_at) if item.posted_at else None,
         }
@@ -105,13 +106,21 @@ def resolve_ext_quotes(content: str, user_id: int,
                 return f"[Quoted reference #{item_id}: inaccessible]"
             return f"[Quoted reference inaccessible: item {item_id}]"
         resolved_ids.append(item_id)
+        # Tweets have @handles; a web clip's author is a byline or the
+        # site's hostname, which an @ would only misrepresent.
         author = d["author_handle"] or "unknown"
+        if d["source"] != "web_clip":
+            author = f"@{author}"
+        title = d.get("title")
         if for_llm:
+            title_attr = f' title="{title}"' if title else ""
             return (
                 f'<quoted_reference id="{item_id}" source="{d["source"]}" '
-                f'author="@{author}">\n{d["content"]}\n</quoted_reference>')
+                f'author="{author}"{title_attr}>\n{d["content"]}\n'
+                f'</quoted_reference>')
         posted = f' ({d["posted_at"][:10]})' if d.get("posted_at") else ""
-        return (f'\n--- Saved reference from @{author}{posted} ---\n'
+        label = f'"{title}" from {author}' if title else f"from {author}"
+        return (f'\n--- Saved reference {label}{posted} ---\n'
                 f'{d["content"]}\n--- End reference ---\n')
 
     resolved = re.sub(EXT_QUOTE_PLACEHOLDER_PATTERN, replace, content)

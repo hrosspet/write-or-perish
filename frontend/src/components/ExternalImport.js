@@ -1,11 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
 import api from '../api';
 import { useUser } from '../contexts/UserContext';
+import NewTokenDialog from './NewTokenDialog';
+import { Link } from 'react-router-dom';
 
 /**
  * References import (#155 / Download substrate): Community Archive
- * tweets + X bookmarks. Imported items become semantically searchable
- * (Cmd+K → Semantic) alongside your own entries.
+ * tweets + X bookmarks + web clips from the Chrome clipper (#232).
+ * Imported items become semantically searchable (Cmd+K → Semantic)
+ * alongside your own entries — and never enter the profile.
  */
 
 const cardStyle = {
@@ -40,6 +43,35 @@ const buttonStyle = {
   cursor: 'pointer',
 };
 
+const ghostButtonStyle = {
+  ...buttonStyle, background: 'none',
+  border: '1px solid var(--border)', color: 'var(--text-muted)',
+};
+
+const codeStyle = {
+  fontFamily: 'var(--mono, ui-monospace, monospace)', fontSize: '0.8rem',
+  color: 'var(--text-secondary)', background: 'var(--bg-input)',
+  padding: '1px 5px', borderRadius: '4px',
+};
+
+// Floating "Copied" label above the chrome://extensions address. Native
+// title tooltips can't be shown on demand, so this is a small custom one.
+const copiedTipStyle = {
+  position: 'absolute', left: '50%', bottom: 'calc(100% + 6px)',
+  transform: 'translateX(-50%)',
+  background: 'var(--bg-deep)', border: '1px solid var(--border)',
+  borderRadius: '4px', padding: '3px 8px', whiteSpace: 'nowrap',
+  fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 400,
+  color: 'var(--text-primary)', pointerEvents: 'none', zIndex: 2,
+};
+
+const tokenRowStyle = {
+  display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap',
+  fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.8rem',
+  color: 'var(--text-muted)', padding: '8px 0',
+  borderTop: '1px solid var(--border)',
+};
+
 export default function ExternalImport() {
   const { user } = useUser();
   const [counts, setCounts] = useState({});
@@ -51,6 +83,10 @@ export default function ExternalImport() {
   const [importing, setImporting] = useState(false);
   const [importMsg, setImportMsg] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [tokens, setTokens] = useState([]);
+  const [newToken, setNewToken] = useState(null);  // {id, token}: plaintext, shown once
+  const [tokenMsg, setTokenMsg] = useState(null);
+  const [addressCopied, setAddressCopied] = useState(false);
   const fileRef = useRef(null);
   const pollRef = useRef(null);
 
@@ -65,10 +101,57 @@ export default function ExternalImport() {
     } catch (e) { /* page still works without counts */ }
   };
 
+  const refreshTokens = async () => {
+    try {
+      const res = await api.get('/external/tokens');
+      setTokens(res.data.tokens || []);
+    } catch (e) { /* card still renders */ }
+  };
+
   useEffect(() => {
     refresh();
+    refreshTokens();
     return () => pollRef.current && clearInterval(pollRef.current);
   }, []);
+
+  const createToken = async () => {
+    setBusy(true);
+    setTokenMsg(null);
+    try {
+      const res = await api.post('/external/tokens', { name: 'Chrome clipper' });
+      setNewToken({ id: res.data.id, token: res.data.token });
+      refreshTokens();
+    } catch (e) {
+      setTokenMsg(e.response?.data?.error || 'Could not create a token.');
+    }
+    setBusy(false);
+  };
+
+  // Chrome refuses to open chrome:// pages from a web page (link or
+  // window.open), so the address is copy-to-paste instead of a link.
+  const copyExtensionsAddress = async () => {
+    try {
+      await navigator.clipboard.writeText('chrome://extensions');
+      setAddressCopied(true);
+      setTimeout(() => setAddressCopied(false), 1500);
+    } catch (e) {
+      setAddressCopied(false);
+    }
+  };
+
+  const revokeToken = async (id) => {
+    setBusy(true);
+    setTokenMsg(null);
+    try {
+      await api.delete(`/external/tokens/${id}`);
+      setTokens((prev) => prev.filter((t) => t.id !== id));
+      // A revoked token's plaintext has no use anymore.
+      setNewToken((cur) => (cur && cur.id === id ? null : cur));
+    } catch (e) {
+      setTokenMsg(e.response?.data?.error || 'Could not revoke the token.');
+    }
+    setBusy(false);
+  };
 
   const pollCounts = () => {
     // Fetch tasks run in the background — refresh counts a few times.
@@ -176,19 +259,28 @@ export default function ExternalImport() {
         fontFamily: 'var(--serif)', fontWeight: 300, fontSize: '1.5rem',
         color: 'var(--text-primary)', margin: '0 0 4px 0',
       }}>
-        References
+        Import References
       </h2>
       <p style={helpStyle}>
         Content you've saved elsewhere, made searchable next to your own
         writing (Cmd+K → Semantic).
-        {(counts.community_archive || counts.twitter_bookmark) ? (
-          <> Imported so far:
-            {counts.community_archive ? ` ${counts.community_archive} archive tweets` : ''}
-            {counts.community_archive && counts.twitter_bookmark ? ' ·' : ''}
-            {counts.twitter_bookmark ? ` ${counts.twitter_bookmark} bookmarks` : ''}.
+        {(counts.community_archive || counts.twitter_bookmark || counts.web_clip) ? (
+          <> Imported so far:{' '}
+            {[
+              counts.community_archive && `${counts.community_archive} archive tweets`,
+              counts.twitter_bookmark && `${counts.twitter_bookmark} bookmarks`,
+              counts.web_clip && `${counts.web_clip} clipped pages`,
+            ].filter(Boolean).join(' · ')}.
           </>
         ) : null}
       </p>
+      {(counts.community_archive || counts.twitter_bookmark || counts.web_clip) ? (
+        <Link to="/references" style={{ textDecoration: 'none' }}>
+          <button style={{ ...ghostButtonStyle, marginBottom: '16px' }}>
+            View references
+          </button>
+        </Link>
+      ) : null}
 
       <div style={cardStyle}>
         <h3 style={titleStyle}>Community Archive</h3>
@@ -292,6 +384,74 @@ export default function ExternalImport() {
           </div>
         )}
       </div>
+
+      {/* Rides the external-content opt-in (Account, shipped off): the
+          clipper only makes sense once Loore searches references. */}
+      {user && user.external_content_enabled && (
+      <div style={cardStyle}>
+        <h3 style={titleStyle}>Chrome clipper</h3>
+        <p style={helpStyle}>
+          Save any open tab into your references with one key press. The
+          extension reads the page in your browser, sends the text to
+          Loore, and closes the tab. Clips are references, not your
+          writing: they are searchable and quotable, and never enter your
+          profile.
+        </p>
+        <p style={helpStyle}>
+          Install: open{' '}
+          <span style={{ position: 'relative', display: 'inline-block' }}>
+            <code
+              onClick={copyExtensionsAddress}
+              title="Click to copy"
+              style={{ ...codeStyle, cursor: 'pointer' }}
+            >
+              chrome://extensions
+            </code>
+            {addressCopied && (
+              <span role="status" style={copiedTipStyle}>Copied</span>
+            )}
+          </span>
+          , turn on Developer mode, choose “Load unpacked” and pick the{' '}
+          <code style={codeStyle}>extension/</code> folder of the Loore
+          repository. Then paste a token below into the extension’s options.
+          A token can only add references; it cannot read anything.
+        </p>
+        {tokens.length > 0 && (
+          <div style={{ marginBottom: '12px' }}>
+            {tokens.map((t) => (
+              <div key={t.id} style={tokenRowStyle}>
+                <span style={{ color: 'var(--text-primary)' }}>{t.name}</span>
+                <code style={codeStyle}>loore_{t.prefix}…</code>
+                <span>created {t.created_at ? t.created_at.slice(0, 10) : '?'}</span>
+                <span>
+                  {t.last_used_at ? `last used ${t.last_used_at.slice(0, 10)}` : 'never used'}
+                </span>
+                <button
+                  onClick={() => revokeToken(t.id)}
+                  disabled={busy}
+                  style={{ ...ghostButtonStyle, padding: '4px 10px', marginLeft: 'auto' }}
+                >
+                  Revoke
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <button onClick={createToken} disabled={busy} style={buttonStyle}>
+          Create token
+        </button>
+        {tokenMsg && (
+          <p style={{ ...helpStyle, marginTop: '8px', color: 'var(--text-secondary)' }}>
+            {tokenMsg}
+          </p>
+        )}
+      </div>
+      )}
+
+      <NewTokenDialog
+        token={newToken ? newToken.token : null}
+        onClose={() => setNewToken(null)}
+      />
     </div>
   );
 }

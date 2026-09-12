@@ -4,6 +4,8 @@
 - X bookmarks: OAuth2 PKCE connect + sync (env-gated by X_CLIENT_ID
   until pay-per-use credits are configured) and a JSON import fallback
 - Listing imported references
+- Web clips from the Chrome clipper (#232): one POST per page, bearer
+  token or session auth; personal API tokens are managed here too
 """
 import base64
 import hashlib
@@ -14,13 +16,20 @@ from datetime import datetime, timedelta
 
 import requests
 from flask import (
-    Blueprint, current_app, jsonify, redirect, request, session,
+    Blueprint, current_app, g, jsonify, redirect, request, session,
 )
 from flask_login import current_user, login_required
 
 from backend.extensions import db
-from backend.models import ExternalAccount, ExternalItem
+from backend.models import (
+    ApiToken, ExternalAccount, ExternalItem, ExternalItemEmbedding,
+)
+from backend.utils.api_tokens import (
+    SCOPE_EXTERNAL_WRITE, generate_api_token, token_or_login_required,
+)
+from backend.utils.magic_link import hash_token
 from backend.utils.timefmt import iso_utc
+from backend.utils.web_clip import classify_clip
 
 external_bp = Blueprint("external_bp", __name__)
 
@@ -34,7 +43,11 @@ def _serialize_item(item):
     return {
         "id": item.id,
         "source": item.source,
+        # Tweet id for tweets (the reference page embeds by it); the URL
+        # hash for web clips.
+        "external_id": item.external_id,
         "author_handle": item.author_handle,
+        "title": item.title,
         "preview": content[:280] + ("…" if len(content) > 280 else ""),
         "url": item.url,
         "posted_at": iso_utc(item.posted_at) if item.posted_at else None,
@@ -53,10 +66,15 @@ def list_items():
     if source:
         query = query.filter_by(source=source)
     total = query.count()
-    items = query.order_by(
-        ExternalItem.posted_at.desc().nullslast(),
-        ExternalItem.id.desc(),
-    ).offset((page - 1) * per_page).limit(per_page).all()
+    if request.args.get("sort") == "saved":
+        # Most recently saved first — the references list on the Import
+        # page, where "did my clip land?" is the question.
+        order = (ExternalItem.id.desc(),)
+    else:
+        order = (ExternalItem.posted_at.desc().nullslast(),
+                 ExternalItem.id.desc())
+    items = query.order_by(*order).offset(
+        (page - 1) * per_page).limit(per_page).all()
 
     counts = dict(
         db.session.query(ExternalItem.source, db.func.count())
@@ -66,8 +84,38 @@ def list_items():
     return jsonify({
         "items": [_serialize_item(i) for i in items],
         "total": total,
+        "has_more": page * per_page < total,
         "counts": counts,
     }), 200
+
+
+@external_bp.route("/items/<int:item_id>", methods=["GET"])
+@login_required
+def get_item(item_id):
+    """One reference with its full stored text (Markdown for clips)."""
+    item = ExternalItem.query.filter_by(
+        id=item_id, user_id=current_user.id).first()
+    if item is None:
+        return jsonify({"error": "not found"}), 404
+    data = _serialize_item(item)
+    data["content"] = item.get_content() or ""
+    return jsonify(data), 200
+
+
+@external_bp.route("/items/<int:item_id>", methods=["DELETE"])
+@login_required
+def delete_item(item_id):
+    """Remove a reference. Its embedding goes with it (explicitly, since
+    SQLite tests don't enforce the FK cascade). A {quote_ext} marker that
+    pointed at it renders as inaccessible, like a deleted node's quote."""
+    item = ExternalItem.query.filter_by(
+        id=item_id, user_id=current_user.id).first()
+    if item is None:
+        return jsonify({"error": "not found"}), 404
+    ExternalItemEmbedding.query.filter_by(item_id=item.id).delete()
+    db.session.delete(item)
+    db.session.commit()
+    return jsonify({"deleted": True, "id": item_id}), 200
 
 
 @external_bp.route("/community-archive/fetch", methods=["POST"])
@@ -324,3 +372,156 @@ def twitter_sync():
     from backend.tasks.external_sync import sync_twitter_bookmarks
     task = sync_twitter_bookmarks.delay(current_user.id)
     return jsonify({"task_id": task.id, "status": "pending"}), 202
+
+
+# ── Web clips (Chrome clipper, #232) ─────────────────────────────────────
+
+# Same bound as an authored entry: a clip is one node's worth of text at
+# most. The extension truncates before sending; the server truncates
+# again rather than rejecting, because a one-keypress clip has no UI in
+# which to negotiate.
+MAX_TOKENS_PER_USER = 10  # active tokens; a sanity bound, not a plan limit
+MAX_TITLE_CHARS = 512
+
+
+def _parse_posted_at(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(
+            str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+    except (ValueError, TypeError):
+        return None
+
+
+@external_bp.route("/clip", methods=["POST"])
+@token_or_login_required(SCOPE_EXTERNAL_WRITE)
+def clip():
+    """Save one web page (or tweet) as an external item.
+
+    Body: {url, content, title?, author?, posted_at?}. The URL decides
+    the source (see backend.utils.web_clip). Re-clipping a known URL is
+    a no-op 200 so the extension can be pressed twice safely.
+    """
+    from backend.utils.node_split import NODE_CHAR_CAP
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    content = data.get("content")
+    if not url or not url.lower().startswith(("http://", "https://")):
+        return jsonify({"error": "url is required"}), 400
+    if not isinstance(content, str) or not content.strip():
+        return jsonify({"error": "content is required"}), 400
+
+    user = g.api_user
+    source, external_id, canon = classify_clip(url)
+    existing = ExternalItem.query.filter_by(
+        user_id=user.id, source=source, external_id=external_id).first()
+    if existing is not None:
+        return jsonify({
+            "created": False, "id": existing.id, "source": source,
+            "title": existing.title,
+        }), 200
+
+    truncated = len(content) > NODE_CHAR_CAP
+    if truncated:
+        content = content[:NODE_CHAR_CAP]
+    title = (data.get("title") or "").strip()[:MAX_TITLE_CHARS] or None
+    author = (data.get("author") or "").strip().lstrip("@")[:64] or None
+
+    item = ExternalItem(
+        user_id=user.id, source=source, external_id=external_id,
+        author_handle=author, title=title, url=canon,
+        posted_at=_parse_posted_at(data.get("posted_at")),
+    )
+    item.set_content(content.strip())
+    db.session.add(item)
+    db.session.commit()
+
+    from backend.tasks.external_digest import rebuild_external_digest
+    rebuild_external_digest.delay(user.id)
+    return jsonify({
+        "created": True, "id": item.id, "source": source,
+        "title": title, "truncated": truncated,
+    }), 201
+
+
+@external_bp.route("/clip/status", methods=["GET"])
+@token_or_login_required(SCOPE_EXTERNAL_WRITE)
+def clip_status():
+    """Connection check for the extension's options page."""
+    user = g.api_user
+    counts = dict(
+        db.session.query(ExternalItem.source, db.func.count())
+        .filter_by(user_id=user.id)
+        .group_by(ExternalItem.source).all()
+    )
+    return jsonify({
+        "ok": True, "username": user.username, "counts": counts,
+        "token_name": g.api_token.name if g.api_token else None,
+    }), 200
+
+
+# ── Personal API tokens ──────────────────────────────────────────────────
+
+def _clipper_available(user):
+    """The clipper rides the per-user external-content opt-in (Account
+    page, shipped off — the #229 easter-egg pattern): no point minting
+    tokens for references Loore would never search."""
+    return bool(user.external_content_enabled)
+
+
+def _serialize_token(t):
+    return {
+        "id": t.id, "name": t.name, "prefix": t.prefix, "scope": t.scope,
+        "created_at": iso_utc(t.created_at) if t.created_at else None,
+        "last_used_at": iso_utc(t.last_used_at) if t.last_used_at else None,
+    }
+
+
+@external_bp.route("/tokens", methods=["GET"])
+@login_required
+def list_tokens():
+    rows = ApiToken.query.filter_by(
+        user_id=current_user.id, revoked_at=None
+    ).order_by(ApiToken.created_at.desc()).all()
+    return jsonify({"tokens": [_serialize_token(t) for t in rows]}), 200
+
+
+@external_bp.route("/tokens", methods=["POST"])
+@login_required
+def create_token():
+    """Mint a token. The plaintext is returned ONCE, in this response."""
+    if not _clipper_available(current_user):
+        return jsonify({"error": (
+            "Turn on external content under Account first.")}), 403
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "Chrome clipper").strip()[:64]
+    active = ApiToken.query.filter_by(
+        user_id=current_user.id, revoked_at=None).count()
+    if active >= MAX_TOKENS_PER_USER:
+        return jsonify({"error": (
+            f"You already have {MAX_TOKENS_PER_USER} active tokens; "
+            "revoke one first.")}), 400
+    plaintext, prefix = generate_api_token()
+    row = ApiToken(
+        user_id=current_user.id, name=name, prefix=prefix,
+        token_hash=hash_token(plaintext), scope=SCOPE_EXTERNAL_WRITE,
+    )
+    db.session.add(row)
+    db.session.commit()
+    payload = _serialize_token(row)
+    payload["token"] = plaintext
+    return jsonify(payload), 201
+
+
+@external_bp.route("/tokens/<int:token_id>", methods=["DELETE"])
+@login_required
+def revoke_token(token_id):
+    row = ApiToken.query.filter_by(
+        id=token_id, user_id=current_user.id).first()
+    if row is None:
+        return jsonify({"error": "not found"}), 404
+    if row.revoked_at is None:
+        row.revoked_at = datetime.utcnow()
+        db.session.commit()
+    return jsonify({"revoked": True, "id": row.id}), 200
