@@ -81,6 +81,7 @@ def list_items():
     return jsonify({
         "items": [_serialize_item(i) for i in items],
         "total": total,
+        "has_more": page * per_page < total,
         "counts": counts,
     }), 200
 

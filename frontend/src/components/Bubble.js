@@ -36,6 +36,11 @@ const Bubble = ({
   isHighlighted = false,
   leftAlign = false,
   actions = null,
+  // References (#232) reuse the card but are not nodes: `footer`
+  // replaces NodeFooter (no username link, no reply count) and `tag`
+  // fills the tag slot (Pinned / prompt / Voice Note) with a source label.
+  footer = null,
+  tag = null,
 }) => {
   // Detect voice notes via backend-provided has_original_audio flag
   const isVoiceNote = !!node.has_original_audio;
@@ -221,22 +226,33 @@ const Bubble = ({
           alignItems: "center",
           justifyContent: "space-between",
         }}>
-          <NodeFooter
-            username={node.username}
-            createdAt={node.created_at}
-            childrenCount={childrenCount}
-            humanOwnerUsername={node.human_owner_username}
-            llmModel={node.llm_model}
-            origin={node.origin}
-            publicPage={node.privacy_level === 'public'}
-            onReplyClick={
-              !isPlaceholder && Array.isArray(actions)
-                ? (actions.find((a) => a.kind === 'reply') || {}).action || null
-                : null
-            }
-          />
+          {footer || (
+            <NodeFooter
+              username={node.username}
+              createdAt={node.created_at}
+              childrenCount={childrenCount}
+              humanOwnerUsername={node.human_owner_username}
+              llmModel={node.llm_model}
+              origin={node.origin}
+              publicPage={node.privacy_level === 'public'}
+              onReplyClick={
+                !isPlaceholder && Array.isArray(actions)
+                  ? (actions.find((a) => a.kind === 'reply') || {}).action || null
+                  : null
+              }
+            />
+          )}
           {!isPlaceholder && (
             <div style={{ display: "flex", alignItems: "center" }}>
+              {tag && (
+                <span style={{
+                  ...tagStyle,
+                  color: "var(--accent-dim)",
+                  backgroundColor: "var(--accent-subtle)",
+                }}>
+                  {tag}
+                </span>
+              )}
               {isPinned && (
                 <span style={{
                   ...tagStyle,

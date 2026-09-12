@@ -69,6 +69,8 @@ const buttonBaseStyle = {
  *     "this + my replies".
  *   - "thread": always-with-descendants, single Delete button. Used
  *     by the Log card kebab.
+ *   - "reference": a saved reference (#232) — not a node, nothing
+ *     nests under it. Single Delete button.
  *
  * onConfirm receives { withDescendants: boolean }.
  */
@@ -94,7 +96,31 @@ function DeleteConfirmDialog({
   let body;
   let buttons;
 
-  if (mode === "thread") {
+  if (mode === "reference") {
+    title = "Delete reference?";
+    body = (
+      <>
+        It leaves your saved references and search. The original stays
+        where it is.
+      </>
+    );
+    buttons = (
+      <>
+        <button
+          onClick={() => onConfirm({ withDescendants: false })}
+          style={{ ...buttonBaseStyle, color: "var(--accent)" }}
+        >
+          Delete
+        </button>
+        <button
+          onClick={onClose}
+          style={{ ...buttonBaseStyle, color: "var(--text-secondary)" }}
+        >
+          Cancel
+        </button>
+      </>
+    );
+  } else if (mode === "thread") {
     title = "Delete entire thread?";
     body = (
       <>
