@@ -294,12 +294,22 @@ code {
   text-underline-offset: 3px;
   transition: color 0.15s ease, text-decoration-color 0.15s ease;
 }
+/* Unread ("Mark as read") is the live invitation and takes the amber
+   tint; read ("Mark as unread") recedes to muted — the same weighting as
+   the reference page's filled vs. outlined button. */
+.ext-quote-read-toggle[data-read="false"] {
+  color: var(--accent-dim);
+}
 .ext-quote-read-toggle:hover,
 .ext-quote-read-toggle:focus-visible {
   background: none;
   border: 0;
   color: var(--accent);
   text-decoration-color: currentColor;
+}
+.ext-quote-read-toggle[data-read="true"]:hover,
+.ext-quote-read-toggle[data-read="true"]:focus-visible {
+  color: var(--text-secondary);
 }
 .ext-quote-read-toggle:active {
   background: none;
@@ -308,4 +318,36 @@ code {
   background: none;
   border: 0;
   color: var(--text-muted);
+}
+
+/* More / fewer like this (ReferenceFeedback): bare contour glyphs, muted
+   until chosen. The chosen one takes the accent; hover only lifts the
+   other to secondary so the pair never turns colorful. */
+.ref-feedback-glyph {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-muted);
+  opacity: 0.75;
+  transition: color 0.15s ease, opacity 0.15s ease;
+}
+.ref-feedback-glyph:hover,
+.ref-feedback-glyph:focus-visible {
+  background: none;
+  border: 0;
+  color: var(--text-secondary);
+  opacity: 1;
+}
+.ref-feedback-glyph[data-selected="true"],
+.ref-feedback-glyph[data-selected="true"]:hover {
+  color: var(--accent);
+  opacity: 1;
+}
+.ref-feedback-glyph:active,
+.ref-feedback-glyph:disabled:hover {
+  background: none;
+  border: 0;
 }

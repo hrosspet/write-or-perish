@@ -86,6 +86,7 @@ def get_ext_quote_data(item_ids: List[int], user_id: int) -> Dict[int, Optional[
             # sees the quote.
             "user_id": item.user_id,
             "read_at": iso_utc(item.read_at) if item.read_at else None,
+            "feedback": item.feedback,
         }
     return result
 

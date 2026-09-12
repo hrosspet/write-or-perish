@@ -4,6 +4,7 @@ import MarkdownBody from './MarkdownBody';
 import { formatDate } from '../utils/date';
 import { useUser } from '../contexts/UserContext';
 import { useToast } from '../contexts/ToastContext';
+import ReferenceFeedback from './ReferenceFeedback';
 
 const SOURCE_LABELS = {
   community_archive: 'Community Archive',
@@ -22,6 +23,8 @@ const SOURCE_LABELS = {
  * be marked read right where Loore surfaced it. The label alone carries
  * the state ("Mark as unread" = read). Only the user marks a
  * reference read — the AI quoting it is tracked separately as surfacing.
+ * Beside it, the more/fewer-like-this verdict (ReferenceFeedback) — the
+ * hit-or-miss half of the recommendation record.
  */
 const ExternalQuoteBubble = ({ quote }) => {
   const userCtx = useUser();
@@ -80,16 +83,19 @@ const ExternalQuoteBubble = ({ quote }) => {
       <div style={footerStyle}>
         <span>{postedAt}</span>
         {mine && (
-          <button
-            type="button"
-            className="ext-quote-read-toggle"
-            style={{ marginLeft: 'auto' }}
-            onClick={toggleRead}
-            disabled={marking}
-            title={readAt ? `You read it ${formatDate(readAt)}` : undefined}
-          >
-            {readAt ? 'Mark as unread' : 'Mark as read'}
-          </button>
+          <span style={ownerSlotStyle}>
+            <ReferenceFeedback itemId={quote.id} feedback={quote.feedback} />
+            <button
+              type="button"
+              className="ext-quote-read-toggle"
+              data-read={readAt ? 'true' : 'false'}
+              onClick={toggleRead}
+              disabled={marking}
+              title={readAt ? `You read it ${formatDate(readAt)}` : undefined}
+            >
+              {readAt ? 'Mark as unread' : 'Mark as read'}
+            </button>
+          </span>
         )}
       </div>
     </div>
@@ -130,6 +136,13 @@ const footerStyle = {
   gap: '8px 12px',
   fontSize: '0.8em',
   color: 'var(--text-muted)',
+};
+
+const ownerSlotStyle = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '14px',
+  marginLeft: 'auto',
 };
 
 const notAccessibleStyle = {

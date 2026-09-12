@@ -65,6 +65,8 @@ def _serialize_item(item):
         # The user's own mark (see ExternalItem.read_at) and the AI's
         # surfacing history — two different things, shown side by side.
         "read_at": iso_utc(item.read_at) if item.read_at else None,
+        "feedback": item.feedback,
+        "feedback_at": iso_utc(item.feedback_at) if item.feedback_at else None,
         "edited_at": iso_utc(item.edited_at) if item.edited_at else None,
         "has_tts": bool(item.audio_tts_url),
         "surfaced_count": item.surfaced_count or 0,
@@ -314,6 +316,32 @@ def mark_item_read(item_id):
     return jsonify({
         "id": item.id,
         "read_at": iso_utc(item.read_at) if item.read_at else None,
+    }), 200
+
+
+FEEDBACK_VALUES = ("more", "less")
+
+
+@external_bp.route("/items/<int:item_id>/feedback", methods=["POST"])
+@login_required
+def set_item_feedback(item_id):
+    """Record the user's verdict on Loore surfacing this reference:
+    {"feedback": "more" | "less" | null}. Null clears it."""
+    item = ExternalItem.query.filter_by(
+        id=item_id, user_id=current_user.id).first()
+    if item is None:
+        return jsonify({"error": "not found"}), 404
+    data = request.get_json(silent=True) or {}
+    value = data.get("feedback")
+    if value is not None and value not in FEEDBACK_VALUES:
+        return jsonify({"error": "feedback must be 'more', 'less' or null"}), 400
+    item.feedback = value
+    item.feedback_at = datetime.utcnow() if value else None
+    db.session.commit()
+    return jsonify({
+        "id": item.id,
+        "feedback": item.feedback,
+        "feedback_at": iso_utc(item.feedback_at) if item.feedback_at else None,
     }), 200
 
 

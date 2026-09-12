@@ -52,6 +52,32 @@ test('a read reference offers Mark as unread and clears the mark', async () => {
   await waitFor(() => expect(screen.getByRole('button', { name: 'Mark as read' })).toBeInTheDocument());
 });
 
+test('the owner can say more or fewer like this without opening the post', async () => {
+  api.post.mockResolvedValue({ data: { id: 42, feedback: 'more', feedback_at: '2026-09-13T08:00:00Z' } });
+  render(<ExternalQuoteBubble quote={quote()} />);
+
+  const more = screen.getByRole('button', { name: 'More like this' });
+  expect(more).toHaveAttribute('aria-pressed', 'false');
+  fireEvent.click(more);
+  expect(api.post).toHaveBeenCalledWith('/external/items/42/feedback', { feedback: 'more' });
+  expect(window.open).not.toHaveBeenCalled();
+  await waitFor(() => expect(screen.getByRole('button', { name: 'More like this' })).toHaveAttribute('aria-pressed', 'true'));
+  expect(screen.getByRole('button', { name: 'Fewer like this' })).toHaveAttribute('aria-pressed', 'false');
+
+  // Choosing the selected one again clears it.
+  api.post.mockResolvedValue({ data: { id: 42, feedback: null, feedback_at: null } });
+  fireEvent.click(screen.getByRole('button', { name: 'More like this' }));
+  expect(api.post).toHaveBeenLastCalledWith('/external/items/42/feedback', { feedback: null });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'More like this' })).toHaveAttribute('aria-pressed', 'false'));
+});
+
+test('the read toggle is tinted while unread and muted once read', () => {
+  const { rerender } = render(<ExternalQuoteBubble quote={quote()} />);
+  expect(screen.getByRole('button', { name: 'Mark as read' })).toHaveAttribute('data-read', 'false');
+  rerender(<ExternalQuoteBubble quote={quote({ read_at: '2026-09-12T20:00:00Z' })} />);
+  expect(screen.getByRole('button', { name: 'Mark as unread' })).toHaveAttribute('data-read', 'true');
+});
+
 test('someone else viewing the node sees the quote without the toggle', () => {
   useUser.mockReturnValue({ user: { id: 99 } });
   render(<ExternalQuoteBubble quote={quote()} />);

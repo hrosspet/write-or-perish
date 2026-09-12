@@ -9,6 +9,7 @@ import ReferenceEditForm from '../components/ReferenceEditForm';
 import NodeFormModal from '../components/NodeFormModal';
 import RegenerateTtsDialog from '../components/RegenerateTtsDialog';
 import SpeakerIcon from '../components/SpeakerIcon';
+import ReferenceFeedback from '../components/ReferenceFeedback';
 import { useToast } from '../contexts/ToastContext';
 import { formatDate } from '../utils/date';
 import TweetEmbed from '../components/TweetEmbed';
@@ -264,20 +265,28 @@ function ReferenceDetailPage() {
             {item.read_at ? ` · you read it ${formatDate(item.read_at)}` : ''}
             {item.edited_at ? ` · edited ${formatDate(item.edited_at)}` : ''}
           </span>
-          <button
-            type="button"
-            onClick={toggleRead}
-            disabled={marking}
-            style={{
-              padding: '6px 14px', borderRadius: '6px', cursor: 'pointer',
-              fontFamily: 'var(--sans)', fontSize: '0.82rem', fontWeight: 400,
-              background: item.read_at ? 'none' : 'var(--accent)',
-              border: item.read_at ? '1px solid var(--border)' : '1px solid var(--accent)',
-              color: item.read_at ? 'var(--text-muted)' : 'var(--bg-deep)',
-            }}
-          >
-            {item.read_at ? 'Mark as unread' : 'Mark as read'}
-          </button>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '18px' }}>
+            <ReferenceFeedback
+              itemId={item.id}
+              feedback={item.feedback}
+              size={18}
+              onChange={(fb) => setItem((prev) => ({ ...prev, feedback: fb }))}
+            />
+            <button
+              type="button"
+              onClick={toggleRead}
+              disabled={marking}
+              style={{
+                padding: '6px 14px', borderRadius: '6px', cursor: 'pointer',
+                fontFamily: 'var(--sans)', fontSize: '0.82rem', fontWeight: 400,
+                background: item.read_at ? 'none' : 'var(--accent)',
+                border: item.read_at ? '1px solid var(--border)' : '1px solid var(--accent)',
+                color: item.read_at ? 'var(--text-muted)' : 'var(--bg-deep)',
+              }}
+            >
+              {item.read_at ? 'Mark as unread' : 'Mark as read'}
+            </button>
+          </span>
         </div>
       </div>
       {editing && (
