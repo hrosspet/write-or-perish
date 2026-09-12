@@ -212,7 +212,10 @@ function AddTaskInput({ onSubmit, onCancel }) {
 // writing, LLM replies) depends on it; AUTHORED markdown wrapped at a
 // fixed column (e.g. the user changelog) must opt in to flow, or every
 // source line break renders literally — unreadable on narrow screens.
-const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText = false, onCheckboxToggle, onAddTask, onInternalLinkClick }) => {
+// inline: render a single line of markdown as phrasing content (a <span>
+// wrapper, paragraphs as <span>s) so it can sit inside an existing label —
+// e.g. a Todo item's text — instead of forcing block layout.
+const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText = false, inline = false, onCheckboxToggle, onAddTask, onInternalLinkClick }) => {
   const [addingAfter, setAddingAfter] = React.useState(null);
   // MarkdownBody renders inside the app's BrowserRouter, but unit tests and
   // any future router-less host must not crash on useNavigate.
@@ -237,7 +240,9 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText =
       <h6 style={{ fontFamily: 'var(--serif)', fontSize: '0.95em', fontWeight: 600, lineHeight: 1.35, margin: '0.9em 0 0.3em', color: 'var(--text-primary)' }} {...props}>{children}</h6>
     ),
     p: ({ node, ...props }) => (
-      <p style={{ whiteSpace: flowText ? 'normal' : 'pre-wrap', overflowWrap: 'break-word', margin: paragraphMargin }} {...props} />
+      inline
+        ? <span {...props} />
+        : <p style={{ whiteSpace: flowText ? 'normal' : 'pre-wrap', overflowWrap: 'break-word', margin: paragraphMargin }} {...props} />
     ),
     blockquote: ({ node, ...props }) => (
       <blockquote
@@ -468,12 +473,13 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText =
     ),
   };
 
+  const Wrapper = inline ? 'span' : 'div';
   return (
-    <div className="loore-md" style={style}>
+    <Wrapper className="loore-md" style={style}>
       <ReactMarkdown remarkPlugins={[remarkGfm, remarkHtmlAsCode]} components={components}>
         {children}
       </ReactMarkdown>
-    </div>
+    </Wrapper>
   );
 };
 

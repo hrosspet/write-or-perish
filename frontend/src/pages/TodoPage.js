@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import api from '../api';
-import { useCheckboxToggle, useTaskInsert, appendItemToSection } from '../utils/markdown';
+import { useCheckboxToggle, useTaskInsert, appendItemToSection, stripInlineMarkdown } from '../utils/markdown';
+import MarkdownBody from '../components/MarkdownBody';
 import { formatDate } from '../utils/date';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
 import ArtifactsNav from '../components/ArtifactsNav';
@@ -154,7 +155,7 @@ function TodoItem({ item, onToggle, onInsertAfter, addingKey, setAddingKey, dept
           opacity: item.checked ? 0.4 : 1,
           lineHeight: 1.5,
         }}>
-          {item.text}
+          <MarkdownBody inline>{item.text}</MarkdownBody>
         </span>
         {hasChildren && (
           <div
@@ -279,11 +280,13 @@ export default function TodoPage() {
   const checkboxToggle = useCheckboxToggle(getTodoContent, setTodoContent, saveTodoContent);
   const taskInsert = useTaskInsert(getTodoContent, setTodoContent, saveTodoContent);
 
+  // item.text is the raw source label (may contain links/bold); the markdown
+  // helpers match lines by their stripped plain text, so key on that.
   const handleToggle = (item) => {
-    checkboxToggle(item.text, item.checked);
+    checkboxToggle(stripInlineMarkdown(item.text).trim(), item.checked);
   };
   const handleInsertAfter = (item, text) => {
-    taskInsert(item.text, text);
+    taskInsert(stripInlineMarkdown(item.text).trim(), text);
   };
 
   const handleSave = async () => {

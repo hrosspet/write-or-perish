@@ -6,7 +6,7 @@ import { useToast } from '../contexts/ToastContext';
 // like `- [ ] **bold** rest` is captured with the asterisks intact and
 // never matches the React-extracted itemText (`bold rest`), so the
 // toggle silently no-ops.
-function stripInlineMarkdown(text) {
+export function stripInlineMarkdown(text) {
   return text
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')   // ![alt](url) → alt
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')    // [text](url) → text
