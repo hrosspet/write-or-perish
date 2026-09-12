@@ -20,7 +20,7 @@ and quotable in conversations, and it never enters your profile.
   tweet arriving through the bookmark sync are one row.
 - **PDFs** opened in Chrome's viewer: the link only, titled from the file
   name (or the PDF's own title when Chrome shows one). The text is not
-  extracted; the reference says so.
+  extracted.
 - Content is capped at 100,000 characters, the same bound as a Loore entry.
 
 ## Install (unpacked)

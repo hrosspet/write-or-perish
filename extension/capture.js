@@ -113,8 +113,7 @@
     return {
       url: location.href,
       title: title,
-      content: 'PDF: [' + title + '](' + location.href + ')\n\n' +
-        '_Only the link was saved; the PDF\'s text was not extracted._',
+      content: 'PDF: [' + title + '](' + location.href + ')',
       author: location.hostname.replace(/^www\./, ''),
       posted_at: null,
       pdf: true,

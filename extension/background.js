@@ -49,7 +49,7 @@ function pdfLinkFromTab(tab) {
   title = title || tab.url;
   return {
     url: tab.url, title, pdf: true, author: null, posted_at: null,
-    content: `PDF: [${title}](${tab.url})\n\n_Only the link was saved; the PDF's text was not extracted._`,
+    content: `PDF: [${title}](${tab.url})`,
   };
 }
 
