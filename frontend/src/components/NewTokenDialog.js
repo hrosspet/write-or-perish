@@ -45,9 +45,9 @@ const bodyStyle = {
 
 // The token box is the one active element: the whole box copies on
 // click; the icon in its corner says so, and the copied state answers
-// the click in place: check icon, green border, and the hint line under
-// the box (same icon pair and colors as the share cards in
-// ProposalInline, so it reads as one family).
+// the click in place with just the icon turning into a green check
+// (same icon pair and colors as the share cards in ProposalInline, so
+// it reads as one family).
 const tokenBoxStyle = {
   position: "relative",
   display: "block",
@@ -166,9 +166,7 @@ function NewTokenDialog({ token, onClose }) {
           aria-label="Copy token to clipboard"
           style={{
             ...tokenBoxStyle,
-            borderColor: copied
-              ? "var(--success)"
-              : hover ? "var(--accent)" : "var(--border)",
+            borderColor: hover ? "var(--accent)" : "var(--border)",
           }}
         >
           {token}
@@ -185,9 +183,7 @@ function NewTokenDialog({ token, onClose }) {
             )}
           </span>
         </button>
-        <p style={{ ...hintStyle, color: copied ? "var(--success)" : "var(--text-muted)" }}>
-          {copied ? "Copied to your clipboard." : "Click the token to copy it."}
-        </p>
+        <p style={hintStyle}>Click the token to copy it.</p>
         <div style={buttonRowStyle}>
           <button
             onClick={onClose}
