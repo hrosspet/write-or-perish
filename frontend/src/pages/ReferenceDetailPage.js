@@ -6,7 +6,8 @@ import BubbleKebabMenu from '../components/BubbleKebabMenu';
 import ReferenceFooter from '../components/ReferenceFooter';
 import DeleteConfirmDialog from '../components/DeleteConfirmDialog';
 import { useToast } from '../contexts/ToastContext';
-import { bodyWithoutTitle, sourceLabel } from '../utils/references';
+import TweetEmbed from '../components/TweetEmbed';
+import { bodyWithoutTitle, sourceLabel, tweetId } from '../utils/references';
 
 // The focal card of a thread (NodeDetail's highlightedTextStyle), so a
 // reference opens the way a node does.
@@ -48,6 +49,10 @@ function ReferenceDetailPage() {
   const [item, setItem] = useState(null);
   const [error, setError] = useState('');
   const [deleting, setDeleting] = useState(false);
+  // For tweets: the embed's state decides whether the stored text is
+  // the main body (embed unavailable) or a disclosure under the embed.
+  const [embedStatus, setEmbedStatus] = useState('loading');
+  const [showStored, setShowStored] = useState(false);
 
   useEffect(() => {
     setItem(null);
@@ -129,12 +134,41 @@ function ReferenceDetailPage() {
             {item.title}
           </h1>
         )}
-        <div style={{
-          fontFamily: 'var(--sans)', fontSize: '0.95rem', fontWeight: 300,
-          color: 'var(--text-secondary)', lineHeight: 1.7,
-        }}>
-          <MarkdownBody>{bodyWithoutTitle(item)}</MarkdownBody>
-        </div>
+        {tweetId(item) && (
+          <TweetEmbed tweetId={tweetId(item)} onStatus={setEmbedStatus} />
+        )}
+        {tweetId(item) && embedStatus === 'shown' ? (
+          <div style={{ marginTop: '10px' }}>
+            <button
+              type="button"
+              onClick={() => setShowStored((v) => !v)}
+              style={{
+                background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+                fontFamily: 'var(--sans)', fontSize: '0.8rem', fontWeight: 300,
+                color: 'var(--text-muted)',
+              }}
+            >
+              {showStored ? 'Hide stored text' : 'Show stored text'}
+            </button>
+            {showStored && (
+              <div style={{
+                marginTop: '8px', fontFamily: 'var(--sans)', fontSize: '0.9rem',
+                fontWeight: 300, color: 'var(--text-secondary)', lineHeight: 1.7,
+              }}>
+                <MarkdownBody>{item.content || ''}</MarkdownBody>
+              </div>
+            )}
+          </div>
+        ) : (
+          // Pages, and tweets whose embed is still loading or unavailable
+          // (deleted tweet, blocked script, offline): the stored text.
+          <div style={{
+            fontFamily: 'var(--sans)', fontSize: '0.95rem', fontWeight: 300,
+            color: 'var(--text-secondary)', lineHeight: 1.7,
+          }}>
+            <MarkdownBody>{bodyWithoutTitle(item)}</MarkdownBody>
+          </div>
+        )}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <ReferenceFooter item={item} />
           <span style={{ ...tagStyle, marginTop: '12px' }}>{sourceLabel(item)}</span>

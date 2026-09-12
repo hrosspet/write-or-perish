@@ -44,3 +44,9 @@ export function bodyWithoutTitle(item) {
   }
   return content;
 }
+
+// Both tweet sources key items by tweet id.
+export function tweetId(item) {
+  if (item.source !== 'twitter_bookmark' && item.source !== 'community_archive') return null;
+  return item.external_id || null;
+}

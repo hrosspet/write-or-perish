@@ -43,6 +43,9 @@ def _serialize_item(item):
     return {
         "id": item.id,
         "source": item.source,
+        # Tweet id for tweets (the reference page embeds by it); the URL
+        # hash for web clips.
+        "external_id": item.external_id,
         "author_handle": item.author_handle,
         "title": item.title,
         "preview": content[:280] + ("…" if len(content) > 280 else ""),
