@@ -152,7 +152,14 @@ def resolve_ext_quotes(content: str, user_id: int,
                 f'{d["content"]}\n</quoted_reference>')
         posted = f' ({d["posted_at"][:10]})' if d.get("posted_at") else ""
         label = f'"{title}" from {author}' if title else f"from {author}"
-        return (f'\n--- Saved reference {label}{posted} ---\n'
+        # The same two marks in the human rendering (exports): they are
+        # the user's own record of the pick.
+        marks = ""
+        if d.get("read_at"):
+            marks += f' · read {d["read_at"][:10]}'
+        if d.get("feedback"):
+            marks += f' · rated a {d["feedback"]} quote'
+        return (f'\n--- Saved reference {label}{posted}{marks} ---\n'
                 f'{d["content"]}\n--- End reference ---\n')
 
     resolved = re.sub(EXT_QUOTE_PLACEHOLDER_PATTERN, replace, content)

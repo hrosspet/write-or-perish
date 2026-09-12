@@ -143,6 +143,8 @@ def test_resolve_ext_quotes_carries_read_and_verdict_to_the_model(app):
     llm_text, _ = resolve_ext_quotes(marker, uid, for_llm=True)
     assert ' read="' not in llm_text
     assert ' verdict="' not in llm_text
+    human_text, _ = resolve_ext_quotes(marker, uid, for_llm=False)
+    assert "· read" not in human_text and "rated" not in human_text
 
     item.read_at = datetime(2026, 9, 13, 7, 45)
     item.feedback = "bad"
@@ -150,9 +152,9 @@ def test_resolve_ext_quotes_carries_read_and_verdict_to_the_model(app):
     llm_text, _ = resolve_ext_quotes(marker, uid, for_llm=True)
     assert ' read="2026-09-13"' in llm_text
     assert ' verdict="bad"' in llm_text
-    # The human-readable rendering (exports) stays as it was.
+    # The human-readable rendering (exports) carries the same two marks.
     human_text, _ = resolve_ext_quotes(marker, uid, for_llm=False)
-    assert "verdict" not in human_text
+    assert "· read 2026-09-13 · rated a bad quote ---" in human_text
 
 
 def test_get_ext_quote_data_carries_owner_and_read_mark(app):
