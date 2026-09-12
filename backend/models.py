@@ -1125,11 +1125,16 @@ class ExternalItem(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
                         nullable=False, index=True)
-    # 'community_archive' | 'twitter_bookmark'
+    # 'community_archive' | 'twitter_bookmark' | 'web_clip'
     source = db.Column(db.String(32), nullable=False)
-    # Stable per-source identifier (tweet id) for dedupe
+    # Stable per-source identifier for dedupe: tweet id, or for web clips
+    # the sha256 hex of the canonical URL (exactly 64 chars).
     external_id = db.Column(db.String(64), nullable=False)
     author_handle = db.Column(db.String(64), nullable=True)
+    # Page/article title for web clips (tweets have none). Plaintext:
+    # a title is what the list and the quote card show before the user
+    # opens anything, and it carries no more than the stored URL does.
+    title = db.Column(db.String(512), nullable=True)
     content = db.Column(db.Text, nullable=False)
     url = db.Column(db.String(512), nullable=True)
     posted_at = db.Column(db.DateTime, nullable=True)
@@ -1196,6 +1201,38 @@ class ExternalAccount(db.Model):
 
     def get_refresh_token(self):
         return decrypt_content(self.refresh_token) if self.refresh_token else None
+
+
+class ApiToken(db.Model):
+    """A personal API token for first-party clients that can't ride the
+    browser session (the Chrome clipper, #232).
+
+    Only the sha256 of the token is stored — the plaintext is shown once
+    at creation, like a magic link. ``prefix`` is the first characters
+    after the ``loore_`` marker so the user can tell tokens apart in the
+    list. ``scope`` bounds what the token may do; today the only scope is
+    ``external:write`` (add saved references), which deliberately cannot
+    read a single node.
+    """
+    __tablename__ = "api_token"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    name = db.Column(db.String(64), nullable=False)
+    token_hash = db.Column(db.String(64), nullable=False, unique=True)
+    prefix = db.Column(db.String(12), nullable=False)
+    scope = db.Column(db.String(64), nullable=False,
+                      default="external:write",
+                      server_default="external:write")
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    last_used_at = db.Column(db.DateTime, nullable=True)
+    revoked_at = db.Column(db.DateTime, nullable=True)
+
+    user = db.relationship("User", backref="api_tokens")
+
+    @property
+    def active(self):
+        return self.revoked_at is None
 
 
 class ExternalItemEmbedding(db.Model):

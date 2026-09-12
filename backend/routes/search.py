@@ -279,6 +279,7 @@ def semantic_search():
                 "kind": "external",
                 "source": item.source,
                 "author_handle": item.author_handle,
+                "title": item.title,
                 "external_url": item.url,
                 "preview": content[:200] + ("..." if len(content) > 200
                                             else ""),

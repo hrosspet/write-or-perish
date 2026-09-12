@@ -222,3 +222,174 @@ def test_semantic_search_includes_external(app, client, monkeypatch):
     body2 = client.get(
         "/api/search/semantic?q=gardening&include_external=0").get_json()
     assert body2["results"] == []
+
+
+# ── Web clips + personal API tokens (#232) ───────────────────────────────
+
+from backend.models import ApiToken  # noqa: E402
+from backend.utils.web_clip import (  # noqa: E402
+    canonical_url, classify_clip, tweet_id_from_url,
+)
+
+
+def test_canonical_url_strips_noise_and_keeps_meaning():
+    a = canonical_url("HTTPS://Example.com:443/Post/?utm_source=x&b=1#frag")
+    assert a == "https://example.com/Post?b=1"
+    assert canonical_url("https://example.com") == "https://example.com/"
+    assert canonical_url("https://e.com/a?fbclid=1") == "https://e.com/a"
+    # Real query params survive, in order
+    assert canonical_url("https://e.com/a?z=1&a=2") == "https://e.com/a?z=1&a=2"
+
+
+def test_classify_clip_routes_tweets_to_bookmarks():
+    assert tweet_id_from_url("https://x.com/alice/status/123?s=20") == "123"
+    assert tweet_id_from_url("https://twitter.com/i/web/status/9") == "9"
+    assert tweet_id_from_url("https://example.com/a/status/1") is None
+    source, ext_id, canon = classify_clip("https://x.com/alice/status/123")
+    assert (source, ext_id) == ("twitter_bookmark", "123")
+    assert canon == "https://x.com/i/status/123"
+    source, ext_id, _ = classify_clip("https://example.com/post")
+    assert source == "web_clip" and len(ext_id) == 64
+
+
+def test_clip_session_creates_then_dedupes(app, client):
+    body = client.post("/api/external/clip", json={
+        "url": "https://example.com/post/?utm_source=tw",
+        "title": "A post", "content": "# A post\n\nBody text.",
+        "author": "@writer",
+    })
+    assert body.status_code == 201
+    data = body.get_json()
+    assert data["created"] is True and data["source"] == "web_clip"
+    # Same page spelled differently is the same item
+    again = client.post("/api/external/clip", json={
+        "url": "https://example.com/post#top", "content": "whatever",
+    })
+    assert again.status_code == 200
+    assert again.get_json() == {
+        "created": False, "id": data["id"], "source": "web_clip",
+        "title": "A post"}
+    with app.app_context():
+        item = ExternalItem.query.get(data["id"])
+        assert item.url == "https://example.com/post"
+        assert item.author_handle == "writer"
+        assert item.title == "A post"
+    listed = client.get("/api/external/items").get_json()
+    assert listed["counts"] == {"web_clip": 1}
+    assert listed["items"][0]["title"] == "A post"
+
+
+def test_clip_tweet_url_lands_as_bookmark(app, client):
+    body = client.post("/api/external/clip", json={
+        "url": "https://x.com/alice/status/555?s=20",
+        "content": "the tweet", "author": "alice",
+        "posted_at": "2025-01-02T03:04:05.000Z",
+    }).get_json()
+    assert body["source"] == "twitter_bookmark"
+    with app.app_context():
+        item = ExternalItem.query.get(body["id"])
+        assert item.external_id == "555"
+        assert item.posted_at.year == 2025
+        # The nightly sync would now skip it: same (user, source, ext_id)
+        uid = User.query.first().id
+        created, skipped = _upsert_items(uid, "twitter_bookmark", [
+            {"external_id": "555", "content": "x", "author_handle": "alice",
+             "url": None, "posted_at": None}])
+        assert (created, skipped) == (0, 1)
+
+
+def test_clip_validates_and_truncates(app, client):
+    from backend.utils.node_split import NODE_CHAR_CAP
+    assert client.post("/api/external/clip", json={
+        "url": "ftp://nope", "content": "x"}).status_code == 400
+    assert client.post("/api/external/clip", json={
+        "url": "https://e.com", "content": "   "}).status_code == 400
+    body = client.post("/api/external/clip", json={
+        "url": "https://e.com/long", "content": "a" * (NODE_CHAR_CAP + 5),
+    }).get_json()
+    assert body["truncated"] is True
+    with app.app_context():
+        assert len(ExternalItem.query.get(body["id"]).get_content()) == NODE_CHAR_CAP
+
+
+def _mint(client):
+    res = client.post("/api/external/tokens", json={"name": "test clipper"})
+    assert res.status_code == 201
+    return res.get_json()
+
+
+def _no_session(app, method, path, **kw):
+    """A request from a client that has no session cookie.
+
+    The ``app`` fixture holds one app context open for the whole test and
+    flask-login caches the loaded user on ``g`` per app context, so a
+    plain ``app.test_client()`` call after any logged-in request would
+    silently reuse the fixture user. A nested app context gives each call
+    a fresh ``g`` — which is what production has per request anyway.
+    """
+    with app.app_context():
+        return getattr(app.test_client(), method)(path, **kw)
+
+
+def test_tokens_lifecycle_and_bearer_auth(app, client):
+    with app.app_context():
+        user = User.query.first()
+        user.approved = True
+        _db.session.commit()
+    minted = _mint(client)
+    plaintext = minted["token"]
+    assert plaintext.startswith("loore_") and minted["prefix"] == plaintext[6:14]
+    # Only the hash is stored; the listing never returns the plaintext
+    with app.app_context():
+        row = ApiToken.query.get(minted["id"])
+        assert row.token_hash != plaintext and plaintext not in row.token_hash
+    listing = client.get("/api/external/tokens").get_json()["tokens"]
+    assert [t["id"] for t in listing] == [minted["id"]]
+    assert "token" not in listing[0]
+
+    # Bearer auth with no session at all
+    headers = {"Authorization": f"Bearer {plaintext}"}
+    status = _no_session(app, "get", "/api/external/clip/status",
+                         headers=headers)
+    assert status.status_code == 200
+    assert status.get_json()["token_name"] == "test clipper"
+    res = _no_session(app, "post", "/api/external/clip", headers=headers,
+                      json={"url": "https://e.com/via-token", "content": "hi"})
+    assert res.status_code == 201
+    with app.app_context():
+        assert ApiToken.query.get(minted["id"]).last_used_at is not None
+
+    # Wrong / absent bearer
+    assert _no_session(app, "post", "/api/external/clip", json={
+        "url": "https://e.com/x", "content": "hi"}).status_code == 401
+    bad = _no_session(app, "post", "/api/external/clip",
+                      headers={"Authorization": "Bearer loore_nope"},
+                      json={"url": "https://e.com/x", "content": "hi"})
+    assert bad.status_code == 401 and bad.get_json()["error"] == "invalid_token"
+
+    # A bad bearer is refused even with a live session (no silent fallback)
+    with_session = client.post(
+        "/api/external/clip", headers={"Authorization": "Bearer loore_nope"},
+        json={"url": "https://e.com/y", "content": "hi"})
+    assert with_session.status_code == 401
+
+    # Revocation: token dies, listing forgets it, second revoke is idempotent
+    assert client.delete(f"/api/external/tokens/{minted['id']}").status_code == 200
+    assert client.get("/api/external/tokens").get_json()["tokens"] == []
+    assert _no_session(app, "get", "/api/external/clip/status",
+                       headers=headers).status_code == 401
+    assert client.delete(f"/api/external/tokens/{minted['id']}").status_code == 200
+    assert client.delete("/api/external/tokens/999").status_code == 404
+
+
+def test_token_of_unapproved_user_is_refused(app, client):
+    minted = _mint(client)  # fixture user is not approved
+    res = _no_session(app, "get", "/api/external/clip/status",
+                      headers={"Authorization": f"Bearer {minted['token']}"})
+    assert res.status_code == 401
+
+
+def test_token_routes_need_a_session(app):
+    assert _no_session(app, "get", "/api/external/tokens").status_code == 401
+    assert _no_session(app, "post", "/api/external/tokens",
+                       json={}).status_code == 401

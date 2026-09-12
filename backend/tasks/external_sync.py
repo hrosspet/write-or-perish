@@ -52,6 +52,7 @@ def _upsert_items(user_id, source, items):
             source=source,
             external_id=item["external_id"],
             author_handle=item.get("author_handle"),
+            title=item.get("title"),
             url=item.get("url"),
             posted_at=item.get("posted_at"),
         )

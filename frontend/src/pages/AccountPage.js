@@ -317,8 +317,9 @@ export default function AccountPage() {
           </select>
           <div style={helperStyle}>
             Let Loore search your archive and your saved external content
-            (imported tweets and bookmarks) during conversations, and quote
-            what it finds. Import bookmarks on the{" "}
+            (imported tweets, bookmarks and clipped web pages) during
+            conversations, and quote what it finds. Import bookmarks or set
+            up the Chrome clipper on the{" "}
             <Link to="/import" style={{ color: "var(--accent)" }}>
               Import page
             </Link>. Experimental.

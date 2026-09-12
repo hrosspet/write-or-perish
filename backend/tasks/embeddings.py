@@ -163,6 +163,10 @@ def sweep_embeddings(limit=SWEEP_BATCH_SIZE):
         for item, _ in ext_rows:
             text = item.get_content()
             if text and text.strip():
+                # A web clip's title is often the best one-line summary
+                # of the page; fold it in so the vector reflects it.
+                if item.title:
+                    text = f"{item.title}\n\n{text}"
                 ext_candidates.append((item, text))
         ext_embedded = 0
         for start in range(0, len(ext_candidates), EMBED_API_BATCH):
