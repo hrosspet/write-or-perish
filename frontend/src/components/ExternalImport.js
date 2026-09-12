@@ -53,6 +53,17 @@ const codeStyle = {
   padding: '1px 5px', borderRadius: '4px',
 };
 
+// Floating "Copied" label above the chrome://extensions address. Native
+// title tooltips can't be shown on demand, so this is a small custom one.
+const copiedTipStyle = {
+  position: 'absolute', left: '50%', bottom: 'calc(100% + 6px)',
+  transform: 'translateX(-50%)',
+  background: 'var(--bg-deep)', border: '1px solid var(--border)',
+  borderRadius: '4px', padding: '3px 8px', whiteSpace: 'nowrap',
+  fontFamily: 'var(--sans)', fontSize: '0.75rem', fontWeight: 400,
+  color: 'var(--text-primary)', pointerEvents: 'none', zIndex: 2,
+};
+
 const tokenRowStyle = {
   display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap',
   fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.8rem',
@@ -66,7 +77,6 @@ export default function ExternalImport() {
   const [caUsername, setCaUsername] = useState('');
   const [caStatus, setCaStatus] = useState(null);
   const [xStatus, setXStatus] = useState(null);
-  const [clipperStatus, setClipperStatus] = useState(null);
   const [xSyncMsg, setXSyncMsg] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -81,14 +91,12 @@ export default function ExternalImport() {
 
   const refresh = async () => {
     try {
-      const [itemsRes, xRes, clipperRes] = await Promise.all([
+      const [itemsRes, xRes] = await Promise.all([
         api.get('/external/items', { params: { per_page: 1 } }),
         api.get('/external/twitter/status'),
-        api.get('/external/clipper/status'),
       ]);
       setCounts(itemsRes.data.counts || {});
       setXStatus(xRes.data);
-      setClipperStatus(clipperRes.data);
     } catch (e) { /* page still works without counts */ }
   };
 
@@ -369,7 +377,9 @@ export default function ExternalImport() {
         )}
       </div>
 
-      {clipperStatus && clipperStatus.configured && (
+      {/* Rides the external-content opt-in (Account, shipped off): the
+          clipper only makes sense once Loore searches references. */}
+      {user && user.external_content_enabled && (
       <div style={cardStyle}>
         <h3 style={titleStyle}>Chrome clipper</h3>
         <p style={helpStyle}>
@@ -381,19 +391,19 @@ export default function ExternalImport() {
         </p>
         <p style={helpStyle}>
           Install: open{' '}
-          <code
-            onClick={copyExtensionsAddress}
-            title="Click to copy, then paste into the address bar"
-            style={{
-              ...codeStyle, cursor: 'pointer',
-              color: addressCopied ? 'var(--success)' : codeStyle.color,
-            }}
-          >
-            chrome://extensions
-          </code>
-          {' '}(click to copy, then paste it into the address bar: Chrome
-          does not open its own pages from links), turn on Developer mode,
-          choose “Load unpacked” and pick the{' '}
+          <span style={{ position: 'relative', display: 'inline-block' }}>
+            <code
+              onClick={copyExtensionsAddress}
+              title="Click to copy"
+              style={{ ...codeStyle, cursor: 'pointer' }}
+            >
+              chrome://extensions
+            </code>
+            {addressCopied && (
+              <span role="status" style={copiedTipStyle}>Copied</span>
+            )}
+          </span>
+          , turn on Developer mode, choose “Load unpacked” and pick the{' '}
           <code style={codeStyle}>extension/</code> folder of the Loore
           repository. Then paste a token below into the extension’s options.
           A token can only add references; it cannot read anything.

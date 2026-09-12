@@ -29,7 +29,6 @@ services:
       - FRONTEND_URL=${FRONTEND_URL:-https://staging.loore.org}
       # Dark features live on staging by design.
       - SHARE_V1=true
-      - CLIPPER_ENABLED=true
       - SEMANTIC_SEARCH_AGENTIC=true
       # Server-rendered public pages read the built SPA shell.
       - FRONTEND_BUILD_DIR=/app/frontend/build-staging
@@ -49,7 +48,6 @@ services:
       # Dark features live on staging by design (must match the backend
       # service — the worker renders prompts and executes tools).
       - SHARE_V1=true
-      - CLIPPER_ENABLED=true
       - SEMANTIC_SEARCH_AGENTIC=true
     deploy:
       resources:

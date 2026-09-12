@@ -57,7 +57,6 @@ def app():
     app.config["SECRET_KEY"] = "test-secret"
     app.config["TESTING"] = True
     app.config["OPENAI_API_KEY_CHAT"] = "fake-key"
-    app.config["CLIPPER_ENABLED"] = True
     _db.init_app(app)
     login_manager = LoginManager(app)
 
@@ -72,7 +71,9 @@ def app():
 
     with app.app_context():
         _db.create_all()
-        user = User(username="tester")
+        # Opted into external content (Account toggle): the clipper's
+        # token minting is gated on it.
+        user = User(username="tester", external_content_enabled=True)
         _db.session.add(user)
         _db.session.commit()
         yield app
@@ -396,14 +397,20 @@ def test_token_routes_need_a_session(app):
                        json={}).status_code == 401
 
 
-def test_clipper_env_gated(app, client):
-    assert client.get("/api/external/clipper/status").get_json() == {
-        "configured": True}
-    app.config["CLIPPER_ENABLED"] = False
-    try:
-        assert client.get("/api/external/clipper/status").get_json() == {
-            "configured": False}
-        res = client.post("/api/external/tokens", json={})
-        assert res.status_code == 503
-    finally:
-        app.config["CLIPPER_ENABLED"] = True
+def test_token_minting_needs_external_content_opt_in(app, client):
+    # Each request runs in its own nested app context so flask-login
+    # reloads the user (see _no_session) and sees the flag change.
+    def _set(enabled):
+        with app.app_context():
+            user = User.query.first()
+            user.external_content_enabled = enabled
+            _db.session.commit()
+
+    def _mint_status():
+        with app.app_context():
+            return client.post("/api/external/tokens", json={}).status_code
+
+    _set(False)
+    assert _mint_status() == 403
+    _set(True)
+    assert _mint_status() == 201
