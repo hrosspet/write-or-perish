@@ -19,7 +19,8 @@ const SOURCE_LABELS = {
  *
  * The reference's owner also gets the same read toggle as the reference
  * page (POST/DELETE /external/items/<id>/read), so a recommendation can
- * be marked read right where Loore surfaced it. Only the user marks a
+ * be marked read right where Loore surfaced it. The label alone carries
+ * the state ("Mark as unread" = read). Only the user marks a
  * reference read — the AI quoting it is tracked separately as surfacing.
  */
 const ExternalQuoteBubble = ({ quote }) => {
@@ -79,21 +80,16 @@ const ExternalQuoteBubble = ({ quote }) => {
       <div style={footerStyle}>
         <span>{postedAt}</span>
         {mine && (
-          <span style={readSlotStyle}>
-            {readAt && (
-              <span style={readTagStyle} title={`You read it ${formatDate(readAt)}`}>
-                Read
-              </span>
-            )}
-            <button
-              type="button"
-              className="ext-quote-read-toggle"
-              onClick={toggleRead}
-              disabled={marking}
-            >
-              {readAt ? 'Mark as unread' : 'Mark as read'}
-            </button>
-          </span>
+          <button
+            type="button"
+            className="ext-quote-read-toggle"
+            style={{ marginLeft: 'auto' }}
+            onClick={toggleRead}
+            disabled={marking}
+            title={readAt ? `You read it ${formatDate(readAt)}` : undefined}
+          >
+            {readAt ? 'Mark as unread' : 'Mark as read'}
+          </button>
         )}
       </div>
     </div>
@@ -134,23 +130,6 @@ const footerStyle = {
   gap: '8px 12px',
   fontSize: '0.8em',
   color: 'var(--text-muted)',
-};
-
-const readSlotStyle = {
-  display: 'inline-flex',
-  alignItems: 'center',
-  gap: '10px',
-  marginLeft: 'auto',
-};
-
-// Same "Read" mark as the reference page, scaled to the footer.
-const readTagStyle = {
-  fontFamily: 'var(--sans)',
-  fontSize: '0.8em',
-  fontWeight: 500,
-  textTransform: 'uppercase',
-  letterSpacing: '0.08em',
-  color: 'var(--accent-dim)',
 };
 
 const notAccessibleStyle = {

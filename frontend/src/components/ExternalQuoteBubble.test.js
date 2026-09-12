@@ -39,19 +39,17 @@ test('the owner gets a Mark as read toggle that does not open the post', async (
   expect(window.open).not.toHaveBeenCalled();
 
   await waitFor(() => expect(screen.getByRole('button', { name: 'Mark as unread' })).toBeInTheDocument());
-  expect(screen.getByText('Read')).toBeInTheDocument();
+  expect(screen.queryByText('Read')).not.toBeInTheDocument();
 });
 
 test('a read reference offers Mark as unread and clears the mark', async () => {
   api.delete.mockResolvedValue({ data: { id: 42, read_at: null } });
   render(<ExternalQuoteBubble quote={quote({ read_at: '2026-09-12T20:00:00Z' })} />);
 
-  expect(screen.getByText('Read')).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Mark as unread' }));
   expect(api.delete).toHaveBeenCalledWith('/external/items/42/read');
 
   await waitFor(() => expect(screen.getByRole('button', { name: 'Mark as read' })).toBeInTheDocument());
-  expect(screen.queryByText('Read')).not.toBeInTheDocument();
 });
 
 test('someone else viewing the node sees the quote without the toggle', () => {
