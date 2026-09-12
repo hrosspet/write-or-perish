@@ -31,7 +31,7 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
 
 from backend.extensions import db as _db  # noqa: E402
 from backend.models import (  # noqa: E402
-    User, ExternalItem, ExternalItemEmbedding,
+    User, ExternalItem, ExternalItemEmbedding, TTSChunk,
 )
 from backend.utils.external_content import (  # noqa: E402
     normalize_ca_tweet, normalize_x_bookmark,
@@ -68,8 +68,10 @@ def app():
 
     from backend.routes.external import external_bp
     from backend.routes.search import search_bp
+    from backend.routes.sse import sse_bp
     app.register_blueprint(external_bp, url_prefix="/api/external")
     app.register_blueprint(search_bp, url_prefix="/api")
+    app.register_blueprint(sse_bp, url_prefix="/api/sse")
 
     with app.app_context():
         _db.create_all()
@@ -583,3 +585,155 @@ def test_mark_read_is_explicit_idempotent_and_reversible(app, client):
 
     assert client.delete(f"/api/external/items/{item_id}/read").get_json()["read_at"] is None
     assert client.post("/api/external/items/999/read").status_code == 404
+
+
+def test_update_item_edits_title_and_text_and_drops_embedding(app, client):
+    with app.app_context():
+        uid = User.query.first().id
+        _upsert_items(uid, "web_clip", [
+            {"external_id": "e" * 64, "content": "first draft",
+             "title": "Old title", "author_handle": None, "url": None,
+             "posted_at": None}])
+        item = ExternalItem.query.one()
+        item_id = item.id
+        _db.session.add(ExternalItemEmbedding(
+            item_id=item_id, user_id=uid, model="m",
+            content_hash="h" * 64, vector=b"\x00" * 8))
+        _db.session.commit()
+
+    res = client.put(f"/api/external/items/{item_id}",
+                     json={"title": "  New title  ", "content": "rewritten\n"})
+    assert res.status_code == 200
+    body = res.get_json()
+    assert body["title"] == "New title"
+    assert body["content"] == "rewritten"
+    assert body["edited_at"] is not None
+    with app.app_context():
+        assert ExternalItemEmbedding.query.filter_by(item_id=item_id).count() == 0
+        assert ExternalItem.query.get(item_id).get_content() == "rewritten"
+
+    # An empty title clears it; the text is untouched.
+    res = client.put(f"/api/external/items/{item_id}", json={"title": ""})
+    assert res.status_code == 200 and res.get_json()["title"] is None
+    assert res.get_json()["content"] == "rewritten"
+
+    # Validation: nothing to change, empty text, over the cap, not mine.
+    assert client.put(f"/api/external/items/{item_id}", json={}).status_code == 400
+    assert client.put(f"/api/external/items/{item_id}",
+                      json={"content": "   "}).status_code == 400
+    assert client.put(f"/api/external/items/{item_id}",
+                      json={"content": "x" * 100001}).status_code == 422
+    assert client.put("/api/external/items/999",
+                      json={"content": "x"}).status_code == 404
+
+
+def test_reclip_keeps_a_hand_edited_reference(app, client):
+    with app.app_context():
+        User.query.first().approved = True
+        _db.session.commit()
+    url = "https://example.com/edited"
+    first = client.post("/api/external/clip",
+                        json={"url": url, "content": "short capture"})
+    assert first.status_code == 201
+    item_id = first.get_json()["id"]
+
+    assert client.put(f"/api/external/items/{item_id}",
+                      json={"content": "my own notes"}).status_code == 200
+
+    # A longer re-clip would normally replace the text; not after an edit.
+    again = client.post("/api/external/clip",
+                        json={"url": url, "content": "a much longer capture of the page"})
+    assert again.status_code == 200
+    assert again.get_json()["updated"] is False
+    assert client.get(f"/api/external/items/{item_id}").get_json()["content"] == "my own notes"
+
+
+def test_reference_tts_routes_queue_report_and_clear(app, client, monkeypatch):
+    with app.app_context():
+        uid = User.query.first().id
+        _upsert_items(uid, "web_clip", [
+            {"external_id": "t" * 64, "content": "# Title\n\nSpoken text",
+             "title": "Title", "author_handle": None, "url": None,
+             "posted_at": None}])
+        item_id = ExternalItem.query.one().id
+
+    # Nothing yet.
+    assert client.get(f"/api/external/items/{item_id}/audio").status_code == 404
+    assert client.get(f"/api/external/items/{item_id}").get_json()["has_tts"] is False
+
+    # Queue: the task is dispatched with the item id and the caller's id.
+    # Module objects, not dotted strings: another test's fixture swaps
+    # sys.modules entries and a string path then fails to resolve.
+    calls = []
+    import backend.tasks.tts as tts_mod
+    import backend.routes.external as ext_mod
+    from backend.celery_app import celery as celery_app
+    monkeypatch.setattr(tts_mod.generate_tts_audio_for_item, "delay",
+                        lambda *a, **kw: (calls.append((a, kw)) or MagicMock(id="task-1")))
+    monkeypatch.setattr(ext_mod, "get_openai_chat_key", lambda cfg: "k")
+    res = client.post(f"/api/external/items/{item_id}/tts")
+    assert res.status_code == 202, res.get_json()
+    assert calls and calls[0][0][0] == item_id and calls[0][1]["requesting_user_id"] == uid
+    # In progress: audio says generating, a second POST does not re-queue.
+    assert client.get(f"/api/external/items/{item_id}/audio").status_code == 202
+    assert client.post(f"/api/external/items/{item_id}/tts").status_code == 202
+    assert len(calls) == 1
+
+    # The worker finished: chunk rows + final URL, as the task writes them.
+    with app.app_context():
+        item = ExternalItem.query.get(item_id)
+        item.audio_tts_url = "/media/user/1/item/1/tts.mp3?v=9"
+        item.tts_task_status = "completed"
+        item.tts_task_progress = 100
+        _db.session.add_all([
+            TTSChunk(item_id=item_id, chunk_index=0, status="completed",
+                     section_index=0, section_title="Title", duration=3.0),
+            TTSChunk(item_id=item_id, chunk_index=1, status="completed",
+                     section_index=1, section_title="Second", duration=2.0),
+        ])
+        _db.session.commit()
+    monkeypatch.setattr(celery_app, "AsyncResult",
+                        lambda tid: MagicMock(state="SUCCESS"))
+    status = client.get(f"/api/external/items/{item_id}/tts-status").get_json()
+    assert status["status"] == "completed"
+    assert status["item"]["audio_tts_url"].endswith("tts.mp3?v=9")
+    assert client.get(f"/api/external/items/{item_id}/audio").get_json()["tts_url"]
+    assert client.post(f"/api/external/items/{item_id}/tts").status_code == 200
+    chapters = client.get(f"/api/external/items/{item_id}/tts-chapters").get_json()["chapters"]
+    assert [c["start_time"] for c in chapters] == [0.0, 3.0]
+    assert client.get(f"/api/external/items/{item_id}").get_json()["has_tts"] is True
+
+    # An edit that keeps the audio leaves it; one that regenerates clears
+    # the URL and the chunk rows.
+    client.put(f"/api/external/items/{item_id}", json={"content": "changed once"})
+    assert client.get(f"/api/external/items/{item_id}").get_json()["has_tts"] is True
+    client.put(f"/api/external/items/{item_id}",
+               json={"content": "changed twice", "regenerate_tts": True})
+    assert client.get(f"/api/external/items/{item_id}").get_json()["has_tts"] is False
+    with app.app_context():
+        assert TTSChunk.query.filter_by(item_id=item_id).count() == 0
+
+    # Deleting the reference takes its chunk rows along.
+    with app.app_context():
+        _db.session.add(TTSChunk(item_id=item_id, chunk_index=0, status="completed"))
+        _db.session.commit()
+    assert client.delete(f"/api/external/items/{item_id}").status_code == 200
+    with app.app_context():
+        assert TTSChunk.query.filter_by(item_id=item_id).count() == 0
+
+
+def test_reference_tts_stream_gates_on_ownership_and_state(app, client):
+    with app.app_context():
+        uid = User.query.first().id
+        _upsert_items(uid, "web_clip", [
+            {"external_id": "s" * 64, "content": "text", "title": None,
+             "author_handle": None, "url": None, "posted_at": None}])
+        item_id = ExternalItem.query.one().id
+    # Not in progress and no audio: 400, not a hanging stream.
+    assert client.get(f"/api/sse/items/{item_id}/tts-stream").status_code == 400
+    with app.app_context():
+        item = ExternalItem.query.get(item_id)
+        item.audio_tts_url = "/media/x.mp3"
+        _db.session.commit()
+    assert client.get(f"/api/sse/items/{item_id}/tts-stream").get_json()["status"] == "completed"
+    assert client.get("/api/sse/items/999/tts-stream").status_code == 404

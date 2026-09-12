@@ -5,6 +5,10 @@ import MarkdownBody from '../components/MarkdownBody';
 import BubbleKebabMenu from '../components/BubbleKebabMenu';
 import ReferenceFooter from '../components/ReferenceFooter';
 import DeleteConfirmDialog from '../components/DeleteConfirmDialog';
+import ReferenceEditForm from '../components/ReferenceEditForm';
+import NodeFormModal from '../components/NodeFormModal';
+import RegenerateTtsDialog from '../components/RegenerateTtsDialog';
+import SpeakerIcon from '../components/SpeakerIcon';
 import { useToast } from '../contexts/ToastContext';
 import { formatDate } from '../utils/date';
 import TweetEmbed from '../components/TweetEmbed';
@@ -57,6 +61,12 @@ function ReferenceDetailPage() {
   const [embedStatus, setEmbedStatus] = useState('loading');
   const [showStored, setShowStored] = useState(false);
   const [marking, setMarking] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  // An edit that changes the text of a reference with generated audio:
+  // ask keep-or-regenerate first, as a node edit does (#66). The pending
+  // edit waits here for the answer.
+  const [pendingEdit, setPendingEdit] = useState(null);
 
   useEffect(() => {
     setItem(null);
@@ -104,6 +114,30 @@ function ReferenceDetailPage() {
       .finally(() => setMarking(false));
   };
 
+  const saveEdit = ({ title, content }, regenerateTts) => {
+    const textChanged = content.trim() !== (item.content || '').trim();
+    if (item.has_tts && textChanged && regenerateTts === undefined) {
+      setPendingEdit({ title, content });
+      return;
+    }
+    setSaving(true);
+    api.put(`/external/items/${item.id}`, {
+      title,
+      content,
+      ...(regenerateTts && { regenerate_tts: true }),
+    })
+      .then((res) => {
+        setItem(res.data);
+        setEditing(false);
+        addToast('Reference updated', 3000);
+      })
+      .catch((err) => {
+        addToast((err.response && err.response.data && err.response.data.error)
+          || 'Error saving reference.', 4000);
+      })
+      .finally(() => setSaving(false));
+  };
+
   if (error) return <div style={{ padding: '20px', color: 'var(--accent)' }}>{error}</div>;
   if (!item) return <div style={{ padding: '20px', color: 'var(--text-muted)' }}>Loading...</div>;
 
@@ -116,6 +150,7 @@ function ReferenceDetailPage() {
       action: () => window.open(item.url, '_blank', 'noopener,noreferrer'),
       color: 'var(--text-primary)',
     }] : []),
+    { label: 'Edit', action: () => setEditing(true), color: 'var(--text-primary)' },
     { label: 'Delete', action: () => setDeleting(true), color: 'var(--accent)' },
   ];
 
@@ -147,14 +182,28 @@ function ReferenceDetailPage() {
       </div>
       <div style={cardStyle}>
         <BubbleKebabMenu visible={true} items={actions} />
-        {item.title && (
-          <h1 style={{
-            fontFamily: 'var(--serif)', fontWeight: 400, fontSize: '1.5rem',
-            color: 'var(--text-primary)', margin: '0 0 0.8rem 0', lineHeight: 1.3,
-          }}>
-            {item.title}
-          </h1>
-        )}
+        {/* The title row carries the speaker (a tweet has no title: the
+            icon then stands alone at the top of the card). */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '2px', margin: '0 0 0.8rem 0' }}>
+          {item.title && (
+            <h1 style={{
+              fontFamily: 'var(--serif)', fontWeight: 400, fontSize: '1.5rem',
+              color: 'var(--text-primary)', margin: 0, lineHeight: 1.3,
+            }}>
+              {item.title}
+            </h1>
+          )}
+          {/* Cormorant's glyphs sit below the line-box center; the nudge
+              puts the icon on the title's optical middle. */}
+          <span style={{ display: 'flex', alignItems: 'center', color: 'var(--text-muted)', fontSize: '1rem', position: 'relative', top: '0.18em' }}>
+            <SpeakerIcon
+              itemId={item.id}
+              content={item.title ? `# ${item.title}\n${item.content || ''}` : item.content}
+              isPublic={false}
+              onTtsGenerated={() => setItem((prev) => (prev ? { ...prev, has_tts: true } : prev))}
+            />
+          </span>
+        </div>
         {tweetId(item) && (
           <TweetEmbed tweetId={tweetId(item)} onStatus={setEmbedStatus} />
         )}
@@ -213,6 +262,7 @@ function ReferenceDetailPage() {
               ? `Shown by Loore ${item.surfaced_count}× · last ${formatDate(item.last_surfaced_at)}`
               : 'Not yet shown by Loore in a conversation'}
             {item.read_at ? ` · you read it ${formatDate(item.read_at)}` : ''}
+            {item.edited_at ? ` · edited ${formatDate(item.edited_at)}` : ''}
           </span>
           <button
             type="button"
@@ -230,6 +280,26 @@ function ReferenceDetailPage() {
           </button>
         </div>
       </div>
+      {editing && (
+        <NodeFormModal title="Edit Reference" onClose={() => setEditing(false)}>
+          <ReferenceEditForm
+            key={item.id}
+            item={item}
+            saving={saving}
+            onSave={saveEdit}
+            onCancel={() => setEditing(false)}
+          />
+        </NodeFormModal>
+      )}
+      <RegenerateTtsDialog
+        open={!!pendingEdit}
+        onClose={() => setPendingEdit(null)}
+        onChoice={(regenerate) => {
+          const edit = pendingEdit;
+          setPendingEdit(null);
+          if (edit) saveEdit(edit, regenerate);
+        }}
+      />
       <DeleteConfirmDialog
         open={deleting}
         mode="reference"

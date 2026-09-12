@@ -455,3 +455,25 @@ def draft_transcription_stream(session_id):
             'X-Accel-Buffering': 'no'  # Disable nginx buffering
         }
     )
+
+
+@sse_bp.route("/items/<int:item_id>/tts-stream")
+@login_required
+def item_tts_stream(item_id):
+    """SSE TTS chunk stream for a saved reference (same events as nodes)."""
+    from backend.models import ExternalItem
+    item = ExternalItem.query.filter_by(
+        id=item_id, user_id=current_user.id).first()
+    if item is None:
+        return jsonify({"error": "not found"}), 404
+
+    if item.tts_task_status not in ['pending', 'processing']:
+        if item.audio_tts_url:
+            return jsonify({"status": "completed",
+                            "tts_url": item.audio_tts_url}), 200
+        return jsonify({"error": "TTS not in progress for this reference"}), 400
+
+    last_chunk = request.args.get('last_chunk', -1, type=int)
+    app = current_app._get_current_object()
+    return _tts_stream_response(app, ExternalItem, item_id, 'item_id',
+                                'Reference', last_chunk)

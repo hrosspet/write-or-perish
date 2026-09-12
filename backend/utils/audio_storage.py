@@ -18,7 +18,8 @@ AUDIO_STORAGE_ROOT = pathlib.Path(
 
 
 def clear_tts_artifacts(entity) -> bool:
-    """Invalidate any generated TTS audio for a Node or UserProfile.
+    """Invalidate any generated TTS audio for a Node, UserProfile or
+    ExternalItem (saved reference).
 
     Called when the entity's text content is edited so the user doesn't
     keep hearing audio that no longer matches the text (#66). Clears the
@@ -33,12 +34,14 @@ def clear_tts_artifacts(entity) -> bool:
 
     Returns True if anything was cleared (caller still owns the commit).
     """
-    from backend.models import Node, UserProfile, TTSChunk
+    from backend.models import Node, UserProfile, ExternalItem, TTSChunk
 
     if isinstance(entity, Node):
         fk = {"node_id": entity.id}
     elif isinstance(entity, UserProfile):
         fk = {"profile_id": entity.id}
+    elif isinstance(entity, ExternalItem):
+        fk = {"item_id": entity.id}
     else:
         raise TypeError(f"clear_tts_artifacts: unsupported entity {type(entity)!r}")
 

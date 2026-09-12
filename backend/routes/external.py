@@ -8,6 +8,8 @@
   token or session auth; personal API tokens are managed here too
 """
 import base64
+import os
+import pathlib
 import hashlib
 import json
 import re
@@ -23,7 +25,7 @@ from flask_login import current_user, login_required
 from backend.extensions import db
 from backend.models import (
     ApiToken, ExternalAccount, ExternalItem, ExternalItemEmbedding,
-    UserNotification,
+    TTSChunk, UserNotification,
 )
 from backend.utils.api_tokens import (
     SCOPE_EXTERNAL_WRITE, generate_api_token, token_or_login_required,
@@ -31,6 +33,13 @@ from backend.utils.api_tokens import (
 from backend.utils.magic_link import hash_token
 from backend.utils.timefmt import iso_utc
 from backend.utils.web_clip import classify_clip
+from backend.utils.spend import require_spend_headroom
+from backend.utils.api_keys import get_openai_chat_key
+from backend.utils.audio_storage import clear_tts_artifacts
+
+# Same root as the nodes blueprint and the TTS task.
+AUDIO_STORAGE_ROOT = pathlib.Path(
+    os.environ.get("AUDIO_STORAGE_PATH", "data/audio")).resolve()
 
 external_bp = Blueprint("external_bp", __name__)
 
@@ -56,6 +65,8 @@ def _serialize_item(item):
         # The user's own mark (see ExternalItem.read_at) and the AI's
         # surfacing history — two different things, shown side by side.
         "read_at": iso_utc(item.read_at) if item.read_at else None,
+        "edited_at": iso_utc(item.edited_at) if item.edited_at else None,
+        "has_tts": bool(item.audio_tts_url),
         "surfaced_count": item.surfaced_count or 0,
         "last_surfaced_at": (iso_utc(item.last_surfaced_at)
                              if item.last_surfaced_at else None),
@@ -109,6 +120,63 @@ def get_item(item_id):
     return jsonify(data), 200
 
 
+@external_bp.route("/items/<int:item_id>", methods=["PUT"])
+@login_required
+def update_item(item_id):
+    """Edit a reference's title and/or text by hand, as a node is edited.
+
+    Body: {title?, content?, regenerate_tts?}. Content, when given, must be non-empty and
+    within the per-entry cap (rejected, not truncated: an edit has a UI
+    to negotiate in). A changed text drops the stale embedding so the
+    nightly sweep re-embeds it, and stamps edited_at so a later re-clip
+    keeps the user's copy (see _upgrade_clip).
+    """
+    from backend.utils.node_split import NODE_CHAR_CAP
+    item = ExternalItem.query.filter_by(
+        id=item_id, user_id=current_user.id).first()
+    if item is None:
+        return jsonify({"error": "not found"}), 404
+    data = request.get_json(silent=True) or {}
+    if "title" not in data and "content" not in data:
+        return jsonify({"error": "title or content is required"}), 400
+
+    changed = False
+    if "content" in data:
+        content = data.get("content")
+        if not isinstance(content, str) or not content.strip():
+            return jsonify({"error": "content cannot be empty"}), 400
+        if len(content) > NODE_CHAR_CAP:
+            return jsonify({
+                "error": (f"Content exceeds the {NODE_CHAR_CAP:,}-character "
+                          f"per-entry limit."),
+                "char_cap": NODE_CHAR_CAP,
+            }), 422
+        content = content.strip()
+        if content != (item.get_content() or ""):
+            item.set_content(content)
+            ExternalItemEmbedding.query.filter_by(item_id=item.id).delete()
+            # Generated speech of the old text is stale. As with nodes
+            # (#66) the editor asks keep-or-regenerate and sends
+            # regenerate_tts=true only for the latter.
+            if data.get("regenerate_tts"):
+                clear_tts_artifacts(item)
+            changed = True
+    if "title" in data:
+        title = (data.get("title") or "")
+        if not isinstance(title, str):
+            return jsonify({"error": "title must be a string"}), 400
+        title = title.strip()[:MAX_TITLE_CHARS] or None
+        if title != item.title:
+            item.title = title
+            changed = True
+    if changed:
+        item.edited_at = datetime.utcnow()
+        db.session.commit()
+    out = _serialize_item(item)
+    out["content"] = item.get_content() or ""
+    return jsonify(out), 200
+
+
 @external_bp.route("/items/<int:item_id>", methods=["DELETE"])
 @login_required
 def delete_item(item_id):
@@ -120,9 +188,112 @@ def delete_item(item_id):
     if item is None:
         return jsonify({"error": "not found"}), 404
     ExternalItemEmbedding.query.filter_by(item_id=item.id).delete()
+    TTSChunk.query.filter_by(item_id=item.id).delete()
     db.session.delete(item)
     db.session.commit()
     return jsonify({"deleted": True, "id": item_id}), 200
+
+
+# ── Reference TTS (same contract as /nodes/<id> and /profile/<id>) ──────
+
+def _owned_item_or_404(item_id):
+    return ExternalItem.query.filter_by(
+        id=item_id, user_id=current_user.id).first()
+
+
+@external_bp.route("/items/<int:item_id>/audio", methods=["GET"])
+@login_required
+def get_item_audio(item_id):
+    """Generated speech for a reference, if any (SpeakerIcon's first
+    call). A reference never has an original recording."""
+    item = _owned_item_or_404(item_id)
+    if item is None:
+        return jsonify({"error": "not found"}), 404
+    if item.audio_tts_url:
+        return jsonify({"tts_url": item.audio_tts_url}), 200
+    if item.tts_task_status in ("pending", "processing"):
+        return jsonify({
+            "status": "generating",
+            "progress": item.tts_task_progress or 0,
+            "task_id": item.tts_task_id,
+        }), 202
+    return jsonify({"error": "No audio for this reference"}), 404
+
+
+@external_bp.route("/items/<int:item_id>/tts", methods=["POST"])
+@login_required
+@require_spend_headroom
+def generate_item_tts(item_id):
+    """Queue TTS generation for a reference; 200 when it already exists."""
+    item = _owned_item_or_404(item_id)
+    if item is None:
+        return jsonify({"error": "not found"}), 404
+    if item.audio_tts_url:
+        return jsonify({"message": "TTS already available",
+                        "tts_url": item.audio_tts_url}), 200
+    if item.tts_task_status in ("pending", "processing"):
+        return jsonify({"message": "TTS generation already in progress",
+                        "task_id": item.tts_task_id,
+                        "status": item.tts_task_status}), 202
+    if not get_openai_chat_key(current_app.config):
+        return jsonify({"error": "TTS not configured (missing API key)"}), 500
+
+    from backend.tasks.tts import generate_tts_audio_for_item
+    item.tts_task_status = "pending"
+    item.tts_task_progress = 0
+    db.session.commit()
+    task = generate_tts_audio_for_item.delay(
+        item.id, str(AUDIO_STORAGE_ROOT), requesting_user_id=current_user.id)
+    item.tts_task_id = task.id
+    db.session.commit()
+    return jsonify({"message": "TTS generation started",
+                    "task_id": task.id, "status": "pending"}), 202
+
+
+@external_bp.route("/items/<int:item_id>/tts-status", methods=["GET"])
+@login_required
+def get_item_tts_status(item_id):
+    """Polling fallback for the SSE stream."""
+    item = _owned_item_or_404(item_id)
+    if item is None:
+        return jsonify({"error": "not found"}), 404
+    if item.tts_task_id:
+        try:
+            from backend.celery_app import celery
+            task = celery.AsyncResult(item.tts_task_id)
+            if task.state == "SUCCESS" and item.tts_task_status != "completed":
+                item.tts_task_status = "completed"
+                db.session.commit()
+            elif task.state in ("FAILURE", "REVOKED") and item.tts_task_status != "failed":
+                item.tts_task_status = "failed"
+                db.session.commit()
+        except Exception as e:  # Celery unreachable: answer from the DB
+            current_app.logger.warning(f"Failed to check Celery task status: {e}")
+    data = {
+        "status": item.tts_task_status,
+        "progress": item.tts_task_progress or 0,
+        "task_id": item.tts_task_id,
+        "item": {"id": item.id},
+    }
+    if item.tts_task_status == "completed":
+        data["item"]["audio_tts_url"] = item.audio_tts_url
+    response = jsonify(data)
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return response
+
+
+@external_bp.route("/items/<int:item_id>/tts-chapters", methods=["GET"])
+@login_required
+def get_item_tts_chapters(item_id):
+    """Chapter list for a reference's TTS, built from its TTSChunk rows
+    exactly as for nodes (#145)."""
+    item = _owned_item_or_404(item_id)
+    if item is None:
+        return jsonify({"error": "not found"}), 404
+    from backend.utils.audio_processing import tts_chapters
+    chunks = TTSChunk.query.filter_by(item_id=item_id).order_by(
+        TTSChunk.chunk_index).all()
+    return jsonify({"chapters": tts_chapters(chunks)}), 200
 
 
 @external_bp.route("/items/<int:item_id>/read", methods=["POST", "DELETE"])
@@ -438,6 +609,9 @@ def _upgrade_clip(item, content, title, author, posted_at):
     text. Returns True when anything changed (one decrypt of the stored
     text — a single user-initiated item, not a corpus loop).
     """
+    if item.edited_at is not None:
+        # The user rewrote this one by hand; their copy stands.
+        return False
     if len(content) <= len(item.get_content() or ""):
         return False
     item.set_content(content)

@@ -24,10 +24,10 @@ const extractMarkdownHeader = (content) => {
 };
 
 /**
- * SpeakerIcon component fetches and plays audio for a node or profile.
- * Shows loading spinner, play/pause state.
+ * SpeakerIcon component fetches and plays audio for a node, a profile or
+ * a saved reference (itemId). Shows loading spinner, play/pause state.
  */
-const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGenerated }) => {
+const SpeakerIcon = ({ nodeId, profileId, itemId, content, isPublic, aiUsage, onTtsGenerated }) => {
   const { user } = useUser();
   const { loadAudio, loadAudioQueue, updateChapters, appendChunkToQueue, setGeneratingTTS, currentAudio, isPlaying, warmup } = useAudio();
   const [loading, setLoading] = useState(false);
@@ -48,27 +48,31 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
   const lastSectionRef = useRef(null);
 
   const isNode = nodeId != null;
-  const id = isNode ? nodeId : profileId;
-  const baseUrl = isNode ? `/nodes/${id}` : `/profile/${id}`;
+  const isItem = !isNode && itemId != null;
+  const id = isNode ? nodeId : (isItem ? itemId : profileId);
+  const entityType = isNode ? 'node' : (isItem ? 'item' : 'profile');
+  const baseUrl = isNode ? `/nodes/${id}`
+    : isItem ? `/external/items/${id}` : `/profile/${id}`;
 
   // Extract header from content if available. The "Node N" form is a
   // fallback only — when the content has a title, show just the title.
   const header = extractMarkdownHeader(content);
-  const baseTitle = isNode ? `Node ${id}` : `Profile ${id}`;
+  const baseTitle = isNode ? `Node ${id}` : (isItem ? `Reference ${id}` : `Profile ${id}`);
   const fullTitle = header || baseTitle;
 
   // Chapter list for TTS playback (#145) — empty for unstructured text.
+  // Profiles have no chapters route.
   const fetchChapters = useCallback(async () => {
-    if (!isNode) return [];
+    if (!isNode && !isItem) return [];
     try {
-      const res = await api.get(`/nodes/${id}/tts-chapters`, {
+      const res = await api.get(`${baseUrl}/tts-chapters`, {
         validateStatus: (s) => s === 200 || s === 404,
       });
       return res.status === 200 ? (res.data.chapters || []) : [];
     } catch (e) {
       return [];
     }
-  }, [id, isNode]);
+  }, [baseUrl, isNode, isItem]);
 
   // SSE streaming for TTS chunks
   const handleChunkReady = useCallback((data) => {
@@ -88,7 +92,7 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
         chaptersRef.current = chapters;
         loadAudioQueue(
           [chunkUrl],
-          { title: fullTitle, id, type: isNode ? 'node' : 'profile', chapters },
+          { title: fullTitle, id, type: entityType, chapters },
           chunkDuration != null ? [chunkDuration] : null
         );
       });
@@ -105,11 +109,11 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
         lastSectionRef.current = section;
         fetchChapters().then((chapters) => {
           chaptersRef.current = chapters;
-          updateChapters(id, isNode ? 'node' : 'profile', chapters);
+          updateChapters(id, entityType, chapters);
         });
       }
     }
-  }, [fullTitle, id, isNode, loadAudioQueue, appendChunkToQueue, fetchChapters, updateChapters]);
+  }, [fullTitle, id, entityType, loadAudioQueue, appendChunkToQueue, fetchChapters, updateChapters]);
 
   const handleAllComplete = useCallback((data) => {
     setSseActive(false);
@@ -130,18 +134,18 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
     // them into both the live player and the replay cache (#145).
     fetchChapters().then((chapters) => {
       chaptersRef.current = chapters;
-      updateChapters(id, isNode ? 'node' : 'profile', chapters);
+      updateChapters(id, entityType, chapters);
     });
     // Fresh generation completes via this SSE path (the tts-status poll is
     // only a fallback), so tell the parent the entry now has TTS — this is
     // what makes the edit "regenerate audio?" prompt (#66) fire without a
     // page refresh.
     if (onTtsGenerated) onTtsGenerated();
-  }, [setGeneratingTTS, onTtsGenerated, fetchChapters, updateChapters, id, isNode]);
+  }, [setGeneratingTTS, onTtsGenerated, fetchChapters, updateChapters, id, entityType]);
 
   const { disconnect: disconnectSSE } = useTTSStreamSSE(id, {
     enabled: sseActive,
-    entityType: isNode ? 'node' : 'profile',
+    entityType,
     onChunkReady: handleChunkReady,
     onAllComplete: handleAllComplete,
   });
@@ -172,7 +176,7 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
     sseChunkCountRef.current = 0;
     chaptersRef.current = [];
     lastSectionRef.current = null;
-  }, [nodeId, profileId, content]);
+  }, [nodeId, profileId, itemId, content]);
 
   // Clean up SSE on unmount
   useEffect(() => {
@@ -187,7 +191,7 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
   // Handle TTS completion (polling fallback)
   useEffect(() => {
     if (ttsStatus === 'completed' && ttsData) {
-      const ttsUrl = isNode ? ttsData.node?.audio_tts_url : ttsData.profile?.audio_tts_url;
+      const ttsUrl = (ttsData.node || ttsData.item || ttsData.profile || {}).audio_tts_url;
       if (ttsUrl) {
         // Build absolute URL
         const srcUrl = ttsUrl.startsWith('http')
@@ -196,7 +200,7 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
         setAudioSrc(srcUrl);
         // Add a small delay to ensure file is available on server before loading
         setTimeout(() => {
-          loadAudio({ url: srcUrl, title: fullTitle, id, type: isNode ? 'node' : 'profile' });
+          loadAudio({ url: srcUrl, title: fullTitle, id, type: entityType });
         }, 500);
         // Tell the parent this entry now has generated TTS, so its cached
         // node/profile object updates without a page refresh — otherwise the
@@ -211,7 +215,7 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
       setTtsTaskActive(false);
       setLoading(false);
     }
-  }, [ttsStatus, ttsData, ttsError, isNode, id, loadAudio, fullTitle, onTtsGenerated]);
+  }, [ttsStatus, ttsData, ttsError, entityType, id, loadAudio, fullTitle, onTtsGenerated]);
 
   // Show for voice-mode users, or for any authenticated user on public posts
   if (!user || (!user.voice_mode_enabled && !isPublic)) {
@@ -229,14 +233,14 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
       // chapters from the first load so a same-session replay keeps the
       // dropdown — #145)
       if (audioChunks && audioChunks.length > 0) {
-        await loadAudioQueue(audioChunks, { title: fullTitle, id, type: isNode ? 'node' : 'profile', chapters: chaptersRef.current }, audioChunkDurations);
+        await loadAudioQueue(audioChunks, { title: fullTitle, id, type: entityType, chapters: chaptersRef.current }, audioChunkDurations);
         return;
       }
 
       // If we already have a single audio source, play it (same: preserve
       // the cached chapters on replay — #145)
       if (audioSrc) {
-        await loadAudio({ url: audioSrc, title: fullTitle, id, type: isNode ? 'node' : 'profile', chapters: chaptersRef.current });
+        await loadAudio({ url: audioSrc, title: fullTitle, id, type: entityType, chapters: chaptersRef.current });
         return;
       }
 
@@ -344,7 +348,7 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
       // recorded-original playback has no section structure, #145)
       const chapters = (!original_url && tts_url) ? await fetchChapters() : [];
       chaptersRef.current = chapters;
-      await loadAudio({ url: srcUrl, title: fullTitle, id, type: isNode ? 'node' : 'profile', chapters });
+      await loadAudio({ url: srcUrl, title: fullTitle, id, type: entityType, chapters });
       setLoading(false);
     } catch (err) {
       console.error('Error playing audio:', err);
@@ -358,7 +362,7 @@ const SpeakerIcon = ({ nodeId, profileId, content, isPublic, aiUsage, onTtsGener
   // Check if this is the currently playing audio
   const isCurrentlyPlaying = currentAudio &&
     currentAudio.id === id &&
-    currentAudio.type === (isNode ? 'node' : 'profile') &&
+    currentAudio.type === entityType &&
     isPlaying;
 
   const isActive = loading || ttsTaskActive || sseActive;
