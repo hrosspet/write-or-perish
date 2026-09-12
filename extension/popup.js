@@ -13,7 +13,7 @@ async function renderLast() {
   const el = $('last');
   if (!last) { el.textContent = 'Nothing clipped yet.'; el.className = ''; return; }
   if (last.ok) {
-    const what = last.source === 'twitter_bookmark' ? 'tweet' : 'page';
+    const what = last.source === 'twitter_bookmark' ? 'tweet' : (last.pdf ? 'PDF link' : 'page');
     const verb = last.created ? 'Saved' : (last.updated ? 'Updated' : 'Already saved');
     el.textContent = `${verb} ${what} “${last.title || last.url}” ${ago(last.at)}`
       + (last.truncated ? ' (truncated to 100k characters)' : '') + '.';

@@ -92,6 +92,35 @@
     };
   }
 
+  // Chrome shows a PDF in its own viewer, a frame this script cannot
+  // enter: the document we run in holds one <embed> and nothing else.
+  // Save the link itself, titled from the file name, so the reference
+  // exists and the tab can go. Re-clipping later with a fuller capture
+  // upgrades the stored text (the server keeps the longer copy).
+  function pdfTitleFromUrl(href) {
+    var name = '';
+    try {
+      var path = new URL(href).pathname;
+      name = decodeURIComponent(path.split('/').filter(Boolean).pop() || '');
+    } catch (e) { /* keep the empty name */ }
+    name = name.replace(/\.pdf$/i, '').replace(/[_+]/g, ' ').trim();
+    return name;
+  }
+
+  function pdfCapture() {
+    if (document.contentType !== 'application/pdf') return null;
+    var title = pdfTitleFromUrl(location.href) || location.href;
+    return {
+      url: location.href,
+      title: title,
+      content: 'PDF: [' + title + '](' + location.href + ')\n\n' +
+        '_Only the link was saved; the PDF\'s text was not extracted._',
+      author: location.hostname.replace(/^www\./, ''),
+      posted_at: null,
+      pdf: true,
+    };
+  }
+
   function pageCapture() {
     var article = null;
     try {
@@ -132,8 +161,8 @@
     };
   }
 
-  var result = null;
-  if (/(^|\.)(x|twitter)\.com$/.test(location.hostname)) result = tweetCapture();
+  var result = pdfCapture();
+  if (!result && /(^|\.)(x|twitter)\.com$/.test(location.hostname)) result = tweetCapture();
   if (!result) result = pageCapture();
   if (result && result.content && result.content.length > MAX_CHARS) {
     result.content = result.content.slice(0, MAX_CHARS);

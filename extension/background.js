@@ -33,6 +33,26 @@ async function capture(tabId) {
   return results && results[0] ? results[0].result : null;
 }
 
+// Chrome may refuse to inject into a PDF tab at all (it has in some
+// versions). The URL and the tab title are still ours under activeTab,
+// and that is all the in-page capture saves for a PDF anyway.
+const PDF_URL = /\.pdf(?:[?#]|$)/i;
+
+function pdfLinkFromTab(tab) {
+  let title = (tab.title || '').replace(/\.pdf$/i, '').trim();
+  if (!title) {
+    try {
+      title = decodeURIComponent(new URL(tab.url).pathname.split('/').pop() || '')
+        .replace(/\.pdf$/i, '').trim();
+    } catch (e) { /* keep empty */ }
+  }
+  title = title || tab.url;
+  return {
+    url: tab.url, title, pdf: true, author: null, posted_at: null,
+    content: `PDF: [${title}](${tab.url})\n\n_Only the link was saved; the PDF's text was not extracted._`,
+  };
+}
+
 async function clip(tab, closeAfter) {
   const { baseUrl, token } = await getSettings();
   if (!token) {
@@ -44,8 +64,17 @@ async function clip(tab, closeAfter) {
   try {
     page = await capture(tab.id);
   } catch (e) {
-    await fail(`Cannot read this page (${e.message}).`, { url: tab.url });
-    return;
+    if (tab.url && PDF_URL.test(tab.url)) {
+      page = pdfLinkFromTab(tab);
+    } else {
+      await fail(`Cannot read this page (${e.message}).`, { url: tab.url });
+      return;
+    }
+  }
+  if (page && page.pdf && tab.title && !PDF_URL.test(tab.title)) {
+    // Chrome titles a PDF tab from the document's own Title metadata
+    // when it has one; that beats a name derived from the file name.
+    page.title = tab.title.trim();
   }
   if (!page || !page.content || !page.content.trim()) {
     await fail('Nothing readable on this page.', { url: tab.url });
@@ -80,7 +109,7 @@ async function clip(tab, closeAfter) {
   await setLast({
     ok: true, at: Date.now(), url: page.url, title: page.title,
     created: data.created, updated: !!data.updated, source: data.source,
-    truncated: !!data.truncated, chars: page.content.length,
+    truncated: !!data.truncated, chars: page.content.length, pdf: !!page.pdf,
   });
   await badge(data.created || data.updated ? '✓' : '=', '#5a8f5a');
   if (closeAfter) {
