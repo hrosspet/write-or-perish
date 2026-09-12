@@ -4,15 +4,16 @@ import api from '../api';
 import { useToast } from '../contexts/ToastContext';
 
 /**
- * ReferenceFeedback - the user's verdict on Loore having surfaced a saved
- * reference: "More like this" (+) or "Fewer like this" (−). Two thin
- * contour glyphs, muted until chosen; the chosen one takes the accent.
- * Choosing the same one again clears it. Neutral on purpose — this
- * steers future picks, it does not rate the post.
+ * ReferenceFeedback - the user's verdict on Loore having quoted a saved
+ * reference: "Good quote" (+) or "Bad quote" (−). Two thin contour
+ * glyphs, muted until chosen; the chosen one takes the accent. Choosing
+ * the same one again clears it. Neutral on purpose — it judges the
+ * recommendation (was this the right thing to surface, here, now), not
+ * the post itself, so no heart and no thumbs-down.
  *
  * Props:
  *   itemId:   ExternalItem id
- *   feedback: 'more' | 'less' | null (server value; local state follows it)
+ *   feedback: 'good' | 'bad' | null (server value; local state follows it)
  *   size:     icon size in px (default 14)
  *   onChange: optional (feedback) => void after the server confirms
  */
@@ -52,8 +53,8 @@ const ReferenceFeedback = ({ itemId, feedback, size = 14, onChange }) => {
 
   return (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-      {glyph('more', 'More like this', FiPlusCircle)}
-      {glyph('less', 'Fewer like this', FiMinusCircle)}
+      {glyph('good', 'Good quote', FiPlusCircle)}
+      {glyph('bad', 'Bad quote', FiMinusCircle)}
     </span>
   );
 };

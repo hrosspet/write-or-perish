@@ -1059,7 +1059,7 @@ def test_search_preview_shows_users_read_mark(app, monkeypatch):
     item = _mk_external_item(
         alice.id, "the perfect saved tweet about zen", [0.9, 0.1])
     item.read_at = datetime(2026, 9, 10, 8, 0, 0)
-    item.feedback = "more"
+    item.feedback = "good"
     _db.session.commit()
 
     _ScriptedProvider.reset([
@@ -1080,7 +1080,7 @@ def test_search_preview_shows_users_read_mark(app, monkeypatch):
         m["text"] for m in _ScriptedProvider.calls[1]["messages"])
     assert "saved reference by @visa" in round2
     assert "marked read by the user (2026-09-10)" in round2
-    assert "the user asked for more like this" in round2
+    assert "the user rated this a good quote" in round2
 
 
 def test_label_canonicalization_in_final_answer(app, monkeypatch):

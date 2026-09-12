@@ -587,7 +587,7 @@ def test_mark_read_is_explicit_idempotent_and_reversible(app, client):
     assert client.post("/api/external/items/999/read").status_code == 404
 
 
-def test_feedback_is_more_less_or_cleared(app, client):
+def test_feedback_is_good_bad_or_cleared(app, client):
     with app.app_context():
         uid = User.query.first().id
         _upsert_items(uid, "web_clip", [
@@ -597,16 +597,16 @@ def test_feedback_is_more_less_or_cleared(app, client):
 
     assert client.get(f"/api/external/items/{item_id}").get_json()["feedback"] is None
     url = f"/api/external/items/{item_id}/feedback"
-    more = client.post(url, json={"feedback": "more"}).get_json()
-    assert more["feedback"] == "more" and more["feedback_at"] is not None
+    more = client.post(url, json={"feedback": "good"}).get_json()
+    assert more["feedback"] == "good" and more["feedback_at"] is not None
     listed = client.get("/api/external/items").get_json()["items"][0]
-    assert listed["feedback"] == "more"
-    less = client.post(url, json={"feedback": "less"}).get_json()
-    assert less["feedback"] == "less"
+    assert listed["feedback"] == "good"
+    less = client.post(url, json={"feedback": "bad"}).get_json()
+    assert less["feedback"] == "bad"
     cleared = client.post(url, json={"feedback": None}).get_json()
     assert cleared["feedback"] is None and cleared["feedback_at"] is None
     assert client.post(url, json={"feedback": "meh"}).status_code == 400
-    assert client.post("/api/external/items/999/feedback", json={"feedback": "more"}).status_code == 404
+    assert client.post("/api/external/items/999/feedback", json={"feedback": "good"}).status_code == 404
 
 
 def test_update_item_edits_title_and_text_and_drops_embedding(app, client):

@@ -23,7 +23,7 @@ const SOURCE_LABELS = {
  * be marked read right where Loore surfaced it. The label alone carries
  * the state ("Mark as unread" = read). Only the user marks a
  * reference read — the AI quoting it is tracked separately as surfacing.
- * Beside it, the more/fewer-like-this verdict (ReferenceFeedback) — the
+ * Beside it, the good/bad-quote verdict (ReferenceFeedback) — the
  * hit-or-miss half of the recommendation record.
  */
 const ExternalQuoteBubble = ({ quote }) => {

@@ -320,7 +320,7 @@ code {
   color: var(--text-muted);
 }
 
-/* More / fewer like this (ReferenceFeedback): bare contour glyphs, muted
+/* Good / bad quote (ReferenceFeedback): bare contour glyphs, muted
    until chosen. The chosen one takes the accent; hover only lifts the
    other to secondary so the pair never turns colorful. */
 .ref-feedback-glyph {

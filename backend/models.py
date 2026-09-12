@@ -1152,10 +1152,10 @@ class ExternalItem(db.Model):
     # is surfaced_count above). Null = unread.
     read_at = db.Column(db.DateTime, nullable=True)
     # The user's verdict on Loore having surfaced this reference:
-    # 'more' (more like this) | 'less' (fewer like this) | null. Set only
+    # 'good' (good quote) | 'bad' (bad quote) | null. Set only
     # by the user, from the quote bubble or the reference page; shown to
-    # the model as metadata on search previews so future picks can lean
-    # on it. Together with surfaced_count and read_at this is the
+    # the model as metadata on search previews so it makes more good
+    # picks and fewer bad ones. Together with surfaced_count and read_at this is the
     # recommendation record: shown, read, hit or miss.
     feedback = db.Column(db.String(8), nullable=True)
     feedback_at = db.Column(db.DateTime, nullable=True)

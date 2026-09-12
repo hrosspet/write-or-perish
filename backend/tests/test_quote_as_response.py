@@ -142,11 +142,11 @@ def test_get_ext_quote_data_carries_owner_and_read_mark(app):
     assert data["feedback"] is None
 
     item.read_at = datetime(2026, 3, 4, 10, 30)
-    item.feedback = "more"
+    item.feedback = "good"
     _db.session.commit()
     data = get_ext_quote_data([item.id], uid)[item.id]
     assert data["read_at"].startswith("2026-03-04T10:30")
-    assert data["feedback"] == "more"
+    assert data["feedback"] == "good"
 
 
 def test_resolve_ext_quotes_owner_only(app):

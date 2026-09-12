@@ -52,23 +52,23 @@ test('a read reference offers Mark as unread and clears the mark', async () => {
   await waitFor(() => expect(screen.getByRole('button', { name: 'Mark as read' })).toBeInTheDocument());
 });
 
-test('the owner can say more or fewer like this without opening the post', async () => {
-  api.post.mockResolvedValue({ data: { id: 42, feedback: 'more', feedback_at: '2026-09-13T08:00:00Z' } });
+test('the owner can rate the quote good or bad without opening the post', async () => {
+  api.post.mockResolvedValue({ data: { id: 42, feedback: 'good', feedback_at: '2026-09-13T08:00:00Z' } });
   render(<ExternalQuoteBubble quote={quote()} />);
 
-  const more = screen.getByRole('button', { name: 'More like this' });
+  const more = screen.getByRole('button', { name: 'Good quote' });
   expect(more).toHaveAttribute('aria-pressed', 'false');
   fireEvent.click(more);
-  expect(api.post).toHaveBeenCalledWith('/external/items/42/feedback', { feedback: 'more' });
+  expect(api.post).toHaveBeenCalledWith('/external/items/42/feedback', { feedback: 'good' });
   expect(window.open).not.toHaveBeenCalled();
-  await waitFor(() => expect(screen.getByRole('button', { name: 'More like this' })).toHaveAttribute('aria-pressed', 'true'));
-  expect(screen.getByRole('button', { name: 'Fewer like this' })).toHaveAttribute('aria-pressed', 'false');
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Good quote' })).toHaveAttribute('aria-pressed', 'true'));
+  expect(screen.getByRole('button', { name: 'Bad quote' })).toHaveAttribute('aria-pressed', 'false');
 
   // Choosing the selected one again clears it.
   api.post.mockResolvedValue({ data: { id: 42, feedback: null, feedback_at: null } });
-  fireEvent.click(screen.getByRole('button', { name: 'More like this' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Good quote' }));
   expect(api.post).toHaveBeenLastCalledWith('/external/items/42/feedback', { feedback: null });
-  await waitFor(() => expect(screen.getByRole('button', { name: 'More like this' })).toHaveAttribute('aria-pressed', 'false'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Good quote' })).toHaveAttribute('aria-pressed', 'false'));
 });
 
 test('the read toggle is tinted while unread and muted once read', () => {

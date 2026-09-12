@@ -319,14 +319,14 @@ def mark_item_read(item_id):
     }), 200
 
 
-FEEDBACK_VALUES = ("more", "less")
+FEEDBACK_VALUES = ("good", "bad")
 
 
 @external_bp.route("/items/<int:item_id>/feedback", methods=["POST"])
 @login_required
 def set_item_feedback(item_id):
     """Record the user's verdict on Loore surfacing this reference:
-    {"feedback": "more" | "less" | null}. Null clears it."""
+    {"feedback": "good" | "bad" | null}. Null clears it."""
     item = ExternalItem.query.filter_by(
         id=item_id, user_id=current_user.id).first()
     if item is None:
@@ -334,7 +334,7 @@ def set_item_feedback(item_id):
     data = request.get_json(silent=True) or {}
     value = data.get("feedback")
     if value is not None and value not in FEEDBACK_VALUES:
-        return jsonify({"error": "feedback must be 'more', 'less' or null"}), 400
+        return jsonify({"error": "feedback must be 'good', 'bad' or null"}), 400
     item.feedback = value
     item.feedback_at = datetime.utcnow() if value else None
     db.session.commit()

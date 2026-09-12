@@ -922,10 +922,10 @@ def _retrieval_injection_text(tr, with_labels=False):
             if item.read_at:
                 surfaced += (" · marked read by the user "
                              f"({item.read_at.strftime('%Y-%m-%d')})")
-            if item.feedback == "more":
-                surfaced += " · the user asked for more like this"
-            elif item.feedback == "less":
-                surfaced += " · the user asked for fewer like this"
+            if item.feedback == "good":
+                surfaced += " · the user rated this a good quote"
+            elif item.feedback == "bad":
+                surfaced += " · the user rated this a bad quote"
             tag = (f"[{m['label']}] " if with_labels and m.get("label")
                    else f"reference {item.id} · ")
             author = (f"@{item.author_handle}" if item.author_handle
