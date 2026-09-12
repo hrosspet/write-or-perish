@@ -21,7 +21,9 @@ from flask import (
 from flask_login import current_user, login_required
 
 from backend.extensions import db
-from backend.models import ApiToken, ExternalAccount, ExternalItem
+from backend.models import (
+    ApiToken, ExternalAccount, ExternalItem, ExternalItemEmbedding,
+)
 from backend.utils.api_tokens import (
     SCOPE_EXTERNAL_WRITE, generate_api_token, token_or_login_required,
 )
@@ -61,10 +63,15 @@ def list_items():
     if source:
         query = query.filter_by(source=source)
     total = query.count()
-    items = query.order_by(
-        ExternalItem.posted_at.desc().nullslast(),
-        ExternalItem.id.desc(),
-    ).offset((page - 1) * per_page).limit(per_page).all()
+    if request.args.get("sort") == "saved":
+        # Most recently saved first — the references list on the Import
+        # page, where "did my clip land?" is the question.
+        order = (ExternalItem.id.desc(),)
+    else:
+        order = (ExternalItem.posted_at.desc().nullslast(),
+                 ExternalItem.id.desc())
+    items = query.order_by(*order).offset(
+        (page - 1) * per_page).limit(per_page).all()
 
     counts = dict(
         db.session.query(ExternalItem.source, db.func.count())
@@ -76,6 +83,35 @@ def list_items():
         "total": total,
         "counts": counts,
     }), 200
+
+
+@external_bp.route("/items/<int:item_id>", methods=["GET"])
+@login_required
+def get_item(item_id):
+    """One reference with its full stored text (Markdown for clips)."""
+    item = ExternalItem.query.filter_by(
+        id=item_id, user_id=current_user.id).first()
+    if item is None:
+        return jsonify({"error": "not found"}), 404
+    data = _serialize_item(item)
+    data["content"] = item.get_content() or ""
+    return jsonify(data), 200
+
+
+@external_bp.route("/items/<int:item_id>", methods=["DELETE"])
+@login_required
+def delete_item(item_id):
+    """Remove a reference. Its embedding goes with it (explicitly, since
+    SQLite tests don't enforce the FK cascade). A {quote_ext} marker that
+    pointed at it renders as inaccessible, like a deleted node's quote."""
+    item = ExternalItem.query.filter_by(
+        id=item_id, user_id=current_user.id).first()
+    if item is None:
+        return jsonify({"error": "not found"}), 404
+    ExternalItemEmbedding.query.filter_by(item_id=item.id).delete()
+    db.session.delete(item)
+    db.session.commit()
+    return jsonify({"deleted": True, "id": item_id}), 200
 
 
 @external_bp.route("/community-archive/fetch", methods=["POST"])

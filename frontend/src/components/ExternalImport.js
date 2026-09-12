@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import api from '../api';
 import { useUser } from '../contexts/UserContext';
 import NewTokenDialog from './NewTokenDialog';
+import ReferenceList from './ReferenceList';
 
 /**
  * References import (#155 / Download substrate): Community Archive
@@ -86,6 +87,8 @@ export default function ExternalImport() {
   const [newToken, setNewToken] = useState(null);  // {id, token}: plaintext, shown once
   const [tokenMsg, setTokenMsg] = useState(null);
   const [addressCopied, setAddressCopied] = useState(false);
+  // Bumped whenever counts change so the references list reloads.
+  const [listKey, setListKey] = useState(0);
   const fileRef = useRef(null);
   const pollRef = useRef(null);
 
@@ -95,7 +98,11 @@ export default function ExternalImport() {
         api.get('/external/items', { params: { per_page: 1 } }),
         api.get('/external/twitter/status'),
       ]);
-      setCounts(itemsRes.data.counts || {});
+      setCounts((prev) => {
+        const next = itemsRes.data.counts || {};
+        if (JSON.stringify(prev) !== JSON.stringify(next)) setListKey((k) => k + 1);
+        return next;
+      });
       setXStatus(xRes.data);
     } catch (e) { /* page still works without counts */ }
   };
@@ -439,6 +446,8 @@ export default function ExternalImport() {
         )}
       </div>
       )}
+
+      <ReferenceList refreshKey={listKey} />
 
       <NewTokenDialog
         token={newToken ? newToken.token : null}

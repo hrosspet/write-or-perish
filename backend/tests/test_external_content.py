@@ -20,6 +20,8 @@ sys.modules.setdefault("celery.utils", MagicMock())
 sys.modules.setdefault("celery.utils.log", MagicMock())
 sys.modules.setdefault("celery.result", MagicMock())
 
+from datetime import datetime  # noqa: E402
+
 import pytest  # noqa: E402
 from flask import Flask  # noqa: E402
 
@@ -414,3 +416,57 @@ def test_token_minting_needs_external_content_opt_in(app, client):
     assert _mint_status() == 403
     _set(True)
     assert _mint_status() == 201
+
+
+def test_item_detail_delete_and_saved_order(app, client):
+    with app.app_context():
+        uid = User.query.first().id
+        _upsert_items(uid, "web_clip", [
+            {"external_id": "a" * 64, "content": "# Old\n\nfirst saved",
+             "title": "Old", "author_handle": "example.com",
+             "url": "https://example.com/old",
+             "posted_at": datetime(2026, 5, 1)},
+            {"external_id": "b" * 64, "content": "# New\n\nsaved later",
+             "title": "New", "author_handle": "example.com",
+             "url": "https://example.com/new",
+             "posted_at": datetime(2026, 1, 1)},
+        ])
+        old_id, new_id = [i.id for i in ExternalItem.query.order_by(
+            ExternalItem.id).all()]
+        _db.session.add(ExternalItemEmbedding(
+            item_id=new_id, user_id=uid, model="m", content_hash="h",
+            vector=b""))
+        _db.session.commit()
+
+    # Default order is by posted_at (Old posted later → first); the
+    # references list asks for saved order (New saved later → first).
+    default = client.get("/api/external/items").get_json()["items"]
+    assert [i["id"] for i in default] == [old_id, new_id]
+    saved = client.get("/api/external/items?sort=saved").get_json()["items"]
+    assert [i["id"] for i in saved] == [new_id, old_id]
+
+    detail = client.get(f"/api/external/items/{new_id}").get_json()
+    assert detail["title"] == "New"
+    assert detail["content"] == "# New\n\nsaved later"
+
+    assert client.delete(f"/api/external/items/{new_id}").status_code == 200
+    assert client.get(f"/api/external/items/{new_id}").status_code == 404
+    assert client.delete(f"/api/external/items/{new_id}").status_code == 404
+    with app.app_context():
+        assert ExternalItemEmbedding.query.filter_by(item_id=new_id).count() == 0
+        assert ExternalItem.query.count() == 1
+
+
+def test_item_routes_are_owner_only(app, client):
+    with app.app_context():
+        other = User(username="other")
+        _db.session.add(other)
+        _db.session.commit()
+        _upsert_items(other.id, "web_clip", [
+            {"external_id": "c" * 64, "content": "theirs", "title": None,
+             "author_handle": None, "url": None, "posted_at": None}])
+        their_id = ExternalItem.query.filter_by(user_id=other.id).one().id
+    assert client.get(f"/api/external/items/{their_id}").status_code == 404
+    assert client.delete(f"/api/external/items/{their_id}").status_code == 404
+    with app.app_context():
+        assert ExternalItem.query.get(their_id) is not None
