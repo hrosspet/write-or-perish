@@ -407,7 +407,11 @@ VOICE_TOOLS = [
             "saying right now — the quote plus your reasoning is the "
             "response, not a link dump. Reference previews show how often "
             "each was already surfaced; weigh that yourself — re-quoting "
-            "something recently shown needs a good reason. You can refine "
+            "something recently shown needs a good reason. Some previews "
+            "also carry 'marked read by the user': only the user can set "
+            "that mark, by hand, so it means they have actually read the "
+            "reference — build on it as shared ground rather than "
+            "introducing it as new. You can refine "
             "and search again if the previews miss, and quoting nothing is "
             "always fine. Labels are your private triage handles: use them "
             "only inside {quote:...} markers — in prose, refer to items by "
@@ -890,8 +894,10 @@ def _retrieval_injection_text(tr, with_labels=False):
             lines.append(
                 f"- {tag}entry {node.id} · {stamp}{pct}: {snippet}")
         # Saved external references (imported tweets/bookmarks), with their
-        # surfacing history as visible metadata — the model weighs
-        # repetition itself; there is no hardcoded cooldown.
+        # surfacing history and the user's own read mark as visible
+        # metadata — the model weighs repetition itself; there is no
+        # hardcoded cooldown. The read mark is set only by the user
+        # (see ExternalItem.read_at), never by surfacing.
         for m in (tr.get("ext_matches") or []):
             item = ExternalItem.query.get(m.get("item_id"))
             if item is None:
@@ -911,6 +917,9 @@ def _retrieval_injection_text(tr, with_labels=False):
                         if item.last_surfaced_at else "?")
                 surfaced = (f" · already surfaced {item.surfaced_count}x"
                             f" (last {last})")
+            if item.read_at:
+                surfaced += (" · marked read by the user "
+                             f"({item.read_at.strftime('%Y-%m-%d')})")
             tag = (f"[{m['label']}] " if with_labels and m.get("label")
                    else f"reference {item.id} · ")
             author = (f"@{item.author_handle}" if item.author_handle

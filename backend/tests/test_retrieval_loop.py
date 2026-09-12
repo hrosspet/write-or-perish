@@ -993,6 +993,8 @@ def test_search_labels_canonicalize_and_bump_surfaced(app, monkeypatch):
         m["text"] for m in _ScriptedProvider.calls[1]["messages"])
     assert "[A]" in round2 and "[B]" in round2
     assert "saved reference by @visa" in round2
+    # Unread reference: no read mark in the preview.
+    assert "marked read by the user" not in round2
     # The FINAL node carries the canonical marker; no continuation node.
     interim = _fresh(llm_node.id)
     final = (Node.query.get(interim.continuation_node_id)
@@ -1008,6 +1010,41 @@ def test_search_labels_canonicalize_and_bump_surfaced(app, monkeypatch):
     assert fresh_item.surfaced_count == 1
     assert fresh_item.last_surfaced_at is not None
     assert result["status"] == "completed"
+
+
+def test_search_preview_shows_users_read_mark(app, monkeypatch):
+    """A reference the user marked read (ExternalItem.read_at — set only
+    by the user's own hand, never by surfacing) carries that mark in the
+    search preview the model sees, dated."""
+    from datetime import datetime
+    import backend.utils.embeddings as emb_mod
+    monkeypatch.setattr(
+        emb_mod, "embed_texts", lambda texts, key, **kw: [[1.0, 0.0]])
+
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    item = _mk_external_item(
+        alice.id, "the perfect saved tweet about zen", [0.9, 0.1])
+    item.read_at = datetime(2026, 9, 10, 8, 0, 0)
+    _db.session.commit()
+
+    _ScriptedProvider.reset([
+        _resp("Checking your archive.",
+              tool_calls=[{"id": "t1", "name": "semantic_search",
+                           "input": {"query": "zen"}}]),
+        _resp("You already read that one — building on it."),
+    ])
+
+    result = generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+
+    assert result["status"] == "completed"
+    assert len(_ScriptedProvider.calls) == 2
+    round2 = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[1]["messages"])
+    assert "saved reference by @visa" in round2
+    assert "marked read by the user (2026-09-10)" in round2
 
 
 def test_label_canonicalization_in_final_answer(app, monkeypatch):
