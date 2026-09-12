@@ -102,6 +102,9 @@ function RootRoute() {
 function App() {
   const [showNewEntry, setShowNewEntry] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
+  // 'archive' (the Log) or 'external' (the References page) — set when
+  // the modal opens so ⌘K searches whatever the page in front of you lists.
+  const [searchScope, setSearchScope] = useState('archive');
   const nodeFormRef = useRef(null);
   const [showTerms, setShowTerms] = useState(false);
   const [updates, setUpdates] = useState(null);
@@ -136,11 +139,18 @@ function App() {
     }).catch(() => {});
   }, [user]);
 
+  const openSearch = (scope) => {
+    setSearchScope(scope);
+    setShowSearch(true);
+  };
+
   // Cmd+K / Ctrl+K to open search
   useEffect(() => {
     const handleSearchShortcut = (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
         e.preventDefault();
+        setSearchScope(window.location.pathname.startsWith('/references')
+          ? 'external' : 'archive');
         setShowSearch((prev) => !prev);
       }
     };
@@ -174,7 +184,7 @@ function App() {
           />
       )}
 
-      {showSearch && <SearchModal onClose={() => setShowSearch(false)} />}
+      {showSearch && <SearchModal scope={searchScope} onClose={() => setShowSearch(false)} />}
 
       {/* Render the Terms Modal if the user hasn't accepted the terms yet */}
       {showTerms && (
@@ -215,7 +225,7 @@ function App() {
           <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
           <Route path="/todo" element={<ProtectedRoute><TodoPage /></ProtectedRoute>} />
           {/* Log (renamed from feed) */}
-          <Route path="/log" element={<ProtectedRoute><Feed onSearchClick={() => setShowSearch(true)} /></ProtectedRoute>} />
+          <Route path="/log" element={<ProtectedRoute><Feed onSearchClick={() => openSearch('archive')} /></ProtectedRoute>} />
           {/* Backward compatibility redirects */}
           <Route path="/feed" element={<Navigate to="/log" replace />} />
           <Route path="/dashboard" element={<Navigate to="/profile" replace />} />
@@ -224,7 +234,7 @@ function App() {
           <Route path="/prompts" element={<ProtectedRoute><PromptsPage /></ProtectedRoute>} />
           <Route path="/prompts/:promptKey" element={<ProtectedRoute><PromptDetailPage /></ProtectedRoute>} />
           <Route path="/import" element={<ProtectedRoute><ImportPage /></ProtectedRoute>} />
-          <Route path="/references" element={<ProtectedRoute><ReferencesPage /></ProtectedRoute>} />
+          <Route path="/references" element={<ProtectedRoute><ReferencesPage onSearchClick={() => openSearch('external')} /></ProtectedRoute>} />
           <Route path="/references/:id" element={<ProtectedRoute><ReferenceDetailPage /></ProtectedRoute>} />
           {/* AI preferences folded into the artifact model (#158 Slice 5);
               keep the old path working as a redirect. */}

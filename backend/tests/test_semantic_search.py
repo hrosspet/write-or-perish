@@ -28,7 +28,9 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
         del sys.modules[_mod]
 
 from backend.extensions import db as _db  # noqa: E402
-from backend.models import User, Node, NodeEmbedding  # noqa: E402
+from backend.models import (  # noqa: E402
+    User, Node, NodeEmbedding, ExternalItem, ExternalItemEmbedding,
+)
 from backend.utils.embeddings import (  # noqa: E402
     content_hash, cosine_similarity, pack_vector, unpack_vector,
     top_k_similar, retrieve_relevant_snippets,
@@ -251,6 +253,48 @@ def test_semantic_search_respects_date_range(app, client, monkeypatch):
 
     resp = client.get("/api/search/semantic?q=gardens&from=not-a-date")
     assert resp.status_code == 400
+
+
+def _mk_reference(uid, content, vector, **kw):
+    item = ExternalItem(user_id=uid, source=kw.pop("source", "web_clip"),
+                        external_id=kw.pop("external_id", "x" * 64), **kw)
+    item.set_content(content)
+    _db.session.add(item)
+    _db.session.commit()
+    _db.session.add(ExternalItemEmbedding(
+        item_id=item.id, user_id=uid, model="text-embedding-3-small",
+        content_hash=content_hash(content), vector=pack_vector(vector)))
+    _db.session.commit()
+    return item
+
+
+def test_semantic_search_external_scope_returns_only_references(
+        app, client, monkeypatch):
+    with app.app_context():
+        uid = User.query.first().id
+        node = _mk_node(uid, "my own note on tomatoes")
+        _mk_embedding(node, [1.0, 0.0])
+        ref = _mk_reference(uid, "a clipped guide to tomatoes", [0.9, 0.1],
+                            title="Tomato guide", url="https://e.x/t")
+        other = User(username="other")
+        _db.session.add(other)
+        _db.session.commit()
+        _mk_reference(other.id, "someone else's clip", [1.0, 0.0],
+                      external_id="y" * 64)
+        node_id, ref_id = node.id, ref.id
+
+    _patch_query_embedding(monkeypatch, [1.0, 0.0])
+    body = client.get("/api/search/semantic?q=tomatoes&scope=external").get_json()
+    assert body["scope"] == "external"
+    assert [r["id"] for r in body["results"]] == [ref_id]
+    assert body["results"][0]["kind"] == "external"
+    assert body["results"][0]["title"] == "Tomato guide"
+
+    # Default scope still merges the node in, ranked by score.
+    body = client.get("/api/search/semantic?q=tomatoes").get_json()
+    assert body["scope"] == "archive"
+    assert [(r["id"], r.get("kind", "node")) for r in body["results"]] == [
+        (node_id, "node"), (ref_id, "external")]
 
 
 def test_semantic_search_requires_query(app, client):

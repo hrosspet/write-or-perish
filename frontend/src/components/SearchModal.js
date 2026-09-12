@@ -3,9 +3,15 @@ import { useNavigate } from 'react-router-dom';
 import api from '../api';
 import { formatDate } from '../utils/date';
 import { useUser } from '../contexts/UserContext';
+import { authorLabel, sourceLabel } from '../utils/references';
 
-function SearchModal({ onClose }) {
+// Two surfaces share this modal: the Log (scope 'archive', the default —
+// the user's own entries, with saved references merged into semantic
+// results) and the References page (scope 'external' — saved references
+// only, in both modes).
+function SearchModal({ onClose, scope = 'archive' }) {
   const { user } = useUser();
+  const externalOnly = scope === 'external';
   const isAdmin = !!(user && user.is_admin);
   const [query, setQuery] = useState('');
   // Semantic is the default for everyone; the Keyword toggle is admin-only.
@@ -49,6 +55,7 @@ function SearchModal({ onClose }) {
       if (to) params.to = to;
       params.per_page = 20;
       params.page = 1;
+      if (externalOnly) params.scope = 'external';
 
       const endpoint = mode === 'semantic' ? '/search/semantic' : '/search';
       const res = await api.get(endpoint, { params });
@@ -63,7 +70,7 @@ function SearchModal({ onClose }) {
     } finally {
       setLoading(false);
     }
-  }, [mode]);
+  }, [mode, externalOnly]);
 
   const loadMore = useCallback(async () => {
     if (mode === 'semantic') return; // semantic returns a single ranked set
@@ -71,6 +78,7 @@ function SearchModal({ onClose }) {
     setLoadingMore(true);
     try {
       const params = { per_page: 20, page: nextPage };
+      if (externalOnly) params.scope = 'external';
       const trimmed = query.trim();
       if (trimmed) params.q = trimmed;
       if (dateFrom) params.from = dateFrom;
@@ -85,7 +93,7 @@ function SearchModal({ onClose }) {
     } finally {
       setLoadingMore(false);
     }
-  }, [page, query, dateFrom, dateTo, mode]);
+  }, [page, query, dateFrom, dateTo, mode, externalOnly]);
 
   // Auto-load more when the button scrolls into view
   useEffect(() => {
@@ -127,6 +135,17 @@ function SearchModal({ onClose }) {
     } else {
       onClose();
       navigate(`/node/${id}`);
+    }
+  };
+
+  // A reference opens its Loore page (as a References card does); the
+  // page carries the "Open source" action.
+  const handleReferenceClick = (id, e) => {
+    if (e && (e.metaKey || e.ctrlKey)) {
+      window.open(`/references/${id}`, '_blank');
+    } else {
+      onClose();
+      navigate(`/references/${id}`);
     }
   };
 
@@ -175,7 +194,7 @@ function SearchModal({ onClose }) {
           <input
             ref={inputRef}
             type="text"
-            placeholder="Search your entries..."
+            placeholder={externalOnly ? 'Search your references...' : 'Search your entries...'}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             style={{
@@ -309,20 +328,16 @@ function SearchModal({ onClose }) {
 
           {!loading && !hasSearched && (
             <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '14px' }}>
-              Type to search your entries
+              {externalOnly ? 'Type to search your references' : 'Type to search your entries'}
             </div>
           )}
 
           {!loading && results.map((r) => (
             <div
               key={`${r.kind || 'node'}-${r.id}`}
-              onClick={(e) => {
-                if (r.kind === 'external') {
-                  if (r.external_url) window.open(r.external_url, '_blank', 'noopener');
-                  return;
-                }
-                handleResultClick(r.id, e);
-              }}
+              onClick={(e) => (r.kind === 'external'
+                ? handleReferenceClick(r.id, e)
+                : handleResultClick(r.id, e))}
               style={{
                 padding: '12px 20px',
                 cursor: 'pointer',
@@ -347,13 +362,11 @@ function SearchModal({ onClose }) {
                   textTransform: 'uppercase',
                   letterSpacing: '0.5px',
                 }}>
-                  {r.kind === 'external'
-                    ? (r.source === 'twitter_bookmark' ? 'bookmark' : 'archive')
-                    : r.node_type}
+                  {r.kind === 'external' ? sourceLabel(r) : r.node_type}
                 </span>
-                {r.kind === 'external' && r.author_handle && (
+                {r.kind === 'external' && authorLabel(r) && (
                   <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-                    @{r.author_handle}
+                    {authorLabel(r)}
                   </span>
                 )}
                 <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
@@ -377,6 +390,18 @@ function SearchModal({ onClose }) {
                   </span>
                 )}
               </div>
+              {r.kind === 'external' && r.title && (
+                <div style={{
+                  fontSize: '14px',
+                  color: 'var(--text-primary)',
+                  marginBottom: '2px',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}>
+                  {r.title}
+                </div>
+              )}
               <div
                 style={{
                   fontSize: '14px',
