@@ -1033,8 +1033,66 @@ def _focal_own_fields(node):
             data["tool_calls_meta"] = _json.loads(node.tool_calls_meta)
         except (ValueError, TypeError):
             pass
+        # A Community Archive feed reply carries picks (see FeedPick), as
+        # does a control sample rendered through the same list; the
+        # count is looked up only for nodes marked as either.
+        if any(isinstance(m, dict) and m.get("name") in ("_batch", "_feed_sample")
+               for m in data.get("tool_calls_meta") or []):
+            from backend.models import FeedPick
+            data["feed_picks_count"] = FeedPick.query.filter_by(
+                node_id=node.id).count()
     data.update(_system_prompt_fields(node))
     return data
+
+
+@nodes_bp.route("/<int:node_id>/feed-picks", methods=["GET"])
+@login_required
+def get_feed_picks(node_id):
+    """The tweets a Community Archive feed reply named, in the model's
+    order, each with the saved reference it became (full text, read
+    mark, verdict) and what the model claimed about it. Owner only."""
+    from backend.models import FeedPick
+    from backend.routes.external import _serialize_item
+    node = Node.query.get_or_404(node_id)
+    owner_id = node.human_owner_id or node.user_id
+    if owner_id != current_user.id:
+        return jsonify({"error": "Unauthorized"}), 403
+    rows = (FeedPick.query.filter_by(node_id=node.id)
+            .order_by(FeedPick.rank.asc()).all())
+    picks = []
+    for row in rows:
+        item = _serialize_item(row.item)
+        item["content"] = row.item.get_content() or ""
+        picks.append({
+            "rank": row.rank,
+            "relevance": row.relevance,
+            "recommended": bool(row.recommended),
+            "picked_by": row.picked_by,
+            "why": row.get_why(),
+            "item": item,
+        })
+    return jsonify({"node_id": node.id, "picks": picks})
+
+
+@nodes_bp.route("/<int:node_id>/feed-picks/read", methods=["POST"])
+@login_required
+def mark_feed_picks_read(node_id):
+    """Mark every tweet this feed reply named as read (the list's "Mark
+    all as read"). Idempotent: an already-read item keeps its read_at.
+    Returns {item_id: read_at} for the whole list."""
+    from backend.models import FeedPick
+    node = Node.query.get_or_404(node_id)
+    owner_id = node.human_owner_id or node.user_id
+    if owner_id != current_user.id:
+        return jsonify({"error": "Unauthorized"}), 403
+    now = datetime.utcnow()
+    read_at = {}
+    for row in FeedPick.query.filter_by(node_id=node.id).all():
+        if row.item.read_at is None:
+            row.item.read_at = now
+        read_at[row.item.id] = iso_utc(row.item.read_at)
+    db.session.commit()
+    return jsonify({"node_id": node.id, "read_at": read_at})
 
 
 @nodes_bp.route("/<int:node_id>", methods=["GET"])
@@ -1959,6 +2017,20 @@ def get_llm_status(node_id):
             )
         except (json.JSONDecodeError, TypeError):
             pass
+    # Batch stage ({ca_tweets}): the synchronous part is done and the
+    # turn is queued at the provider. The thread page uses this to stop
+    # the generate spinner and hand the wait to the pending node.
+    batch = next((m for m in response_data.get("tool_calls_meta") or []
+                  if isinstance(m, dict) and m.get("name") == "_batch"),
+                 None)
+    if batch and batch.get("status") == "submitted" \
+            and node.llm_task_status == "processing":
+        response_data["stage"] = "batch"
+        response_data["batch_submitted_at"] = batch.get("submitted_at")
+    if batch and node.llm_task_status == "completed":
+        from backend.models import FeedPick
+        response_data["feed_picks_count"] = FeedPick.query.filter_by(
+            node_id=node.id).count()
 
     # Include user-facing task warnings (rendered as toasts by
     # frontend useLlmTaskWarnings hook). Always include the key so the

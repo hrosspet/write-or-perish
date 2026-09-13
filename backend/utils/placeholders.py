@@ -250,6 +250,96 @@ def parse_max_export_tokens(raw, *, user_id=None, placeholder=None,
     return parsed
 
 
+# ── {ca_tweets} — Community Archive feed (PoC, 2026-09-13) ─────────────
+#
+# Syntax: {ca_tweets} or {ca_tweets?days=N}
+#
+# Renders the last N days of the Community Archive corpus (the nightly
+# parquet snapshot cached under COMMUNITY_ARCHIVE_SNAPSHOT_DIR) in the
+# compact tweet format, so a prompt can ask "is there anything in the
+# last day's tweets this person would benefit from reading?". The window
+# ends at the NEWEST TWEET IN THE SNAPSHOT, not at the node's timestamp:
+# the export lags a few hours and undercounts the newest day, so
+# anchoring on the node would silently shrink days=1 to a partial day.
+#
+# A prompt carrying this placeholder is sent through the provider's
+# Batch API (Anthropic only for now) rather than a synchronous call: a
+# day of the corpus is ~250k tokens, the answer is not latency-bound,
+# and batch is half price. See generate_llm_response.
+#
+# Supported params:
+#   days=<int>     - window length, default 1. Non-numeric or < 1 is
+#                    refused (not silently defaulted — see the note above
+#                    USER_EXPORT_KNOWN_KEYS on silent-fallback cost bugs).
+#   scope=all      - the whole archive (default).
+#   scope=follows  - only the accounts the user follows on X, from the
+#                    following list saved for them under the snapshot
+#                    dir (following/<username>.json); refused at run
+#                    time when no list is saved.
+#
+CA_TWEETS_PATTERN = re.compile(r"\{ca_tweets(\?[^}]*)?\}")
+CA_TWEETS_KNOWN_KEYS = frozenset({"days", "scope"})
+CA_TWEETS_DEFAULT_DAYS = 1
+CA_TWEETS_SCOPES = ("all", "follows")
+
+
+class CaTweetsValidationError(UserExportValidationError):
+    """A malformed {ca_tweets} placeholder. Subclasses the export error so
+    every HTTP call site that already turns a refused {user_export} into
+    a 400 + toast handles this one identically."""
+
+
+def parse_ca_tweets_days(params, *, placeholder=None):
+    """`days` from a parsed {ca_tweets} param dict → int >= 1 (default
+    CA_TWEETS_DEFAULT_DAYS). Raises CaTweetsValidationError on junk."""
+    raw = params.get("days")
+    if raw is None:
+        return CA_TWEETS_DEFAULT_DAYS
+    try:
+        days = int(raw)
+    except (TypeError, ValueError):
+        days = 0
+    if days < 1:
+        raise CaTweetsValidationError(
+            f"{{ca_tweets}} needs days=<whole number >= 1>; got "
+            f"{placeholder or raw!r}.")
+    return days
+
+
+def parse_ca_tweets_scope(params, *, placeholder=None):
+    """`scope` from a parsed {ca_tweets} param dict → 'all' | 'follows'."""
+    raw = (params.get("scope") or "all").strip().lower()
+    if raw not in CA_TWEETS_SCOPES:
+        raise CaTweetsValidationError(
+            f"{{ca_tweets}} scope must be one of {list(CA_TWEETS_SCOPES)}; "
+            f"got {placeholder or raw!r}.")
+    return raw
+
+
+def validate_ca_tweets_placeholders(text, *, user_id=None, log=None):
+    """Refuse a {ca_tweets?...} placeholder with unknown keys or a bad
+    `days` BEFORE any LLM node exists or any spend happens (mirrors
+    validate_user_export_placeholders). No-op without the placeholder."""
+    if not text:
+        return
+    log = log if log is not None else _default_logger
+    for match in CA_TWEETS_PATTERN.finditer(text):
+        placeholder = match.group(0)
+        params = parse_placeholder_params(placeholder)
+        unknown = set(params) - CA_TWEETS_KNOWN_KEYS
+        if unknown:
+            log.warning(
+                "Refused {ca_tweets} placeholder for user_id=%s: unknown "
+                "key(s) %s placeholder=%r", user_id, sorted(unknown),
+                placeholder)
+            raise CaTweetsValidationError(
+                f"{{ca_tweets}} has unrecognized param key(s) "
+                f"{sorted(unknown)}. Got: {placeholder}. Known keys: "
+                f"{sorted(CA_TWEETS_KNOWN_KEYS)}.")
+        parse_ca_tweets_days(params, placeholder=placeholder)
+        parse_ca_tweets_scope(params, placeholder=placeholder)
+
+
 def parse_days(raw, *, user_id=None, placeholder=None, log=None):
     """Parse the `days` value from a {user_export} placeholder.
 

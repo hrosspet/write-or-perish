@@ -6,6 +6,11 @@ import json
 import re
 import time
 from celery import Task
+try:
+    from celery.exceptions import Retry
+except ImportError:  # test fixtures stub `celery` with a bare module
+    class Retry(Exception):  # noqa: N818 — mirrors celery's name
+        """Stand-in so the task body's `except Retry` still parses."""
 from celery.utils.log import get_task_logger
 from datetime import datetime, timedelta, timezone
 
@@ -16,7 +21,9 @@ from backend.models import (
     NodeContextArtifact, ExternalItem,
 )
 from backend.extensions import db
-from backend.llm_providers import LLMProvider, PromptTooLongError
+from backend.llm_providers import (
+    LLMProvider, PromptTooLongError, DEFAULT_MAX_OUTPUT_TOKENS,
+)
 from backend.utils.tokens import (
     approximate_token_count, reduce_export_tokens, format_date_metadata,
 )
@@ -32,7 +39,10 @@ from backend.utils.cost import calculate_llm_cost_microdollars
 from backend.utils.tool_meta import update_tool_meta, parse_github_issue
 from backend.utils.privacy import AI_ALLOWED
 from backend.utils.placeholders import (
+    CA_TWEETS_PATTERN,
     USER_EXPORT_PATTERN,
+    parse_ca_tweets_days,
+    parse_ca_tweets_scope,
     UserExportValidationError,
     export_budget_allowed,
     parse_placeholder_params,
@@ -1955,6 +1965,98 @@ def get_user_recent_raw_content(user_id, created_before=None):
     }
 
 
+# {ca_tweets} (PoC, 2026-09-13): the prompt carries a day of the Community
+# Archive corpus (~250k tokens) and is not latency-bound, so it goes through
+# the Anthropic Batch API. The task polls its own batch by re-queueing
+# itself (Celery retry with a countdown): every poll re-runs the whole
+# task, which rebuilds the prompt (cheap: a duckdb scan of the cached
+# parquet, ~2 s) and then finds the batch id stored on the node. 120 s ×
+# 800 polls covers the Batch API's 24 h window; the countdown stays well
+# under the Redis visibility timeout so an ETA task is never redelivered.
+CA_BATCH_POLL_SECONDS = 120
+CA_BATCH_MAX_POLLS = 800
+CA_TWEETS_STUB = "(see Community Archive tweets above)"
+
+
+CA_BATCH_PROVIDERS = ("anthropic", "openai")
+
+
+def _ca_batch_roundtrip(task, llm_node, model_id, api_model, messages,
+                        api_key, model_config, ca_refs=None,
+                        provider="anthropic"):
+    """Submit-or-poll the one-item batch for *llm_node*.
+
+    First run: submit, record {name: "_batch", batch_id, custom_id} in the
+    node's tool_calls_meta (underscore names are hidden by the UI, like
+    "_mode"), and re-queue the task. Later runs: poll; re-queue while the
+    batch is processing; return the response dict (same shape as the sync
+    provider call, plus batch=True for the cost log) once it has ended.
+    A failed / expired item raises, which fails the node normally."""
+    from backend.utils import llm_batch
+    submit_one, collect_one = {
+        "anthropic": (llm_batch.anthropic_batch_submit_one,
+                      llm_batch.anthropic_batch_collect_one),
+        "openai": (llm_batch.openai_batch_submit_one,
+                   llm_batch.openai_batch_collect_one),
+    }[provider]
+    meta = []
+    if llm_node.tool_calls_meta:
+        try:
+            meta = json.loads(llm_node.tool_calls_meta) or []
+        except (json.JSONDecodeError, TypeError):
+            meta = []
+    entry = next((m for m in meta if isinstance(m, dict)
+                  and m.get("name") == "_batch"), None)
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    if entry is None:
+        max_tokens = min(
+            model_config.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS),
+            DEFAULT_MAX_OUTPUT_TOKENS)
+        custom_id = f"node-{llm_node.id}"
+        from backend.utils.ca_feed import FEED_SCHEMA
+        batch_id = submit_one(
+            api_key, custom_id, api_model, messages, max_tokens,
+            output_schema=FEED_SCHEMA if ca_refs else None)
+        meta.append({
+            "name": "_batch", "batch_id": batch_id, "custom_id": custom_id,
+            "model": model_id, "provider": provider, "submitted_at": now,
+            "status": "submitted",
+        })
+        llm_node.tool_calls_meta = json.dumps(meta)
+        llm_node.llm_task_progress = 50
+        db.session.commit()
+        logger.info("Node %s: batch %s submitted; polling every %ss",
+                    llm_node.id, batch_id, CA_BATCH_POLL_SECONDS)
+        raise task.retry(countdown=CA_BATCH_POLL_SECONDS,
+                         max_retries=CA_BATCH_MAX_POLLS)
+    status, resp = collect_one(
+        api_key, entry["batch_id"], entry["custom_id"])
+    if resp is None:
+        logger.info("Node %s: batch %s still %s (poll %s)", llm_node.id,
+                    entry["batch_id"], status, task.request.retries)
+        raise task.retry(countdown=CA_BATCH_POLL_SECONDS,
+                         max_retries=CA_BATCH_MAX_POLLS)
+    entry["status"] = "ended"
+    entry["collected_at"] = now
+    llm_node.tool_calls_meta = json.dumps(meta)
+    db.session.commit()
+    if ca_refs:
+        # Feed reply: the JSON answer becomes saved references + FeedPick
+        # rows (read mark, good/bad verdict and the model's claims all
+        # live on rows, not in prose); the node text is the verdict.
+        from backend.utils.ca_feed import (
+            parse_feed_reply, render_feed_reply, save_feed_picks)
+        from backend.utils.community_archive import expand_ca_citations
+        verdict, picks = parse_feed_reply(resp["content"], ca_refs)
+        save_feed_picks(llm_node.human_owner_id, llm_node, picks)
+        resp["content"] = expand_ca_citations(
+            render_feed_reply(verdict, picks), ca_refs)
+        logger.info("Node %s: feed reply with %d picks (%d recommended)",
+                    llm_node.id, len(picks),
+                    sum(1 for p in picks if p["recommend"]))
+    return resp
+
+
 class LLMCompletionTask(Task):
     """Custom task class with error handling."""
 
@@ -2078,7 +2180,9 @@ def prewarm_anthropic_cache(system_node_id, user_id, model_id,
             if system_node is None:
                 return {"status": "skipped", "reason": "no_system_node"}
             sys_content = system_node.get_content() or ""
-            if USER_EXPORT_PATTERN.search(sys_content)                     or has_quotes(sys_content):
+            if (USER_EXPORT_PATTERN.search(sys_content)
+                    or CA_TWEETS_PATTERN.search(sys_content)
+                    or has_quotes(sys_content)):
                 return {"status": "skipped", "reason": "volatile_prompt"}
 
             model_config = flask_app.config["SUPPORTED_MODELS"].get(model_id)
@@ -2243,6 +2347,56 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             export_params = parse_placeholder_params(export_placeholder_match) if export_placeholder_match else {}
             user_export_content = None
 
+            # {ca_tweets?days=N} (PoC): the last N days of the Community
+            # Archive corpus, rendered from the cached parquet snapshot.
+            # First alive node in chain order wins, like {user_export}.
+            # Rendered here, outside the retry loop — it never shrinks
+            # (a day is ~250k tokens against a 1M window).
+            ca_node = None
+            ca_placeholder_match = None
+            for node in node_chain:
+                if not _alive(node):
+                    continue
+                m = CA_TWEETS_PATTERN.search(node.get_content())
+                if m:
+                    ca_node = node
+                    ca_placeholder_match = m.group(0)
+                    break
+            needs_ca = ca_node is not None
+            ca_tweets_content = None
+            ca_refs = None
+            if needs_ca:
+                from backend.tasks.imports import snapshot_dir_for
+                from backend.utils import community_archive as ca
+                ca_params = parse_placeholder_params(ca_placeholder_match)
+                ca_days = parse_ca_tweets_days(
+                    ca_params, placeholder=ca_placeholder_match)
+                ca_scope = parse_ca_tweets_scope(
+                    ca_params, placeholder=ca_placeholder_match)
+                ca_snapshot_dir = snapshot_dir_for(flask_app.config)
+                # Never feed the reader their own tweets back as picks.
+                ca_owner = User.query.get(user_id)
+                ca_follows = None
+                if ca_scope == "follows":
+                    ca_follows = ca.following_handles(
+                        ca_snapshot_dir,
+                        ca_owner.username if ca_owner else "")
+                    if ca_follows is None:
+                        raise ValueError(
+                            "{ca_tweets} scope=follows needs a saved list "
+                            "of the accounts you follow, and there is none "
+                            "for your account yet.")
+                ca_tweets_content, ca_stats, ca_refs = ca.render_recent_tweets(
+                    ca_snapshot_dir, days=ca_days,
+                    exclude_usernames=[ca_owner.username,
+                                       ca_owner.prefilled_handle]
+                    if ca_owner else (),
+                    include_usernames=ca_follows)
+                logger.info(
+                    "Rendered %s for node %s: %s (~%d tokens)",
+                    ca_placeholder_match, ca_node.id, ca_stats,
+                    approximate_token_count(ca_tweets_content))
+
             # Every context artifact is pinned to a per-session snapshot.
             # The node carrying a placeholder also carries a
             # NodeContextArtifact row recording the exact artifact version
@@ -2277,6 +2431,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # Exclude prompts carrying per-call volatile placeholders.
                 system_render_cacheable = (
                     not USER_EXPORT_PATTERN.search(_sys_text)
+                    and not CA_TWEETS_PATTERN.search(_sys_text)
                     and not has_quotes(_sys_text)
                 )
                 if system_render_cacheable:
@@ -2537,6 +2692,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 replaced_recent = False
                 replaced_recent_raw = False
                 replaced_export = False  # #139: first occurrence only
+                replaced_ca = False
 
                 # Temporal grounding (#130): every message is prefixed with an
                 # absolute local-time stamp derived from the node's updated_at
@@ -2657,6 +2813,18 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                     export_placeholder_match,
                                     "(see archive above)"
                                 )
+                        # Replace {ca_tweets} — first occurrence gets
+                        # the day's corpus, repeats get a stub.
+                        if needs_ca and ca_placeholder_match in message_text:
+                            if not replaced_ca:
+                                message_text = message_text.replace(
+                                    ca_placeholder_match,
+                                    ca_tweets_content or "", 1
+                                )
+                                replaced_ca = True
+                            message_text = message_text.replace(
+                                ca_placeholder_match, CA_TWEETS_STUB
+                            )
                         # Replace {user_profile} — first occurrence
                         # gets content, subsequent get emptied (dedup)
                         if USER_PROFILE_PLACEHOLDER in message_text:
@@ -2878,11 +3046,26 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 estimated_tokens = approximate_token_count(total_content)
                 logger.info(f"Calling LLM API: model_id={model_id}, api_model={api_model}, provider={provider}, key_type={key_type}, estimated_tokens={estimated_tokens}, total_chars={len(total_content)}")
 
+                # #189: stable per-thread key improves OpenAI's
+                # automatic prefix-cache routing.
+                thread_root_id = (node_chain[0].id if node_chain
+                                  else parent_node_id)
+                # {ca_tweets}: not latency-bound and up to ~250k tokens,
+                # so the call goes through the provider's Batch API with
+                # the feed's structured output. The round-trip runs
+                # below, after _finalize is defined. Any provider the
+                # feed does not support fails here rather than silently
+                # running the full-price, unstructured live call.
+                batch_mode = needs_ca
+                if batch_mode:
+                    if provider not in CA_BATCH_PROVIDERS:
+                        raise ValueError(
+                            f"{{ca_tweets}} is not supported on {model_id} "
+                            f"({provider}); pick an Anthropic or OpenAI "
+                            "model.")
+                    response = None
+                    break
                 try:
-                    # #189: stable per-thread key improves OpenAI's
-                    # automatic prefix-cache routing.
-                    thread_root_id = (node_chain[0].id if node_chain
-                                      else parent_node_id)
                     response = LLMProvider.get_completion(
                         model_id, messages, api_keys,
                         tools=agentic_tools,
@@ -2924,6 +3107,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 cached_input_toks = resp.get("cached_tokens", 0)
                 cost = calculate_llm_cost_microdollars(
                     model_id, in_toks, out_toks,
+                    batch=bool(resp.get("batch")),
                     cache_read_tokens=cache_read_toks,
                     cache_write_tokens=cache_write_toks,
                     cached_input_tokens=cached_input_toks,
@@ -3111,6 +3295,17 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # Both agentic modes (text + voice) run the bounded within-turn
             # retrieval loop so read_artifact/read_todo resolve same-turn. Any
             # other (non-agentic) caller — source_mode None — stays single-shot.
+            if batch_mode:
+                # Submits on the first run and re-queues; returns the
+                # response only on the run that finds the batch ended.
+                from backend.utils.llm_batch import apply_batch_key_override
+                batch_keys = apply_batch_key_override(
+                    api_keys, flask_app.config)
+                response = _ca_batch_roundtrip(
+                    self, llm_node, model_id, api_model, messages,
+                    batch_keys[provider], model_config, ca_refs=ca_refs,
+                    provider=provider)
+
             if source_mode not in ("textmode", "voice"):
                 # Single-shot: one model call, one node, no within-turn loop.
                 return _finalize(llm_node, response)
@@ -3385,6 +3580,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # FINAL answer: no retrieval (or budget exhausted).
                 return _finalize(current_node, response)
 
+        except Retry:
+            # Batch poll re-queue ({ca_tweets}); the node stays 'processing'.
+            raise
         except Exception as e:
             error_message = str(e)
             logger.error(f"LLM completion error for node {llm_node_id}: {error_message}", exc_info=True)

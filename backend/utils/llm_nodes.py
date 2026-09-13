@@ -5,7 +5,8 @@ from flask import current_app
 from backend.models import Node, User
 from backend.extensions import db
 from backend.utils.placeholders import (
-    check_user_export_plan, validate_user_export_placeholders,
+    check_user_export_plan, validate_ca_tweets_placeholders,
+    validate_user_export_placeholders,
 )
 
 
@@ -108,6 +109,9 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     # to "no token cap" and cost real $$$ on a single request.
     parent_content = parent.get_content()
     validate_user_export_placeholders(
+        parent_content, user_id=human_owner_id,
+    )
+    validate_ca_tweets_placeholders(
         parent_content, user_id=human_owner_id,
     )
     # Plan gate: an uncapped export in the parent entry is refused here
