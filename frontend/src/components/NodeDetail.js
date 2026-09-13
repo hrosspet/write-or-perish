@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate, useSearchParams, Link } from "react-router-dom";
-import { FaThumbtack, FaMicrophone, FaSpinner } from "react-icons/fa";
+import { FaThumbtack, FaMicrophone, FaSpinner, FaBookOpen } from "react-icons/fa";
 import NodeFooter from "./NodeFooter";
 import SpeakerIcon from "./SpeakerIcon";
 import DownloadAudioIcon from "./DownloadAudioIcon";
@@ -18,6 +18,7 @@ import NodeFormModal from "./NodeFormModal";
 import Bubble from "./Bubble";
 import BubbleKebabMenu from "./BubbleKebabMenu";
 import QuotedContent from "./QuotedContent";
+import FeedPicks from "./FeedPicks";
 import DeleteConfirmDialog from "./DeleteConfirmDialog";
 
 // Recursive component to render children nodes.
@@ -52,6 +53,21 @@ function RenderChildTree({ nodes, onBubbleClick, buildActions }) {
   );
 }
 
+// The browser tab's title for a node: its first line, or a state word
+// while an AI reply is still being generated.
+const tabTitleFor = (node) => {
+  const pending = (node?.node_type === 'llm' || !!node?.llm_model)
+    && (node?.llm_task_status === 'pending' || node?.llm_task_status === 'processing');
+  if (pending) {
+    const batch = Array.isArray(node?.tool_calls_meta)
+      && node.tool_calls_meta.some(tc => tc?.name === '_batch' && tc.status === 'submitted');
+    return `${batch ? 'Processing' : 'Thinking'}… — Loore`;
+  }
+  const firstLine = (node?.content || '')
+    .trim().split('\n')[0].replace(/^[#>\s]+/, '').slice(0, 120);
+  return firstLine ? `${firstLine} — Loore` : 'Loore';
+};
+
 function NodeDetail({ nodeIdOverride }) {
   const { id: paramId } = useParams();
   // Under /u/:username/:slug the id arrives resolved; under /node/:id it
@@ -68,10 +84,15 @@ function NodeDetail({ nodeIdOverride }) {
   const [showEditOverlay, setShowEditOverlay] = useState(false);
   const [selectedModel, setSelectedModel] = useState(currentUser?.preferred_model || null);
   const [llmTaskNodeId, setLlmTaskNodeId] = useState(null);
+  // True from the click until POST /nodes/:id/llm answers: the spinner is
+  // otherwise driven by the returned node id, so the round trip (a cold
+  // dev server can take seconds) showed a button that ignored the click.
+  const [llmRequesting, setLlmRequesting] = useState(false);
   const [quotes, setQuotes] = useState({});
   const [externalQuotes, setExternalQuotes] = useState({});
   const [pinLoading, setPinLoading] = useState(false);
   const [voiceLoading, setVoiceLoading] = useState(false);
+  const [readLoading, setReadLoading] = useState(false);
   const [toolActionsExpanded, setToolActionsExpanded] = useState(false);
   const [showPromptEditConfirm, setShowPromptEditConfirm] = useState(false);
   // Per-bubble action targets. The kebab on any rendered Bubble (focal,
@@ -114,13 +135,27 @@ function NodeDetail({ nodeIdOverride }) {
   const autoGenerateActive = isPublicThread ? false : autoGenerate;
 
   // LLM completion polling - enabled automatically when llmTaskNodeId is set
+  // Batch stage ({ca_tweets}): the synchronous part is done and the turn
+  // is queued at the provider (minutes, up to 24 h). Poll slowly and
+  // don't time out at the hook's 30-minute default.
+  const batchMeta = Array.isArray(node?.tool_calls_meta)
+    ? node.tool_calls_meta.find(tc => tc?.name === '_batch' && tc.status === 'submitted')
+    : null;
+  // (Only the pending node's own meta counts here: on the parent page the
+  // batch stage triggers a navigation to that node — see the completion
+  // effect — so the slow cadence is needed there, not before.)
+  const isBatchWait = !!batchMeta;
   const {
     status: llmStatus,
     data: llmData,
     error: llmError
   } = useAsyncTaskPolling(
     llmTaskNodeId ? `/nodes/${llmTaskNodeId}/llm-status` : null,
-    { enabled: !!llmTaskNodeId }  // Auto-start when llmTaskNodeId is set
+    {
+      enabled: !!llmTaskNodeId,  // Auto-start when llmTaskNodeId is set
+      interval: isBatchWait ? 15000 : 2000,
+      maxDuration: isBatchWait ? 25 * 60 * 60 * 1000 : 30 * 60 * 1000,
+    }
   );
 
   useEffect(() => {
@@ -138,9 +173,7 @@ function NodeDetail({ nodeIdOverride }) {
         // be probed), so the tab title has to be set here once the
         // logged-in fetch succeeds — same first-line rule PublicThreadPage
         // uses. Reset on unmount below.
-        const firstLine = (response.data?.content || '')
-          .trim().split('\n')[0].replace(/^[#>\s]+/, '').slice(0, 120);
-        document.title = firstLine ? `${firstLine} — Loore` : 'Loore';
+        document.title = tabTitleFor(response.data);
         // Human-readable address (#228): when the node has a permalink and
         // we arrived via /node/<id>, show the pretty URL instead. Display
         // only — router state is untouched, and revisiting the pretty URL
@@ -165,6 +198,14 @@ function NodeDetail({ nodeIdOverride }) {
       document.title = 'Loore';
     };
   }, [id]);
+
+  // Keep the tab title with the content: a pending reply loads as its
+  // placeholder text and is patched in place when the batch lands, so
+  // the title set on fetch would otherwise stay "[LLM response generation
+  // pending...]" for the finished reply.
+  useEffect(() => {
+    if (node) document.title = tabTitleFor(node);
+  }, [node]);
 
   // Fetch quote data when node loads (if content contains {quote:ID} placeholders)
   useEffect(() => {
@@ -213,6 +254,18 @@ function NodeDetail({ nodeIdOverride }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
+  // Opening a pending LLM node directly (the batch wait parks the view
+  // there) resumes polling on it, so the reply patches in when it lands.
+  useEffect(() => {
+    if (!node || llmTaskNodeId) return;
+    const pending = (node.node_type === 'llm' || !!node.llm_model)
+      && (node.llm_task_status === 'pending' || node.llm_task_status === 'processing');
+    if (pending && String(node.id) === String(id)) {
+      setLlmTaskNodeId(node.id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [node?.id, node?.llm_task_status]);
+
   // editTarget drives Edit's two-path branch: prompt-rooted nodes show
   // a confirmation first; everything else opens the edit overlay
   // directly. Both paths route through editTarget.id, so focal and
@@ -260,12 +313,20 @@ function NodeDetail({ nodeIdOverride }) {
           ...prev,
           content: llmData.content ?? prev.content,
           tool_calls_meta: llmData.tool_calls_meta ?? prev.tool_calls_meta,
+          feed_picks_count: llmData.feed_picks_count ?? prev.feed_picks_count,
           llm_task_status: 'completed',
         } : prev);
       } else if (completedId) {
         navigate(`/node/${completedId}`);
       }
       setLlmTaskNodeId(null);
+    } else if (llmData?.stage === 'batch'
+               && String(llmTaskNodeId) !== String(id)) {
+      // The turn is queued in a provider batch: the generate button's job
+      // is done. Hand the wait to the pending node itself (it shows
+      // "Processing" and keeps polling slowly via the effect above).
+      setLlmTaskNodeId(null);
+      navigate(`/node/${llmTaskNodeId}`);
     } else if (llmStatus === 'failed') {
       // Toast, never setError — setError replaces the entire thread view
       // with the raw failure text, hiding the thread and the inline form.
@@ -450,9 +511,11 @@ function NodeDetail({ nodeIdOverride }) {
 
   const handleLLMResponse = () => {
     setError("");
+    setLlmRequesting(true);
     requestLlmFor(id)
       .then((newNodeId) => setLlmTaskNodeId(newNodeId))
-      .catch(handleLlmRequestError);
+      .catch(handleLlmRequestError)
+      .finally(() => setLlmRequesting(false));
   };
 
   // Gate + fire a child LLM generation under `parentNodeId`. Returns the
@@ -589,6 +652,32 @@ function NodeDetail({ nodeIdOverride }) {
       });
   };
 
+  // Community Archive read against this thread (admin-only PoC): the
+  // 'read_thread' prompt is attached under this node by reference. With
+  // auto-generate on, the batch reply parks under it and we land on the
+  // pending reply, which this page polls as "Processing…" until the
+  // picks arrive. With it off, only the prompt is attached and we land
+  // on it, where the model picker and LLM Response wait for the user.
+  const handleReadFromNode = () => {
+    setReadLoading(true);
+    setError("");
+    api
+      .post(`/read/from-node/${id}`, {
+        model: selectedModel,
+        auto_generate: autoGenerateActive,
+      })
+      .then((response) => {
+        const { llm_node_id, prompt_node_id } = response.data;
+        navigate(`/node/${llm_node_id || prompt_node_id}`);
+      })
+      .catch((err) => {
+        setReadLoading(false);
+        if (err?.response?.status === 402) return;
+        const msg = err.response?.data?.error || 'Could not start the read.';
+        addToast(msg, 6000);
+      });
+  };
+
   // Ancestors section rendered as a list of bubbles.
   const ancestorsSection = node.ancestors && node.ancestors.length > 0 && (
     <div style={{ display: "flex", flexDirection: "column", marginBottom: "10px" }}>
@@ -680,7 +769,7 @@ function NodeDetail({ nodeIdOverride }) {
   // the kebab Edit/Delete menu.
   const showInlineInput = !!currentUser;
   const showCraftBar = isOwner && (craftMode || isPublicThread)
-    && !autoGenerateActive && node.ai_usage !== 'none';
+    && !autoGenerateActive && node.ai_usage !== 'none' && !isLlmPending;
 
   // Shared shell for the top-right controls. Voice Mode + Auto-generate
   // share padding/border/typography; Auto-generate uses `space-between`
@@ -733,6 +822,25 @@ function NodeDetail({ nodeIdOverride }) {
           <FaMicrophone size={12} />
         </span>
       </button>
+      {currentUser?.is_admin && (
+        <button
+          onClick={handleReadFromNode}
+          disabled={readLoading}
+          style={{ ...topRightButtonStyle, justifyContent: 'space-between' }}
+          title="Read the last day of the Community Archive against this thread"
+        >
+          <span>{readLoading ? 'Starting…' : 'Read the archive'}</span>
+          <span style={{
+            width: '32px',
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            lineHeight: 0,
+          }}>
+            <FaBookOpen size={12} />
+          </span>
+        </button>
+      )}
       {craftMode && (
         <button
           type="button"
@@ -819,7 +927,7 @@ function NodeDetail({ nodeIdOverride }) {
             fontStyle: 'italic',
             padding: '8px 0',
           }}>
-            <span>Thinking</span>
+            <span>{batchMeta ? 'Processing' : 'Thinking'}</span>
             <span style={{ display: 'inline-flex', gap: '3px' }}>
               {[0, 1, 2].map(i => (
                 <span key={i} style={{
@@ -879,6 +987,9 @@ function NodeDetail({ nodeIdOverride }) {
               onQuoteClick={handleBubbleClick}
             />
           </div>
+        )}
+        {!isLlmPending && isOwner && node.feed_picks_count > 0 && (
+          <FeedPicks nodeId={node.id} />
         )}
         {(() => {
           const visibleTools = (node.tool_calls_meta || [])
@@ -1007,13 +1118,14 @@ function NodeDetail({ nodeIdOverride }) {
           <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
             <button
               onClick={handleLLMResponse}
-              disabled={!!llmTaskNodeId}
+              disabled={llmRequesting || !!llmTaskNodeId}
               style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}
             >
-              {llmTaskNodeId ? (
+              {(llmRequesting || llmTaskNodeId) ? (
                 <>
                   <FaSpinner className="spin" aria-hidden="true" />
-                  {llmStatus === 'pending' ? 'Waiting for AI…' : 'Generating…'}
+                  {llmRequesting ? 'Requesting…'
+                    : llmStatus === 'pending' ? 'Waiting for AI…' : 'Generating…'}
                 </>
               ) : 'LLM Response'}
             </button>
@@ -1024,7 +1136,7 @@ function NodeDetail({ nodeIdOverride }) {
             />
           </div>
         )}
-        {llmTaskNodeId && !showCraftBar && (
+        {llmTaskNodeId && !showCraftBar && !isLlmPending && (
           <div style={{
             marginTop: '8px',
             display: 'flex', alignItems: 'center', gap: '8px',

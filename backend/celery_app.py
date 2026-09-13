@@ -41,6 +41,13 @@ celery.conf.update(
             'task': 'backend.tasks.node_cleanup.cleanup_deleted_nodes',
             'schedule': 86400.0,  # daily
         },
+        # Backstop for the {ca_tweets} batch poll: a hard worker kill loses
+        # the scheduled retry; this re-dispatches nodes whose poll
+        # heartbeat stopped (see llm_completion.resume_stuck_feed_batches).
+        'resume-stuck-feed-batches': {
+            'task': 'backend.tasks.llm_completion.resume_stuck_feed_batches',
+            'schedule': 600.0,  # every 10 minutes
+        },
         # Semantic-search embedding sweep (issue #155).
         'sweep-embeddings': {
             'task': 'backend.tasks.embeddings.sweep_embeddings',

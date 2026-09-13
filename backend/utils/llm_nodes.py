@@ -5,7 +5,8 @@ from flask import current_app
 from backend.models import Node, User
 from backend.extensions import db
 from backend.utils.placeholders import (
-    check_user_export_plan, validate_user_export_placeholders,
+    check_ca_tweets_access, check_user_export_plan,
+    validate_ca_tweets_placeholders, validate_user_export_placeholders,
 )
 
 
@@ -110,6 +111,9 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     validate_user_export_placeholders(
         parent_content, user_id=human_owner_id,
     )
+    validate_ca_tweets_placeholders(
+        parent_content, user_id=human_owner_id,
+    )
     # Plan gate: an uncapped export in the parent entry is refused here
     # for non-Pro users, before any node exists. A placeholder inherited
     # from an older message or the thread's system prompt is caught by
@@ -122,6 +126,7 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
         unrestricted_allowed=bool(owner and owner.has_unrestricted_export),
         user_id=human_owner_id,
     )
+    check_ca_tweets_access(parent_content, owner)
 
     llm_user = User.query.filter_by(username=model_id).first()
     if not llm_user:

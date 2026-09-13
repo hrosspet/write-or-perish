@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useUser } from '../contexts/UserContext';
+import { useToast } from '../contexts/ToastContext';
+import api from '../api';
 
 function useOnScreen(ref, threshold = 0.1) {
   const [isVisible, setIsVisible] = useState(false);
@@ -68,12 +70,19 @@ function WorkflowCard({ card, delay }) {
     }
   }, [isVisible, hasAnimated, delay]);
 
-  const disabled = card.disabled;
+  const disabled = card.disabled || card.busy;
+  // A card either opens a page (`path`) or starts something itself
+  // (`onSelect`, e.g. Read fires the request and lands on the reply).
+  const select = () => {
+    if (disabled) return;
+    if (card.onSelect) card.onSelect();
+    else navigate(card.path);
+  };
 
   return (
     <div
       ref={ref}
-      onClick={() => !disabled && navigate(card.path)}
+      onClick={select}
       onMouseEnter={() => !disabled && setHovered(true)}
       onMouseLeave={() => !disabled && setHovered(false)}
       style={{
@@ -125,7 +134,7 @@ function WorkflowCard({ card, delay }) {
         gap: "0.6rem",
       }}>
         {card.title}
-        {disabled && <span style={{
+        {card.disabled && <span style={{
           fontFamily: "var(--sans)",
           fontSize: "0.65rem",
           fontWeight: 400,
@@ -172,13 +181,68 @@ const shareCard = {
   ),
 };
 
+// Community Archive read (admin-only while the placeholder behind it is):
+// what the archive holds that is worth this person's time today. Like
+// Text mode, the click creates the thread: the 'read' prompt as the
+// root and the reply under it, on the user's preferred model. There is
+// nothing to type, so the card fires the request itself.
+const readCard = {
+  key: "read",
+  title: "Read",
+  description: "What's worth your time today.",
+  icon: (
+    <svg width="42" height="42" viewBox="0 0 42 42" fill="none">
+      {/* An open book, one page marked: the read is a small marked place
+          in a large corpus, not a stack of cards. */}
+      <path d="M6 11 C11 9.5 16 9.8 21 12.5 C26 9.8 31 9.5 36 11 L36 32 C31 30.5 26 30.8 21 33.5 C16 30.8 11 30.5 6 32 Z"
+            stroke="var(--accent)" strokeWidth="1.4" fill="none" strokeLinejoin="round"/>
+      <path d="M21 12.5 L21 33.5" stroke="var(--accent)" strokeWidth="1.1" opacity="0.7"/>
+      <path d="M10 16.5 C13 15.8 15.5 16 18 17.2 M10 21 C13 20.3 15.5 20.5 18 21.7 M10 25.5 C13 24.8 15.5 25 18 26.2"
+            stroke="var(--accent)" strokeWidth="1" strokeLinecap="round" opacity="0.6"/>
+      <path d="M24 16.5 C27 15.8 29.5 16 32 17.2 M24 21 C27 20.3 29.5 20.5 32 21.7"
+            stroke="var(--accent)" strokeWidth="1" strokeLinecap="round" opacity="0.6"/>
+      <circle cx="28" cy="26" r="1.6" fill="var(--accent)"/>
+    </svg>
+  ),
+};
+
 export default function HomePage() {
   const greetingRef = useRef(null);
   const questionRef = useRef(null);
   const greetingVisible = useOnScreen(greetingRef);
   const questionVisible = useOnScreen(questionRef);
   const { user } = useUser();
-  const displayCards = user?.share_v1_enabled ? [...cards, shareCard] : cards;
+  const { addToast } = useToast();
+  const navigate = useNavigate();
+  const [readStarting, setReadStarting] = useState(false);
+
+  const startRead = async () => {
+    setReadStarting(true);
+    try {
+      // Same preference Text mode honours (`loore_auto_generate`, default
+      // on). Off: only the root prompt node is created and we land on it,
+      // where the model picker and LLM Response wait for the user.
+      const stored = localStorage.getItem('loore_auto_generate');
+      const autoGenerate = stored === null ? true : stored === 'true';
+      const res = await api.post('/read/start', { auto_generate: autoGenerate });
+      navigate(`/node/${res.data.llm_node_id || res.data.prompt_node_id}`);
+    } catch (err) {
+      setReadStarting(false);
+      if (err?.response?.status === 402) return;
+      addToast(err?.response?.data?.error || 'Could not start the read.', 6000);
+    }
+  };
+
+  const displayCards = [
+    ...cards,
+    ...(user?.share_v1_enabled ? [shareCard] : []),
+    ...(user?.is_admin ? [{
+      ...readCard,
+      onSelect: startRead,
+      busy: readStarting,
+      description: readStarting ? 'Starting…' : readCard.description,
+    }] : []),
+  ];
 
   return (
     <div style={{

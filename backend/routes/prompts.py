@@ -66,6 +66,8 @@ def list_prompts():
     for key, meta in PROMPT_DEFAULTS.items():
         if meta.get('hidden'):
             continue
+        if meta.get('admin') and not getattr(current_user, "is_admin", False):
+            continue
         latest = UserPrompt.query.filter_by(
             user_id=current_user.id, prompt_key=key
         ).order_by(UserPrompt.created_at.desc()).first()

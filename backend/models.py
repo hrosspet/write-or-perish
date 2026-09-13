@@ -1515,6 +1515,57 @@ class PollDraftBatchJob(db.Model):
     collected_at = db.Column(db.DateTime, nullable=True)
 
 
+class FeedPick(db.Model):
+    """One tweet the Community Archive feed named in a reply (PoC,
+    2026-09-13). The tweet itself is an ExternalItem (source
+    'community_archive'), which carries the user's read mark and
+    good/bad verdict like any other reference; this row records what the
+    MODEL said about it in that reply — its rank, its relevance estimate
+    and whether it recommended the tweet — so the picks can be judged
+    against the verdicts later (was a 6% pick good? was a starred one
+    bad?). One row per (reply node, item)."""
+    __tablename__ = "feed_pick"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    node_id = db.Column(db.Integer, db.ForeignKey("node.id"),
+                        nullable=False, index=True)
+    external_item_id = db.Column(db.Integer, db.ForeignKey("external_item.id"),
+                                 nullable=False, index=True)
+    # 1 = best, in the model's order.
+    rank = db.Column(db.Integer, nullable=False)
+    # The model's estimate, 0-100: probability that reading it changes
+    # what the user does this week. Null for rows no model scored (a
+    # random control sample rendered through the same list).
+    relevance = db.Column(db.Integer, nullable=True)
+    recommended = db.Column(db.Boolean, nullable=False, default=False)
+    # Who chose this tweet: the model id of the reply that named it, or
+    # 'random' for a control sample. Kept on the row so a list merged from
+    # several runs, or a sample, can still say which selector each tweet
+    # came from without joining back through the node.
+    picked_by = db.Column(db.String(64), nullable=True)
+    # The model's one-line reason, encrypted like a reply (it paraphrases
+    # the user's intentions).
+    why = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    node = db.relationship("Node", backref=db.backref(
+        "feed_picks", cascade="all, delete-orphan"))
+    item = db.relationship("ExternalItem", backref=db.backref(
+        "feed_picks", cascade="all, delete-orphan"))
+
+    __table_args__ = (
+        db.UniqueConstraint("node_id", "external_item_id",
+                            name="uq_feed_pick_node_item"),
+    )
+
+    def set_why(self, plaintext):
+        self.why = encrypt_content(plaintext) if plaintext else None
+
+    def get_why(self):
+        return decrypt_content(self.why) if self.why else ""
+
+
 class ExternalDigestBatchJob(db.Model):
     """A submitted provider batch carrying nightly external-digest
     rebuilds — one request per user whose saved references changed.

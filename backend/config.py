@@ -177,6 +177,23 @@ class Config:
             "long_context_input_multiplier": 2.0,
             "long_context_output_multiplier": 1.5,
         },
+        "gpt-5.6-luna": {
+            "tokenizer_family": "o200k",
+            "provider": "openai",
+            "api_model": "gpt-5.6-luna",
+            "max_input_tokens": 922000,
+            "display_name": "GPT-5.6 Luna",
+            "context_window": 1050000,
+            # Verified 2026-09-13 on the OpenAI pricing page: $0.20 / $1.20,
+            # cached input $0.02, long context (>272k) $0.40 / $1.80, batch
+            # half of each. No promotional note.
+            "input_price_per_mtok": 0.20,
+            "output_price_per_mtok": 1.20,
+            "cached_input_multiplier": 0.10,
+            "long_context_threshold": 272000,
+            "long_context_input_multiplier": 2.0,
+            "long_context_output_multiplier": 1.5,
+        },
         "gpt-5.5": {
             "tokenizer_family": "o200k",
             "provider": "openai",

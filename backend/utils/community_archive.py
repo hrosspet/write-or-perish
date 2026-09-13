@@ -14,9 +14,10 @@ deep offsets, which is what made large accounts impractical before.
 import json
 import os
 import pathlib
+import re
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 SUPABASE_URL = "https://fabxmporizzqflnftavs.supabase.co"
 # Public anon key, from
@@ -332,3 +333,166 @@ def coverage_summary(handle, snapshot_dir=None, scan_limit=CHECK_SCAN_LIMIT):
     if archived is not None and archived != out["archived"]:
         out["archived_live"] = archived
     return out
+
+
+# ── recent-tweets render for the {ca_tweets} placeholder (PoC) ────────────
+
+def snapshot_newest_tweet_at(snapshot_dir):
+    """UTC 'YYYY-MM-DD HH:MM:SS' of the newest tweet in the cached
+    snapshot, or None when the snapshot is absent."""
+    if not snapshot_export_id(snapshot_dir):
+        return None
+    con, tweets, _ = _duckdb(snapshot_dir)
+    row = con.execute(
+        "select strftime(max(created_at) at time zone 'UTC', "
+        "'%Y-%m-%d %H:%M:%S') from read_parquet(?)", [tweets]).fetchone()
+    return row[0] if row else None
+
+
+CA_CITATION_RE = re.compile(r"(?<![\w/#\[])#(\d{1,6})\b")
+
+
+def render_recent_tweets(snapshot_dir, days=1, exclude_usernames=(),
+                         include_usernames=None):
+    """The last ``days`` days of the whole Community Archive corpus as
+    prompt text: one ``# Tweets by <user>`` section per account, one
+    ``[#n] text`` line per tweet in time order, retweets dropped like
+    the import drops them. ``n`` is a sequential number within the
+    render (2 tokens) instead of the 19-digit tweet id (~10 tokens, and
+    a copy-fidelity hazard when the model cites 20 of them out of 5k);
+    the model cites ``#n`` and expand_ca_citations() turns that into the
+    x.com link. No per-tweet timestamp: the window is in the header,
+    order is preserved by the numbering, and a stamp was ~10 tokens per
+    tweet (a quarter of the prompt) for nothing the model could use. The window ends at the newest tweet in the snapshot (the
+    export lags a few hours; see placeholders.py).
+
+    ``exclude_usernames`` drops those accounts (case-insensitive) — the
+    reader's own handle, so the feed never recommends their own tweets.
+    ``include_usernames`` (None = everyone) keeps only those accounts:
+    the follows scope.
+
+    Returns (text, stats, refs) — stats: {export_id, window_start,
+    window_end, tweets, accounts}; refs: {n: {username, tweet_id, text,
+    posted_at}} — everything a pick needs to become a saved reference. The
+    render is deterministic for a snapshot (ordered by username, time,
+    id), so refs regenerate identically on every poll of the batch.
+    Raises CommunityArchiveError when no snapshot is cached (this PoC
+    never downloads one in the request path — a day's render must not
+    wait on a 900 MB download)."""
+    export_id = snapshot_export_id(snapshot_dir)
+    if not export_id:
+        raise CommunityArchiveError(
+            f"No Community Archive snapshot cached at {snapshot_dir}")
+    newest = snapshot_newest_tweet_at(snapshot_dir)
+    excluded = sorted({(u or "").strip().lstrip("@").lower()
+                       for u in exclude_usernames if u}) or ["\0"]
+    included = None
+    if include_usernames is not None:
+        included = sorted({(u or "").strip().lstrip("@").lower()
+                           for u in include_usernames if u}) or ["\0"]
+    con, tweets, profiles = _duckdb(snapshot_dir)
+    # Window bound computed in Python: duckdb can't correlate a subquery
+    # through the outer join, and a naive-UTC comparison keeps the
+    # TIMESTAMPTZ column out of the parameter path (no pytz needed).
+    cur = con.execute(
+        "select coalesce(p.username, t.account_id) as username, "
+        "t.tweet_id, t.full_text, "
+        "strftime(t.created_at at time zone 'UTC', '%Y-%m-%d %H:%M:%S') "
+        "as posted "
+        "from read_parquet(?) t "
+        "left join read_parquet(?) p on p.account_id = t.account_id "
+        "where (t.created_at at time zone 'UTC') "
+        "> (?::TIMESTAMP - to_days(?)) "
+        "and t.full_text not like 'RT @%' "
+        "and lower(coalesce(p.username, t.account_id)) not in "
+        "(select unnest(?::VARCHAR[])) "
+        + ("and lower(coalesce(p.username, t.account_id)) in "
+           "(select unnest(?::VARCHAR[])) " if included is not None else "")
+        + "order by lower(coalesce(p.username, t.account_id)), t.created_at, "
+        "t.tweet_id",
+        [tweets, profiles, newest, int(days), excluded]
+        + ([included] if included is not None else []))
+    sections = []
+    body = []
+    current = None
+    count = 0
+    total = 0
+    refs = {}
+
+    def flush():
+        if current is None:
+            return
+        sections.append(
+            f"# Tweets by {current} (Community Archive) — {count} tweets")
+        sections.append("")
+        sections.extend(body)
+        sections.append("---")
+        sections.append("")
+
+    while True:
+        rows = cur.fetchmany(2000)
+        if not rows:
+            break
+        for username, tweet_id, text, posted in rows:
+            if username != current:
+                flush()
+                current, count, body = username, 0, []
+            count += 1
+            total += 1
+            text = (text or "").strip()
+            refs[total] = {
+                "username": username, "tweet_id": str(tweet_id),
+                "text": text,
+                "posted_at": datetime.strptime(posted, "%Y-%m-%d %H:%M:%S")
+                if posted else None,
+            }
+            body.append(f"[#{total}] {text}")
+            body.append("")
+    flush()
+    accounts = sum(1 for line in sections if line.startswith("# Tweets by "))
+    end = datetime.strptime(newest, "%Y-%m-%d %H:%M:%S")
+    newest = end.strftime("%Y-%m-%d %H:%M")
+    window_start = (end - timedelta(days=int(days))).strftime(
+        "%Y-%m-%d %H:%M")
+    scope_note = (" Only accounts the reader follows." if included is not None
+                  else "")
+    header = (
+        f"# Community Archive — tweets from {window_start} to {newest} UTC "
+        f"(last {int(days)} day(s) of export {export_id}): {total} tweets "
+        f"by {accounts} accounts, retweets omitted.{scope_note} Each tweet "
+        f"is numbered; cite a tweet by its number, e.g. #123.")
+    text = "\n".join([header, ""] + sections).rstrip() + "\n"
+    stats = {"export_id": export_id, "window_start": window_start,
+             "window_end": newest, "tweets": total, "accounts": accounts,
+             "scope": "follows" if included is not None else "all"}
+    return text, stats, refs
+
+
+def following_handles(snapshot_dir, username):
+    """The X accounts ``username`` follows, from
+    ``<snapshot_dir>/following/<username>.json`` ({"usernames": [...]},
+    saved from a live pull — the archive's own following data only
+    comes from uploads and goes stale). None when no list is saved."""
+    path = pathlib.Path(snapshot_dir) / "following" / f"{username}.json"
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text())
+    return [u for u in data.get("usernames", []) if u]
+
+
+def expand_ca_citations(reply, refs):
+    """Turn ``#n`` citations in a model reply into markdown links to the
+    tweet: ``#12`` → ``[#12](https://x.com/<user>/status/<id>)``. Numbers
+    not in ``refs`` (a hashtag, a year) are left alone; a ``#n`` already
+    inside a link or URL is skipped by the lookbehind."""
+    if not reply or not refs:
+        return reply
+
+    def sub(m):
+        n = int(m.group(1))
+        ref = refs.get(n)
+        if not ref:
+            return m.group(0)
+        return (f"[#{n}](https://x.com/{ref['username']}/status/"
+                f"{ref['tweet_id']})")
+    return CA_CITATION_RE.sub(sub, reply)
