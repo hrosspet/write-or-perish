@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate, useSearchParams, Link } from "react-router-dom";
-import { FaThumbtack, FaMicrophone, FaSpinner } from "react-icons/fa";
+import { FaThumbtack, FaMicrophone, FaSpinner, FaBookOpen } from "react-icons/fa";
 import NodeFooter from "./NodeFooter";
 import SpeakerIcon from "./SpeakerIcon";
 import DownloadAudioIcon from "./DownloadAudioIcon";
@@ -92,6 +92,7 @@ function NodeDetail({ nodeIdOverride }) {
   const [externalQuotes, setExternalQuotes] = useState({});
   const [pinLoading, setPinLoading] = useState(false);
   const [voiceLoading, setVoiceLoading] = useState(false);
+  const [readLoading, setReadLoading] = useState(false);
   const [toolActionsExpanded, setToolActionsExpanded] = useState(false);
   const [showPromptEditConfirm, setShowPromptEditConfirm] = useState(false);
   // Per-bubble action targets. The kebab on any rendered Bubble (focal,
@@ -651,6 +652,26 @@ function NodeDetail({ nodeIdOverride }) {
       });
   };
 
+  // Community Archive read against this thread (admin-only PoC): the
+  // 'read_thread' prompt is attached under this node by reference and
+  // the batch reply parks under it; land on the pending reply, which
+  // this page polls as "Processing…" until the picks arrive.
+  const handleReadFromNode = () => {
+    setReadLoading(true);
+    setError("");
+    api
+      .post(`/read/from-node/${id}`, { model: selectedModel })
+      .then((response) => {
+        navigate(`/node/${response.data.llm_node_id}`);
+      })
+      .catch((err) => {
+        setReadLoading(false);
+        if (err?.response?.status === 402) return;
+        const msg = err.response?.data?.error || 'Could not start the read.';
+        addToast(msg, 6000);
+      });
+  };
+
   // Ancestors section rendered as a list of bubbles.
   const ancestorsSection = node.ancestors && node.ancestors.length > 0 && (
     <div style={{ display: "flex", flexDirection: "column", marginBottom: "10px" }}>
@@ -795,6 +816,25 @@ function NodeDetail({ nodeIdOverride }) {
           <FaMicrophone size={12} />
         </span>
       </button>
+      {currentUser?.is_admin && (
+        <button
+          onClick={handleReadFromNode}
+          disabled={readLoading}
+          style={{ ...topRightButtonStyle, justifyContent: 'space-between' }}
+          title="Read the last day of the Community Archive against this thread"
+        >
+          <span>{readLoading ? 'Starting…' : 'Read the archive'}</span>
+          <span style={{
+            width: '32px',
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            lineHeight: 0,
+          }}>
+            <FaBookOpen size={12} />
+          </span>
+        </button>
+      )}
       {craftMode && (
         <button
           type="button"

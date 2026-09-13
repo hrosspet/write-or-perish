@@ -188,6 +188,9 @@ def create_app():
     from backend.routes.voice import voice_bp
     app.register_blueprint(voice_bp, url_prefix="/api/voice")
 
+    from backend.routes.read import read_bp
+    app.register_blueprint(read_bp, url_prefix="/api/read")
+
     from backend.routes.github_issues import github_bp
     app.register_blueprint(github_bp, url_prefix="/api/github")
 
