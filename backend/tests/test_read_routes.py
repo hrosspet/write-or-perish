@@ -189,6 +189,23 @@ class TestReadStart:
         assert llm_node.parent_id == prompt_node.id
         assert llm_node.node_type == "llm"
 
+    def test_auto_generate_off_creates_only_the_prompt_node(self, app):
+        client = app.test_client()
+        alice = _make_user("alice", is_admin=True)
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.post("/api/read/start",
+                           json={"model": "gpt-5", "auto_generate": False})
+
+        assert resp.status_code == 202, resp.get_json()
+        data = resp.get_json()
+        assert "llm_node_id" not in data
+        prompt_node = Node.query.get(data["prompt_node_id"])
+        assert prompt_node.prompt_key == "read"
+        assert prompt_node.content is None
+        assert Node.query.count() == 1
+
     def test_non_admin_refused_before_any_node_exists(self, app):
         client = app.test_client()
         bob = _make_user("bob")
@@ -234,6 +251,24 @@ class TestReadFromNode:
         assert prompt_node.ai_usage == entry.ai_usage
         assert prompt_node.privacy_level == entry.privacy_level
         assert llm_node.parent_id == prompt_node.id
+
+    def test_auto_generate_off_attaches_only_the_prompt(self, app):
+        client = app.test_client()
+        alice = _make_user("alice", is_admin=True)
+        entry = _make_node(alice, content="entry")
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.post(f"/api/read/from-node/{entry.id}",
+                           json={"model": "gpt-5", "auto_generate": False})
+
+        assert resp.status_code == 202, resp.get_json()
+        data = resp.get_json()
+        assert "llm_node_id" not in data
+        prompt_node = Node.query.get(data["prompt_node_id"])
+        assert prompt_node.parent_id == entry.id
+        assert prompt_node.prompt_key == "read_thread"
+        assert Node.query.count() == 2
 
     def test_works_inside_an_agentic_thread(self, app):
         """A textmode thread keeps its own root prompt; the read prompt is

@@ -653,16 +653,22 @@ function NodeDetail({ nodeIdOverride }) {
   };
 
   // Community Archive read against this thread (admin-only PoC): the
-  // 'read_thread' prompt is attached under this node by reference and
-  // the batch reply parks under it; land on the pending reply, which
-  // this page polls as "Processing…" until the picks arrive.
+  // 'read_thread' prompt is attached under this node by reference. With
+  // auto-generate on, the batch reply parks under it and we land on the
+  // pending reply, which this page polls as "Processing…" until the
+  // picks arrive. With it off, only the prompt is attached and we land
+  // on it, where the model picker and LLM Response wait for the user.
   const handleReadFromNode = () => {
     setReadLoading(true);
     setError("");
     api
-      .post(`/read/from-node/${id}`, { model: selectedModel })
+      .post(`/read/from-node/${id}`, {
+        model: selectedModel,
+        auto_generate: autoGenerateActive,
+      })
       .then((response) => {
-        navigate(`/node/${response.data.llm_node_id}`);
+        const { llm_node_id, prompt_node_id } = response.data;
+        navigate(`/node/${llm_node_id || prompt_node_id}`);
       })
       .catch((err) => {
         setReadLoading(false);

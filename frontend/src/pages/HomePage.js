@@ -219,8 +219,13 @@ export default function HomePage() {
   const startRead = async () => {
     setReadStarting(true);
     try {
-      const res = await api.post('/read/start', {});
-      navigate(`/node/${res.data.llm_node_id}`);
+      // Same preference Text mode honours (`loore_auto_generate`, default
+      // on). Off: only the root prompt node is created and we land on it,
+      // where the model picker and LLM Response wait for the user.
+      const stored = localStorage.getItem('loore_auto_generate');
+      const autoGenerate = stored === null ? true : stored === 'true';
+      const res = await api.post('/read/start', { auto_generate: autoGenerate });
+      navigate(`/node/${res.data.llm_node_id || res.data.prompt_node_id}`);
     } catch (err) {
       setReadStarting(false);
       if (err?.response?.status === 402) return;

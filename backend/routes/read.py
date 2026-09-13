@@ -5,10 +5,15 @@ is worth their time (see backend/utils/ca_feed.py for the reply shape).
 Two entry points, both admin-only while the placeholder is:
 
   POST /api/read/start            a fresh thread rooted on the 'read'
-                                  prompt (profile + intentions + archive)
+                                  prompt (profile + intentions + archive);
+                                  honours auto_generate like /textmode/start
   POST /api/read/from-node/<id>   the 'read_thread' prompt attached under
                                   an existing node, so the archive is read
                                   against the conversation above it
+
+Both honour `auto_generate` (default true) like /textmode/start: off
+means only the prompt node is created, and the user picks a model and
+asks for the reply on the thread page.
 
 The prompt is never copied into a node. Like Voice / Text mode, the
 prompt node's content stays empty and resolves through the linked
@@ -64,12 +69,19 @@ def _attach_prompt_node(prompt_key, parent_id, privacy_level, ai_usage):
     return prompt_node
 
 
-def _start(prompt_key, parent, privacy_level, ai_usage, model_id):
+def _start(prompt_key, parent, privacy_level, ai_usage, model_id,
+           auto_generate=True):
     """Create the prompt node and its LLM placeholder; commit; respond.
     A refused placeholder (the pre-flight in create_llm_placeholder) rolls
-    the prompt node back too: there is nothing to keep without the reply."""
+    the prompt node back too: there is nothing to keep without the reply.
+    With auto_generate off only the prompt node is created (the user
+    picks a model and asks for the reply on the thread page), as
+    /textmode/start does."""
     prompt_node = _attach_prompt_node(
         prompt_key, parent.id if parent else None, privacy_level, ai_usage)
+    if not auto_generate:
+        db.session.commit()
+        return jsonify({"prompt_node_id": prompt_node.id}), 202
     try:
         llm_node, task_id = create_llm_placeholder(
             prompt_node.id, model_id, current_user.id,
@@ -103,7 +115,10 @@ def start_read():
     privacy_level = (
         getattr(current_user, "default_privacy_level", None) or "private"
     )
-    return _start(ROOT_PROMPT_KEY, None, privacy_level, ai_usage, model_id)
+    data = request.get_json(silent=True) or {}
+    auto_generate = bool(data.get("auto_generate", True))
+    return _start(ROOT_PROMPT_KEY, None, privacy_level, ai_usage, model_id,
+                  auto_generate=auto_generate)
 
 
 @read_bp.route("/from-node/<int:node_id>", methods=["POST"])
@@ -126,5 +141,7 @@ def start_read_from_node(node_id):
     model_id, err = _resolve_model(node)
     if err:
         return err
+    data = request.get_json(silent=True) or {}
+    auto_generate = bool(data.get("auto_generate", True))
     return _start(THREAD_PROMPT_KEY, node, node.privacy_level or "private",
-                  ai_usage, model_id)
+                  ai_usage, model_id, auto_generate=auto_generate)
