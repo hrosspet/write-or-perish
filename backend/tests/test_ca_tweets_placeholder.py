@@ -24,7 +24,7 @@ class TestPlaceholderParsing:
         assert parse_ca_tweets_days(parse_placeholder_params(m.group(0))) == 3
 
     @pytest.mark.parametrize("bad", ["{ca_tweets?days=0}", "{ca_tweets?days=x}",
-                                     "{ca_tweets?days=-2}"])
+                                     "{ca_tweets?days=-2}", "{ca_tweets?days=4}"])
     def test_bad_days_is_refused_not_defaulted(self, bad):
         with pytest.raises(CaTweetsValidationError):
             validate_ca_tweets_placeholders(bad)
@@ -36,6 +36,23 @@ class TestPlaceholderParsing:
         validate_ca_tweets_placeholders("{ca_tweets?days=2&scope=follows}")
         with pytest.raises(CaTweetsValidationError):
             validate_ca_tweets_placeholders("{ca_tweets?scope=friends}")
+
+    def test_days_cap(self):
+        from backend.utils.placeholders import CA_TWEETS_MAX_DAYS
+        assert CA_TWEETS_MAX_DAYS == 3
+        assert parse_ca_tweets_days({"days": "3"}) == 3
+
+    def test_admin_gate(self):
+        from backend.utils.placeholders import (
+            ca_tweets_allowed, check_ca_tweets_access)
+        admin = types.SimpleNamespace(id=1, is_admin=True)
+        user = types.SimpleNamespace(id=2, is_admin=False)
+        assert ca_tweets_allowed(admin) and not ca_tweets_allowed(user)
+        assert not ca_tweets_allowed(None)
+        check_ca_tweets_access("{ca_tweets}", admin)
+        check_ca_tweets_access("no placeholder", user)
+        with pytest.raises(CaTweetsValidationError, match="not available"):
+            check_ca_tweets_access("see {ca_tweets?days=1}", user)
 
     def test_unknown_key_is_refused(self):
         with pytest.raises(CaTweetsValidationError) as exc:

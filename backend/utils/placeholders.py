@@ -268,9 +268,13 @@ def parse_max_export_tokens(raw, *, user_id=None, placeholder=None,
 # and batch is half price. See generate_llm_response.
 #
 # Supported params:
-#   days=<int>     - window length, default 1. Non-numeric or < 1 is
-#                    refused (not silently defaulted — see the note above
-#                    USER_EXPORT_KNOWN_KEYS on silent-fallback cost bugs).
+#   days=<int>     - window length, default 1, at most CA_TWEETS_MAX_DAYS
+#                    (a day of the whole archive is ~170k tokens; three is
+#                    the most a 1M-context model takes, and the most one
+#                    request should cost). Non-numeric, < 1 or over the cap
+#                    is refused (not silently defaulted — see the note
+#                    above USER_EXPORT_KNOWN_KEYS on silent-fallback cost
+#                    bugs).
 #   scope=all      - the whole archive (default).
 #   scope=follows  - only the accounts the user follows on X, from the
 #                    following list saved for them under the snapshot
@@ -280,6 +284,7 @@ def parse_max_export_tokens(raw, *, user_id=None, placeholder=None,
 CA_TWEETS_PATTERN = re.compile(r"\{ca_tweets(\?[^}]*)?\}")
 CA_TWEETS_KNOWN_KEYS = frozenset({"days", "scope"})
 CA_TWEETS_DEFAULT_DAYS = 1
+CA_TWEETS_MAX_DAYS = 3
 CA_TWEETS_SCOPES = ("all", "follows")
 
 
@@ -299,11 +304,37 @@ def parse_ca_tweets_days(params, *, placeholder=None):
         days = int(raw)
     except (TypeError, ValueError):
         days = 0
-    if days < 1:
+    if days < 1 or days > CA_TWEETS_MAX_DAYS:
         raise CaTweetsValidationError(
-            f"{{ca_tweets}} needs days=<whole number >= 1>; got "
-            f"{placeholder or raw!r}.")
+            f"{{ca_tweets}} needs days=<whole number 1..{CA_TWEETS_MAX_DAYS}>; "
+            f"got {placeholder or raw!r}.")
     return days
+
+
+def ca_tweets_allowed(user):
+    """Who may run {ca_tweets}: admins, while it is a PoC. A day of the
+    archive is a ~$0.02–$0.50 batch request per run with no plan gate
+    behind it, so it must not be reachable from any account that can
+    type the placeholder."""
+    return bool(user is not None and getattr(user, "is_admin", False))
+
+
+def ca_tweets_denied_message():
+    return ("{ca_tweets} (the Community Archive feed) is not available on "
+            "your account yet.")
+
+
+def check_ca_tweets_access(text, user, *, log=None):
+    """Refuse {ca_tweets} in `text` for users ca_tweets_allowed() rejects.
+    Raises CaTweetsValidationError (→ 400 + toast at every call site),
+    before any node exists. No-op without the placeholder."""
+    if not text or not CA_TWEETS_PATTERN.search(text):
+        return
+    if not ca_tweets_allowed(user):
+        log = log if log is not None else _default_logger
+        log.warning("Refused {ca_tweets} for user_id=%s: not allowed",
+                    getattr(user, "id", None))
+        raise CaTweetsValidationError(ca_tweets_denied_message())
 
 
 def parse_ca_tweets_scope(params, *, placeholder=None):

@@ -41,6 +41,8 @@ from backend.utils.privacy import AI_ALLOWED
 from backend.utils.placeholders import (
     CA_TWEETS_PATTERN,
     USER_EXPORT_PATTERN,
+    ca_tweets_allowed,
+    ca_tweets_denied_message,
     parse_ca_tweets_days,
     parse_ca_tweets_scope,
     UserExportValidationError,
@@ -2031,6 +2033,11 @@ def _ca_batch_roundtrip(task, llm_node, model_id, api_model, messages,
                          max_retries=CA_BATCH_MAX_POLLS)
     status, resp = collect_one(
         api_key, entry["batch_id"], entry["custom_id"])
+    # Heartbeat for resume_stuck_feed_batches: a poll that stops
+    # arriving means the scheduled retry died with its worker.
+    entry["last_polled_at"] = now
+    llm_node.tool_calls_meta = json.dumps(meta)
+    db.session.commit()
     if resp is None:
         logger.info("Node %s: batch %s still %s (poll %s)", llm_node.id,
                     entry["batch_id"], status, task.request.retries)
@@ -2055,6 +2062,85 @@ def _ca_batch_roundtrip(task, llm_node, model_id, api_model, messages,
                     llm_node.id, len(picks),
                     sum(1 for p in picks if p["recommend"]))
     return resp
+
+
+# A submitted batch whose last heartbeat is older than this is presumed
+# orphaned: the poll runs every CA_BATCH_POLL_SECONDS, so three misses
+# means the retry chain is gone (a hard worker kill loses scheduled
+# retries; a warm shutdown re-queues them).
+CA_BATCH_STALE_SECONDS = 3 * CA_BATCH_POLL_SECONDS + 60
+
+
+def find_stuck_feed_batches(now=None):
+    """Nodes still 'processing' on a submitted batch with no poll heartbeat
+    for CA_BATCH_STALE_SECONDS. Returns [(node, batch_entry)]."""
+    now = now or datetime.utcnow()
+    stale = []
+    rows = (Node.query
+            .filter(Node.node_type == "llm",
+                    Node.llm_task_status == "processing",
+                    Node.deleted_at.is_(None),
+                    Node.tool_calls_meta.isnot(None),
+                    Node.tool_calls_meta.like('%"_batch"%'))
+            .all())
+    for node in rows:
+        try:
+            meta = json.loads(node.tool_calls_meta) or []
+        except (json.JSONDecodeError, TypeError):
+            continue
+        entry = next((m for m in meta if isinstance(m, dict)
+                      and m.get("name") == "_batch"
+                      and m.get("status") == "submitted"), None)
+        if entry is None:
+            continue
+        last = entry.get("last_polled_at") or entry.get("submitted_at")
+        try:
+            last_dt = datetime.fromisoformat(last) if last else None
+        except ValueError:
+            last_dt = None
+        if last_dt is None or (now - last_dt).total_seconds() > CA_BATCH_STALE_SECONDS:
+            stale.append((node, entry))
+    return stale
+
+
+@celery.task(name="backend.tasks.llm_completion.resume_stuck_feed_batches")
+def resume_stuck_feed_batches():
+    """Beat backstop for the batch poll (every 10 min): re-dispatch
+    generate_llm_response for any submitted feed batch whose poll
+    heartbeat stopped. The re-run finds the stored batch id and polls
+    or collects it; a batch that has ended is collected exactly once
+    (save_feed_picks is idempotent and a collected node is no longer
+    'processing', so the next sweep skips it). The dispatch stamps the
+    heartbeat so one orphan is resumed once per stale window."""
+    with flask_app.app_context():
+        resumed = []
+        for node, entry in find_stuck_feed_batches():
+            parent = Node.query.get(node.parent_id) if node.parent_id else None
+            if parent is None:
+                continue
+            source_mode = None
+            try:
+                mode = next((m for m in json.loads(node.tool_calls_meta)
+                             if isinstance(m, dict) and m.get("name") == "_mode"), None)
+                source_mode = mode.get("source_mode") if mode else None
+            except (json.JSONDecodeError, TypeError):
+                pass
+            task = generate_llm_response.delay(
+                parent.id, node.id, node.llm_model, node.human_owner_id,
+                source_mode=source_mode)
+            meta = json.loads(node.tool_calls_meta)
+            for m in meta:
+                if isinstance(m, dict) and m.get("name") == "_batch":
+                    m["last_polled_at"] = datetime.utcnow().isoformat(timespec="seconds")
+                    m["resumed_at"] = m["last_polled_at"]
+                    m["resumed_count"] = int(m.get("resumed_count") or 0) + 1
+            node.tool_calls_meta = json.dumps(meta)
+            node.llm_task_id = task.id
+            db.session.commit()
+            resumed.append(node.id)
+            logger.warning("Resumed orphaned feed batch %s on node %s (task %s)",
+                           entry.get("batch_id"), node.id, task.id)
+        return {"resumed": resumed}
 
 
 class LLMCompletionTask(Task):
@@ -2368,6 +2454,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             if needs_ca:
                 from backend.tasks.imports import snapshot_dir_for
                 from backend.utils import community_archive as ca
+                # Gate on the EFFECTIVE placeholder: the pre-flight in
+                # create_llm_placeholder only sees the parent entry, not
+                # an older message or the thread's system prompt.
+                if not ca_tweets_allowed(User.query.get(user_id)):
+                    raise ValueError(ca_tweets_denied_message())
                 ca_params = parse_placeholder_params(ca_placeholder_match)
                 ca_days = parse_ca_tweets_days(
                     ca_params, placeholder=ca_placeholder_match)
