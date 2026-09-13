@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useUser } from '../contexts/UserContext';
+import { useToast } from '../contexts/ToastContext';
+import api from '../api';
 
 function useOnScreen(ref, threshold = 0.1) {
   const [isVisible, setIsVisible] = useState(false);
@@ -68,12 +70,19 @@ function WorkflowCard({ card, delay }) {
     }
   }, [isVisible, hasAnimated, delay]);
 
-  const disabled = card.disabled;
+  const disabled = card.disabled || card.busy;
+  // A card either opens a page (`path`) or starts something itself
+  // (`onSelect`, e.g. Read fires the request and lands on the reply).
+  const select = () => {
+    if (disabled) return;
+    if (card.onSelect) card.onSelect();
+    else navigate(card.path);
+  };
 
   return (
     <div
       ref={ref}
-      onClick={() => !disabled && navigate(card.path)}
+      onClick={select}
       onMouseEnter={() => !disabled && setHovered(true)}
       onMouseLeave={() => !disabled && setHovered(false)}
       style={{
@@ -125,7 +134,7 @@ function WorkflowCard({ card, delay }) {
         gap: "0.6rem",
       }}>
         {card.title}
-        {disabled && <span style={{
+        {card.disabled && <span style={{
           fontFamily: "var(--sans)",
           fontSize: "0.65rem",
           fontWeight: 400,
@@ -173,10 +182,12 @@ const shareCard = {
 };
 
 // Community Archive read (admin-only while the placeholder behind it is):
-// what the archive holds that is worth this person's time today.
+// what the archive holds that is worth this person's time today. Like
+// Text mode, the click creates the thread: the 'read' prompt as the
+// root and the reply under it, on the user's preferred model. There is
+// nothing to type, so the card fires the request itself.
 const readCard = {
   key: "read",
-  path: "/read",
   title: "Read",
   description: "What's worth your time today.",
   icon: (
@@ -201,10 +212,31 @@ export default function HomePage() {
   const greetingVisible = useOnScreen(greetingRef);
   const questionVisible = useOnScreen(questionRef);
   const { user } = useUser();
+  const { addToast } = useToast();
+  const navigate = useNavigate();
+  const [readStarting, setReadStarting] = useState(false);
+
+  const startRead = async () => {
+    setReadStarting(true);
+    try {
+      const res = await api.post('/read/start', {});
+      navigate(`/node/${res.data.llm_node_id}`);
+    } catch (err) {
+      setReadStarting(false);
+      if (err?.response?.status === 402) return;
+      addToast(err?.response?.data?.error || 'Could not start the read.', 6000);
+    }
+  };
+
   const displayCards = [
     ...cards,
     ...(user?.share_v1_enabled ? [shareCard] : []),
-    ...(user?.is_admin ? [readCard] : []),
+    ...(user?.is_admin ? [{
+      ...readCard,
+      onSelect: startRead,
+      busy: readStarting,
+      description: readStarting ? 'Starting…' : readCard.description,
+    }] : []),
   ];
 
   return (
