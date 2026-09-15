@@ -108,6 +108,13 @@ class User(db.Model, UserMixin):
     # Consecutive batch failures for the current step (bounds retries).
     profile_batch_attempts = db.Column(
         db.Integer, nullable=False, default=0, server_default="0")
+    # Why the seeder's last attempt to BUILD this user's next batch request
+    # raised (exception text), cleared once a request builds. Distinct from
+    # profile_batch_attempts, which counts provider-side failures of a
+    # submitted step: a build failure never reaches the provider, so
+    # without this the admin panel showed it as "waiting" (2026-09-15,
+    # a mistyped LLM_NAME failed every seed for five days unseen).
+    profile_seed_error = db.Column(db.String(255), nullable=True)
     # Pin this user to the Batch profile pipeline regardless of the global
     # switch / canary list. Set by admin pre-fills (Community Archive):
     # a bootstrapped corpus must never hit the synchronous (full-price) path.

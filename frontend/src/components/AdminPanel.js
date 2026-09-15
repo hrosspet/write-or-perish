@@ -871,7 +871,7 @@ function AdminPanel() {
     if (c.replies != null) parts.push(`${n(c.replies)} replies`);
     if (c.originals != null) parts.push(`${n(c.originals)} originals`);
     if (c.est_tokens != null) {
-      const below = c.est_tokens < (c.profile_threshold_tokens || 10000);
+      const below = c.est_tokens < (c.profile_threshold_tokens || 5000);
       parts.push(`~${n(c.est_tokens)} tokens${below ? " — below profile threshold" : ""}`);
     }
     parts.push(`account reports ${n(c.account_num_tweets)}`);
@@ -935,6 +935,11 @@ function AdminPanel() {
     }
     if (p.status === "completed") {
       const r = p.result || {};
+      // The seeder's own verdict on the account after the import (not a
+      // token comparison done here): queued, or under the next ladder step.
+      const queuedNote = r.profile_batch_queued
+        ? " — batch profile queued"
+        : ` — not queued: under the ${r.profile_threshold_tokens ? r.profile_threshold_tokens.toLocaleString() + "-token" : "next"} profile step`;
       if (r.source === "x-api") {
         return `${r.partial ? "PARTIAL" : "Done"}: ${(r.created || 0).toLocaleString()} nodes from ${(r.fetched || 0).toLocaleString()} posts via X` +
           `${r.partial ? ` (stopped: ${r.fetch_error})` : ""}` +
@@ -942,7 +947,7 @@ function AdminPanel() {
           `${r.retweets_skipped ? `, ${r.retweets_skipped.toLocaleString()} retweets skipped` : ""}` +
           `${r.skipped ? `, ${r.skipped} already imported` : ""}` +
           `${r.imported_tokens != null ? `, ~${r.imported_tokens.toLocaleString()} tokens` : ""}` +
-          `${r.profile_batch_queued ? " — batch profile queued" : " — below profile threshold"}`;
+          queuedNote;
       }
       const archived = r.archived != null ? ` of ${r.archived.toLocaleString()} archived` : "";
       const rts = r.retweets_skipped ? `, ${r.retweets_skipped.toLocaleString()} retweets skipped` : "";
@@ -953,7 +958,7 @@ function AdminPanel() {
         `${r.source === "parquet" ? " (snapshot)" : ""}${rts}${reported}` +
         `${r.skipped ? `, ${r.skipped} already imported` : ""}` +
         `${r.imported_tokens != null ? `, ~${r.imported_tokens.toLocaleString()} tokens` : ""}` +
-        `${r.profile_batch_queued ? " — batch profile queued" : " — below profile threshold"}`;
+        queuedNote;
     }
     if (p.status === "failed") return `Failed: ${p.error}`;
     return null;
@@ -1172,15 +1177,23 @@ function AdminPanel() {
                     ✓ profile v{u.profile.versions}
                   </span>
                 )}
-                {u.profile?.state === "generating" && u.profile.waiting === "inactive" && (
+                {u.profile?.state === "generating" && u.profile.seed_error && (
+                  <span
+                    style={{ color: "var(--error)" }}
+                    title={`The seeder reached this account but could not build its batch request: ${u.profile.seed_error}. Fix the cause, then Build profile (an Inactive account is not retried by the hourly seeder).`}
+                  >
+                    ✗ seed failed{u.profile.versions ? ` (${u.profile.versions} so far)` : ""}
+                  </span>
+                )}
+                {u.profile?.state === "generating" && !u.profile.seed_error && u.profile.waiting === "inactive" && (
                   <span
                     style={{ color: "var(--text-muted)" }}
-                    title="A profile build is requested but the account is Inactive: the hourly seeder only walks approved accounts, so nothing will happen until you Activate it"
+                    title="A profile build is requested, nothing is in flight, and the account is Inactive: the hourly seeder only walks approved accounts. Activate it, or Build profile, which seeds immediately regardless of status."
                   >
                     ⏸ waiting: inactive{u.profile.versions ? ` (${u.profile.versions} so far)` : ""}
                   </span>
                 )}
-                {u.profile?.state === "generating" && u.profile.waiting !== "inactive" && (
+                {u.profile?.state === "generating" && !u.profile.seed_error && u.profile.waiting !== "inactive" && (
                   <span
                     style={{ color: u.profile.incomplete || u.profile.batch_attempts ? "var(--error)" : "var(--warning)" }}
                     title={u.profile.incomplete ? "Data remains after the latest version's cutoff and no batch job is in flight — the last chunk failed; the hourly seeder retries" : undefined}
@@ -1366,7 +1379,7 @@ function AdminPanel() {
                     <button
                       onClick={() => startPrefill(u.id)}
                       disabled={["queued", "running"].includes(prefill[u.id].status) || (prefill[u.id].source === "x" && prefill[u.id].check?.protected)}
-                      style={prefill[u.id].check && prefill[u.id].check.est_tokens != null && prefill[u.id].check.est_tokens < (prefill[u.id].check.profile_threshold_tokens || 10000) ? { opacity: 0.6 } : undefined}
+                      style={prefill[u.id].check && prefill[u.id].check.est_tokens != null && prefill[u.id].check.est_tokens < (prefill[u.id].check.profile_threshold_tokens || 5000) ? { opacity: 0.6 } : undefined}
                     >
                       Start
                     </button>

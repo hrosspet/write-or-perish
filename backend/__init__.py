@@ -25,6 +25,32 @@ from backend.oauth import init_twitter_blueprint
 from flask_cors import CORS
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+
+def validate_default_model(config):
+    """Refuse to boot on an ``LLM_NAME`` that is not a SUPPORTED_MODELS key.
+
+    The keys are the dotted display ids (``claude-opus-4.6``); the API ids
+    use dashes (``claude-opus-4-6``). Setting the API id in the env file
+    does not fail anywhere visible: every reply route 400s for users with
+    no preferred model, and every periodic task (profile seeder, recent
+    context, digest) logs a per-user warning and skips — prod ran that way
+    for five days on 2026-09-10..15 and once before in May. A boot failure
+    turns the typo into a red deploy instead."""
+    model_id = config.get("DEFAULT_LLM_MODEL")
+    supported = config.get("SUPPORTED_MODELS") or {}
+    if model_id in supported:
+        return
+    hint = ""
+    dotted = (model_id or "").replace("-", ".")
+    for key in supported:
+        if key.replace("-", ".") == dotted:
+            hint = f" (did you mean {key!r}?)"
+            break
+    raise RuntimeError(
+        f"LLM_NAME={model_id!r} is not a SUPPORTED_MODELS key{hint}. "
+        f"Known keys: {', '.join(sorted(supported))}")
+
+
 def create_app():
     # Error monitoring (roadmap Phase 0). No-op unless SENTRY_DSN is set.
     sentry_dsn = os.environ.get("SENTRY_DSN")
@@ -66,6 +92,7 @@ def create_app():
 
     app = Flask(__name__)
     app.config.from_object(Config)
+    validate_default_model(app.config)
 
     # Fix for running behind nginx reverse proxy - handles X-Forwarded-* headers
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
