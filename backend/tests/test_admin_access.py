@@ -276,7 +276,12 @@ class TestProfileStatus:
         waiting1 = User(username="waiting1", approved=False, profile_force_batch=True,
                         profile_needs_full_regen=True)
         active_regen = User(username="active_regen", approved=True, profile_needs_full_regen=True)
-        _db.session.add_all([waiting0, waiting1, active_regen]); _db.session.flush()
+        # Same flags as waiting0, but the immediate seed DID run and could
+        # not build the request: not a wait on activation.
+        seed_fail = User(username="seed_fail", approved=False, profile_force_batch=True,
+                         profile_needs_full_regen=True,
+                         profile_seed_error="ValueError: Unsupported model: claude-opus-4-6")
+        _db.session.add_all([waiting0, waiting1, active_regen, seed_fail]); _db.session.flush()
         self._profile(waiting1, "iterative")
         _db.session.commit()
 
@@ -285,7 +290,8 @@ class TestProfileStatus:
         rows = {u["username"]: u for u in client.get("/api/admin/users").json["users"]}
         assert rows["fresh"]["profile"] == {
             "versions": 0, "last_generation_type": None,
-            "last_created_at": None, "state": "none", "waiting": None}
+            "last_created_at": None, "state": "none", "waiting": None,
+            "seed_error": None}
         assert rows["one"]["profile"]["state"] == "complete"
         assert rows["one"]["profile"]["versions"] == 1
         assert rows["one"]["prefilled_handle"] == "corbindreams"
@@ -303,6 +309,10 @@ class TestProfileStatus:
         assert rows["waiting1"]["profile"]["incomplete"] is False
         assert rows["active_regen"]["profile"]["waiting"] is None
         assert rows["pending"]["profile"]["waiting"] is None
+        assert rows["waiting0"]["profile"]["seed_error"] is None
+        assert rows["seed_fail"]["profile"]["state"] == "generating"
+        assert rows["seed_fail"]["profile"]["waiting"] is None
+        assert rows["seed_fail"]["profile"]["seed_error"] == "ValueError: Unsupported model: claude-opus-4-6"
 
     def test_intentions_column_state(self, app, users):
         from datetime import datetime
@@ -404,7 +414,7 @@ class TestPrefillCheck:
             "archived_live": 6100})
         assert client.get("/api/admin/prefill/check?handle=big").json["import_source"] == "rest"
         assert r.json["already_imported"] == 1
-        assert r.json["profile_threshold_tokens"] == 10000
+        assert r.json["profile_threshold_tokens"] == 5000  # first ladder step
         monkeypatch.setattr(ca, "coverage_summary", lambda h, snapshot_dir=None: None)
         assert client.get("/api/admin/prefill/check?handle=nobody").status_code == 404
         assert client.get("/api/admin/prefill/check").status_code == 400

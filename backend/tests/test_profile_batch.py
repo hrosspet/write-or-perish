@@ -1224,3 +1224,35 @@ def test_provisional_ladder_drives_first_builds_and_rebuilds(app):
     assert pb._should_seed(w) is False
     write(w, 1_000)
     assert pb._should_seed(w) is True
+
+
+def test_seed_build_failure_is_recorded_on_the_user_and_cleared_on_success(app, monkeypatch):
+    """A request-build failure never reaches the provider, so nothing
+    counted it: the admin panel showed the account as waiting on
+    activation while prod's LLM_NAME was a typo for five days
+    (2026-09-15). The seeder now records the exception on the row (and
+    logs at ERROR for Sentry), and clears it once a request builds."""
+    u = _user(profile_force_batch=True, profile_needs_full_regen=True)
+    u.approved = False
+    db.session.commit()
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("DATA")))
+    monkeypatch.setattr(pb._exports, "_load_prompt", lambda *a, **k: "G {user_export}")
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: {k: f"b-{k}" for k in reqs})
+    u.preferred_model = "claude-opus-4-6"  # the API id, not a config key
+    db.session.commit()
+
+    assert pb._seed_profile_batches(users=[u]) == 0
+    fresh = User.query.get(u.id)
+    assert fresh.profile_seed_error == "ValueError: Unsupported model: claude-opus-4-6"
+    assert fresh.profile_batch_pending is False
+    assert fresh.profile_batch_attempts == 0  # not a provider failure
+    assert fresh.profile_needs_full_regen is True  # the request stands
+
+    fresh.preferred_model = "test-model"
+    db.session.commit()
+    assert pb._seed_profile_batches(users=[fresh]) == 1
+    fresh = User.query.get(u.id)
+    assert fresh.profile_seed_error is None
+    assert fresh.profile_batch_pending is True

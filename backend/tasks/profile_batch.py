@@ -566,9 +566,18 @@ def _seed_profile_batches(users=None):
         try:
             req = _build_next_profile_request(user)
         except Exception as e:
-            logger.warning(
+            # Recorded on the row (admin Profile column) and logged at
+            # ERROR so Sentry sees it: a build failure never reaches the
+            # provider, so nothing else counts or reports it.
+            db.session.rollback()  # the builder may have left the session failed
+            user.profile_seed_error = f"{type(e).__name__}: {e}"[:255]
+            db.session.commit()
+            logger.error(
                 f"Build batch request failed for user {user.id}: {e}")
             continue
+        if user.profile_seed_error:
+            user.profile_seed_error = None
+            db.session.commit()
         if req:
             built.append(req)
     return _submit_requests(built, keys)

@@ -133,7 +133,8 @@ def test_prefill_x_impl_imports_and_pins_batch(app, monkeypatch):  # noqa: F811
     assert fresh.profile_force_batch is True and fresh.prefilled_handle == "Alice"
     assert sync.call_count == 0
     assert states[0]["stage"] == "fetching" and states[-1]["stage"] == "importing"
-    assert result["profile_batch_queued"] is False
+    assert result["profile_batch_queued"] is False  # three tiny tweets: under the ladder
+    assert result["profile_threshold_tokens"] == 5000
     # Every paid-for post is kept as raw JSON, independent of the account.
     import json
     lines = [json.loads(ln) for ln in open(result["dump_path"], encoding="utf-8")]
@@ -258,3 +259,31 @@ def test_spam_flag_toggle_and_listing(admin_app):  # noqa: F811
     assert row["spam"] is True
     assert User.query.get(target.id).approved is True  # marking spam doesn't deactivate
     assert client.post(f"/api/admin/users/{target.id}/toggle_spam").json["spam"] is False
+
+
+def test_prefill_reports_queued_from_the_seeder_gate_not_the_racing_flag(app, monkeypatch):  # noqa: F811
+    """The result line's "queued" is the seeder's own gate evaluated in
+    the import task. Reading the regen flag instead raced the seed task
+    that sets it and reported "below profile threshold" for a 339k-token
+    pre-fill (2026-09-15). Over the first ladder step: queued, the flag
+    set, the immediate seed dispatched."""
+    from backend.tasks import imports as imports_mod
+    import backend.tasks.exports as ex
+    import backend.tasks.profile_batch as pb
+    u = _make_user("carol")
+    _db.session.commit()
+    _fake_x(monkeypatch, tweet_count=2, tweets=[_v2_tweet(2, "second"), _v2_tweet(1, "first")])
+    monkeypatch.setattr(ex, "maybe_trigger_profile_update", MagicMock())
+    # Through the seeder's own binding: under the full suite's fixture
+    # ordering backend.tasks.exports can be a different module object.
+    monkeypatch.setattr(pb._exports, "_estimate_source_tokens", lambda user: 6000)
+    seed = MagicMock()
+    monkeypatch.setattr(pb, "seed_profile_batch_for_user", seed)
+
+    result = imports_mod.prefill_x_api_impl(
+        u.id, "carol", {"max_tweets": 500}, update_state=lambda **kw: None)
+
+    assert result["profile_batch_queued"] is True
+    assert result["profile_threshold_tokens"] == 5000
+    assert User.query.get(u.id).profile_needs_full_regen is True
+    assert seed.delay.call_args_list[-1].args == (u.id,)

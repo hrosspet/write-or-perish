@@ -211,17 +211,33 @@ def _import_prefill_rows(user_id, handle, rows, options, state, seed_now,
     except Exception:
         db.session.rollback()
         raise
-    queued = bool(User.query.get(user_id).profile_needs_full_regen)
-    if queued and seed_now:
-        # Don't wait for the hourly seeder: submit this user's first chunk
-        # now (the ~60s poller then drives the rest of the chain).
-        from backend.tasks.profile_batch import seed_profile_batch_for_user
+    # Whether the seeder will build for this account is its own gate,
+    # evaluated here for the admin's result line (the regen flag it sets
+    # when due is the one the seed sets anyway). Reading the flag instead
+    # raced the seed task the handoff dispatches and reported "below
+    # threshold" for every pre-fill since the chunk planner (2026-09-04..15).
+    from backend.tasks.profile_batch import (
+        _should_seed, _latest_non_integration_profile,
+        seed_profile_batch_for_user)
+    from backend.utils.chunk_plan import next_build_threshold
+    user = User.query.get(user_id)
+    queued = bool(user.profile_batch_pending or _should_seed(user))
+    if queued and seed_now and not user.profile_batch_pending:
+        # Don't wait for the hourly seeder (which skips unapproved
+        # accounts): submit this user's first chunk now. The handoff in
+        # create_twitter_nodes seeds too, but only for Voice-Mode plans;
+        # a second seed is harmless (pipeline lock + pending guard).
         seed_profile_batch_for_user.delay(user_id)
+    latest = _latest_non_integration_profile(user_id)
+    covered = (latest.source_tokens_used or 0) if latest else 0
     result.update({
         "user_id": user_id, "handle": handle, "total": total, "stage": "done",
         "profile_batch_queued": queued,
+        # The ladder step the account's total must reach for the next
+        # from-scratch build (None once the account is past the ladder).
+        "profile_threshold_tokens": next_build_threshold(covered),
         # Importer's approximate count over the rows offered (incl. any
-        # deduped as already imported) — what the 10k profile gate sees.
+        # deduped as already imported).
         "imported_tokens": sum(r.get("token_count") or 0 for r in rows),
     })
     return result

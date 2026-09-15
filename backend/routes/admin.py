@@ -74,7 +74,12 @@ def _profile_status_map():
         # Inactive account with a rebuild requested (regen flag) or a
         # chunk still to go (stuck) waits until activation — a different
         # thing from provider latency, and it must not look like it.
+        # A recorded seed error takes precedence: the seeder DID reach the
+        # account and could not build its request (Unsupported model, a
+        # KMS or count-tokens failure) — not a wait on activation.
+        seed_error = (u.profile_seed_error if u else None) or None
         waiting = bool(u and not u.approved and not u.profile_batch_pending
+                       and not seed_error
                        and (u.profile_needs_full_regen or stuck))
         out[user_id] = {
             "versions": n,
@@ -86,6 +91,7 @@ def _profile_status_map():
             # scratch, not updated, once the organic gate next trips.
             "provisional": profile_is_provisional(last),
             "waiting": "inactive" if waiting else None,
+            "seed_error": seed_error,
             "batch_attempts": (u.profile_batch_attempts or 0) if u else 0,
         }
     return out
@@ -231,10 +237,12 @@ def list_users():
                           or user.profile_needs_full_regen else "none"),
                 # Rebuild requested, nothing in flight, account inactive →
                 # the seeder won't touch it until activation (see
-                # _profile_status_map).
+                # _profile_status_map). A seed error outranks that.
                 "waiting": ("inactive" if (user.profile_needs_full_regen
                                            and not user.profile_batch_pending
+                                           and not user.profile_seed_error
                                            and not user.approved) else None),
+                "seed_error": user.profile_seed_error or None,
             },
         })
     return jsonify({
@@ -549,7 +557,10 @@ def prefill_check():
     summary["import_source"] = "parquet" if (big and snapshot_complete) else (
         "parquet (if snapshot is current)" if big and summary.get("detail_source") != "parquet"
         else "rest")
-    summary["profile_threshold_tokens"] = 10000
+    # The first step of the provisional ladder: what a fresh account must
+    # hold for the seeder to build anything at all.
+    from backend.utils.chunk_plan import next_build_threshold
+    summary["profile_threshold_tokens"] = next_build_threshold(0)
     user_id = request.args.get("user_id", type=int)
     if user_id:
         summary["already_imported"] = Node.query.filter(
