@@ -458,3 +458,80 @@ def test_private_node_shell_is_neutral_for_signed_in_member(app):
     assert "Not found" not in html
     assert "deeply private thought" not in html
     assert "noindex" in html
+
+
+# ── Username rename keeps permalinks alive (#253) ────────────────────────
+
+def _rename(old, new):
+    from backend.utils.username_history import record_rename
+    user = _user(old)
+    record_rename(user, old, new)
+    user.username = new
+    _db.session.commit()
+
+
+def test_former_handle_301s_to_current_on_every_public_route(app):
+    _publish("author", ARTICLE, "on-lore")
+    _rename("author", "writer")
+    c = app.test_client()
+    for old, new in [
+        ("/@author/on-lore", "/@writer/on-lore"),
+        ("/@author/on-lore.md", "/@writer/on-lore.md"),
+        ("/@author/on-lore/og.png", "/@writer/on-lore/og.png"),
+        ("/@author", "/@writer"),
+        ("/@author/feed.xml", "/@writer/feed.xml"),
+        ("/@author/og.png", "/@writer/og.png"),
+    ]:
+        r = c.get(old)
+        assert r.status_code == 301, (old, r.status_code)
+        assert r.headers["Location"].endswith(new), (old, r.headers["Location"])
+    # The current handle serves the page; the sitemap only lists it.
+    assert c.get("/@writer/on-lore").status_code == 200
+    sitemap = c.get("/sitemap.xml").get_data(as_text=True)
+    assert "/@writer/on-lore" in sitemap and "/@author/" not in sitemap
+    # Nobody-ever-held-it stays a plain 404.
+    assert c.get("/@nobody/on-lore").status_code == 404
+    assert c.get("/@nobody").status_code == 404
+
+
+def test_permalink_api_carries_canonical_for_former_handle(app):
+    node = _publish("author", ARTICLE, "on-lore")
+    _rename("author", "writer")
+    c = app.test_client()
+    old = c.get("/api/commons/permalink/author/on-lore").get_json()
+    assert old == {"node_id": node.id, "canonical": "/@writer/on-lore"}
+    new = c.get("/api/commons/permalink/writer/on-lore").get_json()
+    assert new == {"node_id": node.id}
+
+
+def test_former_handle_is_reserved_for_everyone_but_its_owner(app):
+    from backend.utils.reserved_usernames import validate_username
+    _publish("author", ARTICLE, "on-lore")
+    _rename("author", "writer")
+    assert validate_username("author", exclude_user_id=_user("visitor").id) == (
+        "That username is reserved.")
+    assert validate_username("Author", exclude_user_id=_user("visitor").id) == (
+        "That username is reserved.")
+    # Taking your own former handle back is allowed…
+    assert validate_username("author", exclude_user_id=_user("writer").id) is None
+    # …and ends the redirect: the old direction flips.
+    _rename("writer", "author")
+    from backend.models import UsernameHistory
+    rows = UsernameHistory.query.filter_by(user_id=_user("author").id).all()
+    assert [r.old_username for r in rows] == ["writer"]
+    c = app.test_client()
+    assert c.get("/@author/on-lore").status_code == 200
+    r = c.get("/@writer/on-lore")
+    assert r.status_code == 301 and r.headers["Location"].endswith("/@author/on-lore")
+    assert validate_username("writer", exclude_user_id=_user("visitor").id) == (
+        "That username is reserved.")
+
+
+def test_rename_history_dedupes_per_handle(app):
+    from backend.models import UsernameHistory
+    _publish("author", ARTICLE, "on-lore")
+    _rename("author", "writer")
+    _rename("writer", "author")
+    _rename("author", "writer")
+    rows = UsernameHistory.query.filter_by(user_id=_user("writer").id).all()
+    assert [r.old_username for r in rows] == ["author"]

@@ -135,7 +135,8 @@ def resolve_permalink(username, slug):
     for unknown user/slug and anything non-public."""
     if not _enabled():
         return jsonify({"error": "Not found"}), 404
-    user = User.query.filter_by(username=username).first()
+    from backend.utils.username_history import resolve_handle
+    user, moved = resolve_handle(username)
     if user is None:
         return jsonify({"error": "Not found"}), 404
     node = _public_alive(Node.query.filter(
@@ -144,7 +145,12 @@ def resolve_permalink(username, slug):
     )).first()
     if node is None:
         return jsonify({"error": "Not found"}), 404
-    return jsonify({"node_id": node.id}), 200
+    body = {"node_id": node.id}
+    if moved:
+        # Former handle (#253): the SPA swaps the address bar to the
+        # current one; the server-rendered pages 301 instead.
+        body["canonical"] = f"/@{user.username}/{slug}"
+    return jsonify(body), 200
 
 
 @commons_bp.route("/node/<int:node_id>", methods=["GET"])

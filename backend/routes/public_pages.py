@@ -21,7 +21,7 @@ still carry public_slug through the 30-day grace window).
 from datetime import datetime
 from xml.sax.saxutils import escape as xml_escape
 
-from flask import Blueprint, Response, current_app, request
+from flask import Blueprint, Response, current_app, redirect, request
 from markupsafe import escape
 
 from backend.extensions import db
@@ -259,11 +259,24 @@ def _public_roots_for(user):
 # Routes: articles and profiles
 # ---------------------------------------------------------------------------
 
+def _moved(username, rest=""):
+    """301 to the current handle when *username* is a FORMER one (#253),
+    else None. Checked before the page cache so a rename never serves a
+    stale page under the old handle and the redirect itself is never
+    cached (a handle can be taken back)."""
+    from backend.utils.username_history import resolve_handle
+    user, moved = resolve_handle(username)
+    if moved:
+        return redirect(f"/@{user.username}{rest}", code=301)
+    return None
+
+
 @public_pages_bp.route("/@<username>/feed.xml")
 def author_feed(username):
     if not _enabled():
         return Response("Not found", status=404, mimetype="text/plain")
-    return _cached(lambda: _render_author_feed(username))
+    return _moved(username, "/feed.xml") or _cached(
+        lambda: _render_author_feed(username))
 
 
 def _render_author_feed(username):
@@ -312,6 +325,9 @@ def article_og_image(username, slug):
     worker (DEK-cached) — no Redis layer, short HTTP cache instead."""
     if not _enabled():
         return Response("Not found", status=404, mimetype="text/plain")
+    moved = _moved(username, f"/{slug}/og.png")
+    if moved:
+        return moved
     user, node, _ = _resolve_permalink(username, slug)
     if node is None:
         return Response("Not found", status=404, mimetype="text/plain")
@@ -327,6 +343,9 @@ def article_og_image(username, slug):
 def profile_og_image(username):
     if not _enabled():
         return Response("Not found", status=404, mimetype="text/plain")
+    moved = _moved(username, "/og.png")
+    if moved:
+        return moved
     user = User.query.filter_by(username=username).first()
     if (user is None or not user.public_sharing_enabled
             or not _public_roots_for(user)):
@@ -342,6 +361,9 @@ def profile_og_image(username):
 def article(username, slug):
     if not _enabled():
         return _shell_404()
+    moved = _moved(username, f"/{slug}")
+    if moved:
+        return moved
     if slug.endswith(".md"):
         return _cached(lambda: _render_article_md(username, slug[:-3]))
     return _cached(lambda: _render_article(username, slug))
@@ -392,7 +414,7 @@ def _render_article_md(username, slug):
 def profile(username):
     if not _enabled():
         return _shell_404()
-    return _cached(lambda: _render_profile(username))
+    return _moved(username) or _cached(lambda: _render_profile(username))
 
 
 def _render_profile(username):
