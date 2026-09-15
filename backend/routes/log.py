@@ -10,9 +10,9 @@ from backend.utils.timefmt import iso_utc
 from backend.utils.encryption import prefetch_deks
 from sqlalchemy import and_, or_, func
 
-feed_bp = Blueprint("feed_bp", __name__)
+log_bp = Blueprint("log_bp", __name__)
 
-@feed_bp.route("/feed", methods=["GET"])
+@log_bp.route("/log", methods=["GET"])
 @login_required
 def get_feed():
     """
