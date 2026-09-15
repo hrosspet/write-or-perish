@@ -46,19 +46,32 @@ export default function ProfileGenerationWatcher() {
     return () => window.removeEventListener('loore_profile_started', handler);
   }, []);
 
-  const { status, progress, data } = useAsyncTaskPolling(
+  const { status, progress, data, error } = useAsyncTaskPolling(
     taskId ? `/export/profile-status/${taskId}` : null,
-    { interval: 3000, enabled: !!taskId }
+    // #258: a chunked build over a large import legitimately runs for
+    // hours; the hook's default 30-minute cap silently stopped polling
+    // and froze the indicator on its last payload ("Chunk 1 · 35%").
+    // The backend has its own staleness guard (_is_task_stale), so the
+    // cap here is only a backstop against a lost task id.
+    { interval: 3000, enabled: !!taskId, maxDuration: 12 * 60 * 60 * 1000 }
   );
 
   // Broadcast progress so ProfilePage can render its inline indicator
-  // without running a second poller.
+  // without running a second poller. If polling gave up (the backstop
+  // above), say so instead of leaving a stale percentage on screen.
   useEffect(() => {
     if (!taskId || !status) return;
+    const stalled = !!error && status !== 'completed' && status !== 'failed';
     window.dispatchEvent(new CustomEvent('loore_profile_progress', {
-      detail: { status, progress, message: data?.message },
+      detail: {
+        status: stalled ? 'stalled' : status,
+        progress,
+        message: stalled
+          ? 'Still running in the background — reload to refresh'
+          : data?.message,
+      },
     }));
-  }, [taskId, status, progress, data]);
+  }, [taskId, status, progress, data, error]);
 
   useEffect(() => {
     if (status !== 'completed' && status !== 'failed') return;

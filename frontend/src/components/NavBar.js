@@ -178,8 +178,11 @@ function NavBar({ onNewEntryClick }) {
         padding: "0 clamp(14px, 4vw, 24px)",
       }}
     >
+      {/* .nav-brand / .nav-links: index.css shrinks the wordmark and the
+          link gap below 380px so the kebab stays on a 360px phone (#284). */}
       <Link
         to="/"
+        className="nav-brand"
         style={{
           color: "var(--text-secondary)",
           textDecoration: "none",
@@ -207,6 +210,7 @@ function NavBar({ onNewEntryClick }) {
       {/* The links tighten up on narrow screens so the group keeps a
           clear gap from the logo instead of running into it. */}
       <div
+        className="nav-links"
         style={{
           display: "flex",
           alignItems: "center",

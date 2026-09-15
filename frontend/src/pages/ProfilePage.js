@@ -100,7 +100,9 @@ export default function ProfilePage() {
   useEffect(() => {
     const onProgress = (e) => {
       setGenProgress(e.detail?.progress || 0);
-      setGenData(e.detail?.message ? { message: e.detail.message } : null);
+      setGenData(e.detail?.message
+        ? { message: e.detail.message, stalled: e.detail.status === 'stalled' }
+        : null);
       if (e.detail?.status === 'failed') {
         setFailMessage('Generation failed');
         setTimeout(() => setFailMessage(''), 5000);
@@ -289,7 +291,9 @@ export default function ProfilePage() {
             animation: generationTaskId ? 'pulse 2s ease-in-out infinite' : 'none',
           }}>
             {failMessage || (genData?.message
-              ? `${genData.message} \u00b7 ${genProgress || 0}%`
+              ? (genData.stalled
+                ? genData.message
+                : `${genData.message} \u00b7 ${genProgress || 0}%`)
               : 'Starting generation...')}
           </span>
         )}

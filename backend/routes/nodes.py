@@ -563,6 +563,21 @@ def approximate_token_count(text):
 
 
 
+def _permalink_for(node):
+    """The node's public address, or None while it is not public (#263).
+
+    The slug is KEPT on the row when a node goes private, so republishing
+    restores the same URL — but the permalink only resolves for public
+    nodes (commons.resolve_permalink is public-only), so advertising it
+    for a private node sends the owner to a 404 the moment NodeDetail
+    rewrites the address bar. Gate on current privacy, not on the slug.
+    """
+    if (node.public_slug and node.user
+            and node.privacy_level == PrivacyLevel.PUBLIC):
+        return f"/@{node.user.username}/{node.public_slug}"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Create a new node (supports both text & voice uploads)
 # ---------------------------------------------------------------------------
@@ -781,9 +796,7 @@ def create_node():
         "created_at": iso_utc(node.created_at),
         "username": current_user.username,
         "privacy_level": node.privacy_level,
-        "permalink": (
-            f"/@{node.user.username}/{node.public_slug}"
-            if node.public_slug and node.user else None),
+        "permalink": _permalink_for(node),
         "ai_usage": node.ai_usage,
         "split_into": 1 + len(parts),
         "tip_id": parts[-1].id if parts else node.id
@@ -1003,9 +1016,7 @@ def _focal_own_fields(node):
         "node_type": node.node_type,
         "created_at": iso_utc(node.created_at),
         "updated_at": iso_utc(node.updated_at),
-        "permalink": (
-            f"/@{node.user.username}/{node.public_slug}"
-            if node.public_slug and node.user else None),
+        "permalink": _permalink_for(node),
         "user": {
             "id": node.user.id,
             "username": node.user.username,

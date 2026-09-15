@@ -98,10 +98,26 @@ const NodeForm = forwardRef(
         localStorage.setItem('loore_last_ai_usage', aiUsage);
       }
     }, [aiUsage, remembersChoices, aiUsageFromGlobalDefault]);
-    // "Agentic Reply" — opt-in to attaching the textmode system prompt
-    // (profile + recent + todo + prefs as context). Local state, OFF by
-    // default — deliberate and distinct from "auto-generate".
-    const [useAgenticPrompt, setUseAgenticPrompt] = useState(false);
+    // "Agentic Reply" — attaches the textmode system prompt (profile +
+    // recent + todo + prefs as context). ON by default wherever it is
+    // offered (#261: a first message without it is the weakest possible
+    // first impression, and a pre-loaded account only pays off on the
+    // agentic path) and remembered in localStorage like Auto-generate, so
+    // switching it off is respected while a fresh account starts agentic.
+    const [useAgenticPrompt, setUseAgenticPromptState] = useState(() => {
+      if (!allowAgenticPrompt) return false;
+      const stored = localStorage.getItem('loore_agentic_reply');
+      return stored === null ? true : stored === 'true';
+    });
+    const setUseAgenticPrompt = useCallback((next) => {
+      setUseAgenticPromptState(prev => {
+        const resolved = typeof next === 'function' ? next(prev) : next;
+        if (allowAgenticPrompt) {
+          localStorage.setItem('loore_agentic_reply', String(resolved));
+        }
+        return resolved;
+      });
+    }, [allowAgenticPrompt]);
 
     // "Auto-generate" — does an LLM reply fire automatically on submit,
     // so the user doesn't have to click LLM Response manually on the
