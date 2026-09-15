@@ -12,7 +12,10 @@ export default function AlphaThankYouPage() {
   const [error, setError] = useState("");
   const [submitted, setSubmitted] = useState(false);
 
-  const needsEmail = user && (!user.email || user.email.trim() === "");
+  // No bound email and no confirmation pending → ask for one. Binding
+  // happens only when the link we send is opened (#260).
+  const needsEmail = user && (!user.email || user.email.trim() === "")
+    && !user.pending_email;
 
   // This page is handed out as a link (e.g. to fresh X signups, so they can
   // opt in to the tweet seed). Signed-up users are logged in even before
@@ -37,13 +40,13 @@ export default function AlphaThankYouPage() {
     setLoading(true);
     setError("");
     try {
-      const response = await api.put("/dashboard/user", { email });
-      setUser(response.data.user);
+      const response = await api.post("/dashboard/email", { email });
+      setUser({ ...user, pending_email: response.data.pending_email });
       setSubmitted(true);
       setLoading(false);
     } catch (err) {
       console.error(err);
-      setError("Error updating email. Please try again.");
+      setError(err.response?.data?.error || "Error sending the confirmation link. Please try again.");
       setLoading(false);
     }
   };
@@ -157,6 +160,22 @@ export default function AlphaThankYouPage() {
         </Fade>
       )}
 
+      {/* The link we sent binds the address when opened (#260). */}
+      {user.pending_email && (
+        <Fade delay={0.25}>
+          <div style={{
+            background: "var(--bg-card)", border: "1px solid var(--border)",
+            borderRadius: 12, padding: "1.4rem 2.2rem", maxWidth: 460,
+            textAlign: "left", marginBottom: "2rem",
+            fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.92rem",
+            lineHeight: 1.7, color: "var(--text-secondary)",
+          }}>
+            We sent a confirmation link to{" "}
+            <strong style={{ color: "var(--text-primary)", fontWeight: 400 }}>{user.pending_email}</strong>.
+            Open it to finish — until then we have no way to reach you.
+          </div>
+        </Fade>
+      )}
       {/* Opt-in: seed the account from the user's own public tweets. Asked
           here because it's dead time — the signup is already done, so a
           hesitation costs nothing. Renders null unless X-login + unanswered. */}
