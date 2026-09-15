@@ -17,7 +17,7 @@ from backend.utils.tokens import (
     approximate_token_count, reduce_export_tokens, format_date_metadata,
 )
 from backend.utils.api_keys import get_api_keys_for_usage
-from backend.utils.cost import calculate_llm_cost_microdollars
+from backend.utils.cost import llm_cost_from_response
 
 logger = get_task_logger(__name__)
 
@@ -379,8 +379,8 @@ def generate_user_profile(self, user_id: int, model_id: str):
 
             logger.info(f"Profile generated for user {user_id}: {len(profile_text)} characters, {total_tokens} tokens")
 
-            # Log API cost
-            cost = calculate_llm_cost_microdollars(model_id, input_tokens, output_tokens)
+            # Log API cost (cache-aware, #286)
+            cost = llm_cost_from_response(model_id, response)
             cost_log = APICostLog(
                 user_id=user.id,
                 model_id=model_id,
@@ -528,8 +528,7 @@ def _save_profile(user, model_id, profile_text, response,
     output_tokens = response.get("output_tokens", 0)
     total_tokens = response["total_tokens"]
 
-    cost = calculate_llm_cost_microdollars(model_id, input_tokens,
-                                           output_tokens, batch=batch)
+    cost = llm_cost_from_response(model_id, response, batch=batch)
     cost_log = APICostLog(
         user_id=user.id, model_id=model_id,
         request_type="profile_batch" if batch else "profile",

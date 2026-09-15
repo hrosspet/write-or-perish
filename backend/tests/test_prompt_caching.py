@@ -32,7 +32,8 @@ from backend.models import (  # noqa: E402
     User, Node, NodeContextArtifact, UserTodo, APICostLog,
 )
 import backend.utils.prompt_cache as prompt_cache  # noqa: E402
-from backend.utils.cost import calculate_llm_cost_microdollars  # noqa: E402
+from backend.utils.cost import (  # noqa: E402
+    calculate_llm_cost_microdollars, llm_cost_from_response)
 
 _GLUE = ("backend.celery_app", "backend.llm_providers",
          "backend.tasks.llm_completion")
@@ -340,3 +341,98 @@ def test_openai_cached_input_discount(app):
         capped = calculate_llm_cost_microdollars(
             "gpt-5.5", 100, 0, cached_input_tokens=10_000)
         assert capped == round(100 * 5 * 0.25)
+
+
+# ── OpenAI cache writes (#286 / #241) ────────────────────────────────────
+
+def _sol(app):
+    # Mirrors backend/config.py gpt-5.6-sol: $4/M input, 0.1x cached,
+    # long-context tier above 272k at 2x input / 1.5x output.
+    app.config["SUPPORTED_MODELS"]["gpt-5.6-sol"] = {
+        "provider": "openai", "api_model": "gpt-5.6-sol",
+        "input_price_per_mtok": 4.00, "output_price_per_mtok": 20.00,
+        "cached_input_multiplier": 0.10,
+        "long_context_threshold": 272_000,
+        "long_context_input_multiplier": 2.0,
+        "long_context_output_multiplier": 1.5,
+    }
+
+
+def test_openai_cache_write_subset_no_double_billing(app):
+    """OpenAI's cache_write_tokens is a SUBSET of input_tokens (like
+    cached_tokens), so the written tokens leave the full-price remainder
+    and bill once at 1.25x — never 1.0x + 1.25x."""
+    _sol(app)
+    with app.app_context():
+        # 100k prompt, all of it written to the cache (first turn).
+        cost = calculate_llm_cost_microdollars(
+            "gpt-5.6-sol", 100_000, 0, cache_write_subset_tokens=100_000)
+        assert cost == round(100_000 * 4 * 1.25)   # $0.50, not $1.125
+        # Later turn: 80k served from cache, 15k written, 5k ordinary.
+        mixed = calculate_llm_cost_microdollars(
+            "gpt-5.6-sol", 100_000, 1_000,
+            cached_input_tokens=80_000, cache_write_subset_tokens=15_000)
+        assert mixed == round(5_000 * 4 + 80_000 * 4 * 0.1
+                              + 15_000 * 4 * 1.25 + 1_000 * 20)
+        # The two subsets together can never exceed input_tokens.
+        capped = calculate_llm_cost_microdollars(
+            "gpt-5.6-sol", 100, 0,
+            cached_input_tokens=80, cache_write_subset_tokens=500)
+        assert capped == round(80 * 4 * 0.1 + 20 * 4 * 1.25)
+        # Pre-5.6 models report no writes: nothing changes for them.
+        assert calculate_llm_cost_microdollars(
+            "gpt-5.5", 1_000, 0) == round(1_000 * 5)
+
+
+def test_openai_cache_write_long_context(app):
+    """The long-context surcharge applies to the input price BEFORE the
+    write multiplier: a 300k first-turn write on Sol is $8/M * 1.25."""
+    _sol(app)
+    with app.app_context():
+        cost = calculate_llm_cost_microdollars(
+            "gpt-5.6-sol", 300_000, 0, cache_write_subset_tokens=300_000)
+        assert cost == round(300_000 * 4 * 2.0 * 1.25)
+
+
+def test_cache_write_multiplier_override(app):
+    """A model entry may override the 1.25x write premium (#241), on both
+    the OpenAI subset and the Anthropic disjoint counter."""
+    _sol(app)
+    app.config["SUPPORTED_MODELS"]["gpt-5.6-sol"]["cache_write_multiplier"] = 1.5
+    with app.app_context():
+        assert calculate_llm_cost_microdollars(
+            "gpt-5.6-sol", 1_000, 0, cache_write_subset_tokens=1_000
+        ) == round(1_000 * 4 * 1.5)
+        assert calculate_llm_cost_microdollars(
+            "gpt-5.6-sol", 0, 0, cache_write_tokens=1_000
+        ) == round(1_000 * 4 * 1.5)
+
+
+def test_llm_cost_from_response_reads_every_counter(app):
+    """The response-dict helper feeds every provider counter through, so
+    single-shot pipeline calls price caching like conversation turns."""
+    _sol(app)
+    with app.app_context():
+        openai_resp = {"input_tokens": 100_000, "output_tokens": 500,
+                       "cached_tokens": 60_000,
+                       "cache_write_subset_tokens": 40_000}
+        assert llm_cost_from_response("gpt-5.6-sol", openai_resp) == (
+            calculate_llm_cost_microdollars(
+                "gpt-5.6-sol", 100_000, 500, cached_input_tokens=60_000,
+                cache_write_subset_tokens=40_000))
+        anthropic_resp = {"input_tokens": 1_000, "output_tokens": 10,
+                          "cache_read_input_tokens": 90_000,
+                          "cache_creation_input_tokens": 9_000}
+        assert llm_cost_from_response("claude-opus-4.6", anthropic_resp) == (
+            calculate_llm_cost_microdollars(
+                "claude-opus-4.6", 1_000, 10, cache_read_tokens=90_000,
+                cache_write_tokens=9_000))
+        # batch: explicit flag wins, else the dict's own flag.
+        batched = dict(anthropic_resp, batch=True)
+        assert llm_cost_from_response("claude-opus-4.6", batched) == (
+            calculate_llm_cost_microdollars(
+                "claude-opus-4.6", 1_000, 10, batch=True,
+                cache_read_tokens=90_000, cache_write_tokens=9_000))
+        assert llm_cost_from_response(
+            "claude-opus-4.6", batched, batch=False) == (
+            llm_cost_from_response("claude-opus-4.6", anthropic_resp))

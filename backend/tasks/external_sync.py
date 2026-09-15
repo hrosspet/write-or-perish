@@ -15,7 +15,7 @@ from celery.utils.log import get_task_logger
 from backend.celery_app import celery, flask_app
 from backend.extensions import db
 from backend.models import APICostLog, ExternalAccount, ExternalItem
-from backend.utils.cost import X_REQUEST_COST_MICRODOLLARS
+from backend.utils.cost import X_POST_READ_COST_MICRODOLLARS
 from backend.utils.notifications import notify_user
 from backend.utils.timefmt import user_local_hour
 from backend.utils.external_content import (
@@ -148,12 +148,15 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
         # rest is already imported — stop instead of paying for the tail.
         # Page-wise (not first-known-id) because a re-bookmarked old tweet
         # jumps to the top and would otherwise mask newer items below it.
-        created = skipped = requests_made = 0
+        # X bills pay-per-use per RETURNED POST (#271), not per request:
+        # a page of N bookmarks costs N post reads, an empty page nothing.
+        created = skipped = requests_made = posts_read = 0
         try:
             for page in x_fetch_bookmark_pages(
                     account.get_access_token(), account.external_user_id,
                     max_items=max_items):
-                requests_made += 1  # one yielded page == one paid request
+                requests_made += 1
+                posts_read += len(page)
                 page_created, page_skipped = _upsert_items(
                     user_id, "twitter_bookmark", page)
                 created += page_created
@@ -176,17 +179,20 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
                 user_id=user_id,
                 model_id="x-api/bookmarks",
                 request_type="x_bookmark_sync",
+                # Auditable against the developer-portal bill: N posts
+                # read over M pages.
+                request_ref=f"posts:{posts_read}/pages:{requests_made}",
                 input_tokens=0,
                 output_tokens=0,
                 cost_microdollars=(
-                    requests_made * X_REQUEST_COST_MICRODOLLARS),
+                    posts_read * X_POST_READ_COST_MICRODOLLARS),
             ))
         db.session.commit()
         logger.info("X bookmarks sync for user %s: %d new, %d known, "
-                    "%d API requests", user_id, created, skipped,
-                    requests_made)
+                    "%d posts read over %d API requests", user_id, created,
+                    skipped, posts_read, requests_made)
         return {"status": "ok", "created": created, "skipped": skipped,
-                "requests": requests_made}
+                "requests": requests_made, "posts_read": posts_read}
 
 
 # The nightly sync fires in each user's OWN night: the hourly beat gate

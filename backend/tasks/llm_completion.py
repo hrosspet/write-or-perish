@@ -3189,28 +3189,33 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 OpenAI (#189): cached_tokens is the cached SUBSET of
                 input_tokens (auto prefix-cache) — billed at the model's
                 cached_input_multiplier, fixing the prior full-price
-                over-count."""
+                over-count. (#286) cache_write_subset_tokens is the
+                subset WRITTEN to the cache (GPT-5.6+, 1.25x)."""
                 in_toks = resp.get("input_tokens", 0)
                 out_toks = resp.get("output_tokens", 0)
                 cache_read_toks = resp.get("cache_read_input_tokens", 0)
                 cache_write_toks = resp.get(
                     "cache_creation_input_tokens", 0)
                 cached_input_toks = resp.get("cached_tokens", 0)
+                cache_write_subset_toks = resp.get(
+                    "cache_write_subset_tokens", 0)
                 cost = calculate_llm_cost_microdollars(
                     model_id, in_toks, out_toks,
                     batch=bool(resp.get("batch")),
                     cache_read_tokens=cache_read_toks,
                     cache_write_tokens=cache_write_toks,
                     cached_input_tokens=cached_input_toks,
+                    cache_write_subset_tokens=cache_write_subset_toks,
                 )
                 if cache_read_toks or cache_write_toks:
                     logger.info(
                         "Prompt cache usage: read=%d write=%d uncached=%d",
                         cache_read_toks, cache_write_toks, in_toks)
-                if cached_input_toks:
+                if cached_input_toks or cache_write_subset_toks:
                     logger.info(
-                        "OpenAI prompt cache: %d/%d input tokens cached",
-                        cached_input_toks, in_toks)
+                        "OpenAI prompt cache: %d/%d input tokens cached, "
+                        "%d written",
+                        cached_input_toks, in_toks, cache_write_subset_toks)
                 db.session.add(APICostLog(
                     user_id=user_id,
                     model_id=model_id,
@@ -3226,7 +3231,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     # cached_tokens (one of the two is always 0). Drives the
                     # admin hit-rate (served / full prompt input).
                     cache_read_tokens=(cache_read_toks + cached_input_toks),
-                    cache_write_tokens=cache_write_toks,
+                    # cache_write_tokens = input WRITTEN to cache, unified
+                    # the same way: Anthropic cache creation + the OpenAI
+                    # write subset (one of the two is always 0).
+                    cache_write_tokens=(cache_write_toks
+                                        + cache_write_subset_toks),
                     cost_microdollars=cost,
                 ))
 
