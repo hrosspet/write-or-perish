@@ -388,6 +388,32 @@ def test_slug_dedupes_per_owner(app):
     assert p2 == "/@author/same-words-2"
 
 
+def test_private_node_keeps_slug_but_advertises_no_permalink(app):
+    """#263: flipping a published node to private keeps public_slug on the
+    row (republishing restores the URL) but GET /api/nodes/<id> must stop
+    emitting the permalink — the resolver is public-only, so NodeDetail
+    would rewrite the owner's address bar to a 404. Public again → back."""
+    client = _client_for(app, "author")
+    share = _mk_share_draft(content="now you see it")
+    node_id = client.post(
+        f"/api/share/{share.id}/publish").get_json()["public_node_id"]
+    assert client.get(f"/api/nodes/{node_id}").get_json()["permalink"] == (
+        "/@author/now-you-see-it")
+
+    r = client.put(f"/api/nodes/{node_id}",
+                   json={"content": "now you see it", "privacy_level": "private"})
+    assert r.status_code == 200
+    detail = client.get(f"/api/nodes/{node_id}").get_json()
+    assert detail["privacy_level"] == "private"
+    assert detail["permalink"] is None
+    assert Node.query.get(node_id).public_slug == "now-you-see-it"
+
+    client.put(f"/api/nodes/{node_id}",
+               json={"content": "now you see it", "privacy_level": "public"})
+    assert client.get(f"/api/nodes/{node_id}").get_json()["permalink"] == (
+        "/@author/now-you-see-it")
+
+
 def test_permalink_resolver_and_404_parity(app):
     client = _client_for(app, "author")
     share = _mk_share_draft(content="findable piece")
