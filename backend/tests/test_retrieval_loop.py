@@ -1525,3 +1525,56 @@ def test_artifact_substantial_rewrite_echoes_full_text(app):
     # Full new text, not a diff: every line present, un-prefixed.
     assert "- new fact 199" in second_texts
     assert "+- new fact 199" not in second_texts
+
+
+# ── #222: the prompt always ends on a user turn ──────────────────────────
+
+def test_reply_under_llm_node_ends_with_user_turn(app):
+    """A non-agentic reply whose parent is itself an LLM node would send a
+    prompt ending on an assistant turn (the chain ends at parent_node).
+    Prefill-unsupported models 400 on that; the task now closes the prompt
+    with a neutral user turn."""
+    alice = _mk_user("alice", approved=True, plan="alpha")
+    llm_user = _mk_user("gpt-5", twitter_id="llm-gpt-5")
+    root = Node(user_id=alice.id, human_owner_id=alice.id, node_type="user",
+                privacy_level="private", ai_usage="chat")
+    root.set_content("a thought")
+    _db.session.add(root)
+    _db.session.flush()
+    first_reply = Node(user_id=llm_user.id, human_owner_id=alice.id,
+                       parent_id=root.id, node_type="llm", llm_model="gpt-5",
+                       llm_task_status="completed", privacy_level="private",
+                       ai_usage="chat")
+    first_reply.set_content("a first answer")
+    _db.session.add(first_reply)
+    _db.session.flush()
+    placeholder = Node(user_id=llm_user.id, human_owner_id=alice.id,
+                       parent_id=first_reply.id, node_type="llm",
+                       llm_model="gpt-5", llm_task_status="pending",
+                       privacy_level="private", ai_usage="chat")
+    placeholder.set_content("[LLM response generation pending...]")
+    _db.session.add(placeholder)
+    _db.session.commit()
+
+    _ScriptedProvider.reset([_resp("continuing…")])
+    generate_llm_response(
+        _FakeSelf(), first_reply.id, placeholder.id, "gpt-5", alice.id)
+
+    msgs = _ScriptedProvider.calls[0]["messages"]
+    assert msgs[-2]["role"] == "assistant"
+    assert msgs[-2]["text"].endswith("a first answer")
+    assert msgs[-1] == {"role": "user", "text": "[continue]"}
+
+
+def test_agentic_prompt_already_ending_on_user_turn_is_untouched(app):
+    """Agentic turns end on the injected notes (a user turn); nothing extra
+    is appended — the guard is a no-op there."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _ScriptedProvider.reset([_resp("hi")])
+    generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode")
+    msgs = _ScriptedProvider.calls[0]["messages"]
+    assert msgs[-1]["role"] == "user"
+    assert "[continue]" not in msgs[-1]["text"]
+    assert sum(1 for m in msgs if m["text"] == "[continue]") == 0
