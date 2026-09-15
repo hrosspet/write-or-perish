@@ -102,6 +102,15 @@ def validate_username(username: str, exclude_user_id=None) -> Optional[str]:
     if query.first():
         return "That username is already taken."
 
+    # A handle someone ELSE used to publish under still redirects to them
+    # (#253); letting a second user claim it would make that redirect an
+    # impersonation vector. The user's own former handles are fine — taking
+    # one back just ends the redirect.
+    from backend.utils.username_history import former_handle_owner
+    former = former_handle_owner(username)
+    if former is not None and former.id != exclude_user_id:
+        return "That username is reserved."
+
     return None
 
 

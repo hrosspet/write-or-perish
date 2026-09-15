@@ -267,3 +267,45 @@ class TestNodeDetailPrivacy:
         resp = client.get(f"/api/nodes/{data['bob_public_id']}")
         assert resp.status_code == 200
         assert "Bob public post" in resp.json["content"]
+
+
+# ── Username rename records history (#253) ───────────────────────────────
+
+class TestUsernameRenameHistory:
+    def test_rename_reserves_old_handle_and_frees_it_when_taken_back(self, app):
+        from backend.models import UsernameHistory
+        renamer = User(username="renamer", default_ai_usage="chat")
+        squatter = User(username="squatter", default_ai_usage="chat")
+        _db.session.add_all([renamer, squatter])
+        _db.session.commit()
+
+        client = app.test_client()
+        _login(client, renamer.id)
+        r = client.put("/api/dashboard/user", json={"username": "renamed"})
+        assert r.status_code == 200, r.get_json()
+        assert User.query.get(renamer.id).username == "renamed"
+        rows = UsernameHistory.query.filter_by(user_id=renamer.id).all()
+        assert [x.old_username for x in rows] == ["renamer"]
+
+        # Someone else cannot pick up the redirecting handle… (Flask-Login
+        # caches the loaded user on `g` for the fixture's app context, so
+        # drop it before switching clients.)
+        from flask import g
+        g.pop("_login_user", None)
+        other = app.test_client()
+        _login(other, squatter.id)
+        r = other.put("/api/dashboard/user", json={"username": "renamer"})
+        assert r.status_code == 400
+        assert r.get_json()["error"] == "That username is reserved."
+
+        # …the owner can, which ends the redirect for it.
+        g.pop("_login_user", None)
+        r = client.put("/api/dashboard/user", json={"username": "renamer"})
+        assert r.status_code == 200, r.get_json()
+        rows = UsernameHistory.query.filter_by(user_id=renamer.id).all()
+        assert [x.old_username for x in rows] == ["renamed"]
+
+        # Re-saving the same handle is a no-op for the history.
+        r = client.put("/api/dashboard/user", json={"username": "renamer"})
+        assert r.status_code == 200
+        assert UsernameHistory.query.filter_by(user_id=renamer.id).count() == 1

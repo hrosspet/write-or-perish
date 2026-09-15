@@ -219,6 +219,14 @@ def update_user():
         error = validate_username(new_username, exclude_user_id=current_user.id)
         if error:
             return jsonify({"error": error}), 400
+        if new_username != current_user.username:
+            # #253: the old handle keeps resolving (301 to the new one) and
+            # stays reserved; cached public pages under the old handle are
+            # dropped before the rename so nothing stale is served.
+            from backend.utils.username_history import record_rename
+            from backend.utils.public_cache import invalidate_for_user
+            invalidate_for_user(current_user)
+            record_rename(current_user, current_user.username, new_username)
         current_user.username = new_username
 
     if new_description is not None:

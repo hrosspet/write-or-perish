@@ -228,6 +228,33 @@ class User(db.Model, UserMixin):
         )
 
 
+class UsernameHistory(db.Model):
+    """A handle the user used to publish under (#253).
+
+    Public permalinks are /@<username>/<slug>; slugs are immutable but the
+    handle is user-editable, so a rename would break every shared and
+    indexed URL. A row is appended on rename; the public pages and the
+    permalink API resolve a former handle to its owner and 301 to the
+    current one. A former handle stays reserved for as long as a row
+    points at it — another user claiming it would turn the redirect into
+    an impersonation vector. Renaming back to a former handle removes its
+    row (it is live again, not a redirect).
+    """
+    __tablename__ = "username_history"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False,
+                        index=True)
+    # Stored as typed; matched case-insensitively (usernames are unique
+    # case-insensitively, see validate_username).
+    old_username = db.Column(db.String(64), nullable=False, index=True)
+    changed_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow)
+
+    user = db.relationship("User", backref=db.backref(
+        "former_usernames", cascade="all, delete-orphan"))
+
+
 class ProfileBatchJob(db.Model):
     """A submitted provider batch covering one profile-generation step for one
     or more users (issue #173, Part A).
