@@ -77,6 +77,112 @@ def send_magic_link_email(to_email, magic_link_url):
         raise
 
 
+def _deliver(to_email, subject, text_body, html_body):
+    """Send one multipart mail through the configured SMTP relay."""
+    config = current_app.config
+    sender = config.get("MAIL_DEFAULT_SENDER", "login@loore.org")
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = sender
+    msg["To"] = to_email
+    msg.attach(MIMEText(text_body, "plain"))
+    msg.attach(MIMEText(html_body, "html"))
+    server = config.get("MAIL_SERVER", "localhost")
+    port = config.get("MAIL_PORT", 587)
+    use_tls = config.get("MAIL_USE_TLS", True)
+    username = config.get("MAIL_USERNAME")
+    password = config.get("MAIL_PASSWORD")
+    with smtplib.SMTP(server, port) as smtp:
+        if use_tls:
+            smtp.starttls()
+        if username and password:
+            smtp.login(username, password)
+        smtp.sendmail(sender, to_email, msg.as_string())
+
+
+def _card(heading, lead, button_label=None, button_url=None, footnotes=()):
+    """The dark Loore mail card used by the sign-in mail, parameterised."""
+    button = ""
+    if button_url:
+        button = f"""
+    <a href="{button_url}"
+       style="display: inline-block; padding: 12px 32px; background: transparent; color: #c4956a;
+              text-decoration: none; border-radius: 6px; border: 1px solid #c4956a;
+              font-family: 'Outfit', -apple-system, sans-serif; font-size: 14px; font-weight: 400;
+              letter-spacing: 0.04em;">
+      {button_label}
+    </a>"""
+    notes = "".join(
+        f'<p style="color: #736b5f; font-size: 13px; font-weight: 300; margin: 0 0 6px 0; line-height: 1.5;">{n}</p>'
+        for n in footnotes)
+    return f"""\
+<html>
+<body style="font-family: 'Outfit', -apple-system, sans-serif; background: #0e0d0b; color: #ede8dd; padding: 40px 20px; margin: 0;">
+  <div style="max-width: 460px; margin: 0 auto; background: #181714; border-radius: 10px; border: 1px solid #302c27; padding: 48px 40px;">
+    <div style="font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif; font-size: 14px; font-weight: 300; text-transform: uppercase; letter-spacing: 0.3em; color: #736b5f; margin-bottom: 32px;">
+      Loore
+    </div>
+    <h2 style="font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif; font-weight: 300; font-size: 28px; color: #ede8dd; margin: 0 0 12px 0;">
+      {heading}
+    </h2>
+    <p style="font-size: 15px; font-weight: 300; color: #a89f91; margin: 0 0 28px 0; line-height: 1.6;">
+      {lead}
+    </p>{button}
+    <div style="border-top: 1px solid #302c27; margin-top: 36px; padding-top: 20px;">
+      {notes}
+    </div>
+  </div>
+</body>
+</html>"""
+
+
+def send_email_change_email(to_email, verify_url):
+    """Verification link for binding *to_email* to an account (#260). The
+    address becomes the account's email only when this link is opened."""
+    text_body = (
+        "Confirm your email for Loore\n\n"
+        "Someone asked to use this address for their Loore account. "
+        f"Open the link below to confirm it:\n{verify_url}\n\n"
+        "This link expires in 15 minutes.\n\n"
+        "If this wasn't you, ignore this email and nothing changes."
+    )
+    html_body = _card(
+        "Confirm your email",
+        "Someone asked to use this address for their Loore account. "
+        "Confirm it to make it your sign-in email.",
+        "Confirm this address", verify_url,
+        ("This link expires in 15 minutes.",
+         "If this wasn't you, ignore this email and nothing changes."))
+    try:
+        _deliver(to_email, "Confirm your email for Loore", text_body, html_body)
+        logger.info("Email-change verification sent")
+    except Exception:
+        logger.exception("Failed to send email-change verification")
+        raise
+
+
+def send_email_changed_notice(old_email, new_email):
+    """Tell the previous address that the account moved to a new one, so a
+    hijacked session cannot silently re-home the account (#260)."""
+    text_body = (
+        "Your Loore sign-in email changed\n\n"
+        f"The email for your Loore account is now {new_email}. "
+        "This address no longer signs you in.\n\n"
+        "If you did not do this, reply to this email right away."
+    )
+    html_body = _card(
+        "Your sign-in email changed",
+        f"The email for your Loore account is now <strong style=\"color: #ede8dd;\">{new_email}</strong>. "
+        "This address no longer signs you in.",
+        footnotes=("If you did not do this, reply to this email right away.",))
+    try:
+        _deliver(old_email, "Your Loore sign-in email changed", text_body, html_body)
+        logger.info("Email-changed notice sent to the previous address")
+    except Exception:
+        # The change itself already happened; the notice is best-effort.
+        logger.exception("Failed to send email-changed notice")
+
+
 def send_welcome_email(to_email, magic_link_url):
     config = current_app.config
     sender = config.get("MAIL_DEFAULT_SENDER", "login@loore.org")

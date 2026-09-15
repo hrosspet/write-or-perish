@@ -7,13 +7,17 @@ def _get_serializer():
     return URLSafeTimedSerializer(current_app.config["SECRET_KEY"])
 
 
-def generate_magic_link_token(email, next_url=None, max_age=None):
+def generate_magic_link_token(email, next_url=None, max_age=None, extra=None):
+    """Signed, time-limited token for the /auth/magic-link/verify route.
+    ``extra`` adds claims (e.g. ``bind_user_id`` for an email change, #260)."""
     s = _get_serializer()
     payload = {"email": email}
     if next_url:
         payload["next_url"] = next_url
     if max_age:
         payload["max_age"] = max_age
+    if extra:
+        payload.update(extra)
     return s.dumps(payload, salt="magic-link")
 
 

@@ -1,3 +1,4 @@
+import re
 from datetime import datetime, timezone
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
@@ -122,6 +123,7 @@ def get_dashboard():
             "default_privacy_level": current_user.default_privacy_level,
             "default_ai_usage": current_user.default_ai_usage,
             "twitter_login": bool(current_user.twitter_id),
+            "pending_email": current_user.pending_email,
             "prefill_consent": current_user.prefill_consent,
             "prefilled_handle": current_user.prefilled_handle,
             "timezone": current_user.timezone or "UTC",
@@ -200,6 +202,77 @@ def get_public_dashboard(username):
     return jsonify(dashboard), 200
 
 
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+@dashboard_bp.route("/email", methods=["POST"])
+@login_required
+def request_email_change():
+    """Start an email change / add (#260): send a verification link to the
+    NEW address. Nothing binds until that link is opened (see
+    auth._bind_verified_email); until then the address sits in
+    `pending_email` so the UI can say "check your inbox"."""
+    from datetime import timedelta
+    from backend.utils.magic_link import generate_magic_link_token, hash_token
+    from backend.utils.email import send_email_change_email
+
+    data = request.get_json() or {}
+    new_email = (data.get("email") or "").strip().lower()
+    if not new_email or not _EMAIL_RE.match(new_email):
+        return jsonify({"error": "Please enter a valid email address."}), 400
+    if current_user.email and current_user.email.lower() == new_email:
+        return jsonify({"error": "That is already your email address."}), 400
+    if User.query.filter(db.func.lower(User.email) == new_email,
+                         User.id != current_user.id).first():
+        return jsonify({"error": "That email is already in use."}), 400
+
+    token = generate_magic_link_token(
+        new_email, extra={"bind_user_id": current_user.id})
+    backend_url = request.host_url.rstrip("/")
+    verify_url = f"{backend_url}/auth/magic-link/verify?token={token}"
+    try:
+        send_email_change_email(new_email, verify_url)
+    except Exception:
+        # Nothing persisted: a failed send must not leave a "pending"
+        # address the user never received a link for.
+        return jsonify({"error": "Could not send the verification email. "
+                                 "Please try again."}), 502
+    current_user.pending_email = new_email
+    current_user.magic_link_token_hash = hash_token(token)
+    current_user.magic_link_expires_at = datetime.utcnow() + timedelta(
+        seconds=current_app.config.get("MAGIC_LINK_EXPIRY_SECONDS", 900))
+    db.session.commit()
+    return jsonify({
+        "message": f"Verification link sent to {new_email}. The address "
+                   "becomes yours once you open it.",
+        "pending_email": new_email,
+    }), 200
+
+
+@dashboard_bp.route("/email", methods=["DELETE"])
+@login_required
+def remove_email():
+    """Drop the account's email or cancel a pending change (#260). Removing
+    a bound email is only allowed when the account keeps another way in
+    (Sign in with X) — otherwise it would lock the user out."""
+    data = request.get_json(silent=True) or {}
+    if data.get("pending_only") or (current_user.pending_email
+                                    and not data.get("remove_bound")):
+        current_user.pending_email = None
+        current_user.magic_link_token_hash = None
+        db.session.commit()
+        return jsonify({"message": "Pending email change cancelled.",
+                        "pending_email": None}), 200
+    if not current_user.twitter_id:
+        return jsonify({"error": "This email is your only way to sign in. "
+                                 "Add another address first."}), 400
+    current_user.email = None
+    current_user.pending_email = None
+    current_user.magic_link_token_hash = None
+    db.session.commit()
+    return jsonify({"message": "Email removed.", "email": None}), 200
+
+
 # New endpoint to update the user’s display handle and description.
 @dashboard_bp.route("/user", methods=["PUT"])
 @login_required
@@ -207,7 +280,14 @@ def update_user():
     data = request.get_json()
     new_username = data.get("username")
     new_description = data.get("description")
-    new_email = data.get("email")
+    # `email` is deliberately NOT accepted here any more (#260): binding an
+    # address to a logged-in session without proving control of it would
+    # let a hijacked session re-home the account. POST /dashboard/email
+    # sends a verification link; the address binds when it is opened.
+    if "email" in data:
+        return jsonify({
+            "error": "Email changes go through verification: use "
+                     "POST /api/dashboard/email."}), 400
 
     if new_description and len(new_description) > 128:
         return jsonify({"error": "Description exceeds maximum length of 128 characters."}), 400
@@ -223,8 +303,6 @@ def update_user():
 
     if new_description is not None:
         current_user.description = new_description
-    if new_email is not None:
-        current_user.email = new_email
 
     if "craft_mode" in data:
         current_user.craft_mode = bool(data["craft_mode"])
@@ -290,6 +368,7 @@ def update_user():
                 "default_privacy_level": current_user.default_privacy_level,
                 "default_ai_usage": current_user.default_ai_usage,
                 "twitter_login": bool(current_user.twitter_id),
+                "pending_email": current_user.pending_email,
                 "prefill_consent": current_user.prefill_consent,
                 "prefilled_handle": current_user.prefilled_handle,
                 "spend_blocked": user_is_capped(current_user),
