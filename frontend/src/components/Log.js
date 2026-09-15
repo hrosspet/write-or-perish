@@ -6,7 +6,7 @@ import DeleteConfirmDialog from "./DeleteConfirmDialog";
 import RenameThreadDialog from "./RenameThreadDialog";
 import { useToast } from "../contexts/ToastContext";
 
-function Feed({ onSearchClick }) {
+function Log({ onSearchClick }) {
   const [feedNodes, setFeedNodes] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -24,7 +24,7 @@ function Feed({ onSearchClick }) {
     if (isFirst) setLoading(true);
     else setLoadingMore(true);
 
-    api.get(`/feed?page=${pageNum}&per_page=20`)
+    api.get(`/log?page=${pageNum}&per_page=20`)
       .then(response => {
         const { nodes, has_more } = response.data;
         setFeedNodes(prev => isFirst ? nodes : [...prev, ...nodes]);
@@ -33,7 +33,7 @@ function Feed({ onSearchClick }) {
       })
       .catch(err => {
         console.error(err);
-        setError("Error loading feed.");
+        setError("Error loading log.");
       })
       .finally(() => {
         setLoading(false);
@@ -132,7 +132,7 @@ function Feed({ onSearchClick }) {
       });
   };
 
-  if (loading) return <div style={{ padding: "20px", color: "var(--text-muted)" }}>Loading feed...</div>;
+  if (loading) return <div style={{ padding: "20px", color: "var(--text-muted)" }}>Loading log...</div>;
   if (error) return <div style={{ padding: "20px", color: "var(--accent)" }}>{error}</div>;
 
   return (
@@ -250,4 +250,4 @@ function Feed({ onSearchClick }) {
   );
 }
 
-export default Feed;
+export default Log;

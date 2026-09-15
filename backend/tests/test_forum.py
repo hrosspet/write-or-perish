@@ -67,11 +67,11 @@ def _make_app():
     from backend.routes.share import share_bp
     from backend.routes.commons import commons_bp
     from backend.routes.nodes import nodes_bp
-    from backend.routes.feed import feed_bp
+    from backend.routes.log import log_bp
     app.register_blueprint(share_bp, url_prefix="/api/share")
     app.register_blueprint(commons_bp, url_prefix="/api/commons")
     app.register_blueprint(nodes_bp, url_prefix="/api/nodes")
-    app.register_blueprint(feed_bp, url_prefix="/api")
+    app.register_blueprint(log_bp, url_prefix="/api")
     return app
 
 
@@ -249,7 +249,7 @@ def test_log_excludes_public_roots(app):
     client = _client_for(app, "author")
     _mk_node("author", "private root", privacy="private")
     _mk_node("author", "public root")
-    r = client.get("/api/feed?page=1&per_page=20")
+    r = client.get("/api/log?page=1&per_page=20")
     assert r.status_code == 200
     previews = [n["preview"] for n in r.get_json()["nodes"]]
     assert any("private root" in p for p in previews)
@@ -566,7 +566,7 @@ def test_feed_prefetches_every_preview_and_batches_per_card_lookups(app, monkeyp
     from datetime import datetime
     from sqlalchemy import event
     from backend.models import NodeContextArtifact, UserPrompt
-    from backend.routes import feed as feed_mod
+    from backend.routes import log as log_mod
     author = User.query.filter_by(username="author").first()
 
     plain = _mk_node("author", "plain root", privacy="private")
@@ -588,7 +588,7 @@ def test_feed_prefetches_every_preview_and_batches_per_card_lookups(app, monkeyp
     _db.session.commit()
 
     seen = []
-    monkeypatch.setattr(feed_mod, "prefetch_deks", lambda texts: seen.append(sorted(texts)) or 0)
+    monkeypatch.setattr(log_mod, "prefetch_deks", lambda texts: seen.append(sorted(texts)) or 0)
     per_card = []
 
     def after(conn, cursor, statement, params, context, executemany):
@@ -597,7 +597,7 @@ def test_feed_prefetches_every_preview_and_batches_per_card_lookups(app, monkeyp
             per_card.append(statement)
     event.listen(_db.engine, "after_cursor_execute", after)
     try:
-        r = _client_for(app, "author").get("/api/feed?page=1&per_page=20")
+        r = _client_for(app, "author").get("/api/log?page=1&per_page=20")
     finally:
         event.remove(_db.engine, "after_cursor_execute", after)
     assert r.status_code == 200

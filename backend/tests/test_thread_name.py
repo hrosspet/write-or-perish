@@ -51,9 +51,9 @@ def _make_app():
         return User.query.get(int(user_id))
 
     from backend.routes.nodes import nodes_bp
-    from backend.routes.feed import feed_bp
+    from backend.routes.log import log_bp
     app.register_blueprint(nodes_bp, url_prefix="/nodes")
-    app.register_blueprint(feed_bp, url_prefix="/api")
+    app.register_blueprint(log_bp, url_prefix="/api")
 
     return app
 
@@ -139,7 +139,7 @@ def _stored_name(root_id):
 
 
 def _feed_card(client, root_id):
-    resp = client.get("/api/feed")
+    resp = client.get("/api/log")
     assert resp.status_code == 200
     return next(c for c in resp.json["nodes"] if c["thread_root_id"] == root_id)
 

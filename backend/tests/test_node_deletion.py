@@ -325,12 +325,12 @@ def test_feed_excludes_soft_deleted(app, alice):
     deleted = _make_node(alice, content="dead")
     deleted.deleted_at = datetime.utcnow()
     _db.session.commit()
-    # Re-create the app with feed_bp registered.
-    from backend.routes.feed import feed_bp
-    app.register_blueprint(feed_bp, url_prefix="/api")
+    # Re-create the app with log_bp registered.
+    from backend.routes.log import log_bp
+    app.register_blueprint(log_bp, url_prefix="/api")
     client = app.test_client()
     _login(client, alice)
-    resp = client.get("/api/feed")
+    resp = client.get("/api/log")
     assert resp.status_code == 200
     ids = [c["id"] for c in resp.json["nodes"]]
     assert alive.id in ids
@@ -555,8 +555,8 @@ def test_feed_skips_deleted_first_child_of_system_prompt_root(app, alice):
     from backend.models import (
         UserPrompt, NodeContextArtifact,
     )
-    from backend.routes.feed import feed_bp
-    app.register_blueprint(feed_bp, url_prefix="/api")
+    from backend.routes.log import log_bp
+    app.register_blueprint(log_bp, url_prefix="/api")
 
     # Build a system-prompt root + 2 children; soft-delete the first.
     prompt = UserPrompt(
@@ -577,7 +577,7 @@ def test_feed_skips_deleted_first_child_of_system_prompt_root(app, alice):
 
     client = app.test_client()
     _login(client, alice)
-    r = client.get("/api/feed")
+    r = client.get("/api/log")
     assert r.status_code == 200
     cards = [c for c in r.json["nodes"] if c["thread_root_id"] == root.id]
     assert len(cards) == 1
@@ -596,8 +596,8 @@ def test_feed_surfaces_thread_with_multi_level_partial_deletes(app, alice):
     wouldn't fire, and G never enters the CTE result). The thread
     would disappear from Log even though the user has live content.
     """
-    from backend.routes.feed import feed_bp
-    app.register_blueprint(feed_bp, url_prefix="/api")
+    from backend.routes.log import log_bp
+    app.register_blueprint(log_bp, url_prefix="/api")
 
     r = _make_node(alice, content="root body")
     c = _make_node(alice, parent=r, content="child body")
@@ -612,7 +612,7 @@ def test_feed_surfaces_thread_with_multi_level_partial_deletes(app, alice):
 
     client = app.test_client()
     _login(client, alice)
-    resp = client.get("/api/feed")
+    resp = client.get("/api/log")
     assert resp.status_code == 200
     cards = [card for card in resp.json["nodes"] if card["thread_root_id"] == r.id]
     # The thread MUST surface — G is alive and accessible. Without the
@@ -629,8 +629,8 @@ def test_feed_surfaces_deleted_root_with_alive_descendants(app, alice, bob):
     an alive accessible descendant must still surface in Log so the
     descendants are reachable.
     """
-    from backend.routes.feed import feed_bp
-    app.register_blueprint(feed_bp, url_prefix="/api")
+    from backend.routes.log import log_bp
+    app.register_blueprint(log_bp, url_prefix="/api")
 
     root = _make_node(alice, content="root body")
     # bob's reply is alive and visible to alice via human_owner /
@@ -643,7 +643,7 @@ def test_feed_surfaces_deleted_root_with_alive_descendants(app, alice, bob):
 
     client = app.test_client()
     _login(client, alice)
-    r = client.get("/api/feed")
+    r = client.get("/api/log")
     assert r.status_code == 200
     cards = [c for c in r.json["nodes"] if c["thread_root_id"] == root.id]
     # Root is deleted but its subtree has an alive reply → the thread
