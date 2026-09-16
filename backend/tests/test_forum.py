@@ -388,6 +388,78 @@ def test_slug_dedupes_per_owner(app):
     assert p2 == "/@author/same-words-2"
 
 
+def test_private_node_keeps_slug_but_advertises_no_permalink(app):
+    """#263: flipping a published node to private keeps public_slug on the
+    row (republishing restores the URL) but GET /api/nodes/<id> must stop
+    emitting the permalink — the resolver is public-only, so NodeDetail
+    would rewrite the owner's address bar to a 404. Public again → back."""
+    client = _client_for(app, "author")
+    share = _mk_share_draft(content="now you see it")
+    node_id = client.post(
+        f"/api/share/{share.id}/publish").get_json()["public_node_id"]
+    assert client.get(f"/api/nodes/{node_id}").get_json()["permalink"] == (
+        "/@author/now-you-see-it")
+
+    def share_card():
+        cards = client.get("/api/share").get_json()["shares"]
+        return next(c for c in cards if c["id"] == share.id)
+
+    assert share_card()["permalink"] == "/@author/now-you-see-it"
+
+    r = client.put(f"/api/nodes/{node_id}",
+                   json={"content": "now you see it", "privacy_level": "private"})
+    assert r.status_code == 200
+    detail = client.get(f"/api/nodes/{node_id}").get_json()
+    assert detail["privacy_level"] == "private"
+    assert detail["permalink"] is None
+    assert Node.query.get(node_id).public_slug == "now-you-see-it"
+    # The Share page card reads the same gate: going private leaves the
+    # ShareDraft `published`, and its card must not navigate to the 404.
+    card = share_card()
+    assert card["status"] == "published"
+    assert card["permalink"] is None
+    assert client.get(
+        "/api/commons/permalink/author/now-you-see-it").status_code == 404
+
+    client.put(f"/api/nodes/{node_id}",
+               json={"content": "now you see it", "privacy_level": "public"})
+    assert client.get(f"/api/nodes/{node_id}").get_json()["permalink"] == (
+        "/@author/now-you-see-it")
+    assert share_card()["permalink"] == "/@author/now-you-see-it"
+
+
+def test_permalink_uses_human_owner_not_model_account(app):
+    """Permalinks are keyed on the HUMAN owner: slug uniqueness and both
+    resolvers match human_owner_id, so an LLM-authored public root (the
+    slug backfill takes any public root) must be addressed as
+    /@<human>/<slug>, not /@<model>/<slug> — the latter 404s."""
+    llm_account = User(username="claude-opus-4.6")
+    _db.session.add(llm_account)
+    _db.session.commit()
+    author = User.query.filter_by(username="author").first()
+    llm = Node(user_id=llm_account.id, human_owner_id=author.id,
+               node_type="llm", privacy_level="public", ai_usage="chat",
+               public_slug="a-model-piece")
+    llm.llm_model = "claude-opus-4.6"
+    llm.set_content("a model piece")
+    _db.session.add(llm)
+    _db.session.commit()
+
+    client = _client_for(app, "author")
+    anon = app.test_client()
+    expected = "/@author/a-model-piece"
+    assert client.get(f"/api/nodes/{llm.id}").get_json()["permalink"] == expected
+    page = anon.get("/api/share/public/author").get_json()["shares"]
+    assert next(i for i in page if i["id"] == llm.id)["permalink"] == expected
+    feed = client.get("/api/commons/feed").get_json()["items"]
+    assert next(i for i in feed if i["id"] == llm.id)["permalink"] == expected
+    # The advertised address actually resolves; the model-keyed one never did.
+    r = anon.get("/api/commons/permalink/author/a-model-piece")
+    assert r.status_code == 200 and r.get_json()["node_id"] == llm.id
+    assert anon.get(
+        "/api/commons/permalink/claude-opus-4.6/a-model-piece").status_code == 404
+
+
 def test_permalink_resolver_and_404_parity(app):
     client = _client_for(app, "author")
     share = _mk_share_draft(content="findable piece")

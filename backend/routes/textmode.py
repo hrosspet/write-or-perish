@@ -101,7 +101,7 @@ def start_conversation():
     if model_id not in current_app.config["SUPPORTED_MODELS"]:
         return jsonify({"error": f"Unsupported model: {model_id}"}), 400
 
-    # 1. System node with converse prompt
+    # 1. System node with the textmode prompt
     prompt_record = get_user_prompt_record(current_user.id, PROMPT_KEY)
     system_node = Node(
         user_id=current_user.id,

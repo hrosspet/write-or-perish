@@ -119,6 +119,9 @@ def get_dashboard():
             "craft_mode": current_user.craft_mode,
             "preferred_model": current_user.preferred_model,
             "profile_generation_task_id": current_user.profile_generation_task_id,
+            # Batch-pipeline builds set no task id (#258); the watcher starts
+            # polling /export/profile-progress on either flag.
+            "profile_batch_pending": bool(current_user.profile_batch_pending),
             "default_privacy_level": current_user.default_privacy_level,
             "default_ai_usage": current_user.default_ai_usage,
             "twitter_login": bool(current_user.twitter_id),
@@ -287,6 +290,7 @@ def update_user():
                 "craft_mode": current_user.craft_mode,
                 "preferred_model": current_user.preferred_model,
                 "profile_generation_task_id": current_user.profile_generation_task_id,
+                "profile_batch_pending": bool(current_user.profile_batch_pending),
                 "default_privacy_level": current_user.default_privacy_level,
                 "default_ai_usage": current_user.default_ai_usage,
                 "twitter_login": bool(current_user.twitter_id),
