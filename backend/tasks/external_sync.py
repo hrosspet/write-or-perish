@@ -148,8 +148,9 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
         # imported — stop instead of paying for the tail. Page-wise (not
         # first-known-id) because a re-bookmarked old tweet jumps to the
         # top and would otherwise mask newer items below it. Pages start
-        # small and grow (x_fetch_bookmark_pages), so the page that ends a
-        # quiet night is a cheap one.
+        # small and grow while all-new (x_fetch_bookmark_pages); the page
+        # that reaches known bookmarks freezes the size (send(False)), so
+        # the page that ends a night is a cheap one.
         # X bills pay-per-use per RETURNED POST (#271), not per request:
         # a page of N bookmarks costs N post reads, an empty page nothing.
         created = skipped = requests_made = posts_read = 0
@@ -173,10 +174,16 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
                         posts_read * X_POST_READ_COST_MICRODOLLARS),
                 ))
 
+        pages = x_fetch_bookmark_pages(
+            account.get_access_token(), account.external_user_id,
+            max_items=max_items)
+        grow = None
         try:
-            for page, returned in x_fetch_bookmark_pages(
-                    account.get_access_token(), account.external_user_id,
-                    max_items=max_items):
+            while True:
+                try:
+                    page, returned = pages.send(grow)
+                except StopIteration:
+                    break
                 requests_made += 1
                 posts_read += returned
                 page_created, page_skipped = _upsert_items(
@@ -185,13 +192,24 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
                 skipped += page_skipped
                 if page_created == 0:
                     break
+                grow = page_skipped == 0
         except Exception as exc:
             # Pages already upserted are committed (_upsert_items commits
             # per page); this only discards a half-applied page from a DB
             # failure, so the cost row can be written on a clean session.
-            db.session.rollback()
-            _log_cost()
-            db.session.commit()
+            # If the database itself is what failed, the cost row cannot
+            # be written either: log that and let the ORIGINAL error
+            # propagate rather than replacing it with the commit's.
+            try:
+                db.session.rollback()
+                _log_cost()
+                db.session.commit()
+            except Exception:
+                logger.exception(
+                    "X bookmarks sync for user %s: could not log the cost "
+                    "of %d posts over %d pages after the sync failed",
+                    user_id, posts_read, requests_made)
+                db.session.rollback()
             code = (exc.response.status_code
                     if isinstance(exc, requests.HTTPError)
                     and exc.response is not None else None)

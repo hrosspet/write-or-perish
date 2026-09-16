@@ -30,7 +30,7 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
 
 from backend.extensions import db as _db  # noqa: E402
 from backend.models import (  # noqa: E402
-    User, ExternalAccount, APICostLog, UserNotification,
+    User, ExternalAccount, ExternalItem, APICostLog, UserNotification,
 )
 
 
@@ -407,3 +407,89 @@ def test_401_mid_sync_logs_cost_then_revokes(app, monkeypatch):
     assert log.request_ref == "posts:7/pages:1"
     _db.session.expire_all()
     assert ExternalAccount.query.get(account.id).revoked_at is not None
+
+
+def _fake_x_bookmarks(monkeypatch, ids):
+    """Serve *ids* (newest-bookmarked first) from a fake X endpoint that
+    honors max_results and paginates by token; return the list of
+    max_results asked per request. Drives the REAL fetcher."""
+    from backend.utils import external_content as content
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._payload
+
+    calls = []
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        size = params["max_results"]
+        calls.append(size)
+        start = int(params.get("pagination_token") or 0)
+        chunk = ids[start:start + size]
+        nxt = start + len(chunk)
+        payload = {
+            "data": [{"id": i, "author_id": "a", "text": f"t{i}"}
+                     for i in chunk],
+            "includes": {"users": [{"id": "a", "username": "u"}]},
+            "meta": {"next_token": str(nxt)} if nxt < len(ids) else {},
+        }
+        return _Resp(payload)
+    monkeypatch.setattr(content.requests, "get", fake_get)
+    return calls
+
+
+@pytest.mark.parametrize("n_new,expected_calls,expected_posts", [
+    (0, [10], 10),
+    (1, [10, 10], 20),
+    (11, [10, 20, 20], 50),
+    (31, [10, 20, 40, 40], 110),
+])
+def test_sync_freezes_page_growth_once_known_bookmarks_appear(
+        app, monkeypatch, n_new, expected_calls, expected_posts):
+    """The ceiling in external_content.py: N new bookmarks on top of an
+    imported set cost at most N + 2·min(N + 10, 100) posts, because the
+    sync stops doubling the page once a page reached known bookmarks
+    (1 new = 20 posts, not 30; 11 new = 50, not 70)."""
+    uid = User.query.first().id
+    _mk_account(uid, expired=False)
+    known = [f"k{i}" for i in range(200)]
+    _sync_mod._upsert_items(uid, "twitter_bookmark", [
+        {"external_id": k, "content": "t", "author_handle": "u",
+         "url": None, "posted_at": None} for k in known])
+    calls = _fake_x_bookmarks(
+        monkeypatch, [f"n{i}" for i in range(n_new)] + known)
+
+    result = _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    assert result["created"] == n_new
+    assert calls == expected_calls
+    assert result["posts_read"] == expected_posts
+    assert ExternalItem.query.filter_by(
+        user_id=uid, source="twitter_bookmark").count() == 200 + n_new
+
+
+def test_failed_sync_whose_cost_row_cannot_be_written_raises_the_original(
+        app, monkeypatch):
+    """When the database is what broke, writing the cost row fails too;
+    that must not replace the sync's own error (the one the retry logic
+    keys on) — it is logged and the original propagates."""
+    uid = User.query.first().id
+    _mk_account(uid, expired=False)
+
+    def page_then_429(token, x_user_id, max_items=800):
+        yield [{"external_id": "n1", "content": "t", "author_handle": "x",
+                "url": None, "posted_at": None}], 1
+        raise _http_error(429)
+    monkeypatch.setattr(_sync_mod, "x_fetch_bookmark_pages", page_then_429)
+
+    def broken_cost_log(**kwargs):
+        raise RuntimeError("database gone")
+    monkeypatch.setattr(_sync_mod, "APICostLog", broken_cost_log)
+
+    with pytest.raises(requests.HTTPError):
+        _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)

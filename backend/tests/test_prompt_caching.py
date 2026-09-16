@@ -260,7 +260,7 @@ def test_render_system_message_resolves_pinned_placeholders(app):
 
 def test_call_anthropic_preserves_blocks_and_cache_usage(app, monkeypatch):
     # Import the real provider module fresh (it may be mocked globally)
-    sys.modules.pop("backend.llm_providers", None)
+    monkeypatch.delitem(sys.modules, "backend.llm_providers", raising=False)
     import backend.llm_providers as providers
 
     captured = {}
@@ -443,7 +443,7 @@ def test_call_openai_surfaces_cache_write_subset(app, monkeypatch):
     """_call_openai must pull input_tokens_details.cache_write_tokens out
     of the Responses usage under the subset key; a renamed field would
     silently drop OpenAI write billing back to 1.0x (#286)."""
-    sys.modules.pop("backend.llm_providers", None)
+    monkeypatch.delitem(sys.modules, "backend.llm_providers", raising=False)
     import backend.llm_providers as providers
 
     class FakeDetails:

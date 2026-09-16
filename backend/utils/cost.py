@@ -93,6 +93,24 @@ def calculate_llm_cost_microdollars(model_id, input_tokens, output_tokens,
     return round(cost)
 
 
+def _response_counters(response):
+    """The token counters a provider response dict (LLMProvider.get_completion
+    / llm_batch result) may carry, as calculate_llm_cost_microdollars's
+    keyword names, 0 when absent. Anthropic reports cache_read_tokens /
+    cache_write_tokens, OpenAI cached_input_tokens /
+    cache_write_subset_tokens; the other pair is always 0."""
+    def get(key):
+        return response.get(key, 0) or 0
+    return {
+        "input_tokens": get("input_tokens"),
+        "output_tokens": get("output_tokens"),
+        "cache_read_tokens": get("cache_read_input_tokens"),
+        "cache_write_tokens": get("cache_creation_input_tokens"),
+        "cached_input_tokens": get("cached_tokens"),
+        "cache_write_subset_tokens": get("cache_write_subset_tokens"),
+    }
+
+
 def llm_cost_from_response(model_id, response, batch=None):
     """calculate_llm_cost_microdollars fed from a provider response dict
     (LLMProvider.get_completion / llm_batch result): picks up every cache
@@ -102,14 +120,8 @@ def llm_cost_from_response(model_id, response, batch=None):
     "batch" flag."""
     return calculate_llm_cost_microdollars(
         model_id,
-        response.get("input_tokens", 0) or 0,
-        response.get("output_tokens", 0) or 0,
         batch=bool(response.get("batch")) if batch is None else batch,
-        cache_read_tokens=response.get("cache_read_input_tokens", 0) or 0,
-        cache_write_tokens=response.get("cache_creation_input_tokens", 0) or 0,
-        cached_input_tokens=response.get("cached_tokens", 0) or 0,
-        cache_write_subset_tokens=response.get(
-            "cache_write_subset_tokens", 0) or 0,
+        **_response_counters(response),
     )
 
 
@@ -131,16 +143,14 @@ def llm_cost_log_fields(model_id, response, batch=None):
     cache warm, profile, digest, poll draft, ...) fills the same columns
     the same way; the admin hit-rate (served / full prompt input) then
     holds for any request_type."""
-    in_toks = response.get("input_tokens", 0) or 0
-    read = response.get("cache_read_input_tokens", 0) or 0
-    write = response.get("cache_creation_input_tokens", 0) or 0
-    cached = response.get("cached_tokens", 0) or 0
-    write_subset = response.get("cache_write_subset_tokens", 0) or 0
+    c = _response_counters(response)
     return {
-        "input_tokens": in_toks + read + write,
-        "output_tokens": response.get("output_tokens", 0) or 0,
-        "cache_read_tokens": read + cached,
-        "cache_write_tokens": write + write_subset,
+        "input_tokens": (c["input_tokens"] + c["cache_read_tokens"]
+                         + c["cache_write_tokens"]),
+        "output_tokens": c["output_tokens"],
+        "cache_read_tokens": c["cache_read_tokens"] + c["cached_input_tokens"],
+        "cache_write_tokens": (c["cache_write_tokens"]
+                               + c["cache_write_subset_tokens"]),
         "cost_microdollars": llm_cost_from_response(
             model_id, response, batch=batch),
     }

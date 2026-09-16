@@ -13,7 +13,11 @@ Request shape (per item):
      "messages": list, "max_tokens": int}
 
 Result shape (per custom_id), from batch_check_and_collect:
-    {"content": str, "input_tokens": int, "output_tokens": int}
+    {"content": str, "input_tokens": int, "output_tokens": int,
+     "batch": True, + the provider's cache counters under the keys the
+     live calls use (Anthropic cache_read_input_tokens /
+     cache_creation_input_tokens; OpenAI cached_tokens /
+     cache_write_subset_tokens), so llm_cost_from_response prices it}
 """
 import json
 import logging
@@ -244,7 +248,12 @@ def batch_check_and_collect(batch_ids, api_keys):
                 resp = entry.get("response", entry.get("result", {}))
                 body = resp.get("body", {})
                 if resp.get("status_code") == 200 and body.get("choices"):
-                    usage = body.get("usage") or {}
+                    usage = body.get("usage")
+                    if not usage:
+                        # Priced at $0 otherwise, silently — say so.
+                        log.warning(f"OpenAI batch item {cid}: 200 without "
+                                    f"usage; cost row will be $0")
+                    usage = usage or {}
                     # chat/completions spells the counters prompt_tokens /
                     # prompt_tokens_details (the Responses API says
                     # input_tokens / input_tokens_details). Both subsets

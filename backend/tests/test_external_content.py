@@ -816,6 +816,22 @@ def test_x_bookmark_pages_start_small_and_double_to_the_cap(monkeypatch):
     assert content.X_BOOKMARKS_FIRST_PAGE_SIZE == calls[0]
 
 
+def test_x_bookmark_pages_send_false_keeps_the_page_size(monkeypatch):
+    """The caller can freeze growth with send(False) — the sync does so
+    after a page that reached known bookmarks, so the closing page costs
+    the same as the one before it, not double. send(None)/send(True)
+    grow as plain iteration does."""
+    from backend.utils import external_content as content
+    calls = _x_pages(monkeypatch, n_total=400)
+    gen = content.x_fetch_bookmark_pages("tok", "42", max_items=800)
+    gen.send(None)
+    gen.send(True)
+    gen.send(False)
+    gen.send(False)
+    gen.send(None)
+    assert calls == [10, 20, 20, 20, 40]
+
+
 def test_x_bookmark_pages_never_ask_for_more_than_max_items(monkeypatch):
     """The last request asks X for exactly the remainder, so max_items
     never makes X return (and bill) posts we then throw away."""
