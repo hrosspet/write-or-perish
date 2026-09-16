@@ -22,11 +22,25 @@ def permalink_for(node):
     address bar; the Share page card navigates to it). Every serializer
     that emits a permalink goes through here: gate on current privacy,
     not on the slug.
+
+    The username is the HUMAN owner's (human_owner_id, falling back to
+    user_id), never the model account's: slug uniqueness and both
+    resolvers (commons.resolve_permalink, public_pages._resolve_permalink)
+    key on human_owner_id, so an LLM-authored public root addressed as
+    /@<model>/<slug> would 404.
     """
-    if (node is not None and node.public_slug and node.user
-            and node.privacy_level == PrivacyLevel.PUBLIC):
-        return f"/@{node.user.username}/{node.public_slug}"
-    return None
+    from backend.models import User
+
+    if (node is None or not node.public_slug
+            or node.privacy_level != PrivacyLevel.PUBLIC):
+        return None
+    if node.human_owner_id in (None, node.user_id):
+        owner = node.user
+    else:
+        owner = User.query.get(node.human_owner_id)
+    if owner is None:
+        return None
+    return f"/@{owner.username}/{node.public_slug}"
 
 
 def slugify(text):

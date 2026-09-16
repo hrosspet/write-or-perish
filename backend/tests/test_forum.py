@@ -428,6 +428,38 @@ def test_private_node_keeps_slug_but_advertises_no_permalink(app):
     assert share_card()["permalink"] == "/@author/now-you-see-it"
 
 
+def test_permalink_uses_human_owner_not_model_account(app):
+    """Permalinks are keyed on the HUMAN owner: slug uniqueness and both
+    resolvers match human_owner_id, so an LLM-authored public root (the
+    slug backfill takes any public root) must be addressed as
+    /@<human>/<slug>, not /@<model>/<slug> — the latter 404s."""
+    llm_account = User(username="claude-opus-4.6")
+    _db.session.add(llm_account)
+    _db.session.commit()
+    author = User.query.filter_by(username="author").first()
+    llm = Node(user_id=llm_account.id, human_owner_id=author.id,
+               node_type="llm", privacy_level="public", ai_usage="chat",
+               public_slug="a-model-piece")
+    llm.llm_model = "claude-opus-4.6"
+    llm.set_content("a model piece")
+    _db.session.add(llm)
+    _db.session.commit()
+
+    client = _client_for(app, "author")
+    anon = app.test_client()
+    expected = "/@author/a-model-piece"
+    assert client.get(f"/api/nodes/{llm.id}").get_json()["permalink"] == expected
+    page = anon.get("/api/share/public/author").get_json()["shares"]
+    assert next(i for i in page if i["id"] == llm.id)["permalink"] == expected
+    feed = client.get("/api/commons/feed").get_json()["items"]
+    assert next(i for i in feed if i["id"] == llm.id)["permalink"] == expected
+    # The advertised address actually resolves; the model-keyed one never did.
+    r = anon.get("/api/commons/permalink/author/a-model-piece")
+    assert r.status_code == 200 and r.get_json()["node_id"] == llm.id
+    assert anon.get(
+        "/api/commons/permalink/claude-opus-4.6/a-model-piece").status_code == 404
+
+
 def test_permalink_resolver_and_404_parity(app):
     client = _client_for(app, "author")
     share = _mk_share_draft(content="findable piece")

@@ -18,6 +18,7 @@ from sqlalchemy.orm import aliased
 from backend.models import Node, User
 from backend.extensions import db
 from backend.utils.privacy import PrivacyLevel
+from backend.utils.slugs import permalink_for
 from backend.utils.timefmt import iso_utc
 
 commons_bp = Blueprint("commons", __name__)
@@ -88,9 +89,7 @@ def feed():
         items.append({
             "id": node.id,
             "username": _author_name(node),
-            "permalink": (
-                f"/@{node.user.username}/{node.public_slug}"
-                if node.public_slug and node.user else None),
+            "permalink": permalink_for(node),
             "content": content[:600] + ("…" if len(content) > 600 else ""),
             "created_at": iso_utc(node.created_at),
             "reply_count": reply_count,
