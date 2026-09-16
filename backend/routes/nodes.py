@@ -5,7 +5,7 @@ from backend.models import (
     UserRecentContext, UserArtifact, Thread,
 )
 from backend.extensions import db
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from backend.utils.timefmt import iso_utc
 from datetime import datetime
 from openai import OpenAI
@@ -2964,37 +2964,53 @@ def delete_node(node_id):
             # Pointer kept: republishing unchanged content undeletes this
             # node (identity follows content).
         db.session.commit()
-        # Public pages are cached server-side; a takedown must reach the
-        # open web now, not when the cache expires. Every tombstoned
-        # node counts: the target, the descendants the cascade took, and
-        # the prompt root deleted with it (its own page, the /@user page
-        # and the sitemap are all keyed by the root — which is the
-        # target's root too, so one root invalidation covers them).
-        from backend.utils.public_cache import invalidate, invalidate_for_node
-        if orphaned_prompt_deleted is not None:
-            gone = [prompt_root]
-        else:
-            gone = []
-        gone += Node.query.filter(Node.id.in_(deleted.ids)).all()
-        public = [n for n in gone if n.public_slug or n.privacy_level == "public"]
-        if public:
-            invalidate_for_node(public[0])
-            invalidate(*[f"/node/{n.id}" for n in public[1:]])
-        return jsonify({
-            "scheduled": flagged,
-            "grace_days": SOFT_DELETE_GRACE_DAYS,
-            # The session root's id when `delete_orphaned_prompt` took it
-            # too, else null — the client then knows the thread is gone.
-            "orphaned_prompt_deleted": orphaned_prompt_deleted,
-            # Pinned nodes the cascade took: each is a Log card of its
-            # own (a reply pinned under the target, possibly in someone
-            # else's thread), so the Log drops those cards too.
-            "deleted_pinned_ids": deleted.pinned_ids,
-        }), 200
     except Exception as e:
         db.session.rollback()
         current_app.logger.error(f"Error soft-deleting node {node_id}: {e}")
         return jsonify({"error": "Error deleting node", "details": str(e)}), 500
+
+    # The delete is committed: from here on the answer is 200 whatever
+    # happens, or the client keeps a card for a node that is gone.
+    # Public pages are cached server-side; a takedown must reach the
+    # open web now, not when the cache expires. Every tombstoned node
+    # counts: the target, the descendants the cascade took, and the
+    # prompt root deleted with it (its own page, the /@user page and
+    # the sitemap are all keyed by the root — which is the target's
+    # root too, so one root invalidation covers them). Which of them
+    # are public is asked of the database on ids: a cascade can take
+    # tens of thousands of nodes, and loading their rows (content
+    # included) to read two columns is the kind of whole-subtree load
+    # that has run staging out of memory. A failure here is logged,
+    # not returned — the cache TTL bounds how long a stale public page
+    # outlives its node.
+    gone_ids = list(deleted.ids)
+    if orphaned_prompt_deleted is not None:
+        gone_ids.append(orphaned_prompt_deleted)
+    try:
+        if gone_ids:
+            from backend.utils.public_cache import invalidate_for_nodes
+            public_ids = [nid for (nid,) in db.session.query(Node.id).filter(
+                Node.id.in_(gone_ids),
+                or_(Node.public_slug.isnot(None), Node.privacy_level == "public"),
+            ).all()]
+            if public_ids:
+                invalidate_for_nodes(public_ids)
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception(
+            f"Node {node_id} was deleted, but its public pages could not be "
+            "dropped from the cache")
+    return jsonify({
+        "scheduled": flagged,
+        "grace_days": SOFT_DELETE_GRACE_DAYS,
+        # The session root's id when `delete_orphaned_prompt` took it
+        # too, else null — the client then knows the thread is gone.
+        "orphaned_prompt_deleted": orphaned_prompt_deleted,
+        # Pinned nodes the cascade took: each is a Log card of its
+        # own (a reply pinned under the target, possibly in someone
+        # else's thread), so the Log drops those cards too.
+        "deleted_pinned_ids": deleted.pinned_ids,
+    }), 200
 
 
 @nodes_bp.route("/<int:node_id>/tts-chapters", methods=["GET"])

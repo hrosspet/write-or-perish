@@ -89,10 +89,6 @@ def _roots_of(nodes):
     return [roots.get(root_id_of.get(n.id, n.id), n) for n in nodes]
 
 
-def _root_of(node):
-    return _roots_of([node])[0]
-
-
 def _paths_for_root(root):
     from backend.models import User
 
@@ -108,13 +104,36 @@ def _paths_for_root(root):
     return paths
 
 
-def invalidate_for_node(node):
-    """Drop every cached page *node* can appear on: its own id URL, and
-    the pages of the thread root it lives under (a reply edit/delete must
-    refresh the cached thread page, which is keyed by the root)."""
-    paths = {"/sitemap.xml", f"/node/{node.id}"}
-    paths.update(_paths_for_root(_root_of(node)))
+def invalidate_for_nodes(node_ids):
+    """Drop every cached page the nodes with these ids can appear on:
+    each one's own id URL, and the pages of the thread root it lives
+    under (a reply edit/delete must refresh the cached thread page,
+    which is keyed by the root). Takes ids, not rows: a cascade delete
+    hands over a whole subtree, and only the root columns the paths
+    need are loaded — one recursive query finds every root, one column
+    query reads them."""
+    from backend.extensions import db
+    from backend.models import Node
+    from backend.utils.thread_tree import thread_root_of
+
+    ids = list({int(i) for i in node_ids})
+    if not ids:
+        return
+    paths = {"/sitemap.xml", *(f"/node/{i}" for i in ids)}
+    root_id_of = thread_root_of(ids)
+    # A node whose root can't be found (a corrupt chain) stands for itself.
+    root_ids = {root_id_of.get(i, i) for i in ids}
+    roots = db.session.query(
+        Node.id, Node.human_owner_id, Node.user_id, Node.public_slug,
+    ).filter(Node.id.in_(root_ids)).all()
+    for root in roots:
+        paths.update(_paths_for_root(root))
     invalidate(*paths)
+
+
+def invalidate_for_node(node):
+    """`invalidate_for_nodes` for one node."""
+    invalidate_for_nodes([node.id])
 
 
 def invalidate_for_user(user):

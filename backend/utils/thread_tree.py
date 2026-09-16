@@ -18,12 +18,13 @@ from backend.extensions import db
 from backend.models import Node
 from backend.utils.privacy import accessible_nodes_filter_ignoring_deleted
 
-# A chain longer than this is treated as a cycle and the walk stops (up:
-# a root is then never found for that start id; down: deeper nodes are
-# not reached). The FK tree has no cycles by construction; this only
-# bounds a corrupt row's damage, where an unbounded recursive CTE would
-# spin until the connection is killed. Real threads are hundreds of
-# levels deep at most.
+# An *upward* chain longer than this is treated as a cycle and the walk
+# stops (a root is then never found for that start id). The FK tree has
+# no cycles by construction; this only bounds a corrupt row's damage,
+# where an unbounded recursive CTE would spin until the connection is
+# killed. Real threads are hundreds of levels deep at most. The downward
+# walk needs no cap — see `subtree_walk` for why a cycle ends there on
+# its own.
 MAX_THREAD_DEPTH = 100_000
 
 
@@ -82,9 +83,15 @@ def subtree_walk(root_ids, viewer_id=None, *, name="subtree_walk"):
     private reply, which is exactly what the viewer cannot see either.
     Tombstones are walked through in both cases: the *caller* filters on
     `deleted_at` to tell alive nodes from deleted ones, so an alive
-    grandchild under a deleted entry is still found. The walk stops at
-    MAX_THREAD_DEPTH, so a parent cycle in corrupt data ends the query
-    instead of hanging it.
+    grandchild under a deleted entry is still found.
+
+    A node has one parent, so the descendants of a root form a tree
+    unless the root itself sits on a parent cycle (corrupt data) — and
+    the only way back into that cycle is through the root. The recursive
+    step skips the root, which ends a cycle at its first repeat: every
+    node is walked once per root. A depth cap would not do: it bounds
+    the number of rounds, not rows, and re-walks whatever hangs off the
+    cycle on every round (100,000 × those nodes for a two-node cycle).
     """
     anchor = db.session.query(
         Node.id.label("id"),
@@ -104,7 +111,7 @@ def subtree_walk(root_ids, viewer_id=None, *, name="subtree_walk"):
         child.user_id, child.human_owner_id, child.deleted_at,
         child.created_at, child.updated_at,
     ).join(anchor, child.parent_id == anchor.c.id).filter(
-        anchor.c.depth < MAX_THREAD_DEPTH,
+        child.id != anchor.c.root_id,
     )
     if viewer_id is not None:
         recursive = recursive.filter(

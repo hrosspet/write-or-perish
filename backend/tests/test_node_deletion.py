@@ -1252,15 +1252,101 @@ def test_cascade_drops_the_pages_of_public_descendants(app, alice, monkeypatch):
     assert {f"/node/{public_reply.id}", f"/node/{root.id}", "/@alice"} <= set(dropped)
 
 
-def test_subtree_walk_stops_at_a_parent_cycle(app, alice, monkeypatch):
-    """Corrupt data with a parent cycle must end the walk, not hang the
-    Log request."""
+def test_subtree_walk_ends_a_parent_cycle_at_its_first_repeat(app, alice):
+    """Corrupt data with a parent cycle must end the downward walk at
+    the first repeat, not after a depth cap's worth of rounds: a cap
+    bounds rounds, not rows, so everything hanging off the cycle is
+    re-walked on every round (100,000 × the hanging nodes for a two-node
+    cycle — a Log page with such a pinned node took 23 s per 100 nodes
+    under the cycle). No lowered limit here: the real walk, a pinned node
+    on the cycle, nodes hanging off it, and the Log request itself."""
+    from sqlalchemy import func
     from backend.utils import thread_tree
 
-    a = _make_node(alice, content="a")
-    b = _make_node(alice, parent=a, content="b")
-    a.parent_id = b.id  # a → b → a (SQLite does not enforce the FK tree)
+    p = _make_node(alice, content="p")
+    q = _make_node(alice, parent=p, content="q")
+    p.parent_id = q.id  # p → q → p (SQLite does not enforce the FK tree)
+    p.pinned_at = datetime.utcnow()
     _db.session.commit()
-    monkeypatch.setattr(thread_tree, "MAX_THREAD_DEPTH", 10)
-    rows = thread_tree.subtree_rows(a.id, alice.id)
-    assert 0 < len(rows) <= 10
+    hanging = [_make_node(alice, parent=q, content=f"off the cycle {i}") for i in range(100)]
+
+    # Every node once: p at depth 0, q, then the 100 under q.
+    walk = thread_tree.subtree_walk([p.id], alice.id)
+    assert _db.session.query(func.count()).select_from(walk).scalar() == 2 + len(hanging)
+    assert {r.id for r in thread_tree.subtree_rows(p.id, alice.id)} == {
+        q.id, *(n.id for n in hanging),
+    }
+
+    # The pinned node's card comes from that same walk (its thread root
+    # is never found — the chain up has no end — so the card is its own).
+    card = _log_cards(app, alice)[p.id]
+    assert card["id"] == p.id
+    assert card["newest_node_id"] == hanging[-1].id
+
+
+def test_committed_delete_answers_200_when_the_cache_step_fails(app, alice, monkeypatch, caplog):
+    """The public-page invalidation runs after the commit. When it fails
+    (a dropped connection, a statement timeout on a long id list) the
+    node is already gone: the client must hear 200, not a 500 that keeps
+    the card as if nothing had happened — and the failure is logged."""
+    from backend.utils import public_cache
+
+    root = _make_node(alice, content="public root")
+    root.privacy_level = "public"
+    _db.session.commit()
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("the cache step fell over")
+    monkeypatch.setattr(public_cache, "invalidate_for_nodes", fail)
+
+    client = app.test_client()
+    _login(client, alice)
+    with caplog.at_level("ERROR"):
+        r = client.delete(f"/nodes/{root.id}")
+    assert r.status_code == 200, r.json
+    assert r.json["scheduled"] == 1
+    _db.session.expire_all()
+    assert Node.query.get(root.id).deleted_at is not None
+    assert "could not be dropped from the cache" in caplog.text
+
+
+def test_cache_step_after_a_cascade_asks_the_database_on_ids(app, alice, monkeypatch):
+    """Which of the deleted nodes are public is answered in SQL, on ids:
+    a cascade can take tens of thousands of nodes, and loading their
+    rows (content included) to read two columns is the whole-subtree
+    load that has run staging out of memory. Nothing deleted → no query
+    at all (not an empty `IN ()`)."""
+    from sqlalchemy import event
+    from backend.utils import public_cache
+
+    root = _make_node(alice, content="private root")
+    replies = [_make_node(alice, parent=root, content=f"reply {i}") for i in range(3)]
+    replies[1].privacy_level = "public"
+    _db.session.commit()
+    dropped = []
+    monkeypatch.setattr(public_cache, "invalidate", lambda *paths: dropped.extend(paths))
+    id_list_statements = []
+
+    def after(conn, cursor, statement, params, context, executemany):
+        if "FROM node" in statement and "IN (" in statement:
+            id_list_statements.append(statement)
+    event.listen(_db.engine, "after_cursor_execute", after)
+    client = app.test_client()
+    _login(client, alice)
+    try:
+        r = client.delete(f"/nodes/{root.id}", query_string={"delete_descendants": "true"})
+        assert r.status_code == 200 and r.json["scheduled"] == 4
+        # Id-list queries read columns; none loads a row's content.
+        assert id_list_statements
+        assert not [s for s in id_list_statements if "node.content" in s]
+        # The public reply's page and the root's pages go; the private
+        # replies never reached Python.
+        assert {f"/node/{replies[1].id}", f"/node/{root.id}", "/@alice"} <= set(dropped)
+        assert f"/node/{replies[0].id}" not in dropped
+
+        id_list_statements.clear()
+        r = client.delete(f"/nodes/{root.id}")  # already a tombstone
+        assert r.status_code == 200 and r.json["scheduled"] == 0
+        assert id_list_statements == []
+    finally:
+        event.remove(_db.engine, "after_cursor_execute", after)
