@@ -8,6 +8,9 @@ import { useUser } from '../contexts/UserContext';
 // per chunk, so it is polled more often.
 const BATCH_INTERVAL_MS = 60 * 1000;
 const SYNC_INTERVAL_MS = 5 * 1000;
+// Backstop for an endpoint that keeps failing for some user state: with
+// no duration cap, this is what ends the polling.
+const MAX_CONSECUTIVE_ERRORS = 10;
 
 /**
  * App-wide watcher for profile generation (#131, #258).
@@ -29,7 +32,12 @@ export default function ProfileGenerationWatcher() {
   const { addToast } = useToast();
   const { user, setUser } = useUser();
   const [active, setActive] = useState(false);
+  // Which pipeline is running: from the endpoint once it has answered,
+  // before that from the user payload, so the batch cadence applies from
+  // the first request and the hook does not restart on the first answer.
   const [source, setSource] = useState(null);
+  const effectiveSource = source
+    || (user?.profile_batch_pending ? 'batch' : 'sync');
   // The sync task last seen running: its `finally` clears the guard
   // before we can observe the terminal state, so the endpoint resolves
   // the outcome from this id once nothing is in flight.
@@ -62,11 +70,33 @@ export default function ProfileGenerationWatcher() {
   const endpoint = active
     ? `/export/profile-progress${syncTaskId ? `?task_id=${encodeURIComponent(syncTaskId)}` : ''}`
     : null;
-  const { data } = useAsyncTaskPolling(endpoint, {
-    interval: source === 'batch' ? BATCH_INTERVAL_MS : SYNC_INTERVAL_MS,
+  const { data, error } = useAsyncTaskPolling(endpoint, {
+    interval: effectiveSource === 'batch' ? BATCH_INTERVAL_MS : SYNC_INTERVAL_MS,
     enabled: active,
     maxDuration: 0,
+    maxConsecutiveErrors: MAX_CONSECUTIVE_ERRORS,
   });
+
+  const reset = () => {
+    setActive(false);
+    setSource(null);
+    setSyncTaskId(null);
+    startVersionRef.current = undefined;
+    // Drop the running flags from the cached user so this build is not
+    // re-adopted (re-fetched flags reflect any new one).
+    setUser((prev) => (prev
+      ? { ...prev, profile_generation_task_id: null, profile_batch_pending: false }
+      : prev));
+  };
+
+  // The hook gave up (consecutive request failures): stop quietly and
+  // clear the indicator rather than leave a label nothing updates.
+  useEffect(() => {
+    if (!active || !error || data) return;
+    console.warn('Profile progress polling stopped:', error);
+    reset();
+    window.dispatchEvent(new Event('loore_profile_done'));
+  }, [error]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!active || !data) return;
@@ -92,29 +122,24 @@ export default function ProfileGenerationWatcher() {
       return;
     }
 
-    // Terminal. `status` is authoritative for the sync task; a batch
-    // chain ends as `idle`, judged by whether a version landed.
+    // Terminal. `status` is authoritative for the sync task. A batch
+    // chain ends as `idle`: its last step failed (the backend says so),
+    // or it finished — a version landed since the watch began.
     const sawRunning = startVersionRef.current !== undefined;
     const newVersion = sawRunning
       && (data.latest_profile?.id ?? null) !== startVersionRef.current;
     let outcome = null;
-    if (data.status === 'completed' || (data.status === 'idle' && newVersion)) {
-      outcome = 'completed';
-    } else if (data.status === 'failed') {
+    if (data.status === 'failed') {
       outcome = 'failed';
-    } else if (data.status === 'stalled' || (data.status === 'idle' && sawRunning)) {
+    } else if (data.status === 'stalled' || (data.status === 'idle' && sawRunning && data.batch_step_failed)) {
+      outcome = 'stalled';
+    } else if (data.status === 'completed' || (data.status === 'idle' && newVersion)) {
+      outcome = 'completed';
+    } else if (data.status === 'idle' && sawRunning) {
       outcome = 'stalled';
     }
 
-    setActive(false);
-    setSource(null);
-    setSyncTaskId(null);
-    startVersionRef.current = undefined;
-    // Drop the running flags from the cached user so this finished build
-    // is not re-adopted (re-fetched flags reflect any new one).
-    setUser((prev) => (prev
-      ? { ...prev, profile_generation_task_id: null, profile_batch_pending: false }
-      : prev));
+    reset();
 
     if (outcome) {
       window.dispatchEvent(new CustomEvent('loore_profile_progress', {

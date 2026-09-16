@@ -342,6 +342,29 @@ def test_build_next_request_full_regen_starts_from_scratch(app, monkeypatch):
     assert "ALL DATA" in text and "PREVIOUS PROFILE" not in text
 
 
+def test_build_next_request_records_chunk_ordinal_and_planned_total(app, monkeypatch):
+    """The item meta carries "chunk n of ~N" for the progress endpoint
+    (#258): n is the caller's ordinal (1 from the seeder), N = n - 1 plus
+    the plan for the remainder — computed once, at submit time."""
+    _wide_window(app)
+    u = _user()
+    db.session.commit()
+    _remaining(monkeypatch, 300_000)   # plans into 3 chunks
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("ALL DATA")))
+    monkeypatch.setattr(pb._exports, "_load_prompt",
+                        lambda *a, **k: "GEN {user_export}")
+
+    req = pb._build_next_profile_request(u)
+    assert (req["meta"]["chunk_num"], req["meta"]["chunk_total"]) == (1, 3)
+
+    # Mid-run: the poller passes the applied chunk's number + 1; the
+    # remainder now plans into 2, so the total stays at 3.
+    _remaining(monkeypatch, 180_000)
+    req = pb._build_next_profile_request(u, chunk_num=2)
+    assert (req["meta"]["chunk_num"], req["meta"]["chunk_total"]) == (2, 3)
+
+
 def test_build_next_request_single_chunk_from_scratch_is_initial(app, monkeypatch):
     """A from-scratch corpus that plans into ONE chunk is saved as
     "initial" — the whole corpus in one call — not as an iterative root."""
@@ -945,7 +968,8 @@ def test_apply_result_chunks_again_only_over_data_that_existed_at_the_render(
                 "prev_cumulative": 0, "origin_stats": None,
                 "source_data_cutoff": (rendered - timedelta(days=1)).isoformat(),
                 "rendered_at": rendered.isoformat(),
-                "model_id": "test-model", "chunk_units": 1000}
+                "model_id": "test-model", "chunk_units": 1000,
+                "chunk_num": 2, "chunk_total": 3}
         monkeypatch.setattr(pb._exports, "build_user_export_content",
                             MagicMock(return_value=_chunk("MORE", units=500)))
         nxt = pb._apply_result(user, item, result, rendered)
@@ -960,6 +984,8 @@ def test_apply_result_chunks_again_only_over_data_that_existed_at_the_render(
     nxt = run(_user(), rendered - timedelta(minutes=10))
     assert nxt is not None and nxt["meta"]["kind"] == "chunk"
     assert nxt["meta"]["rendered_at"] is not None
+    # The next step carries the applied chunk's ordinal + 1 (#258 label).
+    assert nxt["meta"]["chunk_num"] == 3
 
 
 def test_build_next_request_without_chunks_goes_to_integration(app, monkeypatch):

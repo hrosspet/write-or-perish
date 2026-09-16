@@ -179,7 +179,7 @@ def _should_seed(user):
     return new_tokens >= UPDATE_THRESHOLD_UNITS
 
 
-def _build_next_profile_request(user, allow_chunk=True):
+def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
     """Build the request for the user's CURRENT step, or None if there's
     nothing to do. Mirrors the 'what's next' decision of
     _do_initial_generation / _do_incremental_update / _chunked_profile_loop /
@@ -188,6 +188,12 @@ def _build_next_profile_request(user, allow_chunk=True):
     allow_chunk=False skips straight to the integration decision: the
     poller passes it after a saved chunk when only data newer than that
     chunk's render remains (organic growth waits for the seeding gates).
+
+    chunk_num is this step's ordinal within the run (1 from the seeder;
+    the poller passes the applied chunk's number + 1). It is recorded in
+    the item meta with the planned total so the progress endpoint can
+    label the in-flight step without re-running the plan (#258). A run
+    re-seeded after a failed step starts the count over.
 
     Returns {"provider", "request", "meta"} or None.
     """
@@ -288,6 +294,11 @@ def _build_next_profile_request(user, allow_chunk=True):
                     # input_tokens, calibrates the user's tokens-per-unit
                     # ratio for the next cap check (_apply_result).
                     "chunk_units": chunk["unit_count"],
+                    # Progress label only (GET /export/profile-progress):
+                    # "Chunk n of ~N", N = chunks done before this one
+                    # plus the plan for the remainder.
+                    "chunk_num": chunk_num,
+                    "chunk_total": chunk_num - 1 + k,
                 },
             }
 
@@ -398,7 +409,8 @@ def _apply_result(user, item, result, submitted_at):
         # Next step: another chunk only over data that existed when this
         # chunk's window was rendered; growth since waits for the gates.
         return _build_next_profile_request(
-            user, allow_chunk=_exports.should_continue_chain(user, profile))
+            user, allow_chunk=_exports.should_continue_chain(user, profile),
+            chunk_num=(item.get("chunk_num") or 0) + 1)
 
     # integration (parent_profile_id is the chain tip, unique per run,
     # but scope by submission time anyway for consistency)

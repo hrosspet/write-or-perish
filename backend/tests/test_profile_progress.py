@@ -38,7 +38,7 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
 
 import flask_login as _real_flask_login  # noqa: E402
 from backend.extensions import db as _db  # noqa: E402
-from backend.models import User, UserProfile  # noqa: E402
+from backend.models import User, UserProfile, ProfileBatchJob  # noqa: E402
 import backend.models as _real_backend_models  # noqa: E402
 from backend.utils.chunk_plan import CHUNK_TARGET_UNITS  # noqa: E402
 
@@ -129,12 +129,6 @@ def _fake_celery(monkeypatch, states):
         st = states.get(task_id, ("PENDING", None))
         return _FakeResult(*st)
     monkeypatch.setattr(ca.celery, "AsyncResult", _async_result)
-
-
-def _remaining(monkeypatch, units):
-    import backend.routes.export_data as ed
-    monkeypatch.setattr(ed, "count_remaining_units",
-                        lambda uid, cutoff=None, **kw: units)
 
 
 def _version(user, gen_type="update", parent=None, cutoff=None,
@@ -253,81 +247,103 @@ def test_sync_task_failed_with_guard_still_set(client, user, monkeypatch):
 
 # ── batch chain ──────────────────────────────────────────────────────────
 
-def test_batch_first_chunk_from_scratch(client, user, monkeypatch):
-    user.profile_batch_pending = True
+def _pending_job(user, item, status="pending", batch_id="b-1"):
+    """A submitted batch carrying one item for `user` (meta shape of
+    profile_batch._build_next_profile_request)."""
+    job = ProfileBatchJob(
+        provider_key="anthropic", batch_id=batch_id, status=status,
+        items=[{"custom_id": f"profile_{user.id}_0_chunk", "user_id": user.id,
+                "model_id": "test-model", **item}])
+    _db.session.add(job)
+    user.profile_batch_pending = (status == "pending")
     _db.session.commit()
-    _remaining(monkeypatch, 3 * CHUNK_TARGET_UNITS)
+    return job
+
+
+def test_batch_chunk_label_comes_from_the_pending_item(client, user):
+    # The builder recorded the step's ordinal and planned total at submit
+    # time; the endpoint re-plans nothing.
+    _pending_job(user, {"kind": "chunk", "chunk_num": 2, "chunk_total": 4})
     body = client.get("/api/export/profile-progress").get_json()
     assert body["running"] is True
     assert body["source"] == "batch"
     assert body["task_id"] is None
-    assert body["message"] == "Generating profile: Chunk 1 of ~3"
-    assert body["progress"] == 0
-    assert body["latest_profile"] is None
+    assert body["message"] == "Generating profile: Chunk 2 of ~4"
+    assert body["progress"] == 25
 
 
-def test_batch_mid_chain_counts_saved_versions(client, user, monkeypatch):
-    t0 = datetime(2026, 9, 1)
-    v1 = _version(user, "iterative", cutoff=datetime(2026, 1, 1), created_at=t0)
-    v2 = _version(user, "iterative", parent=v1, cutoff=datetime(2026, 3, 1),
-                  created_at=t0 + timedelta(hours=1))
-    user.profile_batch_pending = True
-    _db.session.commit()
-    _remaining(monkeypatch, 2 * CHUNK_TARGET_UNITS)
-    body = client.get("/api/export/profile-progress").get_json()
-    assert body["message"] == "Generating profile: Chunk 3 of ~4"
-    assert body["progress"] == 50
-    assert body["latest_profile"]["id"] == v2.id
-
-
-def test_batch_chunk_count_restarts_after_an_integration(
-        client, user, monkeypatch):
-    # An integration ends a run: versions before it belong to the
-    # previous build, not to the chunk count of the one in flight.
-    t0 = datetime(2026, 9, 1)
-    v1 = _version(user, "iterative", cutoff=datetime(2026, 1, 1), created_at=t0)
-    v2 = _version(user, "iterative", parent=v1, cutoff=datetime(2026, 3, 1),
-                  created_at=t0 + timedelta(hours=1))
-    _version(user, "integration", parent=v2, created_at=t0 + timedelta(hours=2))
-    _version(user, "update", parent=v2, cutoff=datetime(2026, 6, 1),
-             created_at=t0 + timedelta(days=1))
-    user.profile_batch_pending = True
-    _db.session.commit()
-    _remaining(monkeypatch, CHUNK_TARGET_UNITS)
-    body = client.get("/api/export/profile-progress").get_json()
-    assert body["message"] == "Generating profile: Chunk 2 of ~2"
-
-
-def test_batch_full_regen_starts_the_count_over(client, user, monkeypatch):
+def test_batch_integration_step(client, user):
     v1 = _version(user, "iterative", cutoff=datetime(2026, 1, 1))
-    _version(user, "iterative", parent=v1, cutoff=datetime(2026, 3, 1))
-    user.profile_batch_pending = True
-    user.profile_needs_full_regen = True
-    _db.session.commit()
-    _remaining(monkeypatch, 2 * CHUNK_TARGET_UNITS)
-    body = client.get("/api/export/profile-progress").get_json()
-    assert body["message"] == "Generating profile: Chunk 1 of ~2"
-
-
-def test_batch_integration_step(client, user, monkeypatch):
-    v1 = _version(user, "iterative", cutoff=datetime(2026, 1, 1))
-    _version(user, "iterative", parent=v1, cutoff=datetime(2026, 3, 1))
-    user.profile_batch_pending = True
-    _db.session.commit()
-    _remaining(monkeypatch, 0)
+    v2 = _version(user, "iterative", parent=v1, cutoff=datetime(2026, 3, 1))
+    _pending_job(user, {"kind": "integration", "prev_profile_id": v2.id})
     body = client.get("/api/export/profile-progress").get_json()
     assert body["running"] is True
     assert body["message"] == "Integrating profile versions"
+    assert body["latest_profile"]["id"] == v2.id
+
+
+def test_batch_does_not_replan(client, user, monkeypatch):
+    import backend.routes.export_data as ed
+
+    def _boom(*a, **k):
+        raise AssertionError("count_remaining_units called from the progress endpoint")
+    monkeypatch.setattr(ed, "count_remaining_units", _boom)
+    _pending_job(user, {"kind": "chunk", "chunk_num": 1, "chunk_total": 3})
+    assert client.get("/api/export/profile-progress").status_code == 200
+
+
+def test_batch_flag_without_a_pending_item_is_generic(client, user):
+    # Flag set, no job carries the user (submit failed after the flag,
+    # admin cancel): still running, no invented numbers.
+    user.profile_batch_pending = True
+    _db.session.commit()
+    body = client.get("/api/export/profile-progress").get_json()
+    assert body["running"] is True
+    assert body["message"] == "Generating profile"
+    assert body["progress"] == 0
+
+
+def test_batch_item_without_ordinal_is_generic(client, user):
+    # Submitted before chunk_num was recorded.
+    _pending_job(user, {"kind": "chunk"})
+    body = client.get("/api/export/profile-progress").get_json()
+    assert body["message"] == "Generating profile"
+
+
+def test_batch_ignores_collected_jobs_and_other_kinds(client, user):
+    _pending_job(user, {"kind": "chunk", "chunk_num": 1, "chunk_total": 5},
+                 status="collected", batch_id="b-old")
+    job = ProfileBatchJob(
+        provider_key="anthropic", batch_id="b-int", status="pending",
+        items=[{"custom_id": f"intentions_{user.id}", "user_id": user.id,
+                "kind": "intentions"}])
+    _db.session.add(job)
+    user.profile_batch_pending = True
+    _db.session.commit()
+    body = client.get("/api/export/profile-progress").get_json()
+    assert body["message"] == "Generating profile"
 
 
 def test_batch_outranks_a_sync_guard(client, user, monkeypatch):
-    user.profile_batch_pending = True
+    _pending_job(user, {"kind": "chunk", "chunk_num": 1, "chunk_total": 1})
     user.profile_generation_task_id = "t-x"
     user.profile_generation_task_dispatched_at = datetime.utcnow()
     _db.session.commit()
-    _remaining(monkeypatch, CHUNK_TARGET_UNITS)
     body = client.get("/api/export/profile-progress").get_json()
     assert body["source"] == "batch"
+
+
+def test_idle_reports_a_failed_batch_step(client, user):
+    # A chain that saved a chunk and then failed: attempts > 0 until the
+    # seeder's retry applies a step. The client must not call it "updated".
+    user.profile_batch_attempts = 1
+    _db.session.commit()
+    body = client.get("/api/export/profile-progress").get_json()
+    assert body["status"] == "idle"
+    assert body["batch_step_failed"] is True
+    user.profile_batch_attempts = 0
+    _db.session.commit()
+    assert client.get("/api/export/profile-progress").get_json()["batch_step_failed"] is False
 
 
 def test_requires_login(app):

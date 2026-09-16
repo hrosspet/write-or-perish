@@ -1897,54 +1897,45 @@ _SYNC_STATUS_MAP = {
 }
 
 
+def _pending_batch_item(user_id):
+    """The user's in-flight profile step, from the item meta of the
+    pending ProfileBatchJob rows (a handful at any time; items are keyed
+    by custom_id, so scanned in Python). None when the flag is set but no
+    job carries the user — a submit that failed after the flag was set,
+    or a job cancelled by an admin."""
+    from backend.models import ProfileBatchJob
+    jobs = (ProfileBatchJob.query.filter_by(status="pending")
+            .order_by(ProfileBatchJob.id.desc()).all())
+    for job in jobs:
+        for item in job.items or []:
+            if (item.get("user_id") == user_id
+                    and item.get("kind") in ("chunk", "integration")):
+                return item
+    return None
+
+
 def _batch_progress(user):
     """Progress of the user's in-flight Batch API step (#258).
 
     The batch pipeline (backend/tasks/profile_batch.py) sets no Celery
-    task id, so the only signals are the guard flag and the saved
-    versions. Chunk n is the number of versions in the current chain
-    saved since the last integration (an integration ends a run); ~N
-    adds the planner's count for the remainder, computed exactly as the
-    seeder will compute it for the next step. A remainder of zero means
-    the in-flight step is the integration.
+    task id; the in-flight step is read from the pending job's item meta,
+    where the request builder recorded its kind and, for a chunk, its
+    ordinal and the planned total. Nothing is re-planned here: the plan
+    walks the user's whole in-scope corpus (about a second and tens of
+    MB for a 60k-node account), and this runs on every poll.
     """
-    from backend.tasks.exports import (
-        _collect_iterative_chain, tokens_per_unit)
-    from backend.utils.chunk_plan import next_window_budget, max_units_for_cap
-    from backend.llm_providers import DEFAULT_MAX_OUTPUT_TOKENS, model_input_cap
-
-    latest = UserProfile.query.filter(
-        UserProfile.user_id == user.id,
-        UserProfile.generation_type != 'integration',
-    ).order_by(UserProfile.created_at.desc()).first()
-    if user.profile_needs_full_regen or latest is None:
-        # From scratch: the chain restarts once chunk 1 commits.
-        done, cutoff = 0, None
+    item = _pending_batch_item(user.id)
+    if item is None:
+        message, progress = "Generating profile", 0
+    elif item.get("kind") == "integration":
+        message, progress = "Integrating profile versions", 95
+    elif item.get("chunk_num") and item.get("chunk_total"):
+        n, total = int(item["chunk_num"]), int(item["chunk_total"])
+        message = f"Generating profile: Chunk {n} of ~{total}"
+        progress = int(100 * (n - 1) / total) if total else 0
     else:
-        chain = _collect_iterative_chain(latest.id)
-        last_integration = UserProfile.query.filter_by(
-            user_id=user.id, generation_type='integration',
-        ).order_by(UserProfile.created_at.desc()).first()
-        if last_integration is not None:
-            chain = [p for p in chain
-                     if p.created_at > last_integration.created_at]
-        done, cutoff = len(chain), latest.source_data_cutoff
-
-    remaining = count_remaining_units(user.id, cutoff)
-    if remaining > 0:
-        model_id = (user.preferred_model
-                    or current_app.config.get("DEFAULT_LLM_MODEL"))
-        cfg = current_app.config.get("SUPPORTED_MODELS", {}).get(model_id) or {}
-        k, _size, _budget = next_window_budget(
-            remaining, max_units=max_units_for_cap(
-                model_input_cap(cfg, DEFAULT_MAX_OUTPUT_TOKENS),
-                tokens_per_unit(user, model_id)))
-        total = done + k
-        message = f"Generating profile: Chunk {done + 1} of ~{total}"
-        progress = int(100 * done / total) if total else 0
-    else:
-        message = "Integrating profile versions"
-        progress = 95
+        # Item submitted before the ordinal was recorded.
+        message, progress = "Generating profile", 0
     return {
         "running": True,
         "source": "batch",
@@ -1962,7 +1953,7 @@ def _sync_progress(user):
     the same staleness rule the dispatchers apply (_is_task_stale:
     finished, PENDING for 15+ min, or running for 1+ h — Celery kills
     every task at 1 h). A stale guard is cleared here too, exactly as
-    POST /export/update_profile clears it, so a reload does not report
+    POST /export/integrate_profile clears it, so a reload does not report
     the same dead task again."""
     from backend.celery_app import celery
     from backend.tasks.exports import _is_task_stale
@@ -2051,6 +2042,10 @@ def get_profile_progress():
         "task_id": None,
         "error": error,
         "latest_profile": _latest_profile_snapshot(current_user),
+        # The batch chain's last step failed and waits for the seeder's
+        # retry (attempts reset to 0 whenever a step is applied), so a
+        # chain that saved a chunk and then failed is not "updated".
+        "batch_step_failed": bool(current_user.profile_batch_attempts),
     }), 200
 
 

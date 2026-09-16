@@ -10,13 +10,16 @@ import api from '../api';
  *   0 disables the cap — for a poller whose endpoint is itself authoritative
  *   about whether the work is still running (it answers "idle" when nothing is)
  * @param {boolean} options.enabled - Whether polling is enabled
+ * @param {number} options.maxConsecutiveErrors - Stop polling (with `error` set)
+ *   after this many failed requests in a row; 0 (default) keeps retrying
  * @returns {Object} - { status, progress, data, error, startPolling, stopPolling }
  */
 export function useAsyncTaskPolling(endpoint, options = {}) {
   const {
     interval = 2000,
     maxDuration = 30 * 60 * 1000, // 30 minutes
-    enabled = false
+    enabled = false,
+    maxConsecutiveErrors = 0
   } = options;
 
   const [status, setStatus] = useState(null); // 'pending', 'processing', 'completed', 'failed'
@@ -27,6 +30,7 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
 
   const intervalRef = useRef(null);
   const timeoutRef = useRef(null);
+  const consecutiveErrorsRef = useRef(0);
   // Track current endpoint to discard stale in-flight responses
   const currentEndpointRef = useRef(endpoint);
   currentEndpointRef.current = endpoint;
@@ -64,6 +68,7 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
       }
 
       const result = response.data;
+      consecutiveErrorsRef.current = 0;
 
       setStatus(result.status);
       setProgress(result.progress || 0);
@@ -80,8 +85,13 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
       console.error('Polling error:', err);
       // Don't stop polling on error, just log it and retry on next interval
       // The task might still be processing or there might be a temporary network issue
+      consecutiveErrorsRef.current += 1;
+      if (maxConsecutiveErrors && consecutiveErrorsRef.current >= maxConsecutiveErrors) {
+        stopPolling();
+        setError(`Polling stopped after ${consecutiveErrorsRef.current} consecutive errors`);
+      }
     }
-  }, [endpoint, stopPolling]);
+  }, [endpoint, stopPolling, maxConsecutiveErrors]);
 
   const startPolling = useCallback(() => {
     if (isPolling) return;
@@ -130,6 +140,7 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
     if (enabled && endpoint) {
       setIsPolling(true);
       setError(null);
+      consecutiveErrorsRef.current = 0;
 
       // Poll immediately
       poll();
