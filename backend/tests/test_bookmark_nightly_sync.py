@@ -274,7 +274,8 @@ def test_nightly_fanout_noop_without_client_id(app, monkeypatch):
 
 
 def test_successful_sync_logs_api_cost(app, monkeypatch):
-    """Every consumed page is a paid request; the sync logs the spend to
+    """X bills per returned POST, not per page (#271): one bookmark over
+    two pages (the second empty) costs one post read, logged to
     APICostLog like any other provider call."""
     uid = User.query.first().id
     _mk_account(uid, expired=False)
@@ -288,11 +289,35 @@ def test_successful_sync_logs_api_cost(app, monkeypatch):
 
     result = _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
     assert result == {"status": "ok", "created": 1, "skipped": 0,
-                      "requests": 2}
+                      "requests": 2, "posts_read": 1}
     log = APICostLog.query.filter_by(
         user_id=uid, request_type="x_bookmark_sync").one()
-    assert log.cost_microdollars == 2 * _sync_mod.X_REQUEST_COST_MICRODOLLARS
+    assert log.cost_microdollars == 1 * _sync_mod.X_POST_READ_COST_MICRODOLLARS
     assert log.model_id == "x-api/bookmarks"
+    assert log.request_ref == "posts:1/pages:2"
+
+
+def test_sync_cost_is_per_post_not_per_page(app, monkeypatch):
+    """A two-page sync returning N posts logs N * post-read price — the
+    old flat per-request constant undercounted by ~the page size."""
+    uid = User.query.first().id
+    _mk_account(uid, expired=False)
+
+    def _item(i):
+        return {"external_id": f"p{i}", "content": f"post {i}",
+                "author_handle": "x", "url": None, "posted_at": None}
+
+    def two_full_pages(token, x_user_id, max_items=800):
+        yield [_item(i) for i in range(5)]
+        yield [_item(i) for i in range(5, 8)]
+    monkeypatch.setattr(_sync_mod, "x_fetch_bookmark_pages", two_full_pages)
+
+    result = _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    assert result["created"] == 8 and result["posts_read"] == 8
+    log = APICostLog.query.filter_by(
+        user_id=uid, request_type="x_bookmark_sync").one()
+    assert log.cost_microdollars == 8 * _sync_mod.X_POST_READ_COST_MICRODOLLARS
+    assert log.request_ref == "posts:8/pages:2"
 
 
 def test_successful_sync_records_created_count(app, monkeypatch):

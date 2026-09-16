@@ -582,14 +582,15 @@ def twitter_callback():
         notice.status = "read"
         notice.read_at = datetime.utcnow()
     from backend.models import APICostLog
-    from backend.utils.cost import X_REQUEST_COST_MICRODOLLARS
+    from backend.utils.cost import X_USER_READ_COST_MICRODOLLARS
     db.session.add(APICostLog(
         user_id=current_user.id,
         model_id="x-api/users-me",
         request_type="x_oauth_connect",
         input_tokens=0,
         output_tokens=0,
-        cost_microdollars=X_REQUEST_COST_MICRODOLLARS,
+        # /users/me is one user read ($0.010 pay-per-use, #271).
+        cost_microdollars=X_USER_READ_COST_MICRODOLLARS,
     ))
     db.session.commit()
     return redirect(_frontend_url("/import?x_connect=ok"))

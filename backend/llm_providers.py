@@ -215,9 +215,15 @@ class LLMProvider:
         # counters) and is billed at a discount we must account for.
         details = getattr(response.usage, "input_tokens_details", None)
         cached_tokens = getattr(details, "cached_tokens", 0) or 0
-        if cached_tokens:
+        # #286: GPT-5.6+ also reports the tokens WRITTEN to the cache this
+        # call (billed at 1.25x). Like cached_tokens it is a subset of
+        # input_tokens, hence the distinct key — never the Anthropic-style
+        # disjoint cache_creation_input_tokens.
+        cache_write_tokens = getattr(details, "cache_write_tokens", 0) or 0
+        if cached_tokens or cache_write_tokens:
             logger.info(
-                f"OpenAI prompt cache: cached={cached_tokens} of "
+                f"OpenAI prompt cache: cached={cached_tokens} "
+                f"written={cache_write_tokens} of "
                 f"{response.usage.input_tokens} input tokens")
 
         return {
@@ -226,6 +232,7 @@ class LLMProvider:
             "input_tokens": response.usage.input_tokens,
             "output_tokens": response.usage.output_tokens,
             "cached_tokens": cached_tokens,
+            "cache_write_subset_tokens": cache_write_tokens,
             "tool_calls": tool_calls,
             "truncated": truncated,
         }

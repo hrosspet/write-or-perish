@@ -404,14 +404,16 @@ def openai_batch_collect_one(api_key, batch_id, custom_id):
         usage = body.get("usage") or {}
         in_toks = usage.get("input_tokens", 0)
         out_toks = usage.get("output_tokens", 0)
-        cached = (usage.get("input_tokens_details") or {}).get(
-            "cached_tokens", 0) or 0
+        details = usage.get("input_tokens_details") or {}
+        cached = details.get("cached_tokens", 0) or 0
+        written = details.get("cache_write_tokens", 0) or 0
         return "completed", {
             "content": content,
             "total_tokens": in_toks + out_toks,
             "input_tokens": in_toks,
             "output_tokens": out_toks,
             "cached_tokens": cached,
+            "cache_write_subset_tokens": written,
             "tool_calls": [],
             "truncated": body.get("status") == "incomplete",
             "batch": True,
