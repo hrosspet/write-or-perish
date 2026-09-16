@@ -113,6 +113,39 @@ def llm_cost_from_response(model_id, response, batch=None):
     )
 
 
+def llm_cost_log_fields(model_id, response, batch=None):
+    """The APICostLog token + cost columns for one model call, from the
+    provider response dict — the ONE place the two providers' counters
+    are folded into the unified column semantics (#187/#189/#286):
+
+    input_tokens       = full prompt size. Anthropic reports the uncached
+                         portion, so its cache reads + writes complete it;
+                         OpenAI's input_tokens is already the full prompt.
+    cache_read_tokens  = input SERVED from cache: Anthropic cache reads +
+                         OpenAI cached_tokens (one of the two is always 0).
+    cache_write_tokens = input WRITTEN to cache: Anthropic cache creation
+                         + the OpenAI write subset (likewise).
+    cost_microdollars  = llm_cost_from_response.
+
+    Spread into APICostLog(...) so every call site (conversation turns,
+    cache warm, profile, digest, poll draft, ...) fills the same columns
+    the same way; the admin hit-rate (served / full prompt input) then
+    holds for any request_type."""
+    in_toks = response.get("input_tokens", 0) or 0
+    read = response.get("cache_read_input_tokens", 0) or 0
+    write = response.get("cache_creation_input_tokens", 0) or 0
+    cached = response.get("cached_tokens", 0) or 0
+    write_subset = response.get("cache_write_subset_tokens", 0) or 0
+    return {
+        "input_tokens": in_toks + read + write,
+        "output_tokens": response.get("output_tokens", 0) or 0,
+        "cache_read_tokens": read + cached,
+        "cache_write_tokens": write + write_subset,
+        "cost_microdollars": llm_cost_from_response(
+            model_id, response, batch=batch),
+    }
+
+
 def calculate_audio_cost_microdollars(model_id, duration_seconds):
     """
     Calculate audio API cost in microdollars from duration.

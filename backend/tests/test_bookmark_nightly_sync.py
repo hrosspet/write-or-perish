@@ -282,8 +282,8 @@ def test_successful_sync_logs_api_cost(app, monkeypatch):
 
     def two_pages(token, x_user_id, max_items=800):
         yield [{"external_id": "n1", "content": "new one",
-                "author_handle": "x", "url": None, "posted_at": None}]
-        yield []  # stale page -> early stop; still a paid request
+                "author_handle": "x", "url": None, "posted_at": None}], 1
+        yield [], 0  # empty page -> early stop; costs nothing
         raise AssertionError("third page must never be fetched")
     monkeypatch.setattr(_sync_mod, "x_fetch_bookmark_pages", two_pages)
 
@@ -308,8 +308,8 @@ def test_sync_cost_is_per_post_not_per_page(app, monkeypatch):
                 "author_handle": "x", "url": None, "posted_at": None}
 
     def two_full_pages(token, x_user_id, max_items=800):
-        yield [_item(i) for i in range(5)]
-        yield [_item(i) for i in range(5, 8)]
+        yield [_item(i) for i in range(5)], 5
+        yield [_item(i) for i in range(5, 8)], 3
     monkeypatch.setattr(_sync_mod, "x_fetch_bookmark_pages", two_full_pages)
 
     result = _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
@@ -328,11 +328,82 @@ def test_successful_sync_records_created_count(app, monkeypatch):
 
     def pages(token, x_user_id, max_items=800):
         yield [{"external_id": f"n{i}", "content": "t", "author_handle": "x",
-                "url": None, "posted_at": None} for i in range(3)]
+                "url": None, "posted_at": None} for i in range(3)], 3
         yield [{"external_id": "n0", "content": "t", "author_handle": "x",
-                "url": None, "posted_at": None}]  # known -> stop
+                "url": None, "posted_at": None}], 1  # known -> stop
     monkeypatch.setattr(_sync_mod, "x_fetch_bookmark_pages", pages)
 
     _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
     _db.session.expire_all()
     assert ExternalAccount.query.get(account.id).last_sync_created == 3
+
+
+def test_posts_read_is_what_x_returned_not_what_normalized(app, monkeypatch):
+    """X bills every post it returns, including ones normalization drops
+    (no id/text), so the ledger counts the returned figure the fetcher
+    reports alongside each page — not len(page)."""
+    uid = User.query.first().id
+    _mk_account(uid, expired=False)
+
+    def pages(token, x_user_id, max_items=800):
+        # 3 returned, 1 normalizable
+        yield [{"external_id": "n1", "content": "t", "author_handle": "x",
+                "url": None, "posted_at": None}], 3
+        yield [], 0
+    monkeypatch.setattr(_sync_mod, "x_fetch_bookmark_pages", pages)
+
+    result = _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    assert result["created"] == 1 and result["posts_read"] == 3
+    log = APICostLog.query.filter_by(
+        user_id=uid, request_type="x_bookmark_sync").one()
+    assert log.cost_microdollars == 3 * _sync_mod.X_POST_READ_COST_MICRODOLLARS
+    assert log.request_ref == "posts:3/pages:2"
+
+
+def test_failed_sync_still_logs_pages_already_billed(app, monkeypatch):
+    """A 429 (or 5xx) after some pages arrived re-raises for the next
+    scheduled retry, but X already billed those pages: the cost row is
+    written before the error propagates. The failing request returned
+    nothing and costs nothing."""
+    uid = User.query.first().id
+    account = _mk_account(uid, expired=False)
+
+    def _item(i):
+        return {"external_id": f"p{i}", "content": f"post {i}",
+                "author_handle": "x", "url": None, "posted_at": None}
+
+    def pages_then_429(token, x_user_id, max_items=800):
+        yield [_item(i) for i in range(10)], 10
+        yield [_item(i) for i in range(10, 30)], 20
+        raise _http_error(429)
+    monkeypatch.setattr(_sync_mod, "x_fetch_bookmark_pages", pages_then_429)
+
+    with pytest.raises(requests.HTTPError):
+        _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    log = APICostLog.query.filter_by(
+        user_id=uid, request_type="x_bookmark_sync").one()
+    assert log.cost_microdollars == 30 * _sync_mod.X_POST_READ_COST_MICRODOLLARS
+    assert log.request_ref == "posts:30/pages:2"
+    # The pages that arrived stay imported; the sync is not marked done.
+    _db.session.expire_all()
+    assert ExternalAccount.query.get(account.id).last_synced_at is None
+    assert ExternalAccount.query.get(account.id).revoked_at is None
+
+
+def test_401_mid_sync_logs_cost_then_revokes(app, monkeypatch):
+    uid = User.query.first().id
+    account = _mk_account(uid, expired=False)
+
+    def page_then_401(token, x_user_id, max_items=800):
+        yield [{"external_id": "n1", "content": "t", "author_handle": "x",
+                "url": None, "posted_at": None}], 7
+        raise _http_error(401)
+    monkeypatch.setattr(_sync_mod, "x_fetch_bookmark_pages", page_then_401)
+
+    result = _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    assert result["status"] == "revoked"
+    log = APICostLog.query.filter_by(
+        user_id=uid, request_type="x_bookmark_sync").one()
+    assert log.request_ref == "posts:7/pages:1"
+    _db.session.expire_all()
+    assert ExternalAccount.query.get(account.id).revoked_at is not None

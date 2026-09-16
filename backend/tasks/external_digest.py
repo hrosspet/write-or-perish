@@ -32,7 +32,7 @@ from backend.models import (
 )
 from backend.llm_providers import LLMProvider
 from backend.utils.api_keys import get_api_keys_for_usage
-from backend.utils.cost import calculate_llm_cost_microdollars
+from backend.utils.cost import llm_cost_log_fields
 from backend.utils.llm_batch import (
     apply_batch_key_override, batch_check_and_collect, batch_submit,
 )
@@ -183,22 +183,22 @@ def _render_digest_prompt(user_id):
     return DIGEST_PROMPT.replace("{corpus}", corpus), total
 
 
-def _save_digest(user, model_id, digest_text, input_tokens, output_tokens,
-                 corpus_at, batch):
-    """Log the cost and write the new digest version. ``corpus_at`` is
-    the moment the prompt was rendered: the artifact is stamped with the
-    corpus state it reflects, not with the moment the response arrived
-    (seconds later on the direct path, hours later from a batch), so an
-    item saved in between still reads as newer than the digest and the
-    staleness check picks it up next time."""
+def _save_digest(user, model_id, digest_text, response, corpus_at, batch):
+    """Log the cost and write the new digest version. ``response`` is the
+    provider result dict (live call or batch collector) so the cost row
+    is priced cache-aware for either provider — the digest model follows
+    the user's preferred model, so it can be an OpenAI one (#286).
+    ``corpus_at`` is the moment the prompt was rendered: the artifact is
+    stamped with the corpus state it reflects, not with the moment the
+    response arrived (seconds later on the direct path, hours later from
+    a batch), so an item saved in between still reads as newer than the
+    digest and the staleness check picks it up next time."""
+    fields = llm_cost_log_fields(model_id, response, batch=batch)
     db.session.add(APICostLog(
         user_id=user.id,
         model_id=model_id,
         request_type="external_digest",
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        cost_microdollars=calculate_llm_cost_microdollars(
-            model_id, input_tokens, output_tokens, batch=batch),
+        **fields,
     ))
     previous = UserArtifact.latest_for(user.id, DIGEST_KIND)
     artifact = UserArtifact(
@@ -211,7 +211,7 @@ def _save_digest(user, model_id, digest_text, input_tokens, output_tokens,
             else DIGEST_DESCRIPTION.replace(
                 "{name}", user.username or "the user")),
         generated_by=model_id,
-        tokens_used=input_tokens + output_tokens,
+        tokens_used=fields["input_tokens"] + fields["output_tokens"],
         # Respect a manual opt-out on the previous version; otherwise
         # mirror the user's global default (recent_context precedent).
         ai_usage=(previous.ai_usage if previous
@@ -385,8 +385,7 @@ def _collect_digest_batches():
                     "digest", item["custom_id"], job.batch_id)
                 continue
             _save_digest(
-                user, item["model_id"], digest_text,
-                result["input_tokens"], result["output_tokens"],
+                user, item["model_id"], digest_text, result,
                 datetime.fromisoformat(item["corpus_at"]), batch=True)
             logger.info(
                 "External digest rebuilt for user %s from batch (%d "
@@ -450,9 +449,7 @@ def rebuild_external_digest(self, user_id, force=False):
             return {"status": "empty_response"}
 
         artifact = _save_digest(
-            user, model_id, digest_text,
-            response.get("input_tokens", 0), response.get("output_tokens", 0),
-            corpus_at, batch=False)
+            user, model_id, digest_text, response, corpus_at, batch=False)
         db.session.commit()
         logger.info(
             "External digest rebuilt for user %s (%d items, model %s)",

@@ -656,12 +656,14 @@ class TestDraftBatchPipeline:
             }}, {}, {}))
         cost_calls = {}
 
-        def fake_cost(model_id, inp, out, batch=False):
-            cost_calls.update(model=model_id, batch=batch)
-            return 4242
+        def fake_fields(model_id, response, batch=None):
+            cost_calls.update(model=model_id, batch=batch,
+                              response=response)
+            return {"input_tokens": 100, "output_tokens": 50,
+                    "cache_read_tokens": 0, "cache_write_tokens": 0,
+                    "cost_microdollars": 4242}
 
-        monkeypatch.setattr(
-            pipeline, "calculate_llm_cost_microdollars", fake_cost)
+        monkeypatch.setattr(pipeline, "llm_cost_log_fields", fake_fields)
 
         pipeline._collect_poll_draft_batches()
 
@@ -677,7 +679,12 @@ class TestDraftBatchPipeline:
         assert log.request_type == "poll_draft"
         assert log.request_ref == f"poll:{poll.id}"   # traceable to poll
         assert log.cost_microdollars == 4242
-        assert cost_calls == {"model": "test-model", "batch": True}
+        # The whole result dict reaches the cost helper, so an OpenAI poll
+        # model's cache counters are priced (#286).
+        assert cost_calls == {"model": "test-model", "batch": True,
+                              "response": {"content": " A drafted answer. ",
+                                           "input_tokens": 100,
+                                           "output_tokens": 50}}
         # System account can't log in / never gets profile-generated
         assert system_user.approved is False
         assert system_user.plan == "free"

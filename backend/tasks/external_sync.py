@@ -143,29 +143,58 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
                     + timedelta(seconds=int(tokens["expires_in"])))
             db.session.commit()
 
-        # Early-stop pagination (credit saving): bookmarks arrive newest-
-        # bookmarked-first, so once a whole page produced nothing new, the
-        # rest is already imported — stop instead of paying for the tail.
-        # Page-wise (not first-known-id) because a re-bookmarked old tweet
-        # jumps to the top and would otherwise mask newer items below it.
+        # Early-stop pagination: bookmarks arrive newest-bookmarked-first,
+        # so once a whole page produced nothing new, the rest is already
+        # imported — stop instead of paying for the tail. Page-wise (not
+        # first-known-id) because a re-bookmarked old tweet jumps to the
+        # top and would otherwise mask newer items below it. Pages start
+        # small and grow (x_fetch_bookmark_pages), so the page that ends a
+        # quiet night is a cheap one.
         # X bills pay-per-use per RETURNED POST (#271), not per request:
         # a page of N bookmarks costs N post reads, an empty page nothing.
         created = skipped = requests_made = posts_read = 0
+
+        def _log_cost():
+            """One APICostLog row for the pages X returned — also when the
+            sync then fails (429, 5xx, 401): X billed every page that
+            arrived, and a dropped row under-counts by up to a page of
+            posts. The failing request itself returned nothing, so it
+            costs nothing. Auditable against the developer-portal bill:
+            N posts read over M pages."""
+            if requests_made:
+                db.session.add(APICostLog(
+                    user_id=user_id,
+                    model_id="x-api/bookmarks",
+                    request_type="x_bookmark_sync",
+                    request_ref=f"posts:{posts_read}/pages:{requests_made}",
+                    input_tokens=0,
+                    output_tokens=0,
+                    cost_microdollars=(
+                        posts_read * X_POST_READ_COST_MICRODOLLARS),
+                ))
+
         try:
-            for page in x_fetch_bookmark_pages(
+            for page, returned in x_fetch_bookmark_pages(
                     account.get_access_token(), account.external_user_id,
                     max_items=max_items):
                 requests_made += 1
-                posts_read += len(page)
+                posts_read += returned
                 page_created, page_skipped = _upsert_items(
                     user_id, "twitter_bookmark", page)
                 created += page_created
                 skipped += page_skipped
                 if page_created == 0:
                     break
-        except requests.HTTPError as exc:
+        except Exception as exc:
+            # Pages already upserted are committed (_upsert_items commits
+            # per page); this only discards a half-applied page from a DB
+            # failure, so the cost row can be written on a clean session.
+            db.session.rollback()
+            _log_cost()
+            db.session.commit()
             code = (exc.response.status_code
-                    if exc.response is not None else None)
+                    if isinstance(exc, requests.HTTPError)
+                    and exc.response is not None else None)
             # 401 = token invalidated without a refresh in between. 403 is
             # NOT revocation (usually an API-tier/permissions problem on
             # our side) — let it raise so it shows up as an operator error.
@@ -174,19 +203,7 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
             raise
         account.last_synced_at = datetime.utcnow()
         account.last_sync_created = created
-        if requests_made:
-            db.session.add(APICostLog(
-                user_id=user_id,
-                model_id="x-api/bookmarks",
-                request_type="x_bookmark_sync",
-                # Auditable against the developer-portal bill: N posts
-                # read over M pages.
-                request_ref=f"posts:{posts_read}/pages:{requests_made}",
-                input_tokens=0,
-                output_tokens=0,
-                cost_microdollars=(
-                    posts_read * X_POST_READ_COST_MICRODOLLARS),
-            ))
+        _log_cost()
         db.session.commit()
         logger.info("X bookmarks sync for user %s: %d new, %d known, "
                     "%d posts read over %d API requests", user_id, created,

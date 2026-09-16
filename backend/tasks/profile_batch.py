@@ -324,10 +324,14 @@ def _build_next_profile_request(user, allow_chunk=True):
 
 
 def _response_from_result(result):
-    inp = result.get("input_tokens", 0)
-    out = result.get("output_tokens", 0)
-    return {"content": result["content"], "input_tokens": inp,
-            "output_tokens": out, "total_tokens": inp + out}
+    """A collected batch result in the shape _save_profile expects. Every
+    counter the collector reported (cache reads/writes, batch flag) is
+    kept so the profile_batch cost row is priced cache-aware (#286);
+    only total_tokens is derived here."""
+    inp = result.get("input_tokens", 0) or 0
+    out = result.get("output_tokens", 0) or 0
+    return {**result, "input_tokens": inp, "output_tokens": out,
+            "total_tokens": inp + out}
 
 
 def _apply_result(user, item, result, submitted_at):
