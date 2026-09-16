@@ -13,7 +13,11 @@ Request shape (per item):
      "messages": list, "max_tokens": int}
 
 Result shape (per custom_id), from batch_check_and_collect:
-    {"content": str, "input_tokens": int, "output_tokens": int}
+    {"content": str, "input_tokens": int, "output_tokens": int,
+     "batch": True, + the provider's cache counters under the keys the
+     live calls use (Anthropic cache_read_input_tokens /
+     cache_creation_input_tokens; OpenAI cached_tokens /
+     cache_write_subset_tokens), so llm_cost_from_response prices it}
 """
 import json
 import logging
@@ -159,7 +163,12 @@ def batch_check_and_collect(batch_ids, api_keys):
 
     Returns (results_by_custom_id, still_pending, batch_durations) where:
         results_by_custom_id: dict mapping custom_id -> result dict with
-            "content", "input_tokens", "output_tokens"
+            "content", "input_tokens", "output_tokens", "batch": True and
+            every cache counter the provider reported, in the same keys
+            the live calls use (Anthropic cache_read_input_tokens /
+            cache_creation_input_tokens; OpenAI cached_tokens /
+            cache_write_subset_tokens), so llm_cost_from_response prices
+            a batch result exactly like a live one (#286).
         still_pending: dict of batch_ids still processing
         batch_durations: dict mapping provider key -> duration in seconds
     """
@@ -196,10 +205,16 @@ def batch_check_and_collect(batch_ids, api_keys):
                     for block in msg.content:
                         if hasattr(block, "text"):
                             content += block.text
+                    usage = msg.usage
                     results[cid] = {
                         "content": content,
-                        "input_tokens": msg.usage.input_tokens,
-                        "output_tokens": msg.usage.output_tokens,
+                        "input_tokens": usage.input_tokens,
+                        "output_tokens": usage.output_tokens,
+                        "cache_read_input_tokens": getattr(
+                            usage, "cache_read_input_tokens", 0) or 0,
+                        "cache_creation_input_tokens": getattr(
+                            usage, "cache_creation_input_tokens", 0) or 0,
+                        "batch": True,
                     }
                 else:
                     log.warning(f"Anthropic batch item {cid}: "
@@ -233,11 +248,27 @@ def batch_check_and_collect(batch_ids, api_keys):
                 resp = entry.get("response", entry.get("result", {}))
                 body = resp.get("body", {})
                 if resp.get("status_code") == 200 and body.get("choices"):
+                    usage = body.get("usage")
+                    if not usage:
+                        # Priced at $0 otherwise, silently — say so.
+                        log.warning(f"OpenAI batch item {cid}: 200 without "
+                                    f"usage; cost row will be $0")
+                    usage = usage or {}
+                    # chat/completions spells the counters prompt_tokens /
+                    # prompt_tokens_details (the Responses API says
+                    # input_tokens / input_tokens_details). Both subsets
+                    # of the prompt, same semantics as the live call.
+                    details = usage.get("prompt_tokens_details") or {}
                     results[cid] = {
                         "content": body["choices"][0]["message"]["content"],
-                        "input_tokens": body["usage"]["prompt_tokens"],
-                        "output_tokens": body["usage"][
-                            "completion_tokens"],
+                        "input_tokens": usage.get("prompt_tokens", 0) or 0,
+                        "output_tokens": usage.get(
+                            "completion_tokens", 0) or 0,
+                        "cached_tokens": details.get(
+                            "cached_tokens", 0) or 0,
+                        "cache_write_subset_tokens": details.get(
+                            "cache_write_tokens", 0) or 0,
+                        "batch": True,
                     }
                 else:
                     log.warning(f"OpenAI batch item {cid}: "

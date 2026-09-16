@@ -29,7 +29,23 @@ CA_PAGE_SIZE = 500
 CA_TIMEOUT = 20
 
 X_API_BASE = "https://api.twitter.com/2"
-X_BOOKMARKS_PAGE_SIZE = 100
+# X bills bookmark reads per RETURNED POST (#271), so the page size is
+# not a request-count lever any more: it is the cost of the last page —
+# the one the sync fetches only to learn it holds nothing new. Pages
+# start small and double while every page is all-new; the first page
+# that reaches known bookmarks freezes the size (the caller sends
+# grow=False), because the next page is most likely the closing one.
+# So a quiet night costs the first page, and a night with N new
+# bookmarks costs at most N + 2·min(N + 10, 100) posts: the all-new
+# pages (≤ N), the page that crosses into known bookmarks and the
+# closing page of the same size, each ≤ N + 10 because the all-new
+# pages before it sum to that size minus 10. E.g. 1 new = 20 posts,
+# 11 new = 50, 31 new = 110, 71 new = 230; a full 800 first import
+# stays 800 (max_items caps the last request). Heuristic: the 10 is a
+# floor on what a nightly check can cost (10 posts = $0.05), nothing
+# more precise.
+X_BOOKMARKS_FIRST_PAGE_SIZE = 10
+X_BOOKMARKS_PAGE_SIZE = 100  # X's max_results cap for the endpoint
 
 
 def _ca_headers():
@@ -138,23 +154,38 @@ def normalize_x_bookmark(tweet, authors_by_id):
 
 
 def x_fetch_bookmark_pages(access_token, x_user_id, max_items=800):
-    """Fetch the user's X bookmarks (newest-bookmarked first) as PAGES of
-    normalized items, so the caller can stop paginating — each page is a
-    paid API request — once a page yields nothing new.
+    """Fetch the user's X bookmarks (newest-bookmarked first) as PAGES,
+    yielding ``(items, posts_returned)`` per request: the normalized
+    items, and how many posts X returned for that request — what the
+    cost ledger counts (#271). X bills each post once per UTC day, so a
+    second manual sync the same day is logged in full though X may bill
+    less. The two numbers differ only when a tweet fails to normalize
+    (no id/text); max_items never makes them differ because the last
+    request asks X for exactly the remainder. Empty pages are yielded
+    too (cost 0), so the caller can stop paginating once a page yields
+    nothing new.
+
+    Page sizes start at X_BOOKMARKS_FIRST_PAGE_SIZE and double up to
+    X_BOOKMARKS_PAGE_SIZE (see the constants for why). A caller driving
+    the generator with ``send(False)`` keeps the next page the SAME size
+    instead of doubling it — the sync does that once a page has reached
+    already-imported bookmarks, so the closing page stays cheap. Plain
+    iteration (``send(None)``) always doubles.
 
     X API v2: GET /2/users/:id/bookmarks — OAuth2 user context with
     bookmark.read; max 800 most recent per X's own cap.
     """
     headers = {"Authorization": f"Bearer {access_token}"}
     params = {
-        "max_results": X_BOOKMARKS_PAGE_SIZE,
         "tweet.fields": "created_at,author_id",
         "expansions": "author_id",
         "user.fields": "username",
     }
     fetched = 0
     next_token = None
+    page_size = X_BOOKMARKS_FIRST_PAGE_SIZE
     while fetched < max_items:
+        params["max_results"] = min(page_size, max_items - fetched)
         if next_token:
             params["pagination_token"] = next_token
         resp = requests.get(
@@ -171,22 +202,13 @@ def x_fetch_bookmark_pages(access_token, x_user_id, max_items=800):
             item = normalize_x_bookmark(tweet, authors_by_id)
             if item is not None:
                 page.append(item)
-                fetched += 1
-                if fetched >= max_items:
-                    break
-        # Empty pages are yielded too: every yield corresponds to exactly
-        # one paid API request, so the caller can meter cost by counting.
-        yield page
+        fetched += len(tweets)
+        grow = yield page, len(tweets)
         next_token = (payload.get("meta") or {}).get("next_token")
         if not next_token:
             break
-
-
-def x_fetch_bookmarks(access_token, x_user_id, max_items=800):
-    """Flat-iteration wrapper over x_fetch_bookmark_pages."""
-    for page in x_fetch_bookmark_pages(
-            access_token, x_user_id, max_items=max_items):
-        yield from page
+        if grow is not False:
+            page_size = min(page_size * 2, X_BOOKMARKS_PAGE_SIZE)
 
 
 def x_refresh_access_token(client_id, refresh_token):

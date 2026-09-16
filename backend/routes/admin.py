@@ -171,7 +171,8 @@ def list_users():
     # Unified across providers: cache_read_tokens holds the input SERVED from
     # cache — Anthropic cache reads AND OpenAI cached_tokens — and input_tokens
     # is the full prompt size, so hit-rate = served / total prompt input works
-    # for both (OpenAI has no separate "write" concept). Scoped to
+    # for both (cache_write_tokens likewise unifies Anthropic cache creation
+    # and the OpenAI write subset, #286, but hit-rate only needs reads). Scoped to
     # request_type='conversation' so embeddings/transcription/profile/warm
     # don't dilute the denominator, and to turns since PROMPT_CACHE_SINCE
     # so pre-caching history doesn't either. NULLs are ignored by SUM.
