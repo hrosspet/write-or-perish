@@ -6,7 +6,9 @@ import api from '../api';
  * @param {string} endpoint - API endpoint to poll (e.g., `/nodes/${nodeId}/transcription-status`)
  * @param {Object} options - Polling options
  * @param {number} options.interval - Polling interval in ms (default: 2000)
- * @param {number} options.maxDuration - Max polling duration in ms (default: 30 minutes)
+ * @param {number} options.maxDuration - Max polling duration in ms (default: 30 minutes);
+ *   0 disables the cap — for a poller whose endpoint is itself authoritative
+ *   about whether the work is still running (it answers "idle" when nothing is)
  * @param {boolean} options.enabled - Whether polling is enabled
  * @returns {Object} - { status, progress, data, error, startPolling, stopPolling }
  */
@@ -98,10 +100,12 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
     intervalRef.current = setInterval(poll, interval);
 
     // Set up timeout to stop polling after max duration
-    timeoutRef.current = setTimeout(() => {
-      stopPolling();
-      setError('Polling timeout - task took too long');
-    }, maxDuration);
+    if (maxDuration) {
+      timeoutRef.current = setTimeout(() => {
+        stopPolling();
+        setError('Polling timeout - task took too long');
+      }, maxDuration);
+    }
   }, [isPolling, endpoint, poll, interval, maxDuration, stopPolling]);
 
   // Auto-start polling if enabled
@@ -134,18 +138,20 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
       intervalRef.current = setInterval(poll, interval);
 
       // Set up timeout to stop polling after max duration
-      timeoutRef.current = setTimeout(() => {
-        if (intervalRef.current) {
-          clearInterval(intervalRef.current);
-          intervalRef.current = null;
-        }
-        if (timeoutRef.current) {
-          clearTimeout(timeoutRef.current);
-          timeoutRef.current = null;
-        }
-        setIsPolling(false);
-        setError('Polling timeout - task took too long');
-      }, maxDuration);
+      if (maxDuration) {
+        timeoutRef.current = setTimeout(() => {
+          if (intervalRef.current) {
+            clearInterval(intervalRef.current);
+            intervalRef.current = null;
+          }
+          if (timeoutRef.current) {
+            clearTimeout(timeoutRef.current);
+            timeoutRef.current = null;
+          }
+          setIsPolling(false);
+          setError('Polling timeout - task took too long');
+        }, maxDuration);
+      }
     }
 
     // Cleanup on unmount or when dependencies change

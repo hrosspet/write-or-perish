@@ -1872,92 +1872,185 @@ def generate_profile():
     }), 202
 
 
-@export_bp.route("/export/profile-status/<task_id>", methods=["GET"])
-@login_required
-def get_profile_status(task_id):
-    """Get the status of a profile generation task."""
-    from backend.celery_app import celery
-    from backend.models import UserProfile
-
-    task = celery.AsyncResult(task_id)
-
-    # Get task state and info
-    state = task.state
-
-    # Celery returns PENDING for unknown/expired task IDs. If the DB no
-    # longer lists this task as the active generation, the task already
-    # finished — treat it as completed so the frontend stops polling.
-    if state == 'PENDING' and current_user.profile_generation_task_id != task_id:
-        latest = (UserProfile.query
-                  .filter_by(user_id=current_user.id)
-                  .order_by(UserProfile.created_at.desc())
-                  .first())
-        profile_data = None
-        if latest:
-            profile_data = {
-                "id": latest.id,
-                "content": latest.get_content(),
-                "generated_by": latest.generated_by,
-                "tokens_used": latest.tokens_used,
-                "created_at": iso_utc(latest.created_at)
-            }
-        return jsonify({
-            "task_id": task_id,
-            "status": "completed",
-            "progress": 100,
-            "message": "Profile generation complete",
-            "error": None,
-            "profile": profile_data
-        }), 200
-
-    # task.info can be a dict (for PROGRESS state) or an exception (for FAILURE)
-    # or None/other for PENDING states
-    info = {}
-    error_message = None
-    if isinstance(task.info, dict):
-        info = task.info
-    elif isinstance(task.info, Exception):
-        error_message = str(task.info)
-
-    # For failed tasks, try to get the traceback
-    if state == 'FAILURE':
-        error_message = error_message or str(task.info) if task.info else "Unknown error"
-        current_app.logger.error(f"Profile generation task {task_id} failed: {error_message}")
-
-    # If task completed, fetch the profile from database
-    profile_data = None
-    if state == 'SUCCESS' and task.result:
-        result = task.result if isinstance(task.result, dict) else {}
-        profile_id = result.get('profile_id')
-        if profile_id:
-            profile = UserProfile.query.get(profile_id)
-            if profile and profile.user_id == current_user.id:
-                profile_data = {
-                    "id": profile.id,
-                    "content": profile.get_content(),
-                    "generated_by": profile.generated_by,
-                    "tokens_used": profile.tokens_used,
-                    "created_at": iso_utc(profile.created_at)
-                }
-
-    # Map Celery states to frontend-expected statuses
-    status_map = {
-        'PENDING': 'pending',
-        'STARTED': 'processing',
-        'PROGRESS': 'progress',
-        'SUCCESS': 'completed',
-        'FAILURE': 'failed',
-        'REVOKED': 'failed',
+def _latest_profile_snapshot(user):
+    """id / created_at of the newest saved version. The client detects a
+    chunk landing (and the end of a batch chain) by the id changing;
+    the content is fetched from /dashboard when it needs it."""
+    latest = (UserProfile.query.filter_by(user_id=user.id)
+              .order_by(UserProfile.created_at.desc()).first())
+    if not latest:
+        return None
+    return {
+        "id": latest.id,
+        "generation_type": latest.generation_type,
+        "created_at": iso_utc(latest.created_at),
     }
-    frontend_status = status_map.get(state, state.lower())
 
-    return jsonify({
-        "task_id": task_id,
-        "status": frontend_status,
+
+_SYNC_STATUS_MAP = {
+    'PENDING': 'pending',
+    'STARTED': 'processing',
+    'PROGRESS': 'progress',
+    'SUCCESS': 'completed',
+    'FAILURE': 'failed',
+    'REVOKED': 'failed',
+}
+
+
+def _batch_progress(user):
+    """Progress of the user's in-flight Batch API step (#258).
+
+    The batch pipeline (backend/tasks/profile_batch.py) sets no Celery
+    task id, so the only signals are the guard flag and the saved
+    versions. Chunk n is the number of versions in the current chain
+    saved since the last integration (an integration ends a run); ~N
+    adds the planner's count for the remainder, computed exactly as the
+    seeder will compute it for the next step. A remainder of zero means
+    the in-flight step is the integration.
+    """
+    from backend.tasks.exports import (
+        _collect_iterative_chain, tokens_per_unit)
+    from backend.utils.chunk_plan import next_window_budget, max_units_for_cap
+    from backend.llm_providers import DEFAULT_MAX_OUTPUT_TOKENS, model_input_cap
+
+    latest = UserProfile.query.filter(
+        UserProfile.user_id == user.id,
+        UserProfile.generation_type != 'integration',
+    ).order_by(UserProfile.created_at.desc()).first()
+    if user.profile_needs_full_regen or latest is None:
+        # From scratch: the chain restarts once chunk 1 commits.
+        done, cutoff = 0, None
+    else:
+        chain = _collect_iterative_chain(latest.id)
+        last_integration = UserProfile.query.filter_by(
+            user_id=user.id, generation_type='integration',
+        ).order_by(UserProfile.created_at.desc()).first()
+        if last_integration is not None:
+            chain = [p for p in chain
+                     if p.created_at > last_integration.created_at]
+        done, cutoff = len(chain), latest.source_data_cutoff
+
+    remaining = count_remaining_units(user.id, cutoff)
+    if remaining > 0:
+        model_id = (user.preferred_model
+                    or current_app.config.get("DEFAULT_LLM_MODEL"))
+        cfg = current_app.config.get("SUPPORTED_MODELS", {}).get(model_id) or {}
+        k, _size, _budget = next_window_budget(
+            remaining, max_units=max_units_for_cap(
+                model_input_cap(cfg, DEFAULT_MAX_OUTPUT_TOKENS),
+                tokens_per_unit(user, model_id)))
+        total = done + k
+        message = f"Generating profile: Chunk {done + 1} of ~{total}"
+        progress = int(100 * done / total) if total else 0
+    else:
+        message = "Integrating profile versions"
+        progress = 95
+    return {
+        "running": True,
+        "source": "batch",
+        "status": "progress",
+        "progress": progress,
+        "message": message,
+        "task_id": None,
+        "error": None,
+        "latest_profile": _latest_profile_snapshot(user),
+    }
+
+
+def _sync_progress(user):
+    """Progress of the synchronous Celery task the guard points at, with
+    the same staleness rule the dispatchers apply (_is_task_stale:
+    finished, PENDING for 15+ min, or running for 1+ h — Celery kills
+    every task at 1 h). A stale guard is cleared here too, exactly as
+    POST /export/update_profile clears it, so a reload does not report
+    the same dead task again."""
+    from backend.celery_app import celery
+    from backend.tasks.exports import _is_task_stale
+
+    task_id = user.profile_generation_task_id
+    task = celery.AsyncResult(task_id)
+    if _is_task_stale(user):
+        state = task.state
+        if state == 'SUCCESS':
+            status = 'completed'
+        elif state in ('FAILURE', 'REVOKED'):
+            status = 'failed'
+        else:
+            status = 'stalled'
+        current_app.logger.warning(
+            f"Profile task {task_id} for user {user.id} is stale "
+            f"(state {state}); clearing guard")
+        user.profile_generation_task_id = None
+        user.profile_generation_task_dispatched_at = None
+        db.session.commit()
+        return {
+            "running": False,
+            "source": "sync",
+            "status": status,
+            "progress": 100 if status == 'completed' else 0,
+            "message": "",
+            "task_id": task_id,
+            "error": (str(task.info)
+                      if status == 'failed' and task.info else None),
+            "latest_profile": _latest_profile_snapshot(user),
+        }
+
+    state = task.state
+    info = task.info if isinstance(task.info, dict) else {}
+    return {
+        "running": True,
+        "source": "sync",
+        "status": _SYNC_STATUS_MAP.get(state, state.lower()),
         "progress": info.get('progress', 0),
         "message": info.get('status', ''),
-        "error": error_message,
-        "profile": profile_data
+        "task_id": task_id,
+        "error": None,
+        "latest_profile": _latest_profile_snapshot(user),
+    }
+
+
+@export_bp.route("/export/profile-progress", methods=["GET"])
+@login_required
+def get_profile_progress():
+    """Is the current user's profile being built, and how far (#258).
+
+    One source of truth for both pipelines: the Batch API chain
+    (profile_batch_pending — no task id, invisible to the old per-task
+    endpoint) and the synchronous Celery task (profile_generation_task_id).
+    ProfileGenerationWatcher polls this while `running` is true.
+
+    Query `task_id`: the sync task the client last saw running. The
+    task's own `finally` clears the guard before the client can observe
+    the terminal state, so with nothing in flight the outcome of that
+    task is resolved from the Celery result (kept 24 h) — the client
+    gets `completed` / `failed` instead of a bare `idle`.
+    """
+    if current_user.profile_batch_pending:
+        return jsonify(_batch_progress(current_user)), 200
+    if current_user.profile_generation_task_id:
+        return jsonify(_sync_progress(current_user)), 200
+
+    status, error = "idle", None
+    last_task_id = request.args.get("task_id")
+    if last_task_id:
+        from backend.celery_app import celery
+        task = celery.AsyncResult(last_task_id)
+        if task.state in ('FAILURE', 'REVOKED'):
+            status = "failed"
+            error = str(task.info) if task.info else None
+        else:
+            # SUCCESS, or PENDING for an id Celery no longer knows: the
+            # task finished (the guard is gone).
+            status = "completed"
+    return jsonify({
+        "running": False,
+        "source": None,
+        "status": status,
+        "progress": 100 if status == "completed" else 0,
+        "message": "",
+        "task_id": None,
+        "error": error,
+        "latest_profile": _latest_profile_snapshot(current_user),
     }), 200
 
 
