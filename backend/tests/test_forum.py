@@ -558,7 +558,7 @@ def test_llm_generation_allowed_on_own_public_reply(app):
 
 # ── Log: batched display-node lookups + one DEK prefetch per page ────────
 
-def test_feed_prefetches_every_preview_and_batches_per_card_lookups(app, monkeypatch):
+def test_log_prefetches_every_preview_and_batches_per_card_lookups(app, monkeypatch):
     """The Log decrypted one preview per card inside its loop (a cold
     worker paid ~80 ms of KMS latency per card, in sequence) and ran a
     query per card for first-child / newest-descendant / child count.
@@ -592,8 +592,14 @@ def test_feed_prefetches_every_preview_and_batches_per_card_lookups(app, monkeyp
     per_card = []
 
     def after(conn, cursor, statement, params, context, executemany):
-        if "FROM node" in statement and "IN (" not in statement and (
+        if "IN (" in statement:
+            return
+        # A single-node lookup, or the lazy loads behind
+        # Node.is_system_prompt (context_artifacts, then UserPrompt).
+        if "FROM node " in statement and (
                 "node.parent_id = " in statement or "node.id = " in statement):
+            per_card.append(statement)
+        elif "FROM node_context_artifact" in statement or "FROM user_prompt" in statement:
             per_card.append(statement)
     event.listen(_db.engine, "after_cursor_execute", after)
     try:
@@ -610,3 +616,45 @@ def test_feed_prefetches_every_preview_and_batches_per_card_lookups(app, monkeyp
     # Exactly the three previews went to the prefetch, once, before serializing.
     assert seen == [sorted(["plain root", "first child of prompt", "live reply under deleted"])]
     assert per_card == [], per_card
+
+
+def test_log_pages_do_not_repeat_or_skip_equal_timestamps(app):
+    """Imports stamp many roots with the same second. Sorting only by
+    that timestamp let LIMIT/OFFSET repeat a root on two pages and skip
+    another; the id tiebreak makes the order total."""
+    from datetime import datetime
+    roots = [_mk_node("author", f"same second {i}", privacy="private") for i in range(5)]
+    for r in roots:
+        r.created_at = datetime(2026, 3, 1, 12, 0, 0)
+    _db.session.commit()
+
+    client = _client_for(app, "author")
+    seen = []
+    for page in (1, 2, 3):
+        r = client.get(f"/api/log?page={page}&per_page=2")
+        assert r.status_code == 200
+        seen += [c["thread_root_id"] for c in r.get_json()["nodes"]]
+    assert sorted(seen) == sorted(n.id for n in roots)
+    assert seen == sorted(seen, reverse=True)
+
+
+def test_log_pinned_reply_card_targets_the_real_thread_root(app):
+    """A pinned reply is its own Log row, but rename and delete on its
+    card must act on the thread root, not on the reply."""
+    from datetime import datetime
+    from backend.models import Thread
+    root = _mk_node("author", "root entry", privacy="private")
+    mid = _mk_node("author", "middle reply", parent=root, privacy="private")
+    pinned = _mk_node("author", "pinned reply", parent=mid, privacy="circles")
+    pinned.pinned_at = datetime(2026, 3, 2)
+    row = Thread(root_node_id=root.id)
+    row.set_name("Named thread")
+    _db.session.add(row)
+    _db.session.commit()
+
+    r = _client_for(app, "author").get("/api/log?page=1&per_page=20")
+    assert r.status_code == 200
+    cards = {c["id"]: c for c in r.get_json()["nodes"]}
+    assert cards[pinned.id]["thread_root_id"] == root.id
+    assert cards[pinned.id]["thread_name"] == "Named thread"
+    assert cards[root.id]["thread_root_id"] == root.id

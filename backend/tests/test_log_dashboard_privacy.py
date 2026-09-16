@@ -1,6 +1,6 @@
-"""Integration tests for privacy filtering on feed, public dashboard, and node detail.
+"""Integration tests for privacy filtering on the Log, public dashboard, and node detail.
 
-Tests that private nodes are excluded from list endpoints (feed, public dashboard)
+Tests that private nodes are excluded from list endpoints (Log, public dashboard)
 and that the node detail endpoint returns 403 for unauthorized access.
 
 These tests build a minimal Flask app to avoid conflicts with module-level
@@ -154,12 +154,12 @@ def _login(client, user_id):
         sess["_fresh"] = True
 
 
-# ── Feed ─────────────────────────────────────────────────────────────────
+# ── Log ──────────────────────────────────────────────────────────────────
 
-class TestFeedPrivacy:
+class TestLogPrivacy:
     """GET /api/log should only return the caller's own nodes (personal log)."""
 
-    def test_feed_shows_only_own_nodes(self, app, data):
+    def test_log_shows_only_own_nodes(self, app, data):
         client = app.test_client()
         _login(client, data["alice_id"])
 
@@ -174,7 +174,7 @@ class TestFeedPrivacy:
         assert "Bob public post" not in previews   # other user's node
         assert "Bob private post" not in previews   # other user's node
 
-    def test_feed_shows_own_private_nodes(self, app, data):
+    def test_log_shows_own_private_nodes(self, app, data):
         client = app.test_client()
         _login(client, data["bob_id"])
 
@@ -185,7 +185,7 @@ class TestFeedPrivacy:
         assert "Bob public post" not in previews  # #228: public ≠ Log
         assert "Alice public post" not in previews  # other user's node
 
-    def test_feed_total_count_only_own_nodes(self, app, data):
+    def test_log_total_count_only_own_nodes(self, app, data):
         """The pagination total must only include the user's own nodes."""
         client = app.test_client()
         _login(client, data["alice_id"])

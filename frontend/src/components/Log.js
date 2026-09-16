@@ -7,10 +7,13 @@ import RenameThreadDialog from "./RenameThreadDialog";
 import { useToast } from "../contexts/ToastContext";
 
 function Log({ onSearchClick }) {
-  const [feedNodes, setFeedNodes] = useState([]);
+  const [logNodes, setLogNodes] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
+  // A failed later page must not replace the cards already on screen
+  // (the component-wide `error` does); it gets its own line + retry.
+  const [loadMoreError, setLoadMoreError] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [page, setPage] = useState(1);
   const [deleteTarget, setDeleteTarget] = useState(null);
@@ -23,17 +26,19 @@ function Log({ onSearchClick }) {
     const isFirst = pageNum === 1;
     if (isFirst) setLoading(true);
     else setLoadingMore(true);
+    setLoadMoreError(false);
 
     api.get(`/log?page=${pageNum}&per_page=20`)
       .then(response => {
         const { nodes, has_more } = response.data;
-        setFeedNodes(prev => isFirst ? nodes : [...prev, ...nodes]);
+        setLogNodes(prev => isFirst ? nodes : [...prev, ...nodes]);
         setHasMore(has_more);
         setPage(pageNum);
       })
       .catch(err => {
         console.error(err);
-        setError("Error loading log.");
+        if (isFirst) setError("Error loading log.");
+        else setLoadMoreError(true);
       })
       .finally(() => {
         setLoading(false);
@@ -45,9 +50,11 @@ function Log({ onSearchClick }) {
     fetchPage(1);
   }, [fetchPage]);
 
-  // Auto-load on scroll near bottom
+  // Auto-load on scroll near bottom. Paused after a failed page so a
+  // dead backend doesn't get a request per scroll tick; the retry link
+  // below the cards resumes it.
   useEffect(() => {
-    if (!hasMore || loading || loadingMore) return;
+    if (!hasMore || loading || loadingMore || loadMoreError) return;
 
     const handleScroll = () => {
       const scrollBottom = window.innerHeight + window.scrollY;
@@ -62,10 +69,10 @@ function Log({ onSearchClick }) {
     handleScroll();
 
     return () => window.removeEventListener("scroll", handleScroll);
-  }, [hasMore, loading, loadingMore, page, fetchPage]);
+  }, [hasMore, loading, loadingMore, loadMoreError, page, fetchPage]);
 
   const handleBubbleClick = (nodeId, e) => {
-    const card = feedNodes.find(n => n.id === nodeId);
+    const card = logNodes.find(n => n.id === nodeId);
     const targetId = (card && card.newest_node_id) || nodeId;
     if (e && (e.metaKey || e.ctrlKey)) {
       window.open(`/node/${targetId}`, '_blank');
@@ -90,7 +97,7 @@ function Log({ onSearchClick }) {
     api.put(`/nodes/${targetId}/thread-name`, { thread_name: name })
       .then(response => {
         const saved = (response.data && response.data.thread_name) || null;
-        setFeedNodes(prev => prev.map(card => (
+        setLogNodes(prev => prev.map(card => (
           card.id === renameTarget.id ? { ...card, thread_name: saved } : card
         )));
         setRenameTarget(null);
@@ -119,7 +126,7 @@ function Log({ onSearchClick }) {
           `Deleted ${n} node${n === 1 ? "" : "s"}`,
           3000,
         );
-        setFeedNodes(prev => prev.filter(card => card.id !== deleteTarget.id));
+        setLogNodes(prev => prev.filter(card => card.id !== deleteTarget.id));
       })
       .catch(err => {
         console.error(err);
@@ -190,7 +197,7 @@ function Log({ onSearchClick }) {
           opacity: 0.5,
         }} />
       </div>
-      {feedNodes.length === 0 && !loading ? (
+      {logNodes.length === 0 && !loading ? (
         <p style={{
           color: "var(--text-muted)",
           fontFamily: "var(--sans)",
@@ -201,7 +208,7 @@ function Log({ onSearchClick }) {
         </p>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: "1rem"}}>
-          {feedNodes.map(node => (
+          {logNodes.map(node => (
             <Bubble
               key={node.id}
               node={node}
@@ -223,7 +230,21 @@ function Log({ onSearchClick }) {
         </div>
       )}
       {loadingMore && <div style={{ padding: "20px", textAlign: "center", color: "var(--text-muted)" }}>Loading more...</div>}
-      {hasMore && !loadingMore && (
+      {loadMoreError && !loadingMore && (
+        <div style={{ padding: "20px", textAlign: "center", color: "var(--text-muted)" }}>
+          Couldn't load more entries.{" "}
+          <span
+            role="button"
+            tabIndex={0}
+            onClick={() => fetchPage(page + 1)}
+            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") fetchPage(page + 1); }}
+            style={{ color: "var(--accent)", cursor: "pointer" }}
+          >
+            Retry
+          </span>
+        </div>
+      )}
+      {hasMore && !loadingMore && !loadMoreError && (
         <div
           style={{ padding: "20px", textAlign: "center", cursor: "pointer", color: "var(--text-muted)" }}
           onClick={() => fetchPage(page + 1)}

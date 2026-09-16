@@ -2770,7 +2770,7 @@ def get_streaming_status(node_id):
 @nodes_bp.route("/<int:node_id>/pin", methods=["POST"])
 @login_required
 def pin_node(node_id):
-    """Pin a node to the current user's profile (Dashboard + Feed)."""
+    """Pin a node to the current user's profile (Dashboard + Log)."""
     node = Node.query.get_or_404(node_id)
 
     owner_id = node.human_owner_id or node.user_id
@@ -2863,6 +2863,32 @@ def set_thread_name(node_id):
     db.session.commit()
 
     return jsonify({"thread_name": name}), 200
+
+
+@nodes_bp.route("/<int:node_id>/delete-impact", methods=["GET"])
+@login_required
+def delete_impact(node_id):
+    """What soft-deleting this node would leave behind, for the dialog.
+
+    Query: `delete_descendants` as for DELETE. Returns
+    `orphaned_system_prompt_id`: the thread root's id when the delete
+    would leave the session with only its system prompt alive (so the
+    dialog can offer deleting the prompt too), else null.
+    """
+    from backend.utils.node_deletion import orphaned_system_prompt_id
+
+    raw = request.args.get("delete_descendants")
+    with_descendants = str(raw).lower() in ("true", "1", "yes")
+
+    node = Node.query.get_or_404(node_id)
+    if not can_user_edit_node(node, current_user.id):
+        return jsonify({"error": "Not authorized"}), 403
+
+    return jsonify({
+        "orphaned_system_prompt_id": orphaned_system_prompt_id(
+            node, current_user.id, with_descendants=with_descendants,
+        ),
+    }), 200
 
 
 @nodes_bp.route("/<int:node_id>", methods=["DELETE"])

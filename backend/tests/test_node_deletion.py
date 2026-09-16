@@ -318,14 +318,14 @@ def test_public_node_tombstone_visible_to_all(app, alice, bob):
     assert can_user_view_tombstone(n, bob.id) is True
 
 
-# ── Soft-deleted nodes excluded from feed ───────────────────────────────
+# ── Soft-deleted nodes excluded from the Log ──────────────────────────────
 
-def test_feed_excludes_soft_deleted(app, alice):
+def test_log_excludes_soft_deleted(app, alice):
     alive = _make_node(alice, content="alive")
     deleted = _make_node(alice, content="dead")
     deleted.deleted_at = datetime.utcnow()
     _db.session.commit()
-    # Re-create the app with log_bp registered.
+    # The fixture's app only registers nodes_bp; add log_bp for this test.
     from backend.routes.log import log_bp
     app.register_blueprint(log_bp, url_prefix="/api")
     client = app.test_client()
@@ -542,14 +542,14 @@ def test_human_owner_can_delete_llm_rooted_thread(app, alice):
     assert Node.query.get(root.id).deleted_at is not None
 
 
-# ── 20, 21. Feed display-swap rules with soft-deletion ─────────────────
+# ── 20, 21. Log display-swap rules with soft-deletion ──────────────────
 
-def test_feed_skips_deleted_first_child_of_system_prompt_root(app, alice):
+def test_log_skips_deleted_first_child_of_system_prompt_root(app, alice):
     """§4a Case 1: when the thread root is a system prompt and the
     first child is soft-deleted, the Log card preview falls through to
     the next live child rather than rendering as [Node deleted].
 
-    Implemented in feed.py via filter(deleted_at IS NULL) on the
+    Implemented in log.py via filter(deleted_at IS NULL) on the
     first_child query.
     """
     from backend.models import (
@@ -585,7 +585,7 @@ def test_feed_skips_deleted_first_child_of_system_prompt_root(app, alice):
     assert cards[0]["id"] == second.id
 
 
-def test_feed_surfaces_thread_with_multi_level_partial_deletes(app, alice):
+def test_log_surfaces_thread_with_multi_level_partial_deletes(app, alice):
     """Successive partial deletes: R(deleted) → C(deleted) → G(alive).
 
     Each level was soft-deleted in a separate transaction (e.g. user
@@ -624,7 +624,7 @@ def test_feed_surfaces_thread_with_multi_level_partial_deletes(app, alice):
     assert cards[0]["thread_root_id"] == r.id
 
 
-def test_feed_surfaces_deleted_root_with_alive_descendants(app, alice, bob):
+def test_log_surfaces_deleted_root_with_alive_descendants(app, alice, bob):
     """§4a Case 2: a soft-deleted thread root whose subtree still has
     an alive accessible descendant must still surface in Log so the
     descendants are reachable.
@@ -856,3 +856,128 @@ def test_update_node_returns_own_fields_without_the_tree(app, alice):
     assert node["privacy_level"] == "private"
     assert node["parent_user_id"] == alice.id
     assert "children" not in node and "ancestors" not in node
+
+
+# ── Deleting the last entry of a system-prompt session ─────────────────
+
+def _prompt_session(alice):
+    """A text/voice session: system-prompt root with the key stamped."""
+    root = _make_node(alice, content="system prompt text")
+    root.prompt_key = "default"
+    _db.session.commit()
+    return root
+
+
+def _impact(client, node_id, with_descendants=False):
+    r = client.get(
+        f"/nodes/{node_id}/delete-impact",
+        query_string={"delete_descendants": "true" if with_descendants else "false"},
+    )
+    assert r.status_code == 200, r.json
+    return r.json["orphaned_system_prompt_id"]
+
+
+def test_delete_impact_flags_last_entry_under_system_prompt(app, alice):
+    root = _prompt_session(alice)
+    only = _make_node(alice, parent=root, content="the only entry")
+    client = app.test_client()
+    _login(client, alice)
+    assert _impact(client, only.id) == root.id
+    assert _impact(client, only.id, with_descendants=True) == root.id
+
+
+def test_delete_impact_none_when_other_entries_remain(app, alice):
+    root = _prompt_session(alice)
+    first = _make_node(alice, parent=root, content="first")
+    _make_node(alice, parent=root, content="second")
+    client = app.test_client()
+    _login(client, alice)
+    assert _impact(client, first.id) is None
+
+
+def test_delete_impact_depends_on_descendants_choice(app, alice):
+    """Entry with its own replies: "this only" keeps the replies alive
+    (not orphaned), "with my replies" empties the session."""
+    root = _prompt_session(alice)
+    entry = _make_node(alice, parent=root, content="entry")
+    llm = _make_node(alice, parent=entry, content="llm reply", node_type="llm")
+    _make_node(alice, parent=llm, content="follow-up")
+    client = app.test_client()
+    _login(client, alice)
+    assert _impact(client, entry.id) is None
+    assert _impact(client, entry.id, with_descendants=True) == root.id
+
+
+def test_delete_impact_counts_other_users_replies_as_remaining(app, alice, bob):
+    root = _prompt_session(alice)
+    entry = _make_node(alice, parent=root, content="entry")
+    _make_node(bob, parent=entry, content="bob's reply")
+    client = app.test_client()
+    _login(client, alice)
+    # Bob's reply survives the cascade, so the session is not left with
+    # only the prompt.
+    assert _impact(client, entry.id, with_descendants=True) is None
+
+
+def test_delete_impact_ignores_already_deleted_siblings(app, alice):
+    root = _prompt_session(alice)
+    gone = _make_node(alice, parent=root, content="already deleted")
+    gone.deleted_at = datetime.utcnow()
+    _db.session.commit()
+    last = _make_node(alice, parent=root, content="last alive")
+    client = app.test_client()
+    _login(client, alice)
+    assert _impact(client, last.id) == root.id
+
+
+def test_delete_impact_none_for_plain_threads_and_roots(app, alice):
+    plain = _make_node(alice, content="plain root")
+    reply = _make_node(alice, parent=plain, content="only reply")
+    session_root = _prompt_session(alice)
+    client = app.test_client()
+    _login(client, alice)
+    assert _impact(client, reply.id) is None       # root is not a prompt
+    assert _impact(client, session_root.id) is None  # deleting the root itself
+    assert _impact(client, plain.id) is None
+
+
+def test_delete_impact_resolves_legacy_prompt_link(app, alice):
+    """Roots from before the prompt_key column: the prompt is only a
+    NodeContextArtifact link."""
+    from backend.models import UserPrompt, NodeContextArtifact
+    prompt = UserPrompt(user_id=alice.id, prompt_key="default", title="t")
+    prompt.set_content("prompt")
+    _db.session.add(prompt)
+    _db.session.commit()
+    root = _make_node(alice, content="system prompt text")
+    _db.session.add(NodeContextArtifact(
+        node_id=root.id, artifact_type="prompt", artifact_id=prompt.id,
+    ))
+    _db.session.commit()
+    only = _make_node(alice, parent=root, content="the only entry")
+    client = app.test_client()
+    _login(client, alice)
+    assert _impact(client, only.id) == root.id
+
+
+def test_delete_impact_403_for_others_nodes(app, alice, bob):
+    root = _prompt_session(alice)
+    only = _make_node(alice, parent=root, content="the only entry")
+    client = app.test_client()
+    _login(client, bob)
+    r = client.get(f"/nodes/{only.id}/delete-impact")
+    assert r.status_code == 403
+
+
+def test_deleting_root_with_descendants_clears_the_orphaned_session(app, alice):
+    """The dialog's "delete the prompt too" path: one DELETE on the root
+    with descendants removes the prompt and the last entry together."""
+    root = _prompt_session(alice)
+    only = _make_node(alice, parent=root, content="the only entry")
+    client = app.test_client()
+    _login(client, alice)
+    r = client.delete(f"/nodes/{root.id}", query_string={"delete_descendants": "true"})
+    assert r.status_code == 200 and r.json["scheduled"] == 2
+    _db.session.expire_all()
+    assert Node.query.get(root.id).deleted_at is not None
+    assert Node.query.get(only.id).deleted_at is not None

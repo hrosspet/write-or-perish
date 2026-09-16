@@ -100,6 +100,10 @@ function NodeDetail({ nodeIdOverride }) {
   const [replyTarget, setReplyTarget] = useState(null);
   const [editTarget, setEditTarget] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
+  // A confirmed delete that would leave a text/voice session with only
+  // its system prompt: { targetId, withDescendants, promptRootId }. The
+  // follow-up dialog asks whether to delete the prompt as well.
+  const [pendingPromptDelete, setPendingPromptDelete] = useState(null);
   const setExclusiveTarget = useCallback((slot, value) => {
     setReplyTarget(slot === 'reply' ? value : null);
     setEditTarget(slot === 'edit' ? value : null);
@@ -428,8 +432,37 @@ function NodeDetail({ nodeIdOverride }) {
   const handleConfirmDelete = ({ withDescendants }) => {
     if (!deleteTarget) return;
     const targetId = deleteTarget.id;
-    const wasFocal = targetId === node.id;
     setDeleteTarget(null);
+    // Would this leave the session with only its system prompt? The
+    // root would stay alive and the Log would show a card whose title
+    // and preview are the prompt text. Ask before that happens. The
+    // check is advisory: if it fails, the delete goes ahead as asked.
+    api
+      .get(`/nodes/${targetId}/delete-impact`, { params: { delete_descendants: withDescendants } })
+      .then((r) => (r.data && r.data.orphaned_system_prompt_id) || null)
+      .catch(() => null)
+      .then((promptRootId) => {
+        if (promptRootId) {
+          setPendingPromptDelete({ targetId, withDescendants, promptRootId });
+        } else {
+          performDelete(targetId, withDescendants);
+        }
+      });
+  };
+
+  const handleConfirmPromptDelete = ({ includePrompt }) => {
+    if (!pendingPromptDelete) return;
+    const { targetId, withDescendants, promptRootId } = pendingPromptDelete;
+    setPendingPromptDelete(null);
+    // Deleting the root with descendants takes the prompt and the last
+    // entry (and the user's replies under it) in one request; the
+    // post-delete navigation below then lands on the Log.
+    if (includePrompt) performDelete(promptRootId, true);
+    else performDelete(targetId, withDescendants);
+  };
+
+  const performDelete = (targetId, withDescendants) => {
+    const wasFocal = targetId === node.id;
     api
       .delete(`/nodes/${targetId}`, { params: { delete_descendants: withDescendants } })
       .then((response) => {
@@ -1304,6 +1337,12 @@ function NodeDetail({ nodeIdOverride }) {
         ))}
         onClose={() => setDeleteTarget(null)}
         onConfirm={handleConfirmDelete}
+      />
+      <DeleteConfirmDialog
+        open={!!pendingPromptDelete}
+        mode="prompt"
+        onClose={() => setPendingPromptDelete(null)}
+        onConfirm={handleConfirmPromptDelete}
       />
       {replyTarget && (
         <NodeFormModal

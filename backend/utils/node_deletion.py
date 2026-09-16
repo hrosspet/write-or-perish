@@ -25,6 +25,75 @@ from backend.models import Node
 from backend.utils.privacy import can_user_edit_node
 
 
+def orphaned_system_prompt_id(node, user_id: int, *,
+                              with_descendants: bool) -> Optional[int]:
+    """Return the thread root's id when soft-deleting `node` would leave
+    the thread with nothing alive but its system prompt; else None.
+
+    A text/voice session is a system-prompt root with the user's entries
+    underneath. Deleting the last entry keeps the root alive, so the Log
+    would list a card whose title and preview are the prompt text. The
+    delete dialog uses this to offer deleting the prompt as well.
+
+    Mirrors soft_delete_node's selection without locking anything: the
+    node itself, plus (with_descendants) every descendant the user can
+    edit. Other users' replies stay alive and therefore count as
+    remaining content.
+    """
+    if node.parent_id is None or node.deleted_at is not None:
+        return None
+
+    # Up to the root.
+    up = db.session.query(
+        Node.id.label("id"), Node.parent_id.label("parent_id"),
+    ).filter(Node.id == node.id).cte(name="up", recursive=True)
+    parent = db.aliased(Node, flat=True)
+    up = up.union_all(
+        db.session.query(parent.id, parent.parent_id)
+        .join(up, parent.id == up.c.parent_id)
+    )
+    root_id = db.session.query(up.c.id).filter(up.c.parent_id.is_(None)).scalar()
+    if root_id is None:
+        return None
+    root = Node.query.get(root_id)
+    if root is None or root.deleted_at is not None or not root.is_system_prompt:
+        return None
+
+    # Down from the root: every descendant, alive or not, with what the
+    # editability check needs.
+    down = db.session.query(
+        Node.id.label("id"), Node.parent_id.label("parent_id"),
+        Node.user_id.label("user_id"), Node.human_owner_id.label("human_owner_id"),
+        Node.deleted_at.label("deleted_at"),
+    ).filter(Node.parent_id == root_id).cte(name="down", recursive=True)
+    child = db.aliased(Node, flat=True)
+    down = down.union_all(
+        db.session.query(
+            child.id, child.parent_id, child.user_id, child.human_owner_id,
+            child.deleted_at,
+        ).join(down, child.parent_id == down.c.id)
+    )
+    rows = db.session.query(
+        down.c.id, down.c.parent_id, down.c.user_id, down.c.human_owner_id,
+        down.c.deleted_at,
+    ).all()
+
+    flagged = {node.id}
+    if with_descendants:
+        children_of: dict = {}
+        for r in rows:
+            children_of.setdefault(r.parent_id, []).append(r)
+        queue = list(children_of.get(node.id, []))
+        while queue:
+            r = queue.pop()
+            if r.user_id == user_id or r.human_owner_id == user_id:
+                flagged.add(r.id)
+            queue.extend(children_of.get(r.id, []))
+
+    remaining = [r.id for r in rows if r.deleted_at is None and r.id not in flagged]
+    return None if remaining else root_id
+
+
 class ParentDeletedError(ValueError):
     """Raised when an attempt is made to insert a child of a soft-deleted node.
 

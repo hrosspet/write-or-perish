@@ -71,8 +71,12 @@ const buttonBaseStyle = {
  *     by the Log card kebab.
  *   - "reference": a saved reference (#232) — not a node, nothing
  *     nests under it. Single Delete button.
+ *   - "prompt": follow-up shown when the confirmed delete would leave a
+ *     text/voice session with only its system prompt alive. Asks
+ *     whether to delete the prompt as well.
  *
- * onConfirm receives { withDescendants: boolean }.
+ * onConfirm receives { withDescendants: boolean }, or for "prompt"
+ * { includePrompt: boolean }.
  */
 function DeleteConfirmDialog({
   open,
@@ -96,7 +100,50 @@ function DeleteConfirmDialog({
   let body;
   let buttons;
 
-  if (mode === "reference") {
+  if (mode === "prompt") {
+    title = "Delete the system prompt too?";
+    body = (
+      <>
+        This is the last entry in the session. Deleting it leaves only the
+        system prompt, and your Log would list the session by the prompt's
+        text.
+      </>
+    );
+    buttons = (
+      <>
+        <button
+          onClick={() => onConfirm({ includePrompt: true })}
+          style={{ ...buttonBaseStyle, color: "var(--accent)" }}
+        >
+          <div style={{ fontWeight: 500 }}>Delete the entry and the system prompt</div>
+          <div style={{
+            fontSize: "0.82rem", color: "var(--text-muted)",
+            fontWeight: 300, marginTop: "2px",
+          }}>
+            The whole session leaves your Log.
+          </div>
+        </button>
+        <button
+          onClick={() => onConfirm({ includePrompt: false })}
+          style={{ ...buttonBaseStyle, color: "var(--text-primary)" }}
+        >
+          <div style={{ fontWeight: 500 }}>Delete the entry only</div>
+          <div style={{
+            fontSize: "0.82rem", color: "var(--text-muted)",
+            fontWeight: 300, marginTop: "2px",
+          }}>
+            The system prompt stays, so you can continue the session.
+          </div>
+        </button>
+        <button
+          onClick={onClose}
+          style={{ ...buttonBaseStyle, color: "var(--text-secondary)" }}
+        >
+          Cancel
+        </button>
+      </>
+    );
+  } else if (mode === "reference") {
     title = "Delete reference?";
     body = (
       <>
