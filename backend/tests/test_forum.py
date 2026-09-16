@@ -658,3 +658,48 @@ def test_log_pinned_reply_card_targets_the_real_thread_root(app):
     assert cards[pinned.id]["thread_root_id"] == root.id
     assert cards[pinned.id]["thread_name"] == "Named thread"
     assert cards[root.id]["thread_root_id"] == root.id
+
+
+def test_log_pinned_reply_in_someone_elses_thread_targets_the_reply(app):
+    """A reply pinned in another user's thread: the card must not carry
+    that user's (private) thread name, and rename/delete on it must act
+    on the reply, where the pinning user has rights."""
+    from datetime import datetime
+    from backend.models import Thread
+    root = _mk_node("visitor", "visitor's root", privacy="circles")
+    pinned = _mk_node("author", "author's reply", parent=root, privacy="circles")
+    pinned.pinned_at = datetime(2026, 3, 2)
+    row = Thread(root_node_id=root.id)
+    row.set_name("Visitor's private name")
+    _db.session.add(row)
+    _db.session.commit()
+
+    client = _client_for(app, "author")
+    r = client.get("/api/log?page=1&per_page=20")
+    assert r.status_code == 200
+    card = {c["id"]: c for c in r.get_json()["nodes"]}[pinned.id]
+    assert card["thread_root_id"] == pinned.id
+    assert card["thread_name"] is None
+
+    r = client.delete(f"/api/nodes/{card['thread_root_id']}",
+                      query_string={"delete_descendants": "true"})
+    assert r.status_code == 200
+    assert Node.query.get(pinned.id).deleted_at is not None
+    assert Node.query.get(root.id).deleted_at is None
+
+
+def test_log_offset_paging_continues_from_the_cards_held(app):
+    """`offset` is the number of cards the client holds, so a card it
+    removed (delete) or one that appeared since (another tab) doesn't
+    shift the next page."""
+    roots = [_mk_node("author", f"root {i}", privacy="private") for i in range(5)]
+    by_newest = [n.id for n in sorted(roots, key=lambda n: n.id, reverse=True)]
+    client = _client_for(app, "author")
+
+    r = client.get("/api/log?offset=2&per_page=2").get_json()
+    assert [c["thread_root_id"] for c in r["nodes"]] == by_newest[2:4]
+    assert r["has_more"] is True and r["offset"] == 2
+
+    r = client.get("/api/log?offset=4&per_page=2").get_json()
+    assert [c["thread_root_id"] for c in r["nodes"]] == by_newest[4:]
+    assert r["has_more"] is False

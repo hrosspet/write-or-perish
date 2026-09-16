@@ -15,25 +15,32 @@ function Log({ onSearchClick }) {
   // (the component-wide `error` does); it gets its own line + retry.
   const [loadMoreError, setLoadMoreError] = useState(false);
   const [hasMore, setHasMore] = useState(false);
-  const [page, setPage] = useState(1);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [renameTarget, setRenameTarget] = useState(null);
   const [renaming, setRenaming] = useState(false);
   const { addToast } = useToast();
   const navigate = useNavigate();
 
-  const fetchPage = useCallback((pageNum) => {
-    const isFirst = pageNum === 1;
+  // The next page starts after the cards on screen, not at a page
+  // number: a card removed here (delete) or one that appeared since
+  // (another tab) would otherwise shift the offsets and skip or repeat
+  // a thread. Cards already held are dropped from the new page too.
+  const loadedCount = logNodes.length;
+  const fetchMore = useCallback((isFirst) => {
+    const offset = isFirst ? 0 : loadedCount;
     if (isFirst) setLoading(true);
     else setLoadingMore(true);
     setLoadMoreError(false);
 
-    api.get(`/log?page=${pageNum}&per_page=20`)
+    api.get(`/log?offset=${offset}&per_page=20`)
       .then(response => {
         const { nodes, has_more } = response.data;
-        setLogNodes(prev => isFirst ? nodes : [...prev, ...nodes]);
+        setLogNodes(prev => {
+          if (isFirst) return nodes;
+          const held = new Set(prev.map(card => card.id));
+          return [...prev, ...nodes.filter(card => !held.has(card.id))];
+        });
         setHasMore(has_more);
-        setPage(pageNum);
       })
       .catch(err => {
         console.error(err);
@@ -44,11 +51,13 @@ function Log({ onSearchClick }) {
         setLoading(false);
         setLoadingMore(false);
       });
-  }, []);
+  }, [loadedCount]);
 
   useEffect(() => {
-    fetchPage(1);
-  }, [fetchPage]);
+    fetchMore(true);
+    // Only on mount: later pages go through the scroll handler / links.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Auto-load on scroll near bottom. Paused after a failed page so a
   // dead backend doesn't get a request per scroll tick; the retry link
@@ -60,7 +69,7 @@ function Log({ onSearchClick }) {
       const scrollBottom = window.innerHeight + window.scrollY;
       const docHeight = document.documentElement.scrollHeight;
       if (docHeight - scrollBottom < 300) {
-        fetchPage(page + 1);
+        fetchMore(false);
       }
     };
 
@@ -69,7 +78,7 @@ function Log({ onSearchClick }) {
     handleScroll();
 
     return () => window.removeEventListener("scroll", handleScroll);
-  }, [hasMore, loading, loadingMore, loadMoreError, page, fetchPage]);
+  }, [hasMore, loading, loadingMore, loadMoreError, fetchMore]);
 
   const handleBubbleClick = (nodeId, e) => {
     const card = logNodes.find(n => n.id === nodeId);
@@ -87,18 +96,22 @@ function Log({ onSearchClick }) {
 
   const handleCloseRename = useCallback(() => setRenameTarget(null), []);
 
+  // A thread can hold several cards: its root and any pinned replies.
+  // Rename and delete act on the thread, so every card of it follows.
+  const threadOf = (card) => card.thread_root_id || card.id;
+
   // Empty name = clear it; the card then falls back to the entry's own
   // title. The name lives on the thread root (see thread_root_id note
   // in handleConfirmDeleteThread).
   const handleSaveThreadName = (name) => {
     if (!renameTarget) return;
-    const targetId = renameTarget.thread_root_id || renameTarget.id;
+    const targetId = threadOf(renameTarget);
     setRenaming(true);
     api.put(`/nodes/${targetId}/thread-name`, { thread_name: name })
       .then(response => {
         const saved = (response.data && response.data.thread_name) || null;
         setLogNodes(prev => prev.map(card => (
-          card.id === renameTarget.id ? { ...card, thread_name: saved } : card
+          threadOf(card) === targetId ? { ...card, thread_name: saved } : card
         )));
         setRenameTarget(null);
       })
@@ -114,8 +127,10 @@ function Log({ onSearchClick }) {
   const handleConfirmDeleteThread = ({ withDescendants }) => {
     if (!deleteTarget) return;
     // The backend's `thread_root_id` is the actual thread root (matters
-    // when the displayed card is the first child of a system-prompt root).
-    const targetId = deleteTarget.thread_root_id || deleteTarget.id;
+    // when the displayed card is the first child of a system-prompt
+    // root, or a pinned reply). For a reply pinned in someone else's
+    // thread it is the reply itself.
+    const targetId = threadOf(deleteTarget);
     api.delete(`/nodes/${targetId}`, {
       params: { delete_descendants: withDescendants },
     })
@@ -126,7 +141,7 @@ function Log({ onSearchClick }) {
           `Deleted ${n} node${n === 1 ? "" : "s"}`,
           3000,
         );
-        setLogNodes(prev => prev.filter(card => card.id !== deleteTarget.id));
+        setLogNodes(prev => prev.filter(card => threadOf(card) !== targetId));
       })
       .catch(err => {
         console.error(err);
@@ -236,8 +251,8 @@ function Log({ onSearchClick }) {
           <span
             role="button"
             tabIndex={0}
-            onClick={() => fetchPage(page + 1)}
-            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") fetchPage(page + 1); }}
+            onClick={() => fetchMore(false)}
+            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") fetchMore(false); }}
             style={{ color: "var(--accent)", cursor: "pointer" }}
           >
             Retry
@@ -247,7 +262,7 @@ function Log({ onSearchClick }) {
       {hasMore && !loadingMore && !loadMoreError && (
         <div
           style={{ padding: "20px", textAlign: "center", cursor: "pointer", color: "var(--text-muted)" }}
-          onClick={() => fetchPage(page + 1)}
+          onClick={() => fetchMore(false)}
         >
           Load more...
         </div>

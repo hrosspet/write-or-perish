@@ -435,36 +435,48 @@ function NodeDetail({ nodeIdOverride }) {
     setDeleteTarget(null);
     // Would this leave the session with only its system prompt? The
     // root would stay alive and the Log would show a card whose title
-    // and preview are the prompt text. Ask before that happens. The
-    // check is advisory: if it fails, the delete goes ahead as asked.
+    // and preview are the prompt text. Ask before that happens. Only a
+    // system-prompt thread can end up there, and the root is already on
+    // the page, so other threads skip the round trip. The check is
+    // advisory: if it fails, the delete goes ahead as asked.
+    const threadRoot = node.ancestors?.length ? node.ancestors[0] : node;
+    if (!threadRoot.is_system_prompt || targetId === threadRoot.id) {
+      performDelete(targetId, withDescendants, false);
+      return;
+    }
     api
       .get(`/nodes/${targetId}/delete-impact`, { params: { delete_descendants: withDescendants } })
       .then((r) => (r.data && r.data.orphaned_system_prompt_id) || null)
       .catch(() => null)
       .then((promptRootId) => {
         if (promptRootId) {
-          setPendingPromptDelete({ targetId, withDescendants, promptRootId });
+          setPendingPromptDelete({ targetId, withDescendants });
         } else {
-          performDelete(targetId, withDescendants);
+          performDelete(targetId, withDescendants, false);
         }
       });
   };
 
   const handleConfirmPromptDelete = ({ includePrompt }) => {
     if (!pendingPromptDelete) return;
-    const { targetId, withDescendants, promptRootId } = pendingPromptDelete;
+    const { targetId, withDescendants } = pendingPromptDelete;
     setPendingPromptDelete(null);
-    // Deleting the root with descendants takes the prompt and the last
-    // entry (and the user's replies under it) in one request; the
-    // post-delete navigation below then lands on the Log.
-    if (includePrompt) performDelete(promptRootId, true);
-    else performDelete(targetId, withDescendants);
+    // One request either way: the answer rides along as a flag and the
+    // server re-checks under the root's lock that nothing else is left,
+    // so an entry that arrived since the check (another device, the
+    // Voice chain) keeps the session.
+    performDelete(targetId, withDescendants, includePrompt);
   };
 
-  const performDelete = (targetId, withDescendants) => {
+  const performDelete = (targetId, withDescendants, includePrompt) => {
     const wasFocal = targetId === node.id;
     api
-      .delete(`/nodes/${targetId}`, { params: { delete_descendants: withDescendants } })
+      .delete(`/nodes/${targetId}`, {
+        params: {
+          delete_descendants: withDescendants,
+          delete_orphaned_prompt: includePrompt,
+        },
+      })
       .then((response) => {
         const data = response.data || {};
         const n = data.scheduled || 1;
@@ -472,6 +484,9 @@ function NodeDetail({ nodeIdOverride }) {
           `Deleted ${n} node${n === 1 ? "" : "s"}`,
           3000,
         );
+        // The session root went with the target: the whole thread is
+        // gone, so the ancestor walk below must not land on it.
+        const gone = new Set([targetId, data.orphaned_prompt_deleted].filter(Boolean));
         // If the cascade swept the focal node away (target is an
         // ancestor of focal AND descendants were included), refetching
         // focal would 404. Treat this like a focal-target delete and
@@ -495,7 +510,7 @@ function NodeDetail({ nodeIdOverride }) {
         const upperBound = focalCascaded ? ancestorIdx : (node.ancestors?.length ?? 0);
         if (node.ancestors) {
           for (let i = upperBound - 1; i >= 0; i -= 1) {
-            if (!node.ancestors[i].deleted) {
+            if (!node.ancestors[i].deleted && !gone.has(node.ancestors[i].id)) {
               navigate(`/node/${node.ancestors[i].id}`);
               return;
             }

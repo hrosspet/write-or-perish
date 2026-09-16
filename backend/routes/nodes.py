@@ -1524,7 +1524,7 @@ def request_llm_response(node_id):
         return jsonify({"error": str(e)}), 410
     except UserExportValidationError as e:
         # Misconfigured {user_export} placeholder — abort BEFORE creating
-        # any LLM node so the user's feed isn't polluted with a stub
+        # any LLM node so the user's Log isn't polluted with a stub
         # failed response. Frontend surfaces this message as a toast.
         return jsonify({"error": str(e)}), 400
 
@@ -2899,13 +2899,28 @@ def delete_node(node_id):
     Sets `deleted_at` rather than removing rows. The Celery cleanup task
     finalizes purge after SOFT_DELETE_GRACE_DAYS (see
     backend/tasks/node_cleanup.py).
+
+    Flags (query string or JSON body): `delete_descendants`, and
+    `delete_orphaned_prompt` — also tombstone the thread's system-prompt
+    root if this delete leaves nothing alive under it.
     """
     from backend.constants import SOFT_DELETE_GRACE_DAYS
-    from backend.utils.node_deletion import soft_delete_node
+    from backend.utils.node_deletion import (
+        soft_delete_node, prompt_root_of, soft_delete_session_if_empty,
+    )
 
-    raw = (request.args.get("delete_descendants")
-           or (request.get_json(silent=True) or {}).get("delete_descendants"))
-    with_descendants = str(raw).lower() in ("true", "1", "yes")
+    body = request.get_json(silent=True) or {}
+
+    def flag(name):
+        raw = request.args.get(name) or body.get(name)
+        return str(raw).lower() in ("true", "1", "yes")
+
+    with_descendants = flag("delete_descendants")
+    # The dialog's "delete the system prompt too" answer. Checked again
+    # here under the root's row lock rather than trusted from the
+    # delete-impact call: an entry added between that call and this one
+    # (another device, the Voice chain) keeps the session.
+    delete_orphaned_prompt = flag("delete_orphaned_prompt")
 
     # Pre-lock 403 short-circuit — cheap and avoids holding a row lock to
     # tell an unauthorized client they can't delete.
@@ -2914,6 +2929,13 @@ def delete_node(node_id):
         return jsonify({"error": "Not authorized"}), 403
 
     try:
+        # Lock the prompt root first (root, then subtree — the same order
+        # as every other walk), so no entry can be inserted under it
+        # while we decide whether it is left empty.
+        prompt_root = (
+            prompt_root_of(pre, current_user.id, lock=True)
+            if delete_orphaned_prompt else None
+        )
         flagged = soft_delete_node(
             node_id, current_user.id, with_descendants=with_descendants,
         )
@@ -2922,6 +2944,10 @@ def delete_node(node_id):
             # the locking re-fetch.
             db.session.rollback()
             return jsonify({"error": "Not found or not authorized"}), 404
+        orphaned_prompt_deleted = None
+        if prompt_root is not None and soft_delete_session_if_empty(prompt_root):
+            orphaned_prompt_deleted = prompt_root.id
+            flagged += 1
         # Deleting a published share's public node via the node UI must
         # reconcile the ShareDraft — otherwise the Share page keeps saying
         # "published" and links a tombstone (#228). Deleting IS revoking.
@@ -2942,6 +2968,9 @@ def delete_node(node_id):
         return jsonify({
             "scheduled": flagged,
             "grace_days": SOFT_DELETE_GRACE_DAYS,
+            # The session root's id when `delete_orphaned_prompt` took it
+            # too, else null — the client then knows the thread is gone.
+            "orphaned_prompt_deleted": orphaned_prompt_deleted,
         }), 200
     except Exception as e:
         db.session.rollback()

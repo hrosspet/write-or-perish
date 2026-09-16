@@ -23,6 +23,50 @@ from flask import jsonify
 from backend.extensions import db
 from backend.models import Node
 from backend.utils.privacy import can_user_edit_node
+from backend.utils.thread_tree import subtree_rows, thread_root_of
+
+
+def prompt_root_of(node, user_id: int, *, lock: bool = False):
+    """The alive system-prompt root of `node`'s thread when the user may
+    delete it; else None.
+
+    With `lock`, the root row is taken FOR UPDATE before anything else in
+    the delete transaction: an INSERT under the root needs FOR KEY SHARE
+    on it, so no new entry can land in the session between the
+    "nothing left" check and the root's own soft-delete.
+    """
+    if node.parent_id is None or node.deleted_at is not None:
+        return None
+    root_id = thread_root_of([node.id]).get(node.id)
+    if root_id is None or root_id == node.id:
+        return None
+    query = Node.query.with_for_update() if lock else Node.query
+    root = query.get(root_id)
+    if (root is None or root.deleted_at is not None
+            or not root.is_system_prompt
+            or not can_user_edit_node(root, user_id)):
+        return None
+    return root
+
+
+def subtree_has_alive_nodes(root_id: int) -> bool:
+    """True when anything under `root_id` (not the root itself) is
+    alive. Pending soft-deletes in the session are flushed first, so this
+    reads the state a commit would produce."""
+    db.session.flush()
+    return any(r.deleted_at is None for r in subtree_rows(root_id))
+
+
+def soft_delete_session_if_empty(root) -> bool:
+    """The "delete the system prompt too" half of a DELETE: once the
+    target is flagged in the session, tombstone the (locked) prompt
+    `root` when nothing alive is left under it. Returns whether it did.
+    Entries that landed in the meantime keep the root alive."""
+    if subtree_has_alive_nodes(root.id):
+        return False
+    root.deleted_at = datetime.utcnow()
+    root.pinned_at = None
+    return True
 
 
 def orphaned_system_prompt_id(node, user_id: int, *,
@@ -38,45 +82,13 @@ def orphaned_system_prompt_id(node, user_id: int, *,
     Mirrors soft_delete_node's selection without locking anything: the
     node itself, plus (with_descendants) every descendant the user can
     edit. Other users' replies stay alive and therefore count as
-    remaining content.
+    remaining content. A root the user may not delete (a reply pinned in
+    someone else's session) is never offered.
     """
-    if node.parent_id is None or node.deleted_at is not None:
+    root = prompt_root_of(node, user_id)
+    if root is None:
         return None
-
-    # Up to the root.
-    up = db.session.query(
-        Node.id.label("id"), Node.parent_id.label("parent_id"),
-    ).filter(Node.id == node.id).cte(name="up", recursive=True)
-    parent = db.aliased(Node, flat=True)
-    up = up.union_all(
-        db.session.query(parent.id, parent.parent_id)
-        .join(up, parent.id == up.c.parent_id)
-    )
-    root_id = db.session.query(up.c.id).filter(up.c.parent_id.is_(None)).scalar()
-    if root_id is None:
-        return None
-    root = Node.query.get(root_id)
-    if root is None or root.deleted_at is not None or not root.is_system_prompt:
-        return None
-
-    # Down from the root: every descendant, alive or not, with what the
-    # editability check needs.
-    down = db.session.query(
-        Node.id.label("id"), Node.parent_id.label("parent_id"),
-        Node.user_id.label("user_id"), Node.human_owner_id.label("human_owner_id"),
-        Node.deleted_at.label("deleted_at"),
-    ).filter(Node.parent_id == root_id).cte(name="down", recursive=True)
-    child = db.aliased(Node, flat=True)
-    down = down.union_all(
-        db.session.query(
-            child.id, child.parent_id, child.user_id, child.human_owner_id,
-            child.deleted_at,
-        ).join(down, child.parent_id == down.c.id)
-    )
-    rows = db.session.query(
-        down.c.id, down.c.parent_id, down.c.user_id, down.c.human_owner_id,
-        down.c.deleted_at,
-    ).all()
+    rows = subtree_rows(root.id)
 
     flagged = {node.id}
     if with_descendants:
@@ -91,7 +103,7 @@ def orphaned_system_prompt_id(node, user_id: int, *,
             queue.extend(children_of.get(r.id, []))
 
     remaining = [r.id for r in rows if r.deleted_at is None and r.id not in flagged]
-    return None if remaining else root_id
+    return None if remaining else root.id
 
 
 class ParentDeletedError(ValueError):

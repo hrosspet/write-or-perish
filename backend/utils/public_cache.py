@@ -74,17 +74,14 @@ def invalidate(*paths):
 
 def _root_of(node):
     """Topmost ancestor by parent chain (privacy-blind — this is cache
-    accounting, not access control), cycle-guarded."""
+    accounting, not access control)."""
     from backend.models import Node
+    from backend.utils.thread_tree import thread_root_of
 
-    root, seen = node, set()
-    while root.parent_id and root.id not in seen:
-        seen.add(root.id)
-        parent = Node.query.get(root.parent_id)
-        if parent is None:
-            break
-        root = parent
-    return root
+    if not node.parent_id:
+        return node
+    root_id = thread_root_of([node.id]).get(node.id)
+    return Node.query.get(root_id) if root_id else node
 
 
 def _paths_for_root(root):

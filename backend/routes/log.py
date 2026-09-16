@@ -7,6 +7,7 @@ from backend.utils.privacy import (
 )
 from backend.utils.timefmt import iso_utc
 from backend.utils.encryption import prefetch_deks
+from backend.utils.thread_tree import thread_root_of
 from sqlalchemy import and_, or_, func
 from sqlalchemy.orm.attributes import set_committed_value
 
@@ -38,11 +39,16 @@ def _preload_context_artifacts(nodes):
 def get_log():
     """
     Returns the current user's personal log: their own top-level and
-    pinned nodes.  Supports pagination via ?page=1&per_page=20.
+    pinned nodes.  Paginated via ?page=1&per_page=20, or ?offset=N
+    (the frontend sends how many cards it holds, so a card removed or
+    added client-side doesn't shift the next page).
     """
-    page = request.args.get("page", 1, type=int)
+    page = max(request.args.get("page", 1, type=int), 1)
     per_page = request.args.get("per_page", 20, type=int)
-    per_page = min(per_page, 100)  # cap max page size
+    per_page = max(1, min(per_page, 100))  # cap max page size
+    offset = request.args.get("offset", type=int)
+    if offset is None or offset < 0:
+        offset = (page - 1) * per_page
 
     # §4a Case 2: a soft-deleted thread root whose subtree still has an
     # alive accessible descendant must still surface in Log — otherwise
@@ -120,80 +126,36 @@ def get_log():
         # pages and skip another.
         Node.id.desc(),
     )
-    pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+    items = query.offset(offset).limit(per_page + 1).all()
+    has_more = len(items) > per_page
+    items = items[:per_page]
+    total = query.order_by(None).count()
 
     def make_preview(text, length=200):
         return text[:length] + ("..." if len(text) > length else "")
 
-    # Map each row's root id to the most-recently-updated descendant the
-    # current user can access. Drives the "click → newest node" jump on
-    # Log cards AND the §4a Case 2 preview swap (when the root is
-    # soft-deleted, the card surfaces a live descendant). The recursive
-    # arm walks through tombstones so a live grandchild buried under
-    # deleted ancestors is still reachable; the outer query then
-    # filters by deleted_at IS NULL so the navigation target itself is
-    # always alive.
-    root_ids = [n.id for n in pagination.items]
-    newest_map = {}
-    if root_ids:
-        anchor = db.session.query(
-            Node.id.label("id"),
-            Node.updated_at.label("updated_at"),
-            Node.deleted_at.label("deleted_at"),
-            Node.id.label("root_id"),
-        ).filter(Node.id.in_(root_ids)).cte(name="subtree", recursive=True)
-
-        child = db.aliased(Node, flat=True)
-        recursive = db.session.query(
-            child.id,
-            child.updated_at,
-            child.deleted_at,
-            anchor.c.root_id,
-        ).join(anchor, child.parent_id == anchor.c.id).filter(
-            accessible_nodes_filter_ignoring_deleted(child, current_user.id),
-        )
-        subtree = anchor.union_all(recursive)
-
-        rows = (
-            db.session.query(subtree.c.root_id, subtree.c.id)
-            .filter(subtree.c.deleted_at.is_(None))
-            .order_by(subtree.c.root_id, subtree.c.updated_at.desc())
-            .distinct(subtree.c.root_id)
-            .all()
-        )
-        newest_map = {root_id: nid for root_id, nid in rows}
-
-    # Phase 1 — pick each card's display node without decrypting anything,
-    # with the per-card lookups batched (they were one query per card):
-    #   1. System prompt root → first alive child for the preview.
-    #   2. Soft-deleted root with alive descendants (§4a Case 2) →
-    #      newest_map's accessible descendant for the preview, since
-    #      the root itself has no content to show.
-    # `thread_root_id` always points at the actual root so the
-    # frontend kebab targets the right node for rename and delete.
-    items = list(pagination.items)
-
     # Pinned replies are rows too; their thread root is up the parent
-    # chain, not the row itself. One recursive walk for the page.
-    thread_root_of = {n.id: n.id for n in items}
+    # chain. The card targets that root (rename, delete, thread name)
+    # only when the root is the user's own: a reply pinned in someone
+    # else's thread keeps targeting the reply, and the other user's
+    # (private, encrypted) thread name never reaches this user's Log.
+    thread_root_of_row = {n.id: n.id for n in items}
     pinned_reply_ids = [n.id for n in items if n.parent_id is not None]
     if pinned_reply_ids:
-        up = db.session.query(
-            Node.id.label("start_id"),
-            Node.id.label("id"),
-            Node.parent_id.label("parent_id"),
-        ).filter(Node.id.in_(pinned_reply_ids)).cte(name="ancestors", recursive=True)
-        parent = db.aliased(Node, flat=True)
-        up = up.union_all(
-            db.session.query(up.c.start_id, parent.id, parent.parent_id)
-            .join(up, parent.id == up.c.parent_id)
-        )
-        for start_id, root_id in (
-            db.session.query(up.c.start_id, up.c.id)
-            .filter(up.c.parent_id.is_(None)).all()
-        ):
-            thread_root_of[start_id] = root_id
-    thread_root_ids = list(set(thread_root_of.values()))
+        root_of = thread_root_of(pinned_reply_ids)
+        own_roots = {
+            rid for (rid,) in db.session.query(Node.id).filter(
+                Node.id.in_(set(root_of.values())),
+                or_(
+                    Node.user_id == current_user.id,
+                    Node.human_owner_id == current_user.id,
+                ),
+            ).all()
+        }
+        for reply_id, root_id in root_of.items():
+            if root_id in own_roots:
+                thread_root_of_row[reply_id] = root_id
+    thread_root_ids = list(set(thread_root_of_row.values()))
 
     # Which rows are system prompts. The stamped column answers for
     # current roots; roots from before the column only carry a prompt
@@ -215,29 +177,100 @@ def get_log():
             if prompt_id in key_of_prompt:
                 prompt_key_of[node_id] = key_of_prompt[prompt_id]
 
+    # One walk down from every row over the descendants the user can
+    # access, then two picks per row from it (window functions, so the
+    # SQL is the same on Postgres and the sqlite tests):
+    #   newest_map: the most recently updated alive node — the "click →
+    #     newest node" jump, and the §4a Case 2 preview swap when the
+    #     row is a soft-deleted root with alive descendants.
+    #   first_alive_map: for system-prompt roots, the shallowest, then
+    #     oldest alive descendant — the entry the card is titled by and
+    #     previews from. Direct children first (the first alive entry, as
+    #     before); when none is alive (the entries were deleted "this
+    #     node only", or before the delete dialog offered the prompt too)
+    #     the first alive grandchild, typically the AI reply, instead of
+    #     the prompt text.
+    # The recursive arm walks through tombstones so an alive grandchild
+    # buried under deleted ancestors is still reachable; the outer
+    # `deleted_at IS NULL` filter is what keeps deleted nodes out. Do not
+    # drop that filter as redundant.
+    root_ids = [n.id for n in items]
+    newest_map = {}
+    first_alive_map = {}
     sys_root_ids = [n.id for n in items if n.id in prompt_key_of]
-    first_child_map = {}
-    if sys_root_ids:
-        for c in (
-            Node.query
-            .filter(Node.parent_id.in_(sys_root_ids), Node.deleted_at.is_(None))
-            .order_by(Node.created_at.asc())
-            .all()
-        ):
-            first_child_map.setdefault(c.parent_id, c)
-    # newest_map's walk uses `accessible_nodes_filter_ignoring_deleted`
-    # so it can pass through tombstones; the outer
-    # `subtree.c.deleted_at.is_(None)` filter is what keeps deleted nodes
-    # out of the result. Do not drop that filter as redundant.
-    newest_needed = [
-        newest_map[n.id] for n in items
-        if n.deleted_at is not None and n.id not in prompt_key_of
-        and newest_map.get(n.id) and newest_map[n.id] != n.id
-    ]
-    newest_nodes = (
-        {n.id: n for n in Node.query.filter(Node.id.in_(newest_needed)).all()}
-        if newest_needed else {}
+    if root_ids:
+        anchor = db.session.query(
+            Node.id.label("id"),
+            Node.updated_at.label("updated_at"),
+            Node.created_at.label("created_at"),
+            Node.deleted_at.label("deleted_at"),
+            Node.id.label("root_id"),
+            db.literal(0).label("depth"),
+        ).filter(Node.id.in_(root_ids)).cte(name="subtree", recursive=True)
+
+        child = db.aliased(Node, flat=True)
+        recursive = db.session.query(
+            child.id,
+            child.updated_at,
+            child.created_at,
+            child.deleted_at,
+            anchor.c.root_id,
+            (anchor.c.depth + 1).label("depth"),
+        ).join(anchor, child.parent_id == anchor.c.id).filter(
+            accessible_nodes_filter_ignoring_deleted(child, current_user.id),
+        )
+        subtree = anchor.union_all(recursive)
+
+        def first_per_root(order_by, only_root_ids=None):
+            ranked = db.session.query(
+                subtree.c.root_id,
+                subtree.c.id,
+                func.row_number().over(
+                    partition_by=subtree.c.root_id, order_by=order_by,
+                ).label("rn"),
+            ).filter(subtree.c.deleted_at.is_(None))
+            if only_root_ids is not None:
+                ranked = ranked.filter(
+                    subtree.c.root_id.in_(only_root_ids),
+                    subtree.c.id != subtree.c.root_id,
+                )
+            ranked = ranked.subquery()
+            return dict(
+                db.session.query(ranked.c.root_id, ranked.c.id)
+                .filter(ranked.c.rn == 1).all()
+            )
+
+        newest_map = first_per_root(
+            (subtree.c.updated_at.desc(), subtree.c.id.desc()),
+        )
+        if sys_root_ids:
+            first_alive_map = first_per_root(
+                (subtree.c.depth.asc(), subtree.c.created_at.asc(), subtree.c.id.asc()),
+                only_root_ids=sys_root_ids,
+            )
+
+    # Phase 1 — pick each card's display node without decrypting anything:
+    #   1. System prompt root → its first alive entry (first_alive_map);
+    #      with nothing alive underneath, the root itself.
+    #   2. Soft-deleted root with alive descendants (§4a Case 2) →
+    #      newest_map's accessible descendant, since the root itself has
+    #      no content to show.
+    # `thread_root_id` points at the actual root (when it is the user's
+    # own) so the frontend kebab targets the right node for rename and
+    # delete.
+    display_ids = set()
+    for n in items:
+        if n.id in prompt_key_of:
+            display_ids.add(first_alive_map.get(n.id, n.id))
+        elif n.deleted_at is not None:
+            display_ids.add(newest_map.get(n.id, n.id))
+    display_needed = [nid for nid in display_ids if nid not in root_ids]
+    display_nodes = (
+        {n.id: n for n in Node.query.filter(Node.id.in_(display_needed)).all()}
+        if display_needed else {}
     )
+    by_id = {n.id: n for n in items}
+    by_id.update(display_nodes)
     # Count only alive children — tombstones don't contribute to the
     # visible reply count.
     alive_child_counts = dict(
@@ -258,26 +291,38 @@ def get_log():
         display_node = node
         prompt_key = prompt_key_of.get(node.id)
         if prompt_key is not None:
-            display_node = first_child_map.get(node.id, node)
+            display_node = by_id.get(first_alive_map.get(node.id), node)
         elif node.deleted_at is not None:
-            display_node = newest_nodes.get(newest_map.get(node.id), node)
+            display_node = by_id.get(newest_map.get(node.id), node)
         cards.append((node, display_node, prompt_key))
 
     # Phase 2 — one concurrent KMS batch for every preview (and thread
     # name) on the page. Decrypting inside the loop cost a cold worker
     # ~80 ms per card, in sequence (~1.6 s for a page of 20).
     # `get_content()` also checks each display node for a linked prompt;
-    # feed that from one query rather than one per card.
+    # supply that from one query rather than one per card. A display
+    # node WITH a linked prompt (a session with nothing alive under its
+    # root) reads the UserPrompt's content, so those rows are loaded
+    # here and their ciphertext joins the batch.
     _preload_context_artifacts([display_node for _, display_node, _ in cards])
-    prefetch_deks(
-        [display_node.content for _, display_node, _ in cards]
-        + [t.name for t in thread_rows.values()]
-    )
+    prompt_id_of_display = {
+        display_node.id: display_node.get_artifact_id("prompt")
+        for _, display_node, _ in cards
+    }
+    prompt_ids = {pid for pid in prompt_id_of_display.values() if pid}
+    prompts = {
+        p.id: p for p in UserPrompt.query.filter(UserPrompt.id.in_(prompt_ids)).all()
+    } if prompt_ids else {}
+    ciphertexts = []
+    for _, display_node, _ in cards:
+        prompt = prompts.get(prompt_id_of_display.get(display_node.id))
+        ciphertexts.append(prompt.content if prompt else display_node.content)
+    prefetch_deks(ciphertexts + [t.name for t in thread_rows.values()])
 
     # Phase 3 — serialize (previews are cache hits now).
     nodes_list = []
     for node, display_node, prompt_key in cards:
-        thread_root_id = thread_root_of[node.id]
+        thread_root_id = thread_root_of_row[node.id]
         # Determine human owner username for LLM nodes
         human_owner_username = None
         if display_node.node_type == "llm" and display_node.human_owner_id:
@@ -309,7 +354,8 @@ def get_log():
 
     return jsonify({
         "nodes": nodes_list,
-        "has_more": pagination.has_next,
+        "has_more": has_more,
         "page": page,
-        "total": pagination.total,
+        "offset": offset,
+        "total": total,
     }), 200

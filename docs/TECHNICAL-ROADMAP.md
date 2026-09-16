@@ -83,7 +83,8 @@ Users have a `plan` column (string, max 16 chars) on the User model. The plan co
 - **Typography system** - Cormorant Garamond (serif headings), Outfit (sans body text), refined font weights and contrast
 - **Loore branding** - Full rebrand with custom icons, waveform logo, and literary-themed landing page
 - **Welcome & onboarding flow** - Public about pages, alpha thank-you page, welcome page with admin welcome flow (#59)
-- **Renamed navigation** - Dashboard → Profile, Feed → Log for clearer semantics
+- **Renamed navigation** - Dashboard → Profile, Feed → Log for clearer semantics; the code followed in #298 (2026-09-16): `backend/routes/log.py`, `GET /api/log`, `Log.js`, the `/feed` route redirects
+- **Orphaned-session delete dialog** (#302, 2026-09-16) - `GET /api/nodes/<id>/delete-impact` (`backend/utils/node_deletion.orphaned_system_prompt_id`, mirrors `soft_delete_node`'s selection) tells NodeDetail whether a delete would leave a text/voice session with only its system prompt alive; the follow-up dialog's answer rides on the same `DELETE /api/nodes/<id>` as `delete_orphaned_prompt`, re-checked under the root's row lock so an entry that arrived in between keeps the session (`orphaned_prompt_deleted` in the response). Log side: a prompt root with no alive direct child is titled by its first alive descendant (shallowest, then oldest); pinned replies resolve to their thread root only when the root is the user's own; `?offset=N` paging so client-side deletes don't skip a thread; `backend/utils/thread_tree.py` is the one recursive root walk shared by the Log, deletion and the public page cache
 
 ### CI/CD & DevOps
 - **GitHub Actions CI pipeline** - Automated testing on PRs with backend tests, frontend tests, linting, and security scans (path-filtered to skip unchanged areas)

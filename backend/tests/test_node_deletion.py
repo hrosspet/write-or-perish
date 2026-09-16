@@ -981,3 +981,117 @@ def test_deleting_root_with_descendants_clears_the_orphaned_session(app, alice):
     _db.session.expire_all()
     assert Node.query.get(root.id).deleted_at is not None
     assert Node.query.get(only.id).deleted_at is not None
+
+
+def test_delete_with_orphaned_prompt_flag_takes_the_prompt_too(app, alice):
+    """The dialog's "delete the system prompt too" answer travels on the
+    same DELETE as the entry, so one request tombstones both."""
+    root = _prompt_session(alice)
+    only = _make_node(alice, parent=root, content="the only entry")
+    client = app.test_client()
+    _login(client, alice)
+    r = client.delete(f"/nodes/{only.id}", query_string={
+        "delete_descendants": "false", "delete_orphaned_prompt": "true",
+    })
+    assert r.status_code == 200, r.json
+    assert r.json["scheduled"] == 2
+    assert r.json["orphaned_prompt_deleted"] == root.id
+    _db.session.expire_all()
+    assert Node.query.get(root.id).deleted_at is not None
+    assert Node.query.get(only.id).deleted_at is not None
+
+
+def test_delete_with_orphaned_prompt_flag_keeps_the_prompt_when_content_remains(app, alice):
+    """The flag is re-checked server-side: an entry that landed after the
+    dialog's check (another device, the Voice chain) keeps the session."""
+    root = _prompt_session(alice)
+    first = _make_node(alice, parent=root, content="first")
+    late = _make_node(alice, parent=root, content="arrived after the check")
+    client = app.test_client()
+    _login(client, alice)
+    r = client.delete(f"/nodes/{first.id}", query_string={
+        "delete_descendants": "true", "delete_orphaned_prompt": "true",
+    })
+    assert r.status_code == 200, r.json
+    assert r.json["scheduled"] == 1
+    assert r.json["orphaned_prompt_deleted"] is None
+    _db.session.expire_all()
+    assert Node.query.get(root.id).deleted_at is None
+    assert Node.query.get(late.id).deleted_at is None
+
+
+def test_orphaned_prompt_is_never_someone_elses_root(app, alice, bob):
+    """Alice's reply is the last alive node in Bob's session: the prompt
+    root is Bob's, so it is neither offered nor deleted."""
+    root = _prompt_session(bob)
+    entry = _make_node(bob, parent=root, content="bob's entry")
+    reply = _make_node(alice, parent=entry, content="alice's reply")
+    entry.deleted_at = datetime.utcnow()
+    _db.session.commit()
+    client = app.test_client()
+    _login(client, alice)
+    assert _impact(client, reply.id) is None
+    r = client.delete(f"/nodes/{reply.id}", query_string={
+        "delete_orphaned_prompt": "true",
+    })
+    assert r.status_code == 200 and r.json["orphaned_prompt_deleted"] is None
+    _db.session.expire_all()
+    assert Node.query.get(root.id).deleted_at is None
+
+
+def _log_cards(app, user):
+    from backend.routes.log import log_bp
+    if "log_bp" not in app.blueprints:
+        app.register_blueprint(log_bp, url_prefix="/api")
+    client = app.test_client()
+    _login(client, user)
+    r = client.get("/api/log")
+    assert r.status_code == 200
+    return {c["thread_root_id"]: c for c in r.json["nodes"]}
+
+
+def test_log_prompt_session_falls_through_to_the_first_alive_descendant(app, alice):
+    """Entries deleted "this node only" (or before the dialog offered the
+    prompt too) leave the AI replies alive under tombstones. The card is
+    then titled by the first alive descendant, not the prompt text."""
+    root = _prompt_session(alice)
+    entry = _make_node(alice, parent=root, content="entry")
+    reply = _make_node(alice, parent=entry, content="the AI reply", node_type="llm")
+    entry.deleted_at = datetime.utcnow()
+    _db.session.commit()
+
+    card = _log_cards(app, alice)[root.id]
+    assert card["id"] == reply.id
+    assert card["preview"] == "the AI reply"
+    assert card["prompt_key"] == "default"
+
+    # An alive direct child still wins over a deeper node, even one
+    # created earlier.
+    later_entry = _make_node(alice, parent=root, content="a later entry")
+    card = _log_cards(app, alice)[root.id]
+    assert card["id"] == later_entry.id
+
+
+def test_log_prompt_session_with_nothing_alive_shows_the_prompt(app, alice, monkeypatch):
+    """A session whose root never got an entry (#187) or lost them all
+    before this shipped still lists; its preview is read from the linked
+    UserPrompt and that read joins the page's batched decrypt."""
+    from backend.models import UserPrompt, NodeContextArtifact
+    import backend.routes.log as log_module
+    prompt = UserPrompt(user_id=alice.id, prompt_key="default", title="t")
+    prompt.set_content("the prompt text")
+    _db.session.add(prompt)
+    _db.session.commit()
+    root = _make_node(alice, content="")
+    root.prompt_key = "default"
+    _db.session.add(NodeContextArtifact(
+        node_id=root.id, artifact_type="prompt", artifact_id=prompt.id,
+    ))
+    _db.session.commit()
+
+    batches = []
+    monkeypatch.setattr(log_module, "prefetch_deks", lambda cts: batches.append(list(cts)))
+    card = _log_cards(app, alice)[root.id]
+    assert card["id"] == root.id
+    assert card["preview"] == "the prompt text"
+    assert batches == [["the prompt text"]]

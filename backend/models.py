@@ -370,7 +370,7 @@ class Node(db.Model):
         index=True
     )
 
-    # Pin-to-profile: surfaces any node on Dashboard & Feed
+    # Pin-to-profile: surfaces any node on the Profile page & Log
     pinned_at = db.Column(db.DateTime, nullable=True)
     pinned_by = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
 
@@ -581,7 +581,7 @@ class Thread(db.Model):
 
     A row exists only while the thread has a name — clearing the name
     deletes the row. The name is user-authored text, so it is KMS-envelope
-    encrypted like content; the feed batches its DEK unwrap with the page's
+    encrypted like content; the Log batches its DEK unwrap with the page's
     preview DEKs (one extra unwrap per NAMED thread on a Log page).
     """
     __tablename__ = "thread"

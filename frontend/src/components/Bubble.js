@@ -79,7 +79,7 @@ const Bubble = ({
   // Extract title (first line, "# " stripped) and body (rest)
   const { title, body, isHeading } = splitPreview(text);
 
-  // A user-given thread name (Log cards; the feed serializes it from the
+  // A user-given thread name (Log cards; the Log serializes it from the
   // thread root) takes the title slot. The entry's own first line is
   // skipped only when it was a markdown heading — the name replaces that
   // title. Plain text has no title to replace, so all of it stays as the

@@ -102,11 +102,12 @@ function DeleteConfirmDialog({
 
   if (mode === "prompt") {
     title = "Delete the system prompt too?";
+    // The confirmed delete may be one entry, an AI reply, or a node with
+    // all your replies under it; the copy names none of them.
     body = (
       <>
-        This is the last entry in the session. Deleting it leaves only the
-        system prompt, and your Log would list the session by the prompt's
-        text.
+        After this, nothing is left in the session but its system prompt,
+        and your Log would list the session by the prompt's text.
       </>
     );
     buttons = (
@@ -115,7 +116,7 @@ function DeleteConfirmDialog({
           onClick={() => onConfirm({ includePrompt: true })}
           style={{ ...buttonBaseStyle, color: "var(--accent)" }}
         >
-          <div style={{ fontWeight: 500 }}>Delete the entry and the system prompt</div>
+          <div style={{ fontWeight: 500 }}>Also delete the system prompt</div>
           <div style={{
             fontSize: "0.82rem", color: "var(--text-muted)",
             fontWeight: 300, marginTop: "2px",
@@ -127,12 +128,12 @@ function DeleteConfirmDialog({
           onClick={() => onConfirm({ includePrompt: false })}
           style={{ ...buttonBaseStyle, color: "var(--text-primary)" }}
         >
-          <div style={{ fontWeight: 500 }}>Delete the entry only</div>
+          <div style={{ fontWeight: 500 }}>Keep the system prompt</div>
           <div style={{
             fontSize: "0.82rem", color: "var(--text-muted)",
             fontWeight: 300, marginTop: "2px",
           }}>
-            The system prompt stays, so you can continue the session.
+            You can continue the session from it.
           </div>
         </button>
         <button

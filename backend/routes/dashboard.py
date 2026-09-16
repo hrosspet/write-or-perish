@@ -47,7 +47,7 @@ def get_latest_profile(user):
 
 
 def _serialize_node_for_list(node):
-    """Serialize a node for dashboard/feed list views."""
+    """Serialize a node for dashboard list views (Log has its own)."""
     # If this is a system prompt root, skip to the first child
     display_node = node
     prompt_key = None
