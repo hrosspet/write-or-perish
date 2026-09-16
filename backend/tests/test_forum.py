@@ -400,6 +400,12 @@ def test_private_node_keeps_slug_but_advertises_no_permalink(app):
     assert client.get(f"/api/nodes/{node_id}").get_json()["permalink"] == (
         "/@author/now-you-see-it")
 
+    def share_card():
+        cards = client.get("/api/share").get_json()["shares"]
+        return next(c for c in cards if c["id"] == share.id)
+
+    assert share_card()["permalink"] == "/@author/now-you-see-it"
+
     r = client.put(f"/api/nodes/{node_id}",
                    json={"content": "now you see it", "privacy_level": "private"})
     assert r.status_code == 200
@@ -407,11 +413,19 @@ def test_private_node_keeps_slug_but_advertises_no_permalink(app):
     assert detail["privacy_level"] == "private"
     assert detail["permalink"] is None
     assert Node.query.get(node_id).public_slug == "now-you-see-it"
+    # The Share page card reads the same gate: going private leaves the
+    # ShareDraft `published`, and its card must not navigate to the 404.
+    card = share_card()
+    assert card["status"] == "published"
+    assert card["permalink"] is None
+    assert client.get(
+        "/api/commons/permalink/author/now-you-see-it").status_code == 404
 
     client.put(f"/api/nodes/{node_id}",
                json={"content": "now you see it", "privacy_level": "public"})
     assert client.get(f"/api/nodes/{node_id}").get_json()["permalink"] == (
         "/@author/now-you-see-it")
+    assert share_card()["permalink"] == "/@author/now-you-see-it"
 
 
 def test_permalink_resolver_and_404_parity(app):

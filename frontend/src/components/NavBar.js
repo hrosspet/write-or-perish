@@ -179,7 +179,8 @@ function NavBar({ onNewEntryClick }) {
       }}
     >
       {/* .nav-brand / .nav-links: index.css shrinks the wordmark and the
-          link gap below 380px so the kebab stays on a 360px phone (#284). */}
+          link gap up to 412px so the kebab (logged in) and Login (logged
+          out) stay on 360–400px phones (#284). */}
       <Link
         to="/"
         className="nav-brand"

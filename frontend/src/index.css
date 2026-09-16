@@ -449,12 +449,13 @@ code {
   .feed-pick-relevance { font-size: 1rem; }
 }
 
-/* NavBar on 360px-class phones (#284): the row is ~32px wider than the
-   screen and the fixed nav clips the overflow menu. Most of the LOORE
-   wordmark's width is its 0.3em tracking, so tightening the tracking and
-   size below 380px (plus the brand→links gap) recovers the width without
+/* NavBar on phones up to 412px (#284): the row is ~32px wider than a
+   360px screen and the fixed nav clips the overflow menu; logged out, the
+   Login link is clipped up to 399px (iPhone 12–16 are 390/393). Most of
+   the LOORE wordmark's width is its 0.3em tracking, so tightening the
+   tracking and size (plus the brand→links gap) recovers the width without
    touching desktop. !important because NavBar sets these inline. */
-@media (max-width: 380px) {
+@media (max-width: 412px) {
   .nav-brand { font-size: 1rem !important; letter-spacing: 0.12em !important; gap: 6px !important; }
   .nav-links { margin-left: 0.6rem !important; gap: 0.45rem !important; }
 }

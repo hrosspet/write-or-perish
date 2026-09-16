@@ -7,7 +7,26 @@ boundary. Unique per author — the permalink shape is /u/<username>/<slug>.
 import re
 import unicodedata
 
+from backend.utils.privacy import PrivacyLevel
+
 MAX_SLUG_CHARS = 60
+
+
+def permalink_for(node):
+    """The node's public address, or None while it is not public (#263).
+
+    The slug is KEPT on the row when a node goes private, so republishing
+    restores the same URL — but the permalink only resolves for public
+    nodes (commons.resolve_permalink is public-only), so advertising it
+    for a private node sends the owner to a 404 (NodeDetail rewrites the
+    address bar; the Share page card navigates to it). Every serializer
+    that emits a permalink goes through here: gate on current privacy,
+    not on the slug.
+    """
+    if (node is not None and node.public_slug and node.user
+            and node.privacy_level == PrivacyLevel.PUBLIC):
+        return f"/@{node.user.username}/{node.public_slug}"
+    return None
 
 
 def slugify(text):

@@ -34,7 +34,6 @@ Disallow: /api/
 Disallow: /auth/
 Disallow: /media/
 Disallow: /voice
-Disallow: /converse
 Disallow: /textmode
 Disallow: /profile
 Disallow: /todo
