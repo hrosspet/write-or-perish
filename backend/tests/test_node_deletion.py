@@ -650,12 +650,13 @@ def test_log_surfaces_deleted_root_with_alive_descendants(app, alice, bob):
     # surfaces via §4a Case 2.
     assert len(cards) == 1
     # thread_root_id stays the actual (deleted) root so the kebab
-    # targets it for further deletion; the display preview swap to a
-    # live descendant happens in production (Postgres) but `newest_map`
-    # uses DISTINCT ON which SQLite silently ignores. We only assert
-    # the routing invariant here; the swap is exercised manually on
-    # staging.
+    # targets it for further deletion; the card itself shows the alive
+    # reply — and since that reply is Bob's, the card carries Bob's
+    # name, not Alice's, over Bob's words.
     assert cards[0]["thread_root_id"] == root.id
+    assert cards[0]["id"] == bob_reply.id
+    assert cards[0]["preview"] == "bob reply"
+    assert cards[0]["username"] == "bob"
 
 
 # ── 22. recent-context token counter excludes soft-deleted ─────────────
@@ -1182,3 +1183,84 @@ def test_log_prompt_session_with_nothing_alive_shows_the_prompt(app, alice, monk
     assert card["id"] == root.id
     assert card["preview"] == "the prompt text"
     assert batches == [["the prompt text"]]
+
+
+def test_locked_prompt_root_check_reads_the_row_again(app, alice):
+    """Two tabs delete the last entry with "also delete the prompt". The
+    second tab loaded the root before the first tab's commit; its check
+    under the lock must see the root already deleted (and not tombstone
+    it again, restarting the purge grace period)."""
+    from sqlalchemy import update
+    from backend.utils.node_deletion import prompt_root_of
+
+    root = _prompt_session(alice)
+    entry = _make_node(alice, parent=root, content="the only entry")
+    # This session's copy of the root says it is alive...
+    assert prompt_root_of(entry, alice.id) is root
+    assert root.deleted_at is None
+    # ...while the row in the database is deleted by the other tab (an
+    # UPDATE that does not synchronize the session leaves the
+    # identity-map copy untouched, exactly like another connection's
+    # commit).
+    _db.session.execute(
+        update(Node).where(Node.id == root.id).values(deleted_at=datetime.utcnow()),
+        execution_options={"synchronize_session": False},
+    )
+    assert root.deleted_at is None
+    assert prompt_root_of(entry, alice.id, lock=True) is None
+
+
+def test_deleting_the_prompt_too_drops_its_public_pages(app, alice, monkeypatch):
+    """A public session's prompt root has cached public pages (its node
+    page, the /@user page, the sitemap). Deleting a private entry with
+    "also delete the system prompt" takes the root too, so those pages
+    must be dropped from the cache — not only the entry's."""
+    from backend.utils import public_cache
+
+    root = _prompt_session(alice)
+    root.privacy_level = "public"
+    only = _make_node(alice, parent=root, content="the only entry")
+    _db.session.commit()
+    dropped = []
+    monkeypatch.setattr(public_cache, "invalidate", lambda *paths: dropped.extend(paths))
+
+    client = app.test_client()
+    _login(client, alice)
+    r = client.delete(f"/nodes/{only.id}", query_string={
+        "delete_orphaned_prompt": "true",
+    })
+    assert r.status_code == 200 and r.json["orphaned_prompt_deleted"] == root.id
+    assert {f"/node/{root.id}", "/@alice", "/sitemap.xml"} <= set(dropped)
+
+
+def test_cascade_drops_the_pages_of_public_descendants(app, alice, monkeypatch):
+    """Deleting a private entry with its descendants takes a public reply
+    under it: that reply's own page leaves the cache too."""
+    from backend.utils import public_cache
+
+    root = _make_node(alice, content="private root")
+    public_reply = _make_node(alice, parent=root, content="public reply")
+    public_reply.privacy_level = "public"
+    _db.session.commit()
+    dropped = []
+    monkeypatch.setattr(public_cache, "invalidate", lambda *paths: dropped.extend(paths))
+
+    client = app.test_client()
+    _login(client, alice)
+    r = client.delete(f"/nodes/{root.id}", query_string={"delete_descendants": "true"})
+    assert r.status_code == 200 and r.json["scheduled"] == 2
+    assert {f"/node/{public_reply.id}", f"/node/{root.id}", "/@alice"} <= set(dropped)
+
+
+def test_subtree_walk_stops_at_a_parent_cycle(app, alice, monkeypatch):
+    """Corrupt data with a parent cycle must end the walk, not hang the
+    Log request."""
+    from backend.utils import thread_tree
+
+    a = _make_node(alice, content="a")
+    b = _make_node(alice, parent=a, content="b")
+    a.parent_id = b.id  # a → b → a (SQLite does not enforce the FK tree)
+    _db.session.commit()
+    monkeypatch.setattr(thread_tree, "MAX_THREAD_DEPTH", 10)
+    rows = thread_tree.subtree_rows(a.id, alice.id)
+    assert 0 < len(rows) <= 10

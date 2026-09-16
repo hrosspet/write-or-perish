@@ -2964,9 +2964,22 @@ def delete_node(node_id):
             # Pointer kept: republishing unchanged content undeletes this
             # node (identity follows content).
         db.session.commit()
-        if pre.public_slug or pre.privacy_level == "public":
-            from backend.utils.public_cache import invalidate_for_node
-            invalidate_for_node(pre)
+        # Public pages are cached server-side; a takedown must reach the
+        # open web now, not when the cache expires. Every tombstoned
+        # node counts: the target, the descendants the cascade took, and
+        # the prompt root deleted with it (its own page, the /@user page
+        # and the sitemap are all keyed by the root — which is the
+        # target's root too, so one root invalidation covers them).
+        from backend.utils.public_cache import invalidate, invalidate_for_node
+        if orphaned_prompt_deleted is not None:
+            gone = [prompt_root]
+        else:
+            gone = []
+        gone += Node.query.filter(Node.id.in_(deleted.ids)).all()
+        public = [n for n in gone if n.public_slug or n.privacy_level == "public"]
+        if public:
+            invalidate_for_node(public[0])
+            invalidate(*[f"/node/{n.id}" for n in public[1:]])
         return jsonify({
             "scheduled": flagged,
             "grace_days": SOFT_DELETE_GRACE_DAYS,

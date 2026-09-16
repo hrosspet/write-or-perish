@@ -4,9 +4,7 @@ from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
 from backend.models import Node, User, Thread, NodeContextArtifact, UserPrompt
 from backend.extensions import db
-from backend.utils.privacy import (
-    PrivacyLevel, accessible_nodes_filter_ignoring_deleted,
-)
+from backend.utils.privacy import PrivacyLevel
 from backend.utils.timefmt import iso_utc
 from backend.utils.encryption import prefetch_deks
 from backend.utils.thread_tree import (
@@ -77,43 +75,27 @@ def get_log():
     # §4a Case 2: a soft-deleted thread root whose subtree still has an
     # alive accessible descendant must still surface in Log — otherwise
     # the live descendants disappear (no other entry point exists for
-    # the owner). The recursive CTE below maps each accessible node to
-    # its root and yields the set of roots whose subtree has at least
-    # one alive accessible node.
-    anchor = db.session.query(
-        Node.id.label("id"),
-        Node.deleted_at.label("deleted_at"),
-        Node.id.label("root_id"),
-    ).filter(
+    # the owner). One walk (thread_tree.subtree_walk, the shared
+    # definition of what is left under a root) seeded from the user's
+    # *deleted* roots only — alive roots need no check, and on a heavy
+    # importer they are the whole corpus — yields the roots with at
+    # least one alive accessible node underneath. The seeds are deleted,
+    # so depth-0 rows never pass the alive filter.
+    deleted_roots = db.session.query(Node.id).filter(
         Node.parent_id.is_(None),
+        Node.deleted_at.isnot(None),
         or_(
             Node.user_id == current_user.id,
             Node.human_owner_id == current_user.id,
         ),
-    ).cte(name="user_thread_subtree", recursive=True)
-
-    descendant = db.aliased(Node, flat=True)
-    recursive = db.session.query(
-        descendant.id,
-        descendant.deleted_at,
-        anchor.c.root_id,
-    ).join(anchor, descendant.parent_id == anchor.c.id).filter(
-        # Walk through tombstones so the alive_roots check below can find
-        # alive descendants buried under one or more deleted ancestors.
-        # The outer alive_roots_subq filter on subtree.deleted_at IS NULL
-        # is what classifies which rows count as "alive descendant" —
-        # this filter just controls which descendants the walk reaches.
-        accessible_nodes_filter_ignoring_deleted(descendant, current_user.id),
     )
-    subtree_cte = anchor.union_all(recursive)
-
-    # Root IDs with at least one alive node in their subtree (the root
-    # itself counts if alive; otherwise an accessible alive descendant).
-    alive_roots_subq = (
-        db.session.query(subtree_cte.c.root_id)
-        .filter(subtree_cte.c.deleted_at.is_(None))
+    deleted_walk = subtree_walk(
+        deleted_roots, current_user.id, name="deleted_root_walk",
+    )
+    alive_roots = (
+        db.session.query(deleted_walk.c.root_id)
+        .filter(deleted_walk.c.deleted_at.is_(None))
         .distinct()
-        .subquery()
     )
 
     query = Node.query.filter(
@@ -140,7 +122,7 @@ def get_log():
             and_(
                 Node.parent_id.is_(None),
                 Node.deleted_at.isnot(None),
-                Node.id.in_(db.session.query(alive_roots_subq)),
+                Node.id.in_(alive_roots),
             ),
         ),
     ).order_by(
@@ -330,16 +312,29 @@ def get_log():
         ciphertexts.append(prompt.content if prompt else display_node.content)
     prefetch_deks(ciphertexts + [t.name for t in thread_rows.values()])
 
+    # The card's names are the *display* node's: when a deleted root
+    # falls back to a descendant, that may be someone else's public
+    # reply, and their words must not appear under the owner's name.
+    # One query for the page's authors and human owners.
+    user_ids = set()
+    for _, display_node, _ in cards:
+        user_ids.add(display_node.user_id)
+        if display_node.node_type == "llm":
+            user_ids.add(display_node.human_owner_id)
+    user_ids.discard(None)
+    username_of = {
+        u.id: u.username
+        for u in User.query.filter(User.id.in_(user_ids)).all()
+    } if user_ids else {}
+
     # Phase 3 — serialize (previews are cache hits now).
     nodes_list = []
     for node, display_node, prompt_key in cards:
         thread_root_id = thread_root_of_row[node.id]
-        # Determine human owner username for LLM nodes
-        human_owner_username = None
-        if display_node.node_type == "llm" and display_node.human_owner_id:
-            human_owner = User.query.get(display_node.human_owner_id)
-            if human_owner:
-                human_owner_username = human_owner.username
+        human_owner_username = (
+            username_of.get(display_node.human_owner_id)
+            if display_node.node_type == "llm" else None
+        )
 
         nodes_list.append({
             "id": display_node.id,
@@ -356,7 +351,7 @@ def get_log():
             "child_count": child_counts.get(display_node.id, 0),
             "created_at": iso_utc(display_node.created_at),
             "pinned_at": iso_utc(node.pinned_at),
-            "username": node.user.username if node.user else "Unknown",
+            "username": username_of.get(display_node.user_id, "Unknown"),
             "human_owner_username": human_owner_username,
             "llm_model": display_node.llm_model,
             "origin": display_node.origin,

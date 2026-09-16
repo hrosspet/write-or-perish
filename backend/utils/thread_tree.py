@@ -11,17 +11,29 @@ viewer, does not).
 """
 
 from sqlalchemy import func
+from sqlalchemy.orm import Query
+from sqlalchemy.sql import ClauseElement
 
 from backend.extensions import db
 from backend.models import Node
 from backend.utils.privacy import accessible_nodes_filter_ignoring_deleted
 
-# A parent chain longer than this is treated as a cycle and the walk
-# stops (a root is then never found for that start id). The FK tree has
-# no cycles by construction; this only bounds a corrupt row's damage,
-# where an unbounded recursive CTE would spin until the connection is
-# killed. Real threads are hundreds of levels deep at most.
+# A chain longer than this is treated as a cycle and the walk stops (up:
+# a root is then never found for that start id; down: deeper nodes are
+# not reached). The FK tree has no cycles by construction; this only
+# bounds a corrupt row's damage, where an unbounded recursive CTE would
+# spin until the connection is killed. Real threads are hundreds of
+# levels deep at most.
 MAX_THREAD_DEPTH = 100_000
+
+
+def _root_id_filter(root_ids):
+    """`Node.id IN root_ids` for either an iterable of ids or a query /
+    select of ids (kept server-side, so a caller can seed a walk from a
+    filtered set without pulling the ids into Python first)."""
+    if isinstance(root_ids, (Query, ClauseElement)):
+        return Node.id.in_(root_ids)
+    return Node.id.in_(list(root_ids))
 
 
 def thread_root_of(node_ids):
@@ -57,18 +69,22 @@ def thread_root_of(node_ids):
     )
 
 
-def subtree_walk(root_ids, viewer_id=None):
-    """A recursive CTE over the subtrees of `root_ids`: every root at
-    depth 0, then its descendants, with the columns the callers rank or
-    count by (id, parent_id, root_id, depth, user_id, human_owner_id,
-    deleted_at, created_at, updated_at).
+def subtree_walk(root_ids, viewer_id=None, *, name="subtree_walk"):
+    """A recursive CTE over the subtrees of `root_ids` (ids, or a query
+    selecting them): every root at depth 0, then its descendants, with
+    the columns the callers rank or count by (id, parent_id, root_id,
+    depth, user_id, human_owner_id, deleted_at, created_at, updated_at).
+    `name` labels the CTE in the SQL, for telling two walks in one
+    request apart in query logs.
 
     With `viewer_id`, the walk only steps through nodes that user can
     access — it does not reach an alive node behind someone else's
     private reply, which is exactly what the viewer cannot see either.
     Tombstones are walked through in both cases: the *caller* filters on
     `deleted_at` to tell alive nodes from deleted ones, so an alive
-    grandchild under a deleted entry is still found.
+    grandchild under a deleted entry is still found. The walk stops at
+    MAX_THREAD_DEPTH, so a parent cycle in corrupt data ends the query
+    instead of hanging it.
     """
     anchor = db.session.query(
         Node.id.label("id"),
@@ -80,14 +96,16 @@ def subtree_walk(root_ids, viewer_id=None):
         Node.deleted_at.label("deleted_at"),
         Node.created_at.label("created_at"),
         Node.updated_at.label("updated_at"),
-    ).filter(Node.id.in_(list(root_ids))).cte(name="subtree_walk", recursive=True)
+    ).filter(_root_id_filter(root_ids)).cte(name=name, recursive=True)
     child = db.aliased(Node, flat=True)
     recursive = db.session.query(
         child.id, child.parent_id, anchor.c.root_id,
         (anchor.c.depth + 1).label("depth"),
         child.user_id, child.human_owner_id, child.deleted_at,
         child.created_at, child.updated_at,
-    ).join(anchor, child.parent_id == anchor.c.id)
+    ).join(anchor, child.parent_id == anchor.c.id).filter(
+        anchor.c.depth < MAX_THREAD_DEPTH,
+    )
     if viewer_id is not None:
         recursive = recursive.filter(
             accessible_nodes_filter_ignoring_deleted(child, viewer_id),

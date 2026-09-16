@@ -26,6 +26,19 @@ from backend.utils.privacy import can_user_edit_node
 from backend.utils.thread_tree import subtree_rows, thread_root_of
 
 
+def lock_node(node_id: int):
+    """SELECT ... FOR UPDATE on one node row, returning the row as it is
+    *now*. A plain `with_for_update().get()` hands back the copy already
+    in the identity map without touching its attributes, so a check on
+    `deleted_at` after the lock would read whatever an earlier unlocked
+    query saw. `populate_existing` overwrites that copy with the locked
+    read (pending changes are flushed first, as for any query), which is
+    the whole point of checking under the lock."""
+    return db.session.get(
+        Node, node_id, with_for_update=True, populate_existing=True,
+    )
+
+
 def prompt_root_of(node, user_id: int, *, lock: bool = False):
     """The alive system-prompt root of `node`'s thread when the user may
     delete it; else None.
@@ -54,7 +67,7 @@ def prompt_root_of(node, user_id: int, *, lock: bool = False):
     if not deletable(root):
         return None
     if lock:
-        root = Node.query.with_for_update().get(root_id)
+        root = lock_node(root_id)
         if not deletable(root):
             return None
     return root
@@ -153,7 +166,7 @@ def assert_parent_alive(parent_id) -> Optional[Tuple[object, int]]:
     except (TypeError, ValueError):
         return jsonify({"error": "Invalid parent_id"}), 400
 
-    parent = Node.query.with_for_update().get(pid)
+    parent = lock_node(pid)
     if parent is None:
         return jsonify({"error": "Parent node not found"}), 404
     if parent.deleted_at is not None:
@@ -162,11 +175,15 @@ def assert_parent_alive(parent_id) -> Optional[Tuple[object, int]]:
 
 
 class Deleted(NamedTuple):
-    """What a soft-delete flagged: how many nodes, and which of them
-    were pinned (each pinned node is a Log card of its own, so the
-    client drops those cards along with the target's)."""
-    count: int
+    """What a soft-delete flagged: which nodes, and which of them were
+    pinned (each pinned node is a Log card of its own, so the client
+    drops those cards along with the target's)."""
+    ids: list
     pinned_ids: list
+
+    @property
+    def count(self) -> int:
+        return len(self.ids)
 
 
 def soft_delete_node(node_id: int, user_id: int, *,
@@ -181,14 +198,14 @@ def soft_delete_node(node_id: int, user_id: int, *,
     """
     now = datetime.utcnow()
 
-    root = Node.query.with_for_update().get(node_id)
+    root = lock_node(node_id)
     if root is None:
         return None
     if not can_user_edit_node(root, user_id):
         return None
 
     visited: set[int] = set()
-    flagged = 0
+    flagged: list[int] = []
     pinned_ids: list[int] = []
 
     # Process the root first so we can clear pinned_at on it specifically.
@@ -198,7 +215,7 @@ def soft_delete_node(node_id: int, user_id: int, *,
             pinned_ids.append(root.id)
         root.deleted_at = now
         root.pinned_at = None
-        flagged += 1
+        flagged.append(root.id)
 
     if not with_descendants:
         return Deleted(flagged, pinned_ids)
@@ -222,7 +239,7 @@ def soft_delete_node(node_id: int, user_id: int, *,
             continue
         visited.add(nid)
 
-        locked = Node.query.with_for_update().get(nid)
+        locked = lock_node(nid)
         if locked is None:
             # Already purged by cleanup, or never existed (e.g. race).
             continue
@@ -238,7 +255,7 @@ def soft_delete_node(node_id: int, user_id: int, *,
             if locked.pinned_at is not None:
                 pinned_ids.append(locked.id)
             locked.deleted_at = now
-            flagged += 1
+            flagged.append(locked.id)
 
         # Re-query children under the lock — catches concurrent inserts that
         # may have raced in before we acquired this node's lock.
