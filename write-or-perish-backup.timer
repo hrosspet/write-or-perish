@@ -1,0 +1,13 @@
+[Unit]
+Description=Nightly Write or Perish backup
+
+[Timer]
+# 08:30 UTC: US night, Prague morning — failures are visible at start of day.
+# The disk snapshot schedule runs at 09:00 UTC, so the two never overlap.
+OnCalendar=*-*-* 08:30:00 UTC
+RandomizedDelaySec=10m
+Persistent=true
+Unit=write-or-perish-backup.service
+
+[Install]
+WantedBy=timers.target
