@@ -30,6 +30,15 @@ const tombstoneStyle = {
   marginBottom: '0.6rem',
 };
 
+// The tag a prompt-rooted node wears. Keys are identifiers ("read_thread");
+// the tag is a word. Both read prompts are one thing to the user: a read.
+const PROMPT_LABELS = {
+  read: 'Read',
+  read_thread: 'Read',
+};
+const promptLabel = (key) => PROMPT_LABELS[key]
+  || (key.charAt(0).toUpperCase() + key.slice(1)).replace(/_/g, ' ');
+
 const Bubble = ({
   node,
   onClick,
@@ -268,7 +277,7 @@ const Bubble = ({
                   color: "var(--accent-dim)",
                   backgroundColor: "var(--accent-subtle)",
                 }}>
-                  {promptKey.charAt(0).toUpperCase() + promptKey.slice(1)}
+                  {promptLabel(promptKey)}
                 </span>
               ) : isVoiceNote ? (
                 <span style={{

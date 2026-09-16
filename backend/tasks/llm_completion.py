@@ -3,6 +3,7 @@ Celery task for asynchronous LLM completion.
 """
 import difflib
 import json
+import uuid
 import re
 import time
 from celery import Task
@@ -32,7 +33,9 @@ from backend.utils.quotes import (
     resolve_ext_quotes, has_ext_quotes, find_ext_quote_ids,
 )
 from backend.utils.node_split import NODE_CHAR_CAP
-from backend.utils.session_helpers import chain_has_agentic_prompt
+from backend.utils.session_helpers import (
+    chain_has_agentic_prompt, strip_agentic_prompts,
+)
 from backend.utils.timefmt import local_stamp, strip_edge_timestamps
 from backend.utils.api_keys import determine_api_key_type, get_api_keys_for_usage
 from backend.utils.cost import calculate_llm_cost_microdollars
@@ -2007,8 +2010,12 @@ def _ca_batch_roundtrip(task, llm_node, model_id, api_model, messages,
             meta = json.loads(llm_node.tool_calls_meta) or []
         except (json.JSONDecodeError, TypeError):
             meta = []
+    # Only the live submission counts: a cancelled entry (the admin's
+    # cancel-and-rerun, see routes/read.py) stays in the meta as history
+    # and a new submission is appended after it.
     entry = next((m for m in meta if isinstance(m, dict)
-                  and m.get("name") == "_batch"), None)
+                  and m.get("name") == "_batch"
+                  and m.get("status") == "submitted"), None)
     now = datetime.utcnow().isoformat(timespec="seconds")
     if entry is None:
         max_tokens = min(
@@ -2048,19 +2055,29 @@ def _ca_batch_roundtrip(task, llm_node, model_id, api_model, messages,
     llm_node.tool_calls_meta = json.dumps(meta)
     db.session.commit()
     if ca_refs:
-        # Feed reply: the JSON answer becomes saved references + FeedPick
-        # rows (read mark, good/bad verdict and the model's claims all
-        # live on rows, not in prose); the node text is the verdict.
-        from backend.utils.ca_feed import (
-            parse_feed_reply, render_feed_reply, save_feed_picks)
-        from backend.utils.community_archive import expand_ca_citations
-        verdict, picks = parse_feed_reply(resp["content"], ca_refs)
-        save_feed_picks(llm_node.human_owner_id, llm_node, picks)
-        resp["content"] = expand_ca_citations(
-            render_feed_reply(verdict, picks), ca_refs)
-        logger.info("Node %s: feed reply with %d picks (%d recommended)",
-                    llm_node.id, len(picks),
-                    sum(1 for p in picks if p["recommend"]))
+        resp = _collect_feed_reply(llm_node, resp, ca_refs)
+    return resp
+
+
+def _collect_feed_reply(llm_node, resp, ca_refs):
+    """Turn the feed's JSON answer into the reply: each pick becomes a
+    saved reference + FeedPick row (rank, relevance, recommend and the
+    quote-tweet text, for judging the model's claims against the user's
+    verdicts later), and the node text is the whole rendered feed: the
+    verdict, then each quote-tweet over its {quote_ext:ID} marker. The
+    same path serves the batch collect and the admin's live rerun."""
+    from backend.utils.ca_feed import (
+        parse_feed_reply, render_feed_reply, save_feed_picks)
+    from backend.utils.community_archive import expand_ca_citations
+    verdict, picks = parse_feed_reply(resp["content"], ca_refs)
+    rows = save_feed_picks(llm_node.human_owner_id, llm_node, picks)
+    resp["content"] = expand_ca_citations(
+        render_feed_reply(
+            verdict, [(r.get_why(), r.external_item_id) for r in rows]),
+        ca_refs)
+    logger.info("Node %s: feed reply with %d picks (%d recommended)",
+                llm_node.id, len(rows),
+                sum(1 for r in rows if r.recommended))
     return resp
 
 
@@ -2125,9 +2142,10 @@ def resume_stuck_feed_batches():
                 source_mode = mode.get("source_mode") if mode else None
             except (json.JSONDecodeError, TypeError):
                 pass
-            task = generate_llm_response.delay(
-                parent.id, node.id, node.llm_model, node.human_owner_id,
-                source_mode=source_mode)
+            # Task id chosen here and committed before the dispatch: the
+            # task bails when the node's task id is not its own (see the
+            # superseded-poll guard in generate_llm_response).
+            task_id = str(uuid.uuid4())
             meta = json.loads(node.tool_calls_meta)
             for m in meta:
                 if isinstance(m, dict) and m.get("name") == "_batch":
@@ -2135,11 +2153,17 @@ def resume_stuck_feed_batches():
                     m["resumed_at"] = m["last_polled_at"]
                     m["resumed_count"] = int(m.get("resumed_count") or 0) + 1
             node.tool_calls_meta = json.dumps(meta)
-            node.llm_task_id = task.id
+            node.llm_task_id = task_id
             db.session.commit()
+            generate_llm_response.apply_async(
+                args=(parent.id, node.id, node.llm_model,
+                      node.human_owner_id),
+                kwargs={"source_mode": source_mode},
+                task_id=task_id,
+            )
             resumed.append(node.id)
             logger.warning("Resumed orphaned feed batch %s on node %s (task %s)",
-                           entry.get("batch_id"), node.id, task.id)
+                           entry.get("batch_id"), node.id, task_id)
         return {"resumed": resumed}
 
 
@@ -2351,7 +2375,7 @@ def prewarm_anthropic_cache(system_node_id, user_id, model_id,
 
 
 @celery.task(base=LLMCompletionTask, bind=True)
-def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id: str, user_id: int, source_mode: str = None, cache_split_offset: int = None):
+def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id: str, user_id: int, source_mode: str = None, cache_split_offset: int = None, ca_live: bool = False):
     """
     Asynchronously generate an LLM response and update a placeholder node.
 
@@ -2375,6 +2399,20 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             raise ValueError(f"Parent node {parent_node_id} not found")
         if not llm_node:
             raise ValueError(f"LLM node {llm_node_id} not found")
+
+        # A superseded feed poll: the admin's cancel-and-rerun
+        # (routes/read.py) re-dispatched this node under a new task id
+        # and revoked this one. If the revoke did not reach the worker,
+        # stop here rather than submit a second batch for the node.
+        this_task_id = getattr(getattr(self, "request", None), "id", None)
+        if (this_task_id and llm_node.llm_task_id
+                and llm_node.llm_task_id != this_task_id
+                and llm_node.tool_calls_meta
+                and '"_batch"' in llm_node.tool_calls_meta):
+            logger.warning(
+                "Node %s: task %s superseded by %s; not polling",
+                llm_node_id, this_task_id, llm_node.llm_task_id)
+            return {"status": "superseded", "llm_node_id": llm_node_id}
 
         from backend.utils.spend import user_is_capped
         if user_is_capped(user_id):
@@ -2487,6 +2525,24 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     "Rendered %s for node %s: %s (~%d tokens)",
                     ca_placeholder_match, ca_node.id, ca_stats,
                     approximate_token_count(ca_tweets_content))
+                # A read runs against the user's own conversation, never
+                # under the agentic system prompt: a Voice / Text mode
+                # thread's tools, mode notes and persona have nothing to
+                # do with judging tweets, and the prompt is the one part
+                # of the thread the user did not write. Drop every
+                # agentic prompt node wherever it sits (a root, or one
+                # attached mid-thread) and keep the messages around it,
+                # so the read still sees the sharing that came before an
+                # agentic session started under it. With it gone the
+                # chain is not agentic: no tools, no notes, no mode
+                # indicator.
+                node_chain, dropped = strip_agentic_prompts(
+                    node_chain, keep=ca_node)
+                if dropped:
+                    logger.info(
+                        "Read for node %s: dropped agentic prompt node(s) "
+                        "%s from the context", llm_node_id,
+                        [n.id for n in dropped])
 
             # Every context artifact is pinned to a per-session snapshot.
             # The node carrying a placeholder also carries a
@@ -3147,21 +3203,31 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # below, after _finalize is defined. Any provider the
                 # feed does not support fails here rather than silently
                 # running the full-price, unstructured live call.
-                batch_mode = needs_ca
+                # The admin's live rerun (ca_live) skips the batch and
+                # asks the live API for the same structured shape.
+                if needs_ca and provider not in CA_BATCH_PROVIDERS:
+                    raise ValueError(
+                        f"{{ca_tweets}} is not supported on {model_id} "
+                        f"({provider}); pick an Anthropic or OpenAI "
+                        "model.")
+                batch_mode = needs_ca and not ca_live
                 if batch_mode:
-                    if provider not in CA_BATCH_PROVIDERS:
-                        raise ValueError(
-                            f"{{ca_tweets}} is not supported on {model_id} "
-                            f"({provider}); pick an Anthropic or OpenAI "
-                            "model.")
                     response = None
                     break
+                feed_schema = None
+                if needs_ca:
+                    from backend.utils.ca_feed import FEED_SCHEMA
+                    feed_schema = FEED_SCHEMA
                 try:
                     response = LLMProvider.get_completion(
                         model_id, messages, api_keys,
                         tools=agentic_tools,
                         prompt_cache_key=f"loore-t{thread_root_id}",
+                        output_schema=feed_schema,
                     )
+                    if needs_ca:
+                        response = _collect_feed_reply(
+                            llm_node, response, ca_refs)
                     break  # Success
                 except PromptTooLongError as e:
                     if attempt == MAX_RETRIES or not needs_export:

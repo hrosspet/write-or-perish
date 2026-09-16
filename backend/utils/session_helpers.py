@@ -21,6 +21,22 @@ def chain_has_agentic_prompt(node_chain):
     return False
 
 
+def strip_agentic_prompts(node_chain, keep=None):
+    """*node_chain* without its agentic prompt nodes (voice / textmode),
+    wherever they sit: the root, or one attached mid-thread. The
+    messages around them stay, so a reader of the chain still sees the
+    sharing that came before an agentic session started under it. A
+    node passed as *keep* stays even if agentic. Returns (chain,
+    dropped)."""
+    dropped = [n for n in node_chain
+               if n is not keep
+               and (n.get_prompt_key() if hasattr(n, 'get_prompt_key')
+                    else None) in AGENTIC_PROMPT_KEYS]
+    if not dropped:
+        return list(node_chain), []
+    return [n for n in node_chain if n not in dropped], dropped
+
+
 def ancestors_have_prompt(node, user_id, prompt_key):
     """Walk up ancestors and check if any node carries a prompt key that
     matches — the key stamped on the node (kept after a per-thread edit

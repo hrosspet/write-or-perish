@@ -832,6 +832,15 @@ def update_node(node_id):
         ai_usage = data["ai_usage"]
         if not validate_ai_usage(ai_usage):
             return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
+        # A read's nodes quote other people's public tweets, which Loore
+        # has no licence to train on (see ca_feed.FEED_AI_USAGE).
+        if ai_usage == "train":
+            from backend.utils.ca_feed import is_feed_node
+            if is_feed_node(node):
+                return jsonify({
+                    "error": "A Community Archive read cannot be used for "
+                             "training: it quotes other people's tweets.",
+                }), 400
         node.ai_usage = ai_usage
 
     # Settings that actually changed here are the only ones a requested

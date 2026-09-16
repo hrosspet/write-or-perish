@@ -274,6 +274,18 @@ def anthropic_batch_submit_one(api_key, custom_id, api_model, messages,
     return batch.id
 
 
+def anthropic_batch_cancel_one(api_key, batch_id):
+    """Cancel a batch (the admin's cancel-and-rerun). Best effort: a
+    batch that already ended cannot be cancelled and the API says so;
+    the caller only needs the item not to be collected any more."""
+    from anthropic import Anthropic
+    client = Anthropic(api_key=api_key)
+    batch = client.messages.batches.cancel(batch_id)
+    log.info("Anthropic batch %s cancel requested: status=%s", batch_id,
+             batch.processing_status)
+    return batch.processing_status
+
+
 def anthropic_batch_collect_one(api_key, batch_id, custom_id):
     """Poll a one-item batch. Returns (processing_status, resp) where resp
     is None until the batch has ended, and otherwise the same dict shape
@@ -365,6 +377,17 @@ def openai_batch_submit_one(api_key, custom_id, api_model, messages,
         completion_window="24h")
     log.info("OpenAI one-item batch submitted: %s (%s)", batch.id, custom_id)
     return batch.id
+
+
+def openai_batch_cancel_one(api_key, batch_id):
+    """Cancel a batch (the admin's cancel-and-rerun); see the Anthropic
+    twin."""
+    from openai import OpenAI
+    client = OpenAI(api_key=api_key)
+    batch = client.batches.cancel(batch_id)
+    log.info("OpenAI batch %s cancel requested: status=%s", batch_id,
+             batch.status)
+    return batch.status
 
 
 def openai_batch_collect_one(api_key, batch_id, custom_id):
