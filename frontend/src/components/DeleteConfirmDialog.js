@@ -73,7 +73,10 @@ const buttonBaseStyle = {
  *     nests under it. Single Delete button.
  *   - "prompt": follow-up shown when the confirmed delete would leave a
  *     text/voice session with only its system prompt alive. Asks
- *     whether to delete the prompt as well.
+ *     whether to delete the prompt as well. `listedIn` names where the
+ *     session would then be listed by the prompt's text: the Log for a
+ *     private session, the public page for a public one (the Log
+ *     doesn't list alive public roots).
  *
  * onConfirm receives { withDescendants: boolean }, or for "prompt"
  * { includePrompt: boolean }.
@@ -82,6 +85,7 @@ function DeleteConfirmDialog({
   open,
   mode = "single",
   hasChildren = false,
+  listedIn = "your Log",
   onClose,
   onConfirm,
 }) {
@@ -107,7 +111,7 @@ function DeleteConfirmDialog({
     body = (
       <>
         After this, nothing is left in the session but its system prompt,
-        and your Log would list the session by the prompt's text.
+        and {listedIn} would list the session by the prompt's text.
       </>
     );
     buttons = (
@@ -121,7 +125,7 @@ function DeleteConfirmDialog({
             fontSize: "0.82rem", color: "var(--text-muted)",
             fontWeight: 300, marginTop: "2px",
           }}>
-            The whole session leaves your Log.
+            The whole session leaves {listedIn}.
           </div>
         </button>
         <button

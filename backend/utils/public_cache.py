@@ -72,16 +72,25 @@ def invalidate(*paths):
         pass
 
 
-def _root_of(node):
-    """Topmost ancestor by parent chain (privacy-blind — this is cache
-    accounting, not access control)."""
+def _roots_of(nodes):
+    """Topmost ancestor of each node by parent chain, with one recursive
+    query for the lot (privacy-blind — this is cache accounting, not
+    access control). A node that is its own root, or whose root can't be
+    found, maps to itself."""
     from backend.models import Node
     from backend.utils.thread_tree import thread_root_of
 
-    if not node.parent_id:
-        return node
-    root_id = thread_root_of([node.id]).get(node.id)
-    return Node.query.get(root_id) if root_id else node
+    roots = {n.id: n for n in nodes if not n.parent_id}
+    pending = [n for n in nodes if n.parent_id]
+    root_id_of = thread_root_of([n.id for n in pending]) if pending else {}
+    missing = set(root_id_of.values()) - set(roots)
+    if missing:
+        roots.update({r.id: r for r in Node.query.filter(Node.id.in_(missing)).all()})
+    return [roots.get(root_id_of.get(n.id, n.id), n) for n in nodes]
+
+
+def _root_of(node):
+    return _roots_of([node])[0]
 
 
 def _paths_for_root(root):
@@ -120,7 +129,7 @@ def invalidate_for_user(user):
         ((Node.human_owner_id == user.id) | (Node.user_id == user.id)),
         Node.privacy_level == "public",
     ).all()
-    for node in rows:
+    for node, root in zip(rows, _roots_of(rows)):
         paths.add(f"/node/{node.id}")
-        paths.update(_paths_for_root(_root_of(node)))
+        paths.update(_paths_for_root(root))
     invalidate(*paths)

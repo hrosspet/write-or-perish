@@ -2936,16 +2936,18 @@ def delete_node(node_id):
             prompt_root_of(pre, current_user.id, lock=True)
             if delete_orphaned_prompt else None
         )
-        flagged = soft_delete_node(
+        deleted = soft_delete_node(
             node_id, current_user.id, with_descendants=with_descendants,
         )
-        if flagged is None:
+        if deleted is None:
             # Concurrent purge or permission flip between the pre-check and
             # the locking re-fetch.
             db.session.rollback()
             return jsonify({"error": "Not found or not authorized"}), 404
+        flagged = deleted.count
         orphaned_prompt_deleted = None
-        if prompt_root is not None and soft_delete_session_if_empty(prompt_root):
+        if prompt_root is not None and soft_delete_session_if_empty(
+                prompt_root, current_user.id):
             orphaned_prompt_deleted = prompt_root.id
             flagged += 1
         # Deleting a published share's public node via the node UI must
@@ -2971,6 +2973,10 @@ def delete_node(node_id):
             # The session root's id when `delete_orphaned_prompt` took it
             # too, else null — the client then knows the thread is gone.
             "orphaned_prompt_deleted": orphaned_prompt_deleted,
+            # Pinned nodes the cascade took: each is a Log card of its
+            # own (a reply pinned under the target, possibly in someone
+            # else's thread), so the Log drops those cards too.
+            "deleted_pinned_ids": deleted.pinned_ids,
         }), 200
     except Exception as e:
         db.session.rollback()

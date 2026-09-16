@@ -908,15 +908,74 @@ def test_delete_impact_depends_on_descendants_choice(app, alice):
     assert _impact(client, entry.id, with_descendants=True) == root.id
 
 
-def test_delete_impact_counts_other_users_replies_as_remaining(app, alice, bob):
+def test_delete_impact_counts_other_users_replies_alice_can_see(app, alice, bob):
+    """Remaining content is what the Log would show: Bob's public reply
+    survives the cascade and keeps the session; his private reply is
+    invisible to Alice, so for her the session is empty and the dialog
+    offers the prompt. The Log's fallback agrees (see the log test)."""
     root = _prompt_session(alice)
     entry = _make_node(alice, parent=root, content="entry")
-    _make_node(bob, parent=entry, content="bob's reply")
+    public_reply = _make_node(bob, parent=entry, content="bob's public reply")
+    public_reply.privacy_level = "public"
+    _db.session.commit()
     client = app.test_client()
     _login(client, alice)
-    # Bob's reply survives the cascade, so the session is not left with
-    # only the prompt.
     assert _impact(client, entry.id, with_descendants=True) is None
+
+    public_reply.privacy_level = "private"
+    _db.session.commit()
+    assert _impact(client, entry.id, with_descendants=True) == root.id
+
+
+def test_dialog_and_log_agree_when_only_an_invisible_reply_survives(app, alice, bob):
+    """Alice's session → her entry → Bob's private reply. The Log card
+    can't show Bob's reply, so it previews the prompt; the delete
+    dialog must then offer the prompt too, and the flagged DELETE must
+    take it. Both sides walk the tree with the same viewer filter."""
+    _ensure_log_bp(app)
+    root = _prompt_session(alice)
+    entry = _make_node(alice, parent=root, content="entry")
+    bobs = _make_node(bob, parent=entry, content="bob's private reply")
+    client = app.test_client()
+    _login(client, alice)
+    assert _impact(client, entry.id, with_descendants=True) == root.id
+
+    r = client.delete(f"/nodes/{entry.id}", query_string={
+        "delete_descendants": "true", "delete_orphaned_prompt": "true",
+    })
+    assert r.status_code == 200, r.json
+    assert r.json["orphaned_prompt_deleted"] == root.id
+    _db.session.expire_all()
+    assert Node.query.get(root.id).deleted_at is not None
+    assert Node.query.get(entry.id).deleted_at is not None
+    # Bob's reply is his: it stays alive under the tombstones.
+    assert Node.query.get(bobs.id).deleted_at is None
+    # And the session is gone from Alice's Log (nothing she can see is
+    # alive under the deleted root).
+    assert root.id not in _log_cards(app, alice)
+
+
+def test_delete_response_lists_pinned_nodes_the_cascade_took(app, alice, bob):
+    """Bob's root → Alice's P1 (pinned) → Bob's B2 → Alice's P2 (pinned).
+    Deleting P1 with descendants takes P2 too; each pinned node is a Log
+    card, so the response names them for the client to drop."""
+    root = _make_node(bob, content="bob's root")
+    p1 = _make_node(alice, parent=root, content="alice pinned 1")
+    b2 = _make_node(bob, parent=p1, content="bob's reply")
+    p2 = _make_node(alice, parent=b2, content="alice pinned 2")
+    unrelated = _make_node(alice, parent=root, content="alice elsewhere")
+    for n in (p1, p2, unrelated):
+        n.pinned_at = datetime.utcnow()
+    _db.session.commit()
+    client = app.test_client()
+    _login(client, alice)
+    r = client.delete(f"/nodes/{p1.id}", query_string={"delete_descendants": "true"})
+    assert r.status_code == 200, r.json
+    assert sorted(r.json["deleted_pinned_ids"]) == sorted([p1.id, p2.id])
+    _db.session.expire_all()
+    assert Node.query.get(p2.id).deleted_at is not None
+    assert Node.query.get(b2.id).deleted_at is None
+    assert Node.query.get(unrelated.id).deleted_at is None
 
 
 def test_delete_impact_ignores_already_deleted_siblings(app, alice):
@@ -1039,10 +1098,15 @@ def test_orphaned_prompt_is_never_someone_elses_root(app, alice, bob):
     assert Node.query.get(root.id).deleted_at is None
 
 
-def _log_cards(app, user):
+def _ensure_log_bp(app):
+    """Register the Log blueprint — before the app's first request."""
     from backend.routes.log import log_bp
     if "log_bp" not in app.blueprints:
         app.register_blueprint(log_bp, url_prefix="/api")
+
+
+def _log_cards(app, user):
+    _ensure_log_bp(app)
     client = app.test_client()
     _login(client, user)
     r = client.get("/api/log")
@@ -1065,11 +1129,34 @@ def test_log_prompt_session_falls_through_to_the_first_alive_descendant(app, ali
     assert card["preview"] == "the AI reply"
     assert card["prompt_key"] == "default"
 
+    # The reply count is the shown node's, not the root's (which has no
+    # alive child at all).
+    for i in range(3):
+        _make_node(alice, parent=reply, content=f"follow-up {i}")
+    card = _log_cards(app, alice)[root.id]
+    assert card["child_count"] == 3
+
     # An alive direct child still wins over a deeper node, even one
     # created earlier.
     later_entry = _make_node(alice, parent=root, content="a later entry")
     card = _log_cards(app, alice)[root.id]
     assert card["id"] == later_entry.id
+
+
+def test_log_entry_pinned_in_its_own_session_is_one_card(app, alice):
+    """A session root whose display node is also a pinned row of the
+    page must not yield two cards with the same id."""
+    root = _prompt_session(alice)
+    entry = _make_node(alice, parent=root, content="the entry")
+    entry.pinned_at = datetime.utcnow()
+    _db.session.commit()
+    _ensure_log_bp(app)
+    client = app.test_client()
+    _login(client, alice)
+    cards = client.get("/api/log").json["nodes"]
+    assert [c["id"] for c in cards] == [entry.id]
+    assert cards[0]["thread_root_id"] == root.id
+    assert cards[0]["pinned_at"] is not None
 
 
 def test_log_prompt_session_with_nothing_alive_shows_the_prompt(app, alice, monkeypatch):

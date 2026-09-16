@@ -16,7 +16,7 @@ cheap insurance for any future bulk-delete API).
 """
 
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import NamedTuple, Optional, Tuple
 
 from flask import jsonify
 
@@ -33,36 +33,50 @@ def prompt_root_of(node, user_id: int, *, lock: bool = False):
     With `lock`, the root row is taken FOR UPDATE before anything else in
     the delete transaction: an INSERT under the root needs FOR KEY SHARE
     on it, so no new entry can land in the session between the
-    "nothing left" check and the root's own soft-delete.
+    "nothing left" check and the root's own soft-delete. The lock is
+    only taken once the unlocked row has passed the checks — a reply in
+    someone else's session must not block that user's inserts for the
+    length of the delete walk — and the checks run again on the locked
+    row, which is re-read from the database.
     """
     if node.parent_id is None or node.deleted_at is not None:
         return None
     root_id = thread_root_of([node.id]).get(node.id)
     if root_id is None or root_id == node.id:
         return None
-    query = Node.query.with_for_update() if lock else Node.query
-    root = query.get(root_id)
-    if (root is None or root.deleted_at is not None
-            or not root.is_system_prompt
-            or not can_user_edit_node(root, user_id)):
+
+    def deletable(root):
+        return (root is not None and root.deleted_at is None
+                and root.is_system_prompt
+                and can_user_edit_node(root, user_id))
+
+    root = Node.query.get(root_id)
+    if not deletable(root):
         return None
+    if lock:
+        root = Node.query.with_for_update().get(root_id)
+        if not deletable(root):
+            return None
     return root
 
 
-def subtree_has_alive_nodes(root_id: int) -> bool:
+def subtree_has_alive_nodes(root_id: int, viewer_id: int) -> bool:
     """True when anything under `root_id` (not the root itself) is
-    alive. Pending soft-deletes in the session are flushed first, so this
-    reads the state a commit would produce."""
+    alive and reachable for `viewer_id` — the definition of remaining
+    content shared with the Log (see thread_tree). Pending soft-deletes
+    in the session are flushed first, so this reads the state a commit
+    would produce."""
     db.session.flush()
-    return any(r.deleted_at is None for r in subtree_rows(root_id))
+    return any(r.deleted_at is None for r in subtree_rows(root_id, viewer_id))
 
 
-def soft_delete_session_if_empty(root) -> bool:
+def soft_delete_session_if_empty(root, user_id: int) -> bool:
     """The "delete the system prompt too" half of a DELETE: once the
     target is flagged in the session, tombstone the (locked) prompt
-    `root` when nothing alive is left under it. Returns whether it did.
-    Entries that landed in the meantime keep the root alive."""
-    if subtree_has_alive_nodes(root.id):
+    `root` when nothing the user can see is left alive under it. Returns
+    whether it did. Entries that landed in the meantime keep the root
+    alive."""
+    if subtree_has_alive_nodes(root.id, user_id):
         return False
     root.deleted_at = datetime.utcnow()
     root.pinned_at = None
@@ -81,14 +95,16 @@ def orphaned_system_prompt_id(node, user_id: int, *,
 
     Mirrors soft_delete_node's selection without locking anything: the
     node itself, plus (with_descendants) every descendant the user can
-    edit. Other users' replies stay alive and therefore count as
-    remaining content. A root the user may not delete (a reply pinned in
-    someone else's session) is never offered.
+    edit. What counts as remaining is what the Log would show: alive
+    nodes the user can reach (another user's public reply stays alive
+    and counts; their private reply is invisible to this user and does
+    not). A root the user may not delete (a reply pinned in someone
+    else's session) is never offered.
     """
     root = prompt_root_of(node, user_id)
     if root is None:
         return None
-    rows = subtree_rows(root.id)
+    rows = subtree_rows(root.id, user_id)
 
     flagged = {node.id}
     if with_descendants:
@@ -145,15 +161,23 @@ def assert_parent_alive(parent_id) -> Optional[Tuple[object, int]]:
     return None
 
 
+class Deleted(NamedTuple):
+    """What a soft-delete flagged: how many nodes, and which of them
+    were pinned (each pinned node is a Log card of its own, so the
+    client drops those cards along with the target's)."""
+    count: int
+    pinned_ids: list
+
+
 def soft_delete_node(node_id: int, user_id: int, *,
-                     with_descendants: bool) -> Optional[int]:
+                     with_descendants: bool) -> Optional[Deleted]:
     """Soft-delete `node_id` (and editable descendants if requested).
 
-    Returns the count of nodes flagged with deleted_at, or None if the
-    target node does not exist or the user lacks edit permission on it.
+    Returns what was flagged with deleted_at, or None if the target node
+    does not exist or the user lacks edit permission on it.
 
     The caller is responsible for the surrounding 403 / 404 / commit/rollback
-    handling — this helper just sets in-session state and returns the count.
+    handling — this helper just sets in-session state and returns the result.
     """
     now = datetime.utcnow()
 
@@ -165,16 +189,19 @@ def soft_delete_node(node_id: int, user_id: int, *,
 
     visited: set[int] = set()
     flagged = 0
+    pinned_ids: list[int] = []
 
     # Process the root first so we can clear pinned_at on it specifically.
     visited.add(root.id)
     if root.deleted_at is None:
+        if root.pinned_at is not None:
+            pinned_ids.append(root.id)
         root.deleted_at = now
         root.pinned_at = None
         flagged += 1
 
     if not with_descendants:
-        return flagged
+        return Deleted(flagged, pinned_ids)
 
     # BFS-style queue, sorted ascending each iteration for deterministic
     # global lock order across overlapping subtree-deletes.
@@ -208,6 +235,8 @@ def soft_delete_node(node_id: int, user_id: int, *,
         # this node also prevents new INSERTs under it during our walk.
         editable = can_user_edit_node(locked, user_id)
         if editable and locked.deleted_at is None:
+            if locked.pinned_at is not None:
+                pinned_ids.append(locked.id)
             locked.deleted_at = now
             flagged += 1
 
@@ -222,4 +251,4 @@ def soft_delete_node(node_id: int, user_id: int, *,
         )
         to_visit.extend(cid for (cid,) in child_rows if cid not in visited)
 
-    return flagged
+    return Deleted(flagged, pinned_ids)

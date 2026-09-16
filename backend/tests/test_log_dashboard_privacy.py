@@ -185,15 +185,19 @@ class TestLogPrivacy:
         assert "Bob public post" not in previews  # #228: public ≠ Log
         assert "Alice public post" not in previews  # other user's node
 
-    def test_log_total_count_only_own_nodes(self, app, data):
-        """The pagination total must only include the user's own nodes."""
+    def test_log_lists_only_own_nodes_and_no_corpus_wide_total(self, app, data):
+        """Only the user's own rows are paged, and the response carries no
+        `total`: counting it re-ran the whole-corpus subtree walk on every
+        page for nothing the client reads."""
         client = app.test_client()
         _login(client, data["alice_id"])
 
         resp = client.get("/api/log")
         # Alice sees only her private node (#228: her public one lives on
         # the public page, not in the Log).
-        assert resp.json["total"] == 1
+        assert len(resp.json["nodes"]) == 1
+        assert "total" not in resp.json
+        assert resp.json["has_more"] is False and resp.json["next_cursor"] is None
 
 
 # ── Public Dashboard ─────────────────────────────────────────────────────

@@ -484,9 +484,25 @@ function NodeDetail({ nodeIdOverride }) {
           `Deleted ${n} node${n === 1 ? "" : "s"}`,
           3000,
         );
-        // The session root went with the target: the whole thread is
-        // gone, so the ancestor walk below must not land on it.
-        const gone = new Set([targetId, data.orphaned_prompt_deleted].filter(Boolean));
+        // Where to land when nothing of this thread is left to show:
+        // public roots live in the Commons, everything else in the Log.
+        const leaveThread = () => {
+          if (node.privacy_level === "public"
+              && currentUser?.share_v1_enabled) {
+            navigate("/commons");
+          } else {
+            navigate("/log");
+          }
+        };
+        // The session root went with the target: nothing of ours is
+        // alive in the thread any more (the server took the root only
+        // because nothing was left), so there is no node to refetch or
+        // walk up to — the page being viewed is the root, the target,
+        // or something under them.
+        if (data.orphaned_prompt_deleted) {
+          leaveThread();
+          return undefined;
+        }
         // If the cascade swept the focal node away (target is an
         // ancestor of focal AND descendants were included), refetching
         // focal would 404. Treat this like a focal-target delete and
@@ -510,20 +526,14 @@ function NodeDetail({ nodeIdOverride }) {
         const upperBound = focalCascaded ? ancestorIdx : (node.ancestors?.length ?? 0);
         if (node.ancestors) {
           for (let i = upperBound - 1; i >= 0; i -= 1) {
-            if (!node.ancestors[i].deleted && !gone.has(node.ancestors[i].id)) {
+            if (!node.ancestors[i].deleted) {
               navigate(`/node/${node.ancestors[i].id}`);
               return;
             }
           }
         }
-        // No alive ancestor (deleted a root). Public roots live in the
-        // Commons, so land back there; everything else goes to the Log.
-        if (node.privacy_level === "public"
-            && currentUser?.share_v1_enabled) {
-          navigate("/commons");
-        } else {
-          navigate("/log");
-        }
+        // No alive ancestor (deleted a root).
+        leaveThread();
         return undefined;
       })
       .catch((err) => {
@@ -1356,6 +1366,11 @@ function NodeDetail({ nodeIdOverride }) {
       <DeleteConfirmDialog
         open={!!pendingPromptDelete}
         mode="prompt"
+        listedIn={
+          (node?.ancestors?.length ? node.ancestors[0] : node)?.privacy_level === "public"
+            ? "your public page"
+            : "your Log"
+        }
         onClose={() => setPendingPromptDelete(null)}
         onConfirm={handleConfirmPromptDelete}
       />

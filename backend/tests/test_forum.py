@@ -579,8 +579,9 @@ def test_log_prefetches_every_preview_and_batches_per_card_lookups(app, monkeypa
     _db.session.flush()
     _db.session.add(NodeContextArtifact(node=sys_root, artifact_type="prompt", artifact_id=prompt.id))
     _db.session.commit()
-    _mk_node("author", "first child of prompt", parent=sys_root, privacy="private")
+    first_child = _mk_node("author", "first child of prompt", parent=sys_root, privacy="private")
     _mk_node("author", "second child of prompt", parent=sys_root, privacy="private")
+    _mk_node("author", "AI reply to the first child", parent=first_child, privacy="private")
     # Soft-deleted root with a live reply (§4a Case 2): previews the reply.
     gone = _mk_node("author", "deleted root", privacy="private")
     _mk_node("author", "live reply under deleted", parent=gone, privacy="private")
@@ -601,18 +602,31 @@ def test_log_prefetches_every_preview_and_batches_per_card_lookups(app, monkeypa
             per_card.append(statement)
         elif "FROM node_context_artifact" in statement or "FROM user_prompt" in statement:
             per_card.append(statement)
+    walks = []
+
+    def count_walks(conn, cursor, statement, params, context, executemany):
+        if "subtree_walk" in statement:
+            walks.append(statement)
     event.listen(_db.engine, "after_cursor_execute", after)
+    event.listen(_db.engine, "after_cursor_execute", count_walks)
     try:
         r = _client_for(app, "author").get("/api/log?page=1&per_page=20")
     finally:
         event.remove(_db.engine, "after_cursor_execute", after)
+        event.remove(_db.engine, "after_cursor_execute", count_walks)
     assert r.status_code == 200
+    # Newest-node and first-alive picks come from ONE recursive walk over
+    # the page's subtrees, not one walk each.
+    assert len(walks) == 1, walks
     cards = {c["thread_root_id"]: c for c in r.get_json()["nodes"]}
     assert cards[plain.id]["preview"] == "plain root" and cards[plain.id]["child_count"] == 1
     assert cards[sys_root.id]["preview"] == "first child of prompt"
-    assert cards[sys_root.id]["prompt_key"] == "agentic" and cards[sys_root.id]["child_count"] == 2
+    assert cards[sys_root.id]["prompt_key"] == "agentic"
+    # The count is the displayed node's replies (the AI reply), not the
+    # root's two entries.
+    assert cards[sys_root.id]["child_count"] == 1
     assert cards[gone.id]["preview"] == "live reply under deleted"
-    assert cards[gone.id]["id"] != gone.id and cards[gone.id]["child_count"] == 1
+    assert cards[gone.id]["id"] != gone.id and cards[gone.id]["child_count"] == 0
     # Exactly the three previews went to the prefetch, once, before serializing.
     assert seen == [sorted(["plain root", "first child of prompt", "live reply under deleted"])]
     assert per_card == [], per_card
@@ -688,18 +702,85 @@ def test_log_pinned_reply_in_someone_elses_thread_targets_the_reply(app):
     assert Node.query.get(root.id).deleted_at is None
 
 
-def test_log_offset_paging_continues_from_the_cards_held(app):
-    """`offset` is the number of cards the client holds, so a card it
-    removed (delete) or one that appeared since (another tab) doesn't
-    shift the next page."""
+def test_log_cursor_paging_survives_deletes_and_inserts_between_pages(app):
+    """Pages continue from a cursor naming the last row seen, so a
+    thread deleted (in another tab) or created after the first page
+    neither skips nor repeats a thread on the next one."""
+    from datetime import datetime
     roots = [_mk_node("author", f"root {i}", privacy="private") for i in range(5)]
     by_newest = [n.id for n in sorted(roots, key=lambda n: n.id, reverse=True)]
     client = _client_for(app, "author")
 
-    r = client.get("/api/log?offset=2&per_page=2").get_json()
-    assert [c["thread_root_id"] for c in r["nodes"]] == by_newest[2:4]
-    assert r["has_more"] is True and r["offset"] == 2
+    first = client.get("/api/log?per_page=2").get_json()
+    assert [c["thread_root_id"] for c in first["nodes"]] == by_newest[:2]
+    assert first["has_more"] is True and first["next_cursor"]
 
-    r = client.get("/api/log?offset=4&per_page=2").get_json()
-    assert [c["thread_root_id"] for c in r["nodes"]] == by_newest[4:]
-    assert r["has_more"] is False
+    # Another tab deletes a thread of the first page and writes a new one.
+    Node.query.get(by_newest[0]).deleted_at = datetime(2026, 4, 1)
+    _db.session.commit()
+    _mk_node("author", "written since", privacy="private")
+
+    second = client.get(f"/api/log?per_page=2&cursor={first['next_cursor']}").get_json()
+    assert [c["thread_root_id"] for c in second["nodes"]] == by_newest[2:4]
+    third = client.get(f"/api/log?per_page=2&cursor={second['next_cursor']}").get_json()
+    assert [c["thread_root_id"] for c in third["nodes"]] == by_newest[4:]
+    assert third["has_more"] is False and third["next_cursor"] is None
+
+    assert client.get("/api/log?cursor=garbage").status_code == 400
+
+
+def test_log_rename_is_offered_only_for_the_users_own_thread_root(app):
+    """A reply pinned in someone else's thread (circles or private root)
+    targets itself, and only a root can be named — so the card says
+    rename is unavailable instead of letting the kebab hit a 400."""
+    from datetime import datetime
+    own_root = _mk_node("author", "own root", privacy="private")
+    own_pinned = _mk_node("author", "own pinned reply", parent=own_root, privacy="private")
+    own_pinned.pinned_at = datetime(2026, 3, 3)
+    foreign = {}
+    for privacy in ("circles", "private"):
+        root = _mk_node("visitor", f"visitor's {privacy} root", privacy=privacy)
+        pinned = _mk_node("author", f"author's reply ({privacy})", parent=root, privacy=privacy)
+        pinned.pinned_at = datetime(2026, 3, 2)
+        foreign[privacy] = pinned
+    _db.session.commit()
+
+    client = _client_for(app, "author")
+    cards = {c["id"]: c for c in client.get("/api/log?per_page=20").get_json()["nodes"]}
+    assert cards[own_root.id]["can_rename"] is True
+    assert cards[own_pinned.id]["can_rename"] is True
+    assert cards[own_pinned.id]["thread_root_id"] == own_root.id
+    for pinned in foreign.values():
+        card = cards[pinned.id]
+        assert card["can_rename"] is False
+        assert card["thread_root_id"] == pinned.id and card["thread_name"] is None
+        r = client.put(f"/api/nodes/{card['thread_root_id']}/thread-name",
+                       json={"thread_name": "x"})
+        assert r.status_code == 400
+
+
+def test_public_cache_resolves_roots_for_a_user_in_one_walk(app):
+    """invalidate_for_user used to run one recursive query per public
+    node; now the roots of all of them come from one walk."""
+    from sqlalchemy import event
+    from backend.utils import public_cache
+    author = User.query.filter_by(username="author").first()
+    root = _mk_node("visitor", "visitor's root")
+    for i in range(4):
+        mid = _mk_node("visitor", f"mid {i}", parent=root)
+        _mk_node("author", f"author's public reply {i}", parent=mid)
+    walks = []
+
+    def after(conn, cursor, statement, params, context, executemany):
+        if "thread_root_walk" in statement:
+            walks.append(statement)
+    event.listen(_db.engine, "after_cursor_execute", after)
+    try:
+        roots = public_cache._roots_of(
+            Node.query.filter(Node.user_id == author.id, Node.parent_id.isnot(None)).all()
+        )
+        public_cache.invalidate_for_user(author)
+    finally:
+        event.remove(_db.engine, "after_cursor_execute", after)
+    assert {r.id for r in roots} == {root.id}
+    assert len(walks) == 2  # one for _roots_of above, one inside invalidate_for_user

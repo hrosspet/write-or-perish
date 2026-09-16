@@ -21,26 +21,32 @@ function Log({ onSearchClick }) {
   const { addToast } = useToast();
   const navigate = useNavigate();
 
-  // The next page starts after the cards on screen, not at a page
-  // number: a card removed here (delete) or one that appeared since
-  // (another tab) would otherwise shift the offsets and skip or repeat
-  // a thread. Cards already held are dropped from the new page too.
-  const loadedCount = logNodes.length;
+  // The next page continues from the server's cursor (the last row of
+  // the previous page), not from a page number or the count of cards on
+  // screen: a thread deleted or written since, here or in another tab,
+  // then neither skips nor repeats a card. Ids already held are dropped
+  // anyway, so a card can't render twice.
+  const [nextCursor, setNextCursor] = useState(null);
   const fetchMore = useCallback((isFirst) => {
-    const offset = isFirst ? 0 : loadedCount;
     if (isFirst) setLoading(true);
     else setLoadingMore(true);
     setLoadMoreError(false);
 
-    api.get(`/log?offset=${offset}&per_page=20`)
+    const cursor = !isFirst && nextCursor ? `&cursor=${encodeURIComponent(nextCursor)}` : "";
+    api.get(`/log?per_page=20${cursor}`)
       .then(response => {
-        const { nodes, has_more } = response.data;
+        const { nodes, has_more, next_cursor } = response.data;
         setLogNodes(prev => {
-          if (isFirst) return nodes;
-          const held = new Set(prev.map(card => card.id));
-          return [...prev, ...nodes.filter(card => !held.has(card.id))];
+          const held = new Set(isFirst ? [] : prev.map(card => card.id));
+          const fresh = nodes.filter(card => {
+            if (held.has(card.id)) return false;
+            held.add(card.id);
+            return true;
+          });
+          return isFirst ? fresh : [...prev, ...fresh];
         });
         setHasMore(has_more);
+        setNextCursor(next_cursor || null);
       })
       .catch(err => {
         console.error(err);
@@ -51,7 +57,7 @@ function Log({ onSearchClick }) {
         setLoading(false);
         setLoadingMore(false);
       });
-  }, [loadedCount]);
+  }, [nextCursor]);
 
   useEffect(() => {
     fetchMore(true);
@@ -141,7 +147,13 @@ function Log({ onSearchClick }) {
           `Deleted ${n} node${n === 1 ? "" : "s"}`,
           3000,
         );
-        setLogNodes(prev => prev.filter(card => threadOf(card) !== targetId));
+        // Every card of the thread goes, and so does every card of a
+        // pinned node the cascade took (a reply of ours pinned deeper in
+        // someone else's thread is its own card, keyed by itself).
+        const gone = new Set(data.deleted_pinned_ids || []);
+        setLogNodes(prev => prev.filter(card => (
+          threadOf(card) !== targetId && !gone.has(card.id) && !gone.has(threadOf(card))
+        )));
       })
       .catch(err => {
         console.error(err);
@@ -229,11 +241,13 @@ function Log({ onSearchClick }) {
               node={node}
               onClick={handleBubbleClick}
               actions={[
-                {
+                // Only a thread root the user owns can be named; a reply
+                // pinned in someone else's thread has no rename.
+                ...(node.can_rename === false ? [] : [{
                   label: 'Rename thread',
                   action: () => setRenameTarget(node),
                   color: 'var(--text-primary)',
-                },
+                }]),
                 {
                   label: 'Delete thread',
                   action: () => handleDeleteThread(node),
