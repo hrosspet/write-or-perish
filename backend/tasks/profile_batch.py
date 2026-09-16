@@ -699,6 +699,11 @@ def _poll_profile_batches():
                 logger.error(
                     f"Apply batch result failed for user {user.id}: {e}",
                     exc_info=True)
+                # Counts as a failed attempt like a provider-side error:
+                # the step produced nothing, retries stay bounded, and
+                # the progress endpoint reports the chain as failed.
+                user.profile_batch_attempts = (
+                    user.profile_batch_attempts or 0) + 1
                 user.profile_batch_pending = False
                 db.session.commit()
                 continue

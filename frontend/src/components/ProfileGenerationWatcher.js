@@ -90,9 +90,12 @@ export default function ProfileGenerationWatcher() {
   };
 
   // The hook gave up (consecutive request failures): stop quietly and
-  // clear the indicator rather than leave a label nothing updates.
+  // clear the indicator rather than leave a label nothing updates. The
+  // hook keeps the last good `data` across failed requests, so that is
+  // not a sign the endpoint is still answering; the one case to leave to
+  // the data effect is a `failed` answer, which also sets `error`.
   useEffect(() => {
-    if (!active || !error || data) return;
+    if (!active || !error || data?.status === 'failed') return;
     console.warn('Profile progress polling stopped:', error);
     reset();
     window.dispatchEvent(new Event('loore_profile_done'));

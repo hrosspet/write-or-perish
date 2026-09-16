@@ -674,6 +674,30 @@ def test_poll_failed_item_bumps_attempts_and_clears_pending(app, monkeypatch):
         parent_profile_id=prev.id).first() is None
 
 
+def test_poll_apply_exception_bumps_attempts_and_clears_pending(app, monkeypatch):
+    """A result that raises while being applied counts as a failed attempt,
+    so retries stay bounded and the progress endpoint's batch_step_failed
+    reports the chain as failed rather than finished."""
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+
+    monkeypatch.setattr(pb, "batch_check_and_collect",
+                        lambda bids, keys: ({item["custom_id"]: "text"}, {}, {}))
+    monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
+
+    def boom(*a, **k):
+        raise RuntimeError("apply blew up")
+    monkeypatch.setattr(pb, "_apply_result", boom)
+
+    pb._poll_profile_batches()
+
+    u2 = User.query.get(u.id)
+    assert u2.profile_batch_attempts == 1
+    assert u2.profile_batch_pending is False
+    assert ProfileBatchJob.query.get(job.id).status == "collected"
+
+
 def test_poll_leaves_pending_job_untouched(app, monkeypatch):
     u = _user()
     prev = _prev_profile(u, datetime(2026, 5, 1))
