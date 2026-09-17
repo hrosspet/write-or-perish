@@ -94,7 +94,7 @@ function XLookupConfirmDialog({ open, handle, message, costUsd, onConfirm, onClo
             style={{ ...buttonBaseStyle, color: "var(--accent)" }}
           >
             <div style={{ fontWeight: 500 }}>Look up on X and whitelist</div>
-            <div style={subStyle}>One paid user read, {cost}, billed to you.</div>
+            <div style={subStyle}>One paid user read, {cost}, billed to the new account.</div>
           </button>
           <button
             onClick={onClose}

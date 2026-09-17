@@ -431,7 +431,7 @@ class TestWhitelistByXId:
         assert "2 Community Archive accounts" in r.json["error"]
         assert User.query.filter_by(username="alice").first() is None
 
-    def test_x_lookup_fallback_is_explicit_and_billed_to_the_admin(self, app, monkeypatch):
+    def test_x_lookup_fallback_is_explicit_and_billed_to_the_new_account(self, app, monkeypatch):
         client, admin = _admin_client(app)
         monkeypatch.setattr(ca_mod, "fetch_account", lambda h, timeout=None: None)
         seen = {}
@@ -451,7 +451,8 @@ class TestWhitelistByXId:
         assert r.json["user"]["twitter_id"] == "777"
         assert 0 < seen["timeout"] <= LOOKUP_TIMEOUT
         log = APICostLog.query.filter_by(request_type="x_id_lookup").one()
-        assert log.user_id == admin.id  # the admin pays, never the placeholder
+        # the read found this account's id: its own ledger, like its pre-fills
+        assert log.user_id == r.json["user"]["id"] and log.user_id != admin.id
         assert log.model_id == "x-api/user-lookup"
         assert log.cost_microdollars == x_api.cost_microdollars(0, user_reads=1)
 
@@ -466,6 +467,7 @@ class TestWhitelistByXId:
         assert r.status_code == 404, r.json
         assert "not on X" in r.json["error"]
         assert r.json["reason"] == "not-on-x" and "x_lookup_cost_usd" not in r.json
+        # no account came of it: the read stays on the admin's ledger
         assert APICostLog.query.filter_by(
             user_id=admin.id, request_type="x_id_lookup").count() == 1
         assert User.query.filter_by(username="alice").first() is None
@@ -497,6 +499,14 @@ class TestWhitelistByXId:
         assert r.status_code == 409, r.json
         assert r.json["user_id"] == holder.id
         assert User.query.filter_by(username="alice").first() is None
+
+        # found through a paid X read instead: that read is the holder's
+        monkeypatch.setattr(ca_mod, "fetch_account", lambda h, timeout=None: None)
+        monkeypatch.setattr(x_api, "lookup_user", lambda h, c, timeout=None: {
+            "id": "123", "username": "alice", "name": "A", "tweet_count": 1, "protected": False})
+        r = client.post("/api/admin/whitelist", json={"handle": "alice", "x_lookup": True})
+        assert r.status_code == 409
+        assert APICostLog.query.filter_by(request_type="x_id_lookup").one().user_id == holder.id
 
     def test_concurrent_insert_is_409_without_db_text(self, app, monkeypatch):
         """A double submit or a signup racing the insert: a readable 409,
@@ -918,6 +928,32 @@ class TestResolveXId:
         with pytest.raises(x_identity.XIdUnresolved, match="auth failed"):
             x_identity.resolve_x_id("alice", x_lookup=True, cost_user_id=admin.id)
         assert APICostLog.query.filter_by(user_id=admin.id, request_type="x_id_lookup").count() == 1
+
+    def test_deferred_cost_is_reported_not_logged(self, app, monkeypatch):
+        """The whitelist bills the account it creates, which does not exist
+        while the lookup runs: with defer_cost the read is counted on the
+        result (or the exception), never logged here."""
+        monkeypatch.setattr(ca_mod, "fetch_account", lambda h, timeout=None: None)
+        monkeypatch.setattr(x_api, "lookup_user", lambda h, c, timeout=None: {
+            "id": "1", "username": "alice", "name": None, "tweet_count": 0, "protected": False})
+        r = x_identity.resolve_x_id("alice", x_lookup=True, defer_cost=True)
+        assert r.paid_reads == 1 and APICostLog.query.count() == 0
+
+        monkeypatch.setattr(x_api, "lookup_user", lambda h, c, timeout=None: None)
+        with pytest.raises(x_identity.XIdUnresolved) as e:
+            x_identity.resolve_x_id("alice", x_lookup=True, defer_cost=True)
+        assert e.value.reason == "not-on-x" and e.value.paid_reads == 1
+        assert APICostLog.query.count() == 0
+
+        def no_token(h, c, timeout=None):
+            raise x_api.XApiError("X API auth failed (401).")  # sent=False
+        monkeypatch.setattr(x_api, "lookup_user", no_token)
+        with pytest.raises(x_identity.XIdUnresolved) as e:
+            x_identity.resolve_x_id("alice", x_lookup=True, defer_cost=True)
+        assert e.value.paid_reads == 0
+        # without defer, a user to bill is still required
+        with pytest.raises(ValueError):
+            x_identity.resolve_x_id("alice", x_lookup=True)
 
     def test_the_matched_record_travels_with_the_id(self, app, monkeypatch):
         monkeypatch.setattr(ca_mod, "fetch_account", lambda h, timeout=None: {

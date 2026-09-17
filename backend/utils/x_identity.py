@@ -32,6 +32,9 @@ class ResolvedX:
     # (archive: num_tweets; X: tweet_count, protected). Never re-resolve
     # the handle after this — a second lookup can name another account.
     account: dict = field(default_factory=dict)
+    # Paid X user reads made (0 or 1). Already logged unless the caller
+    # asked to defer the charge (``defer_cost``), in which case it bills.
+    paid_reads: int = 0
 
 
 class XIdUnresolved(Exception):
@@ -40,13 +43,15 @@ class XIdUnresolved(Exception):
     ``reason`` is one of: not-in-archive, archive-error, ambiguous,
     not-on-x, x-error. ``message`` is safe to show an admin."""
 
-    def __init__(self, reason, message):
+    def __init__(self, reason, message, paid_reads=0):
         super().__init__(message)
         self.reason = reason
         self.message = message
+        self.paid_reads = paid_reads  # see ResolvedX.paid_reads
 
 
-def _log_user_read(cost_user_id, handle):
+def log_user_read(cost_user_id, handle):
+    """Put one paid X user read for ``handle`` on ``cost_user_id``'s ledger."""
     from backend.extensions import db
     from backend.models import APICostLog
     from backend.utils import x_api
@@ -59,7 +64,7 @@ def _log_user_read(cost_user_id, handle):
 
 
 def resolve_x_id(handle, *, x_lookup=False, archive=True, cost_user_id=None,
-                 creds=None, timeout=LOOKUP_TIMEOUT):
+                 creds=None, timeout=LOOKUP_TIMEOUT, defer_cost=False):
     """ResolvedX for ``handle`` or raise XIdUnresolved.
 
     Community Archive first (free, exact username match) unless ``archive``
@@ -67,8 +72,11 @@ def resolve_x_id(handle, *, x_lookup=False, archive=True, cost_user_id=None,
     archive lacks is looked up on the X API only when ``x_lookup`` is true;
     that read is logged to APICostLog against ``cost_user_id`` (required
     then) whenever the request was sent — an error or a timeout on the
-    read included, since X may have counted it. ``timeout`` is one budget
-    for all the calls together."""
+    read included, since X may have counted it. With ``defer_cost`` the
+    read is not logged here but reported as ``paid_reads`` on the result
+    or the exception, for a caller whose account to bill does not exist
+    yet (the whitelist bills the account it creates). ``timeout`` is one
+    budget for all the calls together."""
     from backend.utils import community_archive as ca
 
     handle = (handle or "").strip().lstrip("@")
@@ -104,29 +112,32 @@ def resolve_x_id(handle, *, x_lookup=False, archive=True, cost_user_id=None,
         raise XIdUnresolved(
             "not-in-archive", f"@{handle} is not in the Community Archive.")
 
-    if cost_user_id is None:
+    if cost_user_id is None and not defer_cost:
         raise ValueError("a paid X lookup must name the user it is billed to")
     from flask import current_app
     from backend.utils import x_api
     if creds is None:
         creds = (current_app.config.get("TWITTER_API_KEY"),
                  current_app.config.get("TWITTER_API_SECRET"))
+    def settle(sent):
+        """Log the read now unless deferred; either way say how many."""
+        if sent and not defer_cost:
+            log_user_read(cost_user_id, handle)
+        return 1 if sent else 0
+
     step_timeout = budget("x-error")
-    sent = False
     try:
         account = x_api.lookup_user(handle, creds, timeout=step_timeout)
-        sent = True
     except x_api.XApiError as e:
-        sent = e.sent
-        raise XIdUnresolved("x-error", str(e)) from e
+        raise XIdUnresolved("x-error", str(e), paid_reads=settle(e.sent)) from e
     except Exception as e:
         logger.warning("X API lookup failed for @%s: %s", handle, e)
-        raise XIdUnresolved("x-error", f"X API lookup failed: {e}") from e
-    finally:
-        if sent:
-            _log_user_read(cost_user_id, handle)
+        raise XIdUnresolved("x-error", f"X API lookup failed: {e}",
+                            paid_reads=settle(False)) from e
+    paid = settle(True)
     if account is None:
         raise XIdUnresolved(
-            "not-on-x", f"@{handle} is not on X (suspended, renamed, or never existed).")
+            "not-on-x", f"@{handle} is not on X (suspended, renamed, or never existed).",
+            paid_reads=paid)
     return ResolvedX(str(account["id"]), "x-api", account["username"],
-                     account.get("name"), account)
+                     account.get("name"), account, paid_reads=paid)

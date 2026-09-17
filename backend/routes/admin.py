@@ -436,12 +436,14 @@ def whitelist_user():
     auth.py). The id comes from ``resolve_x_id``: the Community Archive
     (free, exact username match), or one paid X API user read when the
     body sets ``x_lookup`` — which the admin panel only sends after the
-    admin confirmed the spend in a dialog, per whitelist.
+    admin confirmed the spend in a dialog, per whitelist. That read is
+    billed to the account it creates (the admin's ledger only when there
+    is no account to bill).
     Created unapproved: whitelisting starts the pre-fill workflow, not
     ends it — the account is pre-filled (and may be claimed by its owner
     meanwhile) before it is ready, and the admin approves it by hand once
     it is. Body: {"handle", "x_lookup"?: bool}."""
-    from backend.utils.x_identity import resolve_x_id, XIdUnresolved
+    from backend.utils.x_identity import resolve_x_id, XIdUnresolved, log_user_read
     data = request.get_json() or {}
     handle = (data.get("handle") or "").strip().lstrip("@")
     if not handle:
@@ -454,9 +456,14 @@ def whitelist_user():
         return jsonify({"error": error}), 400
 
     try:
+        # The paid read, if any, goes on the ledger of the account it finds
+        # the id for (like that account's pre-fills) — which does not exist
+        # yet, so the charge is deferred and billed below.
         resolved = resolve_x_id(handle, x_lookup=bool(data.get("x_lookup")),
-                                cost_user_id=current_user.id)
+                                defer_cost=True)
     except XIdUnresolved as e:
+        if e.paid_reads:
+            log_user_read(current_user.id, handle)  # no account to bill
         body = {"error": e.message, "reason": e.reason}
         if e.reason in ("not-in-archive", "archive-error"):
             # The admin panel offers the paid X lookup in a dialog at this
@@ -467,6 +474,8 @@ def whitelist_user():
 
     holder = User.query.filter_by(twitter_id=resolved.x_id).first()
     if holder:
+        if resolved.paid_reads:
+            log_user_read(holder.id, handle)  # the read found their id
         return jsonify({
             "error": f"That X account already has a Loore account: @{holder.username}.",
             "user_id": holder.id,
@@ -480,8 +489,12 @@ def whitelist_user():
         # A concurrent whitelist (double submit) or signup took the handle
         # or the X id between the checks above and this insert.
         db.session.rollback()
+        if resolved.paid_reads:
+            log_user_read(current_user.id, handle)  # no account of ours to bill
         return jsonify({
             "error": "That handle or X account was just added by another request."}), 409
+    if resolved.paid_reads:
+        log_user_read(user.id, handle)
     return jsonify({
         "message": "User whitelisted successfully.",
         "source": resolved.source,
