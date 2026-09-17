@@ -101,8 +101,8 @@ function NodeDetail({ nodeIdOverride }) {
   const [editTarget, setEditTarget] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   // A confirmed delete that would leave a text/voice session with only
-  // its system prompt: { targetId, withDescendants, promptRootId }. The
-  // follow-up dialog asks whether to delete the prompt as well.
+  // its system prompt: { targetId, withDescendants }. The follow-up
+  // dialog asks whether to delete the prompt as well.
   const [pendingPromptDelete, setPendingPromptDelete] = useState(null);
   const setExclusiveTarget = useCallback((slot, value) => {
     setReplyTarget(slot === 'reply' ? value : null);

@@ -2947,11 +2947,16 @@ def delete_node(node_id):
         # Every node this request tombstones: the target, the descendants
         # the cascade took, and the prompt root when it goes with them.
         gone_ids = list(deleted.ids)
+        pinned_ids = list(deleted.pinned_ids)
         orphaned_prompt_deleted = None
-        if prompt_root is not None and soft_delete_session_if_empty(
-                prompt_root, current_user.id):
+        session_gone = (
+            soft_delete_session_if_empty(prompt_root, current_user.id)
+            if prompt_root is not None else None
+        )
+        if session_gone is not None:
             orphaned_prompt_deleted = prompt_root.id
-            gone_ids.append(prompt_root.id)
+            gone_ids += session_gone.ids
+            pinned_ids += session_gone.pinned_ids
         # Deleting a published share's public node via the node UI must
         # reconcile the ShareDraft — otherwise the Share page keeps saying
         # "published" and links a tombstone (#228). Deleting IS revoking.
@@ -2983,10 +2988,11 @@ def delete_node(node_id):
         # The session root's id when `delete_orphaned_prompt` took it
         # too, else null — the client then knows the thread is gone.
         "orphaned_prompt_deleted": orphaned_prompt_deleted,
-        # Pinned nodes the cascade took: each is a Log card of its
+        # Pinned nodes this delete took: each is a Log card of its
         # own (a reply pinned under the target, possibly in someone
-        # else's thread), so the Log drops those cards too.
-        "deleted_pinned_ids": deleted.pinned_ids,
+        # else's thread; the prompt root when it was pinned), so the
+        # Log drops those cards too.
+        "deleted_pinned_ids": pinned_ids,
     }), 200
 
 

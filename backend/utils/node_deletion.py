@@ -83,17 +83,19 @@ def subtree_has_alive_nodes(root_id: int, viewer_id: int) -> bool:
     return any(r.deleted_at is None for r in subtree_rows(root_id, viewer_id))
 
 
-def soft_delete_session_if_empty(root, user_id: int) -> bool:
+def soft_delete_session_if_empty(root, user_id: int) -> "Optional[Deleted]":
     """The "delete the system prompt too" half of a DELETE: once the
     target is flagged in the session, tombstone the (locked) prompt
     `root` when nothing the user can see is left alive under it. Returns
-    whether it did. Entries that landed in the meantime keep the root
-    alive."""
+    what it flagged, as soft_delete_node does: the root, listed under
+    `pinned_ids` when it was pinned. Returns None when entries that
+    landed in the meantime keep the root alive."""
     if subtree_has_alive_nodes(root.id, user_id):
-        return False
+        return None
+    pinned_ids = [root.id] if root.pinned_at is not None else []
     root.deleted_at = datetime.utcnow()
     root.pinned_at = None
-    return True
+    return Deleted([root.id], pinned_ids)
 
 
 def orphaned_system_prompt_id(node, user_id: int, *,

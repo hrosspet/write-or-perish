@@ -1061,6 +1061,26 @@ def test_delete_with_orphaned_prompt_flag_takes_the_prompt_too(app, alice):
     assert Node.query.get(only.id).deleted_at is not None
 
 
+def test_orphaned_prompt_that_was_pinned_is_listed_as_a_pinned_delete(app, alice):
+    """`deleted_pinned_ids` tells the Log which pinned cards a delete
+    took. A pinned prompt root that goes with its last entry is one of
+    them, as a pinned node under the target is."""
+    root = _prompt_session(alice)
+    root.pinned_at = datetime.utcnow()
+    only = _make_node(alice, parent=root, content="the only entry")
+    _db.session.commit()
+    client = app.test_client()
+    _login(client, alice)
+    r = client.delete(f"/nodes/{only.id}", query_string={
+        "delete_orphaned_prompt": "true",
+    })
+    assert r.status_code == 200, r.json
+    assert r.json["orphaned_prompt_deleted"] == root.id
+    assert r.json["deleted_pinned_ids"] == [root.id]
+    _db.session.expire_all()
+    assert Node.query.get(root.id).pinned_at is None
+
+
 def test_delete_with_orphaned_prompt_flag_keeps_the_prompt_when_content_remains(app, alice):
     """The flag is re-checked server-side: an entry that landed after the
     dialog's check (another device, the Voice chain) keeps the session."""

@@ -246,9 +246,13 @@ def get_log():
     #   2. Soft-deleted root with alive descendants (§4a Case 2) →
     #      newest_map's accessible descendant, since the root itself has
     #      no content to show.
-    # A node is one card at most: when a root's display node is itself a
-    # pinned row of this page (an entry pinned in its own session), the
-    # row that sorts first keeps the card and the other is skipped.
+    # A node is one card at most per page: when a root's display node is
+    # itself a pinned row of this page (an entry pinned in its own
+    # session), the row that sorts first keeps the card and the other is
+    # skipped. The two rows usually sort onto different pages (the entry
+    # by pinned_at, its root by created_at); the later page then repeats
+    # the card's id and the client drops it, because it already holds
+    # that id.
     # `thread_root_id` points at the actual root (when it is the user's
     # own) so the frontend kebab targets the right node for rename and
     # delete.
