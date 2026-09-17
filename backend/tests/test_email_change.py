@@ -391,6 +391,31 @@ def test_a_failed_send_changes_nothing(app, mails, monkeypatch):
     assert _user("bob").email_change_token_hash is None
 
 
+def test_a_failed_send_does_not_undo_a_newer_request(app, mails, monkeypatch):
+    """Two tabs: while this request's send hangs and fails, another request
+    commits and mails its link. Putting back "what was pending before"
+    would void that delivered link."""
+    from sqlalchemy import text
+    c = _client(app, "alice")
+    import backend.utils.email as email_mod
+
+    def newer_request_lands_then_relay_fails(*a, **k):
+        _db.session.execute(
+            text('UPDATE "user" SET pending_email = :p, '
+                 'email_change_token_hash = :h WHERE username = :u'),
+            {"p": "other-tab@example.com", "h": "other-tabs-hash", "u": "alice"})
+        _db.session.commit()
+        raise OSError("relay down")
+    monkeypatch.setattr(email_mod, "_deliver", newer_request_lands_then_relay_fails)
+
+    assert _request(c, "this-tab@example.com").status_code == 502
+
+    _db.session.expire_all()
+    alice = _user("alice")
+    assert alice.pending_email == "other-tab@example.com"
+    assert alice.email_change_token_hash == "other-tabs-hash"
+
+
 def test_direct_bind_through_put_user_is_refused(app):
     c = _client(app, "alice")
     r = c.put("/api/dashboard/user", json={"email": "evil@example.com"})

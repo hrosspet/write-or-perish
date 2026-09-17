@@ -284,10 +284,15 @@ def request_email_change():
                 new_email, f"{frontend_url}/confirm-email?token={token}",
                 lifetime)
     except Exception:
-        (current_user.pending_email,
-         current_user.email_change_token_hash,
-         current_user.email_change_expires_at) = previous
-        db.session.commit()
+        # Unless another request (a second tab) replaced ours while the
+        # send ran: its link is out, and restoring over it would void it.
+        ours = (new_email, None if taken else hash_token(token))
+        if (current_user.pending_email,
+                current_user.email_change_token_hash) == ours:
+            (current_user.pending_email,
+             current_user.email_change_token_hash,
+             current_user.email_change_expires_at) = previous
+            db.session.commit()
         return jsonify({"error": "Could not send the confirmation email. "
                                  "Please try again."}), 502
     return jsonify({

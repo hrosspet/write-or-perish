@@ -348,23 +348,25 @@ export default function AccountPage() {
               ? `The confirmation link sent to ${user.pending_email} has expired.`
               : `Confirmation link sent to ${user.pending_email}. Open it to make it your sign-in address.`}
             {" "}
-            <button
-              type="button"
-              onClick={() => sendEmailLink(user.pending_email, { resend: true })}
-              disabled={emailSaving}
-              style={inlineActionStyle}
-            >
-              {user.pending_email_expired ? "Send a new link" : "Resend"}
-            </button>
-            {" · "}
-            <button
-              type="button"
-              onClick={cancelPendingEmail}
-              disabled={emailSaving}
-              style={inlineActionStyle}
-            >
-              Cancel
-            </button>
+            <span style={{ whiteSpace: "nowrap" }}>
+              <button
+                type="button"
+                onClick={() => sendEmailLink(user.pending_email, { resend: true })}
+                disabled={emailSaving}
+                style={inlineActionStyle}
+              >
+                {user.pending_email_expired ? "Send a new link" : "Resend"}
+              </button>
+              {" · "}
+              <button
+                type="button"
+                onClick={cancelPendingEmail}
+                disabled={emailSaving}
+                style={inlineActionStyle}
+              >
+                Cancel
+              </button>
+            </span>
           </div>
         )}
         {emailMsg && (
