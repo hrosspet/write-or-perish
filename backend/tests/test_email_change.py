@@ -268,6 +268,114 @@ def test_the_link_alone_binds_nothing_and_signs_nobody_in(app, mails):
     assert _confirm(_client(app, "alice"), token).status_code == 200
 
 
+def test_signing_in_on_the_way_to_a_confirmation_never_creates_an_account(app, mails):
+    """Signed out, /confirm-email sends the visitor to the login page. The
+    address in front of them is the one they are confirming, and sign-in
+    doubles as sign-up: typed there, it became a second account that owned
+    the address, and the account that asked could never bind it (409 taken,
+    then the enumeration-safe "link sent" about their own address)."""
+    waiting = _client(app, "waiting")
+    _request(waiting, "me@example.com")
+    token, _ = _token(mails)
+    way_back = f"/confirm-email?token={token}"
+    users_before = User.query.count()
+
+    visitor = _anonymous(app)
+    r = visitor.post("/auth/magic-link/send",
+                     json={"email": "me@example.com", "next_url": way_back})
+    assert r.status_code == 200
+    sign_in = re.search(r"verify\?token=(\S+)", mails[-1]["text"]).group(1)
+    r = visitor.get(f"/auth/magic-link/verify?token={sign_in}")
+
+    assert r.status_code == 302
+    location = r.headers["Location"]
+    assert location.startswith(f"{FRONTEND_URL}/login?error=confirm_needs_account&returnUrl=")
+    from urllib.parse import unquote
+    assert unquote(location.split("returnUrl=")[1]) == way_back  # still knows the way back
+    assert _session_user_id(visitor) is None
+    assert User.query.count() == users_before
+    # The account that asked is unharmed: signed in properly, it confirms.
+    assert _confirm(_client(app, "waiting"), token).status_code == 200
+    _db.session.expire_all()
+    assert _user("waiting").email == "me@example.com"
+
+
+def test_an_existing_account_signs_in_on_the_way_to_a_confirmation(app, mails):
+    """The guard is about creating accounts only: alice, signing in with her
+    CURRENT address on another device, lands back on the confirmation."""
+    _request(_client(app, "alice"), "new@example.com")
+    token, _ = _token(mails)
+    way_back = f"/confirm-email?token={token}"
+    visitor = _anonymous(app)
+    visitor.post("/auth/magic-link/send",
+                 json={"email": "alice@example.com", "next_url": way_back})
+    sign_in = re.search(r"verify\?token=(\S+)", mails[-1]["text"]).group(1)
+    r = visitor.get(f"/auth/magic-link/verify?token={sign_in}")
+    assert r.headers["Location"] == f"{FRONTEND_URL}{way_back}"
+    assert _session_user_id(visitor) == str(_user("alice").id)
+
+
+def test_a_pending_change_does_not_keep_anyone_from_signing_up(app, mails):
+    """Refusing every sign-up for an address that is pending somewhere
+    would let any account block a stranger's address by requesting it.
+    Outside the confirmation flow, sign-up works as it always did; the
+    pending change then fails at confirmation as "taken"."""
+    _request(_client(app, "alice"), "stranger@example.com")
+    token, _ = _token(mails)
+    visitor = _anonymous(app)
+    visitor.post("/auth/magic-link/send", json={"email": "stranger@example.com"})
+    sign_in = re.search(r"verify\?token=(\S+)", mails[-1]["text"]).group(1)
+    r = visitor.get(f"/auth/magic-link/verify?token={sign_in}")
+    assert r.headers["Location"] == f"{FRONTEND_URL}/dashboard"
+    assert User.query.filter_by(email="stranger@example.com").count() == 1
+    assert _confirm(_client(app, "alice"), token).status_code == 409
+
+
+def test_x_sign_in_on_the_way_to_a_confirmation_never_creates_an_account(app, mails):
+    """Same for "Sign in with X" with an X account Loore has never seen
+    (an email-only account's owner clicking the wrong button): no stray
+    account; an X account that exists signs in and goes back."""
+    way_back = "/confirm-email?token=abc.def"
+    users_before = User.query.count()
+
+    def x_login(client, x_id):
+        x = MagicMock()
+        x.authorized = True
+        x.get.return_value = MagicMock(
+            ok=True, json=lambda: {"id": x_id, "screen_name": "somebody"})
+        with patch("backend.routes.auth.twitter", x):
+            from urllib.parse import quote
+            return client.get(f"/auth/login?next={quote(way_back, safe='')}")
+
+    stranger = _anonymous(app)
+    r = x_login(stranger, 999)
+    assert r.headers["Location"].startswith(
+        f"{FRONTEND_URL}/login?error=confirm_needs_account&returnUrl=")
+    assert _session_user_id(stranger) is None
+    assert User.query.count() == users_before
+    with stranger.session_transaction() as sess:
+        assert "next_url" not in sess  # a later ordinary X sign-up is not refused
+
+    known = _anonymous(app)
+    r = x_login(known, 456)  # the seeded waitlisted X account
+    assert r.headers["Location"] == f"{FRONTEND_URL}{way_back}"
+    assert _session_user_id(known) == str(_user("waiting").id)
+
+
+def test_sign_out_can_come_back_to_the_confirmation(app):
+    """"Sign out and use the other account" on /confirm-email."""
+    c = _client(app, "bob")
+    r = c.get("/auth/logout?next=%2Fconfirm-email%3Ftoken%3Dabc.def")
+    assert r.headers["Location"] == f"{FRONTEND_URL}/confirm-email?token=abc.def"
+    assert _session_user_id(c) is None
+    # Only a path of this app, never another site.
+    c = _client(app, "bob")
+    r = c.get("/auth/logout?next=https%3A%2F%2Fevil.example%2F")
+    assert r.headers["Location"] == FRONTEND_URL
+    c = _client(app, "bob")
+    assert c.get("/auth/logout?next=%2F%2Fevil.example").headers["Location"] == FRONTEND_URL
+
+
 def test_x_login_user_adds_a_first_email_without_a_notice(app, mails):
     c = _client(app, "xonly")
     assert _request(c, "x@example.com").status_code == 200
@@ -538,6 +646,18 @@ def test_admin_set_email_clears_a_pending_change(app, mails):
         f"/api/admin/users/{_user('alice').id}/update_email",
         json={"email": "bob@example.com"})
     assert r.status_code == 409
+    # Nobody confirms the admin's address, so a typo is caught here or
+    # nowhere: the same validator as every other path.
+    for bad in ("right@example", "a@b.com\nBcc: x@evil.example", "a" * 120 + "@example.com"):
+        r = _client(app, "root").put(
+            f"/api/admin/users/{_user('alice').id}/update_email", json={"email": bad})
+        assert r.status_code == 400, bad
+    _db.session.expire_all()
+    assert _user("alice").email == "right@example.com"
+    # An empty string still clears it (the admin panel's prompt can).
+    r = _client(app, "root").put(
+        f"/api/admin/users/{_user('alice').id}/update_email", json={"email": "  "})
+    assert r.status_code == 200 and r.get_json()["email"] is None
 
 
 def test_an_expired_link_is_reported_so_the_ui_can_offer_a_new_one(app, mails):
@@ -585,6 +705,17 @@ def test_the_token_itself_expires(app, mails):
         r = _client(app, "alice").post("/api/dashboard/email/confirm",
                                        json={"token": junk})
         assert r.status_code == 400
+
+
+def test_a_json_body_that_is_not_an_object_is_a_400(app, mails):
+    """"hello" and [1, 2] are valid JSON without a .get(): they used to 500."""
+    c = _client(app, "alice")
+    for body in ("hello", [1, 2], 7, None):
+        assert c.post("/api/dashboard/email", json=body).status_code == 400
+        assert c.post("/api/dashboard/email/confirm", json=body).status_code == 400
+    assert c.post("/api/dashboard/email", data="not json",
+                  content_type="application/json").status_code == 400
+    assert not mails
 
 
 class TestWaitlistedAccountOnTheRealApp:

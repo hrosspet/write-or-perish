@@ -4,6 +4,8 @@ import { useUser } from "../contexts/UserContext";
 import api from "../api";
 import { emailState } from "../utils/emailState";
 
+const backendUrl = process.env.REACT_APP_BACKEND_URL || "";
+
 // Where the link in the "Confirm your email" mail lands (#260). The page
 // hands the link's token to POST /dashboard/email/confirm, which only
 // accepts it inside a session of the account that asked for the change.
@@ -63,8 +65,9 @@ export default function ConfirmEmailPage() {
     const returnUrl = encodeURIComponent(location.pathname + location.search);
     heading = "Sign in to confirm";
     body = "A new sign-in email can only be confirmed from inside the account "
-      + "that asked for it. Sign in the way you usually do and you will come "
-      + "straight back here.";
+      + "that asked for it. Sign in to that account the way you usually do, "
+      + "not with the address you are confirming, and you will come straight "
+      + "back here.";
     action = <Link to={`/login?returnUrl=${returnUrl}`} style={linkStyle}>Sign in &rarr;</Link>;
   } else if (!result) {
     heading = "Confirming your email";
@@ -83,11 +86,23 @@ export default function ConfirmEmailPage() {
     body = result.reason === "other_account"
       ? `${result.text} You are signed in as @${user.username}.`
       : result.text;
-    // "failed" = no answer from the server (network, 5xx). Confirming is
-    // idempotent, so trying again is safe.
-    action = result.reason === "failed"
-      ? <button type="button" onClick={confirm} style={retryStyle}>Try again</button>
-      : <Link to={back.to} style={linkStyle}>{back.label} &rarr;</Link>;
+    if (result.reason === "failed") {
+      // No answer from the server (network, 5xx). Confirming is idempotent,
+      // so trying again is safe.
+      action = <button type="button" onClick={confirm} style={retryStyle}>Try again</button>;
+    } else if (result.reason === "other_account") {
+      // Signed in to the wrong account: sign out and come back here, which
+      // then asks for the right sign-in. A plain link: /auth lives on the
+      // backend.
+      const here = encodeURIComponent(location.pathname + location.search);
+      action = (
+        <a href={`${backendUrl}/auth/logout?next=${here}`} style={linkStyle}>
+          Sign out and use the other account &rarr;
+        </a>
+      );
+    } else {
+      action = <Link to={back.to} style={linkStyle}>{back.label} &rarr;</Link>;
+    }
   }
 
   return (
@@ -103,7 +118,8 @@ export default function ConfirmEmailPage() {
       }}>
         {heading}
       </h1>
-      <p style={{
+      {/* role=status: the outcome replaces "One moment" without a page load */}
+      <p role="status" style={{
         fontFamily: "var(--sans)", fontWeight: 300, fontSize: "1rem",
         lineHeight: 1.8, color: "var(--text-secondary)", maxWidth: 460,
         marginBottom: "2rem", overflowWrap: "anywhere",

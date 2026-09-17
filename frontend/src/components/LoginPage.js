@@ -8,6 +8,8 @@ const backendUrl = process.env.REACT_APP_BACKEND_URL;
 const ERROR_MESSAGES = {
   invalid_or_expired: "This sign-in link is invalid or has expired. Please request a new one.",
   link_already_used: "This sign-in link has already been used. Please request a new one.",
+  // Signing in on the way to /confirm-email never creates an account (#260).
+  confirm_needs_account: "No Loore account signs in that way yet. Sign in to the account you asked from, not with the address you are confirming.",
 };
 
 const loginStyles = `
@@ -216,6 +218,9 @@ function LoginPage() {
 
   const returnUrl = searchParams.get("returnUrl") || "/dashboard";
   const errorCode = searchParams.get("error");
+  // On the way to confirming a new sign-in email (#260): that address cannot
+  // sign in yet, and typing it here is the natural mistake.
+  const confirmingEmail = returnUrl.startsWith("/confirm-email");
 
   const [showEmailForm, setShowEmailForm] = useState(false);
   const [emailInput, setEmailInput] = useState("");
@@ -290,7 +295,11 @@ function LoginPage() {
 
         <div className="loore-login-card">
           <h1>Welcome back</h1>
-          <p className="login-subtitle">Sign in to continue your lore</p>
+          <p className="login-subtitle">
+            {confirmingEmail
+              ? "Sign in to the account you are changing: with X, or with its current email. The address you are confirming can't sign in yet."
+              : "Sign in to continue your lore"}
+          </p>
 
           {errorCode && ERROR_MESSAGES[errorCode] && (
             <p style={{

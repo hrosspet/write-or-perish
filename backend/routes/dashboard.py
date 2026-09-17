@@ -216,6 +216,13 @@ def get_public_dashboard(username):
     return jsonify(dashboard), 200
 
 
+def _json_object():
+    """The request's JSON body when it is an object, else {} — a body of
+    "hello" or [1, 2] is valid JSON and has no .get()."""
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else {}
+
+
 def _pending_email_expired(user):
     """True when a pending change's link can no longer be confirmed, so the
     UI offers a new link instead of "open the one we sent"."""
@@ -251,8 +258,7 @@ def request_email_change():
     goes out tells the inbox's owner the address is in use. Answering "in
     use" here would let any logged-in user test which addresses have
     accounts, which /auth/magic-link/send takes care not to reveal."""
-    data = request.get_json(silent=True) or {}
-    raw = data.get("email")
+    raw = _json_object().get("email")
     new_email = raw.strip().lower() if isinstance(raw, str) else ""
     if not is_valid_email(new_email):
         return jsonify({"error": "Please enter a valid email address."}), 400
@@ -319,8 +325,7 @@ def confirm_email_change():
     that person into the requester's account. A POST from the signed-in app
     rather than a GET on the link, so mail scanners and link previews that
     fetch the URL change nothing."""
-    data = request.get_json(silent=True) or {}
-    token = data.get("token")
+    token = _json_object().get("token")
     payload = (verify_email_change_token(token)
                if isinstance(token, str) and token else None)
     if payload is None:

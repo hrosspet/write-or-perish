@@ -67,8 +67,9 @@ _NOTE_STYLES = (
 def _card(heading, paragraphs, button_label=None, button_url=None, footnotes=()):
     """The dark Loore mail card every mail uses. ``heading``, ``paragraphs``
     and ``footnotes`` are HTML: escape anything a user typed."""
+    # The wider gap below the last paragraph is room for the button.
     body = "".join(
-        f'\n    <p style="{_P_STYLE.format(gap="28px" if i == len(paragraphs) - 1 else "8px")}">'
+        f'\n    <p style="{_P_STYLE.format(gap="28px" if button_url and i == len(paragraphs) - 1 else "8px")}">'
         f"\n      {p}\n    </p>"
         for i, p in enumerate(paragraphs))
     button = ""
@@ -116,17 +117,19 @@ def _duration_words(seconds):
 
 
 def send_magic_link_email(to_email, magic_link_url):
+    lifetime = _duration_words(
+        current_app.config.get("MAGIC_LINK_EXPIRY_SECONDS", 900))
     text_body = (
         "Sign in to Loore\n\n"
         f"Click the link below to sign in:\n{magic_link_url}\n\n"
-        "This link expires in 15 minutes and can only be used once.\n\n"
+        f"This link expires in {lifetime} and can only be used once.\n\n"
         "If you didn't request this, you can safely ignore this email."
     )
     html_body = _card(
         "Sign in",
         ["Click the button below to continue to your account."],
         "Sign in to Loore", magic_link_url,
-        ("This link expires in 15 minutes and can only be used once.",
+        (f"This link expires in {lifetime} and can only be used once.",
          "If you didn't request this, you can safely ignore this email."))
     _send(to_email, "Your Loore sign-in link", text_body, html_body,
           f"Magic link email sent to {to_email}",

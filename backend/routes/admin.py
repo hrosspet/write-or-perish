@@ -9,7 +9,7 @@ from backend.extensions import db
 from backend.utils.timefmt import iso_utc
 from sqlalchemy import func
 from backend.utils.magic_link import generate_magic_link_token, hash_token
-from backend.utils.email import send_welcome_email
+from backend.utils.email import send_welcome_email, is_valid_email
 from backend.utils.reserved_usernames import validate_username
 
 logger = logging.getLogger(__name__)
@@ -375,10 +375,14 @@ def update_user_email(user_id):
     email = data.get("email")
     if not isinstance(email, str):
         return jsonify({"error": "Email is required."}), 400
-    user = User.query.get_or_404(user_id)
     # Lowercased like every other path that writes an address: sign-in and
-    # the change flow look addresses up lowercased.
-    user.email = email.strip().lower() or None
+    # the change flow look addresses up lowercased. Nobody confirms this
+    # one, so a typo is only caught here: same validator as everywhere.
+    email = email.strip().lower()
+    if email and not is_valid_email(email):
+        return jsonify({"error": "That is not a valid email address."}), 400
+    user = User.query.get_or_404(user_id)
+    user.email = email or None
     # A change the user left pending must not replace the admin's address
     # when its link is confirmed later.
     user.pending_email = None

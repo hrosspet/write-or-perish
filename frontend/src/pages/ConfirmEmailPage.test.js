@@ -77,6 +77,18 @@ test('a link requested from another account says whose session this is', async (
   await screen.findByText('Not confirmed');
   expect(screen.getByText(/different Loore account.*signed in as @alice/i)).toBeTruthy();
   expect(mockUserCtx.setUser).not.toHaveBeenCalled();
+  // A way out of the wrong account that comes back to this confirmation,
+  // instead of a link deeper into it.
+  const out = screen.getByRole('link', { name: /sign out and use the other account/i });
+  expect(out.getAttribute('href')).toBe(
+    '/auth/logout?next=' + encodeURIComponent('/confirm-email?token=abc.def'));
+  expect(screen.queryByRole('link', { name: /back to your account/i })).toBeNull();
+});
+
+test('signed out: says which sign-in will not work', () => {
+  mockUserCtx = { user: null, setUser: jest.fn(), loading: false };
+  renderAt('/confirm-email?token=abc.def');
+  expect(screen.getByText(/not with the address you are confirming/i)).toBeTruthy();
 });
 
 test('no answer from the server offers a retry, which posts again', async () => {

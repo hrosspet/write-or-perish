@@ -23,7 +23,7 @@ export default function AlphaThankYouPage() {
   // waitlisted user can reach no other page to fix it.
   const hasEmail = user && user.email && user.email.trim() !== "";
   const pending = user && user.pending_email;
-  const showForm = user && !hasEmail && (!pending || editing);
+  const showForm = user && (editing || (!hasEmail && !pending));
   const showPending = pending && !editing;
 
   // This page is handed out as a link (e.g. to fresh X signups, so they can
@@ -212,11 +212,10 @@ export default function AlphaThankYouPage() {
                 Open it to finish — until then we have no way to reach you.
               </>
             )}
-            {resent && (
-              <div style={{ marginTop: "0.6rem", color: "var(--text-muted)" }}>
-                New link sent. The earlier one no longer works.
-              </div>
-            )}
+            <div style={{ marginTop: "0.6rem", color: "var(--text-muted)" }}>
+              {resent ? "New link sent. The earlier one no longer works. " : ""}
+              {PENDING_HINT}
+            </div>
             {error && <div style={{ color: "var(--accent)", marginTop: "0.6rem", fontSize: "0.88rem" }}>{error}</div>}
             <div style={{ marginTop: "0.9rem", display: "flex", gap: "1.2rem", flexWrap: "wrap" }}>
               <button
@@ -313,6 +312,12 @@ export default function AlphaThankYouPage() {
     </div>
   );
 }
+
+// The answer to a request never says whether the address already belongs to
+// another account (that would let anyone test addresses), so such a request
+// looks like any other and its mail never comes. This is the only hint.
+const PENDING_HINT = "Nothing after a few minutes? Check the spelling. An "
+  + "address that already signs in to Loore can't be added here.";
 
 const pendingActionStyle = (disabled) => ({
   background: "none", border: "none", padding: 0,

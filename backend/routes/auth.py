@@ -14,7 +14,7 @@ from backend.utils.magic_link import (
 from backend.utils.email import send_magic_link_email, is_valid_email
 from backend.utils.reserved_usernames import derive_available_username
 import logging
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 
 logger = logging.getLogger(__name__)
 auth_bp = Blueprint("auth_bp", __name__)
@@ -36,6 +36,26 @@ def is_safe_redirect_url(target):
     if parsed.scheme or parsed.netloc:
         return False
     return True
+
+
+def _confirm_email_flow_redirect(next_url):
+    """Where to send a sign-in that would have to CREATE an account while
+    the person is on their way to /confirm-email (#260), or None.
+
+    The page behind the mailed confirmation link asks a signed-out visitor
+    to sign in. The address in front of them is the one they are confirming,
+    so typing it into the sign-in form is the natural mistake — and sign-in
+    doubles as sign-up: it would create a second account that owns the
+    address, and the account that asked could never bind it. Signing in on
+    the way to a confirmation therefore never creates an account (by magic
+    link or by X); an ordinary sign-up for the same address is untouched,
+    so a pending change cannot be used to keep someone from signing up."""
+    if (not next_url or not is_safe_redirect_url(next_url)
+            or urlparse(next_url).path != "/confirm-email"):
+        return None
+    frontend_url = current_app.config.get("FRONTEND_URL", "")
+    return redirect(f"{frontend_url}/login?error=confirm_needs_account"
+                    f"&returnUrl={quote(next_url, safe='')}")
 
 
 def _drop_x_token():
@@ -108,6 +128,13 @@ def login():
     username = tw_info["screen_name"]
     user = User.query.filter_by(twitter_id=twitter_id).first()
     if not user:
+        refused = _confirm_email_flow_redirect(session.get('next_url'))
+        if refused is not None:
+            # Not the X account they meant, or an account that signs in by
+            # email: forget this X token so the next try goes through X.
+            session.pop('next_url', None)
+            _drop_x_token()
+            return refused
         user = _create_x_user(twitter_id, username)
 
     login_user(user, remember=True)
@@ -193,6 +220,9 @@ def magic_link_verify():
         if user.magic_link_token_hash != token_h:
             return redirect(f"{frontend_url}/login?error=link_already_used")
     else:
+        refused = _confirm_email_flow_redirect(next_url)
+        if refused is not None:
+            return refused
         # New user — create account
         username = generate_unique_username(email)
         user = User(
@@ -221,4 +251,9 @@ def logout():
     _drop_x_token()
     flash("Logged out successfully", "success")
     frontend_url = current_app.config.get("FRONTEND_URL")
+    # "Sign out and use the other account" on /confirm-email comes back to
+    # the confirmation, which then asks for the right sign-in.
+    next_url = request.args.get("next")
+    if next_url and is_safe_redirect_url(next_url):
+        return redirect(f"{frontend_url}{next_url}")
     return redirect(frontend_url)

@@ -311,6 +311,7 @@ export default function AccountPage() {
           <input
             ref={emailInputRef}
             type="email"
+            aria-label={user.email ? `New email address (current: ${user.email})` : "Email address"}
             value={emailInput}
             placeholder={user.email || "Add an email to sign in with"}
             onChange={(e) => {
@@ -346,7 +347,7 @@ export default function AccountPage() {
           <div style={helperStyle}>
             {user.pending_email_expired
               ? `The confirmation link sent to ${user.pending_email} has expired.`
-              : `Confirmation link sent to ${user.pending_email}. Open it to make it your sign-in address.`}
+              : `Confirmation link sent to ${user.pending_email}. Open it to make it your sign-in address. Nothing after a few minutes? Check the spelling; an address that already signs in to Loore can't be added here.`}
             {" "}
             <span style={{ whiteSpace: "nowrap" }}>
               <button

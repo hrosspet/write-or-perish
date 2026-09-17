@@ -77,6 +77,19 @@ test('a mistyped pending address can be replaced, or kept', () => {
   expect(mockPost).not.toHaveBeenCalled();
 });
 
+test('"Use a different address" shows the form for an account that already has an email', () => {
+  // Both cards used to disappear: the form was tied to "has no email".
+  renderPage({ email: 'old@example.com', pending_email: 'new@example.com' });
+  fireEvent.click(screen.getByRole('button', { name: 'Use a different address' }));
+  expect(screen.getByPlaceholderText('your@email.com').value).toBe('new@example.com');
+  expect(screen.getByRole('button', { name: 'Submit' })).toBeTruthy();
+});
+
+test('pending: hints at the two reasons a link never arrives', () => {
+  renderPage({ pending_email: 'me@example.com' });
+  expect(screen.getByText(/Check the spelling.*already signs in to Loore/)).toBeTruthy();
+});
+
 test('a confirmed address needs nothing more from this page', () => {
   renderPage({ email: 'me@example.com' });
   expect(screen.queryByPlaceholderText('your@email.com')).toBeNull();
