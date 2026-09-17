@@ -84,7 +84,7 @@ def test_lookup_user_and_errors(monkeypatch):
 
 
 def _fake_x(monkeypatch, tweet_count=5, protected=False, tweets=None):
-    monkeypatch.setattr(x_api, "lookup_user", lambda h, c: {
+    monkeypatch.setattr(x_api, "lookup_user", lambda h, c, **k: {
         "id": "U1", "username": "Alice", "name": "A",
         "tweet_count": tweet_count, "protected": protected})
     seen = {}
@@ -144,7 +144,10 @@ def test_prefill_x_impl_imports_and_pins_batch(app, monkeypatch):  # noqa: F811
     assert "/x-api/Alice-" in result["dump_path"]
     # Cost ledger: 4 posts * $0.005 + 1 user read * $0.010
     log = APICostLog.query.filter_by(user_id=u.id, request_type="x_prefill").one()
-    assert log.cost_microdollars == 4 * 5000 + 10000 and log.request_ref == "@Alice"
+    assert log.cost_microdollars == 4 * 5000 and log.request_ref == "@Alice"
+    # the user read is its own row, logged by the resolver before the pull
+    lookup = APICostLog.query.filter_by(user_id=u.id, request_type="x_id_lookup").one()
+    assert lookup.cost_microdollars == 10000 and lookup.model_id == "x-api/user-lookup"
     assert log.model_id == "x-api/timeline"
 
 
@@ -156,7 +159,7 @@ def test_prefill_x_impl_keeps_partial_pull_on_api_error(app, monkeypatch):  # no
     monkeypatch.setattr(ex, "maybe_trigger_profile_update", MagicMock())
     u = _make_user("carol")
     _db.session.commit()
-    monkeypatch.setattr(x_api, "lookup_user", lambda h, c: {
+    monkeypatch.setattr(x_api, "lookup_user", lambda h, c, **k: {
         "id": "U2", "username": "Carol", "name": "C", "tweet_count": 5000, "protected": False})
 
     def failing_iter(user_id, creds, max_tweets=3200, on_page=None, on_raw=None):
@@ -171,7 +174,7 @@ def test_prefill_x_impl_keeps_partial_pull_on_api_error(app, monkeypatch):  # no
     result = imports_mod.prefill_x_api_impl(u.id, "carol", {"max_tweets": 3200})
     assert result["partial"] is True and "credits depleted" in result["fetch_error"]
     assert result["fetched"] == 2 and result["created"] == 2
-    assert APICostLog.query.filter_by(user_id=u.id, request_type="x_prefill").one().cost_microdollars == 2 * 5000 + 10000
+    assert sum(l.cost_microdollars for l in APICostLog.query.filter_by(user_id=u.id)) == 2 * 5000 + 10000
     assert len(open(result["dump_path"]).read().splitlines()) == 3  # header + 2 posts
 
     def empty_iter(user_id, creds, max_tweets=3200, on_page=None, on_raw=None):
@@ -181,9 +184,13 @@ def test_prefill_x_impl_keeps_partial_pull_on_api_error(app, monkeypatch):  # no
     monkeypatch.setattr(x_api, "iter_user_tweets", empty_iter)
     u2 = _make_user("dave")
     _db.session.commit()
+    # dave is another X account (U2 now signs in as carol; the same id
+    # would be refused as two accounts for one person)
+    monkeypatch.setattr(x_api, "lookup_user", lambda h, c, **k: {
+        "id": "U3", "username": "Dave", "name": "D", "tweet_count": 5000, "protected": False})
     with pytest.raises(x_api.XApiError, match="credits depleted"):
         imports_mod.prefill_x_api_impl(u2.id, "dave", {})
-    assert APICostLog.query.filter_by(user_id=u2.id, request_type="x_prefill").one().cost_microdollars == 10000
+    assert sum(l.cost_microdollars for l in APICostLog.query.filter_by(user_id=u2.id)) == 10000
 
 
 def test_prefill_x_impl_refuses_protected_and_unknown(app, monkeypatch):  # noqa: F811
@@ -193,8 +200,8 @@ def test_prefill_x_impl_refuses_protected_and_unknown(app, monkeypatch):  # noqa
     _fake_x(monkeypatch, protected=True)
     with pytest.raises(x_api.XApiError, match="protected"):
         imports_mod.prefill_x_api_impl(u.id, "bob", {})
-    monkeypatch.setattr(x_api, "lookup_user", lambda h, c: None)
-    with pytest.raises(x_api.XApiError, match="no such"):
+    monkeypatch.setattr(x_api, "lookup_user", lambda h, c, **k: None)
+    with pytest.raises(x_api.XApiError, match="not on X"):
         imports_mod.prefill_x_api_impl(u.id, "bob", {})
 
 
@@ -211,7 +218,7 @@ def test_x_check_route(admin_app, monkeypatch):  # noqa: F811
     client = _admin(admin_app)
     target = _make_user("kat_szpiech")
     _db.session.commit()
-    monkeypatch.setattr(x_api, "lookup_user", lambda h, c: {
+    monkeypatch.setattr(x_api, "lookup_user", lambda h, c, **k: {
         "id": "1", "username": "kat_szpiech", "name": "Kat", "tweet_count": 17104, "protected": False})
     r = client.get(f"/api/admin/prefill/x/check?handle=@kat_szpiech&user_id={target.id}")
     assert r.status_code == 200, r.json
@@ -220,14 +227,14 @@ def test_x_check_route(admin_app, monkeypatch):  # noqa: F811
     log = APICostLog.query.filter_by(user_id=target.id, request_type="x_prefill_check").one()
     assert log.cost_microdollars == 10000 and log.model_id == "x-api/user-lookup"
     assert client.get("/api/admin/prefill/x/check?handle=kat_szpiech&max_tweets=500").json["fetchable"] == 500
-    monkeypatch.setattr(x_api, "lookup_user", lambda h, c: {
+    monkeypatch.setattr(x_api, "lookup_user", lambda h, c, **k: {
         "id": "2", "username": "mikeytong", "name": "M", "tweet_count": 1995, "protected": True})
     r = client.get("/api/admin/prefill/x/check?handle=mikeytong")
     assert r.json["protected"] is True and r.json["fetchable"] == 0
-    monkeypatch.setattr(x_api, "lookup_user", lambda h, c: None)
+    monkeypatch.setattr(x_api, "lookup_user", lambda h, c, **k: None)
     assert client.get("/api/admin/prefill/x/check?handle=charllie").status_code == 404
     assert client.get("/api/admin/prefill/x/check").status_code == 400
-    monkeypatch.setattr(x_api, "lookup_user", lambda h, c: (_ for _ in ()).throw(x_api.XApiError("rate")))
+    monkeypatch.setattr(x_api, "lookup_user", lambda h, c, **k: (_ for _ in ()).throw(x_api.XApiError("rate")))
     assert client.get("/api/admin/prefill/x/check?handle=x").status_code == 502
 
 
@@ -287,3 +294,94 @@ def test_prefill_reports_queued_from_the_seeder_gate_not_the_racing_flag(app, mo
     assert result["profile_threshold_tokens"] == 5000
     assert User.query.get(u.id).profile_needs_full_regen is True
     assert seed.delay.call_args_list[-1].args == (u.id,)
+
+
+def test_get_says_whether_the_billable_request_was_sent(monkeypatch):
+    """A failed token fetch happens before any read; an error or timeout
+    on the read itself may still have been counted by X."""
+    import urllib.error
+    monkeypatch.setattr(x_api, "_bearer", lambda k, s, timeout=None: "tok")
+    monkeypatch.setattr(x_api.urllib.request, "urlopen", lambda req, timeout=None: (
+        _ for _ in ()).throw(urllib.error.URLError("timed out")))
+    with pytest.raises(x_api.XApiError, match="timed out") as e:
+        x_api._get("/2/users/by/username/x", {}, CREDS, timeout=3)
+    assert e.value.sent is True
+    monkeypatch.setattr(x_api, "_bearer", lambda k, s, timeout=None: (
+        _ for _ in ()).throw(x_api.XApiError("X API auth failed (401).")))
+    with pytest.raises(x_api.XApiError, match="auth failed") as e:
+        x_api._get("/2/users/by/username/x", {}, CREDS)
+    assert e.value.sent is False
+
+
+def test_get_spends_one_budget_on_token_and_read(monkeypatch):
+    """The token fetch and the read share the caller's timeout; the read
+    gets what the token left, and is not sent once nothing is left."""
+    class Clock:
+        def __init__(self, step):
+            self.t, self.step = 0.0, step
+
+        def monotonic(self):
+            self.t += self.step
+            return self.t - self.step
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"data": {}}'
+
+    seen = {}
+    monkeypatch.setattr(x_api, "_bearer", lambda k, s, timeout=None: "tok")
+    monkeypatch.setattr(x_api.urllib.request, "urlopen",
+                        lambda req, timeout=None: seen.update(timeout=timeout) or Resp())
+    monkeypatch.setattr(x_api, "time", Clock(step=15))
+    assert x_api._get("/2/x", {}, CREDS, timeout=20) == {"data": {}}
+    assert seen["timeout"] == 5  # 20 − 15 spent on the token
+    seen.clear()
+    monkeypatch.setattr(x_api, "time", Clock(step=25))
+    with pytest.raises(x_api.XApiError, match="timed out") as e:
+        x_api._get("/2/x", {}, CREDS, timeout=20)
+    assert e.value.sent is False and seen == {}
+
+
+def test_prefill_x_impl_stamps_x_id_on_login_less_account(app, monkeypatch):  # noqa: F811
+    """Same rule as the CA pre-fill: the looked-up X id lands on an account
+    with no login of its own, never on one that signs in by email."""
+    from backend.tasks import imports as imports_mod
+    import backend.tasks.exports as ex
+    monkeypatch.setattr(ex, "maybe_trigger_profile_update", MagicMock())
+    _fake_x(monkeypatch, tweets=[_v2_tweet(1, "one"), _v2_tweet(2, "two")])
+    u = _make_user("alice")
+    _db.session.commit()
+    imports_mod.prefill_x_api_impl(u.id, "alice", {"max_tweets": 10})
+    assert User.query.get(u.id).twitter_id == "U1"
+
+    assert APICostLog.query.filter_by(user_id=u.id, request_type="x_prefill").count() == 1
+
+    # U1 now signs in as `u`: a second account filled from the same handle
+    # is refused BEFORE the paid timeline pull (the lookup still costs one
+    # read, the pull nothing).
+    by_email = _make_user("alice_mail")
+    by_email.email = "a@example.com"
+    _db.session.commit()
+    pulled = MagicMock(side_effect=AssertionError("timeline must not be pulled"))
+    monkeypatch.setattr(x_api, "iter_user_tweets", pulled)
+    with pytest.raises(imports_mod.PrefillIdConflict, match="already signs in as user"):
+        imports_mod.prefill_x_api_impl(by_email.id, "alice", {"max_tweets": 10})
+    pulled.assert_not_called()
+    # the refused pre-fill still paid for its user read: recorded
+    lookup = APICostLog.query.filter_by(user_id=by_email.id).one()
+    assert lookup.model_id == "x-api/user-lookup" and lookup.cost_microdollars == 10000
+    assert Node.query.filter_by(human_owner_id=by_email.id).count() == 0
+
+    # An account that signs in with another X id: same refusal.
+    other = _make_user("other_x")
+    other.twitter_id = "U9"
+    _db.session.commit()
+    with pytest.raises(imports_mod.PrefillIdConflict, match="signs in with X account U9"):
+        imports_mod.prefill_x_api_impl(other.id, "alice", {"max_tweets": 10})
+    pulled.assert_not_called()
