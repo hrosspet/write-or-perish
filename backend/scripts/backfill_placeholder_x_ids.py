@@ -11,8 +11,8 @@ it was pre-filled from (``prefilled_handle``, else the username):
      this account (``for_user_id``) and this handle — the id was already
      paid for, reuse it (a dump for another handle is reported, not used);
   2. the Community Archive (free, exact username match);
-  3. with --x-lookup AND --apply, one paid X API user read, billed to
-     --admin-id (never to the placeholder).
+  3. with --x-lookup AND --apply, one paid X API user read, billed to the
+     placeholder itself — the read finds its own X id, like its pre-fills.
 
 Dry run by default: no paid calls, nothing written; it prints who each
 placeholder would be matched to (archive username and display name, X id,
@@ -27,7 +27,7 @@ Prod runbook (after the deploy that switched X logins to id matching):
     # review: every line names the matched account; UNRESOLVED and
     # CONFLICTS list what needs a paid lookup or a hand fix
     python -m backend.scripts.backfill_placeholder_x_ids --apply
-    python -m backend.scripts.backfill_placeholder_x_ids --apply --x-lookup --admin-id <your id>
+    python -m backend.scripts.backfill_placeholder_x_ids --apply --x-lookup
     python -m backend.scripts.backfill_placeholder_x_ids   # "0 placeholder(s) needing an id"
 
 An "already signs in as user N" line means the owner logged in with X
@@ -84,7 +84,7 @@ def _who(username, display_name):
     return f"@{username} “{display_name}”" if display_name else f"@{username}"
 
 
-def _run(apply, x_lookup, admin_id, dumps_dir, out=sys.stdout):
+def _run(apply, x_lookup, dumps_dir, out=sys.stdout):
     from sqlalchemy import func, update
     from sqlalchemy.exc import IntegrityError
     from backend.extensions import db
@@ -93,11 +93,6 @@ def _run(apply, x_lookup, admin_id, dumps_dir, out=sys.stdout):
     from backend.utils.reserved_usernames import is_username_reserved
     from backend.utils.x_identity import resolve_x_id, XIdUnresolved
 
-    if x_lookup and apply:
-        if admin_id is None:
-            raise SystemExit("--x-lookup with --apply needs --admin-id (the paid reads are billed to it)")
-        if User.query.get(admin_id) is None:
-            raise SystemExit(f"--admin-id {admin_id}: no such user")
     dumped = _ids_from_x_dumps(dumps_dir)
     rows = (User.query
             .filter(User.twitter_id.is_(None), User.email.is_(None))
@@ -130,7 +125,8 @@ def _run(apply, x_lookup, admin_id, dumps_dir, out=sys.stdout):
                         unresolved.append(f"{label}: not in the archive — would need a paid X lookup (--apply)")
                         continue
                     try:
-                        r = resolve_x_id(handle, x_lookup=True, cost_user_id=admin_id,
+                        # billed to the placeholder: the read finds its own id
+                        r = resolve_x_id(handle, x_lookup=True, cost_user_id=user.id,
                                          timeout=LOOKUP_TIMEOUT)
                     except XIdUnresolved as e2:
                         unresolved.append(f"{label}: {e2.message}")
@@ -221,15 +217,14 @@ def main():
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--apply", action="store_true", help="write the ids (default: dry run)")
     p.add_argument("--x-lookup", action="store_true",
-                   help="with --apply: also try the X API for handles the archive lacks (paid)")
-    p.add_argument("--admin-id", type=int, default=None,
-                   help="user id the paid X reads are billed to (required with --x-lookup --apply)")
+                   help="with --apply: also try the X API for handles the archive lacks "
+                        "(one paid user read each, billed to the placeholder)")
     args = p.parse_args()
     from backend import create_app
     app = create_app()
     with app.app_context():
         from backend.utils.twitter_archive import STASH_ROOT
-        _run(args.apply, args.x_lookup, args.admin_id, STASH_ROOT.parent / "x-api")
+        _run(args.apply, args.x_lookup, STASH_ROOT.parent / "x-api")
 
 
 if __name__ == "__main__":

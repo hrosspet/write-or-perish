@@ -579,7 +579,7 @@ class TestBackfillPlaceholderXIds:
         out = io.StringIO()
         kw.setdefault("dumps_dir", tmp_path)
         result = _run(kw.pop("apply", False), kw.pop("x_lookup", False),
-                      kw.pop("admin_id", None), kw.pop("dumps_dir"), out=out)
+                      kw.pop("dumps_dir"), out=out)
         return result, out.getvalue()
 
     def test_dry_run_makes_no_paid_call_and_writes_nothing(self, app, tmp_path, monkeypatch):
@@ -587,7 +587,7 @@ class TestBackfillPlaceholderXIds:
         monkeypatch.setattr(ca_mod, "fetch_account", lambda h, timeout=None: None)
         monkeypatch.setattr(x_api, "lookup_user", _never)
 
-        result, out = self._run(tmp_path, x_lookup=True, admin_id=1)
+        result, out = self._run(tmp_path, x_lookup=True)
 
         assert result["stamped"] == 0
         assert any("would need a paid X lookup" in line for line in result["unresolved"])
@@ -653,21 +653,20 @@ class TestBackfillPlaceholderXIds:
         assert User.query.get(other.id).twitter_id is None
         assert any("@dave" in line for line in result["unresolved"])
 
-    def test_paid_lookup_needs_apply_and_is_billed_to_the_admin(self, app, tmp_path, monkeypatch):
-        admin = _add(username="explore", email="admin@example.com",
-                     approved=True, is_admin=True)
+    def test_paid_lookup_needs_apply_and_is_billed_to_the_placeholder(self, app, tmp_path, monkeypatch):
+        """The read finds the placeholder's own X id: its ledger, like its
+        pre-fills. And only with --apply (the dry run stays free)."""
         placeholder = _add(username="alice", approved=False)
         monkeypatch.setattr(ca_mod, "fetch_account", lambda h, timeout=None: None)
         monkeypatch.setattr(x_api, "lookup_user", lambda h, c, timeout=None: {
             "id": "777", "username": "alice", "name": "A", "tweet_count": 1, "protected": False})
 
-        with pytest.raises(SystemExit, match="--admin-id"):
-            self._run(tmp_path, apply=True, x_lookup=True)
-        result, _out = self._run(tmp_path, apply=True, x_lookup=True, admin_id=admin.id)
+        result, _out = self._run(tmp_path, apply=True, x_lookup=True)
 
         assert result["stamped"] == 1
         log = APICostLog.query.filter_by(request_type="x_id_lookup").one()
-        assert log.user_id == admin.id
+        assert log.user_id == placeholder.id
+        assert log.model_id == "x-api/user-lookup"
         _db.session.refresh(placeholder)
         assert placeholder.twitter_id == "777"
 
@@ -812,15 +811,6 @@ class TestBackfillPlaceholderXIds:
         assert "logged in before the backfill" not in line
         _db.session.refresh(second)
         assert second.twitter_id is None
-
-    def test_unknown_admin_id_stops_before_any_lookup(self, app, tmp_path, monkeypatch):
-        _add(username="alice", approved=False)
-        monkeypatch.setattr(ca_mod, "fetch_account", _never)
-        monkeypatch.setattr(x_api, "lookup_user", _never)
-
-        with pytest.raises(SystemExit, match="no such user"):
-            self._run(tmp_path, apply=True, x_lookup=True, admin_id=999)
-        assert APICostLog.query.count() == 0
 
     def test_reserved_names_are_listed_apart_and_the_count_excludes_them(self, app, tmp_path, monkeypatch):
         _add(username="system", approved=False)  # a system account, never claimable
