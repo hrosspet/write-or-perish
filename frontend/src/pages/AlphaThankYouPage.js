@@ -1,21 +1,30 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { Link, Navigate } from "react-router-dom";
 import Fade from "../utils/Fade";
 import { useUser } from "../contexts/UserContext";
 import api from "../api";
 import PrefillConsentCard from "../components/PrefillConsentCard";
+import { emailState } from "../utils/emailState";
 
 export default function AlphaThankYouPage() {
   const { user, setUser, loading: userLoading } = useUser();
   const [email, setEmail] = useState(user?.email || "");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [submitted, setSubmitted] = useState(false);
+  // "Use a different address": show the form again over a pending one.
+  const [editing, setEditing] = useState(false);
+  const [resent, setResent] = useState(false);
+  // One request at a time: each POST mails a link that voids the one before.
+  const inFlight = useRef(false);
 
-  // No bound email and no confirmation pending → ask for one. Binding
-  // happens only when the link we send is opened (#260).
-  const needsEmail = user && (!user.email || user.email.trim() === "")
-    && !user.pending_email;
+  // The address binds only when the link we send is confirmed (#260).
+  // Until then it is pending, and this page has to keep a way forward:
+  // the link expires, mail gets lost, addresses get mistyped, and a
+  // waitlisted user can reach no other page to fix it.
+  const hasEmail = user && user.email && user.email.trim() !== "";
+  const pending = user && user.pending_email;
+  const showForm = user && !hasEmail && (!pending || editing);
+  const showPending = pending && !editing;
 
   // This page is handed out as a link (e.g. to fresh X signups, so they can
   // opt in to the tweet seed). Signed-up users are logged in even before
@@ -35,20 +44,29 @@ export default function AlphaThankYouPage() {
     return <Navigate to="/landing" replace />;
   }
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  const sendLink = async (address, { isResend = false } = {}) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
     setLoading(true);
     setError("");
+    setResent(false);
     try {
-      const response = await api.post("/dashboard/email", { email });
-      setUser({ ...user, pending_email: response.data.pending_email });
-      setSubmitted(true);
-      setLoading(false);
+      const response = await api.post("/dashboard/email", { email: address });
+      setUser((prev) => ({ ...prev, ...emailState(response.data) }));
+      setEditing(false);
+      setResent(isResend);
     } catch (err) {
       console.error(err);
       setError(err.response?.data?.error || "Error sending the confirmation link. Please try again.");
+    } finally {
+      inFlight.current = false;
       setLoading(false);
     }
+  };
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    sendLink(email);
   };
 
   return (
@@ -99,7 +117,7 @@ export default function AlphaThankYouPage() {
       </Fade>
 
       {/* Email form for users without email */}
-      {needsEmail && !submitted && (
+      {showForm && (
         <Fade delay={0.25}>
           <div style={{
             background: "var(--bg-card)", border: "1px solid var(--border)",
@@ -155,13 +173,23 @@ export default function AlphaThankYouPage() {
               >
                 {loading ? "Submitting..." : "Submit"}
               </button>
+              {editing && (
+                <button
+                  type="button"
+                  disabled={loading}
+                  onClick={() => { setError(""); setEditing(false); }}
+                  style={{ ...pendingActionStyle(loading), marginLeft: "1.2rem" }}
+                >
+                  Keep {user.pending_email}
+                </button>
+              )}
             </form>
           </div>
         </Fade>
       )}
 
-      {/* The link we sent binds the address when opened (#260). */}
-      {user.pending_email && (
+      {/* Pending: the address binds when the link is confirmed (#260). */}
+      {showPending && (
         <Fade delay={0.25}>
           <div style={{
             background: "var(--bg-card)", border: "1px solid var(--border)",
@@ -169,10 +197,45 @@ export default function AlphaThankYouPage() {
             textAlign: "left", marginBottom: "2rem",
             fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.92rem",
             lineHeight: 1.7, color: "var(--text-secondary)",
+            overflowWrap: "anywhere",
           }}>
-            We sent a confirmation link to{" "}
-            <strong style={{ color: "var(--text-primary)", fontWeight: 400 }}>{user.pending_email}</strong>.
-            Open it to finish — until then we have no way to reach you.
+            {user.pending_email_expired ? (
+              <>
+                The confirmation link we sent to{" "}
+                <strong style={{ color: "var(--text-primary)", fontWeight: 400 }}>{user.pending_email}</strong>{" "}
+                has expired. Until the address is confirmed we have no way to reach you.
+              </>
+            ) : (
+              <>
+                We sent a confirmation link to{" "}
+                <strong style={{ color: "var(--text-primary)", fontWeight: 400 }}>{user.pending_email}</strong>.
+                Open it to finish — until then we have no way to reach you.
+              </>
+            )}
+            {resent && (
+              <div style={{ marginTop: "0.6rem", color: "var(--text-muted)" }}>
+                New link sent. The earlier one no longer works.
+              </div>
+            )}
+            {error && <div style={{ color: "var(--accent)", marginTop: "0.6rem", fontSize: "0.88rem" }}>{error}</div>}
+            <div style={{ marginTop: "0.9rem", display: "flex", gap: "1.2rem", flexWrap: "wrap" }}>
+              <button
+                type="button"
+                disabled={loading}
+                onClick={() => sendLink(user.pending_email, { isResend: true })}
+                style={pendingActionStyle(loading)}
+              >
+                {loading ? "Sending..." : (user.pending_email_expired ? "Send a new link" : "Send it again")}
+              </button>
+              <button
+                type="button"
+                disabled={loading}
+                onClick={() => { setEmail(user.pending_email); setError(""); setResent(false); setEditing(true); }}
+                style={pendingActionStyle(loading)}
+              >
+                Use a different address
+              </button>
+            </div>
           </div>
         </Fade>
       )}
@@ -250,3 +313,10 @@ export default function AlphaThankYouPage() {
     </div>
   );
 }
+
+const pendingActionStyle = (disabled) => ({
+  background: "none", border: "none", padding: 0,
+  color: "var(--accent)", cursor: disabled ? "default" : "pointer",
+  opacity: disabled ? 0.6 : 1,
+  fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.88rem",
+});
