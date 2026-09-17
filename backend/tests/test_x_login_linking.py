@@ -116,9 +116,17 @@ def app():
 
 
 @pytest.fixture
-def real_app():
+def real_app(monkeypatch):
     """The real app from create_app(): every blueprint, the login manager
-    and, what the bare app lacks, the approval gate (block_unapproved_users)."""
+    and, what the bare app lacks, the approval gate (block_unapproved_users).
+
+    The database is forced to sqlite here, on the Config class itself.
+    backend/tests is a package, so pytest imports backend/__init__.py — and
+    with it backend.config — BEFORE any test module sets DATABASE_URL;
+    Config.SQLALCHEMY_DATABASE_URI is then whatever the shell had, by
+    default a Postgres on localhost. create_all()/drop_all() against that
+    would create and then DROP the tables of a real database (it did, on a
+    stale local one), and fails in CI where no Postgres runs."""
     _affected = lambda k: (  # noqa: E731
         k == "flask_login"
         or k.startswith("backend.routes")
@@ -131,8 +139,12 @@ def real_app():
     for _k in [k for k in list(sys.modules) if k.startswith("backend.routes")]:
         del sys.modules[_k]
 
+    import backend.config as _config
+    monkeypatch.setattr(_config.Config, "SQLALCHEMY_DATABASE_URI", "sqlite:///:memory:")
     from backend import create_app
     app = create_app()
+    assert app.config["SQLALCHEMY_DATABASE_URI"] == "sqlite:///:memory:", (
+        "the real-app tests must never touch a real database")
     app.config["TESTING"] = True
     app.config["FRONTEND_URL"] = FRONTEND_URL
     with app.app_context():
