@@ -394,8 +394,9 @@ class TestWhitelistByXId:
 
         assert r.status_code == 404, r.json
         assert "not in the Community Archive" in r.json["error"]
-        assert 'Tick "Look up on X"' in r.json["error"]
-        assert "enter the X id" not in r.json["error"]
+        # what the admin panel needs to offer the paid lookup in a dialog
+        assert r.json["reason"] == "not-in-archive"
+        assert r.json["x_lookup_cost_usd"] == x_api.COST_PER_USER_READ
         assert User.query.filter_by(username="alice").first() is None
 
     def test_archive_error_is_502_without_the_x_flag(self, app, monkeypatch):
@@ -410,6 +411,7 @@ class TestWhitelistByXId:
 
         assert r.status_code == 502, r.json
         assert "archive down" in r.json["error"]
+        assert r.json["reason"] == "archive-error" and "x_lookup_cost_usd" in r.json
         assert User.query.filter_by(username="alice").first() is None
 
     def test_ambiguous_archive_match_is_refused(self, app, monkeypatch):
@@ -463,6 +465,7 @@ class TestWhitelistByXId:
 
         assert r.status_code == 404, r.json
         assert "not on X" in r.json["error"]
+        assert r.json["reason"] == "not-on-x" and "x_lookup_cost_usd" not in r.json
         assert APICostLog.query.filter_by(
             user_id=admin.id, request_type="x_id_lookup").count() == 1
         assert User.query.filter_by(username="alice").first() is None

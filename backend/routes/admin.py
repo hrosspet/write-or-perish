@@ -435,7 +435,8 @@ def whitelist_user():
     owner's X login finds it by id (X logins never match on handle — see
     auth.py). The id comes from ``resolve_x_id``: the Community Archive
     (free, exact username match), or one paid X API user read when the
-    body sets ``x_lookup`` — the admin opts into that spend per whitelist.
+    body sets ``x_lookup`` — which the admin panel only sends after the
+    admin confirmed the spend in a dialog, per whitelist.
     Created unapproved: whitelisting starts the pre-fill workflow, not
     ends it — the account is pre-filled (and may be claimed by its owner
     meanwhile) before it is ready, and the admin approves it by hand once
@@ -456,9 +457,13 @@ def whitelist_user():
         resolved = resolve_x_id(handle, x_lookup=bool(data.get("x_lookup")),
                                 cost_user_id=current_user.id)
     except XIdUnresolved as e:
-        hint = (' Tick "Look up on X" (one paid user read).'
-                if e.reason in ("not-in-archive", "archive-error") else "")
-        return jsonify({"error": e.message + hint}), _UNRESOLVED_STATUS[e.reason]
+        body = {"error": e.message, "reason": e.reason}
+        if e.reason in ("not-in-archive", "archive-error"):
+            # The admin panel offers the paid X lookup in a dialog at this
+            # point, with the price; the spend is decided per whitelist.
+            from backend.utils import x_api
+            body["x_lookup_cost_usd"] = x_api.COST_PER_USER_READ
+        return jsonify(body), _UNRESOLVED_STATUS[e.reason]
 
     holder = User.query.filter_by(twitter_id=resolved.x_id).first()
     if holder:
