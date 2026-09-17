@@ -977,6 +977,13 @@ def test_delete_response_lists_pinned_nodes_the_cascade_took(app, alice, bob):
     assert Node.query.get(p2.id).deleted_at is not None
     assert Node.query.get(b2.id).deleted_at is None
     assert Node.query.get(unrelated.id).deleted_at is None
+    # A tombstone is not pinned: the cascade clears the pin on the
+    # descendant it takes as it does on the target, or the pin outlives
+    # the node wherever pinned rows are listed without a deleted_at
+    # filter (GET /api/dashboard).
+    assert Node.query.get(p1.id).pinned_at is None
+    assert Node.query.get(p2.id).pinned_at is None
+    assert Node.query.get(unrelated.id).pinned_at is not None
 
 
 def test_delete_impact_ignores_already_deleted_siblings(app, alice):
@@ -1098,6 +1105,37 @@ def test_delete_with_orphaned_prompt_flag_keeps_the_prompt_when_content_remains(
     _db.session.expire_all()
     assert Node.query.get(root.id).deleted_at is None
     assert Node.query.get(late.id).deleted_at is None
+
+
+def test_nothing_left_check_asks_for_one_alive_row(app, alice):
+    """The re-check under the prompt root's lock is a yes/no question.
+    It asks the database for one alive row (LIMIT 1) rather than
+    fetching the session's whole subtree to look for one in Python while
+    the lock is held."""
+    from sqlalchemy import event
+
+    root = _prompt_session(alice)
+    first = _make_node(alice, parent=root, content="first")
+    for i in range(5):
+        _make_node(alice, parent=root, content=f"entry {i}")
+    walks = []
+
+    def on_execute(conn, cursor, statement, params, context, executemany):
+        if "subtree_walk" in statement:
+            walks.append(statement)
+
+    client = app.test_client()
+    _login(client, alice)
+    event.listen(_db.engine, "before_cursor_execute", on_execute)
+    try:
+        r = client.delete(f"/nodes/{first.id}", query_string={
+            "delete_orphaned_prompt": "true",
+        })
+    finally:
+        event.remove(_db.engine, "before_cursor_execute", on_execute)
+    assert r.status_code == 200 and r.json["orphaned_prompt_deleted"] is None
+    assert len(walks) == 1, "the check is the request's only subtree walk"
+    assert "LIMIT" in walks[0]
 
 
 def test_orphaned_prompt_is_never_someone_elses_root(app, alice, bob):
@@ -1400,8 +1438,8 @@ def test_cache_step_after_a_cascade_asks_the_database_on_ids(app, alice, monkeyp
     load that has run staging out of memory. Every statement after the
     commit is held to that, not only the id-list one: loading the nodes
     one at a time, or fetching every deleted id to pick the public ones
-    in Python, fails here. Nothing deleted → no query at all (not an
-    empty `IN ()`)."""
+    in Python, fails here. Nothing deleted → the target alone is asked
+    about (never an empty `IN ()`)."""
     from backend.utils import public_cache
 
     root = _make_node(alice, content="private root")
@@ -1430,9 +1468,65 @@ def test_cache_step_after_a_cascade_asks_the_database_on_ids(app, alice, monkeyp
     assert {f"/node/{replies[1].id}", f"/node/{root.id}", "/@alice"} <= set(dropped)
     assert f"/node/{replies[0].id}" not in dropped
 
-    r, cache_step = _delete_and_record_cache_step(app, alice, root.id)  # already a tombstone
+    # A repeated DELETE tombstones nothing. The step still asks about
+    # the target, whose pages may be cached yet, so the id list is never
+    # empty; this target is private, which ends the step there.
+    del dropped[:]
+    r, cache_step = _delete_and_record_cache_step(app, alice, root.id)
     assert r.status_code == 200 and r.json["scheduled"] == 0
-    assert cache_step == []
+    assert len(cache_step) == 1
+    statement, params = cache_step[0]
+    assert root.id in params and "node.content" not in statement
+    assert dropped == []
+
+
+def test_repeated_delete_of_a_public_tombstone_still_drops_its_pages(
+        app, alice, monkeypatch):
+    """A DELETE on a node that is already a tombstone flags nothing, but
+    its public pages can still be cached: the first request's cache step
+    failed (it never raises, the client heard 200), or a render that
+    began before the delete stored its page after the drop. The repeat
+    (a second tab, a retry) drops them all the same."""
+    from backend.utils import public_cache
+
+    root = _make_node(alice, content="public root")
+    root.privacy_level = "public"
+    _db.session.commit()
+    drops = []
+    monkeypatch.setattr(public_cache, "invalidate", lambda *paths: drops.append(set(paths)))
+
+    client = app.test_client()
+    _login(client, alice)
+    for scheduled in (1, 0):
+        r = client.delete(f"/nodes/{root.id}")
+        assert r.status_code == 200 and r.json["scheduled"] == scheduled
+    assert len(drops) == 2
+    for paths in drops:
+        assert {f"/node/{root.id}", "/@alice", "/sitemap.xml"} <= paths
+
+
+def test_cascade_from_a_public_tombstone_drops_the_targets_page_too(
+        app, alice, monkeypatch):
+    """The target was deleted "this node only" earlier; now the same
+    DELETE comes with descendants. It tombstones the private reply only,
+    and the public target's own page is dropped with it."""
+    from backend.utils import public_cache
+
+    root = _make_node(alice, content="alice's root")
+    target = _make_node(alice, parent=root, content="public, already deleted")
+    target.privacy_level = "public"
+    target.deleted_at = datetime.utcnow()
+    reply = _make_node(alice, parent=target, content="private reply")
+    _db.session.commit()
+    dropped = []
+    monkeypatch.setattr(public_cache, "invalidate", lambda *paths: dropped.extend(paths))
+
+    client = app.test_client()
+    _login(client, alice)
+    r = client.delete(f"/nodes/{target.id}", query_string={"delete_descendants": "true"})
+    assert r.status_code == 200 and r.json["scheduled"] == 1
+    assert f"/node/{target.id}" in dropped
+    assert f"/node/{reply.id}" not in dropped
 
 
 def test_cache_step_walks_up_the_thread_once_however_much_the_cascade_took(

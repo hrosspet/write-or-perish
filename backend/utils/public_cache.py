@@ -141,10 +141,20 @@ def invalidate_deleted(target_id, deleted_ids):
     deleted too), all in the target's thread. The public ones must stop
     being served now, not when their cache entries expire.
 
-    Which of them are public is asked of the database on ids: a cascade
-    can take tens of thousands of nodes, and loading their rows (content
-    included) to read two columns is the whole-subtree load that has run
-    staging out of memory.
+    The target is asked about even when this request did not tombstone
+    it (a DELETE repeated on a tombstone: a second tab, a retry). Its
+    pages can still be cached then — an earlier cache step failed, or a
+    render that began before the first delete stored its page after the
+    drop — so every DELETE of a public node drops that node's pages.
+
+    Which of these nodes are public is asked of the database on ids: a
+    cascade can take tens of thousands of nodes, and loading their rows
+    (content included) to read two columns is the whole-subtree load
+    that has run staging out of memory. One IN list holds them all:
+    psycopg2 binds parameters client-side, so the wire protocol's
+    65,535-parameter limit does not apply (300,000 ids measured at under
+    a second). A driver that binds server-side would need the list
+    chunked.
 
     Never raises. The delete is already committed when this runs, so the
     caller answers with success whatever happens here: a failure is
@@ -156,9 +166,7 @@ def invalidate_deleted(target_id, deleted_ids):
     from backend.models import Node
 
     try:
-        ids = list(deleted_ids)
-        if not ids:
-            return
+        ids = list({target_id, *deleted_ids})
         public_ids = [nid for (nid,) in db.session.query(Node.id).filter(
             Node.id.in_(ids),
             or_(Node.public_slug.isnot(None), Node.privacy_level == "public"),

@@ -429,6 +429,13 @@ function NodeDetail({ nodeIdOverride }) {
     setPinLoading(false);
   };
 
+  // The thread's root as this page knows it: the topmost ancestor the
+  // viewer can see, else the node itself. The orphaned-prompt check, the
+  // prompt dialog's copy and the landing once the session is gone all
+  // read this one node, so the dialog's "leaves your public page" and
+  // the page the delete lands on agree in a mixed-privacy thread too.
+  const threadRoot = node.ancestors?.length ? node.ancestors[0] : node;
+
   const handleConfirmDelete = ({ withDescendants }) => {
     if (!deleteTarget) return;
     const targetId = deleteTarget.id;
@@ -439,7 +446,6 @@ function NodeDetail({ nodeIdOverride }) {
     // system-prompt thread can end up there, and the root is already on
     // the page, so other threads skip the round trip. The check is
     // advisory: if it fails, the delete goes ahead as asked.
-    const threadRoot = node.ancestors?.length ? node.ancestors[0] : node;
     if (!threadRoot.is_system_prompt || targetId === threadRoot.id) {
       performDelete(targetId, withDescendants, false);
       return;
@@ -486,8 +492,9 @@ function NodeDetail({ nodeIdOverride }) {
         );
         // Where to land when nothing of this thread is left to show:
         // public roots live in the Commons, everything else in the Log.
-        const leaveThread = () => {
-          if (node.privacy_level === "public"
+        // `listed` is the node whose privacy says which of the two.
+        const leaveThread = (listed) => {
+          if (listed.privacy_level === "public"
               && currentUser?.share_v1_enabled) {
             navigate("/commons");
           } else {
@@ -498,9 +505,10 @@ function NodeDetail({ nodeIdOverride }) {
         // alive in the thread any more (the server took the root only
         // because nothing was left), so there is no node to refetch or
         // walk up to — the page being viewed is the root, the target,
-        // or something under them.
+        // or something under them. The root is what was listed, and
+        // what the prompt dialog's copy was written from.
         if (data.orphaned_prompt_deleted) {
-          leaveThread();
+          leaveThread(threadRoot);
           return undefined;
         }
         // If the cascade swept the focal node away (target is an
@@ -533,7 +541,7 @@ function NodeDetail({ nodeIdOverride }) {
           }
         }
         // No alive ancestor (deleted a root).
-        leaveThread();
+        leaveThread(node);
         return undefined;
       })
       .catch((err) => {
@@ -1367,9 +1375,7 @@ function NodeDetail({ nodeIdOverride }) {
         open={!!pendingPromptDelete}
         mode="prompt"
         listedIn={
-          (node?.ancestors?.length ? node.ancestors[0] : node)?.privacy_level === "public"
-            ? "your public page"
-            : "your Log"
+          threadRoot.privacy_level === "public" ? "your public page" : "your Log"
         }
         onClose={() => setPendingPromptDelete(null)}
         onConfirm={handleConfirmPromptDelete}

@@ -23,7 +23,7 @@ from flask import jsonify
 from backend.extensions import db
 from backend.models import Node
 from backend.utils.privacy import can_user_edit_node
-from backend.utils.thread_tree import subtree_rows, thread_root_of
+from backend.utils.thread_tree import subtree_rows, subtree_walk, thread_root_of
 
 
 def lock_node(node_id: int):
@@ -78,9 +78,16 @@ def subtree_has_alive_nodes(root_id: int, viewer_id: int) -> bool:
     alive and reachable for `viewer_id` — the definition of remaining
     content shared with the Log (see thread_tree). Pending soft-deletes
     in the session are flushed first, so this reads the state a commit
-    would produce."""
+    would produce.
+
+    Asked for one row (`first()` is LIMIT 1): the caller holds the
+    prompt root's row lock, and the first alive row answers the
+    question, so the subtree is not fetched to look for it."""
     db.session.flush()
-    return any(r.deleted_at is None for r in subtree_rows(root_id, viewer_id))
+    walk = subtree_walk([root_id], viewer_id)
+    return db.session.query(walk.c.id).filter(
+        walk.c.depth > 0, walk.c.deleted_at.is_(None),
+    ).first() is not None
 
 
 def soft_delete_session_if_empty(root, user_id: int) -> "Optional[Deleted]":
@@ -253,6 +260,11 @@ def soft_delete_node(node_id: int, user_id: int, *,
             if locked.pinned_at is not None:
                 pinned_ids.append(locked.id)
             locked.deleted_at = now
+            # As for the root above: a tombstone is not pinned. Left set,
+            # the pin outlives the node (GET /api/dashboard lists pinned
+            # rows with no deleted_at filter) and a re-import that
+            # undeletes the node brings it back pinned.
+            locked.pinned_at = None
             flagged.append(locked.id)
 
         # Re-query children under the lock — catches concurrent inserts that
