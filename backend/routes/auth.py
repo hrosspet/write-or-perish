@@ -1,4 +1,3 @@
-import re
 from datetime import datetime, timedelta
 
 from flask import Blueprint, redirect, url_for, flash, current_app, request, jsonify
@@ -12,15 +11,13 @@ from backend.utils.magic_link import (
     generate_magic_link_token, verify_magic_link_token,
     hash_token, generate_unique_username,
 )
-from backend.utils.email import send_magic_link_email
+from backend.utils.email import send_magic_link_email, is_valid_email
 from backend.utils.reserved_usernames import derive_available_username
 import logging
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 auth_bp = Blueprint("auth_bp", __name__)
-
-EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def is_safe_redirect_url(target):
@@ -139,7 +136,7 @@ def magic_link_send():
     email = (data.get("email") or "").strip().lower()
     next_url = data.get("next_url")
 
-    if not email or not EMAIL_RE.match(email):
+    if not is_valid_email(email):
         return jsonify({"error": "Please enter a valid email address."}), 400
 
     if next_url and not is_safe_redirect_url(next_url):
@@ -188,9 +185,6 @@ def magic_link_verify():
 
     token_h = hash_token(token)
 
-    if payload.get("bind_user_id") is not None:
-        return _bind_verified_email(payload, token_h, frontend_url)
-
     user = User.query.filter_by(email=email).first()
     if user:
         # Check token hash matches (but don't clear it — let the token
@@ -215,42 +209,6 @@ def magic_link_verify():
     if next_url and is_safe_redirect_url(next_url):
         return redirect(f"{frontend_url}{next_url}")
     return redirect(f"{frontend_url}/dashboard")
-
-
-def _bind_verified_email(payload, token_h, frontend_url):
-    """Email change / add (#260): the link was sent to the NEW address by
-    POST /api/dashboard/email; opening it is the proof of control that
-    binds the address. Single-use (the stored hash is cleared) and only
-    while the request is still the account's pending one."""
-    from backend.utils.email import send_email_changed_notice
-    user = User.query.get(payload["bind_user_id"])
-    new_email = payload.get("email")
-    if (user is None or not new_email
-            or user.magic_link_token_hash != token_h
-            or (user.pending_email or "").lower() != new_email):
-        return redirect(f"{frontend_url}/account?email=invalid_or_expired")
-    taken = User.query.filter(
-        db.func.lower(User.email) == new_email, User.id != user.id).first()
-    if taken:
-        user.pending_email = None
-        user.magic_link_token_hash = None
-        db.session.commit()
-        return redirect(f"{frontend_url}/account?email=taken")
-    old_email = user.email
-    user.email = new_email
-    user.pending_email = None
-    user.magic_link_token_hash = None
-    user.magic_link_expires_at = None
-    db.session.commit()
-    logger.info("User %s bound a verified email (had one before: %s)",
-                user.id, bool(old_email))
-    if old_email and old_email.lower() != new_email:
-        try:
-            send_email_changed_notice(old_email, new_email)
-        except Exception:
-            logger.exception("email-changed notice failed")
-    login_user(user, remember=True)
-    return redirect(f"{frontend_url}/account?email=verified")
 
 
 @auth_bp.route("/logout")

@@ -367,13 +367,28 @@ def toggle_user_spam(user_id):
 @login_required
 @admin_required
 def update_user_email(user_id):
+    """Set (or, with an empty string, clear) a user's email directly. The
+    one path that binds an address without the owner confirming it (#260):
+    the admin vouches for it, e.g. to fix a mistyped waitlist address so
+    Activate & Welcome can reach the person."""
     data = request.get_json()
     email = data.get("email")
-    if email is None:
+    if not isinstance(email, str):
         return jsonify({"error": "Email is required."}), 400
     user = User.query.get_or_404(user_id)
-    user.email = email
-    db.session.commit()
+    # Lowercased like every other path that writes an address: sign-in and
+    # the change flow look addresses up lowercased.
+    user.email = email.strip().lower() or None
+    # A change the user left pending must not replace the admin's address
+    # when its link is confirmed later.
+    user.pending_email = None
+    user.email_change_token_hash = None
+    user.email_change_expires_at = None
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({"error": "That email already belongs to another account."}), 409
     return jsonify({"message": "Email updated", "email": user.email}), 200
 
 @admin_bp.route("/users/<int:user_id>/update_plan", methods=["PUT"])
