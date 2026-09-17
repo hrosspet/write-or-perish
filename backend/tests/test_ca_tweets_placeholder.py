@@ -310,13 +310,16 @@ class TestOpenAIBatchOne:
                            {"type": "output_text", "text": "{\"verdict\": \"x\", "},
                            {"type": "output_text", "text": "\"picks\": []}"}]}],
             "usage": {"input_tokens": 40000, "output_tokens": 300,
-                      "input_tokens_details": {"cached_tokens": 1000}}}}}
+                      "input_tokens_details": {"cached_tokens": 1000,
+                                               "cache_write_tokens": 700}}}}}
         Client, _ = self._client("completed", [line])
         monkeypatch.setattr(openai, "OpenAI", Client)
         status, resp = openai_batch_collect_one("k", "b", "node-7")
         assert status == "completed"
         assert json.loads(resp["content"]) == {"verdict": "x", "picks": []}
         assert (resp["input_tokens"], resp["output_tokens"], resp["cached_tokens"]) == (40000, 300, 1000)
+        # #286: the write subset is read from the same details object.
+        assert resp["cache_write_subset_tokens"] == 700
         assert resp["batch"] is True and resp["truncated"] is False
 
 

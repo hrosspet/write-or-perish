@@ -17,7 +17,6 @@ import AlphaThankYouPage from "./pages/AlphaThankYouPage";
 import WelcomePage from "./pages/WelcomePage";
 import HomePage from "./pages/HomePage";
 import VoicePage from "./pages/VoicePage";
-import ConversePage from "./pages/ConversePage";
 import WritePage from "./pages/WritePage";
 import ProfilePage from "./pages/ProfilePage";
 import TodoPage from "./pages/TodoPage";
@@ -219,7 +218,6 @@ function App() {
           <Route path="/welcome" element={<ProtectedRoute><WelcomePage onNewEntryClick={() => setShowNewEntry(true)} /></ProtectedRoute>} />
           {/* Workflow routes */}
           <Route path="/voice" element={<ProtectedRoute><VoicePage /></ProtectedRoute>} />
-          <Route path="/converse" element={<ProtectedRoute><ConversePage /></ProtectedRoute>} />
           <Route path="/textmode" element={<ProtectedRoute><WritePage /></ProtectedRoute>} />
           {/* Profile and Todo */}
           <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />

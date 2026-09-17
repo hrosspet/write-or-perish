@@ -48,6 +48,29 @@ def touch_last_seen(user, path, now=None):
         return False
 
 
+# last_seen_at arrived with migration 0c7843c6ffd3 (created 2026-08-28,
+# deployed the next day); use of an account before that left no record.
+LAST_SEEN_SINCE = datetime(2026, 8, 29)
+
+
+def sign_in_status(user):
+    """Whether anyone has ever signed into this account, as far as the
+    record can tell — the question behind "is this a placeholder?".
+
+    "signed-in": a last-seen or a terms acceptance is on record.
+    "never": neither, and the account postdates the last-seen record, so
+    any sign-in would have been recorded (X logins stamp it; every app
+    request does too).
+    "unknown": neither, but the account predates the record — an early X
+    signup who never accepted the terms looks exactly like a placeholder
+    here. Callers must not treat it as one."""
+    if user.last_seen_at is not None or user.accepted_terms_at is not None:
+        return "signed-in"
+    if user.created_at is None or user.created_at < LAST_SEEN_SINCE:
+        return "unknown"
+    return "never"
+
+
 def activated_at(user):
     return user.approved_at or user.accepted_terms_at or user.created_at
 

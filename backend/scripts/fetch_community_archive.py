@@ -36,9 +36,9 @@ from backend.utils.community_archive import (  # noqa: E402
     fetch_account_parquet, iter_tweets_parquet)
 
 
-def fetch_tweets(handle):
+def fetch_tweets(account_id):
     return list(iter_tweets(
-        handle, on_page=lambda n: print(f"  fetched {n}", file=sys.stderr)))
+        account_id, on_page=lambda n: print(f"  fetched {n}", file=sys.stderr)))
 
 
 def build_zip(handle, output_dir, snapshot_dir=None):
@@ -49,7 +49,7 @@ def build_zip(handle, output_dir, snapshot_dir=None):
     print(f"@{account['username']}: {account['num_tweets']} tweets listed", file=sys.stderr)
 
     rows = (iter_tweets_parquet(account["account_id"], snapshot_dir) if snapshot_dir
-            else fetch_tweets(account["username"]))
+            else fetch_tweets(account["account_id"]))
     seen, entries = set(), []
     for row in rows:
         if row["tweet_id"] in seen:

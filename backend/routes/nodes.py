@@ -7,6 +7,7 @@ from backend.models import (
 from backend.extensions import db
 from sqlalchemy import func
 from backend.utils.timefmt import iso_utc
+from backend.utils.slugs import permalink_for
 from datetime import datetime
 from openai import OpenAI
 import os
@@ -562,7 +563,6 @@ def approximate_token_count(text):
     return max(1, len(text.split()))
 
 
-
 # ---------------------------------------------------------------------------
 # Create a new node (supports both text & voice uploads)
 # ---------------------------------------------------------------------------
@@ -781,9 +781,7 @@ def create_node():
         "created_at": iso_utc(node.created_at),
         "username": current_user.username,
         "privacy_level": node.privacy_level,
-        "permalink": (
-            f"/@{node.user.username}/{node.public_slug}"
-            if node.public_slug and node.user else None),
+        "permalink": permalink_for(node),
         "ai_usage": node.ai_usage,
         "split_into": 1 + len(parts),
         "tip_id": parts[-1].id if parts else node.id
@@ -1003,9 +1001,7 @@ def _focal_own_fields(node):
         "node_type": node.node_type,
         "created_at": iso_utc(node.created_at),
         "updated_at": iso_utc(node.updated_at),
-        "permalink": (
-            f"/@{node.user.username}/{node.public_slug}"
-            if node.public_slug and node.user else None),
+        "permalink": permalink_for(node),
         "user": {
             "id": node.user.id,
             "username": node.user.username,

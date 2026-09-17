@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from functools import wraps
 from flask import Blueprint, request, jsonify, abort, current_app
 from flask_login import login_required, current_user
+from sqlalchemy.exc import IntegrityError
 from backend.models import User, APICostLog
 from backend.extensions import db
 from backend.utils.timefmt import iso_utc
@@ -171,7 +172,8 @@ def list_users():
     # Unified across providers: cache_read_tokens holds the input SERVED from
     # cache — Anthropic cache reads AND OpenAI cached_tokens — and input_tokens
     # is the full prompt size, so hit-rate = served / total prompt input works
-    # for both (OpenAI has no separate "write" concept). Scoped to
+    # for both (cache_write_tokens likewise unifies Anthropic cache creation
+    # and the OpenAI write subset, #286, but hit-rate only needs reads). Scoped to
     # request_type='conversation' so embeddings/transcription/profile/warm
     # don't dilute the denominator, and to turns since PROMPT_CACHE_SINCE
     # so pre-caching history doesn't either. NULLs are ignored by SUM.
@@ -417,13 +419,33 @@ def update_user_spend_limit(user_id):
         "current_month_spending_usd": state["spend_usd"],
     }), 200
 
-# New endpoint: Whitelist a user by handle.
+_UNRESOLVED_STATUS = {
+    "not-in-archive": 404, "not-on-x": 404, "ambiguous": 409,
+    "archive-error": 502, "x-error": 502,
+}
+
+
 @admin_bp.route("/whitelist", methods=["POST"])
 @login_required
 @admin_required
 def whitelist_user():
+    """Create an account for an X handle ahead of its owner's first login.
+
+    The account carries the handle's numeric X id from creation, so the
+    owner's X login finds it by id (X logins never match on handle — see
+    auth.py). The id comes from ``resolve_x_id``: the Community Archive
+    (free, exact username match), or one paid X API user read when the
+    body sets ``x_lookup`` — which the admin panel only sends after the
+    admin confirmed the spend in a dialog, per whitelist. That read is
+    billed to the account it creates (the admin's ledger only when there
+    is no account to bill).
+    Created unapproved: whitelisting starts the pre-fill workflow, not
+    ends it — the account is pre-filled (and may be claimed by its owner
+    meanwhile) before it is ready, and the admin approves it by hand once
+    it is. Body: {"handle", "x_lookup"?: bool}."""
+    from backend.utils.x_identity import resolve_x_id, XIdUnresolved, log_user_read
     data = request.get_json() or {}
-    handle = data.get("handle", "").strip()
+    handle = (data.get("handle") or "").strip().lstrip("@")
     if not handle:
         return jsonify({"error": "Handle is required."}), 400
 
@@ -433,16 +455,53 @@ def whitelist_user():
     if error:
         return jsonify({"error": error}), 400
 
-    # Create a new user with the handle
-    user = User(twitter_id=None, username=handle, approved=True)
+    try:
+        # The paid read, if any, goes on the ledger of the account it finds
+        # the id for (like that account's pre-fills) — which does not exist
+        # yet, so the charge is deferred and billed below.
+        resolved = resolve_x_id(handle, x_lookup=bool(data.get("x_lookup")),
+                                defer_cost=True)
+    except XIdUnresolved as e:
+        if e.paid_reads:
+            log_user_read(current_user.id, handle)  # no account to bill
+        body = {"error": e.message, "reason": e.reason}
+        if e.reason in ("not-in-archive", "archive-error"):
+            # The admin panel offers the paid X lookup in a dialog at this
+            # point, with the price; the spend is decided per whitelist.
+            from backend.utils import x_api
+            body["x_lookup_cost_usd"] = x_api.COST_PER_USER_READ
+        return jsonify(body), _UNRESOLVED_STATUS[e.reason]
+
+    holder = User.query.filter_by(twitter_id=resolved.x_id).first()
+    if holder:
+        if resolved.paid_reads:
+            log_user_read(holder.id, handle)  # the read found their id
+        return jsonify({
+            "error": f"That X account already has a Loore account: @{holder.username}.",
+            "user_id": holder.id,
+        }), 409
+
+    user = User(twitter_id=resolved.x_id, username=handle, approved=False)
     db.session.add(user)
     try:
         db.session.commit()
-    except Exception as e:
+    except IntegrityError:
+        # A concurrent whitelist (double submit) or signup took the handle
+        # or the X id between the checks above and this insert.
         db.session.rollback()
-        return jsonify({"error": "DB error", "details": str(e)}), 500
+        if resolved.paid_reads:
+            log_user_read(current_user.id, handle)  # no account of ours to bill
+        return jsonify({
+            "error": "That handle or X account was just added by another request."}), 409
+    if resolved.paid_reads:
+        log_user_read(user.id, handle)
     return jsonify({
         "message": "User whitelisted successfully.",
+        "source": resolved.source,
+        # Who the id belongs to, as the source spells it, so the admin can
+        # see the match — not just an opaque number.
+        "matched": {"username": resolved.username,
+                    "display_name": resolved.display_name},
         "user": {
             "id": user.id,
             "username": user.username,

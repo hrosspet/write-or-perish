@@ -37,7 +37,7 @@ These technical capabilities are production-ready and form the foundation:
 - **System prompt management** - Prompts page for viewing and editing AI system prompts (#72). System prompt nodes linked via FK instead of duplicating content (#73). One-off system prompt edits per thread with confirmation dialog. Default prompt propagation to existing users.
 - **Todo page** - Collapsible nested sub-lists, improved parsing, voice label display ("Voice" instead of "voice_session")
 - **Cmd+K keyword search** - Global search with date filtering, diacritics-insensitive matching, and infinite scroll pagination
-- **OAuth authentication flow** - Twitter login with approval/whitelist system
+- **OAuth authentication flow** - X login matched by numeric X id only, never by handle (2026-09-17: handle matching let whoever held a handle log into a same-named magic-link account); admin whitelist by handle resolves the X id via the Community Archive (optional, explicit paid X lookup) and creates the account unapproved — approval is a separate manual step after the pre-fill; logout drops the stored X token
 - **Tree-structured node system** - Hierarchical content organization with parent/child relationships, denormalized `human_owner_id` for efficient access control
 - **Version history tracking** - Edit history for nodes with timestamps for audit trails
 - **Chunked file upload** - Handle large audio files (>10MB) by splitting into chunks and server-side assembly

@@ -35,7 +35,7 @@ from backend.utils.node_split import NODE_CHAR_CAP
 from backend.utils.session_helpers import chain_has_agentic_prompt
 from backend.utils.timefmt import local_stamp, strip_edge_timestamps
 from backend.utils.api_keys import determine_api_key_type, get_api_keys_for_usage
-from backend.utils.cost import calculate_llm_cost_microdollars
+from backend.utils.cost import llm_cost_log_fields
 from backend.utils.tool_meta import update_tool_meta, parse_github_issue
 from backend.utils.privacy import AI_ALLOWED
 from backend.utils.placeholders import (
@@ -2323,22 +2323,11 @@ def prewarm_anthropic_cache(system_node_id, user_id, model_id,
                     search_enabled=_external_enabled_for_user(user_id)),
             )
             cache_write = response.get("cache_creation_input_tokens", 0)
-            cost = calculate_llm_cost_microdollars(
-                model_id, response.get("input_tokens", 0),
-                response.get("output_tokens", 0),
-                cache_read_tokens=response.get(
-                    "cache_read_input_tokens", 0),
-                cache_write_tokens=cache_write,
-            )
             db.session.add(APICostLog(
                 user_id=user_id,
                 model_id=model_id,
                 request_type="cache_warm",
-                input_tokens=response.get("input_tokens", 0) + cache_write,
-                output_tokens=response.get("output_tokens", 0),
-                cache_read_tokens=response.get("cache_read_input_tokens", 0),
-                cache_write_tokens=cache_write,
-                cost_microdollars=cost,
+                **llm_cost_log_fields(model_id, response),
             ))
             db.session.commit()
             logger.info("Cache pre-warm wrote %d tokens (node %s)",
@@ -3181,53 +3170,31 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 """Log an APICostLog row for one model call. Every model call
                 costs money — the retrieval loop logs once per round.
 
-                Cache-aware (#187): cache reads price at 0.1x and writes at
-                1.25x; the logged input_tokens is the full prompt size
-                (uncached + cached reads + cache writes) for visibility, while
-                pricing is already accounted in the cost above.
-
-                OpenAI (#189): cached_tokens is the cached SUBSET of
-                input_tokens (auto prefix-cache) — billed at the model's
-                cached_input_multiplier, fixing the prior full-price
-                over-count."""
+                Pricing and the unified column semantics (full-prompt
+                input_tokens, cache read/write columns across providers,
+                #187/#189/#286) live in llm_cost_log_fields; this only adds
+                the per-turn cache log lines."""
                 in_toks = resp.get("input_tokens", 0)
-                out_toks = resp.get("output_tokens", 0)
                 cache_read_toks = resp.get("cache_read_input_tokens", 0)
                 cache_write_toks = resp.get(
                     "cache_creation_input_tokens", 0)
                 cached_input_toks = resp.get("cached_tokens", 0)
-                cost = calculate_llm_cost_microdollars(
-                    model_id, in_toks, out_toks,
-                    batch=bool(resp.get("batch")),
-                    cache_read_tokens=cache_read_toks,
-                    cache_write_tokens=cache_write_toks,
-                    cached_input_tokens=cached_input_toks,
-                )
+                cache_write_subset_toks = resp.get(
+                    "cache_write_subset_tokens", 0)
                 if cache_read_toks or cache_write_toks:
                     logger.info(
                         "Prompt cache usage: read=%d write=%d uncached=%d",
                         cache_read_toks, cache_write_toks, in_toks)
-                if cached_input_toks:
+                if cached_input_toks or cache_write_subset_toks:
                     logger.info(
-                        "OpenAI prompt cache: %d/%d input tokens cached",
-                        cached_input_toks, in_toks)
+                        "OpenAI prompt cache: %d/%d input tokens cached, "
+                        "%d written",
+                        cached_input_toks, in_toks, cache_write_subset_toks)
                 db.session.add(APICostLog(
                     user_id=user_id,
                     model_id=model_id,
                     request_type="conversation",
-                    # input_tokens = full prompt size. For Anthropic, in_toks
-                    # is the uncached portion so read+write complete it; for
-                    # OpenAI in_toks is already the full prompt (read/write 0).
-                    input_tokens=(in_toks + cache_read_toks
-                                  + cache_write_toks),
-                    output_tokens=out_toks,
-                    # cache_read_tokens = input SERVED from cache, unified
-                    # across providers: Anthropic cache reads + OpenAI
-                    # cached_tokens (one of the two is always 0). Drives the
-                    # admin hit-rate (served / full prompt input).
-                    cache_read_tokens=(cache_read_toks + cached_input_toks),
-                    cache_write_tokens=cache_write_toks,
-                    cost_microdollars=cost,
+                    **llm_cost_log_fields(model_id, resp),
                 ))
 
             # Turn-scoped relative-quote state. quote_labels maps a short

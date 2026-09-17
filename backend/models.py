@@ -109,7 +109,8 @@ class User(db.Model, UserMixin):
     # (one step at a time — chunks are sequential).
     profile_batch_pending = db.Column(
         db.Boolean, nullable=False, default=False, server_default="false")
-    # Consecutive batch failures for the current step (bounds retries).
+    # Consecutive batch failures for the current step (bounds retries):
+    # provider-side errors and results that raised while being applied.
     profile_batch_attempts = db.Column(
         db.Integer, nullable=False, default=0, server_default="0")
     # Why the seeder's last attempt to BUILD this user's next batch request

@@ -17,7 +17,7 @@ from backend.models import Node, UserTodo, User
 from backend.extensions import db
 from backend.llm_providers import LLMProvider
 from backend.utils.api_keys import get_api_keys_for_usage
-from backend.utils.cost import calculate_llm_cost_microdollars
+from backend.utils.cost import llm_cost_log_fields
 from backend.models import APICostLog
 
 logger = get_task_logger(__name__)
@@ -160,16 +160,12 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
         return
 
     # Log cost
-    input_tokens = response.get("input_tokens", 0)
     output_tokens = response.get("output_tokens", 0)
-    cost = calculate_llm_cost_microdollars(model_id, input_tokens, output_tokens)
     db.session.add(APICostLog(
         user_id=user_id,
         model_id=model_id,
         request_type="todo_merge",
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        cost_microdollars=cost,
+        **llm_cost_log_fields(model_id, response),
     ))
 
     # Save new UserTodo
