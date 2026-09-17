@@ -181,10 +181,6 @@ class Deleted(NamedTuple):
     ids: list
     pinned_ids: list
 
-    @property
-    def count(self) -> int:
-        return len(self.ids)
-
 
 def soft_delete_node(node_id: int, user_id: int, *,
                      with_descendants: bool) -> Optional[Deleted]:

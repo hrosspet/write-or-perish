@@ -1270,9 +1270,14 @@ def test_subtree_walk_ends_a_parent_cycle_at_its_first_repeat(app, alice):
     _db.session.commit()
     hanging = [_make_node(alice, parent=q, content=f"off the cycle {i}") for i in range(100)]
 
-    # Every node once: p at depth 0, q, then the 100 under q.
+    # Every node once: p at depth 0, q, then the 100 under q. Counted
+    # through a LIMIT: a walk that lost its cycle guard never ends, and
+    # an unbounded count over it would hang the job until the CI timeout
+    # where this fails at once with 1000 != 102 (SQLite and Postgres
+    # both produce a recursive CTE's rows only as they are fetched).
     walk = thread_tree.subtree_walk([p.id], alice.id)
-    assert _db.session.query(func.count()).select_from(walk).scalar() == 2 + len(hanging)
+    walked = _db.session.query(walk.c.id).limit(1000).subquery()
+    assert _db.session.query(func.count()).select_from(walked).scalar() == 2 + len(hanging)
     assert {r.id for r in thread_tree.subtree_rows(p.id, alice.id)} == {
         q.id, *(n.id for n in hanging),
     }
@@ -1284,69 +1289,166 @@ def test_subtree_walk_ends_a_parent_cycle_at_its_first_repeat(app, alice):
     assert card["newest_node_id"] == hanging[-1].id
 
 
-def test_committed_delete_answers_200_when_the_cache_step_fails(app, alice, monkeypatch, caplog):
+@pytest.mark.parametrize("failing", [
+    "the public-ids query", "the root walk", "the cache drop",
+])
+def test_committed_delete_answers_200_when_the_cache_step_fails(
+        app, alice, monkeypatch, caplog, failing):
     """The public-page invalidation runs after the commit. When it fails
     (a dropped connection, a statement timeout on a long id list) the
     node is already gone: the client must hear 200, not a 500 that keeps
-    the card as if nothing had happened — and the failure is logged."""
+    the card as if nothing had happened. The failure is logged and the
+    session rolled back — on Postgres a failed statement aborts the
+    transaction, so anything run on the session afterwards would fail
+    too. Each part of the step fails in turn, the SQL ones inside the
+    DBAPI call, where a statement timeout surfaces."""
+    import sqlite3
+    from sqlalchemy import event
     from backend.utils import public_cache
 
     root = _make_node(alice, content="public root")
     root.privacy_level = "public"
     _db.session.commit()
 
-    def fail(*args, **kwargs):
-        raise RuntimeError("the cache step fell over")
-    monkeypatch.setattr(public_cache, "invalidate_for_nodes", fail)
+    failing_sql = {
+        "the public-ids query": "public_slug IS NOT NULL",
+        "the root walk": "thread_root_walk",
+    }.get(failing)
+    failed = []
+
+    def do_execute(cursor, statement, parameters, context):
+        if failing_sql and failing_sql in statement:
+            failed.append(statement)
+            raise sqlite3.OperationalError("canceling statement due to statement timeout")
+
+    def drop_fails(*paths):
+        failed.append(paths)
+        raise RuntimeError("the cache drop failed")
+    if failing_sql is None:
+        monkeypatch.setattr(public_cache, "invalidate", drop_fails)
 
     client = app.test_client()
     _login(client, alice)
-    with caplog.at_level("ERROR"):
-        r = client.delete(f"/nodes/{root.id}")
+    event.listen(_db.engine, "do_execute", do_execute)
+    try:
+        with caplog.at_level("ERROR"):
+            r = client.delete(f"/nodes/{root.id}")
+    finally:
+        event.remove(_db.engine, "do_execute", do_execute)
+    assert len(failed) == 1, f"{failing} never ran, so nothing failed"
     assert r.status_code == 200, r.json
     assert r.json["scheduled"] == 1
+    assert "could not be dropped from the cache" in caplog.text
+    assert not _db.session().in_transaction()
     _db.session.expire_all()
     assert Node.query.get(root.id).deleted_at is not None
-    assert "could not be dropped from the cache" in caplog.text
+
+
+def _delete_and_record_cache_step(app, user, node_id, **query):
+    """DELETE `node_id` as `user`. Returns the response and every SQL
+    statement the request ran after its commit — its cache step — as
+    (statement, parameters) pairs."""
+    from sqlalchemy import event
+
+    after_commit = None
+
+    def on_commit(conn):
+        nonlocal after_commit
+        after_commit = []
+
+    def on_execute(conn, cursor, statement, params, context, executemany):
+        if after_commit is not None:
+            after_commit.append((statement, params))
+
+    client = app.test_client()
+    _login(client, user)
+    event.listen(_db.engine, "commit", on_commit)
+    event.listen(_db.engine, "after_cursor_execute", on_execute)
+    try:
+        r = client.delete(f"/nodes/{node_id}", query_string=query)
+    finally:
+        event.remove(_db.engine, "commit", on_commit)
+        event.remove(_db.engine, "after_cursor_execute", on_execute)
+    assert after_commit is not None, "the request never committed"
+    return r, after_commit
 
 
 def test_cache_step_after_a_cascade_asks_the_database_on_ids(app, alice, monkeypatch):
     """Which of the deleted nodes are public is answered in SQL, on ids:
     a cascade can take tens of thousands of nodes, and loading their
     rows (content included) to read two columns is the whole-subtree
-    load that has run staging out of memory. Nothing deleted → no query
-    at all (not an empty `IN ()`)."""
-    from sqlalchemy import event
+    load that has run staging out of memory. Every statement after the
+    commit is held to that, not only the id-list one: loading the nodes
+    one at a time, or fetching every deleted id to pick the public ones
+    in Python, fails here. Nothing deleted → no query at all (not an
+    empty `IN ()`)."""
     from backend.utils import public_cache
 
     root = _make_node(alice, content="private root")
     replies = [_make_node(alice, parent=root, content=f"reply {i}") for i in range(3)]
     replies[1].privacy_level = "public"
     _db.session.commit()
+    gone = {root.id, *(n.id for n in replies)}
     dropped = []
     monkeypatch.setattr(public_cache, "invalidate", lambda *paths: dropped.extend(paths))
-    id_list_statements = []
 
-    def after(conn, cursor, statement, params, context, executemany):
-        if "FROM node" in statement and "IN (" in statement:
-            id_list_statements.append(statement)
-    event.listen(_db.engine, "after_cursor_execute", after)
-    client = app.test_client()
-    _login(client, alice)
-    try:
-        r = client.delete(f"/nodes/{root.id}", query_string={"delete_descendants": "true"})
-        assert r.status_code == 200 and r.json["scheduled"] == 4
-        # Id-list queries read columns; none loads a row's content.
-        assert id_list_statements
-        assert not [s for s in id_list_statements if "node.content" in s]
-        # The public reply's page and the root's pages go; the private
-        # replies never reached Python.
-        assert {f"/node/{replies[1].id}", f"/node/{root.id}", "/@alice"} <= set(dropped)
-        assert f"/node/{replies[0].id}" not in dropped
+    r, cache_step = _delete_and_record_cache_step(
+        app, alice, root.id, delete_descendants="true")
+    assert r.status_code == 200 and r.json["scheduled"] == 4
+    # No statement of the step reads a node's content, by id list or
+    # one node at a time.
+    assert not [s for s, _ in cache_step if "node.content" in s]
+    # The deleted ids go to the database once, and that statement keeps
+    # the public ones in its WHERE: the private replies never reach
+    # Python.
+    with_the_ids = [s for s, params in cache_step if gone <= set(params)]
+    assert len(with_the_ids) == 1
+    where = with_the_ids[0].split("WHERE", 1)[1]
+    assert "public_slug IS NOT NULL" in where and "privacy_level =" in where
+    # The public reply's page and the root's pages go; a private
+    # reply's does not.
+    assert {f"/node/{replies[1].id}", f"/node/{root.id}", "/@alice"} <= set(dropped)
+    assert f"/node/{replies[0].id}" not in dropped
 
-        id_list_statements.clear()
-        r = client.delete(f"/nodes/{root.id}")  # already a tombstone
-        assert r.status_code == 200 and r.json["scheduled"] == 0
-        assert id_list_statements == []
-    finally:
-        event.remove(_db.engine, "after_cursor_execute", after)
+    r, cache_step = _delete_and_record_cache_step(app, alice, root.id)  # already a tombstone
+    assert r.status_code == 200 and r.json["scheduled"] == 0
+    assert cache_step == []
+
+
+def test_cache_step_walks_up_the_thread_once_however_much_the_cascade_took(
+        app, alice, monkeypatch):
+    """Every node one delete takes lives in the target's thread, so the
+    cache step finds the thread root with one walk up from the target. A
+    walk from each deleted public node costs the sum of their depths:
+    N(N+1)/2 rows for a public chain of N, which was 1.8 s after the
+    commit at N = 4,000. What the step asks the database must not grow
+    with the cascade: the same number of statements, and a root walk
+    that starts from the same single node."""
+    from backend.utils import public_cache
+
+    dropped = []
+    monkeypatch.setattr(public_cache, "invalidate", lambda *paths: dropped.extend(paths))
+
+    def cache_step_of_a_public_chain(length):
+        chain = [_make_node(alice, content="public root")]
+        for i in range(length):
+            chain.append(_make_node(alice, parent=chain[-1], content=f"reply {i}"))
+        for n in chain:
+            n.privacy_level = "public"
+        _db.session.commit()
+        page_paths = {f"/node/{n.id}" for n in chain}
+        r, cache_step = _delete_and_record_cache_step(
+            app, alice, chain[0].id, delete_descendants="true")
+        assert r.status_code == 200 and r.json["scheduled"] == length + 1
+        # Every public node's own page is dropped all the same.
+        assert page_paths <= set(dropped)
+        return cache_step
+
+    short, long = cache_step_of_a_public_chain(3), cache_step_of_a_public_chain(30)
+    assert len(short) == len(long)
+    walks = [[params for s, params in step if "thread_root_walk" in s]
+             for step in (short, long)]
+    assert [len(w) for w in walks] == [1, 1]
+    # One start id either way: the walk binds as many parameters for
+    # the chain of 30 as for the chain of 3.
+    assert len(walks[0][0]) == len(walks[1][0])

@@ -104,36 +104,72 @@ def _paths_for_root(root):
     return paths
 
 
-def invalidate_for_nodes(node_ids):
-    """Drop every cached page the nodes with these ids can appear on:
-    each one's own id URL, and the pages of the thread root it lives
-    under (a reply edit/delete must refresh the cached thread page,
-    which is keyed by the root). Takes ids, not rows: a cascade delete
-    hands over a whole subtree, and only the root columns the paths
-    need are loaded — one recursive query finds every root, one column
-    query reads them."""
+def invalidate_in_thread(member_id, node_ids):
+    """Drop every cached page that nodes of ONE thread can appear on:
+    each id's own URL, and the pages of the thread root they live under
+    (a reply edit/delete must refresh the cached thread page, which is
+    keyed by the root). `member_id` is any node of that thread; the root
+    is found with one walk up from it. Walking up from every id costs
+    the sum of their depths, which is quadratic in the length of a
+    public chain. Takes ids, not rows: a cascade delete passes a whole
+    subtree's ids, and only the root's path columns are read."""
     from backend.extensions import db
     from backend.models import Node
     from backend.utils.thread_tree import thread_root_of
 
-    ids = list({int(i) for i in node_ids})
-    if not ids:
-        return
-    paths = {"/sitemap.xml", *(f"/node/{i}" for i in ids)}
-    root_id_of = thread_root_of(ids)
-    # A node whose root can't be found (a corrupt chain) stands for itself.
-    root_ids = {root_id_of.get(i, i) for i in ids}
-    roots = db.session.query(
+    paths = {"/sitemap.xml", *(f"/node/{int(i)}" for i in node_ids)}
+    # No root found (a corrupt parent chain): use the member's own row.
+    root_id = thread_root_of([member_id]).get(member_id, member_id)
+    root = db.session.query(
         Node.id, Node.human_owner_id, Node.user_id, Node.public_slug,
-    ).filter(Node.id.in_(root_ids)).all()
-    for root in roots:
+    ).filter(Node.id == root_id).first()
+    if root is not None:
         paths.update(_paths_for_root(root))
     invalidate(*paths)
 
 
 def invalidate_for_node(node):
-    """`invalidate_for_nodes` for one node."""
-    invalidate_for_nodes([node.id])
+    """Drop every cached page *node* can appear on: its own id URL and
+    the pages of its thread root."""
+    invalidate_in_thread(node.id, [node.id])
+
+
+def invalidate_deleted(target_id, deleted_ids):
+    """The cache step of a committed soft-delete of `target_id`.
+    `deleted_ids` are the nodes it tombstoned (the target, the
+    descendants a cascade took, the session's prompt root when that was
+    deleted too), all in the target's thread. The public ones must stop
+    being served now, not when their cache entries expire.
+
+    Which of them are public is asked of the database on ids: a cascade
+    can take tens of thousands of nodes, and loading their rows (content
+    included) to read two columns is the whole-subtree load that has run
+    staging out of memory.
+
+    Never raises. The delete is already committed when this runs, so the
+    caller answers with success whatever happens here: a failure is
+    logged, the session is rolled back so later statements on it still
+    work, and the TTL bounds how long a stale page outlives its node."""
+    from sqlalchemy import or_
+
+    from backend.extensions import db
+    from backend.models import Node
+
+    try:
+        ids = list(deleted_ids)
+        if not ids:
+            return
+        public_ids = [nid for (nid,) in db.session.query(Node.id).filter(
+            Node.id.in_(ids),
+            or_(Node.public_slug.isnot(None), Node.privacy_level == "public"),
+        ).all()]
+        if public_ids:
+            invalidate_in_thread(target_id, public_ids)
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception(
+            f"Node {target_id} was deleted, but its public pages could not "
+            "be dropped from the cache")
 
 
 def invalidate_for_user(user):
