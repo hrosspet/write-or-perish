@@ -63,10 +63,10 @@ def _make_app():
         return User.query.get(int(user_id))
 
     from backend.routes.nodes import nodes_bp
-    from backend.routes.feed import feed_bp
+    from backend.routes.log import log_bp
     from backend.routes.search import search_bp
     app.register_blueprint(nodes_bp, url_prefix="/nodes")
-    app.register_blueprint(feed_bp, url_prefix="/api")
+    app.register_blueprint(log_bp, url_prefix="/api")
     app.register_blueprint(search_bp, url_prefix="/api")
     return app
 
@@ -325,7 +325,7 @@ def test_log_card_for_detached_root_keeps_badge_and_preview(app, alice):
     _db.session.commit()
     client = _detach(app, alice, root)
 
-    resp = client.get("/api/feed")
+    resp = client.get("/api/log")
     assert resp.status_code == 200
     card = next(c for c in resp.json["nodes"] if c["thread_root_id"] == root.id)
     assert card["prompt_key"] == "textmode"

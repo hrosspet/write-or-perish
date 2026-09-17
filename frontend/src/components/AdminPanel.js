@@ -295,6 +295,10 @@ const relTime = (iso) => {
 const pathArea = (p) => {
   if (!p) return null;
   const seg = p.replace(/^\/api\//, "").split("/")[0];
+  // `/api/feed` became `/api/log` (#298). Stored paths from before the
+  // rename, and the writes still coming from tabs opened before it,
+  // are the same area.
+  if (seg === "feed") return "log";
   return seg || null;
 };
 

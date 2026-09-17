@@ -1,6 +1,6 @@
 """Tests for the search endpoint.
 
-Follows the same pattern as test_feed_dashboard_privacy.py:
+Follows the same pattern as test_log_dashboard_privacy.py:
 ENCRYPTION_DISABLED=true, sqlite in-memory, minimal Flask app.
 """
 
