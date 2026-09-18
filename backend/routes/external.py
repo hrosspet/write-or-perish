@@ -36,6 +36,7 @@ from backend.utils.web_clip import classify_clip
 from backend.utils.spend import require_spend_headroom
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.audio_storage import clear_tts_artifacts
+from backend.utils.external_content import x_exchange_code
 
 # Same root as the nodes blueprint and the TTS task.
 AUDIO_STORAGE_ROOT = pathlib.Path(
@@ -44,7 +45,6 @@ AUDIO_STORAGE_ROOT = pathlib.Path(
 external_bp = Blueprint("external_bp", __name__)
 
 X_AUTHORIZE_URL = "https://twitter.com/i/oauth2/authorize"
-X_TOKEN_URL = "https://api.twitter.com/2/oauth2/token"
 X_SCOPES = "tweet.read users.read bookmark.read offline.access"
 
 
@@ -530,22 +530,14 @@ def twitter_callback():
             or not request.args.get("code")):
         return redirect(_frontend_url("/import?x_connect=failed"))
 
-    data = {
-        "grant_type": "authorization_code",
-        "code": request.args["code"],
-        "redirect_uri": current_app.config["X_REDIRECT_URI"],
-        "client_id": current_app.config["X_CLIENT_ID"],
-        "code_verifier": stash["verifier"],
-    }
-    auth = None
-    if current_app.config.get("X_CLIENT_SECRET"):
-        auth = (current_app.config["X_CLIENT_ID"],
-                current_app.config["X_CLIENT_SECRET"])
     try:
-        token_resp = requests.post(
-            X_TOKEN_URL, data=data, auth=auth, timeout=30)
-        token_resp.raise_for_status()
-        tokens = token_resp.json()
+        tokens = x_exchange_code(
+            current_app.config["X_CLIENT_ID"],
+            request.args["code"],
+            current_app.config["X_REDIRECT_URI"],
+            stash["verifier"],
+            current_app.config.get("X_CLIENT_SECRET"),
+        )
 
         me = requests.get(
             "https://api.twitter.com/2/users/me",

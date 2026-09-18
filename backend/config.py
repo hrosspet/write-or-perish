@@ -377,6 +377,15 @@ class Config:
     MAIL_PASSWORD = os.environ.get("MAIL_PASSWORD")
     MAIL_DEFAULT_SENDER = os.environ.get("MAIL_DEFAULT_SENDER", "login@loore.org")
     MAGIC_LINK_EXPIRY_SECONDS = int(os.environ.get("MAGIC_LINK_EXPIRY_SECONDS") or "900")
+    # How long the link confirming a new sign-in email stays valid (#260).
+    # Longer than a sign-in link on purpose: a sign-in link is a credential
+    # by itself, this one only works inside a session of the account that
+    # asked for the change, and a waitlisted signup who opens the mail an
+    # hour later should not find it dead.
+    EMAIL_CHANGE_EXPIRY_SECONDS = int(os.environ.get("EMAIL_CHANGE_EXPIRY_SECONDS") or "86400")
+    # Per socket operation, for every mail the app sends. smtplib's default
+    # is no timeout: a stalled relay held the request that sent the mail.
+    MAIL_TIMEOUT_SECONDS = float(os.environ.get("MAIL_TIMEOUT_SECONDS") or "10")
 
     FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 

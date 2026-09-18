@@ -318,19 +318,19 @@ def test_public_node_tombstone_visible_to_all(app, alice, bob):
     assert can_user_view_tombstone(n, bob.id) is True
 
 
-# ── Soft-deleted nodes excluded from feed ───────────────────────────────
+# ── Soft-deleted nodes excluded from the Log ──────────────────────────────
 
-def test_feed_excludes_soft_deleted(app, alice):
+def test_log_excludes_soft_deleted(app, alice):
     alive = _make_node(alice, content="alive")
     deleted = _make_node(alice, content="dead")
     deleted.deleted_at = datetime.utcnow()
     _db.session.commit()
-    # Re-create the app with feed_bp registered.
-    from backend.routes.feed import feed_bp
-    app.register_blueprint(feed_bp, url_prefix="/api")
+    # The fixture's app only registers nodes_bp; add log_bp for this test.
+    from backend.routes.log import log_bp
+    app.register_blueprint(log_bp, url_prefix="/api")
     client = app.test_client()
     _login(client, alice)
-    resp = client.get("/api/feed")
+    resp = client.get("/api/log")
     assert resp.status_code == 200
     ids = [c["id"] for c in resp.json["nodes"]]
     assert alive.id in ids
@@ -542,21 +542,21 @@ def test_human_owner_can_delete_llm_rooted_thread(app, alice):
     assert Node.query.get(root.id).deleted_at is not None
 
 
-# ── 20, 21. Feed display-swap rules with soft-deletion ─────────────────
+# ── 20, 21. Log display-swap rules with soft-deletion ──────────────────
 
-def test_feed_skips_deleted_first_child_of_system_prompt_root(app, alice):
+def test_log_skips_deleted_first_child_of_system_prompt_root(app, alice):
     """§4a Case 1: when the thread root is a system prompt and the
     first child is soft-deleted, the Log card preview falls through to
     the next live child rather than rendering as [Node deleted].
 
-    Implemented in feed.py via filter(deleted_at IS NULL) on the
+    Implemented in log.py via filter(deleted_at IS NULL) on the
     first_child query.
     """
     from backend.models import (
         UserPrompt, NodeContextArtifact,
     )
-    from backend.routes.feed import feed_bp
-    app.register_blueprint(feed_bp, url_prefix="/api")
+    from backend.routes.log import log_bp
+    app.register_blueprint(log_bp, url_prefix="/api")
 
     # Build a system-prompt root + 2 children; soft-delete the first.
     prompt = UserPrompt(
@@ -577,7 +577,7 @@ def test_feed_skips_deleted_first_child_of_system_prompt_root(app, alice):
 
     client = app.test_client()
     _login(client, alice)
-    r = client.get("/api/feed")
+    r = client.get("/api/log")
     assert r.status_code == 200
     cards = [c for c in r.json["nodes"] if c["thread_root_id"] == root.id]
     assert len(cards) == 1
@@ -585,7 +585,7 @@ def test_feed_skips_deleted_first_child_of_system_prompt_root(app, alice):
     assert cards[0]["id"] == second.id
 
 
-def test_feed_surfaces_thread_with_multi_level_partial_deletes(app, alice):
+def test_log_surfaces_thread_with_multi_level_partial_deletes(app, alice):
     """Successive partial deletes: R(deleted) → C(deleted) → G(alive).
 
     Each level was soft-deleted in a separate transaction (e.g. user
@@ -596,8 +596,8 @@ def test_feed_surfaces_thread_with_multi_level_partial_deletes(app, alice):
     wouldn't fire, and G never enters the CTE result). The thread
     would disappear from Log even though the user has live content.
     """
-    from backend.routes.feed import feed_bp
-    app.register_blueprint(feed_bp, url_prefix="/api")
+    from backend.routes.log import log_bp
+    app.register_blueprint(log_bp, url_prefix="/api")
 
     r = _make_node(alice, content="root body")
     c = _make_node(alice, parent=r, content="child body")
@@ -612,7 +612,7 @@ def test_feed_surfaces_thread_with_multi_level_partial_deletes(app, alice):
 
     client = app.test_client()
     _login(client, alice)
-    resp = client.get("/api/feed")
+    resp = client.get("/api/log")
     assert resp.status_code == 200
     cards = [card for card in resp.json["nodes"] if card["thread_root_id"] == r.id]
     # The thread MUST surface — G is alive and accessible. Without the
@@ -624,13 +624,13 @@ def test_feed_surfaces_thread_with_multi_level_partial_deletes(app, alice):
     assert cards[0]["thread_root_id"] == r.id
 
 
-def test_feed_surfaces_deleted_root_with_alive_descendants(app, alice, bob):
+def test_log_surfaces_deleted_root_with_alive_descendants(app, alice, bob):
     """§4a Case 2: a soft-deleted thread root whose subtree still has
     an alive accessible descendant must still surface in Log so the
     descendants are reachable.
     """
-    from backend.routes.feed import feed_bp
-    app.register_blueprint(feed_bp, url_prefix="/api")
+    from backend.routes.log import log_bp
+    app.register_blueprint(log_bp, url_prefix="/api")
 
     root = _make_node(alice, content="root body")
     # bob's reply is alive and visible to alice via human_owner /
@@ -643,19 +643,20 @@ def test_feed_surfaces_deleted_root_with_alive_descendants(app, alice, bob):
 
     client = app.test_client()
     _login(client, alice)
-    r = client.get("/api/feed")
+    r = client.get("/api/log")
     assert r.status_code == 200
     cards = [c for c in r.json["nodes"] if c["thread_root_id"] == root.id]
     # Root is deleted but its subtree has an alive reply → the thread
     # surfaces via §4a Case 2.
     assert len(cards) == 1
     # thread_root_id stays the actual (deleted) root so the kebab
-    # targets it for further deletion; the display preview swap to a
-    # live descendant happens in production (Postgres) but `newest_map`
-    # uses DISTINCT ON which SQLite silently ignores. We only assert
-    # the routing invariant here; the swap is exercised manually on
-    # staging.
+    # targets it for further deletion; the card itself shows the alive
+    # reply — and since that reply is Bob's, the card carries Bob's
+    # name, not Alice's, over Bob's words.
     assert cards[0]["thread_root_id"] == root.id
+    assert cards[0]["id"] == bob_reply.id
+    assert cards[0]["preview"] == "bob reply"
+    assert cards[0]["username"] == "bob"
 
 
 # ── 22. recent-context token counter excludes soft-deleted ─────────────
@@ -856,3 +857,712 @@ def test_update_node_returns_own_fields_without_the_tree(app, alice):
     assert node["privacy_level"] == "private"
     assert node["parent_user_id"] == alice.id
     assert "children" not in node and "ancestors" not in node
+
+
+# ── Deleting the last entry of a system-prompt session ─────────────────
+
+def _prompt_session(alice):
+    """A text/voice session: system-prompt root with the key stamped."""
+    root = _make_node(alice, content="system prompt text")
+    root.prompt_key = "default"
+    _db.session.commit()
+    return root
+
+
+def _impact(client, node_id, with_descendants=False):
+    r = client.get(
+        f"/nodes/{node_id}/delete-impact",
+        query_string={"delete_descendants": "true" if with_descendants else "false"},
+    )
+    assert r.status_code == 200, r.json
+    return r.json["orphaned_system_prompt_id"]
+
+
+def test_delete_impact_flags_last_entry_under_system_prompt(app, alice):
+    root = _prompt_session(alice)
+    only = _make_node(alice, parent=root, content="the only entry")
+    client = app.test_client()
+    _login(client, alice)
+    assert _impact(client, only.id) == root.id
+    assert _impact(client, only.id, with_descendants=True) == root.id
+
+
+def test_delete_impact_none_when_other_entries_remain(app, alice):
+    root = _prompt_session(alice)
+    first = _make_node(alice, parent=root, content="first")
+    _make_node(alice, parent=root, content="second")
+    client = app.test_client()
+    _login(client, alice)
+    assert _impact(client, first.id) is None
+
+
+def test_delete_impact_depends_on_descendants_choice(app, alice):
+    """Entry with its own replies: "this only" keeps the replies alive
+    (not orphaned), "with my replies" empties the session."""
+    root = _prompt_session(alice)
+    entry = _make_node(alice, parent=root, content="entry")
+    llm = _make_node(alice, parent=entry, content="llm reply", node_type="llm")
+    _make_node(alice, parent=llm, content="follow-up")
+    client = app.test_client()
+    _login(client, alice)
+    assert _impact(client, entry.id) is None
+    assert _impact(client, entry.id, with_descendants=True) == root.id
+
+
+def test_delete_impact_counts_other_users_replies_alice_can_see(app, alice, bob):
+    """Remaining content is what the Log would show: Bob's public reply
+    survives the cascade and keeps the session; his private reply is
+    invisible to Alice, so for her the session is empty and the dialog
+    offers the prompt. The Log's fallback agrees (see the log test)."""
+    root = _prompt_session(alice)
+    entry = _make_node(alice, parent=root, content="entry")
+    public_reply = _make_node(bob, parent=entry, content="bob's public reply")
+    public_reply.privacy_level = "public"
+    _db.session.commit()
+    client = app.test_client()
+    _login(client, alice)
+    assert _impact(client, entry.id, with_descendants=True) is None
+
+    public_reply.privacy_level = "private"
+    _db.session.commit()
+    assert _impact(client, entry.id, with_descendants=True) == root.id
+
+
+def test_dialog_and_log_agree_when_only_an_invisible_reply_survives(app, alice, bob):
+    """Alice's session → her entry → Bob's private reply. The Log card
+    can't show Bob's reply, so it previews the prompt; the delete
+    dialog must then offer the prompt too, and the flagged DELETE must
+    take it. Both sides walk the tree with the same viewer filter."""
+    _ensure_log_bp(app)
+    root = _prompt_session(alice)
+    entry = _make_node(alice, parent=root, content="entry")
+    bobs = _make_node(bob, parent=entry, content="bob's private reply")
+    client = app.test_client()
+    _login(client, alice)
+    assert _impact(client, entry.id, with_descendants=True) == root.id
+
+    r = client.delete(f"/nodes/{entry.id}", query_string={
+        "delete_descendants": "true", "delete_orphaned_prompt": "true",
+    })
+    assert r.status_code == 200, r.json
+    assert r.json["orphaned_prompt_deleted"] == root.id
+    _db.session.expire_all()
+    assert Node.query.get(root.id).deleted_at is not None
+    assert Node.query.get(entry.id).deleted_at is not None
+    # Bob's reply is his: it stays alive under the tombstones.
+    assert Node.query.get(bobs.id).deleted_at is None
+    # And the session is gone from Alice's Log (nothing she can see is
+    # alive under the deleted root).
+    assert root.id not in _log_cards(app, alice)
+
+
+def test_delete_response_lists_pinned_nodes_the_cascade_took(app, alice, bob):
+    """Bob's root → Alice's P1 (pinned) → Bob's B2 → Alice's P2 (pinned).
+    Deleting P1 with descendants takes P2 too; each pinned node is a Log
+    card, so the response names them for the client to drop."""
+    root = _make_node(bob, content="bob's root")
+    p1 = _make_node(alice, parent=root, content="alice pinned 1")
+    b2 = _make_node(bob, parent=p1, content="bob's reply")
+    p2 = _make_node(alice, parent=b2, content="alice pinned 2")
+    unrelated = _make_node(alice, parent=root, content="alice elsewhere")
+    for n in (p1, p2, unrelated):
+        n.pinned_at = datetime.utcnow()
+    _db.session.commit()
+    client = app.test_client()
+    _login(client, alice)
+    r = client.delete(f"/nodes/{p1.id}", query_string={"delete_descendants": "true"})
+    assert r.status_code == 200, r.json
+    assert sorted(r.json["deleted_pinned_ids"]) == sorted([p1.id, p2.id])
+    _db.session.expire_all()
+    assert Node.query.get(p2.id).deleted_at is not None
+    assert Node.query.get(b2.id).deleted_at is None
+    assert Node.query.get(unrelated.id).deleted_at is None
+    # A tombstone is not pinned: the cascade clears the pin on the
+    # descendant it takes as it does on the target, or the pin outlives
+    # the node wherever pinned rows are listed without a deleted_at
+    # filter (GET /api/dashboard).
+    assert Node.query.get(p1.id).pinned_at is None
+    assert Node.query.get(p2.id).pinned_at is None
+    assert Node.query.get(unrelated.id).pinned_at is not None
+
+
+def test_delete_impact_ignores_already_deleted_siblings(app, alice):
+    root = _prompt_session(alice)
+    gone = _make_node(alice, parent=root, content="already deleted")
+    gone.deleted_at = datetime.utcnow()
+    _db.session.commit()
+    last = _make_node(alice, parent=root, content="last alive")
+    client = app.test_client()
+    _login(client, alice)
+    assert _impact(client, last.id) == root.id
+
+
+def test_delete_impact_none_for_plain_threads_and_roots(app, alice):
+    plain = _make_node(alice, content="plain root")
+    reply = _make_node(alice, parent=plain, content="only reply")
+    session_root = _prompt_session(alice)
+    client = app.test_client()
+    _login(client, alice)
+    assert _impact(client, reply.id) is None       # root is not a prompt
+    assert _impact(client, session_root.id) is None  # deleting the root itself
+    assert _impact(client, plain.id) is None
+
+
+def test_delete_impact_resolves_legacy_prompt_link(app, alice):
+    """Roots from before the prompt_key column: the prompt is only a
+    NodeContextArtifact link."""
+    from backend.models import UserPrompt, NodeContextArtifact
+    prompt = UserPrompt(user_id=alice.id, prompt_key="default", title="t")
+    prompt.set_content("prompt")
+    _db.session.add(prompt)
+    _db.session.commit()
+    root = _make_node(alice, content="system prompt text")
+    _db.session.add(NodeContextArtifact(
+        node_id=root.id, artifact_type="prompt", artifact_id=prompt.id,
+    ))
+    _db.session.commit()
+    only = _make_node(alice, parent=root, content="the only entry")
+    client = app.test_client()
+    _login(client, alice)
+    assert _impact(client, only.id) == root.id
+
+
+def test_delete_impact_403_for_others_nodes(app, alice, bob):
+    root = _prompt_session(alice)
+    only = _make_node(alice, parent=root, content="the only entry")
+    client = app.test_client()
+    _login(client, bob)
+    r = client.get(f"/nodes/{only.id}/delete-impact")
+    assert r.status_code == 403
+
+
+def test_deleting_root_with_descendants_clears_the_orphaned_session(app, alice):
+    """The dialog's "delete the prompt too" path: one DELETE on the root
+    with descendants removes the prompt and the last entry together."""
+    root = _prompt_session(alice)
+    only = _make_node(alice, parent=root, content="the only entry")
+    client = app.test_client()
+    _login(client, alice)
+    r = client.delete(f"/nodes/{root.id}", query_string={"delete_descendants": "true"})
+    assert r.status_code == 200 and r.json["scheduled"] == 2
+    _db.session.expire_all()
+    assert Node.query.get(root.id).deleted_at is not None
+    assert Node.query.get(only.id).deleted_at is not None
+
+
+def test_delete_with_orphaned_prompt_flag_takes_the_prompt_too(app, alice):
+    """The dialog's "delete the system prompt too" answer travels on the
+    same DELETE as the entry, so one request tombstones both."""
+    root = _prompt_session(alice)
+    only = _make_node(alice, parent=root, content="the only entry")
+    client = app.test_client()
+    _login(client, alice)
+    r = client.delete(f"/nodes/{only.id}", query_string={
+        "delete_descendants": "false", "delete_orphaned_prompt": "true",
+    })
+    assert r.status_code == 200, r.json
+    assert r.json["scheduled"] == 2
+    assert r.json["orphaned_prompt_deleted"] == root.id
+    _db.session.expire_all()
+    assert Node.query.get(root.id).deleted_at is not None
+    assert Node.query.get(only.id).deleted_at is not None
+
+
+def test_orphaned_prompt_that_was_pinned_is_listed_as_a_pinned_delete(app, alice):
+    """`deleted_pinned_ids` tells the Log which pinned cards a delete
+    took. A pinned prompt root that goes with its last entry is one of
+    them, as a pinned node under the target is."""
+    root = _prompt_session(alice)
+    root.pinned_at = datetime.utcnow()
+    only = _make_node(alice, parent=root, content="the only entry")
+    _db.session.commit()
+    client = app.test_client()
+    _login(client, alice)
+    r = client.delete(f"/nodes/{only.id}", query_string={
+        "delete_orphaned_prompt": "true",
+    })
+    assert r.status_code == 200, r.json
+    assert r.json["orphaned_prompt_deleted"] == root.id
+    assert r.json["deleted_pinned_ids"] == [root.id]
+    _db.session.expire_all()
+    assert Node.query.get(root.id).pinned_at is None
+
+
+def test_delete_with_orphaned_prompt_flag_keeps_the_prompt_when_content_remains(app, alice):
+    """The flag is re-checked server-side: an entry that landed after the
+    dialog's check (another device, the Voice chain) keeps the session."""
+    root = _prompt_session(alice)
+    first = _make_node(alice, parent=root, content="first")
+    late = _make_node(alice, parent=root, content="arrived after the check")
+    client = app.test_client()
+    _login(client, alice)
+    r = client.delete(f"/nodes/{first.id}", query_string={
+        "delete_descendants": "true", "delete_orphaned_prompt": "true",
+    })
+    assert r.status_code == 200, r.json
+    assert r.json["scheduled"] == 1
+    assert r.json["orphaned_prompt_deleted"] is None
+    _db.session.expire_all()
+    assert Node.query.get(root.id).deleted_at is None
+    assert Node.query.get(late.id).deleted_at is None
+
+
+def test_nothing_left_check_asks_for_one_alive_row(app, alice):
+    """The re-check under the prompt root's lock is a yes/no question.
+    It asks the database for one alive row (LIMIT 1) rather than
+    fetching the session's whole subtree to look for one in Python while
+    the lock is held."""
+    from sqlalchemy import event
+
+    root = _prompt_session(alice)
+    first = _make_node(alice, parent=root, content="first")
+    for i in range(5):
+        _make_node(alice, parent=root, content=f"entry {i}")
+    walks = []
+
+    def on_execute(conn, cursor, statement, params, context, executemany):
+        if "subtree_walk" in statement:
+            walks.append(statement)
+
+    client = app.test_client()
+    _login(client, alice)
+    event.listen(_db.engine, "before_cursor_execute", on_execute)
+    try:
+        r = client.delete(f"/nodes/{first.id}", query_string={
+            "delete_orphaned_prompt": "true",
+        })
+    finally:
+        event.remove(_db.engine, "before_cursor_execute", on_execute)
+    assert r.status_code == 200 and r.json["orphaned_prompt_deleted"] is None
+    assert len(walks) == 1, "the check is the request's only subtree walk"
+    assert "LIMIT" in walks[0]
+
+
+def test_orphaned_prompt_is_never_someone_elses_root(app, alice, bob):
+    """Alice's reply is the last alive node in Bob's session: the prompt
+    root is Bob's, so it is neither offered nor deleted."""
+    root = _prompt_session(bob)
+    entry = _make_node(bob, parent=root, content="bob's entry")
+    reply = _make_node(alice, parent=entry, content="alice's reply")
+    entry.deleted_at = datetime.utcnow()
+    _db.session.commit()
+    client = app.test_client()
+    _login(client, alice)
+    assert _impact(client, reply.id) is None
+    r = client.delete(f"/nodes/{reply.id}", query_string={
+        "delete_orphaned_prompt": "true",
+    })
+    assert r.status_code == 200 and r.json["orphaned_prompt_deleted"] is None
+    _db.session.expire_all()
+    assert Node.query.get(root.id).deleted_at is None
+
+
+def _ensure_log_bp(app):
+    """Register the Log blueprint — before the app's first request."""
+    from backend.routes.log import log_bp
+    if "log_bp" not in app.blueprints:
+        app.register_blueprint(log_bp, url_prefix="/api")
+
+
+def _log_cards(app, user):
+    _ensure_log_bp(app)
+    client = app.test_client()
+    _login(client, user)
+    r = client.get("/api/log")
+    assert r.status_code == 200
+    return {c["thread_root_id"]: c for c in r.json["nodes"]}
+
+
+def test_log_prompt_session_falls_through_to_the_first_alive_descendant(app, alice):
+    """Entries deleted "this node only" (or before the dialog offered the
+    prompt too) leave the AI replies alive under tombstones. The card is
+    then titled by the first alive descendant, not the prompt text."""
+    root = _prompt_session(alice)
+    entry = _make_node(alice, parent=root, content="entry")
+    reply = _make_node(alice, parent=entry, content="the AI reply", node_type="llm")
+    entry.deleted_at = datetime.utcnow()
+    _db.session.commit()
+
+    card = _log_cards(app, alice)[root.id]
+    assert card["id"] == reply.id
+    assert card["preview"] == "the AI reply"
+    assert card["prompt_key"] == "default"
+
+    # The reply count is the shown node's, not the root's (which has no
+    # alive child at all).
+    for i in range(3):
+        _make_node(alice, parent=reply, content=f"follow-up {i}")
+    card = _log_cards(app, alice)[root.id]
+    assert card["child_count"] == 3
+
+    # An alive direct child still wins over a deeper node, even one
+    # created earlier.
+    later_entry = _make_node(alice, parent=root, content="a later entry")
+    card = _log_cards(app, alice)[root.id]
+    assert card["id"] == later_entry.id
+
+
+def test_log_entry_pinned_in_its_own_session_is_one_card(app, alice):
+    """A session root whose display node is also a pinned row of the
+    page must not yield two cards with the same id."""
+    root = _prompt_session(alice)
+    entry = _make_node(alice, parent=root, content="the entry")
+    entry.pinned_at = datetime.utcnow()
+    _db.session.commit()
+    _ensure_log_bp(app)
+    client = app.test_client()
+    _login(client, alice)
+    cards = client.get("/api/log").json["nodes"]
+    assert [c["id"] for c in cards] == [entry.id]
+    assert cards[0]["thread_root_id"] == root.id
+    assert cards[0]["pinned_at"] is not None
+
+
+def test_log_prompt_session_with_nothing_alive_shows_the_prompt(app, alice, monkeypatch):
+    """A session whose root never got an entry (#187) or lost them all
+    before this shipped still lists; its preview is read from the linked
+    UserPrompt and that read joins the page's batched decrypt."""
+    from backend.models import UserPrompt, NodeContextArtifact
+    import backend.routes.log as log_module
+    prompt = UserPrompt(user_id=alice.id, prompt_key="default", title="t")
+    prompt.set_content("the prompt text")
+    _db.session.add(prompt)
+    _db.session.commit()
+    root = _make_node(alice, content="")
+    root.prompt_key = "default"
+    _db.session.add(NodeContextArtifact(
+        node_id=root.id, artifact_type="prompt", artifact_id=prompt.id,
+    ))
+    _db.session.commit()
+
+    batches = []
+    monkeypatch.setattr(log_module, "prefetch_deks", lambda cts: batches.append(list(cts)))
+    card = _log_cards(app, alice)[root.id]
+    assert card["id"] == root.id
+    assert card["preview"] == "the prompt text"
+    assert batches == [["the prompt text"]]
+
+
+def test_locked_prompt_root_check_reads_the_row_again(app, alice):
+    """Two tabs delete the last entry with "also delete the prompt". The
+    second tab loaded the root before the first tab's commit; its check
+    under the lock must see the root already deleted (and not tombstone
+    it again, restarting the purge grace period)."""
+    from sqlalchemy import update
+    from backend.utils.node_deletion import prompt_root_of
+
+    root = _prompt_session(alice)
+    entry = _make_node(alice, parent=root, content="the only entry")
+    # This session's copy of the root says it is alive...
+    assert prompt_root_of(entry, alice.id) is root
+    assert root.deleted_at is None
+    # ...while the row in the database is deleted by the other tab (an
+    # UPDATE that does not synchronize the session leaves the
+    # identity-map copy untouched, exactly like another connection's
+    # commit).
+    _db.session.execute(
+        update(Node).where(Node.id == root.id).values(deleted_at=datetime.utcnow()),
+        execution_options={"synchronize_session": False},
+    )
+    assert root.deleted_at is None
+    assert prompt_root_of(entry, alice.id, lock=True) is None
+
+
+def test_deleting_the_prompt_too_drops_its_public_pages(app, alice, monkeypatch):
+    """A public session's prompt root has cached public pages (its node
+    page, the /@user page, the sitemap). Deleting a private entry with
+    "also delete the system prompt" takes the root too, so those pages
+    must be dropped from the cache — not only the entry's."""
+    from backend.utils import public_cache
+
+    root = _prompt_session(alice)
+    root.privacy_level = "public"
+    only = _make_node(alice, parent=root, content="the only entry")
+    _db.session.commit()
+    dropped = []
+    monkeypatch.setattr(public_cache, "invalidate", lambda *paths: dropped.extend(paths))
+
+    client = app.test_client()
+    _login(client, alice)
+    r = client.delete(f"/nodes/{only.id}", query_string={
+        "delete_orphaned_prompt": "true",
+    })
+    assert r.status_code == 200 and r.json["orphaned_prompt_deleted"] == root.id
+    assert {f"/node/{root.id}", "/@alice", "/sitemap.xml"} <= set(dropped)
+
+
+def test_cascade_drops_the_pages_of_public_descendants(app, alice, monkeypatch):
+    """Deleting a private entry with its descendants takes a public reply
+    under it: that reply's own page leaves the cache too."""
+    from backend.utils import public_cache
+
+    root = _make_node(alice, content="private root")
+    public_reply = _make_node(alice, parent=root, content="public reply")
+    public_reply.privacy_level = "public"
+    _db.session.commit()
+    dropped = []
+    monkeypatch.setattr(public_cache, "invalidate", lambda *paths: dropped.extend(paths))
+
+    client = app.test_client()
+    _login(client, alice)
+    r = client.delete(f"/nodes/{root.id}", query_string={"delete_descendants": "true"})
+    assert r.status_code == 200 and r.json["scheduled"] == 2
+    assert {f"/node/{public_reply.id}", f"/node/{root.id}", "/@alice"} <= set(dropped)
+
+
+def test_subtree_walk_ends_a_parent_cycle_at_its_first_repeat(app, alice):
+    """Corrupt data with a parent cycle must end the downward walk at
+    the first repeat, not after a depth cap's worth of rounds: a cap
+    bounds rounds, not rows, so everything hanging off the cycle is
+    re-walked on every round (100,000 × the hanging nodes for a two-node
+    cycle — a Log page with such a pinned node took 23 s per 100 nodes
+    under the cycle). No lowered limit here: the real walk, a pinned node
+    on the cycle, nodes hanging off it, and the Log request itself."""
+    from sqlalchemy import func
+    from backend.utils import thread_tree
+
+    p = _make_node(alice, content="p")
+    q = _make_node(alice, parent=p, content="q")
+    p.parent_id = q.id  # p → q → p (SQLite does not enforce the FK tree)
+    p.pinned_at = datetime.utcnow()
+    _db.session.commit()
+    hanging = [_make_node(alice, parent=q, content=f"off the cycle {i}") for i in range(100)]
+
+    # Every node once: p at depth 0, q, then the 100 under q. Counted
+    # through a LIMIT: a walk that lost its cycle guard never ends, and
+    # an unbounded count over it would hang the job until the CI timeout
+    # where this fails at once with 1000 != 102 (SQLite and Postgres
+    # both produce a recursive CTE's rows only as they are fetched).
+    walk = thread_tree.subtree_walk([p.id], alice.id)
+    walked = _db.session.query(walk.c.id).limit(1000).subquery()
+    assert _db.session.query(func.count()).select_from(walked).scalar() == 2 + len(hanging)
+    assert {r.id for r in thread_tree.subtree_rows(p.id, alice.id)} == {
+        q.id, *(n.id for n in hanging),
+    }
+
+    # The pinned node's card comes from that same walk (its thread root
+    # is never found — the chain up has no end — so the card is its own).
+    card = _log_cards(app, alice)[p.id]
+    assert card["id"] == p.id
+    assert card["newest_node_id"] == hanging[-1].id
+
+
+@pytest.mark.parametrize("failing", [
+    "the public-ids query", "the root walk", "the cache drop",
+])
+def test_committed_delete_answers_200_when_the_cache_step_fails(
+        app, alice, monkeypatch, caplog, failing):
+    """The public-page invalidation runs after the commit. When it fails
+    (a dropped connection, a statement timeout on a long id list) the
+    node is already gone: the client must hear 200, not a 500 that keeps
+    the card as if nothing had happened. The failure is logged and the
+    session rolled back — on Postgres a failed statement aborts the
+    transaction, so anything run on the session afterwards would fail
+    too. Each part of the step fails in turn, the SQL ones inside the
+    DBAPI call, where a statement timeout surfaces."""
+    import sqlite3
+    from sqlalchemy import event
+    from backend.utils import public_cache
+
+    root = _make_node(alice, content="public root")
+    root.privacy_level = "public"
+    _db.session.commit()
+
+    failing_sql = {
+        "the public-ids query": "public_slug IS NOT NULL",
+        "the root walk": "thread_root_walk",
+    }.get(failing)
+    failed = []
+
+    def do_execute(cursor, statement, parameters, context):
+        if failing_sql and failing_sql in statement:
+            failed.append(statement)
+            raise sqlite3.OperationalError("canceling statement due to statement timeout")
+
+    def drop_fails(*paths):
+        failed.append(paths)
+        raise RuntimeError("the cache drop failed")
+    if failing_sql is None:
+        monkeypatch.setattr(public_cache, "invalidate", drop_fails)
+
+    client = app.test_client()
+    _login(client, alice)
+    event.listen(_db.engine, "do_execute", do_execute)
+    try:
+        with caplog.at_level("ERROR"):
+            r = client.delete(f"/nodes/{root.id}")
+    finally:
+        event.remove(_db.engine, "do_execute", do_execute)
+    assert len(failed) == 1, f"{failing} never ran, so nothing failed"
+    assert r.status_code == 200, r.json
+    assert r.json["scheduled"] == 1
+    assert "could not be dropped from the cache" in caplog.text
+    assert not _db.session().in_transaction()
+    _db.session.expire_all()
+    assert Node.query.get(root.id).deleted_at is not None
+
+
+def _delete_and_record_cache_step(app, user, node_id, **query):
+    """DELETE `node_id` as `user`. Returns the response and every SQL
+    statement the request ran after its commit — its cache step — as
+    (statement, parameters) pairs."""
+    from sqlalchemy import event
+
+    after_commit = None
+
+    def on_commit(conn):
+        nonlocal after_commit
+        after_commit = []
+
+    def on_execute(conn, cursor, statement, params, context, executemany):
+        if after_commit is not None:
+            after_commit.append((statement, params))
+
+    client = app.test_client()
+    _login(client, user)
+    event.listen(_db.engine, "commit", on_commit)
+    event.listen(_db.engine, "after_cursor_execute", on_execute)
+    try:
+        r = client.delete(f"/nodes/{node_id}", query_string=query)
+    finally:
+        event.remove(_db.engine, "commit", on_commit)
+        event.remove(_db.engine, "after_cursor_execute", on_execute)
+    assert after_commit is not None, "the request never committed"
+    return r, after_commit
+
+
+def test_cache_step_after_a_cascade_asks_the_database_on_ids(app, alice, monkeypatch):
+    """Which of the deleted nodes are public is answered in SQL, on ids:
+    a cascade can take tens of thousands of nodes, and loading their
+    rows (content included) to read two columns is the whole-subtree
+    load that has run staging out of memory. Every statement after the
+    commit is held to that, not only the id-list one: loading the nodes
+    one at a time, or fetching every deleted id to pick the public ones
+    in Python, fails here. Nothing deleted → the target alone is asked
+    about (never an empty `IN ()`)."""
+    from backend.utils import public_cache
+
+    root = _make_node(alice, content="private root")
+    replies = [_make_node(alice, parent=root, content=f"reply {i}") for i in range(3)]
+    replies[1].privacy_level = "public"
+    _db.session.commit()
+    gone = {root.id, *(n.id for n in replies)}
+    dropped = []
+    monkeypatch.setattr(public_cache, "invalidate", lambda *paths: dropped.extend(paths))
+
+    r, cache_step = _delete_and_record_cache_step(
+        app, alice, root.id, delete_descendants="true")
+    assert r.status_code == 200 and r.json["scheduled"] == 4
+    # No statement of the step reads a node's content, by id list or
+    # one node at a time.
+    assert not [s for s, _ in cache_step if "node.content" in s]
+    # The deleted ids go to the database once, and that statement keeps
+    # the public ones in its WHERE: the private replies never reach
+    # Python.
+    with_the_ids = [s for s, params in cache_step if gone <= set(params)]
+    assert len(with_the_ids) == 1
+    where = with_the_ids[0].split("WHERE", 1)[1]
+    assert "public_slug IS NOT NULL" in where and "privacy_level =" in where
+    # The public reply's page and the root's pages go; a private
+    # reply's does not.
+    assert {f"/node/{replies[1].id}", f"/node/{root.id}", "/@alice"} <= set(dropped)
+    assert f"/node/{replies[0].id}" not in dropped
+
+    # A repeated DELETE tombstones nothing. The step still asks about
+    # the target, whose pages may be cached yet, so the id list is never
+    # empty; this target is private, which ends the step there.
+    del dropped[:]
+    r, cache_step = _delete_and_record_cache_step(app, alice, root.id)
+    assert r.status_code == 200 and r.json["scheduled"] == 0
+    assert len(cache_step) == 1
+    statement, params = cache_step[0]
+    assert root.id in params and "node.content" not in statement
+    assert dropped == []
+
+
+def test_repeated_delete_of_a_public_tombstone_still_drops_its_pages(
+        app, alice, monkeypatch):
+    """A DELETE on a node that is already a tombstone flags nothing, but
+    its public pages can still be cached: the first request's cache step
+    failed (it never raises, the client heard 200), or a render that
+    began before the delete stored its page after the drop. The repeat
+    (a second tab, a retry) drops them all the same."""
+    from backend.utils import public_cache
+
+    root = _make_node(alice, content="public root")
+    root.privacy_level = "public"
+    _db.session.commit()
+    drops = []
+    monkeypatch.setattr(public_cache, "invalidate", lambda *paths: drops.append(set(paths)))
+
+    client = app.test_client()
+    _login(client, alice)
+    for scheduled in (1, 0):
+        r = client.delete(f"/nodes/{root.id}")
+        assert r.status_code == 200 and r.json["scheduled"] == scheduled
+    assert len(drops) == 2
+    for paths in drops:
+        assert {f"/node/{root.id}", "/@alice", "/sitemap.xml"} <= paths
+
+
+def test_cascade_from_a_public_tombstone_drops_the_targets_page_too(
+        app, alice, monkeypatch):
+    """The target was deleted "this node only" earlier; now the same
+    DELETE comes with descendants. It tombstones the private reply only,
+    and the public target's own page is dropped with it."""
+    from backend.utils import public_cache
+
+    root = _make_node(alice, content="alice's root")
+    target = _make_node(alice, parent=root, content="public, already deleted")
+    target.privacy_level = "public"
+    target.deleted_at = datetime.utcnow()
+    reply = _make_node(alice, parent=target, content="private reply")
+    _db.session.commit()
+    dropped = []
+    monkeypatch.setattr(public_cache, "invalidate", lambda *paths: dropped.extend(paths))
+
+    client = app.test_client()
+    _login(client, alice)
+    r = client.delete(f"/nodes/{target.id}", query_string={"delete_descendants": "true"})
+    assert r.status_code == 200 and r.json["scheduled"] == 1
+    assert f"/node/{target.id}" in dropped
+    assert f"/node/{reply.id}" not in dropped
+
+
+def test_cache_step_walks_up_the_thread_once_however_much_the_cascade_took(
+        app, alice, monkeypatch):
+    """Every node one delete takes lives in the target's thread, so the
+    cache step finds the thread root with one walk up from the target. A
+    walk from each deleted public node costs the sum of their depths:
+    N(N+1)/2 rows for a public chain of N, which was 1.8 s after the
+    commit at N = 4,000. What the step asks the database must not grow
+    with the cascade: the same number of statements, and a root walk
+    that starts from the same single node."""
+    from backend.utils import public_cache
+
+    dropped = []
+    monkeypatch.setattr(public_cache, "invalidate", lambda *paths: dropped.extend(paths))
+
+    def cache_step_of_a_public_chain(length):
+        chain = [_make_node(alice, content="public root")]
+        for i in range(length):
+            chain.append(_make_node(alice, parent=chain[-1], content=f"reply {i}"))
+        for n in chain:
+            n.privacy_level = "public"
+        _db.session.commit()
+        page_paths = {f"/node/{n.id}" for n in chain}
+        r, cache_step = _delete_and_record_cache_step(
+            app, alice, chain[0].id, delete_descendants="true")
+        assert r.status_code == 200 and r.json["scheduled"] == length + 1
+        # Every public node's own page is dropped all the same.
+        assert page_paths <= set(dropped)
+        return cache_step
+
+    short, long = cache_step_of_a_public_chain(3), cache_step_of_a_public_chain(30)
+    assert len(short) == len(long)
+    walks = [[params for s, params in step if "thread_root_walk" in s]
+             for step in (short, long)]
+    assert [len(w) for w in walks] == [1, 1]
+    # One start id either way: the walk binds as many parameters for
+    # the chain of 30 as for the chain of 3.
+    assert len(walks[0][0]) == len(walks[1][0])

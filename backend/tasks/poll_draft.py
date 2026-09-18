@@ -25,7 +25,7 @@ from backend.models import (
     UserArtifact, APICostLog,
 )
 from backend.utils.api_keys import get_api_keys_for_usage
-from backend.utils.cost import calculate_llm_cost_microdollars
+from backend.utils.cost import llm_cost_log_fields
 from backend.utils.llm_batch import (
     batch_submit, batch_check_and_collect, apply_batch_key_override,
 )
@@ -193,15 +193,13 @@ def _save_draft_result(item, result):
         return
 
     system_user = get_poll_system_user()
+    # Cache-aware for either provider: the poll's model is admin-chosen
+    # and may be an OpenAI one (#286).
     db.session.add(APICostLog(
         user_id=system_user.id, model_id=item["model_id"],
         request_type="poll_draft",
         request_ref=f"poll:{item['poll_id']}",
-        input_tokens=result["input_tokens"],
-        output_tokens=result["output_tokens"],
-        cost_microdollars=calculate_llm_cost_microdollars(
-            item["model_id"], result["input_tokens"],
-            result["output_tokens"], batch=True),
+        **llm_cost_log_fields(item["model_id"], result, batch=True),
     ))
     resp.set_content(result["content"].strip())
     resp.generated_by = item["model_id"]

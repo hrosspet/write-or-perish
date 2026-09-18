@@ -7,6 +7,7 @@ from backend.models import (
 from backend.extensions import db
 from sqlalchemy import func
 from backend.utils.timefmt import iso_utc
+from backend.utils.slugs import permalink_for
 from datetime import datetime
 from openai import OpenAI
 import os
@@ -562,7 +563,6 @@ def approximate_token_count(text):
     return max(1, len(text.split()))
 
 
-
 # ---------------------------------------------------------------------------
 # Create a new node (supports both text & voice uploads)
 # ---------------------------------------------------------------------------
@@ -781,9 +781,7 @@ def create_node():
         "created_at": iso_utc(node.created_at),
         "username": current_user.username,
         "privacy_level": node.privacy_level,
-        "permalink": (
-            f"/@{node.user.username}/{node.public_slug}"
-            if node.public_slug and node.user else None),
+        "permalink": permalink_for(node),
         "ai_usage": node.ai_usage,
         "split_into": 1 + len(parts),
         "tip_id": parts[-1].id if parts else node.id
@@ -1012,9 +1010,7 @@ def _focal_own_fields(node):
         "node_type": node.node_type,
         "created_at": iso_utc(node.created_at),
         "updated_at": iso_utc(node.updated_at),
-        "permalink": (
-            f"/@{node.user.username}/{node.public_slug}"
-            if node.public_slug and node.user else None),
+        "permalink": permalink_for(node),
         "user": {
             "id": node.user.id,
             "username": node.user.username,
@@ -1533,7 +1529,7 @@ def request_llm_response(node_id):
         return jsonify({"error": str(e)}), 410
     except UserExportValidationError as e:
         # Misconfigured {user_export} placeholder — abort BEFORE creating
-        # any LLM node so the user's feed isn't polluted with a stub
+        # any LLM node so the user's Log isn't polluted with a stub
         # failed response. Frontend surfaces this message as a toast.
         return jsonify({"error": str(e)}), 400
 
@@ -2783,7 +2779,7 @@ def get_streaming_status(node_id):
 @nodes_bp.route("/<int:node_id>/pin", methods=["POST"])
 @login_required
 def pin_node(node_id):
-    """Pin a node to the current user's profile (Dashboard + Feed)."""
+    """Pin a node to the current user's profile (Dashboard + Log)."""
     node = Node.query.get_or_404(node_id)
 
     owner_id = node.human_owner_id or node.user_id
@@ -2878,6 +2874,32 @@ def set_thread_name(node_id):
     return jsonify({"thread_name": name}), 200
 
 
+@nodes_bp.route("/<int:node_id>/delete-impact", methods=["GET"])
+@login_required
+def delete_impact(node_id):
+    """What soft-deleting this node would leave behind, for the dialog.
+
+    Query: `delete_descendants` as for DELETE. Returns
+    `orphaned_system_prompt_id`: the thread root's id when the delete
+    would leave the session with only its system prompt alive (so the
+    dialog can offer deleting the prompt too), else null.
+    """
+    from backend.utils.node_deletion import orphaned_system_prompt_id
+
+    raw = request.args.get("delete_descendants")
+    with_descendants = str(raw).lower() in ("true", "1", "yes")
+
+    node = Node.query.get_or_404(node_id)
+    if not can_user_edit_node(node, current_user.id):
+        return jsonify({"error": "Not authorized"}), 403
+
+    return jsonify({
+        "orphaned_system_prompt_id": orphaned_system_prompt_id(
+            node, current_user.id, with_descendants=with_descendants,
+        ),
+    }), 200
+
+
 @nodes_bp.route("/<int:node_id>", methods=["DELETE"])
 @login_required
 def delete_node(node_id):
@@ -2886,13 +2908,28 @@ def delete_node(node_id):
     Sets `deleted_at` rather than removing rows. The Celery cleanup task
     finalizes purge after SOFT_DELETE_GRACE_DAYS (see
     backend/tasks/node_cleanup.py).
+
+    Flags (query string or JSON body): `delete_descendants`, and
+    `delete_orphaned_prompt` — also tombstone the thread's system-prompt
+    root if this delete leaves nothing alive under it.
     """
     from backend.constants import SOFT_DELETE_GRACE_DAYS
-    from backend.utils.node_deletion import soft_delete_node
+    from backend.utils.node_deletion import (
+        soft_delete_node, prompt_root_of, soft_delete_session_if_empty,
+    )
 
-    raw = (request.args.get("delete_descendants")
-           or (request.get_json(silent=True) or {}).get("delete_descendants"))
-    with_descendants = str(raw).lower() in ("true", "1", "yes")
+    body = request.get_json(silent=True) or {}
+
+    def flag(name):
+        raw = request.args.get(name) or body.get(name)
+        return str(raw).lower() in ("true", "1", "yes")
+
+    with_descendants = flag("delete_descendants")
+    # The dialog's "delete the system prompt too" answer. Checked again
+    # here under the root's row lock rather than trusted from the
+    # delete-impact call: an entry added between that call and this one
+    # (another device, the Voice chain) keeps the session.
+    delete_orphaned_prompt = flag("delete_orphaned_prompt")
 
     # Pre-lock 403 short-circuit — cheap and avoids holding a row lock to
     # tell an unauthorized client they can't delete.
@@ -2901,14 +2938,34 @@ def delete_node(node_id):
         return jsonify({"error": "Not authorized"}), 403
 
     try:
-        flagged = soft_delete_node(
+        # Lock the prompt root first (root, then subtree — the same order
+        # as every other walk), so no entry can be inserted under it
+        # while we decide whether it is left empty.
+        prompt_root = (
+            prompt_root_of(pre, current_user.id, lock=True)
+            if delete_orphaned_prompt else None
+        )
+        deleted = soft_delete_node(
             node_id, current_user.id, with_descendants=with_descendants,
         )
-        if flagged is None:
+        if deleted is None:
             # Concurrent purge or permission flip between the pre-check and
             # the locking re-fetch.
             db.session.rollback()
             return jsonify({"error": "Not found or not authorized"}), 404
+        # Every node this request tombstones: the target, the descendants
+        # the cascade took, and the prompt root when it goes with them.
+        gone_ids = list(deleted.ids)
+        pinned_ids = list(deleted.pinned_ids)
+        orphaned_prompt_deleted = None
+        session_gone = (
+            soft_delete_session_if_empty(prompt_root, current_user.id)
+            if prompt_root is not None else None
+        )
+        if session_gone is not None:
+            orphaned_prompt_deleted = prompt_root.id
+            gone_ids += session_gone.ids
+            pinned_ids += session_gone.pinned_ids
         # Deleting a published share's public node via the node UI must
         # reconcile the ShareDraft — otherwise the Share page keeps saying
         # "published" and links a tombstone (#228). Deleting IS revoking.
@@ -2923,17 +2980,29 @@ def delete_node(node_id):
             # Pointer kept: republishing unchanged content undeletes this
             # node (identity follows content).
         db.session.commit()
-        if pre.public_slug or pre.privacy_level == "public":
-            from backend.utils.public_cache import invalidate_for_node
-            invalidate_for_node(pre)
-        return jsonify({
-            "scheduled": flagged,
-            "grace_days": SOFT_DELETE_GRACE_DAYS,
-        }), 200
     except Exception as e:
         db.session.rollback()
         current_app.logger.error(f"Error soft-deleting node {node_id}: {e}")
         return jsonify({"error": "Error deleting node", "details": str(e)}), 500
+
+    # The delete is committed: from here on the answer is 200 whatever
+    # happens, or the client keeps a card for a node that is gone.
+    # Public pages are cached server-side and must stop being served
+    # now. invalidate_deleted never raises; it logs its own failures.
+    from backend.utils.public_cache import invalidate_deleted
+    invalidate_deleted(node_id, gone_ids)
+    return jsonify({
+        "scheduled": len(gone_ids),
+        "grace_days": SOFT_DELETE_GRACE_DAYS,
+        # The session root's id when `delete_orphaned_prompt` took it
+        # too, else null — the client then knows the thread is gone.
+        "orphaned_prompt_deleted": orphaned_prompt_deleted,
+        # Pinned nodes this delete took: each is a Log card of its
+        # own (a reply pinned under the target, possibly in someone
+        # else's thread; the prompt root when it was pinned), so the
+        # Log drops those cards too.
+        "deleted_pinned_ids": pinned_ids,
+    }), 200
 
 
 @nodes_bp.route("/<int:node_id>/tts-chapters", methods=["GET"])

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Routes, Route, Navigate, useNavigate, useParams } from 'react-router-dom';
 import LandingPage from "./components/LandingPage";
-import Feed from "./components/Feed";
+import Log from "./components/Log";
 import NavBar from "./components/NavBar";
 import NodeFormModal from "./components/NodeFormModal";
 import SpendCapBanner from "./components/SpendCapBanner";
@@ -17,7 +17,6 @@ import AlphaThankYouPage from "./pages/AlphaThankYouPage";
 import WelcomePage from "./pages/WelcomePage";
 import HomePage from "./pages/HomePage";
 import VoicePage from "./pages/VoicePage";
-import ConversePage from "./pages/ConversePage";
 import WritePage from "./pages/WritePage";
 import ProfilePage from "./pages/ProfilePage";
 import TodoPage from "./pages/TodoPage";
@@ -25,6 +24,7 @@ import ImportPage from "./pages/ImportPage";
 import ReferencesPage from "./pages/ReferencesPage";
 import ReferenceDetailPage from "./pages/ReferenceDetailPage";
 import AccountPage from "./pages/AccountPage";
+import ConfirmEmailPage from "./pages/ConfirmEmailPage";
 import ArtifactsPage from "./pages/ArtifactsPage";
 import SharePage from "./pages/SharePage";
 import PublicSharePage from "./pages/PublicSharePage";
@@ -215,17 +215,19 @@ function App() {
           <Route path="/how-to" element={<HowToPage />} />
           {/* Alpha thank you - public (for unapproved users) */}
           <Route path="/alpha-thank-you" element={<AlphaThankYouPage />} />
+          {/* Confirms a new sign-in email (#260). Not ProtectedRoute: waitlisted
+              (unapproved) signups confirm theirs here, and it asks for sign-in itself. */}
+          <Route path="/confirm-email" element={<ConfirmEmailPage />} />
           {/* Welcome - protected (for newly approved users) */}
           <Route path="/welcome" element={<ProtectedRoute><WelcomePage onNewEntryClick={() => setShowNewEntry(true)} /></ProtectedRoute>} />
           {/* Workflow routes */}
           <Route path="/voice" element={<ProtectedRoute><VoicePage /></ProtectedRoute>} />
-          <Route path="/converse" element={<ProtectedRoute><ConversePage /></ProtectedRoute>} />
           <Route path="/textmode" element={<ProtectedRoute><WritePage /></ProtectedRoute>} />
           {/* Profile and Todo */}
           <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
           <Route path="/todo" element={<ProtectedRoute><TodoPage /></ProtectedRoute>} />
           {/* Log (renamed from feed) */}
-          <Route path="/log" element={<ProtectedRoute><Feed onSearchClick={() => openSearch('archive')} /></ProtectedRoute>} />
+          <Route path="/log" element={<ProtectedRoute><Log onSearchClick={() => openSearch('archive')} /></ProtectedRoute>} />
           {/* Backward compatibility redirects */}
           <Route path="/feed" element={<Navigate to="/log" replace />} />
           <Route path="/dashboard" element={<Navigate to="/profile" replace />} />

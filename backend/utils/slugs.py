@@ -7,7 +7,40 @@ boundary. Unique per author — the permalink shape is /u/<username>/<slug>.
 import re
 import unicodedata
 
+from backend.utils.privacy import PrivacyLevel
+
 MAX_SLUG_CHARS = 60
+
+
+def permalink_for(node):
+    """The node's public address, or None while it is not public (#263).
+
+    The slug is KEPT on the row when a node goes private, so republishing
+    restores the same URL — but the permalink only resolves for public
+    nodes (commons.resolve_permalink is public-only), so advertising it
+    for a private node sends the owner to a 404 (NodeDetail rewrites the
+    address bar; the Share page card navigates to it). Every serializer
+    that emits a permalink goes through here: gate on current privacy,
+    not on the slug.
+
+    The username is the HUMAN owner's (human_owner_id, falling back to
+    user_id), never the model account's: slug uniqueness and both
+    resolvers (commons.resolve_permalink, public_pages._resolve_permalink)
+    key on human_owner_id, so an LLM-authored public root addressed as
+    /@<model>/<slug> would 404.
+    """
+    from backend.models import User
+
+    if (node is None or not node.public_slug
+            or node.privacy_level != PrivacyLevel.PUBLIC):
+        return None
+    if node.human_owner_id in (None, node.user_id):
+        owner = node.user
+    else:
+        owner = User.query.get(node.human_owner_id)
+    if owner is None:
+        return None
+    return f"/@{owner.username}/{node.public_slug}"
 
 
 def slugify(text):

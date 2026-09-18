@@ -25,7 +25,7 @@ from backend.extensions import db as _db
 from backend.models import Node, ExternalItem, FeedPick, APICostLog
 from backend.utils import llm_batch
 from backend.utils.llm_batch import BatchItemFailed, BatchItemCancelled
-from backend.utils.cost import calculate_llm_cost_microdollars as _real_cost
+from backend.utils.cost import llm_cost_log_fields as _real_cost_fields
 
 POLL = _llm_task_mod.CA_BATCH_POLL_SECONDS
 MAX_POLLS = _llm_task_mod.CA_BATCH_MAX_POLLS
@@ -417,9 +417,8 @@ def test_collect_that_dies_inside_the_finalize_counts_once(app, monkeypatch, tmp
         calls_to_cost.append(args)
         if len(calls_to_cost) == 1:
             raise RuntimeError("KMS unavailable")
-        return _real_cost(*args, **kwargs)
-    monkeypatch.setattr(_llm_task_mod, "calculate_llm_cost_microdollars",
-                        cost_once)
+        return _real_cost_fields(*args, **kwargs)
+    monkeypatch.setattr(_llm_task_mod, "llm_cost_log_fields", cost_once)
     calls = _script(monkeypatch, tmp_path,
                     collect=lambda: ("completed", _batch_resp()))
     alice, read, llm_node = _read_thread()

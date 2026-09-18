@@ -139,7 +139,9 @@ def test_collect_anthropic_succeeded(monkeypatch):
 
     assert pending == {}
     assert results["profile:1:0:1:chunk"] == {
-        "content": "PROFILE TEXT", "input_tokens": 100, "output_tokens": 50}
+        "content": "PROFILE TEXT", "input_tokens": 100, "output_tokens": 50,
+        "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+        "batch": True}
     assert durations["anthropic"] == 120.0
 
 
@@ -177,8 +179,61 @@ def test_collect_openai_completed(monkeypatch):
 
     assert pending == {}
     assert results["profile:2:0:1:chunk"] == {
-        "content": "P", "input_tokens": 100, "output_tokens": 50}
+        "content": "P", "input_tokens": 100, "output_tokens": 50,
+        "cached_tokens": 0, "cache_write_subset_tokens": 0, "batch": True}
     assert durations["openai:gpt-x"] == 120.0
+
+
+def test_collect_anthropic_keeps_cache_counters(monkeypatch):
+    """Batch results carry the same cache keys as live calls, so the
+    profile/digest cost rows price cache reads and writes (#286)."""
+    client = MagicMock()
+    client.messages.batches.retrieve.return_value = SimpleNamespace(
+        processing_status="ended", request_counts="c",
+        created_at=None, ended_at=None)
+    entry = SimpleNamespace(
+        custom_id="c1",
+        result=SimpleNamespace(type="succeeded", message=SimpleNamespace(
+            content=[SimpleNamespace(text="T")],
+            usage=SimpleNamespace(input_tokens=10, output_tokens=5,
+                                  cache_read_input_tokens=900,
+                                  cache_creation_input_tokens=90))))
+    client.messages.batches.results.return_value = [entry]
+    _install_fake_sdks(monkeypatch, anthropic_client=client)
+
+    results, _, _ = batch_check_and_collect({"anthropic": "b"}, KEYS)
+    assert results["c1"]["cache_read_input_tokens"] == 900
+    assert results["c1"]["cache_creation_input_tokens"] == 90
+    assert results["c1"]["batch"] is True
+
+
+def test_collect_openai_reads_chat_completions_cache_details(monkeypatch):
+    """chat/completions spells the counters prompt_tokens_details; the
+    write subset must come out under the same key the live Responses
+    call uses, or OpenAI-model batch builds bill writes at 1.0x."""
+    client = MagicMock()
+    client.batches.retrieve.return_value = SimpleNamespace(
+        status="completed", request_counts="c",
+        created_at=None, completed_at=None, output_file_id="of-1")
+    line = json.dumps({
+        "custom_id": "c2",
+        "response": {"status_code": 200, "body": {
+            "choices": [{"message": {"content": "P"}}],
+            "usage": {"prompt_tokens": 6018, "completion_tokens": 50,
+                      "prompt_tokens_details": {
+                          "cached_tokens": 2815,
+                          "cache_write_tokens": 3000}},
+        }},
+    })
+    client.files.content.return_value = SimpleNamespace(
+        content=(line + "\n").encode())
+    _install_fake_sdks(monkeypatch, openai_client=client)
+
+    results, _, _ = batch_check_and_collect({"openai:gpt-x": "b"}, KEYS)
+    assert results["c2"] == {
+        "content": "P", "input_tokens": 6018, "output_tokens": 50,
+        "cached_tokens": 2815, "cache_write_subset_tokens": 3000,
+        "batch": True}
 
 
 # ── one-item collect: the provider's verdict vs. a transient error ───────

@@ -41,7 +41,7 @@ Write or Perish evolves from journaling app to **distributed intelligence networ
 - ✅ **Data import** — Import conversation history from Claude, ChatGPT, an X/Twitter archive or markdown files. An import invalidates only the profile versions whose window would have held the imported data and regenerates the chain from the last still-valid version to the end; data newer than the profile is treated like any other new writing
 - ✅ **Pin to profile** — Curate your profile by pinning selected entries
 - ✅ **Version history** — All artifacts versioned behind the scenes (not yet exposed in UI)
-- ✅ **Personal Log** — Private chronological view of all your entries
+- ✅ **Personal Log** — Private chronological view of all your entries (`/log`, `GET /api/log`; #298 renamed it from Feed end to end, 2026-09-16). Deleting the last entry of a text/voice session asks whether to delete the system prompt too, so the Log never lists a session by its prompt text; sessions already in that state show their first alive entry or AI reply instead
 - ✅ **Issue-close notifications** (#236) — When a GitHub issue you submitted via Loore is fixed (or declined), you learn it in-app through the dev-update channel, targeted to you alone; v0 of the automated issue→fix→verify loop (#237)
 - ✅ **Apply settings to replies** — Changing an entry's privacy or AI usage when it has replies offers "this node only" or "this node and all my replies" (your own entries and AI responses you requested; other people's replies untouched)
 

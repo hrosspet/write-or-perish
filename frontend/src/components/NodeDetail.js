@@ -102,6 +102,10 @@ function NodeDetail({ nodeIdOverride }) {
   const [replyTarget, setReplyTarget] = useState(null);
   const [editTarget, setEditTarget] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
+  // A confirmed delete that would leave a text/voice session with only
+  // its system prompt: { targetId, withDescendants }. The follow-up
+  // dialog asks whether to delete the prompt as well.
+  const [pendingPromptDelete, setPendingPromptDelete] = useState(null);
   const setExclusiveTarget = useCallback((slot, value) => {
     setReplyTarget(slot === 'reply' ? value : null);
     setEditTarget(slot === 'edit' ? value : null);
@@ -441,13 +445,60 @@ function NodeDetail({ nodeIdOverride }) {
     setPinLoading(false);
   };
 
+  // The thread's root as this page knows it: the topmost ancestor the
+  // viewer can see, else the node itself. The orphaned-prompt check, the
+  // prompt dialog's copy and the landing once the session is gone all
+  // read this one node, so the dialog's "leaves your public page" and
+  // the page the delete lands on agree in a mixed-privacy thread too.
+  const threadRoot = node.ancestors?.length ? node.ancestors[0] : node;
+
   const handleConfirmDelete = ({ withDescendants }) => {
     if (!deleteTarget) return;
     const targetId = deleteTarget.id;
-    const wasFocal = targetId === node.id;
     setDeleteTarget(null);
+    // Would this leave the session with only its system prompt? The
+    // root would stay alive and the Log would show a card whose title
+    // and preview are the prompt text. Ask before that happens. Only a
+    // system-prompt thread can end up there, and the root is already on
+    // the page, so other threads skip the round trip. The check is
+    // advisory: if it fails, the delete goes ahead as asked.
+    if (!threadRoot.is_system_prompt || targetId === threadRoot.id) {
+      performDelete(targetId, withDescendants, false);
+      return;
+    }
     api
-      .delete(`/nodes/${targetId}`, { params: { delete_descendants: withDescendants } })
+      .get(`/nodes/${targetId}/delete-impact`, { params: { delete_descendants: withDescendants } })
+      .then((r) => (r.data && r.data.orphaned_system_prompt_id) || null)
+      .catch(() => null)
+      .then((promptRootId) => {
+        if (promptRootId) {
+          setPendingPromptDelete({ targetId, withDescendants });
+        } else {
+          performDelete(targetId, withDescendants, false);
+        }
+      });
+  };
+
+  const handleConfirmPromptDelete = ({ includePrompt }) => {
+    if (!pendingPromptDelete) return;
+    const { targetId, withDescendants } = pendingPromptDelete;
+    setPendingPromptDelete(null);
+    // One request either way: the answer rides along as a flag and the
+    // server re-checks under the root's lock that nothing else is left,
+    // so an entry that arrived since the check (another device, the
+    // Voice chain) keeps the session.
+    performDelete(targetId, withDescendants, includePrompt);
+  };
+
+  const performDelete = (targetId, withDescendants, includePrompt) => {
+    const wasFocal = targetId === node.id;
+    api
+      .delete(`/nodes/${targetId}`, {
+        params: {
+          delete_descendants: withDescendants,
+          delete_orphaned_prompt: includePrompt,
+        },
+      })
       .then((response) => {
         const data = response.data || {};
         const n = data.scheduled || 1;
@@ -455,6 +506,27 @@ function NodeDetail({ nodeIdOverride }) {
           `Deleted ${n} node${n === 1 ? "" : "s"}`,
           3000,
         );
+        // Where to land when nothing of this thread is left to show:
+        // public roots live in the Commons, everything else in the Log.
+        // `listed` is the node whose privacy says which of the two.
+        const leaveThread = (listed) => {
+          if (listed.privacy_level === "public"
+              && currentUser?.share_v1_enabled) {
+            navigate("/commons");
+          } else {
+            navigate("/log");
+          }
+        };
+        // The session root went with the target: nothing of ours is
+        // alive in the thread any more (the server took the root only
+        // because nothing was left), so there is no node to refetch or
+        // walk up to — the page being viewed is the root, the target,
+        // or something under them. The root is what was listed, and
+        // what the prompt dialog's copy was written from.
+        if (data.orphaned_prompt_deleted) {
+          leaveThread(threadRoot);
+          return undefined;
+        }
         // If the cascade swept the focal node away (target is an
         // ancestor of focal AND descendants were included), refetching
         // focal would 404. Treat this like a focal-target delete and
@@ -484,14 +556,8 @@ function NodeDetail({ nodeIdOverride }) {
             }
           }
         }
-        // No alive ancestor (deleted a root). Public roots live in the
-        // Commons, so land back there; everything else goes to the Log.
-        if (node.privacy_level === "public"
-            && currentUser?.share_v1_enabled) {
-          navigate("/commons");
-        } else {
-          navigate("/log");
-        }
+        // No alive ancestor (deleted a root).
+        leaveThread(node);
         return undefined;
       })
       .catch((err) => {
@@ -1384,6 +1450,15 @@ function NodeDetail({ nodeIdOverride }) {
         ))}
         onClose={() => setDeleteTarget(null)}
         onConfirm={handleConfirmDelete}
+      />
+      <DeleteConfirmDialog
+        open={!!pendingPromptDelete}
+        mode="prompt"
+        listedIn={
+          threadRoot.privacy_level === "public" ? "your public page" : "your Log"
+        }
+        onClose={() => setPendingPromptDelete(null)}
+        onConfirm={handleConfirmPromptDelete}
       />
       {replyTarget && (
         <NodeFormModal

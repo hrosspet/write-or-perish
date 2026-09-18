@@ -15,7 +15,7 @@ from backend.extensions import db
 from backend.llm_providers import LLMProvider, PromptTooLongError
 from backend.utils.tokens import reduce_export_tokens, format_date_metadata
 from backend.utils.api_keys import get_api_keys_for_usage
-from backend.utils.cost import llm_cost_from_response
+from backend.utils.cost import llm_cost_log_fields
 from backend.utils.chunk_plan import UPDATE_THRESHOLD_UNITS
 
 logger = get_task_logger(__name__)
@@ -348,19 +348,14 @@ def generate_recent_context(user_id, profile_id=None, data_cutoff_iso=None):
                 )
 
         summary_text = response["content"]
-        input_tokens = response.get("input_tokens", 0)
-        output_tokens = response.get("output_tokens", 0)
         total_tokens = response["total_tokens"]
 
         # Log API cost (cache-aware, #286)
-        cost = llm_cost_from_response(model_id, response)
         cost_log = APICostLog(
             user_id=user_id,
             model_id=model_id,
             request_type="recent_context",
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cost_microdollars=cost,
+            **llm_cost_log_fields(model_id, response),
         )
         db.session.add(cost_log)
 

@@ -16,6 +16,7 @@ from backend.extensions import db
 from backend.utils.share import save_share_drafts_from_node
 from backend.utils.tool_meta import update_tool_meta, get_tool_meta_entry
 from backend.utils.timefmt import iso_utc
+from backend.utils.slugs import permalink_for
 from backend.utils.privacy import PrivacyLevel, AIUsage
 from datetime import datetime
 
@@ -33,13 +34,14 @@ def _share_enabled_for_me():
 
 
 def _permalink(share):
-    """/@<username>/<slug> when published with a slug, else None."""
+    """/@<username>/<slug> while the published node is public, else None.
+
+    #263: PUT /nodes/<id> to private leaves the ShareDraft `published`, so
+    the card must not advertise an address the resolver 404s on.
+    """
     if not share.public_node_id:
         return None
-    node = Node.query.get(share.public_node_id)
-    if node is None or not node.public_slug:
-        return None
-    return f"/@{share.user.username}/{node.public_slug}"
+    return permalink_for(Node.query.get(share.public_node_id))
 
 
 def _serialize(share):
@@ -399,8 +401,7 @@ def public_shares(username):
             "content": content[:600] + ("…" if len(content) > 600 else ""),
             "share_type": share.share_type if share else None,
             "public_node_id": node.id,
-            "permalink": (f"/@{user.username}/{node.public_slug}"
-                          if node.public_slug else None),
+            "permalink": permalink_for(node),
             "pinned": node.pinned_at is not None,
             "published_at": iso_utc(
                 share.published_at if share and share.published_at

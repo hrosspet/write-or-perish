@@ -33,7 +33,8 @@ from backend.models import (  # noqa: E402
 )
 import backend.utils.prompt_cache as prompt_cache  # noqa: E402
 from backend.utils.cost import (  # noqa: E402
-    calculate_llm_cost_microdollars, llm_cost_from_response)
+    calculate_llm_cost_microdollars, llm_cost_from_response,
+    llm_cost_log_fields)
 
 _GLUE = ("backend.celery_app", "backend.llm_providers",
          "backend.tasks.llm_completion")
@@ -259,7 +260,7 @@ def test_render_system_message_resolves_pinned_placeholders(app):
 
 def test_call_anthropic_preserves_blocks_and_cache_usage(app, monkeypatch):
     # Import the real provider module fresh (it may be mocked globally)
-    sys.modules.pop("backend.llm_providers", None)
+    monkeypatch.delitem(sys.modules, "backend.llm_providers", raising=False)
     import backend.llm_providers as providers
 
     captured = {}
@@ -436,3 +437,87 @@ def test_llm_cost_from_response_reads_every_counter(app):
         assert llm_cost_from_response(
             "claude-opus-4.6", batched, batch=False) == (
             llm_cost_from_response("claude-opus-4.6", anthropic_resp))
+
+
+def test_call_openai_surfaces_cache_write_subset(app, monkeypatch):
+    """_call_openai must pull input_tokens_details.cache_write_tokens out
+    of the Responses usage under the subset key; a renamed field would
+    silently drop OpenAI write billing back to 1.0x (#286)."""
+    monkeypatch.delitem(sys.modules, "backend.llm_providers", raising=False)
+    import backend.llm_providers as providers
+
+    class FakeDetails:
+        cached_tokens = 2815
+        cache_write_tokens = 3000
+
+    class FakeUsage:
+        input_tokens = 6018
+        output_tokens = 12
+        total_tokens = 6030
+        input_tokens_details = FakeDetails()
+
+    class FakeBlock:
+        type = "output_text"
+        text = "hi"
+
+    class FakeItem:
+        type = "message"
+        content = [FakeBlock()]
+
+    class FakeResponse:
+        output = [FakeItem()]
+        usage = FakeUsage()
+        status = "completed"
+        incomplete_details = None
+
+    class FakeResponses:
+        def create(self, **kwargs):
+            return FakeResponse()
+
+    class FakeClient:
+        def __init__(self, api_key=None):
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr(providers, "OpenAI", FakeClient)
+    with app.app_context():
+        result = providers.LLMProvider._call_openai(
+            "gpt-5.6-sol", [{"role": "user", "content": "x"}], "k")
+    assert result["input_tokens"] == 6018
+    assert result["cached_tokens"] == 2815
+    assert result["cache_write_subset_tokens"] == 3000
+    # Never the Anthropic-style disjoint key: that would double-bill.
+    assert "cache_creation_input_tokens" not in result
+
+
+def test_llm_cost_log_fields_unifies_columns_across_providers(app):
+    """One helper fills the APICostLog token columns the same way for
+    every request_type: full-prompt input_tokens, read/write unified."""
+    _sol(app)
+    with app.app_context():
+        anthropic_resp = {"input_tokens": 1_000, "output_tokens": 10,
+                          "cache_read_input_tokens": 90_000,
+                          "cache_creation_input_tokens": 9_000}
+        fields = llm_cost_log_fields("claude-opus-4.6", anthropic_resp)
+        assert fields == {
+            "input_tokens": 100_000, "output_tokens": 10,
+            "cache_read_tokens": 90_000, "cache_write_tokens": 9_000,
+            "cost_microdollars": llm_cost_from_response(
+                "claude-opus-4.6", anthropic_resp)}
+        openai_resp = {"input_tokens": 6_018, "output_tokens": 5,
+                       "cached_tokens": 2_815,
+                       "cache_write_subset_tokens": 3_000, "batch": True}
+        fields = llm_cost_log_fields("gpt-5.6-sol", openai_resp)
+        assert fields["input_tokens"] == 6_018  # already the full prompt
+        assert fields["cache_read_tokens"] == 2_815
+        assert fields["cache_write_tokens"] == 3_000
+        assert fields["cost_microdollars"] == llm_cost_from_response(
+            "gpt-5.6-sol", openai_resp)  # batch flag honored
+        assert fields["cost_microdollars"] < llm_cost_from_response(
+            "gpt-5.6-sol", openai_resp, batch=False)
+        # A bare-count dict (no cache keys) still fills every column.
+        assert llm_cost_log_fields("claude-opus-4.6", {
+            "input_tokens": 3, "output_tokens": 4}) == {
+            "input_tokens": 3, "output_tokens": 4, "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cost_microdollars": calculate_llm_cost_microdollars(
+                "claude-opus-4.6", 3, 4)}

@@ -22,6 +22,15 @@ class User(db.Model, UserMixin):
     email = db.Column(db.String(128), nullable=True, unique=True)
     magic_link_token_hash = db.Column(db.String(128), nullable=True)
     magic_link_expires_at = db.Column(db.DateTime, nullable=True)
+    # An address the user asked to bind but has not yet confirmed from the
+    # link sent to it (#260). Never a login identity until it moves into
+    # `email` on confirmation. The link's token has its own hash/expiry
+    # columns: sharing the sign-in link's pair let an unauthenticated
+    # /auth/magic-link/send cancel a pending change, and a change request
+    # kill an outstanding sign-in or 30-day welcome link.
+    pending_email = db.Column(db.String(128), nullable=True)
+    email_change_token_hash = db.Column(db.String(128), nullable=True)
+    email_change_expires_at = db.Column(db.DateTime, nullable=True)
     deactivated_at = db.Column(db.DateTime, nullable=True)
     
     # Relationship to text nodes (explicit foreign_keys needed because Node has
@@ -105,7 +114,8 @@ class User(db.Model, UserMixin):
     # (one step at a time — chunks are sequential).
     profile_batch_pending = db.Column(
         db.Boolean, nullable=False, default=False, server_default="false")
-    # Consecutive batch failures for the current step (bounds retries).
+    # Consecutive batch failures for the current step (bounds retries):
+    # provider-side errors and results that raised while being applied.
     profile_batch_attempts = db.Column(
         db.Integer, nullable=False, default=0, server_default="0")
     # Why the seeder's last attempt to BUILD this user's next batch request
@@ -370,7 +380,7 @@ class Node(db.Model):
         index=True
     )
 
-    # Pin-to-profile: surfaces any node on Dashboard & Feed
+    # Pin-to-profile: surfaces any node on the Profile page & Log
     pinned_at = db.Column(db.DateTime, nullable=True)
     pinned_by = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
 
@@ -581,7 +591,7 @@ class Thread(db.Model):
 
     A row exists only while the thread has a name — clearing the name
     deletes the row. The name is user-authored text, so it is KMS-envelope
-    encrypted like content; the feed batches its DEK unwrap with the page's
+    encrypted like content; the Log batches its DEK unwrap with the page's
     preview DEKs (one extra unwrap per NAMED thread on a Log page).
     """
     __tablename__ = "thread"
@@ -817,26 +827,6 @@ class UserTodo(db.Model):
         return decrypt_content(self.content)
 
 
-class UserAIPreferences(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
-    content = db.Column(db.Text, nullable=False)
-    generated_by = db.Column(db.String(64), nullable=False)
-    tokens_used = db.Column(db.Integer, nullable=False, default=0)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    privacy_level = db.Column(db.String(16), nullable=False, default="private")
-    # AI preferences are used as context in LLM calls — must be AI-readable
-    ai_usage = db.Column(db.String(16), nullable=False, default="chat")
-
-    user = db.relationship("User", backref="ai_preferences")
-
-    def set_content(self, plaintext):
-        self.content = encrypt_content(plaintext)
-
-    def get_content(self):
-        return decrypt_content(self.content)
-
-
 class ArtifactView(db.Model):
     """One row per artifact open in the UI (admin Activity monitoring —
     e.g. "did they check their intentions?"). Written by
@@ -853,7 +843,7 @@ class UserArtifact(db.Model):
     """Generic named user artifact (issue #158): "memory", "scratchpad",
     and user/LLM-created artifacts.
 
-    Append-only versioning like UserAIPreferences — each update inserts a
+    Append-only versioning — each update inserts a
     new row; the latest row per (user_id, kind) is current. Content is
     encrypted at rest and included in data exports as a default Loore
     artifact.
