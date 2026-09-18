@@ -1051,3 +1051,49 @@ def test_prefill_impl_stamps_x_id_only_on_login_less_accounts(app, monkeypatch):
     assert User.query.get(by_email.id).twitter_id is None
     assert result["x_id_stamped"] is False and "signs in by email" in result["x_id_note"]
     assert Node.query.filter_by(human_owner_id=by_email.id).count() == 2
+
+
+# ── empty tweets (#317) ──────────────────────────────────────────────────
+
+def _row(id_str, text, ts="Wed Jun 24 10:00:00 +0000 2026"):
+    return {"id_str": id_str, "full_text": text, "created_at": ts,
+            "is_reply": False, "in_reply_to_screen_name": None,
+            "favorite_count": 0, "retweet_count": 0, "token_count": 1}
+
+
+def test_create_nodes_skips_tweets_with_no_text(app):
+    """A media-only tweet has no text in the export. Importing it made a
+    blank node: nothing for the profile, a blank Log card, and content
+    no encryption pass can touch (#317)."""
+    from backend.routes.import_data import create_twitter_nodes
+    u = _make_user("alice")
+    rows = [_row("1", "real words"), _row("2", ""), _row("3", "   \n  ")]
+    result = create_twitter_nodes(
+        user_id=u.id, rows=iter(rows), total=3,
+        import_type="separate_nodes", include_replies=False,
+        privacy_level="private", ai_usage="none", on_deleted=None,
+    )
+    assert result["created"] == 1 and result["empty"] == 2
+    assert result["skipped"] == 0
+    nodes = Node.query.filter_by(human_owner_id=u.id).all()
+    assert [n.get_content() for n in nodes] == ["real words"]
+    # The empty ones left no row at all, so no source_key is burned for
+    # them either: a later import of the same archive re-evaluates them.
+    assert Node.query.filter_by(source_key="twitter:2").count() == 0
+
+
+def test_single_thread_chain_survives_an_empty_tweet(app):
+    """Skipping mid-chain must not orphan the tweets after it."""
+    from backend.routes.import_data import create_twitter_nodes
+    u = _make_user("bob")
+    rows = [_row("1", "first"), _row("2", ""), _row("3", "third")]
+    result = create_twitter_nodes(
+        user_id=u.id, rows=iter(rows), total=3,
+        import_type="single_thread", include_replies=True,
+        privacy_level="private", ai_usage="none", on_deleted=None,
+    )
+    assert result["created"] == 2 and result["empty"] == 1
+    chain = Node.query.filter_by(human_owner_id=u.id).order_by(Node.id).all()
+    assert chain[0].parent_id is None
+    assert chain[1].parent_id == chain[0].id
+    assert [n.get_content() for n in chain] == ["first", "third"]

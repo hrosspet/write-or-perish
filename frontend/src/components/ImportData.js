@@ -219,7 +219,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
   // confirm with on_deleted set to the user's choice.
   const [deletedPrompt, setDeletedPrompt] = useState(null);
 
-  // Confirm-response stats ({ created, skipped, restored, ... }) shown
+  // Confirm-response stats ({ created, skipped, restored, empty, ... }) shown
   // as a summary after the import finishes; dismissing it reloads the
   // page so the new nodes appear.
   const [importResult, setImportResult] = useState(null);
@@ -608,6 +608,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
               { label: "Restored", value: importResult.restored || 0, highlight: importResult.restored > 0 },
               { label: "Updated", value: importResult.updated || 0, highlight: importResult.updated > 0 },
               { label: "Skipped", value: importResult.skipped || 0, highlight: false },
+              { label: "No text", value: importResult.empty || 0, highlight: false },
             ].filter((s) => s.label === "Imported" || s.value > 0).map((s) => (
               <div key={s.label}>
                 <div style={{
@@ -644,6 +645,12 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
               {importResult.skipped > 0 && (
                 <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.88rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
                   Skipped items were already imported and left untouched.
+                </p>
+              )}
+              {importResult.empty > 0 && (
+                <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.88rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
+                  Posts with no text — usually media-only tweets — were not
+                  imported. There was nothing to write.
                 </p>
               )}
             </>
