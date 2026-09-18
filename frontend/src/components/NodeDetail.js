@@ -60,7 +60,8 @@ const tabTitleFor = (node) => {
     && (node?.llm_task_status === 'pending' || node?.llm_task_status === 'processing');
   if (pending) {
     const batch = Array.isArray(node?.tool_calls_meta)
-      && node.tool_calls_meta.some(tc => tc?.name === '_batch' && tc.status === 'submitted');
+      && node.tool_calls_meta.some(tc => tc?.name === '_batch'
+                                      && ['submitted', 'cancelling'].includes(tc.status));
     return `${batch ? 'Processing' : 'Thinking'}… — Loore`;
   }
   const firstLine = (node?.content || '')
@@ -140,7 +141,8 @@ function NodeDetail({ nodeIdOverride }) {
   // is queued at the provider (minutes, up to 24 h). Poll slowly and
   // don't time out at the hook's 30-minute default.
   const batchMeta = Array.isArray(node?.tool_calls_meta)
-    ? node.tool_calls_meta.find(tc => tc?.name === '_batch' && tc.status === 'submitted')
+    ? node.tool_calls_meta.find(tc => tc?.name === '_batch'
+                                     && ['submitted', 'cancelling'].includes(tc.status))
     : null;
   // (Only the pending node's own meta counts here: on the parent page the
   // batch stage triggers a navigation to that node — see the completion
@@ -328,6 +330,19 @@ function NodeDetail({ nodeIdOverride }) {
       // "Processing" and keeps polling slowly via the effect above).
       setLlmTaskNodeId(null);
       navigate(`/node/${llmTaskNodeId}`);
+    } else if (llmStatus === 'cancelled') {
+      // A read withdrawn before it ran (the spend cap was reached while
+      // it was queued): nothing was billed, and the node's text says so.
+      addToast(llmData?.error || 'Read cancelled', 8000);
+      if (String(llmTaskNodeId) === String(id)) {
+        setNode(prev => prev ? {
+          ...prev,
+          content: llmData?.content ?? prev.content,
+          tool_calls_meta: llmData?.tool_calls_meta ?? prev.tool_calls_meta,
+          llm_task_status: 'cancelled',
+        } : prev);
+      }
+      setLlmTaskNodeId(null);
     } else if (llmStatus === 'failed') {
       // Toast, never setError — setError replaces the entire thread view
       // with the raw failure text, hiding the thread and the inline form.

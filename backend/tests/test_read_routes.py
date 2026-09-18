@@ -444,6 +444,36 @@ class TestRerun:
         assert [m["status"] for m in meta] == ["cancelled"]
         assert meta[0]["cancelled_at"]
 
+    def test_batch_being_withdrawn_is_cancelled_by_the_rerun_too(self, app, monkeypatch):
+        """An entry the poll is withdrawing (the user hit the spend cap)
+        is still live: the rerun cancels it again, best effort, and
+        marks it cancelled like a submitted one."""
+        task = _llm_task(monkeypatch)
+        import json
+        from backend.utils import llm_batch
+        cancelled = []
+        monkeypatch.setattr(llm_batch, "openai_batch_cancel_one",
+                            lambda key, batch_id: cancelled.append(batch_id))
+        client = app.test_client()
+        alice = _make_user("alice", is_admin=True)
+        prompt, reply = _make_read_reply(alice)
+        meta = json.loads(reply.tool_calls_meta)
+        meta[0]["status"] = "cancelling"
+        meta[0]["cancel_requested_at"] = "2026-09-17T10:00:00"
+        reply.tool_calls_meta = json.dumps(meta)
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.post(f"/api/read/{reply.id}/rerun", json={"live": True})
+
+        assert resp.status_code == 202, resp.get_json()
+        assert resp.get_json()["cancelled_batches"] == ["batch_1"]
+        assert cancelled == ["batch_1"]
+        task.apply_async.assert_called_once()
+        meta = json.loads(Node.query.get(reply.id).tool_calls_meta)
+        assert [m["status"] for m in meta] == ["cancelled"]
+        assert meta[0]["cancel_requested_at"] == "2026-09-17T10:00:00"
+
     def test_resubmits_as_batch_when_not_live(self, app, monkeypatch):
         task = _llm_task(monkeypatch)
         from backend.utils import llm_batch

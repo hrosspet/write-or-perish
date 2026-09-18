@@ -31,6 +31,14 @@ class BatchItemFailed(RuntimeError):
     bad key) is not a verdict and the caller polls again."""
 
 
+class BatchItemCancelled(BatchItemFailed):
+    """The batch was cancelled before the item was sent to the model, so
+    the item never ran and is not billed (Anthropic: the item's result
+    type is "canceled"; OpenAI: the batch is "cancelled" and the item is
+    not in its output file). A verdict like its parent, told apart by
+    the poll that asked for the cancel."""
+
+
 def apply_batch_key_override(api_keys, config):
     """Overlay the batch-specific OpenAI key (``OPENAI_API_KEY_BATCH``) if set.
 
@@ -298,8 +306,11 @@ def anthropic_batch_collect_one(api_key, batch_id, custom_id):
     """Poll a one-item batch. Returns (processing_status, resp) where resp
     is None until the batch has ended, and otherwise the same dict shape
     LLMProvider._call_anthropic returns (plus ``batch: True``) so the
-    caller's finalize path is unchanged. Raises BatchItemFailed when
-    the item errored / expired / was canceled."""
+    caller's finalize path is unchanged. A batch still "canceling" after
+    a cancel request is pending like "in_progress"; once it has ended,
+    an item processed before the cancel took effect is returned (it was
+    billed), one canceled before it ran raises BatchItemCancelled (not
+    billed), and an errored / expired item raises BatchItemFailed."""
     from anthropic import Anthropic
     client = Anthropic(api_key=api_key)
     batch = client.messages.batches.retrieve(batch_id)
@@ -310,6 +321,9 @@ def anthropic_batch_collect_one(api_key, batch_id, custom_id):
     for entry in client.messages.batches.results(batch_id):
         if entry.custom_id != custom_id:
             continue
+        if entry.result.type == "canceled":
+            raise BatchItemCancelled(
+                f"Batch item {custom_id} canceled before it ran")
         if entry.result.type != "succeeded":
             err = getattr(entry.result, "error", None)
             raise BatchItemFailed(
@@ -398,56 +412,68 @@ def openai_batch_cancel_one(api_key, batch_id):
     return batch.status
 
 
+OPENAI_BATCH_TERMINAL = ("completed", "failed", "expired", "cancelled")
+
+
 def openai_batch_collect_one(api_key, batch_id, custom_id):
-    """Poll a one-item OpenAI batch. Returns (status, resp) — resp None
-    until the batch completed, else the dict shape the live OpenAI call
-    returns (plus ``batch: True``). Raises BatchItemFailed when the
-    batch failed / expired / was cancelled or the item errored."""
+    """Poll a one-item OpenAI batch. Returns (status, resp): resp is None
+    while the batch is validating / in progress / finalizing / cancelling,
+    else the dict shape the live OpenAI call returns (plus ``batch:
+    True``). A batch that ended early (cancelled, expired) still carries
+    the responses of the requests that had completed by then, and those
+    are billed, so the item is collected whenever it is in the output.
+    Raises BatchItemCancelled when the batch was cancelled before the
+    item ran (not billed) and BatchItemFailed for any other terminal
+    state without a usable response for the item."""
     from openai import OpenAI
     client = OpenAI(api_key=api_key)
     batch = client.batches.retrieve(batch_id)
     log.info("OpenAI batch %s: status=%s counts=%s", batch_id,
              batch.status, batch.request_counts)
-    if batch.status in ("failed", "expired", "cancelled", "cancelling"):
-        raise BatchItemFailed(f"OpenAI batch {batch_id} {batch.status}")
-    if batch.status != "completed":
+    if batch.status not in OPENAI_BATCH_TERMINAL:
         return batch.status, None
-    if not batch.output_file_id:
-        raise BatchItemFailed(f"OpenAI batch {batch_id} completed without output")
-    raw = client.files.content(batch.output_file_id).content.decode()
-    for line in raw.strip().splitlines():
-        entry = json.loads(line)
-        if entry.get("custom_id") != custom_id:
-            continue
-        response = entry.get("response") or {}
-        body = response.get("body") or {}
-        if response.get("status_code") != 200 or entry.get("error"):
-            raise BatchItemFailed(
-                f"Batch item {custom_id} failed: "
-                f"{entry.get('error') or body.get('error')}")
-        content = ""
-        for item in body.get("output") or []:
-            if item.get("type") != "message":
+    output_file_id = getattr(batch, "output_file_id", None)
+    if output_file_id:
+        raw = client.files.content(output_file_id).content.decode()
+        for line in raw.strip().splitlines():
+            entry = json.loads(line)
+            if entry.get("custom_id") != custom_id:
                 continue
-            for block in item.get("content") or []:
-                if block.get("type") == "output_text":
-                    content += block.get("text") or ""
-        usage = body.get("usage") or {}
-        in_toks = usage.get("input_tokens", 0)
-        out_toks = usage.get("output_tokens", 0)
-        details = usage.get("input_tokens_details") or {}
-        cached = details.get("cached_tokens", 0) or 0
-        written = details.get("cache_write_tokens", 0) or 0
-        return "completed", {
-            "content": content,
-            "total_tokens": in_toks + out_toks,
-            "input_tokens": in_toks,
-            "output_tokens": out_toks,
-            "cached_tokens": cached,
-            "cache_write_subset_tokens": written,
-            "tool_calls": [],
-            "truncated": body.get("status") == "incomplete",
-            "batch": True,
-            "batch_id": batch_id,
-        }
-    raise BatchItemFailed(f"Batch {batch_id} ended without item {custom_id}")
+            response = entry.get("response") or {}
+            body = response.get("body") or {}
+            if response.get("status_code") != 200 or entry.get("error"):
+                raise BatchItemFailed(
+                    f"Batch item {custom_id} failed: "
+                    f"{entry.get('error') or body.get('error')}")
+            content = ""
+            for item in body.get("output") or []:
+                if item.get("type") != "message":
+                    continue
+                for block in item.get("content") or []:
+                    if block.get("type") == "output_text":
+                        content += block.get("text") or ""
+            usage = body.get("usage") or {}
+            in_toks = usage.get("input_tokens", 0)
+            out_toks = usage.get("output_tokens", 0)
+            details = usage.get("input_tokens_details") or {}
+            cached = details.get("cached_tokens", 0) or 0
+            written = details.get("cache_write_tokens", 0) or 0
+            return batch.status, {
+                "content": content,
+                "total_tokens": in_toks + out_toks,
+                "input_tokens": in_toks,
+                "output_tokens": out_toks,
+                "cached_tokens": cached,
+                "cache_write_subset_tokens": written,
+                "tool_calls": [],
+                "truncated": body.get("status") == "incomplete",
+                "batch": True,
+                "batch_id": batch_id,
+            }
+    if batch.status == "cancelled":
+        raise BatchItemCancelled(
+            f"OpenAI batch {batch_id} cancelled before item {custom_id} ran")
+    if batch.status == "completed":
+        raise BatchItemFailed(
+            f"Batch {batch_id} ended without item {custom_id}")
+    raise BatchItemFailed(f"OpenAI batch {batch_id} {batch.status}")

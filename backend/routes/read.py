@@ -230,7 +230,7 @@ def rerun_read(node_id):
     now = datetime.utcnow().isoformat(timespec="seconds")
     cancelled = []
     for entry in batches:
-        if entry.get("status") != "submitted":
+        if entry.get("status") not in ("submitted", "cancelling"):
             continue
         _cancel_submitted_batch(entry)
         entry["status"] = "cancelled"

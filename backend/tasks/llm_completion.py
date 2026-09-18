@@ -45,7 +45,7 @@ from backend.utils.session_helpers import (
 from backend.utils.timefmt import local_stamp, strip_edge_timestamps
 from backend.utils.api_keys import determine_api_key_type, get_api_keys_for_usage
 from backend.utils.cost import calculate_llm_cost_microdollars
-from backend.utils.llm_batch import BatchItemFailed
+from backend.utils.llm_batch import BatchItemFailed, BatchItemCancelled
 from backend.utils.ca_feed import FeedReplyError
 from backend.utils.tool_meta import update_tool_meta, parse_github_issue
 from backend.utils.privacy import AI_ALLOWED
@@ -1991,27 +1991,41 @@ def get_user_recent_raw_content(user_id, created_before=None):
 # The batch lives on the node's tool_calls_meta as the "_batch" entry
 # (underscore names are hidden by the UI, like "_mode"):
 #   {name: "_batch", batch_id, custom_id, model, provider, key_type,
-#    submitted_at, status: "submitted" | "ended" | "cancelled",
+#    submitted_at,
+#    status: "submitted" | "cancelling" | "ended" | "cancelled",
 #    last_polled_at (the poll heartbeat), ended_at (the provider's end,
 #    as first seen by a poll), collected_at (the reply finalized: set
 #    with status "ended" in the completion commit), resumed_at /
-#    resumed_count (the backstop)}
-# "submitted" means a collect is still owed for the batch: the poll, the
-# backstop (resume_stuck_feed_batches), the admin's cancel-and-rerun
-# (routes/read.py) and the thread page all look for that one status.
+#    resumed_count (the backstop), cancel_requested_at / cancel_reason /
+#    cancel_error / cancel_outcome (a withdrawal, see _ca_batch_poll)}
+# "submitted" and "cancelling" mean a collect is still owed for the
+# batch: the poll, the backstop (resume_stuck_feed_batches), the admin's
+# cancel-and-rerun (routes/read.py) and the thread page all look for
+# those two. "cancelling" is a batch the poll asked the provider to
+# withdraw (the user hit the spend cap while it was queued); what the
+# provider then reports decides between collecting it (it ran before
+# the cancel took effect and was billed) and "cancelled" (it never ran
+# and is not billed).
 CA_BATCH_POLL_SECONDS = 120
 CA_BATCH_MAX_POLLS = 800
 CA_TWEETS_STUB = "(see Community Archive tweets above)"
 
 
 CA_BATCH_PROVIDERS = ("anthropic", "openai")
+CA_BATCH_LIVE_STATUSES = ("submitted", "cancelling")
+# What a read withdrawn at the provider says in place of its reply.
+CA_BATCH_WITHDRAWN_TEXT = (
+    "This read was cancelled before it ran: the monthly spend cap was "
+    "reached while it was queued at the provider, so the request was "
+    "withdrawn and nothing was billed.")
 
 
 def _batch_meta(node):
-    """(tool_calls_meta as a list, the submitted "_batch" entry or None).
-    Only the live submission counts: a cancelled entry (the admin's
-    cancel-and-rerun) stays in the meta as history, an ended one belongs
-    to a completed reply."""
+    """(tool_calls_meta as a list, the live "_batch" entry or None): the
+    submitted one, or the one being withdrawn (cancelling). A cancelled
+    entry (the admin's cancel-and-rerun, or a withdrawal that never ran)
+    stays in the meta as history, an ended one belongs to a completed
+    reply."""
     meta = []
     if node.tool_calls_meta:
         try:
@@ -2020,7 +2034,7 @@ def _batch_meta(node):
             meta = []
     entry = next((m for m in meta if isinstance(m, dict)
                   and m.get("name") == "_batch"
-                  and m.get("status") == "submitted"), None)
+                  and m.get("status") in CA_BATCH_LIVE_STATUSES), None)
     return meta, entry
 
 
@@ -2028,15 +2042,66 @@ def _task_retries(task):
     return getattr(getattr(task, "request", None), "retries", None)
 
 
-def _ca_batch_poll(task, llm_node, parent_node, meta, entry):
-    """Ask the provider about the submitted batch in *entry*: one call,
-    nothing else loaded. Returns the response dict (the sync provider
-    call's shape plus batch=True for the cost log) once the batch has
-    ended; while it is still processing, stamps the poll heartbeat and
-    re-queues the task. The provider's terminal verdict on the item
-    raises BatchItemFailed; anything else that fails here is re-queued
-    by the task's error handler with the entry still submitted."""
+def _request_batch_cancel(entry, api_key, provider):
+    """Ask the provider to cancel the batch in *entry*. Best effort: a
+    refusal (already ended, gone, network) is recorded on the entry and
+    changes nothing, since the outcome is read from the batch's results
+    either way."""
     from backend.utils import llm_batch
+    cancel_one = {
+        "anthropic": llm_batch.anthropic_batch_cancel_one,
+        "openai": llm_batch.openai_batch_cancel_one,
+    }[provider]
+    try:
+        return cancel_one(api_key, entry["batch_id"])
+    except Exception as e:  # noqa: BLE001 - recorded, not fatal
+        logger.warning("Batch %s cancel request failed: %s",
+                       entry.get("batch_id"), e)
+        entry["cancel_error"] = str(e)
+        return None
+
+
+def _withdraw_batch_reply(llm_node, meta, entry):
+    """The provider confirmed the withdrawn batch never ran: nothing was
+    billed, so no cost row; the reply says why it is empty and the node
+    ends 'cancelled'."""
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    entry["status"] = "cancelled"
+    entry["cancelled_at"] = now
+    entry["cancel_outcome"] = "not_processed"
+    entry["last_polled_at"] = now
+    llm_node.tool_calls_meta = json.dumps(meta)
+    llm_node.set_content(CA_BATCH_WITHDRAWN_TEXT)
+    llm_node.token_count = approximate_token_count(CA_BATCH_WITHDRAWN_TEXT)
+    llm_node.llm_task_status = "cancelled"
+    llm_node.llm_task_progress = 100
+    llm_node.llm_task_error = CA_BATCH_WITHDRAWN_TEXT
+    db.session.commit()
+    logger.warning("Node %s: batch %s withdrawn before it ran (%s); "
+                   "not billed", llm_node.id, entry.get("batch_id"),
+                   entry.get("cancel_reason"))
+
+
+def _ca_batch_poll(task, llm_node, parent_node, meta, entry, user_id):
+    """Ask the provider about the live batch in *entry*: one call, nothing
+    else loaded. Returns ("ended", resp) once the batch has ended with
+    the item processed (resp: the sync provider call's shape plus
+    batch=True for the cost log); while it is still processing, stamps
+    the poll heartbeat and re-queues the task.
+
+    A user who hit the monthly spend cap while their batch was queued
+    gets it withdrawn: the poll asks the provider to cancel and the entry
+    becomes "cancelling". What the provider reports afterwards decides:
+    an item that ran before the cancel took effect is billed by the
+    provider, so it is collected and its cost logged like any other;
+    one that never ran is not billed, and the poll returns
+    ("withdrawn", None) with the node marked cancelled (see
+    _withdraw_batch_reply). The provider's terminal verdict on the item
+    raises BatchItemFailed (a cancel nobody here asked for included);
+    anything else that fails here is re-queued by the task's error
+    handler with the entry still live."""
+    from backend.utils import llm_batch
+    from backend.utils.spend import user_is_capped
     provider = entry.get("provider") or "anthropic"
     collect_one = {
         "anthropic": llm_batch.anthropic_batch_collect_one,
@@ -2052,20 +2117,43 @@ def _ca_batch_poll(task, llm_node, parent_node, meta, entry):
     api_keys = llm_batch.apply_batch_key_override(
         get_api_keys_for_usage(flask_app.config, key_type),
         flask_app.config)
-    status, resp = collect_one(
-        api_keys[provider], entry["batch_id"], entry["custom_id"])
+    withdrawing = entry.get("status") == "cancelling"
+    try:
+        status, resp = collect_one(
+            api_keys[provider], entry["batch_id"], entry["custom_id"])
+    except BatchItemCancelled:
+        if not withdrawing:
+            raise
+        _withdraw_batch_reply(llm_node, meta, entry)
+        return "withdrawn", None
     # Heartbeat for resume_stuck_feed_batches: a poll that stops
     # arriving means the scheduled retry died with its worker.
     now = datetime.utcnow().isoformat(timespec="seconds")
     entry["last_polled_at"] = now
     if resp is None:
+        if not withdrawing and user_is_capped(user_id):
+            # Withdraw: unprocessed requests are not billed. A request
+            # already in flight completes and is billed; the next polls
+            # read which of the two it was from the batch's results.
+            _request_batch_cancel(entry, api_keys[provider], provider)
+            entry["status"] = "cancelling"
+            entry["cancel_requested_at"] = now
+            entry["cancel_reason"] = "spend_cap"
+            logger.warning(
+                "Node %s: user %s hit the spend cap; batch %s cancel "
+                "requested (poll %s)", llm_node.id, user_id,
+                entry["batch_id"], _task_retries(task))
         llm_node.tool_calls_meta = json.dumps(meta)
         db.session.commit()
         logger.info("Node %s: batch %s still %s (poll %s)", llm_node.id,
                     entry["batch_id"], status, _task_retries(task))
         raise task.retry(countdown=CA_BATCH_POLL_SECONDS,
                          max_retries=CA_BATCH_MAX_POLLS)
-    # The entry stays "submitted" until the reply is finalized (see
+    if withdrawing:
+        # Ran before the cancel took effect: billed by the provider, so
+        # collected and logged like any other reply.
+        entry["cancel_outcome"] = "processed"
+    # The entry stays live until the reply is finalized (see
     # _close_batch_entry): if this collecting run dies, the next poll
     # fetches the same result again instead of submitting a second batch.
     entry.setdefault("ended_at", now)
@@ -2073,7 +2161,7 @@ def _ca_batch_poll(task, llm_node, parent_node, meta, entry):
     db.session.commit()
     logger.info("Node %s: batch %s ended (poll %s); collecting",
                 llm_node.id, entry["batch_id"], _task_retries(task))
-    return resp
+    return "ended", resp
 
 
 def _ca_batch_submit(task, llm_node, model_id, api_model, messages,
@@ -2119,8 +2207,8 @@ def _batch_history(node):
 
 
 def _close_batch_entry(node, batch_id):
-    """Mark the submitted "_batch" entry for *batch_id* ended. Called by
-    the finalize so the flip lands in the same commit as the completion:
+    """Mark the live "_batch" entry for *batch_id* ended. Called by the
+    finalize so the flip lands in the same commit as the completion:
     a collecting run that dies earlier leaves the entry submitted, and
     the next poll collects the same result instead of paying for a
     second batch."""
@@ -2169,8 +2257,9 @@ CA_BATCH_STALE_SECONDS = 3 * CA_BATCH_POLL_SECONDS + 60
 
 
 def find_stuck_feed_batches(now=None):
-    """Nodes still 'processing' on a submitted batch with no poll heartbeat
-    for CA_BATCH_STALE_SECONDS. Returns [(node, batch_entry)]."""
+    """Nodes still 'processing' on a live batch (submitted, or being
+    withdrawn) with no poll heartbeat for CA_BATCH_STALE_SECONDS.
+    Returns [(node, batch_entry)]."""
     now = now or datetime.utcnow()
     stale = []
     rows = (Node.query
@@ -2505,13 +2594,22 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # Only the run that finds the batch ended goes on to build the
             # context it needs for ca_refs and the finalize.
             if batch_entry is not None:
-                batch_resp = _ca_batch_poll(
-                    self, llm_node, parent_node, batch_meta, batch_entry)
+                outcome, batch_resp = _ca_batch_poll(
+                    self, llm_node, parent_node, batch_meta, batch_entry,
+                    user_id)
+                if outcome == "withdrawn":
+                    return {
+                        'parent_node_id': parent_node_id,
+                        'llm_node_id': llm_node_id,
+                        'status': 'cancelled',
+                        'reason': 'spend_cap',
+                    }
 
             # A batch that has ended is collected even for a user who hit
-            # the spend cap meanwhile: its cost was incurred at submission
-            # and the finalize logs it either way; the cap holds for their
-            # next request.
+            # the spend cap meanwhile: by then the provider has processed
+            # and billed it (a batch still queued is withdrawn by the poll
+            # instead, see _ca_batch_poll), and the finalize logs the cost
+            # either way. The cap gates new requests: the submit below.
             from backend.utils.spend import user_is_capped
             if batch_resp is None and user_is_capped(user_id):
                 logger.warning(

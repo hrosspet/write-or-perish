@@ -24,7 +24,7 @@ from backend.tests.test_read_context import (
 from backend.extensions import db as _db
 from backend.models import Node, ExternalItem, FeedPick, APICostLog
 from backend.utils import llm_batch
-from backend.utils.llm_batch import BatchItemFailed
+from backend.utils.llm_batch import BatchItemFailed, BatchItemCancelled
 from backend.utils.cost import calculate_llm_cost_microdollars as _real_cost
 
 POLL = _llm_task_mod.CA_BATCH_POLL_SECONDS
@@ -73,8 +73,9 @@ def _batch_resp():
     }
 
 
-def _read_thread(*, submitted=True, key_type="chat"):
-    """read prompt -> reply placeholder, with a submitted batch entry."""
+def _read_thread(*, submitted=True, key_type="chat", entry_status="submitted"):
+    """read prompt -> reply placeholder, with a live batch entry
+    (submitted, or cancelling: a withdrawal whose outcome is pending)."""
     alice = _mk_user("alice", approved=True, plan="alpha", is_admin=True)
     llm_user = _mk_user("gpt-5", twitter_id="llm-gpt-5")
     read = _prompt_node(alice, "read")
@@ -90,23 +91,35 @@ def _read_thread(*, submitted=True, key_type="chat"):
             "name": "_batch", "batch_id": "batch_1",
             "custom_id": f"node-{llm_node.id}", "model": "gpt-5",
             "provider": "openai", "submitted_at": "2026-09-17T09:07:00",
-            "status": "submitted",
+            "status": entry_status,
         }
         if key_type:
             entry["key_type"] = key_type
+        if entry_status == "cancelling":
+            entry["cancel_requested_at"] = "2026-09-17T10:00:00"
+            entry["cancel_reason"] = "spend_cap"
         llm_node.tool_calls_meta = json.dumps([entry])
     _db.session.commit()
     return alice, read, llm_node
 
 
-def _script(monkeypatch, tmp_path, collect, render=None):
+def _script(monkeypatch, tmp_path, collect, render=None, cancel=None):
     """Script the provider's batch calls and count the context builders.
     *collect* is called per poll and returns (status, resp) or raises;
-    *render* replaces the archive render when given."""
+    *render* replaces the archive render when given; *cancel* replaces
+    the provider's cancel (recorded either way)."""
     _stub_archive(monkeypatch, tmp_path)
     # The harness stubs llm_providers, which makes this constant a mock.
     monkeypatch.setattr(_llm_task_mod, "DEFAULT_MAX_OUTPUT_TOKENS", 10000)
-    calls = {"collect": [], "submit": [], "chain": 0, "render": 0}
+    calls = {"collect": [], "submit": [], "cancel": [], "chain": 0,
+             "render": 0}
+
+    def _cancel(key, batch_id):
+        calls["cancel"].append((key, batch_id))
+        if cancel is not None:
+            return cancel(key, batch_id)
+        return "cancelling"
+    monkeypatch.setattr(llm_batch, "openai_batch_cancel_one", _cancel)
 
     def _collect(key, batch_id, custom_id):
         calls["collect"].append((key, batch_id, custom_id))
@@ -158,6 +171,7 @@ def test_pending_poll_builds_no_context(app, monkeypatch, tmp_path):  # noqa: F8
     # The stored key type picks the key; the batch key override applies.
     assert calls["collect"] == [("sk-test", "batch_1", f"node-{llm_node.id}")]
     assert calls["submit"] == []
+    assert calls["cancel"] == []
     assert task.retries == [{"countdown": POLL, "max_retries": MAX_POLLS}]
     node = _reload(llm_node.id)
     assert node.llm_task_status == "processing"
@@ -435,8 +449,9 @@ def test_collect_that_dies_inside_the_finalize_counts_once(app, monkeypatch, tmp
 
 
 def test_capped_user_still_collects_an_ended_batch(app, monkeypatch, tmp_path):  # noqa: F811
-    """The batch's cost was incurred at submission: a user capped since
-    still gets the reply (and its cost row); a new read is refused."""
+    """The batch ended before a poll saw the cap: the provider processed
+    and billed it, so the reply is collected and its cost row written.
+    A new read for the capped user is refused."""
     monkeypatch.setattr("backend.utils.spend.user_is_capped",
                         lambda user_id: True)
     calls = _script(monkeypatch, tmp_path,
@@ -524,6 +539,7 @@ def test_find_stuck_feed_batches_wants_a_stale_submitted_entry(app):  # noqa: F8
                 "status": status, "submitted_at": stale,
                 "last_polled_at": polled}
     orphan = node("processing", [batch("submitted", stale)])
+    withdrawing = node("processing", [batch("cancelling", stale)])
     node("processing", [batch("submitted", fresh)])
     node("completed", [batch("ended", stale)])
     node("failed", [batch("submitted", stale)])
@@ -534,5 +550,153 @@ def test_find_stuck_feed_batches_wants_a_stale_submitted_entry(app):  # noqa: F8
 
     found = _llm_task_mod.find_stuck_feed_batches(now=now)
 
-    assert sorted(n.id for n, _ in found) == sorted([orphan.id, resumed.id])
-    assert all(e["status"] == "submitted" for _, e in found)
+    assert sorted(n.id for n, _ in found) == sorted(
+        [orphan.id, withdrawing.id, resumed.id])
+    assert {e["status"] for _, e in found} == {"submitted", "cancelling"}
+
+
+# ── withdrawal: the spend cap reached while the batch is queued ──────────
+# A batch request is billed when the provider processes it, not when it
+# is submitted. A user who hits the cap while theirs is queued gets it
+# withdrawn, and the provider's answer decides: ran anyway (billed, so
+# collected and logged) or never ran (not billed, node cancelled).
+
+def _capped(monkeypatch, value=True):
+    monkeypatch.setattr("backend.utils.spend.user_is_capped",
+                        lambda user_id: value)
+
+
+def test_capped_user_pending_batch_is_withdrawn_at_the_provider(app, monkeypatch, tmp_path):  # noqa: F811
+    _capped(monkeypatch)
+    calls = _script(monkeypatch, tmp_path,
+                    collect=lambda: ("in_progress", None))
+    alice, read, llm_node = _read_thread()
+    task = _Task()
+
+    with pytest.raises(_llm_task_mod.Retry):
+        _run(task, alice, read, llm_node)
+
+    assert calls["cancel"] == [("sk-test", "batch_1")]
+    assert task.retries == [{"countdown": POLL, "max_retries": MAX_POLLS}]
+    node = _reload(llm_node.id)
+    assert node.llm_task_status == "processing"
+    entry = _entry(node)
+    assert entry["status"] == "cancelling"
+    assert entry["cancel_requested_at"]
+    assert entry["cancel_reason"] == "spend_cap"
+    assert "cancel_error" not in entry
+
+    # Asked once: while the provider is still cancelling, later polls
+    # wait for the outcome and build nothing.
+    with pytest.raises(_llm_task_mod.Retry):
+        _run(_Task(), alice, read, llm_node)
+    assert len(calls["cancel"]) == 1
+    assert calls["chain"] == 0
+    assert calls["render"] == 0
+    assert _entry(_reload(llm_node.id))["status"] == "cancelling"
+
+
+def test_withdrawn_batch_that_never_ran_is_cancelled_unbilled(app, monkeypatch, tmp_path):  # noqa: F811
+    _capped(monkeypatch)
+
+    def never_ran():
+        raise BatchItemCancelled(
+            "OpenAI batch batch_1 cancelled before item node-1 ran")
+    calls = _script(monkeypatch, tmp_path, collect=never_ran)
+    alice, read, llm_node = _read_thread(entry_status="cancelling")
+    task = _Task()
+
+    result = _run(task, alice, read, llm_node)
+
+    assert result["status"] == "cancelled"
+    assert result["reason"] == "spend_cap"
+    assert task.retries == []
+    assert calls["submit"] == []
+    assert calls["chain"] == 0
+    assert calls["render"] == 0
+    node = _reload(llm_node.id)
+    assert node.llm_task_status == "cancelled"
+    assert node.llm_task_progress == 100
+    assert "nothing was billed" in node.get_content()
+    assert node.llm_task_error == node.get_content()
+    entry = _entry(node)
+    assert entry["status"] == "cancelled"
+    assert entry["cancel_outcome"] == "not_processed"
+    assert entry["cancelled_at"]
+    assert APICostLog.query.count() == 0
+    assert FeedPick.query.count() == 0
+    assert ExternalItem.query.count() == 0
+
+
+def test_withdrawn_batch_that_ran_anyway_is_collected_and_billed(app, monkeypatch, tmp_path):  # noqa: F811
+    _capped(monkeypatch)
+    calls = _script(monkeypatch, tmp_path,
+                    collect=lambda: ("cancelled", _batch_resp()))
+    alice, read, llm_node = _read_thread(entry_status="cancelling")
+
+    result = _run(_Task(), alice, read, llm_node)
+
+    assert result["status"] == "completed"
+    assert calls["submit"] == []
+    assert calls["cancel"] == []
+    node = _reload(llm_node.id)
+    assert node.llm_task_status == "completed"
+    assert APICostLog.query.count() == 1
+    item = ExternalItem.query.filter_by(
+        user_id=alice.id, source="community_archive", external_id="222").one()
+    assert node.get_content().endswith(f"{{quote_ext:{item.id}}}")
+    entry = _entry(node)
+    assert entry["status"] == "ended"
+    assert entry["cancel_outcome"] == "processed"
+    assert entry["cancel_requested_at"]
+    assert entry["collected_at"]
+
+
+def test_cancel_refusal_is_recorded_and_the_outcome_still_read(app, monkeypatch, tmp_path):  # noqa: F811
+    """The provider refuses the cancel (say the batch had just ended):
+    recorded on the entry, and the next poll collects and bills as
+    usual."""
+    _capped(monkeypatch)
+    polls = iter([("in_progress", None), ("completed", _batch_resp())])
+
+    def refuse(key, batch_id):
+        raise RuntimeError("batch already ended")
+    calls = _script(monkeypatch, tmp_path, collect=lambda: next(polls),
+                    cancel=refuse)
+    alice, read, llm_node = _read_thread()
+
+    with pytest.raises(_llm_task_mod.Retry):
+        _run(_Task(), alice, read, llm_node)
+
+    entry = _entry(_reload(llm_node.id))
+    assert entry["status"] == "cancelling"
+    assert "already ended" in entry["cancel_error"]
+    assert calls["cancel"] == [("sk-test", "batch_1")]
+
+    _run(_Task(), alice, read, llm_node)
+
+    node = _reload(llm_node.id)
+    assert node.llm_task_status == "completed"
+    assert APICostLog.query.count() == 1
+    assert _entry(node)["status"] == "ended"
+
+
+def test_cancel_nobody_asked_for_fails_the_node(app, monkeypatch, tmp_path):  # noqa: F811
+    """A batch cancelled from outside (the provider console) while the
+    entry is still submitted: the provider's verdict, the node fails."""
+    def gone():
+        raise BatchItemCancelled(
+            "OpenAI batch batch_1 cancelled before item node-1 ran")
+    calls = _script(monkeypatch, tmp_path, collect=gone)
+    alice, read, llm_node = _read_thread()
+    task = _Task()
+
+    with pytest.raises(BatchItemCancelled):
+        _run(task, alice, read, llm_node)
+
+    assert task.retries == []
+    assert calls["cancel"] == []
+    node = _reload(llm_node.id)
+    assert node.llm_task_status == "failed"
+    assert "cancelled" in node.llm_task_error
+    assert _entry(node)["status"] == "submitted"

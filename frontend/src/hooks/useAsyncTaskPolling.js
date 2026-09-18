@@ -17,7 +17,7 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
     enabled = false
   } = options;
 
-  const [status, setStatus] = useState(null); // 'pending', 'processing', 'completed', 'failed'
+  const [status, setStatus] = useState(null); // 'pending', 'processing', 'completed', 'failed', 'cancelled'
   const [progress, setProgress] = useState(0);
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
@@ -67,8 +67,9 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
       setProgress(result.progress || 0);
       setData(result);
 
-      // Stop polling if task is complete or failed
-      if (result.status === 'completed' || result.status === 'failed') {
+      // Stop polling at a terminal state: completed, failed, or
+      // cancelled (a read withdrawn before it ran).
+      if (['completed', 'failed', 'cancelled'].includes(result.status)) {
         stopPolling();
         if (result.status === 'failed') {
           setError(result.error || 'Task failed');
