@@ -80,6 +80,65 @@ def fetch_community_archive(self, user_id, username, max_items=2000):
 X_RECONNECT_LINK = "/import#x-bookmarks"
 
 
+def _oauth_error(exc):
+    """``(error, error_description)`` from a failed grant, ('', '') when
+    the response carries no parseable JSON body."""
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return "", ""
+    try:
+        body = resp.json()
+    except Exception:
+        return "", ""
+    if not isinstance(body, dict):
+        return "", ""
+    return body.get("error") or "", body.get("error_description") or ""
+
+
+# X's wording when the refresh token itself is rejected, as opposed to
+# the request around it: "Value passed for the token was invalid."
+DEAD_TOKEN_DESCRIPTIONS = ("token was invalid",)
+
+
+def _grant_is_dead(code, error, description):
+    """Did X reject the USER's refresh token, or Loore's own client?
+
+    Only the first warrants parking the account and telling the user to
+    reconnect. X's token endpoint does not use the RFC 6749 error names,
+    so this reads the codes it actually sends (probed live 2026-09-18):
+
+      401 unauthorized_client "Missing valid authorization header"
+          — Loore's client credentials are missing or wrong. Identical
+            response whether the Basic header is absent or carries the
+            wrong secret. This was #313: every user disconnected for a
+            bug none of them could fix by reconnecting.
+      400 invalid_request     "Value passed for the token was invalid."
+          — the user's refresh token is dead: they revoked Loore on X,
+            or the rotating refresh-token family died.
+
+    ``invalid_request`` is also the generic "your request was malformed"
+    code — X sends it for a missing parameter too — so it means a dead
+    grant only when the description is X's specific one about the token.
+    A request Loore built wrong is ours, not the user's.
+
+    Anything else — an unparseable body, an HTML error page from an
+    edge, a 5xx — is not a signal about this user's grant, so it fails
+    the sync loudly instead of disconnecting somebody. Matching X's
+    wording is brittle by nature: if they reword it, this stops parking
+    and the sync starts erroring nightly, which Sentry surfaces. That is
+    the direction to be brittle in — the other one disconnects users
+    who did nothing wrong, silently, which is how #313 ran for months.
+    """
+    if code not in (400, 401) or not error:
+        return False
+    if error == "invalid_grant":  # the RFC name, should X ever adopt it
+        return True
+    if error == "invalid_request":
+        return any(phrase in description.lower()
+                   for phrase in DEAD_TOKEN_DESCRIPTIONS)
+    return False
+
+
 def _mark_revoked(account, why):
     """X rejected the account's tokens — user revoked the app, or the
     rotating refresh-token family died. Park the account (nightly sync
@@ -125,15 +184,23 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
                 and account.get_refresh_token()):
             try:
                 tokens = x_refresh_access_token(
-                    client_id, account.get_refresh_token())
+                    client_id, account.get_refresh_token(),
+                    flask_app.config.get("X_CLIENT_SECRET"))
             except requests.HTTPError as exc:
                 code = (exc.response.status_code
                         if exc.response is not None else None)
-                # 400/401 = dead grant (revoked / rotated away underneath
-                # us). Anything else (429, 5xx) is transient — surface it
-                # and let the next scheduled sync retry.
-                if code in (400, 401):
-                    return _mark_revoked(account, f"refresh HTTP {code}")
+                error, description = _oauth_error(exc)
+                if _grant_is_dead(code, error, description):
+                    return _mark_revoked(
+                        account, f"refresh HTTP {code} {error}")
+                # Not this user's grant — ours, or X's. Fail loudly
+                # rather than disconnecting a user who did nothing and
+                # can fix nothing by reconnecting (#313).
+                logger.error(
+                    "X token refresh for user %s failed with HTTP %s "
+                    "%s: %s — NOT parking the account, this is not the "
+                    "user's grant", account.user_id, code,
+                    error or "(no error body)", description[:200])
                 raise
             account.set_tokens(
                 tokens["access_token"], tokens.get("refresh_token"))
