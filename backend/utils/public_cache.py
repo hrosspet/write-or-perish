@@ -77,6 +77,7 @@ def _roots_of(nodes):
     query for the lot (privacy-blind — this is cache accounting, not
     access control). A node that is its own root, or whose root can't be
     found, maps to itself."""
+    from backend.extensions import db
     from backend.models import Node
     from backend.utils.thread_tree import thread_root_of
 
@@ -85,22 +86,31 @@ def _roots_of(nodes):
     root_id_of = thread_root_of([n.id for n in pending]) if pending else {}
     missing = set(root_id_of.values()) - set(roots)
     if missing:
-        roots.update({r.id: r for r in Node.query.filter(Node.id.in_(missing)).all()})
+        # Only the columns _paths_for_root reads: a root's content can be
+        # long, and this is cache accounting.
+        roots.update({r.id: r for r in db.session.query(
+            Node.id, Node.parent_id, Node.human_owner_id, Node.user_id,
+            Node.public_slug).filter(Node.id.in_(missing)).all()})
     return [roots.get(root_id_of.get(n.id, n.id), n) for n in nodes]
 
 
-def _paths_for_root(root):
+def _paths_for_root(root, also=None):
+    """The pages a thread root is served on: its id URL and, under its
+    owner's handle, the profile, feed and (with a slug) article pages.
+    *also* maps a user id to further handles the same pages are cached
+    under — the old one, right after a rename."""
     from backend.models import User
 
     paths = [f"/node/{root.id}"]
     owner_id = root.human_owner_id or root.user_id
     owner = User.query.get(owner_id) if owner_id else None
     if owner is not None:
-        paths.append(f"/@{owner.username}")
-        paths.append(f"/@{owner.username}/feed.xml")
-        if root.public_slug:
-            paths.append(f"/@{owner.username}/{root.public_slug}")
-            paths.append(f"/@{owner.username}/{root.public_slug}.md")
+        for handle in [owner.username, *(also or {}).get(owner.id, [])]:
+            paths.append(f"/@{handle}")
+            paths.append(f"/@{handle}/feed.xml")
+            if root.public_slug:
+                paths.append(f"/@{handle}/{root.public_slug}")
+                paths.append(f"/@{handle}/{root.public_slug}.md")
     return paths
 
 
@@ -180,19 +190,31 @@ def invalidate_deleted(target_id, deleted_ids):
             "be dropped from the cache")
 
 
-def invalidate_for_user(user):
+def invalidate_for_user(user, former_handle=None):
     """Drop every cached page the user's content can appear on — used
     when public_sharing_enabled flips, which takes down (or restores)
-    their posts AND their replies in other people's threads at once."""
+    their posts AND their replies in other people's threads at once, and
+    after a rename, when the same pages sit in the cache under the old
+    handle and carry it in their bylines: pass it as *former_handle* and
+    its URL variants are dropped too. Reads only the columns the paths
+    need — a public archive can be large, and its content is not the
+    point here."""
+    from backend.extensions import db
     from backend.models import Node
 
-    paths = {"/sitemap.xml", f"/@{user.username}",
-             f"/@{user.username}/feed.xml"}
-    rows = Node.query.filter(
+    handles = [user.username] + ([former_handle] if former_handle else [])
+    paths = {"/sitemap.xml"}
+    for handle in handles:
+        paths.update({f"/@{handle}", f"/@{handle}/feed.xml"})
+    also = {user.id: handles[1:]} if former_handle else None
+    rows = db.session.query(
+        Node.id, Node.parent_id, Node.human_owner_id, Node.user_id,
+        Node.public_slug,
+    ).filter(
         ((Node.human_owner_id == user.id) | (Node.user_id == user.id)),
         Node.privacy_level == "public",
     ).all()
     for node, root in zip(rows, _roots_of(rows)):
         paths.add(f"/node/{node.id}")
-        paths.update(_paths_for_root(root))
+        paths.update(_paths_for_root(root, also))
     invalidate(*paths)

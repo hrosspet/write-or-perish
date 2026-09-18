@@ -72,15 +72,45 @@ def is_username_reserved(username: str) -> bool:
     return False
 
 
+def username_conflict(username: str, exclude_user_id=None) -> Optional[str]:
+    """Why *username* can't be handed to a new account (or to the account
+    ``exclude_user_id``): ``"taken"`` while another account holds it,
+    ``"reserved"`` while it is another account's former handle — the old
+    public URLs still redirect there (#253), so a second claimant would
+    turn that redirect into an impersonation vector — and None when it is
+    free. An account may take its own former handle back. Case-insensitive,
+    like the uniqueness the app enforces. The one place every path that
+    issues a username (rename, signup, whitelist) checks, so none of them
+    can hand out a handle another refuses.
+    """
+    # Deferred imports to avoid a hard dependency on the app/db at import
+    # time (keeps the pure helpers above unit-testable in isolation).
+    from backend.models import User
+    from backend.extensions import db
+    from backend.utils.username_history import former_handle_owner
+
+    query = User.query.filter(db.func.lower(User.username) == username.lower())
+    if exclude_user_id is not None:
+        query = query.filter(User.id != exclude_user_id)
+    if query.first():
+        return "taken"
+    former = former_handle_owner(username)
+    if former is not None and former.id != exclude_user_id:
+        return "reserved"
+    return None
+
+
 def validate_username(username: str, exclude_user_id=None) -> Optional[str]:
     """Validate a desired username.
 
     Returns an error string describing the first problem found, or None if the
     username is acceptable. Checks (in order): non-empty, length, allowed
-    characters, reserved, and case-insensitive uniqueness.
+    characters, reserved, case-insensitive uniqueness, and another account's
+    former handle (#253).
 
     ``exclude_user_id`` lets the caller exclude the user's own current row from
-    the uniqueness check (so re-saving the same username is allowed).
+    the uniqueness check (so re-saving the same username is allowed) and their
+    own former handles from the reservation (taking one back is allowed).
     """
     if not username:
         return "Username cannot be empty."
@@ -91,26 +121,11 @@ def validate_username(username: str, exclude_user_id=None) -> Optional[str]:
     if is_username_reserved(username):
         return "That username is reserved."
 
-    # Deferred import to avoid a hard dependency on the app/db at import time
-    # (keeps the pure helpers above unit-testable in isolation).
-    from backend.models import User
-    from backend.extensions import db
-
-    query = User.query.filter(db.func.lower(User.username) == username.lower())
-    if exclude_user_id is not None:
-        query = query.filter(User.id != exclude_user_id)
-    if query.first():
+    conflict = username_conflict(username, exclude_user_id)
+    if conflict == "taken":
         return "That username is already taken."
-
-    # A handle someone ELSE used to publish under still redirects to them
-    # (#253); letting a second user claim it would make that redirect an
-    # impersonation vector. The user's own former handles are fine — taking
-    # one back just ends the redirect.
-    from backend.utils.username_history import former_handle_owner
-    former = former_handle_owner(username)
-    if former is not None and former.id != exclude_user_id:
+    if conflict == "reserved":
         return "That username is reserved."
-
     return None
 
 
@@ -118,14 +133,12 @@ def derive_available_username(base):
     """Derive a username from ``base`` that is neither reserved nor taken.
 
     Returns ``base`` itself when it passes both checks (case-insensitive
-    uniqueness, matching validate_username); otherwise appends an
-    incrementing numeric suffix starting at 2. Used by the magic-link signup
-    (email prefix) and Twitter OAuth signup (screen_name) to pick a fallback
-    instead of failing the auth callback.
+    uniqueness and no other account's former handle, matching
+    validate_username); otherwise appends an incrementing numeric suffix
+    starting at 2. Used by the magic-link signup (email prefix) and Twitter
+    OAuth signup (screen_name) to pick a fallback instead of failing the
+    auth callback.
     """
-    from backend.models import User
-    from backend.extensions import db
-
     if not base:
         base = "user"
     # Brand-substring / founder-prefix reserved matches can't be escaped by
@@ -139,9 +152,7 @@ def derive_available_username(base):
     def _available(candidate):
         if is_username_reserved(candidate):
             return False
-        return not User.query.filter(
-            db.func.lower(User.username) == candidate.lower()
-        ).first()
+        return username_conflict(candidate) is None
 
     if _available(base):
         return base

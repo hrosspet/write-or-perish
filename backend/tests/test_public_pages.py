@@ -470,28 +470,119 @@ def _rename(old, new):
     _db.session.commit()
 
 
+def _former_handles(username):
+    from backend.models import UsernameHistory
+    return [r.old_username for r in UsernameHistory.query.filter_by(
+        user_id=_user(username).id).all()]
+
+
+ROUTES = [
+    ("/@{u}/on-lore", "/@{u}/on-lore"),
+    ("/@{u}/on-lore.md", "/@{u}/on-lore.md"),
+    ("/@{u}/on-lore/og.png", "/@{u}/on-lore/og.png"),
+    ("/@{u}", "/@{u}"),
+    ("/@{u}/feed.xml", "/@{u}/feed.xml"),
+    ("/@{u}/og.png", "/@{u}/og.png"),
+]
+
+
+def _assert_redirects(client, old, new):
+    for path, target in ROUTES:
+        r = client.get(path.format(u=old))
+        assert r.status_code == 301, (path, r.status_code)
+        assert r.headers["Location"].endswith(target.format(u=new)), (
+            path, r.headers["Location"])
+        # A pinned 301 would loop once the handle is taken back.
+        assert r.headers["Cache-Control"] == "no-store", path
+
+
+def _assert_plain_404(client, handle):
+    for path, _ in ROUTES:
+        r = client.get(path.format(u=handle))
+        assert r.status_code == 404, (path, r.status_code)
+        assert "Location" not in r.headers, path
+
+
 def test_former_handle_301s_to_current_on_every_public_route(app):
     _publish("author", ARTICLE, "on-lore")
     _rename("author", "writer")
     c = app.test_client()
-    for old, new in [
-        ("/@author/on-lore", "/@writer/on-lore"),
-        ("/@author/on-lore.md", "/@writer/on-lore.md"),
-        ("/@author/on-lore/og.png", "/@writer/on-lore/og.png"),
-        ("/@author", "/@writer"),
-        ("/@author/feed.xml", "/@writer/feed.xml"),
-        ("/@author/og.png", "/@writer/og.png"),
-    ]:
-        r = c.get(old)
-        assert r.status_code == 301, (old, r.status_code)
-        assert r.headers["Location"].endswith(new), (old, r.headers["Location"])
+    _assert_redirects(c, "author", "writer")
     # The current handle serves the page; the sitemap only lists it.
     assert c.get("/@writer/on-lore").status_code == 200
     sitemap = c.get("/sitemap.xml").get_data(as_text=True)
     assert "/@writer/on-lore" in sitemap and "/@author/" not in sitemap
     # Nobody-ever-held-it stays a plain 404.
-    assert c.get("/@nobody/on-lore").status_code == 404
-    assert c.get("/@nobody").status_code == 404
+    _assert_plain_404(c, "nobody")
+
+
+def test_redirect_keeps_the_query_string(app):
+    _publish("author", ARTICLE, "on-lore")
+    _rename("author", "writer")
+    r = app.test_client().get("/@author/on-lore?utm_source=newsletter&q=a%20b")
+    assert r.status_code == 301
+    assert r.headers["Location"].endswith(
+        "/@writer/on-lore?utm_source=newsletter&q=a%20b")
+
+
+def test_former_handle_of_a_private_account_is_a_plain_404(app):
+    """The redirect names the new handle, so it exists only where the
+    target is public anyway: an account that went private after renaming
+    answers like a handle nobody ever held (404 parity)."""
+    _publish("author", ARTICLE, "on-lore")
+    _rename("author", "writer")
+    _user("writer").public_sharing_enabled = False
+    _db.session.commit()
+    c = app.test_client()
+    _assert_plain_404(c, "author")
+    _assert_plain_404(c, "writer")
+    assert c.get("/api/commons/permalink/author/on-lore").status_code == 404
+    assert c.get("/api/share/public/author").status_code == 404
+    # Sharing back on: the redirect is back.
+    _user("writer").public_sharing_enabled = True
+    _db.session.commit()
+    _assert_redirects(c, "author", "writer")
+
+
+def test_former_handle_only_redirects_to_a_page_that_renders(app):
+    node = _publish("author", ARTICLE, "on-lore")
+    _rename("author", "writer")
+    c = app.test_client()
+    # An unknown slug under the old handle confirms nothing.
+    for path in ["/@author/nope", "/@author/nope.md", "/@author/nope/og.png"]:
+        r = c.get(path)
+        assert r.status_code == 404 and "Location" not in r.headers, path
+    assert c.get("/api/commons/permalink/author/nope").status_code == 404
+    # A tombstone under the old handle is a plain 404 too (410 would say
+    # the article existed under the new handle), the current one 410s.
+    node.deleted_at = datetime.utcnow()
+    _db.session.commit()
+    assert c.get("/@writer/on-lore").status_code == 410
+    r = c.get("/@author/on-lore")
+    assert r.status_code == 404 and "Location" not in r.headers
+    # Nothing public left: the profile-ish routes 404 without redirecting.
+    _assert_plain_404(c, "author")
+    assert c.get("/api/share/public/author").status_code == 404
+
+
+def test_current_handle_in_another_case_redirects_to_its_spelling(app):
+    """Handles are unique case-insensitively; every page has one URL, so
+    another case of the current handle 301s to the stored spelling — the
+    same rule that keeps a case-only rename from breaking old links."""
+    _publish("author", ARTICLE, "on-lore")
+    c = app.test_client()
+    _assert_redirects(c, "Author", "author")
+    old = c.get("/api/commons/permalink/AUTHOR/on-lore").get_json()
+    assert old["canonical"] == "/@author/on-lore"
+    assert c.get("/api/share/public/AUTHOR").get_json()["canonical"] == "/@author"
+    # A private account's handle in another case is still a plain 404.
+    _mk_node("hermit", "hermit's public root", slug="quiet")
+    _assert_plain_404(c, "Hermit")
+    # A case-only rename records no history and keeps every old URL.
+    _rename("author", "Author")
+    assert _former_handles("Author") == []
+    _assert_redirects(c, "author", "Author")
+    assert c.get("/@Author/on-lore").status_code == 200
 
 
 def test_permalink_api_carries_canonical_for_former_handle(app):
@@ -504,34 +595,77 @@ def test_permalink_api_carries_canonical_for_former_handle(app):
     assert new == {"node_id": node.id}
 
 
+def test_public_profile_api_resolves_former_handle(app):
+    """In-app navigation to /@old never reaches the server-rendered 301,
+    so the profile API resolves the handle and hands the SPA the
+    canonical URL."""
+    node = _publish("author", ARTICLE, "on-lore")
+    _rename("author", "writer")
+    c = app.test_client()
+    old = c.get("/api/share/public/author").get_json()
+    assert old["username"] == "writer"
+    assert old["canonical"] == "/@writer"
+    assert [s["public_node_id"] for s in old["shares"]] == [node.id]
+    assert "canonical" not in c.get("/api/share/public/writer").get_json()
+
+
 def test_former_handle_is_reserved_for_everyone_but_its_owner(app):
-    from backend.utils.reserved_usernames import validate_username
+    from backend.utils.reserved_usernames import (
+        derive_available_username, validate_username)
+    from backend.utils.magic_link import generate_unique_username
     _publish("author", ARTICLE, "on-lore")
     _rename("author", "writer")
     assert validate_username("author", exclude_user_id=_user("visitor").id) == (
         "That username is reserved.")
     assert validate_username("Author", exclude_user_id=_user("visitor").id) == (
         "That username is reserved.")
+    # The signup paths (magic link, X login, admin whitelist) share the
+    # check: a new account gets a derived name instead.
+    assert validate_username("author") == "That username is reserved."
+    assert derive_available_username("author") == "author2"
+    assert generate_unique_username("Author@example.com") == "Author2"
     # Taking your own former handle back is allowed…
     assert validate_username("author", exclude_user_id=_user("writer").id) is None
     # …and ends the redirect: the old direction flips.
     _rename("writer", "author")
-    from backend.models import UsernameHistory
-    rows = UsernameHistory.query.filter_by(user_id=_user("author").id).all()
-    assert [r.old_username for r in rows] == ["writer"]
+    assert _former_handles("author") == ["writer"]
     c = app.test_client()
     assert c.get("/@author/on-lore").status_code == 200
     r = c.get("/@writer/on-lore")
     assert r.status_code == 301 and r.headers["Location"].endswith("/@author/on-lore")
     assert validate_username("writer", exclude_user_id=_user("visitor").id) == (
         "That username is reserved.")
+    assert derive_available_username("writer") == "writer2"
 
 
 def test_rename_history_dedupes_per_handle(app):
-    from backend.models import UsernameHistory
     _publish("author", ARTICLE, "on-lore")
     _rename("author", "writer")
     _rename("writer", "author")
     _rename("author", "writer")
-    rows = UsernameHistory.query.filter_by(user_id=_user("writer").id).all()
-    assert [r.old_username for r in rows] == ["author"]
+    assert _former_handles("writer") == ["author"]
+
+
+def test_rename_without_public_writing_reserves_nothing(app):
+    """Only a handle the open web could reach becomes a redirect: with
+    sharing off, or nothing published, a rename leaves no history — so
+    nobody can reserve handles by cycling through them, and a private
+    account's renames stay private."""
+    from backend.utils.reserved_usernames import validate_username
+    # Sharing on, nothing published.
+    _rename("visitor", "visitor_2")
+    assert _former_handles("visitor_2") == []
+    assert validate_username("visitor", exclude_user_id=_user("hermit").id) is None
+    # Something public, sharing off.
+    _mk_node("hermit", "hermit's public root", slug="quiet")
+    _rename("hermit", "hermit_2")
+    assert _former_handles("hermit_2") == []
+    r = app.test_client().get("/@hermit/quiet")
+    assert r.status_code == 404 and "Location" not in r.headers
+    # Taking a former handle back still clears its row, whatever the state.
+    _publish("author", ARTICLE, "on-lore")
+    _rename("author", "writer")
+    _user("writer").public_sharing_enabled = False
+    _db.session.commit()
+    _rename("writer", "author")
+    assert _former_handles("author") == []

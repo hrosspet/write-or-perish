@@ -429,21 +429,17 @@ def update_user():
     if new_description and len(new_description) > 128:
         return jsonify({"error": "Description exceeds maximum length of 128 characters."}), 400
 
+    renamed_from = None
     if new_username:
         new_username = new_username.strip()
-        # Validates non-empty, length, allowed chars, reserved names, and
-        # case-insensitive uniqueness (excluding the current user's own row).
+        # Validates non-empty, length, allowed chars, reserved names,
+        # case-insensitive uniqueness (excluding the current user's own row)
+        # and other accounts' former handles (#253).
         error = validate_username(new_username, exclude_user_id=current_user.id)
         if error:
             return jsonify({"error": error}), 400
         if new_username != current_user.username:
-            # #253: the old handle keeps resolving (301 to the new one) and
-            # stays reserved; cached public pages under the old handle are
-            # dropped before the rename so nothing stale is served.
-            from backend.utils.username_history import record_rename
-            from backend.utils.public_cache import invalidate_for_user
-            invalidate_for_user(current_user)
-            record_rename(current_user, current_user.username, new_username)
+            renamed_from = current_user.username
         current_user.username = new_username
 
     if new_description is not None:
@@ -485,13 +481,25 @@ def update_user():
         current_user.prefill_consent = val
         current_user.prefill_consent_at = datetime.now(timezone.utc)
 
+    if renamed_from:
+        # #253: the old handle keeps resolving (a redirect to the new one)
+        # and stays reserved, while the account has public writing to reach
+        # that way. After every field check above, so a 400 further down
+        # never leaves history behind.
+        from backend.utils.username_history import record_rename
+        record_rename(current_user, renamed_from, new_username)
+
     try:
         db.session.commit()
         # The opt-out must reach the open web immediately: drop every
-        # cached public page this user's content appears on.
-        if sharing_flipped:
+        # cached public page this user's content appears on. A rename
+        # drops the same set — those pages are cached under the old
+        # handle and carry it in their bylines — and only once the new
+        # name is committed, so a request landing in between can't
+        # re-cache the old one.
+        if sharing_flipped or renamed_from:
             from backend.utils.public_cache import invalidate_for_user
-            invalidate_for_user(current_user)
+            invalidate_for_user(current_user, former_handle=renamed_from)
         # Include voice mode feature flag and user plan in the response
         voice_mode_enabled = current_user.has_voice_mode
         return jsonify({
