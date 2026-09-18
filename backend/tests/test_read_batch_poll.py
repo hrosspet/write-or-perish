@@ -181,6 +181,8 @@ def test_entry_without_key_type_loads_the_chain_for_the_key(app, monkeypatch, tm
     assert calls["chain"] == 1
     assert calls["render"] == 0
     assert calls["collect"][0][0] == "sk-test"
+    # Resolved once: the poll writes it back with the heartbeat.
+    assert _entry(_reload(llm_node.id))["key_type"] == "chat"
 
 
 def test_submit_records_the_key_type(app, monkeypatch, tmp_path):  # noqa: F811
@@ -295,6 +297,47 @@ def test_error_without_a_batch_still_fails_the_node(app, monkeypatch, tmp_path):
     node = _reload(llm_node.id)
     assert node.llm_task_status == "failed"
     assert "snapshot directory missing" in node.llm_task_error
+
+
+def test_truncated_reply_fails_at_the_first_collect(app, monkeypatch, tmp_path):  # noqa: F811
+    """A reply cut off at max_tokens is a verdict on the stored result:
+    no re-collect can change it, so the node fails at once instead of
+    re-rendering the archive every poll until the cap."""
+    from backend.utils.ca_feed import FeedReplyError
+    cut = _batch_resp()
+    cut["content"] = cut["content"][:20]
+    cut["truncated"] = True
+    calls = _script(monkeypatch, tmp_path, collect=lambda: ("completed", cut))
+    alice, read, llm_node = _read_thread()
+    task = _Task()
+
+    with pytest.raises(FeedReplyError):
+        _run(task, alice, read, llm_node)
+
+    assert task.retries == []
+    assert calls["render"] == 1
+    assert calls["submit"] == []
+    node = _reload(llm_node.id)
+    assert node.llm_task_status == "failed"
+    assert "cut off" in node.llm_task_error
+
+
+def test_unparseable_reply_fails_at_the_first_collect(app, monkeypatch, tmp_path):  # noqa: F811
+    from backend.utils.ca_feed import FeedReplyError
+    bad = _batch_resp()
+    bad["content"] = "not the promised object"
+    calls = _script(monkeypatch, tmp_path, collect=lambda: ("completed", bad))
+    alice, read, llm_node = _read_thread()
+    task = _Task()
+
+    with pytest.raises(FeedReplyError):
+        _run(task, alice, read, llm_node)
+
+    assert task.retries == []
+    assert calls["render"] == 1
+    node = _reload(llm_node.id)
+    assert node.llm_task_status == "failed"
+    assert "not JSON" in node.llm_task_error
 
 
 # ── the collecting run ───────────────────────────────────────────────────
@@ -417,6 +460,44 @@ def test_capped_user_still_collects_an_ended_batch(app, monkeypatch, tmp_path): 
     _run(_Task(), alice, read, new)
     assert _reload(new.id).llm_task_status == "failed"
     assert calls["submit"] == []
+
+
+def test_read_under_its_own_agentic_prompt_keeps_the_batch_record(app, monkeypatch, tmp_path):  # noqa: F811
+    """{ca_tweets} inside a Text-mode prompt: the reply carries tool meta
+    (_mode), and the batch entry must survive that write and close."""
+    calls = _script(monkeypatch, tmp_path,
+                    collect=lambda: ("completed", _batch_resp()))
+    alice = _mk_user("alice", approved=True, plan="alpha", is_admin=True)
+    llm_user = _mk_user("gpt-5", twitter_id="llm-gpt-5")
+    prompt = _prompt_node(alice, "textmode",
+                          body="You are the text-mode persona.\n\n"
+                               "{ca_tweets?days=1}")
+    llm_node = Node(user_id=llm_user.id, human_owner_id=alice.id,
+                    parent_id=prompt.id, node_type="llm", llm_model="gpt-5",
+                    llm_task_status="processing", privacy_level="private",
+                    ai_usage="chat")
+    llm_node.set_content("[LLM response generation pending...]")
+    _db.session.add(llm_node)
+    _db.session.flush()
+    llm_node.tool_calls_meta = json.dumps([{
+        "name": "_batch", "batch_id": "batch_1",
+        "custom_id": f"node-{llm_node.id}", "model": "gpt-5",
+        "provider": "openai", "key_type": "chat",
+        "submitted_at": "2026-09-17T09:07:00", "status": "submitted"}])
+    _db.session.commit()
+
+    generate_llm_response(_Task(), prompt.id, llm_node.id, "gpt-5",
+                          alice.id, source_mode="textmode")
+
+    assert calls["submit"] == []
+    node = _reload(llm_node.id)
+    assert node.llm_task_status == "completed"
+    names = [m["name"] for m in json.loads(node.tool_calls_meta)]
+    assert "_mode" in names
+    assert names.count("_batch") == 1
+    entry = _entry(node)
+    assert entry["status"] == "ended"
+    assert entry["collected_at"]
 
 
 # ── the backstop's lookup ────────────────────────────────────────────────

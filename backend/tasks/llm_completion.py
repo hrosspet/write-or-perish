@@ -46,6 +46,7 @@ from backend.utils.timefmt import local_stamp, strip_edge_timestamps
 from backend.utils.api_keys import determine_api_key_type, get_api_keys_for_usage
 from backend.utils.cost import calculate_llm_cost_microdollars
 from backend.utils.llm_batch import BatchItemFailed
+from backend.utils.ca_feed import FeedReplyError
 from backend.utils.tool_meta import update_tool_meta, parse_github_issue
 from backend.utils.privacy import AI_ALLOWED
 from backend.utils.placeholders import (
@@ -2043,8 +2044,11 @@ def _ca_batch_poll(task, llm_node, parent_node, meta, entry):
     }[provider]
     # The key the batch was submitted under. An entry from before the
     # key type was stored falls back to the chain (a load, not a render).
-    key_type = entry.get("key_type") or determine_api_key_type(
-        _load_node_chain(parent_node), logger=logger)
+    key_type = entry.get("key_type")
+    if not key_type:
+        key_type = determine_api_key_type(
+            _load_node_chain(parent_node), logger=logger)
+        entry["key_type"] = key_type  # once; written with the heartbeat
     api_keys = llm_batch.apply_batch_key_override(
         get_api_keys_for_usage(flask_app.config, key_type),
         flask_app.config)
@@ -2106,6 +2110,14 @@ def _ca_batch_submit(task, llm_node, model_id, api_model, messages,
                      max_retries=CA_BATCH_MAX_POLLS)
 
 
+def _batch_history(node):
+    """The node's "_batch" entries, any status, to carry across a
+    rewrite of its tool meta."""
+    meta, _ = _batch_meta(node)
+    return [m for m in meta if isinstance(m, dict)
+            and m.get("name") == "_batch"]
+
+
 def _close_batch_entry(node, batch_id):
     """Mark the submitted "_batch" entry for *batch_id* ended. Called by
     the finalize so the flip lands in the same commit as the completion:
@@ -2130,6 +2142,13 @@ def _collect_feed_reply(llm_node, resp, ca_refs):
     from backend.utils.ca_feed import (
         parse_feed_reply, render_feed_reply, save_feed_picks)
     from backend.utils.community_archive import expand_ca_citations
+    # A reply cut off at the output limit is not the promised object even
+    # where its prefix happens to parse. Like a parse failure it is a
+    # verdict on this reply (FeedReplyError), not a condition a later
+    # collect could change: the stored batch result is immutable.
+    if resp.get("truncated"):
+        raise FeedReplyError(
+            "feed reply was cut off at the output limit (max_tokens)")
     verdict, picks = parse_feed_reply(resp["content"], ca_refs)
     rows = save_feed_picks(llm_node.human_owner_id, llm_node, picks)
     resp["content"] = expand_ca_citations(
@@ -3498,6 +3517,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     })
 
                 if f_tool_meta:
+                    # Keep the node's "_batch" history in front of the
+                    # turn's tool meta (a read under its own agentic prompt
+                    # has both), so _close_batch_entry below still finds
+                    # the entry to close.
+                    f_tool_meta = _batch_history(target_node) + f_tool_meta
                     target_node.tool_calls_meta = json.dumps(f_tool_meta)
 
                 # Mark proposal statuses as reported (deferred until
@@ -3846,16 +3870,19 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             error_message = str(e)
             if batch_entry is not None:
                 # The batch outlives this run. While it is submitted only
-                # the provider's verdict on the item (BatchItemFailed) and
-                # the poll cap fail the node; anything else (a restart
-                # mid-render, KMS, the network, a 5xx on retrieve, the DB)
-                # is logged and polled again, the entry still submitted.
+                # the provider's verdict on the item (BatchItemFailed), a
+                # reply the collect cannot use (FeedReplyError: the stored
+                # result is immutable, so every re-collect would fail the
+                # same way) and the poll cap fail the node; anything else
+                # (a restart mid-render, KMS, the network, a 5xx on
+                # retrieve, the DB) is logged and polled again, the entry
+                # still submitted.
                 batch_id = batch_entry.get("batch_id")
                 if isinstance(e, MaxRetriesExceededError):
                     error_message = (
                         f"Batch {batch_id} had not ended after "
                         f"{CA_BATCH_MAX_POLLS} polls")
-                elif not isinstance(e, BatchItemFailed):
+                elif not isinstance(e, (BatchItemFailed, FeedReplyError)):
                     logger.warning(
                         "Node %s: error with batch %s submitted (poll %s); "
                         "polling again: %s", llm_node_id, batch_id,
