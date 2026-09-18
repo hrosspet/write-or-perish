@@ -271,3 +271,113 @@ class TestNodeDetailPrivacy:
         resp = client.get(f"/api/nodes/{data['bob_public_id']}")
         assert resp.status_code == 200
         assert "Bob public post" in resp.json["content"]
+
+
+# ── Username rename records history (#253) ───────────────────────────────
+
+def _publisher(username):
+    """An account with public writing: sharing on and a living public
+    root, so /@<handle> renders and a rename must keep it reachable."""
+    user = User(username=username, default_ai_usage="chat",
+                public_sharing_enabled=True)
+    _db.session.add(user)
+    _db.session.commit()
+    node = Node(user_id=user.id, human_owner_id=user.id, node_type="user",
+                privacy_level="public", public_slug="kept")
+    node.set_content("# Kept\n\nA published piece.")
+    _db.session.add(node)
+    _db.session.commit()
+    return user
+
+
+def _former_handles(user_id):
+    from backend.models import UsernameHistory
+    return [x.old_username for x in
+            UsernameHistory.query.filter_by(user_id=user_id).all()]
+
+
+class TestUsernameRenameHistory:
+    def test_rename_reserves_old_handle_and_frees_it_when_taken_back(self, app):
+        renamer = _publisher("renamer")
+        squatter = User(username="squatter", default_ai_usage="chat")
+        _db.session.add(squatter)
+        _db.session.commit()
+
+        client = app.test_client()
+        _login(client, renamer.id)
+        r = client.put("/api/dashboard/user", json={"username": "renamed"})
+        assert r.status_code == 200, r.get_json()
+        assert User.query.get(renamer.id).username == "renamed"
+        assert _former_handles(renamer.id) == ["renamer"]
+
+        # Someone else cannot pick up the redirecting handle… (Flask-Login
+        # caches the loaded user on `g` for the fixture's app context, so
+        # drop it before switching clients.)
+        from flask import g
+        g.pop("_login_user", None)
+        other = app.test_client()
+        _login(other, squatter.id)
+        r = other.put("/api/dashboard/user", json={"username": "renamer"})
+        assert r.status_code == 400
+        assert r.get_json()["error"] == "That username is reserved."
+        r = other.put("/api/dashboard/user", json={"username": "RENAMER"})
+        assert r.status_code == 400
+        assert r.get_json()["error"] == "That username is reserved."
+
+        # …the owner can, which ends the redirect for it.
+        g.pop("_login_user", None)
+        r = client.put("/api/dashboard/user", json={"username": "renamer"})
+        assert r.status_code == 200, r.get_json()
+        assert _former_handles(renamer.id) == ["renamed"]
+
+        # Re-saving the same handle is a no-op for the history.
+        r = client.put("/api/dashboard/user", json={"username": "renamer"})
+        assert r.status_code == 200
+        assert _former_handles(renamer.id) == ["renamed"]
+
+    def test_case_only_rename_records_nothing(self, app):
+        """Current handles resolve case-insensitively and redirect to
+        their stored spelling, so a case change needs no redirect row."""
+        renamer = _publisher("renamer")
+        client = app.test_client()
+        _login(client, renamer.id)
+        r = client.put("/api/dashboard/user", json={"username": "Renamer"})
+        assert r.status_code == 200, r.get_json()
+        assert User.query.get(renamer.id).username == "Renamer"
+        assert _former_handles(renamer.id) == []
+
+    def test_rejected_request_leaves_no_history(self, app):
+        """The history is written after every field check: a request that
+        renames and fails on a later field changes nothing."""
+        renamer = _publisher("renamer")
+        client = app.test_client()
+        _login(client, renamer.id)
+        r = client.put("/api/dashboard/user", json={
+            "username": "renamed", "default_privacy_level": "bogus"})
+        assert r.status_code == 400
+        _db.session.rollback()
+        assert User.query.get(renamer.id).username == "renamer"
+        assert _former_handles(renamer.id) == []
+
+    def test_rename_without_public_writing_reserves_nothing(self, app):
+        """A handle nobody could reach leaves no redirect and no
+        reservation: the next account may have it."""
+        private = User(username="private", default_ai_usage="chat")
+        squatter = User(username="squatter", default_ai_usage="chat")
+        _db.session.add_all([private, squatter])
+        _db.session.commit()
+
+        client = app.test_client()
+        _login(client, private.id)
+        for handle in ["nike", "openai", "x1"]:
+            r = client.put("/api/dashboard/user", json={"username": handle})
+            assert r.status_code == 200, r.get_json()
+        assert _former_handles(private.id) == []
+
+        from flask import g
+        g.pop("_login_user", None)
+        other = app.test_client()
+        _login(other, squatter.id)
+        r = other.put("/api/dashboard/user", json={"username": "private"})
+        assert r.status_code == 200, r.get_json()
+        assert User.query.get(squatter.id).username == "private"

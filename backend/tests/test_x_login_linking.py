@@ -268,6 +268,24 @@ class TestXLoginMatchesByIdOnly:
         assert logged_in_id != victim.id
         assert User.query.get(logged_in_id).username == "alice2"
 
+    def test_former_handle_of_another_account_is_not_claimed(self, app):
+        """A handle someone else published under and renamed away from
+        still redirects to them (#253): a first X login with that screen
+        name gets a derived username, like a taken one, instead of
+        turning the redirect into an impersonation."""
+        from backend.models import UsernameHistory
+        owner = _add(username="alice_now", approved=True,
+                     public_sharing_enabled=True)
+        _db.session.add(UsernameHistory(user_id=owner.id, old_username="alice"))
+        _db.session.commit()
+
+        _, logged_in_id = _x_login(app, x_id=123, screen_name="alice")
+
+        created = User.query.get(logged_in_id)
+        assert created.id != owner.id
+        assert created.username == "alice2"
+        assert created.twitter_id == "123"
+
     def test_reserved_handle_gets_derived_username(self, app):
         system = _add(username="system", approved=False)
 

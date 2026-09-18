@@ -11,7 +11,7 @@ Consent model, structurally enforced:
 """
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
-from backend.models import Node, Draft, ShareDraft, User
+from backend.models import Node, Draft, ShareDraft
 from backend.extensions import db
 from backend.utils.share import save_share_drafts_from_node
 from backend.utils.tool_meta import update_tool_meta, get_tool_meta_entry
@@ -364,10 +364,13 @@ def public_shares(username):
     item immediately) and 404s entirely while the flag is off."""
     if not _share_enabled():
         return jsonify({"error": "Not found"}), 404
-    user = User.query.filter_by(username=username).first()
+    from backend.utils.username_history import resolve_public_handle
     # Opting out of public sharing takes the whole page down immediately —
-    # indistinguishable from a user that doesn't exist.
-    if not user or not user.public_sharing_enabled:
+    # indistinguishable from a user that doesn't exist. A former handle
+    # (#253) resolves to its owner the same way, so in-app links to /@old
+    # keep working like the server-rendered pages' 301s.
+    user, moved = resolve_public_handle(username)
+    if not user:
         return jsonify({"error": "Not found"}), 404
     # ALL the user's living public roots — shares are enriched with their
     # type/publish date; direct-created public roots (craft path) appear
@@ -378,6 +381,12 @@ def public_shares(username):
         Node.privacy_level == "public",
         (Node.human_owner_id == user.id) | (Node.user_id == user.id),
     ).all()
+    if moved == "former" and not nodes:
+        # A former handle only ever leads to a page that renders (the
+        # server-rendered profile 404s without public roots): an empty
+        # page under the new handle would confirm the rename for nothing.
+        # Another case of the current handle answers like the handle.
+        return jsonify({"error": "Not found"}), 404
     share_by_node = {
         s.public_node_id: s
         for s in ShareDraft.query.filter_by(
@@ -407,7 +416,8 @@ def public_shares(username):
                 share.published_at if share and share.published_at
                 else node.created_at),
         })
-    return jsonify({
-        "username": user.username,
-        "shares": items,
-    }), 200
+    body = {"username": user.username, "shares": items}
+    if moved:
+        # The SPA swaps the address bar to the canonical URL (#253).
+        body["canonical"] = f"/@{user.username}"
+    return jsonify(body), 200

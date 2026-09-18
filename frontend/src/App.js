@@ -51,7 +51,16 @@ function PermalinkRoute({ username, slug }) {
     setNodeId(null);
     setFailed(false);
     api.get(`/commons/permalink/${username}/${slug}`)
-      .then((res) => { if (!cancelled) setNodeId(res.data.node_id); })
+      .then((res) => {
+        if (cancelled) return;
+        // A former handle, or the current one in another case (#253):
+        // keep the page, show the canonical URL (query and anchor kept).
+        if (res.data.canonical && window.location.pathname === `/@${username}/${slug}`) {
+          window.history.replaceState(
+            null, '', res.data.canonical + window.location.search + window.location.hash);
+        }
+        setNodeId(res.data.node_id);
+      })
       .catch(() => { if (!cancelled) setFailed(true); });
     return () => { cancelled = true; };
   }, [username, slug]);

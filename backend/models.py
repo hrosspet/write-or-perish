@@ -238,6 +238,47 @@ class User(db.Model, UserMixin):
         )
 
 
+class UsernameHistory(db.Model):
+    """A handle an account published under and then renamed away from
+    (#253).
+
+    Public permalinks are /@<username>/<slug>; slugs are immutable but the
+    handle is user-editable, so a rename would break every shared and
+    indexed URL. A row is written on rename — only when the account has
+    public writing (a living public root, what /@<handle> renders): a
+    handle with nothing published under it reserves nothing. The sharing
+    toggle does not matter here: it can be paused around a rename, and
+    the old URLs were out there all the same — the redirect just stays
+    silent while sharing is off. The public pages, the permalink API and the public
+    profile API resolve a former handle to its owner and redirect to the
+    current one, but only where the target page renders: an account that
+    went private since answers 404, like a handle nobody ever held, so
+    the redirect never names a private account's new handle. A former
+    handle stays reserved for as long as its row exists — every path that
+    hands out a username (rename, signup, whitelist) refuses it to anyone
+    but its owner, since another account claiming it would turn the
+    redirect into an impersonation vector. Renaming back to a former
+    handle removes its row (it is live again, not a redirect).
+    """
+    __tablename__ = "username_history"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False,
+                        index=True)
+    # Stored lowercased: handles are unique case-insensitively (see
+    # validate_username) and every lookup is an equality on this column,
+    # so the plain unique index serves it. One redirect per former
+    # handle, whoever held it; the constraint is the backstop for two
+    # submissions of the same rename racing past record_rename.
+    old_username = db.Column(db.String(64), nullable=False, unique=True,
+                             index=True)
+    changed_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow)
+
+    user = db.relationship("User", backref=db.backref(
+        "former_usernames", cascade="all, delete-orphan"))
+
+
 class ProfileBatchJob(db.Model):
     """A submitted provider batch covering one profile-generation step for one
     or more users (issue #173, Part A).

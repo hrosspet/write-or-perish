@@ -124,6 +124,10 @@ class TestValidateUsernameUniqueness:
         return {
             "backend.models": MagicMock(User=mock_user),
             "backend.extensions": MagicMock(db=mock_db),
+            # The former-handle reservation (#253) is covered against a
+            # real DB in test_public_pages; here nobody held the name.
+            "backend.utils.username_history": MagicMock(
+                former_handle_owner=lambda name: None),
         }
 
     def test_valid_unique_allowed(self):
@@ -153,6 +157,10 @@ class TestDeriveAvailableUsername:
         return {
             "backend.models": MagicMock(User=mock_user),
             "backend.extensions": MagicMock(),
+            # The former-handle reservation (#253) is covered against a
+            # real DB in test_public_pages; here nobody held the name.
+            "backend.utils.username_history": MagicMock(
+                former_handle_owner=lambda name: None),
         }
 
     def test_available_base_kept(self):
