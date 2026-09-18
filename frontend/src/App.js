@@ -24,6 +24,7 @@ import ImportPage from "./pages/ImportPage";
 import ReferencesPage from "./pages/ReferencesPage";
 import ReferenceDetailPage from "./pages/ReferenceDetailPage";
 import AccountPage from "./pages/AccountPage";
+import ConfirmEmailPage from "./pages/ConfirmEmailPage";
 import ArtifactsPage from "./pages/ArtifactsPage";
 import SharePage from "./pages/SharePage";
 import PublicSharePage from "./pages/PublicSharePage";
@@ -214,6 +215,9 @@ function App() {
           <Route path="/how-to" element={<HowToPage />} />
           {/* Alpha thank you - public (for unapproved users) */}
           <Route path="/alpha-thank-you" element={<AlphaThankYouPage />} />
+          {/* Confirms a new sign-in email (#260). Not ProtectedRoute: waitlisted
+              (unapproved) signups confirm theirs here, and it asks for sign-in itself. */}
+          <Route path="/confirm-email" element={<ConfirmEmailPage />} />
           {/* Welcome - protected (for newly approved users) */}
           <Route path="/welcome" element={<ProtectedRoute><WelcomePage onNewEntryClick={() => setShowNewEntry(true)} /></ProtectedRoute>} />
           {/* Workflow routes */}
