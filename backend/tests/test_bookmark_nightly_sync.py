@@ -121,16 +121,27 @@ def _tz_at_hour(target_hour):
     return f"Etc/GMT+{x}" if x <= 12 else f"Etc/GMT-{24 - x}"
 
 
-def _http_error(status, error=None):
-    """An HTTPError carrying X's OAuth2 error body — the sync tells a dead
-    user grant (invalid_grant) from bad client credentials (invalid_client)
-    by that code, not by the status alone."""
+def _http_error(status, error=None, description=None):
+    """An HTTPError carrying X's OAuth2 error body. The sync tells a dead
+    user grant from bad client credentials by that body, not by the
+    status — see _grant_is_dead."""
     resp = MagicMock()
     resp.status_code = status
-    resp.json.return_value = {"error": error} if error else {}
+    body = {}
+    if error:
+        body["error"] = error
+    if description:
+        body["error_description"] = description
+    resp.json.return_value = body
     err = requests.HTTPError(f"HTTP {status}")
     err.response = resp
     return err
+
+
+# The two bodies X actually returns, probed live 2026-09-18 against
+# api.twitter.com/2/oauth2/token with a bogus refresh token.
+DEAD_TOKEN = ("invalid_request", "Value passed for the token was invalid.")
+BAD_CLIENT = ("unauthorized_client", "Missing valid authorization header")
 
 
 def test_dead_refresh_grant_marks_revoked(app, monkeypatch):
@@ -138,7 +149,7 @@ def test_dead_refresh_grant_marks_revoked(app, monkeypatch):
     account = _mk_account(uid)
 
     def dead_refresh(client_id, refresh_token, client_secret=None):
-        raise _http_error(400, "invalid_grant")
+        raise _http_error(400, *DEAD_TOKEN)
     monkeypatch.setattr(_sync_mod, "x_refresh_access_token", dead_refresh)
 
     result = _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
@@ -154,7 +165,7 @@ def test_revocation_notifies_user_with_reconnect_link(app, monkeypatch):
     _mk_account(uid)
 
     def dead_refresh(client_id, refresh_token, client_secret=None):
-        raise _http_error(400, "invalid_grant")
+        raise _http_error(401, *DEAD_TOKEN)  # reported at 401 as well
     monkeypatch.setattr(_sync_mod, "x_refresh_access_token", dead_refresh)
 
     _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
@@ -197,8 +208,46 @@ def test_bad_client_credentials_do_not_park_the_user(app, monkeypatch):
     account = _mk_account(uid)
 
     def bad_client(client_id, refresh_token, client_secret=None):
-        raise _http_error(401, "invalid_client")
+        raise _http_error(401, *BAD_CLIENT)
     monkeypatch.setattr(_sync_mod, "x_refresh_access_token", bad_client)
+
+    with pytest.raises(requests.HTTPError):
+        _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    _db.session.expire_all()
+    assert ExternalAccount.query.get(account.id).revoked_at is None
+    assert UserNotification.query.filter_by(
+        user_id=uid, type="x_disconnected").count() == 0
+
+
+def test_malformed_refresh_request_does_not_park_the_user(app, monkeypatch):
+    """invalid_request is also X's generic "your request was malformed".
+    Only the token-is-invalid description means the USER's grant is dead;
+    a request we built wrong is ours, and parking everyone for it is the
+    #313 shape all over again."""
+    uid = User.query.first().id
+    account = _mk_account(uid)
+
+    def malformed(client_id, refresh_token, client_secret=None):
+        raise _http_error(400, "invalid_request",
+                          "Missing required parameter: refresh_token")
+    monkeypatch.setattr(_sync_mod, "x_refresh_access_token", malformed)
+
+    with pytest.raises(requests.HTTPError):
+        _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    _db.session.expire_all()
+    assert ExternalAccount.query.get(account.id).revoked_at is None
+
+
+def test_unreadable_refresh_failure_does_not_park_the_user(app, monkeypatch):
+    """A 400 with no OAuth body (an HTML error page from an edge, say) is
+    not a statement about this user's grant — fail the sync, don't
+    disconnect somebody on it."""
+    uid = User.query.first().id
+    account = _mk_account(uid)
+
+    def html_error(client_id, refresh_token, client_secret=None):
+        raise _http_error(400)
+    monkeypatch.setattr(_sync_mod, "x_refresh_access_token", html_error)
 
     with pytest.raises(requests.HTTPError):
         _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
@@ -268,6 +317,15 @@ def test_unpark_script_repairs_accounts_parked_by_the_bug(app):
     assert result["unparked"] == 0 and result["skipped"] == 1
     _db.session.expire_all()
     assert ExternalAccount.query.get(account.id).revoked_at is not None
+
+    # --user-id scopes the repair to named accounts.
+    account = ExternalAccount.query.get(account.id)
+    account.set_tokens("access-token", "refresh-token")
+    _db.session.commit()
+    assert _run(True, user_ids=[uid + 999], out=io.StringIO())["unparked"] == 0
+    _db.session.expire_all()
+    assert ExternalAccount.query.get(account.id).revoked_at is not None
+    assert _run(True, user_ids=[uid], out=io.StringIO())["unparked"] == 1
 
 
 def test_fetch_401_marks_revoked(app, monkeypatch):

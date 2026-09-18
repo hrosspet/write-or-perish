@@ -235,6 +235,7 @@ def test_token_grants_authenticate_a_confidential_client(monkeypatch):
     X then requires HTTP Basic on every grant. Only the code exchange sent
     it, so every nightly refresh came back 401 invalid_client and the sync
     parked the account as revoked (#313)."""
+    import requests
     import backend.utils.external_content as ext_content
     calls = []
 
@@ -253,12 +254,24 @@ def test_token_grants_authenticate_a_confidential_client(monkeypatch):
     for url, kw in calls:
         assert url == ext_content.X_TOKEN_URL
         assert kw["auth"] == ("cid", "secret")
+        # RFC 6749 says not to send a body client_id alongside Basic, but
+        # X accepts both — the connect callback has sent both all along,
+        # and a live probe confirms X answers identically either way.
         assert kw["data"]["client_id"] == "cid"
 
     # A public client (registered without a secret) keeps the body-only form.
     calls.clear()
     ext_content.x_refresh_access_token("cid", "rt")
     assert calls[0][1]["auth"] is None
+
+    # A rejected grant surfaces as an HTTPError for the caller to classify.
+    def failing_post(url, **kw):
+        r = MagicMock()
+        r.raise_for_status.side_effect = requests.HTTPError("HTTP 400")
+        return r
+    monkeypatch.setattr(ext_content.requests, "post", failing_post)
+    with pytest.raises(requests.HTTPError):
+        ext_content.x_refresh_access_token("cid", "rt", "secret")
 
 
 def test_ca_fetch_requires_username(app, client):
