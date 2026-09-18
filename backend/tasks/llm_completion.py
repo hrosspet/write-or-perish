@@ -3,14 +3,21 @@ Celery task for asynchronous LLM completion.
 """
 import difflib
 import json
+import uuid
 import re
 import time
 from celery import Task
 try:
-    from celery.exceptions import Retry
+    from celery.exceptions import Retry, Reject, MaxRetriesExceededError
 except ImportError:  # test fixtures stub `celery` with a bare module
     class Retry(Exception):  # noqa: N818 — mirrors celery's name
         """Stand-in so the task body's `except Retry` still parses."""
+
+    class Reject(Exception):  # noqa: N818
+        """Stand-in: celery raises it when a retry cannot be published."""
+
+    class MaxRetriesExceededError(Exception):
+        """Stand-in: celery raises it from retry() past max_retries."""
 from celery.utils.log import get_task_logger
 from datetime import datetime, timedelta, timezone
 
@@ -32,10 +39,14 @@ from backend.utils.quotes import (
     resolve_ext_quotes, has_ext_quotes, find_ext_quote_ids,
 )
 from backend.utils.node_split import NODE_CHAR_CAP
-from backend.utils.session_helpers import chain_has_agentic_prompt
+from backend.utils.session_helpers import (
+    chain_has_agentic_prompt, strip_agentic_prompts,
+)
 from backend.utils.timefmt import local_stamp, strip_edge_timestamps
 from backend.utils.api_keys import determine_api_key_type, get_api_keys_for_usage
 from backend.utils.cost import llm_cost_log_fields
+from backend.utils.llm_batch import BatchItemFailed, BatchItemCancelled
+from backend.utils.ca_feed import FeedReplyError
 from backend.utils.tool_meta import update_tool_meta, parse_github_issue
 from backend.utils.privacy import AI_ALLOWED
 from backend.utils.placeholders import (
@@ -1969,98 +1980,272 @@ def get_user_recent_raw_content(user_id, created_before=None):
 
 # {ca_tweets} (PoC, 2026-09-13): the prompt carries a day of the Community
 # Archive corpus (~250k tokens) and is not latency-bound, so it goes through
-# the Anthropic Batch API. The task polls its own batch by re-queueing
-# itself (Celery retry with a countdown): every poll re-runs the whole
-# task, which rebuilds the prompt (cheap: a duckdb scan of the cached
-# parquet, ~2 s) and then finds the batch id stored on the node. 120 s ×
-# 800 polls covers the Batch API's 24 h window; the countdown stays well
-# under the Redis visibility timeout so an ETA task is never redelivered.
+# the provider's Batch API. The task polls its own batch by re-queueing
+# itself (Celery retry with a countdown). A poll is one provider call made
+# before anything else is loaded: the chain and the {ca_tweets} render
+# (~66k tokens, a duckdb scan) are built only by the run that finds the
+# batch ended, the collecting run. 120 s × 800 polls covers the Batch
+# API's 24 h window; the countdown stays well under the Redis visibility
+# timeout so an ETA task is never redelivered.
+#
+# The batch lives on the node's tool_calls_meta as the "_batch" entry
+# (underscore names are hidden by the UI, like "_mode"):
+#   {name: "_batch", batch_id, custom_id, model, provider, key_type,
+#    submitted_at,
+#    status: "submitted" | "cancelling" | "ended" | "cancelled",
+#    last_polled_at (the poll heartbeat), ended_at (the provider's end,
+#    as first seen by a poll), collected_at (the reply finalized: set
+#    with status "ended" in the completion commit), resumed_at /
+#    resumed_count (the backstop), cancel_requested_at / cancel_reason /
+#    cancel_error / cancel_outcome (a withdrawal, see _ca_batch_poll)}
+# "submitted" and "cancelling" mean a collect is still owed for the
+# batch: the poll, the backstop (resume_stuck_feed_batches), the admin's
+# cancel-and-rerun (routes/read.py) and the thread page all look for
+# those two. "cancelling" is a batch the poll asked the provider to
+# withdraw (the user hit the spend cap while it was queued); what the
+# provider then reports decides between collecting it (it ran before
+# the cancel took effect and was billed) and "cancelled" (it never ran
+# and is not billed).
 CA_BATCH_POLL_SECONDS = 120
 CA_BATCH_MAX_POLLS = 800
 CA_TWEETS_STUB = "(see Community Archive tweets above)"
 
 
 CA_BATCH_PROVIDERS = ("anthropic", "openai")
+CA_BATCH_LIVE_STATUSES = ("submitted", "cancelling")
+# What a read withdrawn at the provider says in place of its reply.
+CA_BATCH_WITHDRAWN_TEXT = (
+    "This read was cancelled before it ran: the monthly spend cap was "
+    "reached while it was queued at the provider, so the request was "
+    "withdrawn and nothing was billed.")
 
 
-def _ca_batch_roundtrip(task, llm_node, model_id, api_model, messages,
-                        api_key, model_config, ca_refs=None,
-                        provider="anthropic"):
-    """Submit-or-poll the one-item batch for *llm_node*.
-
-    First run: submit, record {name: "_batch", batch_id, custom_id} in the
-    node's tool_calls_meta (underscore names are hidden by the UI, like
-    "_mode"), and re-queue the task. Later runs: poll; re-queue while the
-    batch is processing; return the response dict (same shape as the sync
-    provider call, plus batch=True for the cost log) once it has ended.
-    A failed / expired item raises, which fails the node normally."""
-    from backend.utils import llm_batch
-    submit_one, collect_one = {
-        "anthropic": (llm_batch.anthropic_batch_submit_one,
-                      llm_batch.anthropic_batch_collect_one),
-        "openai": (llm_batch.openai_batch_submit_one,
-                   llm_batch.openai_batch_collect_one),
-    }[provider]
+def _batch_meta(node):
+    """(tool_calls_meta as a list, the live "_batch" entry or None): the
+    submitted one, or the one being withdrawn (cancelling). A cancelled
+    entry (the admin's cancel-and-rerun, or a withdrawal that never ran)
+    stays in the meta as history, an ended one belongs to a completed
+    reply."""
     meta = []
-    if llm_node.tool_calls_meta:
+    if node.tool_calls_meta:
         try:
-            meta = json.loads(llm_node.tool_calls_meta) or []
+            meta = json.loads(node.tool_calls_meta) or []
         except (json.JSONDecodeError, TypeError):
             meta = []
     entry = next((m for m in meta if isinstance(m, dict)
-                  and m.get("name") == "_batch"), None)
+                  and m.get("name") == "_batch"
+                  and m.get("status") in CA_BATCH_LIVE_STATUSES), None)
+    return meta, entry
+
+
+def _task_retries(task):
+    return getattr(getattr(task, "request", None), "retries", None)
+
+
+def _request_batch_cancel(entry, api_key, provider):
+    """Ask the provider to cancel the batch in *entry*. Best effort: a
+    refusal (already ended, gone, network) is recorded on the entry and
+    changes nothing, since the outcome is read from the batch's results
+    either way."""
+    from backend.utils import llm_batch
+    cancel_one = {
+        "anthropic": llm_batch.anthropic_batch_cancel_one,
+        "openai": llm_batch.openai_batch_cancel_one,
+    }[provider]
+    try:
+        return cancel_one(api_key, entry["batch_id"])
+    except Exception as e:  # noqa: BLE001 - recorded, not fatal
+        logger.warning("Batch %s cancel request failed: %s",
+                       entry.get("batch_id"), e)
+        entry["cancel_error"] = str(e)
+        return None
+
+
+def _withdraw_batch_reply(llm_node, meta, entry):
+    """The provider confirmed the withdrawn batch never ran: nothing was
+    billed, so no cost row; the reply says why it is empty and the node
+    ends 'cancelled'."""
     now = datetime.utcnow().isoformat(timespec="seconds")
-    if entry is None:
-        max_tokens = min(
-            model_config.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS),
-            DEFAULT_MAX_OUTPUT_TOKENS)
-        custom_id = f"node-{llm_node.id}"
-        from backend.utils.ca_feed import FEED_SCHEMA
-        batch_id = submit_one(
-            api_key, custom_id, api_model, messages, max_tokens,
-            output_schema=FEED_SCHEMA if ca_refs else None)
-        meta.append({
-            "name": "_batch", "batch_id": batch_id, "custom_id": custom_id,
-            "model": model_id, "provider": provider, "submitted_at": now,
-            "status": "submitted",
-        })
-        llm_node.tool_calls_meta = json.dumps(meta)
-        llm_node.llm_task_progress = 50
-        db.session.commit()
-        logger.info("Node %s: batch %s submitted; polling every %ss",
-                    llm_node.id, batch_id, CA_BATCH_POLL_SECONDS)
-        raise task.retry(countdown=CA_BATCH_POLL_SECONDS,
-                         max_retries=CA_BATCH_MAX_POLLS)
-    status, resp = collect_one(
-        api_key, entry["batch_id"], entry["custom_id"])
-    # Heartbeat for resume_stuck_feed_batches: a poll that stops
-    # arriving means the scheduled retry died with its worker.
+    entry["status"] = "cancelled"
+    entry["cancelled_at"] = now
+    entry["cancel_outcome"] = "not_processed"
     entry["last_polled_at"] = now
     llm_node.tool_calls_meta = json.dumps(meta)
+    llm_node.set_content(CA_BATCH_WITHDRAWN_TEXT)
+    llm_node.token_count = approximate_token_count(CA_BATCH_WITHDRAWN_TEXT)
+    llm_node.llm_task_status = "cancelled"
+    llm_node.llm_task_progress = 100
+    llm_node.llm_task_error = CA_BATCH_WITHDRAWN_TEXT
     db.session.commit()
+    logger.warning("Node %s: batch %s withdrawn before it ran (%s); "
+                   "not billed", llm_node.id, entry.get("batch_id"),
+                   entry.get("cancel_reason"))
+
+
+def _ca_batch_poll(task, llm_node, parent_node, meta, entry, user_id):
+    """Ask the provider about the live batch in *entry*: one call, nothing
+    else loaded. Returns ("ended", resp) once the batch has ended with
+    the item processed (resp: the sync provider call's shape plus
+    batch=True for the cost log); while it is still processing, stamps
+    the poll heartbeat and re-queues the task.
+
+    A user who hit the monthly spend cap while their batch was queued
+    gets it withdrawn: the poll asks the provider to cancel and the entry
+    becomes "cancelling". What the provider reports afterwards decides:
+    an item that ran before the cancel took effect is billed by the
+    provider, so it is collected and its cost logged like any other;
+    one that never ran is not billed, and the poll returns
+    ("withdrawn", None) with the node marked cancelled (see
+    _withdraw_batch_reply). The provider's terminal verdict on the item
+    raises BatchItemFailed (a cancel nobody here asked for included);
+    anything else that fails here is re-queued by the task's error
+    handler with the entry still live."""
+    from backend.utils import llm_batch
+    from backend.utils.spend import user_is_capped
+    provider = entry.get("provider") or "anthropic"
+    collect_one = {
+        "anthropic": llm_batch.anthropic_batch_collect_one,
+        "openai": llm_batch.openai_batch_collect_one,
+    }[provider]
+    # The key the batch was submitted under. An entry from before the
+    # key type was stored falls back to the chain (a load, not a render).
+    key_type = entry.get("key_type")
+    if not key_type:
+        key_type = determine_api_key_type(
+            _load_node_chain(parent_node), logger=logger)
+        entry["key_type"] = key_type  # once; written with the heartbeat
+    api_keys = llm_batch.apply_batch_key_override(
+        get_api_keys_for_usage(flask_app.config, key_type),
+        flask_app.config)
+    withdrawing = entry.get("status") == "cancelling"
+    try:
+        status, resp = collect_one(
+            api_keys[provider], entry["batch_id"], entry["custom_id"])
+    except BatchItemCancelled:
+        if not withdrawing:
+            raise
+        _withdraw_batch_reply(llm_node, meta, entry)
+        return "withdrawn", None
+    # Heartbeat for resume_stuck_feed_batches: a poll that stops
+    # arriving means the scheduled retry died with its worker.
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    entry["last_polled_at"] = now
     if resp is None:
+        if not withdrawing and user_is_capped(user_id):
+            # Withdraw: unprocessed requests are not billed. A request
+            # already in flight completes and is billed; the next polls
+            # read which of the two it was from the batch's results.
+            _request_batch_cancel(entry, api_keys[provider], provider)
+            entry["status"] = "cancelling"
+            entry["cancel_requested_at"] = now
+            entry["cancel_reason"] = "spend_cap"
+            logger.warning(
+                "Node %s: user %s hit the spend cap; batch %s cancel "
+                "requested (poll %s)", llm_node.id, user_id,
+                entry["batch_id"], _task_retries(task))
+        llm_node.tool_calls_meta = json.dumps(meta)
+        db.session.commit()
         logger.info("Node %s: batch %s still %s (poll %s)", llm_node.id,
-                    entry["batch_id"], status, task.request.retries)
+                    entry["batch_id"], status, _task_retries(task))
         raise task.retry(countdown=CA_BATCH_POLL_SECONDS,
                          max_retries=CA_BATCH_MAX_POLLS)
-    entry["status"] = "ended"
-    entry["collected_at"] = now
+    if withdrawing:
+        # Ran before the cancel took effect: billed by the provider, so
+        # collected and logged like any other reply.
+        entry["cancel_outcome"] = "processed"
+    # The entry stays live until the reply is finalized (see
+    # _close_batch_entry): if this collecting run dies, the next poll
+    # fetches the same result again instead of submitting a second batch.
+    entry.setdefault("ended_at", now)
     llm_node.tool_calls_meta = json.dumps(meta)
     db.session.commit()
-    if ca_refs:
-        # Feed reply: the JSON answer becomes saved references + FeedPick
-        # rows (read mark, good/bad verdict and the model's claims all
-        # live on rows, not in prose); the node text is the verdict.
-        from backend.utils.ca_feed import (
-            parse_feed_reply, render_feed_reply, save_feed_picks)
-        from backend.utils.community_archive import expand_ca_citations
-        verdict, picks = parse_feed_reply(resp["content"], ca_refs)
-        save_feed_picks(llm_node.human_owner_id, llm_node, picks)
-        resp["content"] = expand_ca_citations(
-            render_feed_reply(verdict, picks), ca_refs)
-        logger.info("Node %s: feed reply with %d picks (%d recommended)",
-                    llm_node.id, len(picks),
-                    sum(1 for p in picks if p["recommend"]))
+    logger.info("Node %s: batch %s ended (poll %s); collecting",
+                llm_node.id, entry["batch_id"], _task_retries(task))
+    return "ended", resp
+
+
+def _ca_batch_submit(task, llm_node, model_id, api_model, messages,
+                     api_key, key_type, model_config, ca_refs=None,
+                     provider="anthropic"):
+    """Submit the turn as a one-item batch, record the "_batch" entry on
+    the node and re-queue the task for its first poll. Never returns."""
+    from backend.utils import llm_batch
+    submit_one = {
+        "anthropic": llm_batch.anthropic_batch_submit_one,
+        "openai": llm_batch.openai_batch_submit_one,
+    }[provider]
+    max_tokens = min(
+        model_config.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS),
+        DEFAULT_MAX_OUTPUT_TOKENS)
+    custom_id = f"node-{llm_node.id}"
+    from backend.utils.ca_feed import FEED_SCHEMA
+    batch_id = submit_one(
+        api_key, custom_id, api_model, messages, max_tokens,
+        output_schema=FEED_SCHEMA if ca_refs else None)
+    meta, _ = _batch_meta(llm_node)
+    meta.append({
+        "name": "_batch", "batch_id": batch_id, "custom_id": custom_id,
+        "model": model_id, "provider": provider, "key_type": key_type,
+        "submitted_at": datetime.utcnow().isoformat(timespec="seconds"),
+        "status": "submitted",
+    })
+    llm_node.tool_calls_meta = json.dumps(meta)
+    llm_node.llm_task_progress = 50
+    db.session.commit()
+    logger.info("Node %s: batch %s submitted; polling every %ss",
+                llm_node.id, batch_id, CA_BATCH_POLL_SECONDS)
+    raise task.retry(countdown=CA_BATCH_POLL_SECONDS,
+                     max_retries=CA_BATCH_MAX_POLLS)
+
+
+def _batch_history(node):
+    """The node's "_batch" entries, any status, to carry across a
+    rewrite of its tool meta."""
+    meta, _ = _batch_meta(node)
+    return [m for m in meta if isinstance(m, dict)
+            and m.get("name") == "_batch"]
+
+
+def _close_batch_entry(node, batch_id):
+    """Mark the live "_batch" entry for *batch_id* ended. Called by the
+    finalize so the flip lands in the same commit as the completion:
+    a collecting run that dies earlier leaves the entry submitted, and
+    the next poll collects the same result instead of paying for a
+    second batch."""
+    meta, entry = _batch_meta(node)
+    if entry is None or (batch_id and entry.get("batch_id") != batch_id):
+        return
+    entry["status"] = "ended"
+    entry["collected_at"] = datetime.utcnow().isoformat(timespec="seconds")
+    node.tool_calls_meta = json.dumps(meta)
+
+
+def _collect_feed_reply(llm_node, resp, ca_refs):
+    """Turn the feed's JSON answer into the reply: each pick becomes a
+    saved reference + FeedPick row (rank, relevance, recommend and the
+    quote-tweet text, for judging the model's claims against the user's
+    verdicts later), and the node text is the whole rendered feed: the
+    verdict, then each quote-tweet over its {quote_ext:ID} marker. The
+    same path serves the batch collect and the admin's live rerun."""
+    from backend.utils.ca_feed import (
+        parse_feed_reply, render_feed_reply, save_feed_picks)
+    from backend.utils.community_archive import expand_ca_citations
+    # A reply cut off at the output limit is not the promised object even
+    # where its prefix happens to parse. Like a parse failure it is a
+    # verdict on this reply (FeedReplyError), not a condition a later
+    # collect could change: the stored batch result is immutable.
+    if resp.get("truncated"):
+        raise FeedReplyError(
+            "feed reply was cut off at the output limit (max_tokens)")
+    verdict, picks = parse_feed_reply(resp["content"], ca_refs)
+    rows = save_feed_picks(llm_node.human_owner_id, llm_node, picks)
+    resp["content"] = expand_ca_citations(
+        render_feed_reply(
+            verdict, [(r.get_why(), r.external_item_id) for r in rows]),
+        ca_refs)
+    logger.info("Node %s: feed reply with %d picks (%d recommended)",
+                llm_node.id, len(rows),
+                sum(1 for r in rows if r.recommended))
     return resp
 
 
@@ -2072,8 +2257,9 @@ CA_BATCH_STALE_SECONDS = 3 * CA_BATCH_POLL_SECONDS + 60
 
 
 def find_stuck_feed_batches(now=None):
-    """Nodes still 'processing' on a submitted batch with no poll heartbeat
-    for CA_BATCH_STALE_SECONDS. Returns [(node, batch_entry)]."""
+    """Nodes still 'processing' on a live batch (submitted, or being
+    withdrawn) with no poll heartbeat for CA_BATCH_STALE_SECONDS.
+    Returns [(node, batch_entry)]."""
     now = now or datetime.utcnow()
     stale = []
     rows = (Node.query
@@ -2084,13 +2270,7 @@ def find_stuck_feed_batches(now=None):
                     Node.tool_calls_meta.like('%"_batch"%'))
             .all())
     for node in rows:
-        try:
-            meta = json.loads(node.tool_calls_meta) or []
-        except (json.JSONDecodeError, TypeError):
-            continue
-        entry = next((m for m in meta if isinstance(m, dict)
-                      and m.get("name") == "_batch"
-                      and m.get("status") == "submitted"), None)
+        _, entry = _batch_meta(node)
         if entry is None:
             continue
         last = entry.get("last_polled_at") or entry.get("submitted_at")
@@ -2125,9 +2305,10 @@ def resume_stuck_feed_batches():
                 source_mode = mode.get("source_mode") if mode else None
             except (json.JSONDecodeError, TypeError):
                 pass
-            task = generate_llm_response.delay(
-                parent.id, node.id, node.llm_model, node.human_owner_id,
-                source_mode=source_mode)
+            # Task id chosen here and committed before the dispatch: the
+            # task bails when the node's task id is not its own (see the
+            # superseded-poll guard in generate_llm_response).
+            task_id = str(uuid.uuid4())
             meta = json.loads(node.tool_calls_meta)
             for m in meta:
                 if isinstance(m, dict) and m.get("name") == "_batch":
@@ -2135,11 +2316,17 @@ def resume_stuck_feed_batches():
                     m["resumed_at"] = m["last_polled_at"]
                     m["resumed_count"] = int(m.get("resumed_count") or 0) + 1
             node.tool_calls_meta = json.dumps(meta)
-            node.llm_task_id = task.id
+            node.llm_task_id = task_id
             db.session.commit()
+            generate_llm_response.apply_async(
+                args=(parent.id, node.id, node.llm_model,
+                      node.human_owner_id),
+                kwargs={"source_mode": source_mode},
+                task_id=task_id,
+            )
             resumed.append(node.id)
             logger.warning("Resumed orphaned feed batch %s on node %s (task %s)",
-                           entry.get("batch_id"), node.id, task.id)
+                           entry.get("batch_id"), node.id, task_id)
         return {"resumed": resumed}
 
 
@@ -2340,7 +2527,7 @@ def prewarm_anthropic_cache(system_node_id, user_id, model_id,
 
 
 @celery.task(base=LLMCompletionTask, bind=True)
-def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id: str, user_id: int, source_mode: str = None, cache_split_offset: int = None):
+def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id: str, user_id: int, source_mode: str = None, cache_split_offset: int = None, ca_live: bool = False):
     """
     Asynchronously generate an LLM response and update a placeholder node.
 
@@ -2365,26 +2552,65 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
         if not llm_node:
             raise ValueError(f"LLM node {llm_node_id} not found")
 
-        from backend.utils.spend import user_is_capped
-        if user_is_capped(user_id):
+        # A superseded feed poll: the admin's cancel-and-rerun
+        # (routes/read.py) re-dispatched this node under a new task id
+        # and revoked this one. If the revoke did not reach the worker,
+        # stop here rather than submit a second batch for the node.
+        this_task_id = getattr(getattr(self, "request", None), "id", None)
+        if (this_task_id and llm_node.llm_task_id
+                and llm_node.llm_task_id != this_task_id
+                and llm_node.tool_calls_meta
+                and '"_batch"' in llm_node.tool_calls_meta):
             logger.warning(
-                "User %s is spend-capped; skipping LLM completion", user_id)
-            llm_node.llm_task_status = 'failed'
-            db.session.commit()
-            return
-
-        # Update status on the new llm_node
-        llm_node.llm_task_status = 'processing'
-        llm_node.llm_task_progress = 10
-        db.session.commit()
+                "Node %s: task %s superseded by %s; not polling",
+                llm_node_id, this_task_id, llm_node.llm_task_id)
+            return {"status": "superseded", "llm_node_id": llm_node_id}
 
         # The node currently being generated: advances to each continuation
         # node inside the tool loop, so the failure handler below marks the
         # node actually in flight (not an already-completed interim step).
         current_node = llm_node
+        # {ca_tweets}: the node's submitted batch, if any. While one is
+        # submitted this run is a poll of it (or the collecting run), and
+        # the error handler below re-queues instead of failing the node.
+        batch_meta, batch_entry = _batch_meta(llm_node)
+        batch_resp = None
 
         try:
-            # ... (The rest of the logic remains largely the same, but updates llm_node)
+            # The poll comes before anything else is loaded: one provider
+            # call per poll, not the chain and the {ca_tweets} render
+            # (~66k tokens, a duckdb scan, 6-13 s) 150+ times per batch.
+            # Only the run that finds the batch ended goes on to build the
+            # context it needs for ca_refs and the finalize.
+            if batch_entry is not None:
+                outcome, batch_resp = _ca_batch_poll(
+                    self, llm_node, parent_node, batch_meta, batch_entry,
+                    user_id)
+                if outcome == "withdrawn":
+                    return {
+                        'parent_node_id': parent_node_id,
+                        'llm_node_id': llm_node_id,
+                        'status': 'cancelled',
+                        'reason': 'spend_cap',
+                    }
+
+            # A batch that has ended is collected even for a user who hit
+            # the spend cap meanwhile: by then the provider has processed
+            # and billed it (a batch still queued is withdrawn by the poll
+            # instead, see _ca_batch_poll), and the finalize logs the cost
+            # either way. The cap gates new requests: the submit below.
+            from backend.utils.spend import user_is_capped
+            if batch_resp is None and user_is_capped(user_id):
+                logger.warning(
+                    "User %s is spend-capped; skipping LLM completion", user_id)
+                llm_node.llm_task_status = 'failed'
+                db.session.commit()
+                return
+
+            # Update status on the new llm_node
+            llm_node.llm_task_status = 'processing'
+            llm_node.llm_task_progress = 10
+            db.session.commit()
 
             # Step 1: Build the chain of nodes for context
             self.update_state(state='PROGRESS', meta={'progress': 20, 'status': 'Building context'})
@@ -2476,6 +2702,24 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     "Rendered %s for node %s: %s (~%d tokens)",
                     ca_placeholder_match, ca_node.id, ca_stats,
                     approximate_token_count(ca_tweets_content))
+                # A read runs against the user's own conversation, never
+                # under the agentic system prompt: a Voice / Text mode
+                # thread's tools, mode notes and persona have nothing to
+                # do with judging tweets, and the prompt is the one part
+                # of the thread the user did not write. Drop every
+                # agentic prompt node wherever it sits (a root, or one
+                # attached mid-thread) and keep the messages around it,
+                # so the read still sees the sharing that came before an
+                # agentic session started under it. With it gone the
+                # chain is not agentic: no tools, no notes, no mode
+                # indicator.
+                node_chain, dropped = strip_agentic_prompts(
+                    node_chain, keep=ca_node)
+                if dropped:
+                    logger.info(
+                        "Read for node %s: dropped agentic prompt node(s) "
+                        "%s from the context", llm_node_id,
+                        [n.id for n in dropped])
 
             # Every context artifact is pinned to a per-session snapshot.
             # The node carrying a placeholder also carries a
@@ -3151,21 +3395,31 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # below, after _finalize is defined. Any provider the
                 # feed does not support fails here rather than silently
                 # running the full-price, unstructured live call.
-                batch_mode = needs_ca
-                if batch_mode:
-                    if provider not in CA_BATCH_PROVIDERS:
-                        raise ValueError(
-                            f"{{ca_tweets}} is not supported on {model_id} "
-                            f"({provider}); pick an Anthropic or OpenAI "
-                            "model.")
+                # The admin's live rerun (ca_live) skips the batch and
+                # asks the live API for the same structured shape.
+                if needs_ca and provider not in CA_BATCH_PROVIDERS:
+                    raise ValueError(
+                        f"{{ca_tweets}} is not supported on {model_id} "
+                        f"({provider}); pick an Anthropic or OpenAI "
+                        "model.")
+                batch_mode = needs_ca and not ca_live
+                if batch_mode or batch_resp is not None:
                     response = None
                     break
+                feed_schema = None
+                if needs_ca:
+                    from backend.utils.ca_feed import FEED_SCHEMA
+                    feed_schema = FEED_SCHEMA
                 try:
                     response = LLMProvider.get_completion(
                         model_id, messages, api_keys,
                         tools=agentic_tools,
                         prompt_cache_key=f"loore-t{thread_root_id}",
+                        output_schema=feed_schema,
                     )
+                    if needs_ca:
+                        response = _collect_feed_reply(
+                            llm_node, response, ca_refs)
                     break  # Success
                 except PromptTooLongError as e:
                     if attempt == MAX_RETRIES or not needs_export:
@@ -3236,8 +3490,6 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # rendering, TTS) sees only absolute references.
                 f_llm_text = _canonicalize_quote_labels(
                     resp["content"], quote_labels)
-                _bump_surfaced_references(
-                    f_llm_text, user_id, bumped_ext_ids)
                 # #179: strip hallucinated context-timestamp echoes from the
                 # response edges before anything stores or speaks the text.
                 f_scrubbed = strip_edge_timestamps(f_llm_text)
@@ -3285,6 +3537,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         'reason': 'target_soft_deleted',
                     }
 
+                # Surfacing history for every {quote_ext:ID} in the text, in
+                # the same commit as the completion (a finalize that fails
+                # past its first commit and is run again, as a batch collect
+                # is, bumps once).
+                _bump_surfaced_references(
+                    f_llm_text, user_id, bumped_ext_ids)
+
                 target_node.set_content(f_llm_text)
                 # chars/4, NOT the provider's output_tokens: Node.token_count
                 # is the platform's stable information-content measure (gates,
@@ -3329,12 +3588,22 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     })
 
                 if f_tool_meta:
+                    # Keep the node's "_batch" history in front of the
+                    # turn's tool meta (a read under its own agentic prompt
+                    # has both), so _close_batch_entry below still finds
+                    # the entry to close.
+                    f_tool_meta = _batch_history(target_node) + f_tool_meta
                     target_node.tool_calls_meta = json.dumps(f_tool_meta)
 
                 # Mark proposal statuses as reported (deferred until
                 # after LLM success so they re-inject on retry)
                 if proposal_to_mark:
                     _mark_status_reported(proposal_to_mark)
+
+                # {ca_tweets}: the batch entry closes in the same commit as
+                # the completion (see _close_batch_entry).
+                if resp.get("batch"):
+                    _close_batch_entry(target_node, resp.get("batch_id"))
 
                 target_node.llm_task_status = 'completed'
                 target_node.llm_task_progress = 100
@@ -3368,16 +3637,23 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # Both agentic modes (text + voice) run the bounded within-turn
             # retrieval loop so read_artifact/read_todo resolve same-turn. Any
             # other (non-agentic) caller — source_mode None — stays single-shot.
+            if batch_resp is not None:
+                # The collecting run: the poll above found the batch ended
+                # and holds its reply; the context was built for ca_refs.
+                response = batch_resp
+                if ca_refs:
+                    response = _collect_feed_reply(
+                        llm_node, response, ca_refs)
+                return _finalize(llm_node, response)
             if batch_mode:
-                # Submits on the first run and re-queues; returns the
-                # response only on the run that finds the batch ended.
+                # First run: submit and re-queue for the first poll.
                 from backend.utils.llm_batch import apply_batch_key_override
                 batch_keys = apply_batch_key_override(
                     api_keys, flask_app.config)
-                response = _ca_batch_roundtrip(
+                _ca_batch_submit(
                     self, llm_node, model_id, api_model, messages,
-                    batch_keys[provider], model_config, ca_refs=ca_refs,
-                    provider=provider)
+                    batch_keys[provider], key_type, model_config,
+                    ca_refs=ca_refs, provider=provider)
 
             if source_mode not in ("textmode", "voice"):
                 # Single-shot: one model call, one node, no within-turn loop.
@@ -3653,11 +3929,46 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # FINAL answer: no retrieval (or budget exhausted).
                 return _finalize(current_node, response)
 
-        except Retry:
+        except (Retry, Reject):
             # Batch poll re-queue ({ca_tweets}); the node stays 'processing'.
+            # Reject: the re-queue could not be published (a worker on its
+            # way down); the node is still 'processing', so the backstop
+            # (resume_stuck_feed_batches) picks it up once the heartbeat
+            # is stale.
             raise
         except Exception as e:
+            error = e
             error_message = str(e)
+            if batch_entry is not None:
+                # The batch outlives this run. While it is submitted only
+                # the provider's verdict on the item (BatchItemFailed), a
+                # reply the collect cannot use (FeedReplyError: the stored
+                # result is immutable, so every re-collect would fail the
+                # same way) and the poll cap fail the node; anything else
+                # (a restart mid-render, KMS, the network, a 5xx on
+                # retrieve, the DB) is logged and polled again, the entry
+                # still submitted.
+                batch_id = batch_entry.get("batch_id")
+                if isinstance(e, MaxRetriesExceededError):
+                    error_message = (
+                        f"Batch {batch_id} had not ended after "
+                        f"{CA_BATCH_MAX_POLLS} polls")
+                elif not isinstance(e, (BatchItemFailed, FeedReplyError)):
+                    logger.warning(
+                        "Node %s: error with batch %s submitted (poll %s); "
+                        "polling again: %s", llm_node_id, batch_id,
+                        _task_retries(self), e, exc_info=True)
+                    # Drop this run's uncommitted half-work; the next run
+                    # redoes it from the provider's result.
+                    db.session.rollback()
+                    try:
+                        raise self.retry(countdown=CA_BATCH_POLL_SECONDS,
+                                         max_retries=CA_BATCH_MAX_POLLS)
+                    except MaxRetriesExceededError as cap:
+                        error = cap
+                        error_message = (
+                            f"Gave up on batch {batch_id} after "
+                            f"{CA_BATCH_MAX_POLLS} polls; last error: {e}")
             logger.error(f"LLM completion error for node {llm_node_id}: {error_message}", exc_info=True)
             # Fail the node in flight: mid-loop that's the continuation
             # placeholder. Failing llm_node here instead used to clobber the
@@ -3666,4 +3977,4 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             current_node.llm_task_status = 'failed'
             current_node.llm_task_error = error_message
             db.session.commit()
-            raise
+            raise error

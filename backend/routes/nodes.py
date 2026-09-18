@@ -830,6 +830,15 @@ def update_node(node_id):
         ai_usage = data["ai_usage"]
         if not validate_ai_usage(ai_usage):
             return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
+        # A read's nodes quote other people's public tweets, which Loore
+        # has no licence to train on (see ca_feed.FEED_AI_USAGE).
+        if ai_usage == "train":
+            from backend.utils.ca_feed import is_feed_node
+            if is_feed_node(node):
+                return jsonify({
+                    "error": "A Community Archive read cannot be used for "
+                             "training: it quotes other people's tweets.",
+                }), 400
         node.ai_usage = ai_usage
 
     # Settings that actually changed here are the only ones a requested
@@ -1969,7 +1978,10 @@ def get_llm_status(node_id):
 
             if task.state == 'PROGRESS':
                 task_info = task.info
-            elif task.state == 'SUCCESS':
+            elif task.state == 'SUCCESS' and node.llm_task_status not in (
+                    'failed', 'cancelled'):
+                # A task that returned after marking its node failed or
+                # cancelled (spend cap, a withdrawn batch) keeps that.
                 node.llm_task_status = 'completed'
                 db.session.commit()
                 # Get the created node ID from task result
@@ -2000,8 +2012,9 @@ def get_llm_status(node_id):
         "continuation_node_id": node.continuation_node_id,
     }
 
-    # Include content when completed (needed by VoicePage polling)
-    if node.llm_task_status == 'completed':
+    # Include content when completed (needed by VoicePage polling) and
+    # when cancelled (a withdrawn read: the text says why it is empty).
+    if node.llm_task_status in ('completed', 'cancelled'):
         response_data["content"] = node.get_content()
 
     # Include tool call metadata if present
@@ -2019,7 +2032,7 @@ def get_llm_status(node_id):
     batch = next((m for m in response_data.get("tool_calls_meta") or []
                   if isinstance(m, dict) and m.get("name") == "_batch"),
                  None)
-    if batch and batch.get("status") == "submitted" \
+    if batch and batch.get("status") in ("submitted", "cancelling") \
             and node.llm_task_status == "processing":
         response_data["stage"] = "batch"
         response_data["batch_submitted_at"] = batch.get("submitted_at")

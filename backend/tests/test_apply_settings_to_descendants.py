@@ -244,3 +244,65 @@ def test_cascade_from_a_reply_only_covers_its_subtree(app, users, tree):
     assert t["llm_a"].ai_usage == "none"
     assert t["a2"].ai_usage == "chat"
     assert t["root"].ai_usage == "chat"
+
+
+# ── A read's nodes never take 'train' ──────────────────────────────────
+
+
+@pytest.fixture
+def read_tree(users):
+    """root(alice)
+         ├─ a1(alice)
+         └─ read(alice, prompt_key 'read')
+              └─ reply(llm, human owner alice) with one FeedPick"""
+    from backend.models import ExternalItem, FeedPick
+    alice, bob, llm = users
+    root = _node(alice, content="root")
+    a1 = _node(alice, root, content="a1")
+    read = _node(alice, root, content="read prompt")
+    read.prompt_key = "read"
+    reply = _node(llm, read, human_owner=alice, node_type="llm",
+                  content="verdict\n\n{quote_ext:1}")
+    item = ExternalItem(user_id=alice.id, source="community_archive",
+                        external_id="t1", author_handle="someone")
+    item.set_content("a tweet")
+    _db.session.add(item)
+    _db.session.flush()
+    _db.session.add(FeedPick(user_id=alice.id, node_id=reply.id,
+                             external_item_id=item.id, rank=1))
+    _db.session.commit()
+    return dict(root=root, a1=a1, read=read, reply=reply)
+
+
+def test_read_prompt_node_refuses_train(app, users, read_tree):
+    alice = users[0]
+    resp = _put(app, alice, read_tree["read"], ai_usage="train")
+    assert resp.status_code == 400
+    assert "cannot be used for training" in resp.get_json()["error"]
+    assert Node.query.get(read_tree["read"].id).ai_usage == "chat"
+
+
+def test_reply_with_picks_refuses_train(app, users, read_tree):
+    alice = users[0]
+    resp = _put(app, alice, read_tree["reply"], ai_usage="train")
+    assert resp.status_code == 400
+    assert Node.query.get(read_tree["reply"].id).ai_usage == "chat"
+
+
+def test_read_nodes_still_take_other_settings(app, users, read_tree):
+    alice = users[0]
+    resp = _put(app, alice, read_tree["reply"], ai_usage="none")
+    assert resp.status_code == 200, resp.get_json()
+    assert Node.query.get(read_tree["reply"].id).ai_usage == "none"
+
+
+def test_train_cascade_skips_read_nodes(app, users, read_tree):
+    alice = users[0]
+    resp = _put(app, alice, read_tree["root"], ai_usage="train",
+                apply_to_descendants=True)
+    assert resp.status_code == 200, resp.get_json()
+    fresh = _fresh(read_tree)
+    assert fresh["root"].ai_usage == "train"
+    assert fresh["a1"].ai_usage == "train"
+    assert fresh["read"].ai_usage == "chat"
+    assert fresh["reply"].ai_usage == "chat"

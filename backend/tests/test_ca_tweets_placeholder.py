@@ -335,30 +335,45 @@ class TestParseFeedReply:
     def test_normalizes(self):
         from backend.utils.ca_feed import parse_feed_reply
         reply = json.dumps({"verdict": " Nothing much. ", "picks": [
-            {"n": 2, "why": "fits", "relevance": 140, "recommend": True},
-            {"n": 2, "why": "dup", "relevance": 5, "recommend": False},
-            {"n": 99, "why": "unknown", "relevance": 5, "recommend": False},
-            {"n": "1", "why": "", "relevance": -3, "recommend": 0},
+            {"n": 2, "qt": " fits ", "relevance": 140, "recommend": True},
+            {"n": 2, "qt": "dup", "relevance": 5, "recommend": False},
+            {"n": 99, "qt": "unknown", "relevance": 5, "recommend": False},
+            {"n": "1", "qt": "", "relevance": -3, "recommend": 0},
             "junk",
         ]})
         verdict, picks = parse_feed_reply(reply, self.refs)
         assert verdict == "Nothing much."
         assert [(p["n"], p["rank"], p["relevance"], p["recommend"]) for p in picks] == [
             (2, 1, 100, True), (1, 2, 0, False)]
+        assert picks[0]["qt"] == "fits"
         assert picks[0]["ref"] is self.refs[2]
+
+    def test_poc_why_field_still_read(self):
+        # The PoC's replies said "why"; the quote-tweet field is "qt".
+        from backend.utils.ca_feed import parse_feed_reply
+        _, picks = parse_feed_reply(json.dumps({"verdict": "v", "picks": [
+            {"n": 1, "why": "old shape", "relevance": 1, "recommend": False}]}),
+            self.refs)
+        assert picks[0]["qt"] == "old shape"
 
     def test_empty_picks_is_valid(self):
         from backend.utils.ca_feed import parse_feed_reply, render_feed_reply
         verdict, picks = parse_feed_reply('{"verdict": "Nothing.", "picks": []}', self.refs)
         assert picks == []
-        assert render_feed_reply(verdict, picks) == "Nothing."
+        assert render_feed_reply(verdict, []) == "Nothing."
 
-    def test_render_counts(self):
-        from backend.utils.ca_feed import parse_feed_reply, render_feed_reply
-        verdict, picks = parse_feed_reply(json.dumps({"verdict": "One.", "picks": [
-            {"n": 1, "why": "w", "relevance": 60, "recommend": True},
-            {"n": 2, "why": "w", "relevance": 6, "recommend": False}]}), self.refs)
-        assert render_feed_reply(verdict, picks) == "One.\n\n2 tweets below, 1 recommended."
+    def test_render_quotes_each_pick(self):
+        # The whole feed is the node text: verdict, then each quote-tweet
+        # over the {quote_ext:ID} marker of the tweet it quotes, so the
+        # thread page, exports and later turns all see the same thing.
+        from backend.utils.ca_feed import render_feed_reply
+        text = render_feed_reply("One.", [("Read this one.", 41), ("", 42)])
+        assert text == (
+            "One.\n\nRead this one.\n\n{quote_ext:41}\n\n{quote_ext:42}")
+
+    def test_render_without_verdict_has_a_default(self):
+        from backend.utils.ca_feed import render_feed_reply
+        assert render_feed_reply("", []).startswith("Nothing here")
 
     @pytest.mark.parametrize("bad", ["not json", "[]", '{"verdict": "x"}'])
     def test_bad_shape_raises(self, bad):
@@ -370,4 +385,4 @@ class TestParseFeedReply:
         from backend.utils.ca_feed import FEED_SCHEMA
         assert FEED_SCHEMA["additionalProperties"] is False
         item = FEED_SCHEMA["properties"]["picks"]["items"]
-        assert set(item["required"]) == {"n", "why", "relevance", "recommend"}
+        assert set(item["required"]) == {"n", "qt", "relevance", "recommend"}

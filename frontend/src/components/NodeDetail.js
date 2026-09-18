@@ -60,7 +60,8 @@ const tabTitleFor = (node) => {
     && (node?.llm_task_status === 'pending' || node?.llm_task_status === 'processing');
   if (pending) {
     const batch = Array.isArray(node?.tool_calls_meta)
-      && node.tool_calls_meta.some(tc => tc?.name === '_batch' && tc.status === 'submitted');
+      && node.tool_calls_meta.some(tc => tc?.name === '_batch'
+                                      && ['submitted', 'cancelling'].includes(tc.status));
     return `${batch ? 'Processing' : 'Thinking'}… — Loore`;
   }
   const firstLine = (node?.content || '')
@@ -93,6 +94,7 @@ function NodeDetail({ nodeIdOverride }) {
   const [pinLoading, setPinLoading] = useState(false);
   const [voiceLoading, setVoiceLoading] = useState(false);
   const [readLoading, setReadLoading] = useState(false);
+  const [rerunning, setRerunning] = useState(false);
   const [toolActionsExpanded, setToolActionsExpanded] = useState(false);
   const [showPromptEditConfirm, setShowPromptEditConfirm] = useState(false);
   // Per-bubble action targets. The kebab on any rendered Bubble (focal,
@@ -143,7 +145,8 @@ function NodeDetail({ nodeIdOverride }) {
   // is queued at the provider (minutes, up to 24 h). Poll slowly and
   // don't time out at the hook's 30-minute default.
   const batchMeta = Array.isArray(node?.tool_calls_meta)
-    ? node.tool_calls_meta.find(tc => tc?.name === '_batch' && tc.status === 'submitted')
+    ? node.tool_calls_meta.find(tc => tc?.name === '_batch'
+                                     && ['submitted', 'cancelling'].includes(tc.status))
     : null;
   // (Only the pending node's own meta counts here: on the parent page the
   // batch stage triggers a navigation to that node — see the completion
@@ -331,6 +334,19 @@ function NodeDetail({ nodeIdOverride }) {
       // "Processing" and keeps polling slowly via the effect above).
       setLlmTaskNodeId(null);
       navigate(`/node/${llmTaskNodeId}`);
+    } else if (llmStatus === 'cancelled') {
+      // A read withdrawn before it ran (the spend cap was reached while
+      // it was queued): nothing was billed, and the node's text says so.
+      addToast(llmData?.error || 'Read cancelled', 8000);
+      if (String(llmTaskNodeId) === String(id)) {
+        setNode(prev => prev ? {
+          ...prev,
+          content: llmData?.content ?? prev.content,
+          tool_calls_meta: llmData?.tool_calls_meta ?? prev.tool_calls_meta,
+          llm_task_status: 'cancelled',
+        } : prev);
+      }
+      setLlmTaskNodeId(null);
     } else if (llmStatus === 'failed') {
       // Toast, never setError — setError replaces the entire thread view
       // with the raw failure text, hiding the thread and the inline form.
@@ -744,6 +760,26 @@ function NodeDetail({ nodeIdOverride }) {
       });
   };
 
+  // Admin's rerun of a read reply (a batch takes minutes to a day):
+  // cancels the submitted batch and runs the same reply again, through
+  // the batch or the live API. The node stays the same, so the page
+  // keeps polling it.
+  const rerunRead = (live) => {
+    setRerunning(true);
+    api
+      .post(`/read/${id}/rerun`, { live })
+      .then(() => api.get(`/nodes/${id}`))
+      .then((response) => {
+        setNode(response.data);
+        setLlmTaskNodeId(response.data.id);
+        addToast(live ? 'Running the read live.' : 'Read resubmitted as a batch.', 4000);
+      })
+      .catch((err) => {
+        addToast(err?.response?.data?.error || 'Could not rerun the read.', 6000);
+      })
+      .finally(() => setRerunning(false));
+  };
+
   // Ancestors section rendered as a list of bubbles.
   const ancestorsSection = node.ancestors && node.ancestors.length > 0 && (
     <div style={{ display: "flex", flexDirection: "column", marginBottom: "10px" }}>
@@ -808,6 +844,17 @@ function NodeDetail({ nodeIdOverride }) {
     node.llm_task_status === 'pending'
     || node.llm_task_status === 'processing'
   );
+  // A read reply: it carries (or carried) a batch, or hangs under one of
+  // the read prompts. Only these get the admin's rerun controls, while
+  // the reply is pending or after it failed.
+  const parentAncestor = node.ancestors?.[node.ancestors.length - 1];
+  const isReadReply = isLlmNode && (
+    (Array.isArray(node.tool_calls_meta)
+      && node.tool_calls_meta.some(tc => tc?.name === '_batch'))
+    || ['read', 'read_thread'].includes(parentAncestor?.prompt_key)
+  );
+  const canRerunRead = !!currentUser?.is_admin && isOwner && isReadReply
+    && (isLlmPending || node.llm_task_status === 'failed');
   const showProposal = !!node.content && !isLlmPending && (
     (isLlmNode && hasProposalSections(node.content))
     // User-authored nodes: the owner can write/paste fenced :::share
@@ -858,6 +905,33 @@ function NodeDetail({ nodeIdOverride }) {
     height: '32px',
     boxSizing: 'border-box',
   };
+
+  const rerunControls = canRerunRead ? (
+    <div style={{
+      display: 'inline-flex', gap: '8px', flexWrap: 'wrap',
+      marginLeft: isLlmPending ? '12px' : 0,
+      marginTop: isLlmPending ? 0 : '8px',
+    }}>
+      <button
+        type="button"
+        onClick={() => rerunRead(true)}
+        disabled={rerunning}
+        style={{ ...topRightButtonStyle, width: 'auto', height: '26px', fontStyle: 'normal' }}
+        title="Cancel the batch and run this read through the live API now"
+      >
+        {rerunning ? 'Rerunning…' : 'Rerun live'}
+      </button>
+      <button
+        type="button"
+        onClick={() => rerunRead(false)}
+        disabled={rerunning}
+        style={{ ...topRightButtonStyle, width: 'auto', height: '26px', fontStyle: 'normal' }}
+        title="Cancel the batch and submit this read as a new batch"
+      >
+        Resubmit batch
+      </button>
+    </div>
+  ) : null;
 
   // Top-right controls (Voice Mode + Auto-generate). Rendered in the
   // same flex row as the Thread heading so they align vertically and
@@ -1003,6 +1077,7 @@ function NodeDetail({ nodeIdOverride }) {
                 }} />
               ))}
             </span>
+            {rerunControls}
             <style>{`
               @keyframes wopPulseDot {
                 0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
@@ -1054,7 +1129,12 @@ function NodeDetail({ nodeIdOverride }) {
             />
           </div>
         )}
-        {!isLlmPending && isOwner && node.feed_picks_count > 0 && (
+        {!isLlmPending && rerunControls}
+        {/* Replies from before 2026-09-16 kept their picks in rows only;
+            since then the reply text quotes each pick ({quote_ext:ID}),
+            so the list is rendered by QuotedContent above. */}
+        {!isLlmPending && isOwner && node.feed_picks_count > 0
+          && !/\{quote_ext:\d+\}/.test(node.content || '') && (
           <FeedPicks nodeId={node.id} />
         )}
         {(() => {
