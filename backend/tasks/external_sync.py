@@ -80,6 +80,21 @@ def fetch_community_archive(self, user_id, username, max_items=2000):
 X_RECONNECT_LINK = "/import#x-bookmarks"
 
 
+def _oauth_error(exc):
+    """The OAuth2 error code X returned for a failed grant, e.g.
+    ``invalid_grant`` (the user's grant is dead) vs ``invalid_client``
+    (Loore's own client credentials are wrong). None when there is no
+    parseable JSON body."""
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return None
+    try:
+        body = resp.json()
+    except Exception:
+        return None
+    return body.get("error") if isinstance(body, dict) else None
+
+
 def _mark_revoked(account, why):
     """X rejected the account's tokens — user revoked the app, or the
     rotating refresh-token family died. Park the account (nightly sync
@@ -125,15 +140,30 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
                 and account.get_refresh_token()):
             try:
                 tokens = x_refresh_access_token(
-                    client_id, account.get_refresh_token())
+                    client_id, account.get_refresh_token(),
+                    flask_app.config.get("X_CLIENT_SECRET"))
             except requests.HTTPError as exc:
                 code = (exc.response.status_code
                         if exc.response is not None else None)
-                # 400/401 = dead grant (revoked / rotated away underneath
-                # us). Anything else (429, 5xx) is transient — surface it
-                # and let the next scheduled sync retry.
-                if code in (400, 401):
-                    return _mark_revoked(account, f"refresh HTTP {code}")
+                error = _oauth_error(exc)
+                # invalid_grant = the USER's grant is dead (they revoked
+                # the app, or the rotating refresh-token family died) —
+                # park the account and ask them to reconnect. Anything
+                # else is OURS or transient: invalid_client means Loore's
+                # own credentials are wrong, and parking every user for
+                # that is exactly what #313 did for months. Raise, so a
+                # broken client shows up as an operator error instead of
+                # as N users silently disconnected.
+                if error == "invalid_grant" or (error is None
+                                                and code == 400):
+                    return _mark_revoked(
+                        account,
+                        f"refresh HTTP {code} ({error or 'no error body'})")
+                logger.error(
+                    "X token refresh for user %s failed with HTTP %s (%s) "
+                    "— NOT parking the account; this is Loore's side, not "
+                    "the user's", account.user_id, code,
+                    error or "no error body")
                 raise
             account.set_tokens(
                 tokens["access_token"], tokens.get("refresh_token"))

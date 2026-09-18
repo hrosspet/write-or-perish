@@ -121,9 +121,13 @@ def _tz_at_hour(target_hour):
     return f"Etc/GMT+{x}" if x <= 12 else f"Etc/GMT-{24 - x}"
 
 
-def _http_error(status):
+def _http_error(status, error=None):
+    """An HTTPError carrying X's OAuth2 error body — the sync tells a dead
+    user grant (invalid_grant) from bad client credentials (invalid_client)
+    by that code, not by the status alone."""
     resp = MagicMock()
     resp.status_code = status
+    resp.json.return_value = {"error": error} if error else {}
     err = requests.HTTPError(f"HTTP {status}")
     err.response = resp
     return err
@@ -133,8 +137,8 @@ def test_dead_refresh_grant_marks_revoked(app, monkeypatch):
     uid = User.query.first().id
     account = _mk_account(uid)
 
-    def dead_refresh(client_id, refresh_token):
-        raise _http_error(400)
+    def dead_refresh(client_id, refresh_token, client_secret=None):
+        raise _http_error(400, "invalid_grant")
     monkeypatch.setattr(_sync_mod, "x_refresh_access_token", dead_refresh)
 
     result = _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
@@ -149,8 +153,8 @@ def test_revocation_notifies_user_with_reconnect_link(app, monkeypatch):
     uid = User.query.first().id
     _mk_account(uid)
 
-    def dead_refresh(client_id, refresh_token):
-        raise _http_error(401)
+    def dead_refresh(client_id, refresh_token, client_secret=None):
+        raise _http_error(400, "invalid_grant")
     monkeypatch.setattr(_sync_mod, "x_refresh_access_token", dead_refresh)
 
     _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
@@ -174,7 +178,7 @@ def test_transient_refresh_error_does_not_revoke(app, monkeypatch):
     uid = User.query.first().id
     account = _mk_account(uid)
 
-    def flaky_refresh(client_id, refresh_token):
+    def flaky_refresh(client_id, refresh_token, client_secret=None):
         raise _http_error(429)
     monkeypatch.setattr(_sync_mod, "x_refresh_access_token", flaky_refresh)
 
@@ -182,6 +186,88 @@ def test_transient_refresh_error_does_not_revoke(app, monkeypatch):
         _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
     _db.session.expire_all()
     assert ExternalAccount.query.get(account.id).revoked_at is None
+
+
+def test_bad_client_credentials_do_not_park_the_user(app, monkeypatch):
+    """invalid_client is LOORE's problem, not the user's. Parking accounts
+    for it disconnected every X user on a config bug and told them to
+    reconnect, which could not help (#313) — it must raise instead, and
+    leave the account connected for the next night."""
+    uid = User.query.first().id
+    account = _mk_account(uid)
+
+    def bad_client(client_id, refresh_token, client_secret=None):
+        raise _http_error(401, "invalid_client")
+    monkeypatch.setattr(_sync_mod, "x_refresh_access_token", bad_client)
+
+    with pytest.raises(requests.HTTPError):
+        _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    _db.session.expire_all()
+    assert ExternalAccount.query.get(account.id).revoked_at is None
+    assert UserNotification.query.filter_by(
+        user_id=uid, type="x_disconnected").count() == 0
+
+
+def test_refresh_passes_the_client_secret(app, monkeypatch):
+    """The refresh grant must carry the same client credentials as the
+    code exchange — a confidential client that omits them gets 401."""
+    uid = User.query.first().id
+    _mk_account(uid)
+    monkeypatch.setitem(app.config, "X_CLIENT_SECRET", "shh")
+    seen = {}
+
+    def ok_refresh(client_id, refresh_token, client_secret=None):
+        seen["secret"] = client_secret
+        return {"access_token": "fresh", "refresh_token": "rotated",
+                "expires_in": 7200}
+    monkeypatch.setattr(_sync_mod, "x_refresh_access_token", ok_refresh)
+
+    def empty_pages(token, x_user_id, max_items=800):
+        return
+        yield  # pragma: no cover — makes this a generator
+    monkeypatch.setattr(_sync_mod, "x_fetch_bookmark_pages", empty_pages)
+
+    _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    assert seen["secret"] == "shh"
+    _db.session.expire_all()
+    assert ExternalAccount.query.filter_by(
+        user_id=uid).one().get_access_token() == "fresh"
+
+
+def test_unpark_script_repairs_accounts_parked_by_the_bug(app):
+    """The #313 repair clears revoked_at and answers the stale "X
+    disconnected" notice — but only where a refresh token survived; an
+    account without one genuinely has to reconnect."""
+    import io
+    from datetime import datetime
+    from backend.scripts.unpark_x_accounts import _run
+    uid = User.query.first().id
+    account = _mk_account(uid, revoked=True)
+    _db.session.add(UserNotification(
+        user_id=uid, type="x_disconnected", title="X disconnected",
+        link="/import#x-bookmarks"))
+    _db.session.commit()
+
+    assert _run(False, out=io.StringIO())["unparked"] == 1
+    _db.session.expire_all()
+    assert ExternalAccount.query.get(account.id).revoked_at is not None
+
+    result = _run(True, out=io.StringIO())
+    assert result["unparked"] == 1 and result["notices_read"] == 1
+    _db.session.expire_all()
+    assert ExternalAccount.query.get(account.id).revoked_at is None
+    assert UserNotification.query.filter_by(
+        user_id=uid, type="x_disconnected").one().status == "read"
+
+    # Nothing left to refresh with: leave it parked.
+    account = ExternalAccount.query.get(account.id)
+    account.revoked_at = datetime.utcnow()
+    account.refresh_token = None
+    _db.session.commit()
+    result = _run(True, out=io.StringIO())
+    assert result["unparked"] == 0 and result["skipped"] == 1
+    _db.session.expire_all()
+    assert ExternalAccount.query.get(account.id).revoked_at is not None
 
 
 def test_fetch_401_marks_revoked(app, monkeypatch):
