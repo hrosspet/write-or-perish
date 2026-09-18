@@ -23,6 +23,14 @@ import tempfile
 log = logging.getLogger(__name__)
 
 
+class BatchItemFailed(RuntimeError):
+    """The provider's terminal verdict on a one-item batch: the batch or
+    its item failed, expired or was cancelled, or the batch ended without
+    the item. Polling again cannot change it, so the caller fails the
+    node. Any other error raised while polling (the network, a 5xx, a
+    bad key) is not a verdict and the caller polls again."""
+
+
 def apply_batch_key_override(api_keys, config):
     """Overlay the batch-specific OpenAI key (``OPENAI_API_KEY_BATCH``) if set.
 
@@ -290,8 +298,8 @@ def anthropic_batch_collect_one(api_key, batch_id, custom_id):
     """Poll a one-item batch. Returns (processing_status, resp) where resp
     is None until the batch has ended, and otherwise the same dict shape
     LLMProvider._call_anthropic returns (plus ``batch: True``) so the
-    caller's finalize path is unchanged. Raises RuntimeError when the
-    item errored / expired / was canceled."""
+    caller's finalize path is unchanged. Raises BatchItemFailed when
+    the item errored / expired / was canceled."""
     from anthropic import Anthropic
     client = Anthropic(api_key=api_key)
     batch = client.messages.batches.retrieve(batch_id)
@@ -304,7 +312,7 @@ def anthropic_batch_collect_one(api_key, batch_id, custom_id):
             continue
         if entry.result.type != "succeeded":
             err = getattr(entry.result, "error", None)
-            raise RuntimeError(
+            raise BatchItemFailed(
                 f"Batch item {custom_id} {entry.result.type}: {err}")
         msg = entry.result.message
         content = "".join(
@@ -324,7 +332,7 @@ def anthropic_batch_collect_one(api_key, batch_id, custom_id):
             "batch": True,
             "batch_id": batch_id,
         }
-    raise RuntimeError(f"Batch {batch_id} ended without item {custom_id}")
+    raise BatchItemFailed(f"Batch {batch_id} ended without item {custom_id}")
 
 
 def _responses_input(messages):
@@ -393,19 +401,19 @@ def openai_batch_cancel_one(api_key, batch_id):
 def openai_batch_collect_one(api_key, batch_id, custom_id):
     """Poll a one-item OpenAI batch. Returns (status, resp) — resp None
     until the batch completed, else the dict shape the live OpenAI call
-    returns (plus ``batch: True``). Raises RuntimeError when the batch
-    failed / expired / was cancelled or the item errored."""
+    returns (plus ``batch: True``). Raises BatchItemFailed when the
+    batch failed / expired / was cancelled or the item errored."""
     from openai import OpenAI
     client = OpenAI(api_key=api_key)
     batch = client.batches.retrieve(batch_id)
     log.info("OpenAI batch %s: status=%s counts=%s", batch_id,
              batch.status, batch.request_counts)
     if batch.status in ("failed", "expired", "cancelled", "cancelling"):
-        raise RuntimeError(f"OpenAI batch {batch_id} {batch.status}")
+        raise BatchItemFailed(f"OpenAI batch {batch_id} {batch.status}")
     if batch.status != "completed":
         return batch.status, None
     if not batch.output_file_id:
-        raise RuntimeError(f"OpenAI batch {batch_id} completed without output")
+        raise BatchItemFailed(f"OpenAI batch {batch_id} completed without output")
     raw = client.files.content(batch.output_file_id).content.decode()
     for line in raw.strip().splitlines():
         entry = json.loads(line)
@@ -414,7 +422,7 @@ def openai_batch_collect_one(api_key, batch_id, custom_id):
         response = entry.get("response") or {}
         body = response.get("body") or {}
         if response.get("status_code") != 200 or entry.get("error"):
-            raise RuntimeError(
+            raise BatchItemFailed(
                 f"Batch item {custom_id} failed: "
                 f"{entry.get('error') or body.get('error')}")
         content = ""
@@ -442,4 +450,4 @@ def openai_batch_collect_one(api_key, batch_id, custom_id):
             "batch": True,
             "batch_id": batch_id,
         }
-    raise RuntimeError(f"Batch {batch_id} ended without item {custom_id}")
+    raise BatchItemFailed(f"Batch {batch_id} ended without item {custom_id}")

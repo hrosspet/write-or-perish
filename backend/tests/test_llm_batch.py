@@ -26,6 +26,9 @@ from backend.utils.llm_batch import (  # noqa: E402
     _convert_messages_for_anthropic,
     batch_submit,
     batch_check_and_collect,
+    BatchItemFailed,
+    anthropic_batch_collect_one,
+    openai_batch_collect_one,
 )
 
 KEYS = {"anthropic": "k-ant", "openai": "k-oai"}
@@ -175,3 +178,86 @@ def test_collect_openai_completed(monkeypatch):
     assert results["profile:2:0:1:chunk"] == {
         "content": "P", "input_tokens": 100, "output_tokens": 50}
     assert durations["openai:gpt-x"] == 120.0
+
+
+# ── one-item collect: the provider's verdict vs. a transient error ───────
+# (2026-09-18) The feed poll fails the node only on BatchItemFailed; any
+# other error is polled again.
+
+def test_collect_one_anthropic_errored_item_is_a_verdict(monkeypatch):
+    client = MagicMock()
+    client.messages.batches.retrieve.return_value = SimpleNamespace(
+        processing_status="ended", request_counts="counts")
+    client.messages.batches.results.return_value = [SimpleNamespace(
+        custom_id="node-7",
+        result=SimpleNamespace(type="expired", error=None))]
+    _install_fake_sdks(monkeypatch, anthropic_client=client)
+
+    with pytest.raises(BatchItemFailed, match="expired"):
+        anthropic_batch_collect_one("k", "b-ant", "node-7")
+
+
+def test_collect_one_anthropic_missing_item_is_a_verdict(monkeypatch):
+    client = MagicMock()
+    client.messages.batches.retrieve.return_value = SimpleNamespace(
+        processing_status="ended", request_counts="counts")
+    client.messages.batches.results.return_value = []
+    _install_fake_sdks(monkeypatch, anthropic_client=client)
+
+    with pytest.raises(BatchItemFailed, match="without item"):
+        anthropic_batch_collect_one("k", "b-ant", "node-7")
+
+
+def test_collect_one_anthropic_still_processing(monkeypatch):
+    client = MagicMock()
+    client.messages.batches.retrieve.return_value = SimpleNamespace(
+        processing_status="in_progress", request_counts="counts")
+    _install_fake_sdks(monkeypatch, anthropic_client=client)
+
+    assert anthropic_batch_collect_one("k", "b-ant", "node-7") == (
+        "in_progress", None)
+    client.messages.batches.results.assert_not_called()
+
+
+def test_collect_one_openai_cancelled_batch_is_a_verdict(monkeypatch):
+    client = MagicMock()
+    client.batches.retrieve.return_value = SimpleNamespace(
+        status="cancelled", request_counts="counts")
+    _install_fake_sdks(monkeypatch, openai_client=client)
+
+    with pytest.raises(BatchItemFailed, match="cancelled"):
+        openai_batch_collect_one("k", "b-oai", "node-7")
+
+
+def test_collect_one_openai_failed_item_is_a_verdict(monkeypatch):
+    client = MagicMock()
+    client.batches.retrieve.return_value = SimpleNamespace(
+        status="completed", request_counts="counts", output_file_id="of-1")
+    line = json.dumps({"custom_id": "node-7", "error": {"message": "boom"},
+                       "response": {"status_code": 500, "body": {}}})
+    client.files.content.return_value = SimpleNamespace(
+        content=(line + "\n").encode())
+    _install_fake_sdks(monkeypatch, openai_client=client)
+
+    with pytest.raises(BatchItemFailed, match="boom"):
+        openai_batch_collect_one("k", "b-oai", "node-7")
+
+
+def test_collect_one_openai_still_processing(monkeypatch):
+    client = MagicMock()
+    client.batches.retrieve.return_value = SimpleNamespace(
+        status="in_progress", request_counts="counts")
+    _install_fake_sdks(monkeypatch, openai_client=client)
+
+    assert openai_batch_collect_one("k", "b-oai", "node-7") == (
+        "in_progress", None)
+    client.files.content.assert_not_called()
+
+
+def test_collect_one_transport_error_is_not_a_verdict(monkeypatch):
+    client = MagicMock()
+    client.batches.retrieve.side_effect = ConnectionError("reset by peer")
+    _install_fake_sdks(monkeypatch, openai_client=client)
+
+    with pytest.raises(ConnectionError):
+        openai_batch_collect_one("k", "b-oai", "node-7")

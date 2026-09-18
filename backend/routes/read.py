@@ -175,8 +175,11 @@ def _cancel_submitted_batch(entry):
     from backend.utils import llm_batch
     from backend.utils.api_keys import get_api_keys_for_usage
     provider = entry.get("provider") or "anthropic"
+    # The key the batch was submitted under (reads are chat-only; the
+    # fallback covers entries from before the key type was stored).
     keys = llm_batch.apply_batch_key_override(
-        get_api_keys_for_usage(current_app.config, "chat"),
+        get_api_keys_for_usage(current_app.config,
+                               entry.get("key_type") or "chat"),
         current_app.config)
     cancel = {
         "anthropic": llm_batch.anthropic_batch_cancel_one,
