@@ -827,26 +827,6 @@ class UserTodo(db.Model):
         return decrypt_content(self.content)
 
 
-class UserAIPreferences(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
-    content = db.Column(db.Text, nullable=False)
-    generated_by = db.Column(db.String(64), nullable=False)
-    tokens_used = db.Column(db.Integer, nullable=False, default=0)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    privacy_level = db.Column(db.String(16), nullable=False, default="private")
-    # AI preferences are used as context in LLM calls — must be AI-readable
-    ai_usage = db.Column(db.String(16), nullable=False, default="chat")
-
-    user = db.relationship("User", backref="ai_preferences")
-
-    def set_content(self, plaintext):
-        self.content = encrypt_content(plaintext)
-
-    def get_content(self):
-        return decrypt_content(self.content)
-
-
 class ArtifactView(db.Model):
     """One row per artifact open in the UI (admin Activity monitoring —
     e.g. "did they check their intentions?"). Written by
@@ -863,7 +843,7 @@ class UserArtifact(db.Model):
     """Generic named user artifact (issue #158): "memory", "scratchpad",
     and user/LLM-created artifacts.
 
-    Append-only versioning like UserAIPreferences — each update inserts a
+    Append-only versioning — each update inserts a
     new row; the latest row per (user_id, kind) is current. Content is
     encrypted at rest and included in data exports as a default Loore
     artifact.

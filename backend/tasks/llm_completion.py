@@ -3099,6 +3099,21 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         "content": [{"type": "text", "text": injected_text}]
                     })
 
+                # #222: the chain ends on parent_node, so when the reply
+                # target is itself an LLM node (reply under an AI message,
+                # regenerate, voice chaining) the last message is an
+                # assistant turn. Anthropic models without prefill
+                # support reject that outright ("conversation must end
+                # with a user message"); on the others it silently
+                # becomes a prefill continuation. Close every prompt
+                # with a neutral user turn instead — a no-op for prompts
+                # that already end on one (agentic notes, tool results).
+                if messages and messages[-1].get("role") == "assistant":
+                    messages.append({
+                        "role": "user",
+                        "content": [{"type": "text", "text": "[continue]"}]
+                    })
+
                 # #187: provider-side prompt caching (Anthropic). Mark
                 # cache breakpoints: one on the rendered system prompt
                 # (the big stable prefix) and one on the last assistant
