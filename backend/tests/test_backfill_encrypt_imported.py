@@ -130,3 +130,49 @@ def test_backfill_limit_and_resume(app):
     db.session.expire_all()
     assert mod.count_pending() == (0, 0)
     assert all(_raw(i).startswith(ENC_PREFIX) for i in ids)
+
+
+def test_empty_content_rows_are_not_pending(app):
+    """A row whose content is '' has nothing to encrypt: set_privacy_level
+    and encrypt_content both no-op on a falsy value, so it can never leave
+    the pending set. Counting it as pending made encrypt_pending re-select
+    the same rows every chunk — reported on prod as "encrypted 500 ... 39
+    still pending" for 39 rows, and an unbounded run never terminates."""
+    mod = _load_script()
+    u = User(username="carol", approved=True, plan="alpha")
+    db.session.add(u)
+    db.session.flush()
+    empty = _seed(u, "", source_key="chatgpt:e")
+    real = _seed(u, "real text", source_key="chatgpt:r")
+
+    assert _raw(empty) == ""
+    assert mod.count_pending() == (1, 1)
+
+    assert mod.encrypt_pending(chunk=10) == 1
+    db.session.expire_all()
+    assert _raw(real).startswith(ENC_PREFIX)
+    assert _raw(empty) == ""
+    assert mod.count_pending() == (0, 0)
+
+
+def test_unencryptable_chunk_stops_instead_of_looping(app):
+    """Belt and braces: if some future row lands in the pending set that
+    the encryptor cannot change, the loop stops after one chunk with a
+    message instead of spinning until --limit (or forever, without one)."""
+    mod = _load_script()
+    u = User(username="dave", approved=True, plan="alpha")
+    db.session.add(u)
+    db.session.flush()
+    stuck = _seed(u, "stuck", source_key="chatgpt:s")
+
+    # Make it unencryptable the way an empty row used to be.
+    monkey = mod.Node.set_privacy_level
+    mod.Node.set_privacy_level = lambda self, level: None
+    try:
+        lines = []
+        assert mod.encrypt_pending(limit=500, chunk=10, log=lines.append) == 0
+    finally:
+        mod.Node.set_privacy_level = monkey
+
+    assert any("no progress" in line for line in lines), lines
+    assert _raw(stuck) == "stuck"
