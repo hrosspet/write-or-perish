@@ -346,6 +346,19 @@ class TestUsernameRenameHistory:
         assert User.query.get(renamer.id).username == "Renamer"
         assert _former_handles(renamer.id) == []
 
+    def test_rejected_request_leaves_no_history(self, app):
+        """The history is written after every field check: a request that
+        renames and fails on a later field changes nothing."""
+        renamer = _publisher("renamer")
+        client = app.test_client()
+        _login(client, renamer.id)
+        r = client.put("/api/dashboard/user", json={
+            "username": "renamed", "default_privacy_level": "bogus"})
+        assert r.status_code == 400
+        _db.session.rollback()
+        assert User.query.get(renamer.id).username == "renamer"
+        assert _former_handles(renamer.id) == []
+
     def test_rename_without_public_writing_reserves_nothing(self, app):
         """A handle nobody could reach leaves no redirect and no
         reservation: the next account may have it."""

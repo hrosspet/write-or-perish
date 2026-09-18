@@ -542,6 +542,13 @@ def update_user():
                 "timezone": current_user.timezone or "UTC",
             }
         }), 200
+    except IntegrityError:
+        # Two submissions of the same rename racing (username_history's
+        # unique index) or two accounts racing for one handle (user's):
+        # the first won; this one re-reads instead of echoing the SQL.
+        db.session.rollback()
+        return jsonify({"error": "Your profile changed in another request. "
+                                 "Reload and try again."}), 409
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": "Failed to update profile.", "details": str(e)}), 500

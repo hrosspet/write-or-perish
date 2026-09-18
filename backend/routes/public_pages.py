@@ -380,8 +380,10 @@ def _resolve_permalink(username, slug):
     soft-deleted row with this slug reports tombstoned for the 410.
     moved (#253): the URL used a former handle, or another case of the
     current one, and the caller should 301 to user.username — set only
-    with a node, so an old handle never confirms more than the page that
-    is public under the new one (a tombstone under it is a plain 404)."""
+    with a node, so a former handle never confirms more than the page
+    that is public under the new one (a tombstone under it is a plain
+    404; under another case of the current handle it keeps its 410, that
+    is public already)."""
     user, moved = _author(username)
     if user is None:
         return None, None, False, False
@@ -391,7 +393,7 @@ def _resolve_permalink(username, slug):
     )).first()
     if node is not None:
         return user, node, False, moved
-    if moved:
+    if moved == "former":
         return None, None, False, False
     tombstoned = db.session.query(Node.id).filter(
         Node.human_owner_id == user.id,

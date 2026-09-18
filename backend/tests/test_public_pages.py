@@ -647,25 +647,60 @@ def test_rename_history_dedupes_per_handle(app):
 
 
 def test_rename_without_public_writing_reserves_nothing(app):
-    """Only a handle the open web could reach becomes a redirect: with
-    sharing off, or nothing published, a rename leaves no history — so
-    nobody can reserve handles by cycling through them, and a private
-    account's renames stay private."""
+    """Only a handle with public writing under it becomes a redirect: an
+    account with nothing published leaves no history — so nobody can
+    reserve handles by cycling through them."""
     from backend.utils.reserved_usernames import validate_username
-    # Sharing on, nothing published.
     _rename("visitor", "visitor_2")
     assert _former_handles("visitor_2") == []
     assert validate_username("visitor", exclude_user_id=_user("hermit").id) is None
-    # Something public, sharing off.
-    _mk_node("hermit", "hermit's public root", slug="quiet")
-    _rename("hermit", "hermit_2")
-    assert _former_handles("hermit_2") == []
-    r = app.test_client().get("/@hermit/quiet")
-    assert r.status_code == 404 and "Location" not in r.headers
-    # Taking a former handle back still clears its row, whatever the state.
+    # Taking a former handle back clears its row whatever the sharing
+    # state; the handle given up is recorded (the writing is public).
     _publish("author", ARTICLE, "on-lore")
     _rename("author", "writer")
     _user("writer").public_sharing_enabled = False
     _db.session.commit()
     _rename("writer", "author")
-    assert _former_handles("author") == []
+    assert _former_handles("author") == ["writer"]
+
+
+def test_pausing_sharing_around_a_rename_keeps_the_handle_reserved(app):
+    """The reservation follows the writing, not the toggle: sharing off,
+    rename, sharing on must not release the old handle (a squatter could
+    publish under the indexed URL) nor kill the old links. While sharing
+    is off the redirect stays silent; it resumes with the sharing."""
+    from backend.utils.reserved_usernames import validate_username
+    _publish("author", ARTICLE, "on-lore")
+    _user("author").public_sharing_enabled = False
+    _db.session.commit()
+    _rename("author", "writer")
+    assert _former_handles("writer") == ["author"]
+    c = app.test_client()
+    _assert_plain_404(c, "author")
+    assert validate_username("author", exclude_user_id=_user("visitor").id) == (
+        "That username is reserved.")
+    _user("writer").public_sharing_enabled = True
+    _db.session.commit()
+    _assert_redirects(c, "author", "writer")
+    # A private account with public writing that never shares again:
+    # reserved, silent.
+    _mk_node("hermit", "hermit's public root", slug="quiet")
+    _rename("hermit", "hermit_2")
+    assert _former_handles("hermit_2") == ["hermit"]
+    r = c.get("/@hermit/quiet")
+    assert r.status_code == 404 and "Location" not in r.headers
+
+
+def test_case_variant_of_current_handle_keeps_the_tombstone_and_empty_profile(app):
+    """Another case of the CURRENT handle answers like the handle: a
+    tombstone still 410s (that is public already) and the profile API of
+    an account with nothing public still answers 200."""
+    node = _publish("author", ARTICLE, "on-lore")
+    node.deleted_at = datetime.utcnow()
+    _db.session.commit()
+    c = app.test_client()
+    assert c.get("/@author/on-lore").status_code == 410
+    assert c.get("/@Author/on-lore").status_code == 410
+    assert c.get("/api/share/public/visitor").status_code == 200
+    r = c.get("/api/share/public/VISITOR")
+    assert r.status_code == 200 and r.get_json()["canonical"] == "/@visitor"

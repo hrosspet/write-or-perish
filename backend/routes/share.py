@@ -381,10 +381,11 @@ def public_shares(username):
         Node.privacy_level == "public",
         (Node.human_owner_id == user.id) | (Node.user_id == user.id),
     ).all()
-    if moved and not nodes:
+    if moved == "former" and not nodes:
         # A former handle only ever leads to a page that renders (the
         # server-rendered profile 404s without public roots): an empty
         # page under the new handle would confirm the rename for nothing.
+        # Another case of the current handle answers like the handle.
         return jsonify({"error": "Not found"}), 404
     share_by_node = {
         s.public_node_id: s

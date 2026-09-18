@@ -244,10 +244,12 @@ class UsernameHistory(db.Model):
 
     Public permalinks are /@<username>/<slug>; slugs are immutable but the
     handle is user-editable, so a rename would break every shared and
-    indexed URL. A row is written on rename — only while the account has
-    public writing to reach that way (sharing on and at least one living
-    public root, i.e. /@<handle> rendered): a handle nobody could reach
-    reserves nothing. The public pages, the permalink API and the public
+    indexed URL. A row is written on rename — only when the account has
+    public writing (a living public root, what /@<handle> renders): a
+    handle with nothing published under it reserves nothing. The sharing
+    toggle does not matter here: it can be paused around a rename, and
+    the old URLs were out there all the same — the redirect just stays
+    silent while sharing is off. The public pages, the permalink API and the public
     profile API resolve a former handle to its owner and redirect to the
     current one, but only where the target page renders: an account that
     went private since answers 404, like a handle nobody ever held, so
