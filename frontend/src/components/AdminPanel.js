@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import XLookupConfirmDialog from "./XLookupConfirmDialog";
 import { FaTimesCircle, FaFilter, FaCaretDown, FaCaretUp, FaEye, FaEyeSlash } from "react-icons/fa";
 import api from "../api";
 import { formatDate, formatDateTime } from "../utils/date";
@@ -294,6 +295,10 @@ const relTime = (iso) => {
 const pathArea = (p) => {
   if (!p) return null;
   const seg = p.replace(/^\/api\//, "").split("/")[0];
+  // `/api/feed` became `/api/log` (#298). Stored paths from before the
+  // rename, and the writes still coming from tabs opened before it,
+  // are the same area.
+  if (seg === "feed") return "log";
   return seg || null;
 };
 
@@ -531,6 +536,11 @@ function AdminPanel() {
   const [error, setError] = useState("");
   const [newHandle, setNewHandle] = useState("");
   const [newHandleError, setNewHandleError] = useState("");
+  const [newHandleNotice, setNewHandleNotice] = useState("");
+  const [whitelisting, setWhitelisting] = useState(false);
+  // Set when the archive did not have the handle: the dialog offering the
+  // paid X lookup for that one whitelist.
+  const [xLookupAsk, setXLookupAsk] = useState(null);
   // Per-user spend-limit input values, keyed by user id (controlled inputs).
   const [limitEdits, setLimitEdits] = useState({});
   // Column filters: hide rows with $0 in Spent / This Month (independent).
@@ -940,6 +950,10 @@ function AdminPanel() {
       const queuedNote = r.profile_batch_queued
         ? " — batch profile queued"
         : ` — not queued: under the ${r.profile_threshold_tokens ? r.profile_threshold_tokens.toLocaleString() + "-token" : "next"} profile step`;
+      // Whether the account got the handle's X id (the owner's X login finds
+      // it by that id), or why not — shown for both pre-fill sources, so a
+      // refused or changed stamp is seen before the account is approved.
+      const idNote = r.x_id_stamped ? `; X id ${r.x_id} attached` : r.x_id_note ? `; ${r.x_id_note}` : "";
       if (r.source === "x-api") {
         return `${r.partial ? "PARTIAL" : "Done"}: ${(r.created || 0).toLocaleString()} nodes from ${(r.fetched || 0).toLocaleString()} posts via X` +
           `${r.partial ? ` (stopped: ${r.fetch_error})` : ""}` +
@@ -947,7 +961,7 @@ function AdminPanel() {
           `${r.retweets_skipped ? `, ${r.retweets_skipped.toLocaleString()} retweets skipped` : ""}` +
           `${r.skipped ? `, ${r.skipped} already imported` : ""}` +
           `${r.imported_tokens != null ? `, ~${r.imported_tokens.toLocaleString()} tokens` : ""}` +
-          queuedNote;
+          queuedNote + idNote;
       }
       const archived = r.archived != null ? ` of ${r.archived.toLocaleString()} archived` : "";
       const rts = r.retweets_skipped ? `, ${r.retweets_skipped.toLocaleString()} retweets skipped` : "";
@@ -958,26 +972,54 @@ function AdminPanel() {
         `${r.source === "parquet" ? " (snapshot)" : ""}${rts}${reported}` +
         `${r.skipped ? `, ${r.skipped} already imported` : ""}` +
         `${r.imported_tokens != null ? `, ~${r.imported_tokens.toLocaleString()} tokens` : ""}` +
-        queuedNote;
+        queuedNote + idNote;
     }
     if (p.status === "failed") return `Failed: ${p.error}`;
     return null;
   };
 
-  const handleWhitelistUser = async () => {
-    if (!newHandle.trim()) {
-      setNewHandleError("Handle is required.");
-      return;
-    }
+  const submitWhitelist = async (handle, xLookup) => {
+    if (whitelisting) return; // one request at a time: a double click must not whitelist twice
+    setWhitelisting(true);
     try {
-      await api.post("/admin/whitelist", { handle: newHandle });
+      const res = await api.post("/admin/whitelist", { handle, x_lookup: xLookup });
+      const u = res.data?.user || {};
+      const m = res.data?.matched || {};
+      const source = {
+        "community-archive": "Community Archive",
+        "x-api": "X API (paid lookup)",
+      }[res.data?.source] || res.data?.source;
+      const who = m.display_name ? `@${m.username} “${m.display_name}”` : `@${m.username}`;
       setNewHandle("");
       setNewHandleError("");
+      setNewHandleNotice(
+        `Whitelisted @${u.username} as ${who}, X id ${u.twitter_id} (${source}); unapproved until you approve them.`
+      );
       fetchUsers();
     } catch (err) {
       console.error(err);
-      setNewHandleError(err.response?.data?.error || "Error whitelisting user.");
+      setNewHandleNotice("");
+      const data = err.response?.data || {};
+      // The archive does not have the handle (or could not be asked): the
+      // only other source of its X id is a paid X read — ask, don't assume.
+      if (!xLookup && (data.reason === "not-in-archive" || data.reason === "archive-error")) {
+        setNewHandleError("");
+        setXLookupAsk({ handle, message: data.error, costUsd: data.x_lookup_cost_usd });
+      } else {
+        setNewHandleError(data.error || "Error whitelisting user.");
+      }
+    } finally {
+      setWhitelisting(false);
     }
+  };
+
+  const handleWhitelistUser = () => {
+    const handle = newHandle.trim().replace(/^@/, "");
+    if (!handle) {
+      setNewHandleError("Handle is required.");
+      return;
+    }
+    submitWhitelist(handle, false);
   };
 
   let displayedUsers = users
@@ -1031,9 +1073,24 @@ function AdminPanel() {
           placeholder="Enter user handle"
           style={{ padding: "8px", marginRight: "10px" }}
         />
-        <button onClick={handleWhitelistUser}>Whitelist User</button>
+        <button onClick={handleWhitelistUser} disabled={whitelisting}>
+          {whitelisting ? "Whitelisting…" : "Whitelist User"}
+        </button>
         {newHandleError && <div style={{ color: "var(--error)" }}>{newHandleError}</div>}
+        {newHandleNotice && <div style={{ color: "var(--text-secondary)" }}>{newHandleNotice}</div>}
       </div>
+      <XLookupConfirmDialog
+        open={!!xLookupAsk}
+        handle={xLookupAsk?.handle}
+        message={xLookupAsk?.message}
+        costUsd={xLookupAsk?.costUsd}
+        onClose={() => setXLookupAsk(null)}
+        onConfirm={() => {
+          const ask = xLookupAsk;
+          setXLookupAsk(null);
+          submitWhitelist(ask.handle, true);
+        }}
+      />
 
       {error && <div style={{ color: "var(--error)" }}>{error}</div>}
       <table style={{ width: "100%", borderCollapse: "collapse", color: "var(--text-primary)" }}>

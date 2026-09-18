@@ -7,23 +7,22 @@ floating-point precision issues while supporting sub-cent costs.
 from flask import current_app
 
 
-# Anthropic prompt-caching multipliers on the input price (#187):
-# cache reads bill at 0.1x, cache writes (5-min TTL) at 1.25x. A model
-# entry may override the read multiplier via "cache_read_multiplier"
-# (Fable 5.1 reads at 0.025x per the Anthropic pricing page).
+# Prompt-caching multipliers on the input price (#187, #241, #286):
+# cache reads bill at 0.1x, cache writes at 1.25x — the same write
+# premium on both providers (Anthropic 5-min TTL creation; OpenAI
+# GPT-5.6+ cache writes). A model entry may override either via
+# "cache_read_multiplier" (Fable 5.1 reads at 0.025x per the Anthropic
+# pricing page) / "cache_write_multiplier".
 CACHE_READ_MULTIPLIER = 0.1
 CACHE_WRITE_MULTIPLIER = 1.25
 
-# X API pay-per-use price per request (bookmarks fetch, /users/me), in
-# microdollars ($0.005/request as of 2026-07). Flat per-request — no
-# token dimension — so it lives here as a constant rather than in
-# SUPPORTED_MODELS. Update if X reprices.
-X_REQUEST_COST_MICRODOLLARS = 5000
 # X API v2 pay-per-use, per returned resource (docs.x.com pricing, 2026-08):
 # post reads $0.005 (retweets included — see x_api.iter_user_tweets for
-# why we can't exclude them server-side), user reads $0.010. The admin
-# "Pre-fill from X" logs one APICostLog row per pull (posts * POST +
-# 1 USER) and one per Check.
+# why we can't exclude them server-side), user reads $0.010. There is no
+# flat per-request price any more (#271): a bookmarks page costs
+# len(page) * POST, and the /users/me call on connect is one USER read.
+# The admin "Pre-fill from X" logs one APICostLog row per pull
+# (posts * POST + 1 USER) and one per Check.
 X_POST_READ_COST_MICRODOLLARS = 5000
 X_USER_READ_COST_MICRODOLLARS = 10000
 
@@ -36,7 +35,8 @@ EMBEDDING_PRICE_PER_MTOK = 0.02
 def calculate_llm_cost_microdollars(model_id, input_tokens, output_tokens,
                                     batch=False, cache_read_tokens=0,
                                     cache_write_tokens=0,
-                                    cached_input_tokens=0):
+                                    cached_input_tokens=0,
+                                    cache_write_subset_tokens=0):
     """
     Calculate LLM API cost in microdollars.
 
@@ -48,9 +48,16 @@ def calculate_llm_cost_microdollars(model_id, input_tokens, output_tokens,
     separately and billed at their multipliers.
 
     OpenAI (#189): cached_input_tokens is the cached SUBSET of
-    input_tokens (usage.prompt_tokens_details.cached_tokens), billed at
+    input_tokens (usage.input_tokens_details.cached_tokens), billed at
     the model's cached_input_multiplier (default 0.5). Fixes the prior
     over-count where the auto-cache discount was ignored.
+
+    OpenAI (#286): cache_write_subset_tokens is likewise a SUBSET of
+    input_tokens (usage.input_tokens_details.cache_write_tokens, GPT-5.6
+    and later) billed at the write premium. Both subsets are taken out
+    of the full-price remainder — passing the OpenAI write count through
+    the Anthropic-style (disjoint) cache_write_tokens parameter would
+    bill those tokens twice (1.0x inside input_tokens + 1.25x on top).
 
     batch=True applies the Batch API discount (~50% of synchronous pricing,
     issue #173). Long-context multipliers still apply to the per-call input
@@ -67,17 +74,86 @@ def calculate_llm_cost_microdollars(model_id, input_tokens, output_tokens,
         input_price *= config.get("long_context_input_multiplier", 1)
         output_price *= config.get("long_context_output_multiplier", 1)
     cached_subset = min(cached_input_tokens or 0, input_tokens)
+    write_subset = min(cache_write_subset_tokens or 0,
+                       input_tokens - cached_subset)
+    ordinary = input_tokens - cached_subset - write_subset
     cached_multiplier = config.get("cached_input_multiplier", 0.5)
     cache_read_multiplier = config.get(
         "cache_read_multiplier", CACHE_READ_MULTIPLIER)
-    cost = ((input_tokens - cached_subset) * input_price
+    cache_write_multiplier = config.get(
+        "cache_write_multiplier", CACHE_WRITE_MULTIPLIER)
+    cost = (ordinary * input_price
             + cached_subset * input_price * cached_multiplier
+            + write_subset * input_price * cache_write_multiplier
             + cache_read_tokens * input_price * cache_read_multiplier
-            + cache_write_tokens * input_price * CACHE_WRITE_MULTIPLIER
+            + cache_write_tokens * input_price * cache_write_multiplier
             + output_tokens * output_price)
     if batch:
         cost *= 0.5
     return round(cost)
+
+
+def _response_counters(response):
+    """The token counters a provider response dict (LLMProvider.get_completion
+    / llm_batch result) may carry, as calculate_llm_cost_microdollars's
+    keyword names, 0 when absent. Anthropic reports cache_read_tokens /
+    cache_write_tokens, OpenAI cached_input_tokens /
+    cache_write_subset_tokens; the other pair is always 0."""
+    def get(key):
+        return response.get(key, 0) or 0
+    return {
+        "input_tokens": get("input_tokens"),
+        "output_tokens": get("output_tokens"),
+        "cache_read_tokens": get("cache_read_input_tokens"),
+        "cache_write_tokens": get("cache_creation_input_tokens"),
+        "cached_input_tokens": get("cached_tokens"),
+        "cache_write_subset_tokens": get("cache_write_subset_tokens"),
+    }
+
+
+def llm_cost_from_response(model_id, response, batch=None):
+    """calculate_llm_cost_microdollars fed from a provider response dict
+    (LLMProvider.get_completion / llm_batch result): picks up every cache
+    counter the provider reported so single-shot pipeline calls (profile,
+    recent context, todo merge, ...) price cache reads and writes the
+    same way conversation turns do. batch=None reads the dict's own
+    "batch" flag."""
+    return calculate_llm_cost_microdollars(
+        model_id,
+        batch=bool(response.get("batch")) if batch is None else batch,
+        **_response_counters(response),
+    )
+
+
+def llm_cost_log_fields(model_id, response, batch=None):
+    """The APICostLog token + cost columns for one model call, from the
+    provider response dict — the ONE place the two providers' counters
+    are folded into the unified column semantics (#187/#189/#286):
+
+    input_tokens       = full prompt size. Anthropic reports the uncached
+                         portion, so its cache reads + writes complete it;
+                         OpenAI's input_tokens is already the full prompt.
+    cache_read_tokens  = input SERVED from cache: Anthropic cache reads +
+                         OpenAI cached_tokens (one of the two is always 0).
+    cache_write_tokens = input WRITTEN to cache: Anthropic cache creation
+                         + the OpenAI write subset (likewise).
+    cost_microdollars  = llm_cost_from_response.
+
+    Spread into APICostLog(...) so every call site (conversation turns,
+    cache warm, profile, digest, poll draft, ...) fills the same columns
+    the same way; the admin hit-rate (served / full prompt input) then
+    holds for any request_type."""
+    c = _response_counters(response)
+    return {
+        "input_tokens": (c["input_tokens"] + c["cache_read_tokens"]
+                         + c["cache_write_tokens"]),
+        "output_tokens": c["output_tokens"],
+        "cache_read_tokens": c["cache_read_tokens"] + c["cached_input_tokens"],
+        "cache_write_tokens": (c["cache_write_tokens"]
+                               + c["cache_write_subset_tokens"]),
+        "cost_microdollars": llm_cost_from_response(
+            model_id, response, batch=batch),
+    }
 
 
 def calculate_audio_cost_microdollars(model_id, duration_seconds):

@@ -1,6 +1,6 @@
-"""Integration tests for privacy filtering on feed, public dashboard, and node detail.
+"""Integration tests for privacy filtering on the Log, public dashboard, and node detail.
 
-Tests that private nodes are excluded from list endpoints (feed, public dashboard)
+Tests that private nodes are excluded from list endpoints (Log, public dashboard)
 and that the node detail endpoint returns 403 for unauthorized access.
 
 These tests build a minimal Flask app to avoid conflicts with module-level
@@ -59,11 +59,11 @@ def _make_app():
     def load_user(user_id):
         return User.query.get(int(user_id))
 
-    from backend.routes.feed import feed_bp
+    from backend.routes.log import log_bp
     from backend.routes.dashboard import dashboard_bp
     from backend.routes.nodes import nodes_bp
 
-    app.register_blueprint(feed_bp, url_prefix="/api")
+    app.register_blueprint(log_bp, url_prefix="/api")
     app.register_blueprint(dashboard_bp, url_prefix="/api/dashboard")
     app.register_blueprint(nodes_bp, url_prefix="/api/nodes")
 
@@ -154,16 +154,16 @@ def _login(client, user_id):
         sess["_fresh"] = True
 
 
-# ── Feed ─────────────────────────────────────────────────────────────────
+# ── Log ──────────────────────────────────────────────────────────────────
 
-class TestFeedPrivacy:
-    """GET /api/feed should only return the caller's own nodes (personal log)."""
+class TestLogPrivacy:
+    """GET /api/log should only return the caller's own nodes (personal log)."""
 
-    def test_feed_shows_only_own_nodes(self, app, data):
+    def test_log_shows_only_own_nodes(self, app, data):
         client = app.test_client()
         _login(client, data["alice_id"])
 
-        resp = client.get("/api/feed")
+        resp = client.get("/api/log")
         assert resp.status_code == 200
         previews = [n["preview"] for n in resp.json["nodes"]]
 
@@ -174,26 +174,30 @@ class TestFeedPrivacy:
         assert "Bob public post" not in previews   # other user's node
         assert "Bob private post" not in previews   # other user's node
 
-    def test_feed_shows_own_private_nodes(self, app, data):
+    def test_log_shows_own_private_nodes(self, app, data):
         client = app.test_client()
         _login(client, data["bob_id"])
 
-        resp = client.get("/api/feed")
+        resp = client.get("/api/log")
         previews = [n["preview"] for n in resp.json["nodes"]]
 
         assert "Bob private post" in previews
         assert "Bob public post" not in previews  # #228: public ≠ Log
         assert "Alice public post" not in previews  # other user's node
 
-    def test_feed_total_count_only_own_nodes(self, app, data):
-        """The pagination total must only include the user's own nodes."""
+    def test_log_lists_only_own_nodes_and_no_corpus_wide_total(self, app, data):
+        """Only the user's own rows are paged, and the response carries no
+        `total`: counting it re-ran the whole-corpus subtree walk on every
+        page for nothing the client reads."""
         client = app.test_client()
         _login(client, data["alice_id"])
 
-        resp = client.get("/api/feed")
+        resp = client.get("/api/log")
         # Alice sees only her private node (#228: her public one lives on
         # the public page, not in the Log).
-        assert resp.json["total"] == 1
+        assert len(resp.json["nodes"]) == 1
+        assert "total" not in resp.json
+        assert resp.json["has_more"] is False and resp.json["next_cursor"] is None
 
 
 # ── Public Dashboard ─────────────────────────────────────────────────────

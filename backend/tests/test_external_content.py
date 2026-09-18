@@ -230,6 +230,50 @@ def test_twitter_reconnect_clears_disconnected_notice(app, client,
     assert notice.status == "read" and notice.read_at is not None
 
 
+def test_token_grants_authenticate_a_confidential_client(monkeypatch):
+    """An app registered WITH a client secret is a confidential client, and
+    X then requires HTTP Basic on every grant. Only the code exchange sent
+    it, so every nightly refresh came back 401 invalid_client and the sync
+    parked the account as revoked (#313)."""
+    import requests
+    import backend.utils.external_content as ext_content
+    calls = []
+
+    def fake_post(url, **kw):
+        calls.append((url, kw))
+        r = MagicMock()
+        r.json.return_value = {"access_token": "a"}
+        return r
+    monkeypatch.setattr(ext_content.requests, "post", fake_post)
+
+    ext_content.x_refresh_access_token("cid", "rt", "secret")
+    ext_content.x_exchange_code("cid", "code", "http://cb", "verifier",
+                                "secret")
+    assert [kw["data"]["grant_type"] for _, kw in calls] == [
+        "refresh_token", "authorization_code"]
+    for url, kw in calls:
+        assert url == ext_content.X_TOKEN_URL
+        assert kw["auth"] == ("cid", "secret")
+        # RFC 6749 says not to send a body client_id alongside Basic, but
+        # X accepts both — the connect callback has sent both all along,
+        # and a live probe confirms X answers identically either way.
+        assert kw["data"]["client_id"] == "cid"
+
+    # A public client (registered without a secret) keeps the body-only form.
+    calls.clear()
+    ext_content.x_refresh_access_token("cid", "rt")
+    assert calls[0][1]["auth"] is None
+
+    # A rejected grant surfaces as an HTTPError for the caller to classify.
+    def failing_post(url, **kw):
+        r = MagicMock()
+        r.raise_for_status.side_effect = requests.HTTPError("HTTP 400")
+        return r
+    monkeypatch.setattr(ext_content.requests, "post", failing_post)
+    with pytest.raises(requests.HTTPError):
+        ext_content.x_refresh_access_token("cid", "rt", "secret")
+
+
 def test_ca_fetch_requires_username(app, client):
     assert client.post("/api/external/community-archive/fetch",
                        json={}).status_code == 400
@@ -759,3 +803,95 @@ def test_reference_tts_stream_gates_on_ownership_and_state(app, client):
         _db.session.commit()
     assert client.get(f"/api/sse/items/{item_id}/tts-stream").get_json()["status"] == "completed"
     assert client.get("/api/sse/items/999/tts-stream").status_code == 404
+
+
+# ── X bookmark paging (#271 follow-up: per-post billing) ────────────────
+
+class _FakeXResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+def _x_pages(monkeypatch, n_total, drop_every=None):
+    """Serve n_total bookmarks over as many requests as the caller asks
+    for, honoring max_results; record each request's max_results. Every
+    drop_every-th tweet has no text, so normalization drops it while X
+    still returns (and bills) it."""
+    from backend.utils import external_content as content
+    calls = []
+    state = {"next": 0}
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        size = params["max_results"]
+        assert 1 <= size <= content.X_BOOKMARKS_PAGE_SIZE
+        calls.append(size)
+        start = state["next"]
+        ids = list(range(start, min(start + size, n_total)))
+        state["next"] = start + len(ids)
+        data = [{"id": str(i), "author_id": "a",
+                 "text": (None if drop_every and i % drop_every == 0
+                          else f"t{i}")} for i in ids]
+        payload = {"data": data,
+                   "includes": {"users": [{"id": "a", "username": "u"}]},
+                   "meta": ({"next_token": f"tok{state['next']}"}
+                            if state["next"] < n_total else {})}
+        return _FakeXResponse(payload)
+    monkeypatch.setattr(content.requests, "get", fake_get)
+    return calls
+
+
+def test_x_bookmark_pages_start_small_and_double_to_the_cap(monkeypatch):
+    """A quiet night costs the first (small) page; a busy one still gets
+    full-size pages after a few requests."""
+    from backend.utils import external_content as content
+    calls = _x_pages(monkeypatch, n_total=400)
+    pages = list(content.x_fetch_bookmark_pages("tok", "42", max_items=800))
+    assert calls == [10, 20, 40, 80, 100, 100, 100]
+    # X returns only what is left on the last page; that is what it bills.
+    assert [returned for _items, returned in pages] == [
+        10, 20, 40, 80, 100, 100, 50]
+    assert sum(len(items) for items, _r in pages) == 400
+    assert content.X_BOOKMARKS_FIRST_PAGE_SIZE == calls[0]
+
+
+def test_x_bookmark_pages_send_false_keeps_the_page_size(monkeypatch):
+    """The caller can freeze growth with send(False) — the sync does so
+    after a page that reached known bookmarks, so the closing page costs
+    the same as the one before it, not double. send(None)/send(True)
+    grow as plain iteration does."""
+    from backend.utils import external_content as content
+    calls = _x_pages(monkeypatch, n_total=400)
+    gen = content.x_fetch_bookmark_pages("tok", "42", max_items=800)
+    gen.send(None)
+    gen.send(True)
+    gen.send(False)
+    gen.send(False)
+    gen.send(None)
+    assert calls == [10, 20, 20, 20, 40]
+
+
+def test_x_bookmark_pages_never_ask_for_more_than_max_items(monkeypatch):
+    """The last request asks X for exactly the remainder, so max_items
+    never makes X return (and bill) posts we then throw away."""
+    from backend.utils import external_content as content
+    calls = _x_pages(monkeypatch, n_total=400)
+    pages = list(content.x_fetch_bookmark_pages("tok", "42", max_items=35))
+    assert calls == [10, 20, 5]
+    assert sum(r for _items, r in pages) == 35
+
+
+def test_x_bookmark_pages_report_returned_count_incl_dropped(monkeypatch):
+    """A tweet without text is dropped from the page but was still
+    returned by X — the per-page returned count is what X bills."""
+    from backend.utils import external_content as content
+    _x_pages(monkeypatch, n_total=10, drop_every=5)  # drops ids 0 and 5
+    (items, returned), = list(
+        content.x_fetch_bookmark_pages("tok", "42", max_items=800))
+    assert returned == 10
+    assert len(items) == 8

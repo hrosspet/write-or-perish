@@ -45,46 +45,72 @@ DOWNLOAD_CHUNK = 8 << 20  # 8 MB
 DUCKDB_MEMORY_LIMIT = "256MB"
 
 
+_HANDLE_RE = re.compile(r"[A-Za-z0-9_]{1,64}")
+
+
 class CommunityArchiveError(Exception):
     """User-facing problem (unknown handle, API failure)."""
 
 
-def _get(table, params):
+def _get(table, params, timeout=None):
     query = urllib.parse.urlencode(params)
     req = urllib.request.Request(
         f"{SUPABASE_URL}/rest/v1/{table}?{query}",
         headers={"apikey": ANON_KEY, "Authorization": f"Bearer {ANON_KEY}"},
     )
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+    with urllib.request.urlopen(req, timeout=timeout or TIMEOUT) as resp:
         return json.load(resp)
 
 
-def fetch_account(handle):
-    """{account_id, username, account_display_name, num_tweets} or None."""
+def fetch_account(handle, timeout=None):
+    """{account_id, username, account_display_name, num_tweets} for the one
+    archive account whose username equals ``handle`` (case-insensitively),
+    or None. Raises CommunityArchiveError when several accounts match.
+
+    The REST filter is ``ilike``, whose ``_`` and ``%`` are wildcards, so
+    ``jane_doe`` also fetches ``jane1doe``; rows are therefore matched
+    exactly here, never taken as returned. Loore keys X logins on the id
+    this returns, so a look-alike's id would let that other X user into
+    the account. Same exact rule as fetch_account_parquet."""
     handle = (handle or "").strip().lstrip("@")
-    if not handle:
+    # X handles are [A-Za-z0-9_]; anything else cannot be in the archive,
+    # and "*" / "%" would be wildcards in the filter below.
+    if not _HANDLE_RE.fullmatch(handle):
         return None
     rows = _get("all_account", {
-        "username": f"ilike.{handle}",
+        # "_" is ilike's single-character wildcard: escaped, or "_____"
+        # matches every five-letter username and can overrun the server's
+        # row cap, dropping the exact match or hiding a duplicate.
+        "username": "ilike." + handle.replace("_", "\\_"),
         "select": "account_id,username,account_display_name,num_tweets,created_via",
-    })
-    return rows[0] if rows else None
+    }, **({"timeout": timeout} if timeout else {}))
+    exact = {}
+    for row in rows:
+        if (row.get("username") or "").lower() == handle.lower():
+            exact.setdefault(str(row.get("account_id")), row)
+    if len(exact) > 1:
+        raise CommunityArchiveError(
+            f"@{handle}: {len(exact)} Community Archive accounts have exactly "
+            "that username; refusing to guess which one")
+    return next(iter(exact.values()), None)
 
 
-def iter_tweets(handle, page_size=PAGE_SIZE, on_page=None):
-    """Yield enriched_tweets rows for a handle in tweet_id order, one page
+def iter_tweets(account_id, page_size=PAGE_SIZE, on_page=None, timeout=None):
+    """Yield enriched_tweets rows for an account in tweet_id order, one page
     at a time (memory = one page). ``on_page(fetched_so_far)`` is called
-    after each page for progress reporting."""
+    after each page for progress reporting. Keyed on the account id, not
+    the username: a username filter is ``ilike`` (``_`` is a wildcard) and
+    could pull a look-alike account's tweets into the wrong archive."""
     last_id, fetched = None, 0
     while True:
         params = {
-            "username": f"ilike.{handle}",
+            "account_id": f"eq.{account_id}",
             "order": "tweet_id.asc",
             "limit": page_size,
         }
         if last_id is not None:
             params["tweet_id"] = f"gt.{last_id}"
-        rows = _get("enriched_tweets", params)
+        rows = _get("enriched_tweets", params, **({"timeout": timeout} if timeout else {}))
         for row in rows:
             yield row
         fetched += len(rows)
@@ -328,7 +354,7 @@ def coverage_summary(handle, snapshot_dir=None, scan_limit=CHECK_SCAN_LIMIT):
                     "originals": None, "est_tokens": None,
                     "detail_source": "count_only"})
         return out
-    out.update(_summarize_rows(iter_tweets(account["username"])))
+    out.update(_summarize_rows(iter_tweets(account["account_id"])))
     out["detail_source"] = "rest"
     if archived is not None and archived != out["archived"]:
         out["archived_live"] = archived

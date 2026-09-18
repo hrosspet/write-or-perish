@@ -1,8 +1,8 @@
-import re
 from datetime import datetime, timedelta
 
 from flask import Blueprint, redirect, url_for, flash, current_app, request, jsonify
 from flask_login import login_user, logout_user, login_required, current_user
+from sqlalchemy.exc import IntegrityError
 from backend.models import User
 from backend.extensions import db
 from flask_dance.contrib.twitter import twitter
@@ -11,17 +11,13 @@ from backend.utils.magic_link import (
     generate_magic_link_token, verify_magic_link_token,
     hash_token, generate_unique_username,
 )
-from backend.utils.email import send_magic_link_email
-from backend.utils.reserved_usernames import (
-    is_username_reserved, derive_available_username,
-)
+from backend.utils.email import send_magic_link_email, is_valid_email
+from backend.utils.reserved_usernames import derive_available_username
 import logging
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 
 logger = logging.getLogger(__name__)
 auth_bp = Blueprint("auth_bp", __name__)
-
-EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def is_safe_redirect_url(target):
@@ -42,6 +38,69 @@ def is_safe_redirect_url(target):
     return True
 
 
+def _confirm_email_flow_redirect(next_url):
+    """Where to send a sign-in that would have to CREATE an account while
+    the person is on their way to /confirm-email (#260), or None.
+
+    The page behind the mailed confirmation link asks a signed-out visitor
+    to sign in. The address in front of them is the one they are confirming,
+    so typing it into the sign-in form is the natural mistake — and sign-in
+    doubles as sign-up: it would create a second account that owns the
+    address, and the account that asked could never bind it. Signing in on
+    the way to a confirmation therefore never creates an account (by magic
+    link or by X); an ordinary sign-up for the same address is untouched,
+    so a pending change cannot be used to keep someone from signing up."""
+    if (not next_url or not is_safe_redirect_url(next_url)
+            or urlparse(next_url).path != "/confirm-email"):
+        return None
+    frontend_url = current_app.config.get("FRONTEND_URL", "")
+    return redirect(f"{frontend_url}/login?error=confirm_needs_account"
+                    f"&returnUrl={quote(next_url, safe='')}")
+
+
+def _drop_x_token():
+    """Forget flask-dance's stored X token for this session, so the next
+    "Sign in with X" goes through X again instead of reusing it."""
+    twitter_bp = current_app.blueprints.get("twitter")
+    if twitter_bp is not None:
+        try:
+            del twitter_bp.token
+        except KeyError:
+            pass
+
+
+def _create_x_user(twitter_id, screen_name):
+    """First X login for this X id: a fresh account.
+
+    The X id is the only identity an X login carries. The handle is never
+    used to find an existing account: magic-link usernames are the email's
+    local part and X handles are freely re-registrable, so a handle match
+    proves nothing, and linking on it let whoever held a handle log into
+    someone else's account. Accounts created ahead of their owner's first
+    login (admin whitelist, pre-fill) carry the X id from creation and are
+    found by it. Attaching an X id to an account that signs in another way
+    needs that account's owner signed in (a Connect-X flow, not built).
+
+    The handle only seeds the username; a taken or reserved handle gets a
+    derived one. Two callbacks for the same X id can race here: the loser's
+    insert fails on the unique X id, so re-read and use the winner's row.
+    """
+    for _attempt in range(2):
+        user = User(twitter_id=twitter_id,
+                    username=derive_available_username(screen_name))
+        db.session.add(user)
+        try:
+            db.session.commit()
+            return user
+        except IntegrityError:
+            db.session.rollback()
+            existing = User.query.filter_by(twitter_id=twitter_id).first()
+            if existing is not None:
+                return existing
+            # Lost a race on the derived username instead: derive again.
+    raise RuntimeError(f"could not create an account for X id {twitter_id}")
+
+
 @auth_bp.route("/login")
 def login():
     # Capture the 'next' parameter for post-login redirect
@@ -57,6 +116,10 @@ def login():
     resp = twitter.get("account/verify_credentials.json")
     if not resp.ok:
         logger.error(f"Failed to fetch Twitter credentials. Status: {resp.status_code}")
+        # The token is what failed (revoked on X, expired app auth): keep
+        # it and every retry in this browser fails the same way until the
+        # cookies are cleared, since twitter.authorized stays true.
+        _drop_x_token()
         flash("Failed to fetch user info from Twitter.", "error")
         # Redirect to frontend instead of non-existent 'index' route
         return redirect(current_app.config.get('FRONTEND_URL', '/'))
@@ -65,23 +128,24 @@ def login():
     username = tw_info["screen_name"]
     user = User.query.filter_by(twitter_id=twitter_id).first()
     if not user:
-        # check whether user created just with handle (eg via whitelist)
-        user = User.query.filter_by(username=username).first()
-        if user:
-            # set correct twitter id
-            user.twitter_id = twitter_id
-            db.session.commit()
-        else:
-            # create new user. If the Twitter handle collides with a reserved
-            # name (brand/founder/system), derive a non-reserved, unique
-            # fallback rather than 400-ing the OAuth callback.
-            if is_username_reserved(username):
-                username = derive_available_username(username)
-            user = User(twitter_id=twitter_id, username=username)
-            db.session.add(user)
-            db.session.commit()
+        refused = _confirm_email_flow_redirect(session.get('next_url'))
+        if refused is not None:
+            # Not the X account they meant, or an account that signs in by
+            # email: forget this X token so the next try goes through X.
+            session.pop('next_url', None)
+            _drop_x_token()
+            return refused
+        user = _create_x_user(twitter_id, username)
 
     login_user(user, remember=True)
+    # Record the sign-in itself, not only the app requests that follow:
+    # "has anyone ever signed into this account" (a placeholder has not)
+    # must not depend on the app loading afterwards. Time only, no path:
+    # the Activity tab's "where they last were" is an area of the app, and
+    # the app's bootstrap calls would not overwrite "/auth/login" until
+    # the person opened something.
+    from backend.utils.activity import touch_last_seen
+    touch_last_seen(user, None)
     flash("Logged in successfully!", "success")
 
     # Redirect to stored next_url if available, otherwise dashboard
@@ -99,7 +163,7 @@ def magic_link_send():
     email = (data.get("email") or "").strip().lower()
     next_url = data.get("next_url")
 
-    if not email or not EMAIL_RE.match(email):
+    if not is_valid_email(email):
         return jsonify({"error": "Please enter a valid email address."}), 400
 
     if next_url and not is_safe_redirect_url(next_url):
@@ -156,6 +220,9 @@ def magic_link_verify():
         if user.magic_link_token_hash != token_h:
             return redirect(f"{frontend_url}/login?error=link_already_used")
     else:
+        refused = _confirm_email_flow_redirect(next_url)
+        if refused is not None:
+            return refused
         # New user — create account
         username = generate_unique_username(email)
         user = User(
@@ -178,6 +245,15 @@ def magic_link_verify():
 @login_required
 def logout():
     logout_user()
+    # Drop flask-dance's stored X token as well. Left in the session, the
+    # next "Sign in with X" in this browser skipped X and went straight
+    # back into the account that just signed out (shared devices).
+    _drop_x_token()
     flash("Logged out successfully", "success")
     frontend_url = current_app.config.get("FRONTEND_URL")
+    # "Sign out and use the other account" on /confirm-email comes back to
+    # the confirmation, which then asks for the right sign-in.
+    next_url = request.args.get("next")
+    if next_url and is_safe_redirect_url(next_url):
+        return redirect(f"{frontend_url}{next_url}")
     return redirect(frontend_url)

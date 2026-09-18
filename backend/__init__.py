@@ -121,8 +121,10 @@ def create_app():
     #
     # If the user is logged in but not approved:
     #   - Allow access to /auth, /static, and /favicon.ico.
-    #   - Exempt GET requests to /api/dashboard (for retrieving current user info)
-    #     and PUT requests to /api/dashboard/user (for updating user info, e.g. email).
+    #   - Exempt GET requests to /api/dashboard (for retrieving current user info),
+    #     PUT requests to /api/dashboard/user (for updating user info) and the
+    #     email flow under /api/dashboard/email (a waitlisted signup leaves
+    #     their address before approval).
     #   - For other API requests, return a 403 JSON error.
     #   - For other (HTML) requests, redirect to "/" with the query flag ?alpha=1.
     @app.before_request
@@ -154,9 +156,17 @@ def create_app():
 
         # Exempt endpoints that the frontend needs:
         # Allow GET requests to /api/dashboard to fetch current user info.
-        # Allow PUT requests to /api/dashboard/user to update the profile (and email).
+        # Allow PUT requests to /api/dashboard/user to update the profile.
+        # Allow the email flow (#260): request, confirm, cancel, remove. A
+        # waitlisted signup leaves their address on the thank-you page, and
+        # Activate & Welcome refuses an account without one. PUT
+        # /api/dashboard/user no longer takes an email.
+        email_path = request.path.rstrip("/")
         if (request.method == "GET" and request.path.startswith("/api/dashboard")) or \
            (request.method == "PUT" and request.path.startswith("/api/dashboard/user")) or \
+           (request.method in ("POST", "DELETE")
+                and (email_path == "/api/dashboard/email"
+                     or email_path.startswith("/api/dashboard/email/"))) or \
            request.path.startswith("/api/terms"):
             return
 
@@ -188,8 +198,8 @@ def create_app():
     from backend.routes.import_data import import_bp
     app.register_blueprint(import_bp, url_prefix="/api")
 
-    from backend.routes.feed import feed_bp
-    app.register_blueprint(feed_bp, url_prefix="/api")
+    from backend.routes.log import log_bp
+    app.register_blueprint(log_bp, url_prefix="/api")
 
     from backend.routes.search import search_bp
     app.register_blueprint(search_bp, url_prefix="/api")

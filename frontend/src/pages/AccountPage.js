@@ -5,6 +5,7 @@ import ModelSelector from "../components/ModelSelector";
 import CraftIcon from "../components/CraftIcon";
 import api from "../api";
 import useSubmitShortcut from "../hooks/useSubmitShortcut";
+import { emailState } from "../utils/emailState";
 
 export default function AccountPage() {
   const { user, setUser } = useUser();
@@ -29,6 +30,87 @@ export default function AccountPage() {
   const usernameInputRef = useRef(null);
 
   const [selectedModel, setSelectedModel] = useState(user?.preferred_model || null);
+
+  // Email change / add (#260). The address only binds when the link sent
+  // to it is confirmed from inside this account (ConfirmEmailPage); until
+  // then the backend keeps it as pending_email and we show "check your
+  // inbox".
+  const [emailInput, setEmailInput] = useState("");
+  const [emailSaving, setEmailSaving] = useState(false);
+  const [emailMsg, setEmailMsg] = useState(null); // { type, text }
+  const emailInputRef = useRef(null);
+  // One request at a time. emailSaving alone does not do it: state lands a
+  // render later, so a second handler in the same tick (or a double click)
+  // still saw false, and each POST mails a link that voids the one before.
+  const emailInFlight = useRef(false);
+
+  const sendEmailLink = async (address, { resend = false } = {}) => {
+    const value = (address || "").trim();
+    if (!value || emailInFlight.current) return;
+    emailInFlight.current = true;
+    setEmailSaving(true);
+    setEmailMsg(null);
+    try {
+      const res = await api.post("/dashboard/email", { email: value });
+      setUser((prev) => ({ ...prev, ...emailState(res.data) }));
+      setEmailInput("");
+      // The pending notice below is the confirmation of a first send.
+      if (resend) {
+        setEmailMsg({ type: "success", text: "New link sent. The earlier one no longer works." });
+      }
+    } catch (e) {
+      setEmailMsg({
+        type: "error",
+        text: e.response?.data?.error || "Could not send the confirmation email.",
+      });
+    } finally {
+      emailInFlight.current = false;
+      setEmailSaving(false);
+    }
+  };
+
+  // Both answer with the account's email state as the server has it, so a
+  // change confirmed elsewhere since this page loaded shows up here.
+  const cancelPendingEmail = async () => {
+    if (emailInFlight.current) return;
+    emailInFlight.current = true;
+    setEmailSaving(true);
+    setEmailMsg(null);
+    try {
+      const res = await api.delete("/dashboard/email/pending");
+      setUser((prev) => ({ ...prev, ...emailState(res.data) }));
+    } catch (e) {
+      setEmailMsg({ type: "error", text: "Could not cancel the pending change." });
+    } finally {
+      emailInFlight.current = false;
+      setEmailSaving(false);
+    }
+  };
+
+  const removeEmail = async () => {
+    if (emailInFlight.current) return;
+    emailInFlight.current = true;
+    setEmailSaving(true);
+    setEmailMsg(null);
+    try {
+      const res = await api.delete("/dashboard/email");
+      setUser((prev) => ({ ...prev, ...emailState(res.data) }));
+      setEmailMsg({ type: "success", text: "Email removed. You sign in with X." });
+    } catch (e) {
+      setEmailMsg({ type: "error", text: e.response?.data?.error || "Could not remove the email." });
+    } finally {
+      emailInFlight.current = false;
+      setEmailSaving(false);
+    }
+  };
+
+  // Cmd+Return / Ctrl+Enter; plain Enter is the input's onKeyDown, which
+  // leaves the modified key to this hook so one keypress sends one link.
+  useSubmitShortcut(
+    emailInputRef,
+    () => sendEmailLink(emailInput),
+    !emailSaving && !!emailInput.trim(),
+  );
 
   // Privacy / AI usage defaults
   const [privacySaving, setPrivacySaving] = useState(false);
@@ -139,6 +221,12 @@ export default function AccountPage() {
 
   const rowStyle = { marginBottom: "1.25rem" };
 
+  const inlineActionStyle = {
+    background: "none", border: "none", padding: 0,
+    color: "var(--accent)", cursor: "pointer",
+    fontFamily: "var(--sans)", fontSize: "inherit",
+  };
+
   if (!user) return null;
 
   return (
@@ -217,17 +305,102 @@ export default function AccountPage() {
         <div style={helperStyle}>Letters, numbers, and underscores only.</div>
       </div>
 
-      <div style={rowStyle}>
+      <div style={rowStyle} id="email">
         <div style={labelStyle}>Email</div>
-        <div
-          style={{
-            ...inputStyle,
-            backgroundColor: "transparent",
-            border: "1px solid var(--border)",
-            opacity: 0.6,
-          }}
-        >
-          {user.email || "—"}
+        <div style={{ display: "flex", gap: "8px" }}>
+          <input
+            ref={emailInputRef}
+            type="email"
+            aria-label={user.email ? `New email address (current: ${user.email})` : "Email address"}
+            value={emailInput}
+            placeholder={user.email || "Add an email to sign in with"}
+            onChange={(e) => {
+              setEmailInput(e.target.value);
+              setEmailMsg(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.metaKey && !e.ctrlKey) sendEmailLink(emailInput);
+            }}
+            style={{ ...inputStyle, flex: 1 }}
+          />
+          <button
+            onClick={() => sendEmailLink(emailInput)}
+            disabled={emailSaving || !emailInput.trim()}
+            style={{
+              padding: "8px 16px",
+              borderRadius: "6px",
+              border: "1px solid var(--accent)",
+              background: "none",
+              color: "var(--accent)",
+              fontFamily: "var(--sans)",
+              fontWeight: 300,
+              fontSize: "0.85rem",
+              whiteSpace: "nowrap",
+              cursor: emailSaving || !emailInput.trim() ? "default" : "pointer",
+              opacity: emailSaving || !emailInput.trim() ? 0.4 : 1,
+            }}
+          >
+            {emailSaving ? "Sending..." : "Send confirmation link"}
+          </button>
+        </div>
+        {user.pending_email && (
+          <div style={helperStyle}>
+            {user.pending_email_expired
+              ? `The confirmation link sent to ${user.pending_email} has expired.`
+              : `Confirmation link sent to ${user.pending_email}. Open it to make it your sign-in address. Nothing after a few minutes? Check the spelling; an address that already signs in to Loore can't be added here.`}
+            {" "}
+            <span style={{ whiteSpace: "nowrap" }}>
+              <button
+                type="button"
+                onClick={() => sendEmailLink(user.pending_email, { resend: true })}
+                disabled={emailSaving}
+                style={inlineActionStyle}
+              >
+                {user.pending_email_expired ? "Send a new link" : "Resend"}
+              </button>
+              {" · "}
+              <button
+                type="button"
+                onClick={cancelPendingEmail}
+                disabled={emailSaving}
+                style={inlineActionStyle}
+              >
+                Cancel
+              </button>
+            </span>
+          </div>
+        )}
+        {emailMsg && (
+          <div
+            style={{
+              ...helperStyle,
+              color: emailMsg.type === "error" ? "var(--accent)" : "var(--text-muted)",
+            }}
+          >
+            {emailMsg.text}
+          </div>
+        )}
+        <div style={helperStyle}>
+          {user.email
+            ? "The new address becomes yours once you confirm it from the link we send to it."
+            : "You currently sign in with X only."}
+          {user.email && user.twitter_login && (
+            <>
+              {" "}
+              <button
+                type="button"
+                onClick={removeEmail}
+                disabled={emailSaving}
+                style={{
+                  background: "none", border: "none", padding: 0,
+                  color: "var(--text-muted)", textDecoration: "underline",
+                  cursor: "pointer", fontFamily: "var(--sans)", fontSize: "inherit",
+                }}
+              >
+                Remove email
+              </button>
+            </>
+          )}
         </div>
       </div>
 

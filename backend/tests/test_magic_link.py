@@ -20,6 +20,8 @@ from flask import Flask
 from backend.utils.magic_link import (
     generate_magic_link_token,
     verify_magic_link_token,
+    generate_email_change_token,
+    verify_email_change_token,
     hash_token,
     generate_unique_username,
 )
@@ -74,6 +76,44 @@ class TestTokenExpiry:
             tampered = token + "x"
             payload = verify_magic_link_token(tampered)
             assert payload is None
+
+
+class TestEmailChangeTokens:
+    """Signed under their own salt (#260): an email-change token must never
+    pass for a sign-in token — /auth/magic-link/verify would sign in, or
+    create, an account for the address it carries — nor the reverse."""
+
+    def test_round_trip(self, app):
+        with app.app_context():
+            token = generate_email_change_token(7, "new@example.com")
+            assert verify_email_change_token(token) == {
+                "user_id": 7, "email": "new@example.com"}
+
+    def test_not_a_sign_in_token_and_vice_versa(self, app):
+        with app.app_context():
+            change = generate_email_change_token(7, "new@example.com")
+            sign_in = generate_magic_link_token("new@example.com")
+            assert verify_magic_link_token(change) is None
+            assert verify_email_change_token(sign_in) is None
+
+    def test_has_its_own_lifetime(self, app):
+        app.config["EMAIL_CHANGE_EXPIRY_SECONDS"] = 3600
+        with app.app_context():
+            with patch("itsdangerous.timed.TimestampSigner.get_timestamp",
+                       return_value=int(time.time()) - 1800):
+                half_hour_old = generate_email_change_token(7, "a@example.com")
+            with patch("itsdangerous.timed.TimestampSigner.get_timestamp",
+                       return_value=int(time.time()) - 3700):
+                too_old = generate_email_change_token(7, "a@example.com")
+            # older than a sign-in link lives (900 s), still good
+            assert verify_email_change_token(half_hour_old) is not None
+            assert verify_email_change_token(too_old) is None
+
+    def test_malformed(self, app):
+        with app.app_context():
+            assert verify_email_change_token("not-a-token") is None
+            assert verify_email_change_token(
+                generate_email_change_token(7, "a@example.com") + "x") is None
 
 
 class TestHashToken:

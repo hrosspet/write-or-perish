@@ -1,6 +1,7 @@
 import React, { useState, useRef, forwardRef, useImperativeHandle, useEffect, useCallback } from "react";
 import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 import { useDraft } from "../hooks/useDraft";
+import usePersistedToggle from "../hooks/usePersistedToggle";
 import { useUser } from "../contexts/UserContext";
 import StreamingMicButton from "./StreamingMicButton";
 import PrivacySelector from "./PrivacySelector";
@@ -98,10 +99,14 @@ const NodeForm = forwardRef(
         localStorage.setItem('loore_last_ai_usage', aiUsage);
       }
     }, [aiUsage, remembersChoices, aiUsageFromGlobalDefault]);
-    // "Agentic Reply" — opt-in to attaching the textmode system prompt
-    // (profile + recent + todo + prefs as context). Local state, OFF by
-    // default — deliberate and distinct from "auto-generate".
-    const [useAgenticPrompt, setUseAgenticPrompt] = useState(false);
+    // "Agentic Reply" — attaches the textmode system prompt (profile +
+    // recent + todo + prefs as context). ON by default wherever it is
+    // offered (#261: a first message without it is the weakest possible
+    // first impression, and a pre-loaded account only pays off on the
+    // agentic path) and remembered in localStorage like Auto-generate, so
+    // switching it off is respected while a fresh account starts agentic.
+    const [useAgenticPrompt, setUseAgenticPrompt] = usePersistedToggle(
+      'loore_agentic_reply', allowAgenticPrompt);
 
     // "Auto-generate" — does an LLM reply fire automatically on submit,
     // so the user doesn't have to click LLM Response manually on the
@@ -112,20 +117,8 @@ const NodeForm = forwardRef(
     // the LLM fires via /textmode/start regardless; if Agentic is OFF
     // and Auto-generate is ON we follow the /nodes/ POST with an
     // explicit /nodes/<id>/llm call.
-    const [useAutoGenerate, setUseAutoGenerateState] = useState(() => {
-      if (!allowAgenticPrompt) return false;
-      const stored = localStorage.getItem('loore_auto_generate');
-      return stored === null ? true : stored === 'true';
-    });
-    const setUseAutoGenerate = useCallback((next) => {
-      setUseAutoGenerateState(prev => {
-        const resolved = typeof next === 'function' ? next(prev) : next;
-        if (allowAgenticPrompt) {
-          localStorage.setItem('loore_auto_generate', String(resolved));
-        }
-        return resolved;
-      });
-    }, [allowAgenticPrompt]);
+    const [useAutoGenerate, setUseAutoGenerate] = usePersistedToggle(
+      'loore_auto_generate', allowAgenticPrompt);
 
     // Draft auto-save hook
     const {

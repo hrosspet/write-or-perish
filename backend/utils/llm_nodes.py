@@ -97,8 +97,8 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     # locking is what closes the create-vs-soft-delete race under READ
     # COMMITTED — a plain SELECT-then-INSERT can't see the concurrent
     # deleted_at UPDATE in time. See backend/utils/node_deletion.py.
-    from backend.utils.node_deletion import ParentDeletedError
-    parent = Node.query.with_for_update().get(parent_node_id)
+    from backend.utils.node_deletion import ParentDeletedError, lock_node
+    parent = lock_node(parent_node_id)
     if parent is None:
         raise ParentDeletedError("Parent node not found")
     if parent.deleted_at is not None:

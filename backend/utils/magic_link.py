@@ -34,6 +34,39 @@ def verify_magic_link_token(token):
         return None
 
 
+# Email-change tokens (#260) are signed under their own salt, so they are
+# not sign-in tokens: /auth/magic-link/verify rejects one as a bad
+# signature instead of signing in (or creating) an account for the address
+# it carries. They are only accepted by POST /api/dashboard/email/confirm,
+# inside a session of the account named in the token.
+_EMAIL_CHANGE_SALT = "email-change"
+
+
+def email_change_expiry_seconds():
+    return current_app.config.get("EMAIL_CHANGE_EXPIRY_SECONDS", 86400)
+
+
+def generate_email_change_token(user_id, email):
+    return _get_serializer().dumps(
+        {"user_id": user_id, "email": email}, salt=_EMAIL_CHANGE_SALT)
+
+
+def verify_email_change_token(token):
+    """The token's payload, or None when it is malformed, not an
+    email-change token, or older than EMAIL_CHANGE_EXPIRY_SECONDS."""
+    try:
+        payload = _get_serializer().loads(
+            token, salt=_EMAIL_CHANGE_SALT,
+            max_age=email_change_expiry_seconds())
+    except (SignatureExpired, BadSignature):
+        return None
+    if (not isinstance(payload, dict)
+            or not isinstance(payload.get("user_id"), int)
+            or not isinstance(payload.get("email"), str)):
+        return None
+    return payload
+
+
 def hash_token(token):
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
