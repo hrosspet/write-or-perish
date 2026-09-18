@@ -1022,6 +1022,7 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
     nodes_created = 0
     nodes_skipped = 0
     nodes_restored = 0
+    nodes_empty = 0
     skipped_alive_ids = []
     key_index, deleted_keys = _load_source_key_index(user_id)
     parent_id = None
@@ -1036,6 +1037,16 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
             continue
 
         content = tweet_data.get('full_text', '')
+        if not content.strip():
+            # A tweet with no text (a media-only post, whose text in the
+            # export is empty) would become a blank node: nothing for the
+            # profile to read, a blank card in the Log, and a row no
+            # encryption pass can ever touch — set_content("") stores the
+            # empty string as-is. 39 of these reached prod before this
+            # guard, across 8 accounts (#317).
+            nodes_empty += 1
+            continue
+
         token_count = tweet_data.get(
             'token_count', approximate_token_count(content)
         )
@@ -1118,6 +1129,7 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
         "profile_update_task_id": profile_update_task_id,
         "created": nodes_created,
         "skipped": nodes_skipped,
+        "empty": nodes_empty,
         "restored": nodes_restored,
         "updated": nodes_updated,
     }
