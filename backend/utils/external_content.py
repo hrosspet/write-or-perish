@@ -211,19 +211,48 @@ def x_fetch_bookmark_pages(access_token, x_user_id, max_items=800):
             page_size = min(page_size * 2, X_BOOKMARKS_PAGE_SIZE)
 
 
-def x_refresh_access_token(client_id, refresh_token):
-    """OAuth2 refresh-token grant for X (PKCE public client).
+X_TOKEN_URL = "https://api.twitter.com/2/oauth2/token"
+
+
+def x_token_request(grant, client_id, client_secret=None):
+    """POST one OAuth2 grant to X's token endpoint, authenticating the
+    client the way the app's registration requires.
+
+    An app registered WITH a secret is a confidential client, and X then
+    demands HTTP Basic auth on every grant — the refresh grant included.
+    A confidential client that sends only a body ``client_id`` gets
+    401 invalid_client. Both grants go through this one function so the
+    code exchange and the refresh cannot drift apart again: for months
+    only the code exchange sent Basic auth, so every nightly refresh
+    401'd and the sync parked the account as revoked (#313).
 
     Returns the token-endpoint JSON ({access_token, refresh_token, ...}).
     """
+    auth = (client_id, client_secret) if client_secret else None
     resp = requests.post(
-        "https://api.twitter.com/2/oauth2/token",
-        data={
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": client_id,
-        },
+        X_TOKEN_URL,
+        data=dict(grant, client_id=client_id),
+        auth=auth,
         timeout=30,
     )
     resp.raise_for_status()
     return resp.json()
+
+
+def x_exchange_code(client_id, code, redirect_uri, code_verifier,
+                    client_secret=None):
+    """OAuth2 authorization-code grant (PKCE) — the connect callback."""
+    return x_token_request({
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "code_verifier": code_verifier,
+    }, client_id, client_secret)
+
+
+def x_refresh_access_token(client_id, refresh_token, client_secret=None):
+    """OAuth2 refresh-token grant — the nightly sync's token renewal."""
+    return x_token_request({
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+    }, client_id, client_secret)

@@ -29,7 +29,7 @@ const InlineQuoteBubble = ({ quote, onClick }) => {
   }
 
   const text = quote.content || "";
-  // Use same length as Feed's Bubble component (250 chars)
+  // Use same length as the Log's Bubble component (250 chars)
   const truncatedText = text.length > 250 ? text.substring(0, 250) + "..." : text;
 
   return (

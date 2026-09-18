@@ -10,7 +10,7 @@ import { asCardNode, sourceLabel } from '../utils/references';
 /**
  * The References log (#232): everything the user saved from elsewhere
  * (clipped pages, tweets, archive tweets), newest saved first, shown
- * with the Log's cards. Mirrors Feed so the two read as one family;
+ * with the Log's cards. Mirrors Log so the two read as one family;
  * cards open the reference page the way Log cards open a thread.
  */
 function ReferencesPage({ onSearchClick }) {

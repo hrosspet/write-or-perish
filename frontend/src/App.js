@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Routes, Route, Navigate, useNavigate, useParams } from 'react-router-dom';
 import LandingPage from "./components/LandingPage";
-import Feed from "./components/Feed";
+import Log from "./components/Log";
 import NavBar from "./components/NavBar";
 import NodeFormModal from "./components/NodeFormModal";
 import SpendCapBanner from "./components/SpendCapBanner";
@@ -227,7 +227,7 @@ function App() {
           <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
           <Route path="/todo" element={<ProtectedRoute><TodoPage /></ProtectedRoute>} />
           {/* Log (renamed from feed) */}
-          <Route path="/log" element={<ProtectedRoute><Feed onSearchClick={() => openSearch('archive')} /></ProtectedRoute>} />
+          <Route path="/log" element={<ProtectedRoute><Log onSearchClick={() => openSearch('archive')} /></ProtectedRoute>} />
           {/* Backward compatibility redirects */}
           <Route path="/feed" element={<Navigate to="/log" replace />} />
           <Route path="/dashboard" element={<Navigate to="/profile" replace />} />

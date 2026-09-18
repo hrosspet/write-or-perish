@@ -51,9 +51,9 @@ def _make_app():
         return User.query.get(int(user_id))
 
     from backend.routes.nodes import nodes_bp
-    from backend.routes.feed import feed_bp
+    from backend.routes.log import log_bp
     app.register_blueprint(nodes_bp, url_prefix="/nodes")
-    app.register_blueprint(feed_bp, url_prefix="/api")
+    app.register_blueprint(log_bp, url_prefix="/api")
 
     return app
 
@@ -138,8 +138,8 @@ def _stored_name(root_id):
     return row.get_name() if row is not None else None
 
 
-def _feed_card(client, root_id):
-    resp = client.get("/api/feed")
+def _log_card(client, root_id):
+    resp = client.get("/api/log")
     assert resp.status_code == 200
     return next(c for c in resp.json["nodes"] if c["thread_root_id"] == root_id)
 
@@ -156,14 +156,14 @@ def test_owner_names_thread_and_log_card_carries_it(app, alice):
     assert resp.json["thread_name"] == "Teplárna plan"
 
     assert _stored_name(root.id) == "Teplárna plan"
-    assert _feed_card(client, root.id)["thread_name"] == "Teplárna plan"
+    assert _log_card(client, root.id)["thread_name"] == "Teplárna plan"
 
 
 def test_card_without_name_has_null(app, alice):
     root = _make_node(alice)
     client = app.test_client()
     _login(client, alice)
-    assert _feed_card(client, root.id)["thread_name"] is None
+    assert _log_card(client, root.id)["thread_name"] is None
 
 
 def test_empty_string_clears_name(app, alice):
@@ -176,7 +176,7 @@ def test_empty_string_clears_name(app, alice):
     assert resp.status_code == 200
     assert resp.json["thread_name"] is None
     assert _stored_name(root.id) is None
-    assert _feed_card(client, root.id)["thread_name"] is None
+    assert _log_card(client, root.id)["thread_name"] is None
 
 
 def test_whitespace_is_trimmed_and_blank_clears(app, alice):
@@ -299,7 +299,7 @@ def test_name_goes_through_content_encryption(app, alice, monkeypatch):
     assert _rename(client, root.id, "Secret label").status_code == 200
     _db.session.expire_all()
     assert _db.session.get(Thread, root.id).name == "ENC:Secret label"
-    assert _feed_card(client, root.id)["thread_name"] == "Secret label"
+    assert _log_card(client, root.id)["thread_name"] == "Secret label"
 
 
 def test_deleting_root_removes_thread_row(app, alice):

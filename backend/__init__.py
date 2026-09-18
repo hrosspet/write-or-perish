@@ -198,8 +198,8 @@ def create_app():
     from backend.routes.import_data import import_bp
     app.register_blueprint(import_bp, url_prefix="/api")
 
-    from backend.routes.feed import feed_bp
-    app.register_blueprint(feed_bp, url_prefix="/api")
+    from backend.routes.log import log_bp
+    app.register_blueprint(log_bp, url_prefix="/api")
 
     from backend.routes.search import search_bp
     app.register_blueprint(search_bp, url_prefix="/api")
