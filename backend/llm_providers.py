@@ -59,7 +59,8 @@ class LLMProvider:
     @staticmethod
     def get_completion(model_id: str, messages: list, api_keys: dict,
                        max_tokens: int = None, tools: list = None,
-                       prompt_cache_key: str = None) -> dict:
+                       prompt_cache_key: str = None,
+                       output_schema: dict = None) -> dict:
         """
         Generate a completion using the specified model.
 
@@ -69,6 +70,8 @@ class LLMProvider:
             api_keys: Dict with "openai" and "anthropic" keys
             max_tokens: Optional max output tokens (overrides provider default)
             tools: Optional list of tool definitions (Anthropic format)
+            output_schema: Optional JSON schema the reply must match
+                (structured output; the same shape the batch path takes)
 
         Returns:
             Dict with:
@@ -96,11 +99,12 @@ class LLMProvider:
             return LLMProvider._call_openai(
                 api_model, messages, api_keys["openai"], max_tokens,
                 tools=tools, prompt_cache_key=prompt_cache_key,
-                context_window=config.get("context_window"))
+                context_window=config.get("context_window"),
+                output_schema=output_schema)
         elif provider == "anthropic":
             return LLMProvider._call_anthropic(
                 api_model, messages, api_keys["anthropic"], max_tokens,
-                tools=tools)
+                tools=tools, output_schema=output_schema)
         else:
             raise ValueError(f"Unknown provider: {provider}")
 
@@ -108,7 +112,8 @@ class LLMProvider:
     def _call_openai(model: str, messages: list, api_key: str,
                      max_tokens: int = None, tools: list = None,
                      prompt_cache_key: str = None,
-                     context_window: int = None) -> dict:
+                     context_window: int = None,
+                     output_schema: dict = None) -> dict:
         """
         Call OpenAI via the Responses API (/v1/responses).
 
@@ -175,6 +180,10 @@ class LLMProvider:
                 }
                 for tool in tools
             ]
+        if output_schema:
+            kwargs["text"] = {"format": {
+                "type": "json_schema", "name": "feed_reply",
+                "schema": output_schema, "strict": True}}
 
         try:
             response = client.responses.create(**kwargs)
@@ -368,7 +377,8 @@ class LLMProvider:
 
     @staticmethod
     def _call_anthropic(model: str, messages: list, api_key: str,
-                        max_tokens: int = None, tools: list = None) -> dict:
+                        max_tokens: int = None, tools: list = None,
+                        output_schema: dict = None) -> dict:
         """
         Call Anthropic API with the given model and messages.
 
@@ -409,6 +419,9 @@ class LLMProvider:
         )
         if tools:
             kwargs["tools"] = tools
+        if output_schema:
+            kwargs["output_config"] = {
+                "format": {"type": "json_schema", "schema": output_schema}}
 
         try:
             response = client.messages.create(**kwargs)

@@ -332,3 +332,323 @@ class TestReadFromNode:
         _login(client, alice.id)
         resp = client.post("/api/read/from-node/9999", json={"model": "gpt-5"})
         assert resp.status_code == 404
+
+
+# ── Tests: AI usage is always 'chat' ───────────────────────────────────
+
+
+class TestFeedAiUsage:
+    """The reply quotes other people's public tweets, which Loore has no
+    licence to train on: a 'train' default or thread is lowered to
+    'chat' on both nodes of a read (ca_feed.FEED_AI_USAGE)."""
+
+    def test_train_default_lowered_to_chat_on_start(self, app):
+        client = app.test_client()
+        alice = _make_user("alice", is_admin=True, default_ai_usage="train")
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.post("/api/read/start", json={"model": "gpt-5"})
+
+        assert resp.status_code == 202, resp.get_json()
+        data = resp.get_json()
+        assert Node.query.get(data["prompt_node_id"]).ai_usage == "chat"
+        assert Node.query.get(data["llm_node_id"]).ai_usage == "chat"
+
+    def test_train_thread_lowered_to_chat_from_node(self, app):
+        client = app.test_client()
+        alice = _make_user("alice", is_admin=True)
+        entry = _make_node(alice, content="entry", ai_usage="train")
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.post(f"/api/read/from-node/{entry.id}",
+                           json={"model": "gpt-5"})
+
+        assert resp.status_code == 202, resp.get_json()
+        data = resp.get_json()
+        assert Node.query.get(data["prompt_node_id"]).ai_usage == "chat"
+        assert Node.query.get(data["llm_node_id"]).ai_usage == "chat"
+        assert Node.query.get(entry.id).ai_usage == "train"  # untouched
+
+
+# ── Tests: cancel & rerun ──────────────────────────────────────────────
+
+
+def _make_read_reply(alice, *, status="processing", batch=True,
+                     provider="openai", task_id="old-task"):
+    """A read prompt node with an LLM reply under it, optionally parked
+    on a submitted batch."""
+    import json
+    prompt = _make_prompt_node(alice, "read")
+    prompt.prompt_key = "read"
+    reply = _make_node(alice, parent_id=prompt.id, content="[pending]",
+                       node_type="llm", llm_model="gpt-5")
+    reply.llm_task_status = status
+    reply.llm_task_id = task_id
+    if batch:
+        reply.tool_calls_meta = json.dumps([{
+            "name": "_batch", "batch_id": "batch_1", "custom_id": f"node-{reply.id}",
+            "model": "gpt-5", "provider": provider,
+            "submitted_at": "2026-09-16T08:00:00", "status": "submitted",
+        }])
+    _db.session.commit()
+    return prompt, reply
+
+
+def _llm_task(monkeypatch):
+    """A fresh mock of the completion task module for one test: other
+    test files install their own mock of backend.tasks.llm_completion,
+    and the route imports it at call time."""
+    module = MagicMock()
+    monkeypatch.setitem(sys.modules, "backend.tasks.llm_completion", module)
+    return module.generate_llm_response
+
+
+class TestRerun:
+    def test_cancels_batch_and_reruns_live(self, app, monkeypatch):
+        task = _llm_task(monkeypatch)
+        import json
+        from backend.utils import llm_batch
+        cancelled = []
+        monkeypatch.setattr(llm_batch, "openai_batch_cancel_one",
+                            lambda key, batch_id: cancelled.append(batch_id))
+        client = app.test_client()
+        alice = _make_user("alice", is_admin=True)
+        prompt, reply = _make_read_reply(alice)
+
+        _login(client, alice.id)
+        resp = client.post(f"/api/read/{reply.id}/rerun", json={"live": True})
+
+        assert resp.status_code == 202, resp.get_json()
+        data = resp.get_json()
+        assert data["live"] is True
+        assert data["cancelled_batches"] == ["batch_1"]
+        assert cancelled == ["batch_1"]
+        task.app.control.revoke \
+            .assert_called_once_with("old-task")
+        task.apply_async.assert_called_once()
+        _, kwargs = task.apply_async.call_args
+        assert kwargs["args"] == (prompt.id, reply.id, "gpt-5", alice.id)
+        assert kwargs["kwargs"] == {"source_mode": None, "ca_live": True}
+        fresh = Node.query.get(reply.id)
+        # The new task id is on the node before the dispatch (the task's
+        # superseded-poll guard compares against it).
+        assert fresh.llm_task_id == kwargs["task_id"] == data["task_id"]
+        assert fresh.llm_task_id != "old-task"
+        assert fresh.llm_task_status == "processing"
+        assert fresh.llm_task_progress == 0
+        meta = json.loads(fresh.tool_calls_meta)
+        # The old entry stays as history, marked cancelled; the task's
+        # poll only looks at 'submitted' entries.
+        assert [m["status"] for m in meta] == ["cancelled"]
+        assert meta[0]["cancelled_at"]
+
+    def test_batch_being_withdrawn_is_cancelled_by_the_rerun_too(self, app, monkeypatch):
+        """An entry the poll is withdrawing (the user hit the spend cap)
+        is still live: the rerun cancels it again, best effort, and
+        marks it cancelled like a submitted one."""
+        task = _llm_task(monkeypatch)
+        import json
+        from backend.utils import llm_batch
+        cancelled = []
+        monkeypatch.setattr(llm_batch, "openai_batch_cancel_one",
+                            lambda key, batch_id: cancelled.append(batch_id))
+        client = app.test_client()
+        alice = _make_user("alice", is_admin=True)
+        prompt, reply = _make_read_reply(alice)
+        meta = json.loads(reply.tool_calls_meta)
+        meta[0]["status"] = "cancelling"
+        meta[0]["cancel_requested_at"] = "2026-09-17T10:00:00"
+        reply.tool_calls_meta = json.dumps(meta)
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.post(f"/api/read/{reply.id}/rerun", json={"live": True})
+
+        assert resp.status_code == 202, resp.get_json()
+        assert resp.get_json()["cancelled_batches"] == ["batch_1"]
+        assert cancelled == ["batch_1"]
+        task.apply_async.assert_called_once()
+        meta = json.loads(Node.query.get(reply.id).tool_calls_meta)
+        assert [m["status"] for m in meta] == ["cancelled"]
+        assert meta[0]["cancel_requested_at"] == "2026-09-17T10:00:00"
+
+    def test_resubmits_as_batch_when_not_live(self, app, monkeypatch):
+        task = _llm_task(monkeypatch)
+        from backend.utils import llm_batch
+        monkeypatch.setattr(llm_batch, "openai_batch_cancel_one",
+                            lambda key, batch_id: None)
+        client = app.test_client()
+        alice = _make_user("alice", is_admin=True)
+        prompt, reply = _make_read_reply(alice)
+
+        _login(client, alice.id)
+        resp = client.post(f"/api/read/{reply.id}/rerun", json={})
+
+        assert resp.status_code == 202, resp.get_json()
+        assert resp.get_json()["live"] is False
+        _, kwargs = task.apply_async.call_args
+        assert kwargs["kwargs"]["ca_live"] is False
+
+    def test_cancel_failure_does_not_block_the_rerun(self, app, monkeypatch):
+        task = _llm_task(monkeypatch)
+        import json
+        from backend.utils import llm_batch
+
+        def boom(key, batch_id):
+            raise RuntimeError("already ended")
+        monkeypatch.setattr(llm_batch, "openai_batch_cancel_one", boom)
+        client = app.test_client()
+        alice = _make_user("alice", is_admin=True)
+        _, reply = _make_read_reply(alice)
+
+        _login(client, alice.id)
+        resp = client.post(f"/api/read/{reply.id}/rerun", json={"live": True})
+
+        assert resp.status_code == 202, resp.get_json()
+        meta = json.loads(Node.query.get(reply.id).tool_calls_meta)
+        assert meta[0]["status"] == "cancelled"
+        assert "already ended" in meta[0]["cancel_error"]
+
+    def test_failed_reply_without_batch_reruns(self, app, monkeypatch):
+        task = _llm_task(monkeypatch)
+        client = app.test_client()
+        alice = _make_user("alice", is_admin=True)
+        _, reply = _make_read_reply(alice, status="failed", batch=False)
+        reply.llm_task_error = "boom"
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.post(f"/api/read/{reply.id}/rerun", json={"live": True})
+
+        assert resp.status_code == 202, resp.get_json()
+        assert resp.get_json()["cancelled_batches"] == []
+        fresh = Node.query.get(reply.id)
+        assert fresh.llm_task_status == "processing"
+        assert fresh.llm_task_error is None
+        task.apply_async.assert_called_once()
+
+    def test_completed_reply_is_left_alone(self, app, monkeypatch):
+        task = _llm_task(monkeypatch)
+        client = app.test_client()
+        alice = _make_user("alice", is_admin=True)
+        _, reply = _make_read_reply(alice, status="completed")
+
+        _login(client, alice.id)
+        resp = client.post(f"/api/read/{reply.id}/rerun", json={"live": True})
+
+        assert resp.status_code == 409
+        task.apply_async.assert_not_called()
+
+    def test_ordinary_llm_reply_is_not_a_read(self, app, monkeypatch):
+        task = _llm_task(monkeypatch)
+        client = app.test_client()
+        alice = _make_user("alice", is_admin=True)
+        entry = _make_node(alice, content="entry")
+        reply = _make_node(alice, parent_id=entry.id, content="[pending]",
+                           node_type="llm", llm_model="gpt-5")
+        reply.llm_task_status = "processing"
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.post(f"/api/read/{reply.id}/rerun", json={"live": True})
+
+        assert resp.status_code == 400
+        task.apply_async.assert_not_called()
+
+    def test_non_admin_refused(self, app, monkeypatch):
+        task = _llm_task(monkeypatch)
+        client = app.test_client()
+        bob = _make_user("bob")
+        _, reply = _make_read_reply(bob)
+
+        _login(client, bob.id)
+        resp = client.post(f"/api/read/{reply.id}/rerun", json={"live": True})
+        assert resp.status_code == 403
+
+    def test_other_users_reply_rejected(self, app, monkeypatch):
+        task = _llm_task(monkeypatch)
+        client = app.test_client()
+        alice = _make_user("alice", is_admin=True)
+        eve = _make_user("eve", is_admin=True)
+        _, reply = _make_read_reply(alice)
+
+        _login(client, eve.id)
+        resp = client.post(f"/api/read/{reply.id}/rerun", json={"live": True})
+        assert resp.status_code == 403
+
+
+# ── Tests: the read never runs under the agentic prompt ────────────────
+
+
+class TestStripAgenticPrompts:
+    """The context a read is built from drops Voice / Text mode prompt
+    nodes wherever they sit and keeps the conversation around them."""
+
+    def test_agentic_root_dropped_sharing_kept(self, app):
+        from backend.utils.session_helpers import (
+            chain_has_agentic_prompt, strip_agentic_prompts)
+        alice = _make_user("alice", is_admin=True)
+        voice = _make_prompt_node(alice, "voice")
+        voice.prompt_key = "voice"
+        sharing = _make_node(alice, parent_id=voice.id, content="my morning")
+        reply = _make_node(alice, parent_id=sharing.id, content="reply",
+                           node_type="llm", llm_model="gpt-5")
+        read = _make_prompt_node(alice, "read_thread", parent_id=reply.id)
+        read.prompt_key = "read_thread"
+        _db.session.commit()
+
+        chain, dropped = strip_agentic_prompts(
+            [voice, sharing, reply, read], keep=read)
+
+        assert dropped == [voice]
+        assert chain == [sharing, reply, read]
+        assert not chain_has_agentic_prompt(chain)
+
+    def test_mid_thread_agentic_prompt_dropped_history_before_it_kept(self, app):
+        from backend.utils.session_helpers import strip_agentic_prompts
+        alice = _make_user("alice", is_admin=True)
+        root = _make_node(alice, content="root sharing")
+        textmode = _make_prompt_node(alice, "textmode", parent_id=root.id)
+        textmode.prompt_key = "textmode"
+        later = _make_node(alice, parent_id=textmode.id, content="later")
+        read = _make_prompt_node(alice, "read_thread", parent_id=later.id)
+        read.prompt_key = "read_thread"
+        _db.session.commit()
+
+        chain, dropped = strip_agentic_prompts(
+            [root, textmode, later, read], keep=read)
+
+        assert dropped == [textmode]
+        assert chain == [root, later, read]
+
+    def test_linked_prompt_without_stamp_is_still_recognised(self, app):
+        # Roots attached before Node.prompt_key existed resolve the key
+        # through the linked UserPrompt (Node.get_prompt_key).
+        from backend.utils.session_helpers import strip_agentic_prompts
+        alice = _make_user("alice", is_admin=True)
+        voice = _make_prompt_node(alice, "voice")
+        sharing = _make_node(alice, parent_id=voice.id, content="x")
+        _db.session.commit()
+        assert voice.prompt_key is None
+        chain, dropped = strip_agentic_prompts([voice, sharing])
+        assert dropped == [voice] and chain == [sharing]
+
+    def test_nothing_to_drop(self, app):
+        from backend.utils.session_helpers import strip_agentic_prompts
+        alice = _make_user("alice", is_admin=True)
+        read = _make_prompt_node(alice, "read")
+        read.prompt_key = "read"
+        _db.session.commit()
+        chain, dropped = strip_agentic_prompts([read])
+        assert dropped == [] and chain == [read]
+
+    def test_keep_wins_over_the_key(self, app):
+        from backend.utils.session_helpers import strip_agentic_prompts
+        alice = _make_user("alice", is_admin=True)
+        voice = _make_prompt_node(alice, "voice")
+        voice.prompt_key = "voice"
+        _db.session.commit()
+        chain, dropped = strip_agentic_prompts([voice], keep=voice)
+        assert dropped == [] and chain == [voice]

@@ -8,6 +8,7 @@ alone but walked through, since the user's own replies may sit under
 them — the same promise soft_delete_node makes.
 """
 from backend.models import Node
+from backend.utils.ca_feed import is_feed_node
 from backend.utils.encryption import prefetch_deks
 from backend.utils.privacy import can_user_edit_node
 
@@ -52,8 +53,12 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
                 n.pinned_by = None
             touched = True
         if ai_usage is not None and n.ai_usage != ai_usage:
-            n.ai_usage = ai_usage
-            touched = True
+            # A read's nodes never take 'train' (ca_feed.FEED_AI_USAGE):
+            # the cascade leaves them as they are, like the editor
+            # refuses the same change on the node itself.
+            if not (ai_usage == "train" and is_feed_node(n)):
+                n.ai_usage = ai_usage
+                touched = True
         if touched:
             changed.append(n)
     return changed
