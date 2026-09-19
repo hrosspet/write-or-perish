@@ -1047,6 +1047,14 @@ def _focal_own_fields(node):
             data["feed_picks_count"] = FeedPick.query.filter_by(
                 node_id=node.id).count()
     data.update(_system_prompt_fields(node))
+    # A Community Archive read reply: the thread page shows what the read
+    # covered (the window, from the pinned render) and offers to read
+    # the day again. Focal node only — two small lookups.
+    if node.node_type == "llm" or node.llm_model:
+        from backend.utils.ca_feed import is_read_reply, read_window_fields
+        if is_read_reply(node):
+            data["read_reply"] = True
+            data["read_window"] = read_window_fields(node.feed_render)
     return data
 
 

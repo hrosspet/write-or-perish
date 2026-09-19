@@ -106,10 +106,17 @@ def quote_stamp(iso: Optional[str], tz_name: Optional[str] = None) -> Optional[s
 
 
 def resolve_ext_quotes(content: str, user_id: int,
-                       for_llm: bool = False) -> Tuple[str, List[int]]:
+                       for_llm: bool = False,
+                       marks: bool = True) -> Tuple[str, List[int]]:
     """Replace {quote_ext:ID} placeholders with the saved reference's
     content, verbatim from the DB. No recursion — external items don't
-    nest. Returns (resolved_content, list_of_resolved_item_ids)."""
+    nest. Returns (resolved_content, list_of_resolved_item_ids).
+
+    ``marks=False`` leaves the user's read mark and verdict out of the
+    rendering: for an assistant turn re-sent on later turns, whose bytes
+    must not change as the user marks things (the marks then travel in
+    the note at the end of the prompt, see
+    llm_completion._reference_marks_note)."""
     if not content:
         return content, []
     item_ids = find_ext_quote_ids(content)
@@ -142,9 +149,9 @@ def resolve_ext_quotes(content: str, user_id: int,
             # how they rated it (the same two facts search previews
             # carry). Absent attributes mean unread / unrated.
             read_attr = (f' read="{d["read_at"][:10]}"'
-                         if d.get("read_at") else "")
+                         if marks and d.get("read_at") else "")
             verdict_attr = (f' verdict="{d["feedback"]}"'
-                            if d.get("feedback") else "")
+                            if marks and d.get("feedback") else "")
             return (
                 f'<quoted_reference id="{item_id}" source="{d["source"]}" '
                 f'author="{author}"{title_attr}{posted_attr}'
@@ -154,12 +161,12 @@ def resolve_ext_quotes(content: str, user_id: int,
         label = f'"{title}" from {author}' if title else f"from {author}"
         # The same two marks in the human rendering (exports): they are
         # the user's own record of the pick.
-        marks = ""
-        if d.get("read_at"):
-            marks += f' · read {d["read_at"][:10]}'
-        if d.get("feedback"):
-            marks += f' · rated a {d["feedback"]} quote'
-        return (f'\n--- Saved reference {label}{posted}{marks} ---\n'
+        mark_text = ""
+        if marks and d.get("read_at"):
+            mark_text += f' · read {d["read_at"][:10]}'
+        if marks and d.get("feedback"):
+            mark_text += f' · rated a {d["feedback"]} quote'
+        return (f'\n--- Saved reference {label}{posted}{mark_text} ---\n'
                 f'{d["content"]}\n--- End reference ---\n')
 
     resolved = re.sub(EXT_QUOTE_PLACEHOLDER_PATTERN, replace, content)

@@ -24,9 +24,11 @@ const SOURCE_LABELS = {
  * the state ("Mark as unread" = read). Only the user marks a
  * reference read — the AI quoting it is tracked separately as surfacing.
  * Beside it, the good/bad-quote verdict (ReferenceFeedback) — the
- * hit-or-miss half of the recommendation record.
+ * hit-or-miss half of the recommendation record. `onReadChange(id,
+ * readAt)` tells the page, which keeps the list's read state (a read
+ * reply's "n unread") in step with the bubbles.
  */
-const ExternalQuoteBubble = ({ quote }) => {
+const ExternalQuoteBubble = ({ quote, onReadChange }) => {
   const userCtx = useUser();
   const currentUser = userCtx ? userCtx.user : null;
   const { addToast } = useToast();
@@ -62,7 +64,10 @@ const ExternalQuoteBubble = ({ quote }) => {
       ? api.delete(`/external/items/${quote.id}/read`)
       : api.post(`/external/items/${quote.id}/read`);
     req
-      .then((res) => setReadAt(res.data.read_at))
+      .then((res) => {
+        setReadAt(res.data.read_at);
+        if (onReadChange) onReadChange(quote.id, res.data.read_at);
+      })
       .catch(() => addToast('Could not update the read mark.', 4000))
       .finally(() => setMarking(false));
   };

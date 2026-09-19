@@ -83,6 +83,22 @@ def snapshot_dir_for(config):
     return STASH_ROOT.parent / "community-archive"
 
 
+@celery.task(name="backend.tasks.imports.refresh_community_archive_snapshot")
+def refresh_community_archive_snapshot():
+    """Beat sweep (every 30 min): keep the cached Community Archive export
+    current, so a read started after the nightly export (~07:00 UTC)
+    reads that day and does not wait on the 900 MB download itself (a
+    read also refreshes on its own before rendering, in case this sweep
+    is down). Maintains only a snapshot that exists — the first copy is
+    fetched by the pre-fill import or the CLI, never here, so staging
+    does not download a gigabyte per deploy."""
+    from backend.utils.ca_feed import refresh_snapshot_for_read
+    with flask_app.app_context():
+        export_id = refresh_snapshot_for_read(
+            snapshot_dir_for(flask_app.config), log=logger)
+    return {"export_id": export_id}
+
+
 def prefill_community_archive_impl(user_id, handle, options, update_state=None,
                                    seed_now=True):
     """Fetch @handle's tweets from the Community Archive (REST for small

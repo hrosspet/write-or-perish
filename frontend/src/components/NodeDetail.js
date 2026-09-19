@@ -19,6 +19,7 @@ import Bubble from "./Bubble";
 import BubbleKebabMenu from "./BubbleKebabMenu";
 import QuotedContent from "./QuotedContent";
 import FeedPicks from "./FeedPicks";
+import { ReadWindowLine, ReadReplyTail } from "./ReadReply";
 import DeleteConfirmDialog from "./DeleteConfirmDialog";
 
 // Recursive component to render children nodes.
@@ -566,10 +567,10 @@ function NodeDetail({ nodeIdOverride }) {
       });
   };
 
-  const requestLlmFor = async (parentNodeId) => {
+  const requestLlmFor = async (parentNodeId, { sourceMode = 'textmode' } = {}) => {
     const response = await api.post(`/nodes/${parentNodeId}/llm`, {
       model: selectedModel,
-      source_mode: 'textmode',
+      source_mode: sourceMode,
     });
     const newNodeId = response.data.node_id;
     if (!newNodeId) throw new Error("Failed to get a task ID for the new LLM node.");
@@ -849,10 +850,43 @@ function NodeDetail({ nodeIdOverride }) {
   // the reply is pending or after it failed.
   const parentAncestor = node.ancestors?.[node.ancestors.length - 1];
   const isReadReply = isLlmNode && (
-    (Array.isArray(node.tool_calls_meta)
+    !!node.read_reply
+    || (Array.isArray(node.tool_calls_meta)
       && node.tool_calls_meta.some(tc => tc?.name === '_batch'))
     || ['read', 'read_thread'].includes(parentAncestor?.prompt_key)
   );
+  // A read reply's picks are its {quote_ext:ID} markers. Their read state
+  // lives in externalQuotes, kept in step by the bubbles' own toggles and
+  // the tail's "Mark all as read", so the tail's "n unread" is always the
+  // list as shown.
+  const pickIds = isReadReply
+    ? Array.from(new Set(((node.content || '').match(/\{quote_ext:(\d+)\}/g) || [])
+        .map(m => m.match(/\d+/)[0])))
+    : [];
+  const picksLoaded = pickIds.every(pid => pid in externalQuotes);
+  const picksUnread = pickIds.filter(pid => externalQuotes[pid] && !externalQuotes[pid].read_at).length;
+  const handleExternalReadChange = (itemId, readAt) => setExternalQuotes(prev => (
+    prev[itemId] ? { ...prev, [itemId]: { ...prev[itemId], read_at: readAt } } : prev
+  ));
+  const handlePicksMarkedAll = (readAt) => setExternalQuotes(prev => {
+    const next = { ...prev };
+    Object.entries(readAt).forEach(([itemId, ts]) => {
+      if (next[itemId]) next[itemId] = { ...next[itemId], read_at: ts };
+    });
+    return next;
+  });
+  // "Read the day again": a reply asked for directly under a read reply
+  // is another read (the backend feeds the day back in, with these picks
+  // and the marks on them in view). Same request as LLM Response, minus
+  // the text-mode flag a read never uses.
+  const handleReadAgain = () => {
+    setError("");
+    setLlmRequesting(true);
+    requestLlmFor(id, { sourceMode: null })
+      .then((newNodeId) => setLlmTaskNodeId(newNodeId))
+      .catch(handleLlmRequestError)
+      .finally(() => setLlmRequesting(false));
+  };
   const canRerunRead = !!currentUser?.is_admin && isOwner && isReadReply
     && (isLlmPending || node.llm_task_status === 'failed');
   const showProposal = !!node.content && !isLlmPending && (
@@ -1059,6 +1093,9 @@ function NodeDetail({ nodeIdOverride }) {
             )}
           </div>
         )}
+        {isReadReply && node.read_window && (
+          <ReadWindowLine window={node.read_window} />
+        )}
         {isLlmPending ? (
           <div style={{
             display: 'flex', alignItems: 'center', gap: '10px',
@@ -1091,6 +1128,7 @@ function NodeDetail({ nodeIdOverride }) {
               content={displayContent}
               quotes={quotes}
               externalQuotes={externalQuotes}
+              onExternalReadChange={handleExternalReadChange}
               contextArtifacts={node.context_artifacts || null}
               onQuoteClick={handleBubbleClick}
               onCheckboxToggle={isOwner ? handleCheckboxToggle : undefined}
@@ -1124,6 +1162,7 @@ function NodeDetail({ nodeIdOverride }) {
               content={proposalAfter}
               quotes={quotes}
               externalQuotes={externalQuotes}
+              onExternalReadChange={handleExternalReadChange}
               contextArtifacts={node.context_artifacts || null}
               onQuoteClick={handleBubbleClick}
             />
@@ -1136,6 +1175,18 @@ function NodeDetail({ nodeIdOverride }) {
         {!isLlmPending && isOwner && node.feed_picks_count > 0
           && !/\{quote_ext:\d+\}/.test(node.content || '') && (
           <FeedPicks nodeId={node.id} />
+        )}
+        {!isLlmPending && isOwner && isReadReply
+          && node.llm_task_status === 'completed' && (
+          <ReadReplyTail
+            nodeId={node.id}
+            unread={picksUnread}
+            total={pickIds.length}
+            loaded={picksLoaded}
+            onMarkedAll={handlePicksMarkedAll}
+            onReadAgain={handleReadAgain}
+            busy={llmRequesting || !!llmTaskNodeId}
+          />
         )}
         {(() => {
           const visibleTools = (node.tool_calls_meta || [])
@@ -1262,19 +1313,23 @@ function NodeDetail({ nodeIdOverride }) {
         </NodeFooter>
         {showCraftBar && (
           <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-            <button
-              onClick={handleLLMResponse}
-              disabled={llmRequesting || !!llmTaskNodeId}
-              style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}
-            >
-              {(llmRequesting || llmTaskNodeId) ? (
-                <>
-                  <FaSpinner className="spin" aria-hidden="true" />
-                  {llmRequesting ? 'Requesting…'
-                    : llmStatus === 'pending' ? 'Waiting for AI…' : 'Generating…'}
-                </>
-              ) : 'LLM Response'}
-            </button>
+            {/* Under a read reply the response action is the tail's
+                "Read the day again"; the model picker still applies. */}
+            {!isReadReply && (
+              <button
+                onClick={handleLLMResponse}
+                disabled={llmRequesting || !!llmTaskNodeId}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}
+              >
+                {(llmRequesting || llmTaskNodeId) ? (
+                  <>
+                    <FaSpinner className="spin" aria-hidden="true" />
+                    {llmRequesting ? 'Requesting…'
+                      : llmStatus === 'pending' ? 'Waiting for AI…' : 'Generating…'}
+                  </>
+                ) : 'LLM Response'}
+              </button>
+            )}
             <ModelSelector
               nodeId={node.id}
               selectedModel={selectedModel}
@@ -1309,7 +1364,9 @@ function NodeDetail({ nodeIdOverride }) {
             hidePowerFeatures={!craftMode}
             hideAudioUpload={!craftMode}
             compact
-            placeholder="Type what's on your mind…"
+            placeholder={isReadReply
+              ? "Ask about these picks, or say what you make of them…"
+              : "Type what's on your mind…"}
             onSuccess={handleInlineSuccess}
           />
         </div>

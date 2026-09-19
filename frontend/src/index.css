@@ -485,3 +485,71 @@ code {
   color: var(--text-muted);
 }
 .feed-pick-by { margin-left: auto; color: var(--text-muted); }
+
+/* ── Community Archive read reply (ReadReply.js) ─────────────────────── */
+/* The window line above the verdict: the same quiet meta voice as the
+   prompt line above a system-prompt node. */
+.read-window {
+  margin: 0 0 0.8rem;
+  font-family: var(--sans);
+  font-size: 0.8rem;
+  font-weight: 300;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+/* The tail under the picks: a hairline separates the model's reply from
+   what the reader can do next. */
+.read-tail {
+  margin-top: 16px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  font-family: var(--sans);
+  font-size: 0.8rem;
+  font-weight: 300;
+  color: var(--text-muted);
+}
+.read-tail-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+}
+.read-tail-state {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 10px;
+}
+/* The one action that feeds the day back in: bordered like the thread's
+   top-right controls, tinted like the live "Mark as read" invitation. */
+.read-again {
+  background: none;
+  border: 1px solid var(--accent-dim);
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-family: var(--sans);
+  font-size: 0.78rem;
+  font-weight: 400;
+  color: var(--accent);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.read-again:hover,
+.read-again:focus-visible {
+  background: rgba(196, 149, 106, 0.08);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.read-again:disabled,
+.read-again:disabled:hover {
+  background: none;
+  border-color: var(--border);
+  color: var(--text-muted);
+  cursor: default;
+}
+.read-tail-hint {
+  margin: 8px 0 0;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  max-width: 64ch;
+}

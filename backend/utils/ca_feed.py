@@ -20,13 +20,46 @@ is what later turns (a second read under the same thread), exports and
 search see; the marker resolves to the reference with the user's marks on
 it (quotes.resolve_ext_quotes), so the next read knows what was already
 surfaced, read and rated.
+
+Turns of a read thread (2026-09-19, after the second feedback round):
+the day of tweets is fed to the model only for a READ — the reply that
+answers the read prompt, and any reply requested directly under a read
+reply with nothing in between (a "read again": the model sees its
+earlier picks and the user's marks on them, and whether to repeat a
+pick is its call). A user message after a read reply makes the next
+reply a CHAT turn: the picks and marks are in the context, the day of
+tweets is not (see llm_completion._ca_turn). What the reader has already
+seen — read-marked picks, X bookmarks, clipped tweets — is dropped from
+the render before the model sees it (seen_tweet_ids), and each render's
+numbering is pinned on the reply (FeedRender) so a batch collected hours
+later resolves its numbers against what was actually sent.
 """
 import json
 import logging
+from datetime import datetime
 
 log = logging.getLogger(__name__)
 
 MAX_PICKS = 20
+
+# What the model reads in place of {ca_tweets} on a chat turn: the day
+# was fed in once, for the read whose reply sits below the prompt.
+CA_TWEETS_CHAT_STUB = (
+    "(The day's tweets were provided for the read whose reply follows; "
+    "they are not repeated in this turn.)")
+
+# The user turn that closes a read-again request (a reply asked for
+# directly under a read reply). It replaces the generic "[continue]".
+CA_READ_AGAIN_TURN = (
+    "Read the day again. Your earlier picks in this thread and my marks "
+    "on them are above; tweets I marked as read are no longer in the "
+    "list. Whether to repeat an earlier pick is your call: keep it only "
+    "if you still think I should open it today. Answer in the same "
+    "shape, a verdict and the picks.")
+
+# References the reader saved from X themselves: seen by definition. A
+# clipped tweet is stored under the bookmark source (web_clip.classify_clip).
+SEEN_SOURCES = ("twitter_bookmark", "twitter_like")
 
 # Prompt keys of the two reading entry points (backend/routes/read.py).
 READ_PROMPT_KEYS = ("read", "read_thread")
@@ -98,6 +131,179 @@ def is_feed_node(node):
     if key in READ_PROMPT_KEYS:
         return True
     return bool(getattr(node, "feed_picks", None))
+
+
+def is_read_reply(node):
+    """A reply that answered a read: it has a pinned render (every read
+    since 2026-09-19), a batch entry (the batch path before that) or
+    picks (the live path before that; a pick-less live reply from then
+    is the one shape this misses)."""
+    if node is None or not (node.node_type == "llm" or node.llm_model):
+        return False
+    if '"_batch"' in (node.tool_calls_meta or ""):
+        return True  # no query
+    if getattr(node, "feed_render", None) is not None:
+        return True
+    return bool(getattr(node, "feed_picks", None))
+
+
+def seen_tweet_ids(user_id):
+    """Tweet ids the reader has already seen, to drop from a render before
+    the model sees the day: every reference they saved from X (bookmarks,
+    likes, clipped tweets) and every archive pick they marked as read.
+    An earlier pick they have NOT marked stays a candidate — inside the
+    same thread the model sees it with its marks and decides itself
+    whether to pick it again."""
+    from sqlalchemy import and_, or_
+    from backend.extensions import db
+    from backend.models import ExternalItem
+    rows = (db.session.query(ExternalItem.external_id)
+            .filter(ExternalItem.user_id == user_id,
+                    or_(ExternalItem.source.in_(SEEN_SOURCES),
+                        and_(ExternalItem.source == "community_archive",
+                             ExternalItem.read_at.isnot(None))))
+            .all())
+    return {r[0] for r in rows if r[0]}
+
+
+def record_feed_render(node, stats, refs, days=1, scope="all"):
+    """Pin what this reply's render sent the model (see FeedRender). Adds
+    to the session (or updates the reply's existing row on a rerun); the
+    caller's next commit lands it, before any batch is submitted."""
+    from backend.extensions import db
+    from backend.models import FeedRender
+    row = FeedRender.query.filter_by(node_id=node.id).first()
+    if row is None:
+        row = FeedRender(node_id=node.id)
+    row.export_id = stats.get("export_id")
+    row.days = int(days)
+    row.scope = scope or "all"
+    row.window_start = stats.get("window_start_at")
+    row.window_end = stats.get("window_end_at")
+    row.tweet_count = int(stats.get("tweets") or 0)
+    row.account_count = int(stats.get("accounts") or 0)
+    row.excluded_count = int(stats.get("excluded") or 0)
+    row.set_tweet_ids(refs[n]["tweet_id"] for n in sorted(refs))
+    row.created_at = datetime.utcnow()
+    db.session.add(row)
+    return row
+
+
+def read_window_fields(row):
+    """The reply page's record of what a read covered, from its pinned
+    render (None for replies from before renders were pinned)."""
+    from backend.utils.timefmt import iso_utc
+    if row is None:
+        return None
+    return {
+        "export_id": row.export_id,
+        "days": row.days,
+        "scope": row.scope,
+        "window_start": iso_utc(row.window_start),
+        "window_end": iso_utc(row.window_end),
+        "tweets": row.tweet_count,
+        "accounts": row.account_count,
+        "excluded": row.excluded_count,
+    }
+
+
+def pick_numbers(text):
+    """The tweet numbers a feed reply cites, in its order (unknown shapes
+    yield nothing; parse_feed_reply reports those)."""
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(data, dict) or not isinstance(data.get("picks"), list):
+        return []
+    numbers = []
+    for raw in data["picks"]:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            numbers.append(int(raw.get("n")))
+        except (TypeError, ValueError):
+            continue
+    return numbers
+
+
+def refs_from_render(row, reply_text, snapshot_dir):
+    """The refs a pinned reply's picks need, without re-rendering the day:
+    each cited number maps to the tweet id the model saw under it
+    (FeedRender.tweet_id_for), and those few tweets are fetched by id
+    from the snapshot — the current one; ids are stable across exports.
+    A tweet the snapshot no longer holds drops its pick (parse_feed_reply
+    logs it as an unknown number)."""
+    from backend.utils.community_archive import fetch_tweets_by_id
+    wanted = {}
+    for n in pick_numbers(reply_text):
+        tweet_id = row.tweet_id_for(n)
+        if tweet_id:
+            wanted[n] = tweet_id
+    found = fetch_tweets_by_id(snapshot_dir, wanted.values()) if wanted else {}
+    refs = {}
+    for n, tweet_id in wanted.items():
+        ref = found.get(tweet_id)
+        if ref is None:
+            log.warning("Feed pick #%s: tweet %s is not in the current "
+                        "snapshot; dropping it", n, tweet_id)
+            continue
+        refs[n] = ref
+    return refs
+
+
+def legacy_batches_live():
+    """Read replies still processing on a batch submitted before renders
+    were pinned (no FeedRender row). Their collect re-renders the day
+    from the snapshot and needs the numbering to match the submit, so
+    the snapshot must not change under them. Empties out once those
+    batches end; only matters across the deploy that introduced pinning."""
+    from backend.models import Node, FeedRender
+    rows = (Node.query
+            .outerjoin(FeedRender, FeedRender.node_id == Node.id)
+            .filter(Node.node_type == "llm",
+                    Node.llm_task_status == "processing",
+                    Node.deleted_at.is_(None),
+                    Node.tool_calls_meta.like('%"_batch"%'),
+                    FeedRender.id.is_(None))
+            .all())
+    for node in rows:
+        try:
+            meta = json.loads(node.tool_calls_meta or "[]") or []
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if any(isinstance(m, dict) and m.get("name") == "_batch"
+               and m.get("status") in ("submitted", "cancelling")
+               for m in meta):
+            return True
+    return False
+
+
+def refresh_snapshot_for_read(snapshot_dir, log=log):
+    """Bring the cached archive up to the latest nightly export (the
+    Community Archive exports around 07:00 UTC) so "the last day" is the
+    last day and not the day the snapshot was last fetched. Called by
+    the read before it renders and by the beat sweep. Only maintains a
+    snapshot that exists; a failed refresh is logged and the read goes
+    on with the cached export (its reply shows the window it covered
+    either way). Returns the export id in place, or None when nothing
+    was checked."""
+    from backend.utils import community_archive as ca
+    if not ca.snapshot_export_id(snapshot_dir):
+        return None
+    if legacy_batches_live():
+        log.info("Community Archive snapshot refresh skipped: a batch "
+                 "submitted before renders were pinned is still live")
+        return None
+    try:
+        export_id, refreshed = ca.refresh_snapshot(snapshot_dir)
+    except Exception as e:  # noqa: BLE001 - the read proceeds on the cache
+        log.warning("Community Archive snapshot refresh failed; reading "
+                    "the cached export: %s", e)
+        return None
+    if refreshed:
+        log.info("Community Archive snapshot refreshed to %s", export_id)
+    return export_id
 
 
 def parse_feed_reply(text, refs):
