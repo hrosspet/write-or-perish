@@ -47,9 +47,9 @@ from backend.utils.api_keys import determine_api_key_type, get_api_keys_for_usag
 from backend.utils.cost import llm_cost_log_fields
 from backend.utils.llm_batch import BatchItemFailed, BatchItemCancelled
 from backend.utils.ca_feed import (
-    CA_READ_AGAIN_TURN, CA_TWEETS_CHAT_STUB, FeedReplyError, is_read_reply,
-    record_feed_render, refresh_snapshot_for_read, refs_from_render,
-    seen_tweet_ids,
+    CA_CHAT_TURN_NOTE, CA_READ_AGAIN_TURN, CA_TWEETS_CHAT_STUB,
+    FeedReplyError, read_reply_ids, record_feed_render,
+    refresh_snapshot_for_read, refs_from_render, seen_tweet_ids,
 )
 from backend.utils.tool_meta import update_tool_meta, parse_github_issue
 from backend.utils.privacy import AI_ALLOWED
@@ -2019,8 +2019,10 @@ CA_TWEETS_STUB = "(see Community Archive tweets above)"
 CA_REFS_PINNED = "pinned"
 
 
-def _ca_turn(node_chain, ca_node, parent_node):
-    """Which turn of a read thread this reply is (backend/utils/ca_feed.py):
+def _ca_turn(node_chain, ca_node, parent_node, reply_ids):
+    """Which turn of a read thread this reply is (backend/utils/ca_feed.py);
+    *ca_node* is the newest read prompt in the chain, *reply_ids* the ids
+    of the chain's read replies (ca_feed.read_reply_ids):
 
     "read"       no reply has answered the read prompt yet: the day is
                  rendered and the model answers with a verdict and picks
@@ -2041,7 +2043,7 @@ def _ca_turn(node_chain, ca_node, parent_node):
         if n is ca_node:
             after_prompt = True
             continue
-        if after_prompt and n.deleted_at is None and is_read_reply(n):
+        if after_prompt and n.deleted_at is None and n.id in reply_ids:
             replies.append(n)
     if not replies:
         return "read"
@@ -2220,7 +2222,7 @@ def _ca_batch_submit(task, llm_node, model_id, api_model, messages,
     from backend.utils.ca_feed import FEED_SCHEMA
     batch_id = submit_one(
         api_key, custom_id, api_model, messages, max_tokens,
-        output_schema=FEED_SCHEMA if ca_refs else None)
+        output_schema=FEED_SCHEMA if ca_refs is not None else None)
     meta, _ = _batch_meta(llm_node)
     meta.append({
         "name": "_batch", "batch_id": batch_id, "custom_id": custom_id,
@@ -2696,7 +2698,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             # {ca_tweets?days=N} (PoC): the last N days of the Community
             # Archive corpus, rendered from the cached parquet snapshot.
-            # First alive node in chain order wins, like {user_export}.
+            # The NEWEST alive prompt carrying it is the read this turn
+            # may answer (a second read prompt attached under an earlier
+            # read reply is a new read; the older prompt's placeholder
+            # reads as a stub, its day was fed to the reply below it).
             # Rendered here, outside the retry loop — it never shrinks
             # (a day is ~250k tokens against a 1M window).
             ca_node = None
@@ -2708,16 +2713,37 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 if m:
                     ca_node = node
                     ca_placeholder_match = m.group(0)
-                    break
             # Only a read feeds the day in (the first reply under the
             # prompt, or one asked for directly under a read reply); a
             # chat turn about the picks gets a stub where the day was.
-            ca_turn = (_ca_turn(node_chain, ca_node, parent_node)
+            ca_reply_ids = (read_reply_ids(node_chain)
+                            if ca_node is not None else frozenset())
+            ca_turn = (_ca_turn(node_chain, ca_node, parent_node, ca_reply_ids)
                        if ca_node is not None else None)
             needs_ca = ca_turn in ("read", "read_again")
             if ca_turn is not None:
                 logger.info("Node %s: {ca_tweets} turn is %r",
                             llm_node_id, ca_turn)
+            if ca_node is not None:
+                # A read thread runs against the user's own conversation,
+                # never under the agentic system prompt: a Voice / Text
+                # mode thread's tools, mode notes and persona have nothing
+                # to do with judging tweets or talking about the picks,
+                # and the prompt is the one part of the thread the user
+                # did not write. Drop every agentic prompt node wherever
+                # it sits (a root, or one attached mid-thread) and keep
+                # the messages around it, so the thread still sees the
+                # sharing that came before an agentic session started
+                # under it. With it gone the chain is not agentic: no
+                # tools, no notes, no mode indicator — on every turn of
+                # the thread, reads and chat alike.
+                node_chain, dropped = strip_agentic_prompts(
+                    node_chain, keep=ca_node)
+                if dropped:
+                    logger.info(
+                        "Read thread for node %s: dropped agentic prompt "
+                        "node(s) %s from the context", llm_node_id,
+                        [n.id for n in dropped])
             ca_tweets_content = None
             ca_refs = None
             if needs_ca:
@@ -2779,24 +2805,6 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         # lands in the next commit, before any submit.
                         record_feed_render(llm_node, ca_stats, ca_refs,
                                            days=ca_days, scope=ca_scope)
-                # A read runs against the user's own conversation, never
-                # under the agentic system prompt: a Voice / Text mode
-                # thread's tools, mode notes and persona have nothing to
-                # do with judging tweets, and the prompt is the one part
-                # of the thread the user did not write. Drop every
-                # agentic prompt node wherever it sits (a root, or one
-                # attached mid-thread) and keep the messages around it,
-                # so the read still sees the sharing that came before an
-                # agentic session started under it. With it gone the
-                # chain is not agentic: no tools, no notes, no mode
-                # indicator.
-                node_chain, dropped = strip_agentic_prompts(
-                    node_chain, keep=ca_node)
-                if dropped:
-                    logger.info(
-                        "Read for node %s: dropped agentic prompt node(s) "
-                        "%s from the context", llm_node_id,
-                        [n.id for n in dropped])
 
             # Every context artifact is pinned to a per-session snapshot.
             # The node carrying a placeholder also carries a
@@ -3152,7 +3160,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         if has_ext_quotes(node_content):
                             quoted_ext_ids.extend(
                                 find_ext_quote_ids(node_content))
-                            if is_read_reply(node):
+                            if node.id in ca_reply_ids:
                                 # A read reply quotes tweets the model
                                 # never wrote out (it cited numbers; the
                                 # markers were filled in on collect), so
@@ -3226,25 +3234,25 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                     export_placeholder_match,
                                     "(see archive above)"
                                 )
-                        # Replace {ca_tweets} — first occurrence gets
-                        # the day's corpus, repeats get a stub. On a chat
-                        # turn (see _ca_turn) the day was read once, in
-                        # the reply below: every occurrence is a stub.
-                        if (ca_placeholder_match
-                                and ca_placeholder_match in message_text
-                                and not needs_ca):
-                            message_text = message_text.replace(
-                                ca_placeholder_match, CA_TWEETS_CHAT_STUB)
-                        elif needs_ca and ca_placeholder_match in message_text:
-                            if not replaced_ca:
-                                message_text = message_text.replace(
-                                    ca_placeholder_match,
-                                    ca_tweets_content or "", 1
-                                )
-                                replaced_ca = True
-                            message_text = message_text.replace(
-                                ca_placeholder_match, CA_TWEETS_STUB
-                            )
+                        # Replace {ca_tweets}: on a read, the newest
+                        # prompt's first occurrence gets the day's corpus
+                        # and its repeats a stub. Every other occurrence
+                        # — an older read prompt whose day went to the
+                        # reply below it, or any prompt on a chat turn
+                        # (see _ca_turn) — reads as the chat stub.
+                        if ca_node is not None and CA_TWEETS_PATTERN.search(message_text):
+                            if needs_ca and node is ca_node:
+                                if not replaced_ca:
+                                    message_text = message_text.replace(
+                                        ca_placeholder_match,
+                                        ca_tweets_content or "", 1
+                                    )
+                                    replaced_ca = True
+                                message_text = CA_TWEETS_PATTERN.sub(
+                                    CA_TWEETS_STUB, message_text)
+                            else:
+                                message_text = CA_TWEETS_PATTERN.sub(
+                                    CA_TWEETS_CHAT_STUB, message_text)
                         # Replace {user_profile} — first occurrence
                         # gets content, subsequent get emptied (dedup)
                         if USER_PROFILE_PLACEHOLDER in message_text:
@@ -3433,6 +3441,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     plain_notes.append(reference_marks)
                 if ca_turn == "read_again":
                     plain_notes.append(CA_READ_AGAIN_TURN)
+                elif ca_turn == "chat":
+                    # The read prompt above still asks for a verdict and
+                    # picks; this turn answers the user's message instead.
+                    plain_notes.append(CA_CHAT_TURN_NOTE)
 
                 if is_agentic and agentic_notes:
                     # Synthetic system-side note injected after the latest real
@@ -3756,7 +3768,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # The collecting run: the poll above found the batch ended
                 # and holds its reply; the context was built for ca_refs.
                 response = batch_resp
-                if ca_refs:
+                if ca_refs is not None:
                     response = _collect_feed_reply(
                         llm_node, response, ca_refs)
                 return _finalize(llm_node, response)

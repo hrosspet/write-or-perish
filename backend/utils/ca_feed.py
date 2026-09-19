@@ -59,7 +59,16 @@ CA_READ_AGAIN_TURN = (
 
 # References the reader saved from X themselves: seen by definition. A
 # clipped tweet is stored under the bookmark source (web_clip.classify_clip).
+# Nothing writes twitter_like yet (the frontend already labels it); listed
+# so a saved like counts as seen the day something does.
 SEEN_SOURCES = ("twitter_bookmark", "twitter_like")
+
+# The closing note of a chat turn in a read thread: the read prompt above
+# still asks for a verdict and picks, this turn answers the message.
+CA_CHAT_TURN_NOTE = (
+    "[This turn is a conversation about the picks above, not another "
+    "read: the day's tweets are not in this turn, and the answer is an "
+    "ordinary reply to the last message, not a verdict with picks.]")
 
 # Prompt keys of the two reading entry points (backend/routes/read.py).
 READ_PROMPT_KEYS = ("read", "read_thread")
@@ -145,6 +154,26 @@ def is_read_reply(node):
     if getattr(node, "feed_render", None) is not None:
         return True
     return bool(getattr(node, "feed_picks", None))
+
+
+def read_reply_ids(node_chain):
+    """Ids of the read replies in *node_chain* (see is_read_reply), in two
+    queries for the whole chain instead of two lazy loads per node."""
+    from backend.extensions import db
+    from backend.models import FeedPick, FeedRender
+    llm_ids = [n.id for n in node_chain
+               if n.node_type == "llm" or n.llm_model]
+    if not llm_ids:
+        return frozenset()
+    found = {n.id for n in node_chain
+             if n.id in llm_ids and '"_batch"' in (n.tool_calls_meta or "")}
+    rest = [i for i in llm_ids if i not in found]
+    if rest:
+        found.update(r[0] for r in db.session.query(FeedRender.node_id)
+                     .filter(FeedRender.node_id.in_(rest)).all())
+        found.update(r[0] for r in db.session.query(FeedPick.node_id)
+                     .filter(FeedPick.node_id.in_(rest)).distinct().all())
+    return frozenset(found)
 
 
 def seen_tweet_ids(user_id):
@@ -234,9 +263,18 @@ def refs_from_render(row, reply_text, snapshot_dir):
     from the snapshot — the current one; ids are stable across exports.
     A tweet the snapshot no longer holds drops its pick (parse_feed_reply
     logs it as an unknown number)."""
-    from backend.utils.community_archive import fetch_tweets_by_id
+    from backend.utils.community_archive import (
+        CA_CITATION_RE, fetch_tweets_by_id)
+    numbers = pick_numbers(reply_text)
+    # Numbers cited in the verdict prose too, so expand_ca_citations can
+    # link them (they need no pick row, just the tweet behind them).
+    try:
+        verdict = (json.loads(reply_text) or {}).get("verdict") or ""
+    except (TypeError, ValueError, AttributeError):
+        verdict = ""
+    numbers += [int(m.group(1)) for m in CA_CITATION_RE.finditer(verdict)]
     wanted = {}
-    for n in pick_numbers(reply_text):
+    for n in numbers:
         tweet_id = row.tweet_id_for(n)
         if tweet_id:
             wanted[n] = tweet_id

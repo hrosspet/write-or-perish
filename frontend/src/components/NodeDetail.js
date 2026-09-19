@@ -1313,9 +1313,10 @@ function NodeDetail({ nodeIdOverride }) {
         </NodeFooter>
         {showCraftBar && (
           <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-            {/* Under a read reply the response action is the tail's
-                "Read the day again"; the model picker still applies. */}
-            {!isReadReply && (
+            {/* Under a finished read reply the response action is the
+                tail's "Read the day again"; the model picker still
+                applies. A failed one keeps the generic button. */}
+            {!(isReadReply && node.llm_task_status === 'completed') && (
               <button
                 onClick={handleLLMResponse}
                 disabled={llmRequesting || !!llmTaskNodeId}

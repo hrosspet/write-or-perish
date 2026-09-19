@@ -801,3 +801,60 @@ def test_batch_from_before_pinning_re_renders_on_collect(app, monkeypatch, tmp_p
     assert FeedRender.query.filter_by(node_id=llm_node.id).first() is None
     assert [p.item.external_id
             for p in FeedPick.query.filter_by(node_id=llm_node.id)] == ["222"]
+
+
+def test_empty_render_still_asks_for_the_feed_shape(app, monkeypatch, tmp_path):  # noqa: F811
+    """Every tweet of the day already seen: the batch still carries the
+    schema and the collect still parses it (a verdict, no picks) instead
+    of storing an unstructured reply."""
+    from backend.models import FeedRender
+    from backend.utils import community_archive as ca
+    state = {"resp": None}
+    _script(monkeypatch, tmp_path,
+            collect=lambda: (("completed", state["resp"]) if state["resp"]
+                             else ("in_progress", None)),
+            render=lambda: ("# Community Archive: 0 tweets\n",
+                            {"tweets": 0, "excluded": 2}, {}))
+    schemas = []
+
+    def _submit(key, custom_id, api_model, messages, max_tokens,
+                output_schema=None):
+        schemas.append(output_schema)
+        return "batch_9"
+    monkeypatch.setattr(llm_batch, "openai_batch_submit_one", _submit)
+    monkeypatch.setattr(ca, "fetch_tweets_by_id",
+                        lambda *a: (_ for _ in ()).throw(AssertionError("no fetch")))
+    alice, read, llm_node = _read_thread(submitted=False)
+    with pytest.raises(_llm_task_mod.Retry):
+        _run(_Task(), alice, read, llm_node)
+    assert schemas[0]["required"] == ["verdict", "picks"]
+    row = FeedRender.query.filter_by(node_id=llm_node.id).one()
+    assert (row.tweet_ids, row.tweet_count, row.excluded_count) == ("", 0, 2)
+
+    state["resp"] = dict(_batch_resp(), batch_id="batch_9", content=json.dumps(
+        {"verdict": "Nothing new today.", "picks": []}))
+    result = _run(_Task(), alice, read, llm_node)
+    assert result["status"] == "completed"
+    node = _reload(llm_node.id)
+    assert node.get_content() == "Nothing new today."
+    assert FeedPick.query.filter_by(node_id=node.id).count() == 0
+
+
+def test_pinned_collect_links_citations_in_the_verdict(app, monkeypatch, tmp_path):  # noqa: F811
+    state = {"resp": None}
+    _script(monkeypatch, tmp_path,
+            collect=lambda: (("completed", state["resp"]) if state["resp"]
+                             else ("in_progress", None)))
+    fetched = _fetch_by_id(monkeypatch)
+    alice, read, llm_node = _read_thread(submitted=False)
+    with pytest.raises(_llm_task_mod.Retry):
+        _run(_Task(), alice, read, llm_node)
+    state["resp"] = dict(_batch_resp(), batch_id="batch_9", content=json.dumps({
+        "verdict": "Only #1 is worth a look; #2 is the pick.",
+        "picks": [{"n": 2, "qt": "Q", "relevance": 40, "recommend": True}]}))
+    result = _run(_Task(), alice, read, llm_node)
+    assert result["status"] == "completed"
+    assert fetched == [["111", "222"]]
+    content = _reload(llm_node.id).get_content()
+    assert "[#1](https://x.com/alice_w/status/111)" in content
+    assert "[#2](https://x.com/bob_b/status/222)" in content

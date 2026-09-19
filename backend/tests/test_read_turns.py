@@ -22,13 +22,13 @@ from backend.tests.test_retrieval_loop import (  # noqa: F401 (fixture)
 )
 from backend.tests.test_read_context import (
     _CapturingProvider, _prompt_node, _user_node, _stub_archive, _feed_json,
-    CORPUS, REFS,
+    _voice_thread_with_read, CORPUS, REFS,
 )
 from backend.extensions import db as _db
-from backend.models import Node, ExternalItem, FeedPick, FeedRender
+from backend.models import User, Node, ExternalItem, FeedPick, FeedRender
 from backend.utils.ca_feed import (
-    CA_READ_AGAIN_TURN, CA_TWEETS_CHAT_STUB, seen_tweet_ids,
-    refresh_snapshot_for_read,
+    CA_CHAT_TURN_NOTE, CA_READ_AGAIN_TURN, CA_TWEETS_CHAT_STUB,
+    seen_tweet_ids, refresh_snapshot_for_read,
 )
 
 
@@ -213,6 +213,9 @@ def test_user_message_after_a_read_reply_is_chat(app, monkeypatch, tmp_path):  #
     assert last["role"] == "user"
     assert ("reference %d (@bob_b) — rated a bad quote" % pick.id) in last["text"]
     assert CA_READ_AGAIN_TURN not in last["text"]
+    # ... and the closing note says this is a conversation, not a read
+    # (the prompt above still asks for a verdict and picks).
+    assert CA_CHAT_TURN_NOTE in last["text"]
 
     chat = _fresh(chat.id)
     assert chat.llm_task_status == "completed"
@@ -231,7 +234,11 @@ def test_reply_under_a_chat_reply_stays_chat(app, monkeypatch, tmp_path):  # noq
     call, kwargs = _live(monkeypatch, alice, _fresh(chat.id), follow, "Still not.")
     assert len(renders) == 1
     assert kwargs.get("output_schema") is None
-    assert call["messages"][-1]["text"].endswith("[continue]")
+    # The chat note closes the prompt (a user turn), so no "[continue]".
+    last = call["messages"][-1]
+    assert last["role"] == "user"
+    assert CA_CHAT_TURN_NOTE in last["text"]
+    assert "[continue]" not in "\n".join(_texts(call))
     assert _fresh(follow.id).get_content() == "Still not."
 
 
@@ -315,3 +322,52 @@ def test_refresh_waits_for_batches_from_before_pinning(app, monkeypatch, tmp_pat
         "provider": "openai", "status": "submitted"}])
     _db.session.commit()
     assert refresh_snapshot_for_read(tmp_path) is None
+
+
+def test_chat_turn_under_a_voice_thread_stays_out_of_the_agentic_prompt(app, monkeypatch, tmp_path):  # noqa: F811
+    """voice prompt -> sharing -> read_thread -> read reply -> question:
+    the chat turn is stripped of the agentic prompt like the read was
+    (no persona, no tools), and closes with the chat note."""
+    _capture_render(monkeypatch, tmp_path)
+    alice, read, reply = _voice_thread_with_read()
+    _live(monkeypatch, alice, read, reply, _feed_json([
+        {"n": 2, "qt": "Meets your pacing question.", "relevance": 40,
+         "recommend": True}]))
+    llm_user = User.query.get(reply.user_id)
+    question = _user_node(alice, reply.id, "why that one?")
+    _db.session.commit()
+    chat = _placeholder(llm_user, alice, question.id)
+    call, kwargs = _live(monkeypatch, alice, question, chat, "Because.")
+    joined = "\n".join(_texts(call))
+    assert "AGENTIC PERSONA AND TOOLS" not in joined
+    assert "my morning: unsure about pacing" in joined
+    assert call["tools"] is None
+    assert kwargs.get("output_schema") is None
+    assert "[#1] first tweet" not in joined
+    assert CA_CHAT_TURN_NOTE in call["messages"][-1]["text"]
+    assert _fresh(chat.id).get_content() == "Because."
+
+
+def test_second_read_prompt_under_a_read_reply_is_a_read(app, monkeypatch, tmp_path):  # noqa: F811
+    """"Read the archive" on a read reply attaches a read_thread prompt
+    under it: a new read (the newest prompt carries the day; the older
+    prompt's placeholder reads as the stub, its day went to the reply
+    below it)."""
+    renders, alice, llm_user, read, reply, _, _ = _first_read(monkeypatch, tmp_path)
+    second = _prompt_node(alice, "read_thread", parent_id=reply.id)
+    _db.session.commit()
+    again = _placeholder(llm_user, alice, second.id)
+    call, kwargs = _live(monkeypatch, alice, second, again, _feed_json([
+        {"n": 1, "qt": "The other one.", "relevance": 20, "recommend": False}]))
+    assert len(renders) == 2
+    assert kwargs["output_schema"]["required"] == ["verdict", "picks"]
+    texts = _texts(call)
+    assert "[#1] first tweet" in texts[-1]          # the new prompt
+    assert CA_TWEETS_CHAT_STUB in texts[0]          # the old prompt
+    assert "[#1] first tweet" not in texts[0]
+    assert "{ca_tweets" not in "\n".join(texts)
+    again = _fresh(again.id)
+    assert again.llm_task_status == "completed"
+    assert FeedRender.query.filter_by(node_id=again.id).one().tweet_ids == "111,222"
+    assert [p.item.external_id
+            for p in FeedPick.query.filter_by(node_id=again.id)] == ["111"]

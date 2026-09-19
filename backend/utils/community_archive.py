@@ -176,16 +176,19 @@ def snapshot_export_id(snapshot_dir):
 
 
 @contextlib.contextmanager
-def _snapshot_lock(snapshot_dir):
-    """One downloader per snapshot dir on this host. A second caller (a
-    read starting while the beat refresh downloads, two reads at once)
-    blocks here until the first is done, then finds the export in place
-    and downloads nothing. An fcntl lock dies with its process, so a
-    crashed downloader never leaves the dir locked."""
+def _snapshot_lock(snapshot_dir, shared=False):
+    """One downloader per snapshot dir on this host, and no swap under a
+    reader. The downloader takes the lock exclusively; a render or a
+    lookup takes it shared, so it never sees half a swap (the two
+    parquets and the export marker are replaced one after another) and
+    a read that starts during a download waits for it — minutes at
+    most, bounded by the transfer (a stalled one raises after TIMEOUT)
+    — and then reads the fresh export. An fcntl lock dies with its
+    process, so a crashed holder never leaves the dir locked."""
     d = pathlib.Path(snapshot_dir)
     d.mkdir(parents=True, exist_ok=True)
     with open(d / ".lock", "w") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+        fcntl.flock(fh, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
         try:
             yield
         finally:
@@ -464,7 +467,14 @@ def render_recent_tweets(snapshot_dir, days=1, exclude_usernames=(),
     if include_usernames is not None:
         included = sorted({(u or "").strip().lstrip("@").lower()
                            for u in include_usernames if u}) or ["\0"]
-    seen = sorted({str(i) for i in exclude_tweet_ids if i})
+    seen = {str(i) for i in exclude_tweet_ids if i}
+    with _snapshot_lock(snapshot_dir, shared=True):
+        return _render_recent_tweets(
+            snapshot_dir, export_id, newest, days, excluded, included, seen)
+
+
+def _render_recent_tweets(snapshot_dir, export_id, newest, days, excluded,
+                          included, seen):
     con, tweets, profiles = _duckdb(snapshot_dir)
     # Window bound computed in Python: duckdb can't correlate a subquery
     # through the outer join, and a naive-UTC comparison keeps the
@@ -483,7 +493,6 @@ def render_recent_tweets(snapshot_dir, days=1, exclude_usernames=(),
               + ([included] if included is not None else []))
     # Seen tweets are skipped (and counted) in the row loop below rather
     # than in SQL: one scan of the parquet, not two.
-    seen = set(seen)
     excluded_tweets = 0
     cur = con.execute(
         "select coalesce(p.username, t.account_id) as username, "
@@ -568,15 +577,16 @@ def fetch_tweets_by_id(snapshot_dir, tweet_ids):
     ids = sorted({str(i) for i in tweet_ids if i})
     if not ids:
         return {}
-    con, tweets, profiles = _duckdb(snapshot_dir)
-    rows = con.execute(
-        "select coalesce(p.username, t.account_id), t.tweet_id, "
-        "t.full_text, "
-        "strftime(t.created_at at time zone 'UTC', '%Y-%m-%d %H:%M:%S') "
-        "from read_parquet(?) t "
-        "left join read_parquet(?) p on p.account_id = t.account_id "
-        "where t.tweet_id in (select unnest(?::VARCHAR[]))",
-        [tweets, profiles, ids]).fetchall()
+    with _snapshot_lock(snapshot_dir, shared=True):
+        con, tweets, profiles = _duckdb(snapshot_dir)
+        rows = con.execute(
+            "select coalesce(p.username, t.account_id), t.tweet_id, "
+            "t.full_text, "
+            "strftime(t.created_at at time zone 'UTC', '%Y-%m-%d %H:%M:%S') "
+            "from read_parquet(?) t "
+            "left join read_parquet(?) p on p.account_id = t.account_id "
+            "where t.tweet_id in (select unnest(?::VARCHAR[]))",
+            [tweets, profiles, ids]).fetchall()
     out = {}
     for username, tweet_id, text, posted in rows:
         out[str(tweet_id)] = {

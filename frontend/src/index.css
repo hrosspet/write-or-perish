@@ -536,7 +536,7 @@ code {
 }
 .read-again:hover,
 .read-again:focus-visible {
-  background: rgba(196, 149, 106, 0.08);
+  background: var(--bg-surface);
   border-color: var(--accent);
   color: var(--accent);
 }

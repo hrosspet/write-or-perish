@@ -1619,7 +1619,7 @@ class FeedRender(db.Model):
     __tablename__ = "feed_render"
     id = db.Column(db.Integer, primary_key=True)
     node_id = db.Column(db.Integer, db.ForeignKey("node.id"),
-                        nullable=False, unique=True, index=True)
+                        nullable=False, unique=True)
     export_id = db.Column(db.String(64), nullable=True)
     days = db.Column(db.Integer, nullable=False, default=1)
     scope = db.Column(db.String(16), nullable=False, default="all")
