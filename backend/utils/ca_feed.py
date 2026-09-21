@@ -48,14 +48,21 @@ CA_TWEETS_CHAT_STUB = (
     "(The day's tweets were provided for the read whose reply follows; "
     "they are not repeated in this turn.)")
 
-# The user turn that closes a read-again request (a reply asked for
-# directly under a read reply). It replaces the generic "[continue]".
+# The user turn that closes a read-further request (the Read button
+# anywhere in a read thread, or a reply asked for directly under a read
+# reply). It replaces the generic "[continue]".
 CA_READ_AGAIN_TURN = (
-    "Read the day again. Your earlier picks in this thread and my marks "
-    "on them are above; tweets I marked as read are no longer in the "
-    "list. Whether to repeat an earlier pick is your call: keep it only "
-    "if you still think I should open it today. Answer in the same "
-    "shape, a verdict and the picks.")
+    "Read further: go through the day again against everything above — "
+    "your earlier picks, my marks on them, and whatever I have written "
+    "since. Tweets I have read are out of the list; an unread earlier "
+    "pick is yours to repeat if it still stands. Beyond that, find what "
+    "else is worth my time. Answer in the same shape, a verdict and the "
+    "picks.")
+
+# tool_calls_meta entry name on a placeholder the Read button created
+# inside a read thread: the task reads it as "this turn is a read", not
+# a chat about the picks (routes/read.py, llm_completion._ca_turn).
+READ_FURTHER_MARKER = "_read"
 
 # References the reader saved from X themselves: seen by definition. A
 # clipped tweet is stored under the bookmark source (web_clip.classify_clip).

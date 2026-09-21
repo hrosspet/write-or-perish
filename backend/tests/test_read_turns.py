@@ -13,6 +13,7 @@ render's numbering is pinned on the reply (FeedRender).
 Runs the real task body through the test_retrieval_loop harness on the
 live path (ca_live=True), like test_read_context.
 """
+import json
 from datetime import datetime
 
 import pytest  # noqa: F401
@@ -29,7 +30,7 @@ from backend.extensions import db as _db
 from backend.models import User, Node, ExternalItem, FeedPick, FeedRender
 from backend.utils.ca_feed import (
     CA_CHAT_TURN_NOTE, CA_READ_AGAIN_TURN, CA_TWEETS_CHAT_STUB,
-    seen_tweet_ids, refresh_snapshot_for_read,
+    READ_FURTHER_MARKER, seen_tweet_ids, refresh_snapshot_for_read,
 )
 
 
@@ -223,6 +224,44 @@ def test_user_message_after_a_read_reply_is_chat(app, monkeypatch, tmp_path):  #
     assert chat.get_content() == "Because it fit."
     assert FeedRender.query.filter_by(node_id=chat.id).first() is None
     assert FeedPick.query.filter_by(node_id=chat.id).count() == 0
+
+
+def test_read_further_from_a_comment_is_a_read_with_the_thread_in_view(app, monkeypatch, tmp_path):  # noqa: F811
+    """read prompt -> read reply -> the user's comment -> the Read button
+    (a placeholder marked "_read"): a read, not a chat. The day is
+    rendered again with the comment, the earlier picks and the marks in
+    view, the feed shape is asked for, and the render is pinned."""
+    renders, alice, llm_user, read, reply, _, _ = _first_read(monkeypatch, tmp_path)
+    pick = ExternalItem.query.filter_by(user_id=alice.id, external_id="222").one()
+    # As the feedback route leaves it: a verdict marks the pick read.
+    pick.feedback = "bad"
+    pick.read_at = datetime(2026, 9, 21, 9, 0)
+    _db.session.commit()
+    comment = _user_node(alice, reply.id, "more on people building tools, please")
+    _db.session.commit()
+    further = _placeholder(llm_user, alice, comment.id)
+    further.tool_calls_meta = json.dumps([{"name": READ_FURTHER_MARKER}])
+    _db.session.commit()
+    call, kwargs = _live(monkeypatch, alice, comment, further,
+                         _feed_json([{"n": 1, "qt": "The other one.",
+                                      "relevance": 30, "recommend": False}]))
+    joined = "\n".join(_texts(call))
+    assert len(renders) == 2
+    assert "[#1] first tweet" in joined
+    assert "more on people building tools, please" in joined
+    assert kwargs["output_schema"]["required"] == ["verdict", "picks"]
+    last = call["messages"][-1]
+    assert last["role"] == "user"
+    assert ("reference %d (@bob_b) — read 2026-09-21, rated a bad quote"
+            % pick.id) in last["text"]
+    assert CA_READ_AGAIN_TURN in last["text"]
+    assert CA_CHAT_TURN_NOTE not in last["text"]
+    # The read pick is out of the list; the render is pinned on the reply.
+    assert set(renders[1]["exclude_tweet_ids"]) == {"222"}
+    assert FeedRender.query.filter_by(node_id=further.id).one().tweet_ids == "111"
+    # The marker survives the run: a rerun classifies the same way.
+    assert any(m.get("name") == READ_FURTHER_MARKER
+               for m in json.loads(_fresh(further.id).tool_calls_meta))
 
 
 def test_reply_under_a_chat_reply_stays_chat(app, monkeypatch, tmp_path):  # noqa: F811

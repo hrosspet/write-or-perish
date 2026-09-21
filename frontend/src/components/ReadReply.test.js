@@ -44,7 +44,7 @@ test('an all-read list says so and the read-again action is its own button', () 
   render(<ReadReplyTail nodeId={77} unread={0} total={6} onReadAgain={onReadAgain} />);
   expect(screen.getByText('All read.')).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Mark all as read' })).toBeNull();
-  fireEvent.click(screen.getByRole('button', { name: 'Read again with my marks' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Read further' }));
   expect(onReadAgain).toHaveBeenCalled();
 });
 
@@ -55,16 +55,10 @@ test('while the read runs the button waits; before the quotes load the state is 
   expect(screen.queryByText('All read.')).toBeNull();
 });
 
-test('the hint says what a second read gets, and asks for marks while there are none', () => {
-  const { container, rerender } = render(
-    <ReadReplyTail nodeId={77} unread={3} total={3} marked={0} onReadAgain={() => {}} />,
-  );
-  expect(container.textContent).toMatch(/Nothing marked yet/);
+test('the hint says what Read further does and what a reply does, and nothing about read items', () => {
+  const { container } = render(<ReadReplyTail nodeId={77} unread={3} total={3} onReadAgain={() => {}} />);
+  expect(container.textContent).toMatch(/Read further asks for more from the same day/);
   expect(container.textContent).toMatch(/Text-mode conversation/);
-  rerender(<ReadReplyTail nodeId={77} unread={3} total={3} marked={1} onReadAgain={() => {}} />);
-  expect(container.textContent).toMatch(/The second read gets your marks/);
-  expect(container.textContent).not.toMatch(/Nothing marked yet/);
-  // Unknown marks (quotes still loading) are not "none".
-  rerender(<ReadReplyTail nodeId={77} unread={3} total={3} marked={0} loaded={false} onReadAgain={() => {}} />);
-  expect(container.textContent).not.toMatch(/Nothing marked yet/);
+  expect(container.textContent).not.toMatch(/marked read|leaves the list/);
+  expect(screen.getByRole('button', { name: 'Read further' }).title).not.toMatch(/marked read|leaves the list/);
 });

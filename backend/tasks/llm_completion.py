@@ -48,6 +48,7 @@ from backend.utils.cost import llm_cost_log_fields
 from backend.utils.llm_batch import BatchItemFailed, BatchItemCancelled
 from backend.utils.ca_feed import (
     CA_CHAT_TURN_NOTE, CA_READ_AGAIN_TURN, CA_TWEETS_CHAT_STUB,
+    READ_FURTHER_MARKER,
     FeedReplyError, read_reply_ids, record_feed_render,
     refresh_snapshot_for_read, refs_from_render, seen_tweet_ids,
 )
@@ -2019,20 +2020,31 @@ CA_TWEETS_STUB = "(see Community Archive tweets above)"
 CA_REFS_PINNED = "pinned"
 
 
-def _ca_turn(node_chain, ca_node, parent_node, reply_ids):
+def _read_requested(node):
+    """True when the Read button created this placeholder inside a read
+    thread (READ_FURTHER_MARKER in its tool_calls_meta, routes/read.py)."""
+    meta, _ = _batch_meta(node)
+    return any(isinstance(m, dict) and m.get("name") == READ_FURTHER_MARKER
+               for m in meta)
+
+
+def _ca_turn(node_chain, ca_node, parent_node, reply_ids, requested=False):
     """Which turn of a read thread this reply is (backend/utils/ca_feed.py);
     *ca_node* is the newest read prompt in the chain, *reply_ids* the ids
-    of the chain's read replies (ca_feed.read_reply_ids):
+    of the chain's read replies (ca_feed.read_reply_ids), *requested*
+    whether the Read button asked for this reply (_read_requested):
 
     "read"       no reply has answered the read prompt yet: the day is
                  rendered and the model answers with a verdict and picks
                  (also when the user typed something under the prompt
                  before asking for the reply).
-    "read_again" the reply was asked for directly under a read reply,
-                 nothing in between: another read. The day is rendered
-                 again (minus what the reader has seen since), the earlier
-                 picks and the reader's marks on them are in the context,
-                 and whether to repeat a pick is the model's call.
+    "read_again" the Read button asked for it from anywhere in the
+                 thread (*requested*), or the reply was asked for directly
+                 under a read reply: another read, further into the day.
+                 The day is rendered again (minus what the reader has seen
+                 since); the earlier picks, the reader's marks on them and
+                 whatever was written since are in the context, and
+                 whether to repeat an unread pick is the model's call.
     "chat"       a user message came after a read reply: a conversation
                  about the picks. The day is not rendered; the placeholder
                  reads as a stub, the picks and marks stay in the context.
@@ -2049,6 +2061,8 @@ def _ca_turn(node_chain, ca_node, parent_node, reply_ids):
             replies.append(n)
     if not replies:
         return "read"
+    if requested:
+        return "read_again"
     if parent_node is not None and replies[-1].id == parent_node.id:
         return "read_again"
     return "chat"
@@ -2720,7 +2734,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # chat turn about the picks gets a stub where the day was.
             ca_reply_ids = (read_reply_ids(node_chain)
                             if ca_node is not None else frozenset())
-            ca_turn = (_ca_turn(node_chain, ca_node, parent_node, ca_reply_ids)
+            ca_turn = (_ca_turn(node_chain, ca_node, parent_node, ca_reply_ids,
+                                requested=_read_requested(llm_node))
                        if ca_node is not None else None)
             needs_ca = ca_turn in ("read", "read_again")
             if ca_turn is not None:

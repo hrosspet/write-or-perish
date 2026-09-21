@@ -769,6 +769,9 @@ function NodeDetail({ nodeIdOverride }) {
   // pending reply, which this page polls as "Processing…" until the
   // picks arrive. With it off, only the prompt is attached and we land
   // on it, where the model picker and LLM Response wait for the user.
+  // Inside a read thread the same call reads further (no prompt, a read
+  // turn under this node; the click is the request, so auto-generate
+  // does not apply) and we land on the pending reply.
   const handleReadFromNode = () => {
     setReadLoading(true);
     setError("");
@@ -880,23 +883,19 @@ function NodeDetail({ nodeIdOverride }) {
   const isReadReply = isLlmNode && (
     !!node.read_reply
     || (Array.isArray(node.tool_calls_meta)
-      && node.tool_calls_meta.some(tc => tc?.name === '_batch'))
+      && node.tool_calls_meta.some(tc => ['_batch', '_read'].includes(tc?.name)))
     || ['read', 'read_thread'].includes(parentAncestor?.prompt_key)
   );
   // A read reply's picks are its {quote_ext:ID} markers. Their read state
   // and good / bad verdicts live in externalQuotes, kept in step by the
   // bubbles' own controls and the tail's "Mark all as read", so the
-  // tail's "n unread" and "nothing marked yet" are always the list as
-  // shown.
+  // tail's "n unread" is always the list as shown.
   const pickIds = isReadReply
     ? Array.from(new Set(((node.content || '').match(/\{quote_ext:(\d+)\}/g) || [])
         .map(m => m.match(/\d+/)[0])))
     : [];
   const picksLoaded = pickIds.every(pid => pid in externalQuotes);
   const picksUnread = pickIds.filter(pid => externalQuotes[pid] && !externalQuotes[pid].read_at).length;
-  // Marked = read, or rated good / bad: what a second read gets to see.
-  const picksMarked = pickIds.filter(pid => externalQuotes[pid]
-    && (externalQuotes[pid].read_at || externalQuotes[pid].feedback)).length;
   const handleExternalReadChange = (itemId, readAt) => setExternalQuotes(prev => (
     prev[itemId] ? { ...prev, [itemId]: { ...prev[itemId], read_at: readAt } } : prev
   ));
@@ -910,18 +909,11 @@ function NodeDetail({ nodeIdOverride }) {
     });
     return next;
   });
-  // "Read again with my marks": a reply asked for directly under a read reply
-  // is another read (the backend feeds the day back in, with these picks
-  // and the marks on them in view). Same request as LLM Response, minus
-  // the text-mode flag a read never uses.
-  const handleReadAgain = () => {
-    setError("");
-    setLlmRequesting(true);
-    requestLlmFor(id, { sourceMode: null })
-      .then((newNodeId) => setLlmTaskNodeId(newNodeId))
-      .catch(handleLlmRequestError)
-      .finally(() => setLlmRequesting(false));
-  };
+  // Inside a read thread the Read button (top right, and the tail's
+  // "Read further") reads further: /read/from-node makes a read turn
+  // under this node with the whole thread in view, no second prompt.
+  const inReadThread = [node, ...(node.ancestors || [])]
+    .some(n => ['read', 'read_thread'].includes(n?.prompt_key));
   const canRerunRead = !!currentUser?.is_admin && isOwner && isReadReply
     && (isLlmPending || node.llm_task_status === 'failed');
   const showProposal = !!node.content && !isLlmPending && (
@@ -1036,9 +1028,11 @@ function NodeDetail({ nodeIdOverride }) {
           onClick={handleReadFromNode}
           disabled={readLoading}
           style={{ ...topRightButtonStyle, justifyContent: 'space-between' }}
-          title="Read the last day of the Community Archive against this thread"
+          title={inReadThread
+            ? "Another pass over the day's tweets, against everything in this thread so far"
+            : "Read the last day of Community Archive tweets against this thread"}
         >
-          <span>{readLoading ? 'Starting…' : 'Read the archive'}</span>
+          <span>{readLoading ? 'Starting…' : (inReadThread ? 'Read further' : 'Read the day')}</span>
           <span style={{
             width: '32px',
             display: 'inline-flex',
@@ -1219,11 +1213,10 @@ function NodeDetail({ nodeIdOverride }) {
             nodeId={node.id}
             unread={picksUnread}
             total={pickIds.length}
-            marked={picksMarked}
             loaded={picksLoaded}
             onMarkedAll={handlePicksMarkedAll}
-            onReadAgain={handleReadAgain}
-            busy={llmRequesting || !!llmTaskNodeId}
+            onReadAgain={handleReadFromNode}
+            busy={readLoading || llmRequesting || !!llmTaskNodeId}
           />
         )}
         {(() => {
@@ -1352,8 +1345,8 @@ function NodeDetail({ nodeIdOverride }) {
         {showCraftBar && (
           <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
             {/* Under a finished read reply the response action is the
-                tail's "Read again with my marks"; the model picker still
-                applies. A failed one keeps the generic button. */}
+                tail's "Read further"; the model picker still applies. A
+                failed one keeps the generic button. */}
             {!(isReadReply && node.llm_task_status === 'completed') && (
               <button
                 onClick={handleLLMResponse}

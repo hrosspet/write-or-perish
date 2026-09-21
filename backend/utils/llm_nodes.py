@@ -1,3 +1,4 @@
+import json
 """Shared factory for creating LLM placeholder nodes."""
 
 from flask import current_app
@@ -74,10 +75,13 @@ def pick_model_for_generation(parent_node, user):
 def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
                            privacy_level="private", ai_usage="chat",
                            placeholder_text="[LLM response generation pending...]",
-                           enqueue=True, source_mode=None):
+                           enqueue=True, source_mode=None, meta=None):
     """Create an LLM placeholder node, optionally enqueue generation task.
 
     Returns (llm_node, task_id) -- task_id is None if enqueue=False.
+    *meta* seeds the node's tool_calls_meta (a list of entries) in the
+    same commit that creates it, so a marker the task reads (the read
+    thread's "_read", routes/read.py) is there before the task can start.
 
     Raises UserExportValidationError if the parent node's content
     contains a {user_export} placeholder with unrecognized param keys.
@@ -148,6 +152,8 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
         token_count=approximate_token_count(placeholder_text),
     )
     llm_node.set_content(placeholder_text)
+    if meta:
+        llm_node.tool_calls_meta = json.dumps(list(meta))
     db.session.add(llm_node)
     db.session.commit()
 

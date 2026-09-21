@@ -9,7 +9,14 @@ Three entry points, all admin-only while the placeholder is:
                                   honours auto_generate like /textmode/start
   POST /api/read/from-node/<id>   the 'read_thread' prompt attached under
                                   an existing node, so the archive is read
-                                  against the conversation above it
+                                  against the conversation above it; inside
+                                  a thread that already has a read prompt
+                                  it reads FURTHER instead: no second
+                                  prompt, a read turn under <id> (marked
+                                  "_read" in its tool_calls_meta) with the
+                                  whole thread so far in view — the earlier
+                                  picks, the user's marks and whatever was
+                                  written since
   POST /api/read/<id>/rerun       cancel the reply's pending batch (if
                                   any) and run it again, through the batch
                                   or, with {"live": true}, the live API
@@ -47,7 +54,10 @@ from backend.utils.placeholders import (
     UserExportValidationError, ca_tweets_allowed, ca_tweets_denied_message,
 )
 from backend.utils.context_artifacts import attach_context_artifacts
-from backend.utils.ca_feed import FEED_AI_USAGE, READ_PROMPT_KEYS
+from backend.utils.session_helpers import ancestors_have_prompt
+from backend.utils.ca_feed import (
+    FEED_AI_USAGE, READ_PROMPT_KEYS, READ_FURTHER_MARKER,
+)
 
 read_bp = Blueprint("read", __name__)
 
@@ -152,9 +162,28 @@ def start_read_from_node(node_id):
     model_id, err = _resolve_model(node)
     if err:
         return err
+    privacy_level = node.privacy_level or "private"
+    if ancestors_have_prompt(node, current_user.id, READ_PROMPT_KEYS):
+        # Read further: the thread already has its read prompt, so the
+        # click is the request itself (auto_generate does not apply) —
+        # a read turn under this node, the day rendered again against
+        # everything above. The marker is what tells the task this is
+        # a read and not a chat about the picks (_ca_turn); it is
+        # written in the commit that creates the node.
+        try:
+            llm_node, task_id = create_llm_placeholder(
+                node.id, model_id, current_user.id,
+                privacy_level=privacy_level, ai_usage=FEED_AI_USAGE,
+                meta=[{"name": READ_FURTHER_MARKER}],
+            )
+        except UserExportValidationError as e:
+            db.session.rollback()
+            return jsonify({"error": str(e)}), 400
+        db.session.commit()
+        return jsonify({"llm_node_id": llm_node.id, "task_id": task_id}), 202
     data = request.get_json(silent=True) or {}
     auto_generate = bool(data.get("auto_generate", True))
-    return _start(THREAD_PROMPT_KEY, node, node.privacy_level or "private",
+    return _start(THREAD_PROMPT_KEY, node, privacy_level,
                   model_id, auto_generate=auto_generate)
 
 

@@ -13,15 +13,16 @@ import { formatDateTime } from '../utils/date';
  * never reached the model.
  *
  * ReadReplyTail sits under the picks. Two things can happen after a
- * read, and they differ in what the model gets. "Read again with my
- * marks" feeds the day back in with the reader's marks on these picks
- * in view: what they marked read leaves the list, and read / good / bad
- * tell the model how the first picks landed (the marks travel in the
- * closing note of the prompt, see _reference_marks_note). A reply typed
+ * read, and they differ in what the model gets. "Read further" asks for
+ * more from the same day with everything in the thread so far in view:
+ * the earlier picks, the reader's marks on them (they travel in the
+ * closing note of the prompt, see _reference_marks_note) and whatever
+ * was written since; what the reader has read never comes back, which
+ * is the feed's obvious behaviour and goes unsaid here. A reply typed
  * below is a Text-mode conversation about the picks instead: the day
  * stays out, the assistant's tools are on. The tail makes that
- * difference plain, says when there is nothing to feed back yet, and
- * carries the list's read state so the reader can clear it in one go.
+ * difference plain and carries the list's read state so the reader can
+ * clear it in one go.
  */
 
 const count = (n) => Number(n || 0).toLocaleString('en-US');
@@ -38,17 +39,13 @@ export const ReadWindowLine = ({ window: w }) => {
   );
 };
 
-const READ_AGAIN_TITLE = 'Reads the day\'s tweets again with your marks on these picks in view: '
-  + 'what you marked read leaves the list; read, good and bad tell it how the picks landed.';
-const HINT_WITH_MARKS = 'The second read gets your marks: what you marked read leaves the list, '
-  + 'and read, good and bad tell it how these picks landed. '
-  + 'A reply below is a Text-mode conversation instead.';
-const HINT_NO_MARKS = 'Nothing marked yet, so a second read would see the same day and the same picks. '
-  + 'Open or mark what you read and rate the picks first. '
-  + 'A reply below is a Text-mode conversation instead.';
+const READ_FURTHER_TITLE = 'Another pass over the day\'s tweets, against everything in this thread so far '
+  + '— your marks on these picks included.';
+const HINT = 'Read further asks for more from the same day, with everything in this thread so far in view '
+  + '— your marks included. A reply below is a Text-mode conversation instead.';
 
 export const ReadReplyTail = ({
-  nodeId, unread, total, marked = 0, loaded = true, onMarkedAll, onReadAgain, busy,
+  nodeId, unread, total, loaded = true, onMarkedAll, onReadAgain, busy,
 }) => {
   const { addToast } = useToast();
   const [marking, setMarking] = useState(false);
@@ -78,9 +75,6 @@ export const ReadReplyTail = ({
       </>
     ) : <span>All read.</span>;
   }
-  // Before the quotes load the marks are unknown; say nothing about them.
-  const noMarksYet = loaded && total > 0 && marked === 0;
-
   return (
     <div className="read-tail">
       <div className="read-tail-row">
@@ -90,14 +84,12 @@ export const ReadReplyTail = ({
           className="read-again"
           onClick={onReadAgain}
           disabled={busy}
-          title={READ_AGAIN_TITLE}
+          title={READ_FURTHER_TITLE}
         >
-          {busy ? 'Reading…' : 'Read again with my marks'}
+          {busy ? 'Reading…' : 'Read further'}
         </button>
       </div>
-      <p className="read-tail-hint">
-        {noMarksYet ? HINT_NO_MARKS : HINT_WITH_MARKS}
-      </p>
+      <p className="read-tail-hint">{HINT}</p>
     </div>
   );
 };
