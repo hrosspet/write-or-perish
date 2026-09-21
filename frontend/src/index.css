@@ -499,6 +499,16 @@ code {
 }
 /* The tail under the picks: a hairline separates the model's reply from
    what the reader can do next. */
+/* A read reply is a run of picks: the model's line on why, then the
+   tweet. Motivation-to-tweet stays tight (the bubble's own 10px);
+   tweet-to-next-motivation gets air, so each pick reads as one unit
+   instead of an essay with quotes in it. */
+.read-reply-body .ext-quote-slot {
+  margin-bottom: 28px;
+}
+.read-reply-body .ext-quote-slot:last-child {
+  margin-bottom: 0;
+}
 .read-tail {
   margin-top: 16px;
   border-top: 1px solid var(--border);

@@ -1179,17 +1179,19 @@ function NodeDetail({ nodeIdOverride }) {
           </div>
         ) : (
           (!showProposal || displayContent) && (
-            <QuotedContent
-              content={displayContent}
-              quotes={quotes}
-              externalQuotes={externalQuotes}
-              onExternalReadChange={handleExternalReadChange}
-              onExternalFeedbackChange={handleExternalFeedbackChange}
-              contextArtifacts={node.context_artifacts || null}
-              onQuoteClick={handleBubbleClick}
-              onCheckboxToggle={isOwner ? handleCheckboxToggle : undefined}
-              onAddTask={isOwner ? handleTaskInsert : undefined}
-            />
+            <div className={isReadReply ? 'read-reply-body' : undefined}>
+              <QuotedContent
+                content={displayContent}
+                quotes={quotes}
+                externalQuotes={externalQuotes}
+                onExternalReadChange={handleExternalReadChange}
+                onExternalFeedbackChange={handleExternalFeedbackChange}
+                contextArtifacts={node.context_artifacts || null}
+                onQuoteClick={handleBubbleClick}
+                onCheckboxToggle={isOwner ? handleCheckboxToggle : undefined}
+                onAddTask={isOwner ? handleTaskInsert : undefined}
+              />
+            </div>
           )
         )}
         {showProposal && (

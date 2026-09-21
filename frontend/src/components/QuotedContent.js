@@ -119,13 +119,16 @@ const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQu
           );
         } else if (segment.type === 'external_quote') {
           const quoteData = externalQuotes ? externalQuotes[segment.quoteId] : null;
+          // The slot lets a page space quotes as units (a read reply's
+          // picks, .read-reply-body) without touching the bubble.
           return (
-            <ExternalQuoteBubble
-              key={index}
-              quote={quoteData}
-              onReadChange={onExternalReadChange}
-              onFeedbackChange={onExternalFeedbackChange}
-            />
+            <div key={index} className="ext-quote-slot">
+              <ExternalQuoteBubble
+                quote={quoteData}
+                onReadChange={onExternalReadChange}
+                onFeedbackChange={onExternalFeedbackChange}
+              />
+            </div>
           );
         } else if (segment.type === 'artifact') {
           const artifact = contextArtifacts
