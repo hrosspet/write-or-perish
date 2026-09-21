@@ -25,7 +25,7 @@ const COMBINED_PATTERN = /(\{quote_ext:\d+\}|\{quote:\d+\}|\{user_(?:profile|tod
  *   contextArtifacts: Object with "profile" and/or "todo" keys containing artifact data
  *   onQuoteClick: Callback when a quote is clicked (receives quote ID)
  */
-const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQuoteClick, onCheckboxToggle, onAddTask, onExternalReadChange }) => {
+const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQuoteClick, onCheckboxToggle, onAddTask, onExternalReadChange, onExternalFeedbackChange }) => {
   if (!content) {
     return null;
   }
@@ -124,6 +124,7 @@ const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQu
               key={index}
               quote={quoteData}
               onReadChange={onExternalReadChange}
+              onFeedbackChange={onExternalFeedbackChange}
             />
           );
         } else if (segment.type === 'artifact') {

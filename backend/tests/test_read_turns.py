@@ -5,7 +5,8 @@ the read prompt, and a reply asked for directly under a read reply (a
 read-again, where the model sees its earlier picks and the reader's
 marks and decides itself whether to repeat one). A user message after a
 read reply makes the next reply a chat turn: the picks and the marks are
-in the context, the day is not. What the reader has already seen (read
+in the context, the day is not, and the agentic prompt stays when the
+chain has one (a Text-mode session under the read reply, #323). What the reader has already seen (read
 marks, bookmarks) never reaches the model as a candidate, and each
 render's numbering is pinned on the reply (FeedRender).
 
@@ -324,28 +325,75 @@ def test_refresh_waits_for_batches_from_before_pinning(app, monkeypatch, tmp_pat
     assert refresh_snapshot_for_read(tmp_path) is None
 
 
-def test_chat_turn_under_a_voice_thread_stays_out_of_the_agentic_prompt(app, monkeypatch, tmp_path):  # noqa: F811
+def test_chat_turn_under_a_voice_thread_is_agentic(app, monkeypatch, tmp_path):  # noqa: F811
     """voice prompt -> sharing -> read_thread -> read reply -> question:
-    the chat turn is stripped of the agentic prompt like the read was
-    (no persona, no tools), and closes with the chat note."""
+    the read ran without the agentic prompt; the chat turn about the
+    picks keeps it (persona, tools), the day stays out, and the chat
+    note rides with the agentic notes (#323)."""
     _capture_render(monkeypatch, tmp_path)
     alice, read, reply = _voice_thread_with_read()
-    _live(monkeypatch, alice, read, reply, _feed_json([
+    read_call, _ = _live(monkeypatch, alice, read, reply, _feed_json([
         {"n": 2, "qt": "Meets your pacing question.", "relevance": 40,
          "recommend": True}]))
+    assert "AGENTIC PERSONA AND TOOLS" not in "\n".join(_texts(read_call))
+    assert read_call["tools"] is None
     llm_user = User.query.get(reply.user_id)
     question = _user_node(alice, reply.id, "why that one?")
     _db.session.commit()
     chat = _placeholder(llm_user, alice, question.id)
     call, kwargs = _live(monkeypatch, alice, question, chat, "Because.")
     joined = "\n".join(_texts(call))
-    assert "AGENTIC PERSONA AND TOOLS" not in joined
+    assert "AGENTIC PERSONA AND TOOLS" in joined
     assert "my morning: unsure about pacing" in joined
-    assert call["tools"] is None
+    assert call["tools"] is not None
     assert kwargs.get("output_schema") is None
     assert "[#1] first tweet" not in joined
     assert CA_CHAT_TURN_NOTE in call["messages"][-1]["text"]
     assert _fresh(chat.id).get_content() == "Because."
+
+
+def test_chat_turn_under_a_read_root_is_agentic_once_text_mode_is_attached(app, monkeypatch, tmp_path):  # noqa: F811
+    """read prompt -> read reply -> textmode prompt (what POST
+    /textmode/from-node attaches under the reply) -> question: the chat
+    turn runs under the agentic prompt with tools, the day stays a stub,
+    and the reader's marks and the chat note ride with the agentic
+    notes. A read prompt attached under that chat reply is a read: the
+    textmode prompt is stripped and the feed shape is back."""
+    renders, alice, llm_user, read, reply, _, _ = _first_read(monkeypatch, tmp_path)
+    pick = ExternalItem.query.filter_by(user_id=alice.id, external_id="222").one()
+    pick.feedback = "bad"
+    _db.session.commit()
+    text = _prompt_node(alice, "textmode", parent_id=reply.id,
+                        body="AGENTIC PERSONA AND TOOLS")
+    question = _user_node(alice, text.id, "why the second one?")
+    _db.session.commit()
+    chat = _placeholder(llm_user, alice, question.id)
+    call, kwargs = _live(monkeypatch, alice, question, chat, "Because it fit.")
+    texts = _texts(call)
+    joined = "\n".join(texts)
+    assert "AGENTIC PERSONA AND TOOLS" in joined
+    assert call["tools"] is not None
+    assert kwargs.get("output_schema") is None
+    assert len(renders) == 1
+    assert CA_TWEETS_CHAT_STUB in texts[0]
+    assert "[#1] first tweet" not in joined
+    last = call["messages"][-1]
+    assert last["role"] == "user"
+    assert ("reference %d (@bob_b) — rated a bad quote" % pick.id) in last["text"]
+    assert CA_CHAT_TURN_NOTE in last["text"]
+    assert _fresh(chat.id).get_content() == "Because it fit."
+    assert FeedRender.query.filter_by(node_id=chat.id).first() is None
+
+    read2 = _prompt_node(alice, "read_thread", parent_id=chat.id)
+    _db.session.commit()
+    reply2 = _placeholder(llm_user, alice, read2.id)
+    call2, kwargs2 = _live(monkeypatch, alice, read2, reply2, _feed_json([]))
+    joined2 = "\n".join(_texts(call2))
+    assert "AGENTIC PERSONA AND TOOLS" not in joined2
+    assert call2["tools"] is None
+    assert kwargs2["output_schema"]["required"] == ["verdict", "picks"]
+    assert len(renders) == 2
+    assert "[#1] first tweet" in joined2
 
 
 def test_second_read_prompt_under_a_read_reply_is_a_read(app, monkeypatch, tmp_path):  # noqa: F811

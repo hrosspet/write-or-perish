@@ -11,6 +11,7 @@ from backend.utils.llm_nodes import (
     create_llm_placeholder, pick_model_for_generation,
 )
 from backend.utils.context_artifacts import attach_context_artifacts
+from backend.utils.session_helpers import attach_agentic_prompt_under
 from backend.utils.privacy import validate_ai_usage
 
 textmode_bp = Blueprint("textmode", __name__)
@@ -326,3 +327,105 @@ def get_conversation_from_node(node_id):
         "conversation_id": root.id,
         "messages": messages,
     }), 200
+
+
+@textmode_bp.route("/from-node/<int:node_id>", methods=["POST"])
+@login_required
+def continue_from_node(node_id):
+    """A Text-mode message under *node_id*: the user's message and, unless
+    auto_generate is off, its reply. When no agentic prompt sits above the
+    node the textmode prompt is attached under it first and the message
+    hangs under that, so the thread is an agentic session from here
+    (tools, artifacts, mode notes); inside an agentic thread nothing is
+    added. The text counterpart of POST /voice/from-node.
+
+    Body: { content: string, model?: string, auto_generate?: bool }.
+    Privacy and AI usage come from the node (a read reply's is 'chat').
+
+    The one caller today is the reply box under a read reply (#323): a
+    conversation about the picks says a lot about what the user is
+    oriented toward, and this is what lets the assistant record it in
+    their intentions and memory. The read itself never runs under the
+    agentic prompt (llm_completion strips it on read turns).
+    """
+    node = Node.query.get_or_404(node_id)
+    if node.human_owner_id != current_user.id:
+        return jsonify({"error": "Unauthorized"}), 403
+
+    data = request.get_json() or {}
+    content = data.get("content")
+    if not content or not content.strip():
+        return jsonify({"error": "Content is required"}), 400
+    from backend.utils.node_split import NODE_CHAR_CAP
+    if len(content) > NODE_CHAR_CAP:
+        return jsonify({
+            "error": (
+                f"Content exceeds the {NODE_CHAR_CAP:,}-character "
+                f"per-entry limit."
+            ),
+            "char_cap": NODE_CHAR_CAP,
+        }), 422
+
+    ai_usage = node.ai_usage or current_user.default_ai_usage
+    if ai_usage == 'none':
+        return jsonify({
+            "error": "Text mode requires ai_usage of 'chat' or 'train'",
+        }), 400
+    privacy_level = node.privacy_level or "private"
+    auto_generate = bool(data.get("auto_generate", True))
+
+    model_id = data.get("model")
+    if not model_id:
+        model_id = pick_model_for_generation(node, current_user)
+    if model_id not in current_app.config["SUPPORTED_MODELS"]:
+        return jsonify({"error": f"Unsupported model: {model_id}"}), 400
+
+    prompt_node = attach_agentic_prompt_under(
+        node, current_user.id, PROMPT_KEY, privacy_level, ai_usage)
+    parent_id = prompt_node.id if prompt_node is not None else node.id
+
+    from backend.utils.tokens import approximate_token_count
+    user_node = Node(
+        user_id=current_user.id,
+        human_owner_id=current_user.id,
+        parent_id=parent_id,
+        node_type="user",
+        privacy_level=privacy_level,
+        ai_usage=ai_usage,
+        token_count=approximate_token_count(content),
+    )
+    user_node.set_content(content)
+    db.session.add(user_node)
+    db.session.flush()
+
+    response = {
+        "prompt_node_id": prompt_node.id if prompt_node is not None else None,
+        "user_node_id": user_node.id,
+    }
+    # Spend cap and a refused {user_export}: the message is kept, only
+    # the reply is skipped — the same stance as /start and /message.
+    from backend.utils.spend import user_is_capped
+    if auto_generate and user_is_capped(current_user):
+        db.session.commit()
+        response["spend_capped"] = True
+        return jsonify(response), 202
+    if auto_generate:
+        try:
+            llm_node, task_id = create_llm_placeholder(
+                user_node.id, model_id, current_user.id,
+                privacy_level=privacy_level,
+                ai_usage=ai_usage,
+                source_mode='textmode',
+            )
+        except UserExportValidationError as e:
+            db.session.commit()
+            current_app.logger.warning(
+                f"textmode/from-node: LLM reply skipped for node "
+                f"{user_node.id}: {e}"
+            )
+            response["llm_error"] = str(e)
+            return jsonify(response), 202
+        response["llm_node_id"] = llm_node.id
+        response["task_id"] = task_id
+    db.session.commit()
+    return jsonify(response), 202

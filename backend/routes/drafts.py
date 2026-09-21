@@ -967,9 +967,13 @@ def save_streaming_as_node(session_id):
     Request body:
     {
         "content": "optional edited content",  // If not provided, uses draft.content
-        "agentic": false,        // new threads only: parent the entry under a
-                                 // system node carrying the textmode prompt,
-                                 // exactly like POST /textmode/start does
+        "agentic": false,        // parent the entry under a system node
+                                 // carrying the textmode prompt: a new
+                                 // thread's root (like POST /textmode/start)
+                                 // or, under a parent with no agentic prompt
+                                 // above it, one attached under the parent
+                                 // (like POST /textmode/from-node); a no-op
+                                 // inside an agentic thread
         "auto_generate": false,  // create + enqueue an LLM reply after the
                                  // entry (spend cap honored, like /textmode/start)
         "model": "optional model id for auto_generate"
@@ -1005,10 +1009,6 @@ def save_streaming_as_node(session_id):
     privacy_level = draft.privacy_level or "private"
     ai_usage = draft.ai_usage or "none"
 
-    if agentic and draft.parent_id is not None:
-        return jsonify({
-            "error": "agentic applies to new threads only (draft has a parent)",
-        }), 400
     if (agentic or auto_generate) and ai_usage == "none":
         # Same contract as /textmode/start: an AI reply / agentic prompt
         # contradicts ai_usage 'none'. The frontend gates on this too.
@@ -1030,7 +1030,20 @@ def save_streaming_as_node(session_id):
     # context) from its first turn.
     user_parent_id = draft.parent_id
     system_node = None
-    if agentic:
+    if agentic and draft.parent_id is not None:
+        # A recorded reply inside an existing thread (the reply box under
+        # a read reply, #323): the textmode prompt goes under the parent
+        # when no agentic prompt sits above it, as POST /textmode/from-node
+        # does for a typed reply; inside an agentic thread nothing is added.
+        from backend.utils.session_helpers import attach_agentic_prompt_under
+        parent_node = Node.query.get(draft.parent_id)
+        if parent_node is None:
+            return jsonify({"error": "Parent node not found"}), 404
+        system_node = attach_agentic_prompt_under(
+            parent_node, current_user.id, "textmode", privacy_level, ai_usage)
+        if system_node is not None:
+            user_parent_id = system_node.id
+    elif agentic:
         from backend.utils.prompts import get_user_prompt_record
         from backend.utils.context_artifacts import attach_context_artifacts
         prompt_record = get_user_prompt_record(current_user.id, "textmode")

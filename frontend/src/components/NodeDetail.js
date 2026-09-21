@@ -649,6 +649,34 @@ function NodeDetail({ nodeIdOverride }) {
     }
   };
 
+  // A reply typed or recorded under a read reply is a Text-mode message
+  // (#323): the backend attaches the textmode prompt under the read reply
+  // when no agentic prompt sits above it, so the conversation about the
+  // picks runs with the assistant's tools and what the user says there
+  // can move their intentions and memory. The read itself never runs
+  // under that prompt (the task strips it on read turns). Auto-generate
+  // is honoured like Text mode's own entry, and the reply fires
+  // server-side, so there is no /nodes/<id>/llm follow-up here.
+  const submitReadReplyMessage = async ({ content, streaming_session_id }) => {
+    if (streaming_session_id) {
+      const res = await api.post(
+        `/drafts/streaming/${streaming_session_id}/save-as-node`,
+        { content, agentic: true, auto_generate: autoGenerateActive, model: selectedModel },
+      );
+      return res.data;
+    }
+    const res = await api.post(`/textmode/from-node/${id}`, {
+      content, model: selectedModel, auto_generate: autoGenerateActive,
+    });
+    return res.data;
+  };
+  const handleReadReplySuccess = (data) => {
+    const userNodeId = data?.user_node_id || data?.id;
+    if (!userNodeId) return;
+    const suffix = data?.llm_node_id ? `?awaitLlm=${data.llm_node_id}` : '';
+    navigate(`/node/${userNodeId}${suffix}`);
+  };
+
   // Called after NodeForm successfully PUTs /nodes/<id>. Updates local
   // state, closes the overlay, and — if the edited node is user-authored
   // — fires a fresh LLM child off it. Re-running on a node that already
@@ -856,17 +884,24 @@ function NodeDetail({ nodeIdOverride }) {
     || ['read', 'read_thread'].includes(parentAncestor?.prompt_key)
   );
   // A read reply's picks are its {quote_ext:ID} markers. Their read state
-  // lives in externalQuotes, kept in step by the bubbles' own toggles and
-  // the tail's "Mark all as read", so the tail's "n unread" is always the
-  // list as shown.
+  // and good / bad verdicts live in externalQuotes, kept in step by the
+  // bubbles' own controls and the tail's "Mark all as read", so the
+  // tail's "n unread" and "nothing marked yet" are always the list as
+  // shown.
   const pickIds = isReadReply
     ? Array.from(new Set(((node.content || '').match(/\{quote_ext:(\d+)\}/g) || [])
         .map(m => m.match(/\d+/)[0])))
     : [];
   const picksLoaded = pickIds.every(pid => pid in externalQuotes);
   const picksUnread = pickIds.filter(pid => externalQuotes[pid] && !externalQuotes[pid].read_at).length;
+  // Marked = read, or rated good / bad: what a second read gets to see.
+  const picksMarked = pickIds.filter(pid => externalQuotes[pid]
+    && (externalQuotes[pid].read_at || externalQuotes[pid].feedback)).length;
   const handleExternalReadChange = (itemId, readAt) => setExternalQuotes(prev => (
     prev[itemId] ? { ...prev, [itemId]: { ...prev[itemId], read_at: readAt } } : prev
+  ));
+  const handleExternalFeedbackChange = (itemId, feedback) => setExternalQuotes(prev => (
+    prev[itemId] ? { ...prev, [itemId]: { ...prev[itemId], feedback } } : prev
   ));
   const handlePicksMarkedAll = (readAt) => setExternalQuotes(prev => {
     const next = { ...prev };
@@ -875,7 +910,7 @@ function NodeDetail({ nodeIdOverride }) {
     });
     return next;
   });
-  // "Read the day again": a reply asked for directly under a read reply
+  // "Read again with my marks": a reply asked for directly under a read reply
   // is another read (the backend feeds the day back in, with these picks
   // and the marks on them in view). Same request as LLM Response, minus
   // the text-mode flag a read never uses.
@@ -1129,6 +1164,7 @@ function NodeDetail({ nodeIdOverride }) {
               quotes={quotes}
               externalQuotes={externalQuotes}
               onExternalReadChange={handleExternalReadChange}
+              onExternalFeedbackChange={handleExternalFeedbackChange}
               contextArtifacts={node.context_artifacts || null}
               onQuoteClick={handleBubbleClick}
               onCheckboxToggle={isOwner ? handleCheckboxToggle : undefined}
@@ -1163,6 +1199,7 @@ function NodeDetail({ nodeIdOverride }) {
               quotes={quotes}
               externalQuotes={externalQuotes}
               onExternalReadChange={handleExternalReadChange}
+              onExternalFeedbackChange={handleExternalFeedbackChange}
               contextArtifacts={node.context_artifacts || null}
               onQuoteClick={handleBubbleClick}
             />
@@ -1182,6 +1219,7 @@ function NodeDetail({ nodeIdOverride }) {
             nodeId={node.id}
             unread={picksUnread}
             total={pickIds.length}
+            marked={picksMarked}
             loaded={picksLoaded}
             onMarkedAll={handlePicksMarkedAll}
             onReadAgain={handleReadAgain}
@@ -1314,7 +1352,7 @@ function NodeDetail({ nodeIdOverride }) {
         {showCraftBar && (
           <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
             {/* Under a finished read reply the response action is the
-                tail's "Read the day again"; the model picker still
+                tail's "Read again with my marks"; the model picker still
                 applies. A failed one keeps the generic button. */}
             {!(isReadReply && node.llm_task_status === 'completed') && (
               <button
@@ -1368,7 +1406,8 @@ function NodeDetail({ nodeIdOverride }) {
             placeholder={isReadReply
               ? "Ask about these picks, or say what you make of them…"
               : "Type what's on your mind…"}
-            onSuccess={handleInlineSuccess}
+            onSubmitOverride={isReadReply ? submitReadReplyMessage : undefined}
+            onSuccess={isReadReply ? handleReadReplySuccess : handleInlineSuccess}
           />
         </div>
       )}

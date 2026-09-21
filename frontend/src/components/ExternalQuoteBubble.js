@@ -25,10 +25,11 @@ const SOURCE_LABELS = {
  * reference read — the AI quoting it is tracked separately as surfacing.
  * Beside it, the good/bad-quote verdict (ReferenceFeedback) — the
  * hit-or-miss half of the recommendation record. `onReadChange(id,
- * readAt)` tells the page, which keeps the list's read state (a read
- * reply's "n unread") in step with the bubbles.
+ * readAt)` and `onFeedbackChange(id, feedback)` tell the page, which
+ * keeps the list's marks (a read reply's "n unread", "nothing marked
+ * yet") in step with the bubbles.
  */
-const ExternalQuoteBubble = ({ quote, onReadChange }) => {
+const ExternalQuoteBubble = ({ quote, onReadChange, onFeedbackChange }) => {
   const userCtx = useUser();
   const currentUser = userCtx ? userCtx.user : null;
   const { addToast } = useToast();
@@ -89,7 +90,11 @@ const ExternalQuoteBubble = ({ quote, onReadChange }) => {
         <span>{postedAt}</span>
         {mine && (
           <span style={ownerSlotStyle}>
-            <ReferenceFeedback itemId={quote.id} feedback={quote.feedback} />
+            <ReferenceFeedback
+              itemId={quote.id}
+              feedback={quote.feedback}
+              onChange={(fb) => { if (onFeedbackChange) onFeedbackChange(quote.id, fb); }}
+            />
             <button
               type="button"
               className="ext-quote-read-toggle"

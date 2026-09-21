@@ -2036,6 +2036,8 @@ def _ca_turn(node_chain, ca_node, parent_node, reply_ids):
     "chat"       a user message came after a read reply: a conversation
                  about the picks. The day is not rendered; the placeholder
                  reads as a stub, the picks and marks stay in the context.
+                 Unlike a read it may run under the agentic prompt (a
+                 Text-mode session under the read reply, #323).
     """
     replies = []
     after_prompt = False
@@ -2724,19 +2726,21 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             if ca_turn is not None:
                 logger.info("Node %s: {ca_tweets} turn is %r",
                             llm_node_id, ca_turn)
-            if ca_node is not None:
-                # A read thread runs against the user's own conversation,
-                # never under the agentic system prompt: a Voice / Text
-                # mode thread's tools, mode notes and persona have nothing
-                # to do with judging tweets or talking about the picks,
-                # and the prompt is the one part of the thread the user
-                # did not write. Drop every agentic prompt node wherever
+            if needs_ca:
+                # A read runs against the user's own conversation, never
+                # under the agentic system prompt: it is a batch judgement
+                # against a schema, and a Voice / Text mode thread's
+                # tools, mode notes and persona have nothing to do with
+                # judging tweets. Drop every agentic prompt node wherever
                 # it sits (a root, or one attached mid-thread) and keep
-                # the messages around it, so the thread still sees the
+                # the messages around it, so the read still sees the
                 # sharing that came before an agentic session started
-                # under it. With it gone the chain is not agentic: no
-                # tools, no notes, no mode indicator — on every turn of
-                # the thread, reads and chat alike.
+                # under it. A chat turn keeps the chain as it is: a
+                # conversation about the picks is a Text-mode session
+                # that happens to hold the read (the reply box under a
+                # read reply attaches the textmode prompt when none sits
+                # above, POST /textmode/from-node), so what the user says
+                # there can move their intentions and memory (#323).
                 node_chain, dropped = strip_agentic_prompts(
                     node_chain, keep=ca_node)
                 if dropped:
@@ -3427,24 +3431,29 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # loop). Nothing to inject here.
 
                 # The user's read marks / verdicts on references quoted
-                # earlier in the thread (see _reference_marks_note).
+                # earlier in the thread (see _reference_marks_note), and
+                # the read thread's turn note: on a read-again the
+                # request itself, on a chat turn the reminder that the
+                # read prompt above still asks for a verdict and picks
+                # while this turn answers the user's message. A read turn
+                # is never agentic (its agentic prompts were stripped
+                # above), so these close the prompt in their own user
+                # turn; a chat turn may be (a Text-mode conversation under
+                # the read reply, #323), and then they ride with the
+                # agentic notes.
                 reference_marks = _reference_marks_note(
                     quoted_ext_ids, user_id)
-                if reference_marks:
-                    agentic_notes.append(reference_marks)
-                # A read thread is never agentic, so its notes go in
-                # their own closing user turn: the marks the user put on
-                # the picks (the one way a later turn learns them), and
-                # on a read-again the request itself.
-                plain_notes = []
-                if not is_agentic and reference_marks:
-                    plain_notes.append(reference_marks)
+                ca_note = None
                 if ca_turn == "read_again":
-                    plain_notes.append(CA_READ_AGAIN_TURN)
+                    ca_note = CA_READ_AGAIN_TURN
                 elif ca_turn == "chat":
-                    # The read prompt above still asks for a verdict and
-                    # picks; this turn answers the user's message instead.
-                    plain_notes.append(CA_CHAT_TURN_NOTE)
+                    ca_note = CA_CHAT_TURN_NOTE
+                plain_notes = []
+                notes = agentic_notes if is_agentic else plain_notes
+                if reference_marks:
+                    notes.append(reference_marks)
+                if ca_note:
+                    notes.append(ca_note)
 
                 if is_agentic and agentic_notes:
                     # Synthetic system-side note injected after the latest real
