@@ -29,10 +29,11 @@ const SOURCE_LABELS = {
  * keeps the list's marks (a read reply's "n unread", "nothing marked
  * yet") in step with the bubbles.
  *
- * Opening the post is reading it: the owner's click marks the reference
- * read as the tab opens, and "Mark as unread" stays for the ones to come
- * back to (a long post opened for later). Only the default flipped; the
- * toggle is the override.
+ * Opening the post is reading it, and so is judging it: the owner's
+ * click marks the reference read as the tab opens, a good / bad verdict
+ * marks it read server-side, and "Mark as unread" stays for the ones to
+ * come back to (a long post opened for later). Only the default flipped;
+ * the toggle is the override.
  */
 const ExternalQuoteBubble = ({ quote, onReadChange, onFeedbackChange }) => {
   const userCtx = useUser();
@@ -105,7 +106,13 @@ const ExternalQuoteBubble = ({ quote, onReadChange, onFeedbackChange }) => {
             <ReferenceFeedback
               itemId={quote.id}
               feedback={quote.feedback}
-              onChange={(fb) => { if (onFeedbackChange) onFeedbackChange(quote.id, fb); }}
+              onChange={(fb, data) => {
+                if (onFeedbackChange) onFeedbackChange(quote.id, fb);
+                if (data && data.read_at && !readAt) {
+                  setReadAt(data.read_at);
+                  if (onReadChange) onReadChange(quote.id, data.read_at);
+                }
+              }}
             />
             <button
               type="button"

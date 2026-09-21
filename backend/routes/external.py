@@ -326,7 +326,10 @@ FEEDBACK_VALUES = ("good", "bad")
 @login_required
 def set_item_feedback(item_id):
     """Record the user's verdict on Loore surfacing this reference:
-    {"feedback": "good" | "bad" | null}. Null clears it."""
+    {"feedback": "good" | "bad" | null}. Null clears it. A verdict also
+    marks the reference read (you judged it, you saw it); an already-read
+    item keeps its read_at, and clearing the verdict leaves the read mark
+    alone. The response carries read_at so the page can follow."""
     item = ExternalItem.query.filter_by(
         id=item_id, user_id=current_user.id).first()
     if item is None:
@@ -337,11 +340,14 @@ def set_item_feedback(item_id):
         return jsonify({"error": "feedback must be 'good', 'bad' or null"}), 400
     item.feedback = value
     item.feedback_at = datetime.utcnow() if value else None
+    if value and item.read_at is None:
+        item.read_at = item.feedback_at
     db.session.commit()
     return jsonify({
         "id": item.id,
         "feedback": item.feedback,
         "feedback_at": iso_utc(item.feedback_at) if item.feedback_at else None,
+        "read_at": iso_utc(item.read_at) if item.read_at else None,
     }), 200
 
 

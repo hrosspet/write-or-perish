@@ -41,3 +41,14 @@ test('opening an already-read pick marks nothing', async () => {
   fireEvent.click(await screen.findByRole('link', { name: 'Open on X' }));
   expect(api.post).not.toHaveBeenCalled();
 });
+
+test('rating a pick marks it read too', async () => {
+  api.get.mockResolvedValue({ data: { picks: [pick()] } });
+  api.post.mockResolvedValue({ data: { id: 5, feedback: 'good', feedback_at: '2026-09-21T13:00:00Z', read_at: '2026-09-21T13:00:00Z' } });
+  render(<FeedPicks nodeId={9} />);
+
+  fireEvent.click(await screen.findByRole('button', { name: 'Good quote' }));
+  expect(api.post).toHaveBeenCalledWith('/external/items/5/feedback', { feedback: 'good' });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Mark as unread' })).toBeInTheDocument());
+  expect(screen.getByText('All read.')).toBeInTheDocument();
+});

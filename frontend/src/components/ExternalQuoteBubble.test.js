@@ -115,3 +115,14 @@ test('opening an already-read post, or someone else\'s, marks nothing', () => {
   expect(api.post).not.toHaveBeenCalled();
   expect(window.open).toHaveBeenCalledTimes(2);
 });
+
+test('a good / bad verdict marks the quote read too, and tells the page', async () => {
+  api.post.mockResolvedValue({ data: { id: 42, feedback: 'bad', feedback_at: '2026-09-21T13:00:00Z', read_at: '2026-09-21T13:00:00Z' } });
+  const onReadChange = jest.fn();
+  render(<ExternalQuoteBubble quote={quote()} onReadChange={onReadChange} />);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Bad quote' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Mark as unread' })).toBeInTheDocument());
+  expect(onReadChange).toHaveBeenCalledWith(42, '2026-09-21T13:00:00Z');
+  expect(window.open).not.toHaveBeenCalled();
+});

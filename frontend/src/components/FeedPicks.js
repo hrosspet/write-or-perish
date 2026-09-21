@@ -17,8 +17,9 @@ import { useToast } from '../contexts/ToastContext';
  * Every pick is a saved reference, so the footer is the reference's own
  * record: the good / bad verdict (was this the right thing to surface)
  * and the user's read mark. A read pick fades so the unread ones stand
- * out while working down the list. Opening a tweet marks it read; the
- * toggle stays to undo it (a long post opened for later).
+ * out while working down the list. Opening a tweet marks it read, and so
+ * does rating it; the toggle stays to undo it (a long post opened for
+ * later).
  */
 const FeedPicks = ({ nodeId, enabled = true }) => {
   const { addToast } = useToast();
@@ -125,7 +126,10 @@ const FeedPicks = ({ nodeId, enabled = true }) => {
                   <ReferenceFeedback
                     itemId={item.id}
                     feedback={item.feedback}
-                    onChange={(feedback) => patch(idx, { feedback })}
+                    onChange={(feedback, data) => patch(idx, {
+                      feedback,
+                      ...(data && data.read_at ? { read_at: data.read_at } : {}),
+                    })}
                   />
                   <ReferenceReadToggle
                     itemId={item.id}
