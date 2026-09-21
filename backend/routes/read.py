@@ -54,9 +54,8 @@ from backend.utils.placeholders import (
     UserExportValidationError, ca_tweets_allowed, ca_tweets_denied_message,
 )
 from backend.utils.context_artifacts import attach_context_artifacts
-from backend.utils.session_helpers import ancestors_have_prompt
 from backend.utils.ca_feed import (
-    FEED_AI_USAGE, READ_PROMPT_KEYS, READ_FURTHER_MARKER,
+    FEED_AI_USAGE, READ_PROMPT_KEYS, READ_FURTHER_MARKER, in_read_thread,
 )
 
 read_bp = Blueprint("read", __name__)
@@ -163,7 +162,7 @@ def start_read_from_node(node_id):
     if err:
         return err
     privacy_level = node.privacy_level or "private"
-    if ancestors_have_prompt(node, current_user.id, READ_PROMPT_KEYS):
+    if in_read_thread(node):
         # Read further: the thread already has its read prompt, so the
         # click is the request itself (auto_generate does not apply) —
         # a read turn under this node, the day rendered again against

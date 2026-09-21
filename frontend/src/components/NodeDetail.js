@@ -912,8 +912,11 @@ function NodeDetail({ nodeIdOverride }) {
   // Inside a read thread the Read button (top right, and the tail's
   // "Read further") reads further: /read/from-node makes a read turn
   // under this node with the whole thread in view, no second prompt.
-  const inReadThread = [node, ...(node.ancestors || [])]
-    .some(n => ['read', 'read_thread'].includes(n?.prompt_key));
+  // The backend says which it is (in_read_thread: a read prompt above,
+  // by key or by the {ca_tweets} placeholder in a PoC-era prompt's
+  // text), the same test the route applies; a read reply is one by
+  // definition.
+  const inReadThread = !!node.in_read_thread || isReadReply;
   const canRerunRead = !!currentUser?.is_admin && isOwner && isReadReply
     && (isLlmPending || node.llm_task_status === 'failed');
   const showProposal = !!node.content && !isLlmPending && (

@@ -1161,11 +1161,23 @@ def get_node(node_id):
     # was once there. Privacy-blocked ancestors (and deletions the viewer
     # never had access to) are omitted entirely.
     from backend.utils.serialization import serialize_node_status
+    from backend.utils.ca_feed import READ_PROMPT_KEYS
+    from backend.utils.placeholders import CA_TWEETS_PATTERN
     ancestors = []
+    # A read prompt above this node (by key, or by the {ca_tweets}
+    # placeholder in a PoC-era prompt's copied text): the thread page's
+    # Read button then reads further instead of attaching a prompt —
+    # the same test routes/read.py applies (ca_feed.in_read_thread),
+    # taken here from content the loop decrypts anyway.
+    read_prompt_above = False
     for current in ancestor_nodes:
         status = serialize_node_status(current, current_user.id)
         if status is None:  # alive + accessible
             ancestor_content = current.get_content()
+            if not read_prompt_above and (
+                    current.get_prompt_key() in READ_PROMPT_KEYS
+                    or CA_TWEETS_PATTERN.search(ancestor_content or "")):
+                read_prompt_above = True
             # Mirror the focal serializer's parent_user_id derivation
             # (nodes.py:822) so the frontend's ownedByMe check works on
             # ancestors. The walk already has current.parent in hand, no
@@ -1242,11 +1254,17 @@ def get_node(node_id):
             for child in sorted_children
         ) if serialized is not None
     ]
+    focal = _focal_own_fields(node)
     node_data = {
-        **_focal_own_fields(node),
+        **focal,
         "child_count": len(serialized_children),
         "ancestors": ancestors,
         "children": serialized_children,
+        "in_read_thread": bool(
+            read_prompt_above
+            or focal.get("read_reply")
+            or node.get_prompt_key() in READ_PROMPT_KEYS
+            or CA_TWEETS_PATTERN.search(focal.get("content") or "")),
     }
     return jsonify(node_data), 200
 

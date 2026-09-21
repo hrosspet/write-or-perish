@@ -163,6 +163,29 @@ def is_read_reply(node):
     return bool(getattr(node, "feed_picks", None))
 
 
+def in_read_thread(node):
+    """True when *node* sits in a read thread: it or an alive ancestor is
+    a read prompt — stamped or linked with a read key, or, for the PoC
+    threads of 2026-09-13 whose prompt text was copied into the node,
+    carrying the {ca_tweets} placeholder in its content. The same test
+    the completion task applies when it looks for the day (ca_node), so
+    the Read button and the task agree on what a read thread is. Walks
+    the chain and decrypts each ancestor once (a KMS call per node): a
+    click on Read, not a list."""
+    from backend.utils.placeholders import CA_TWEETS_PATTERN
+    seen = set()
+    current = node
+    while current is not None and current.id not in seen:
+        seen.add(current.id)
+        if current.deleted_at is None:
+            if current.get_prompt_key() in READ_PROMPT_KEYS:
+                return True
+            if CA_TWEETS_PATTERN.search(current.get_content() or ""):
+                return True
+        current = current.parent
+    return False
+
+
 def read_reply_ids(node_chain):
     """Ids of the read replies in *node_chain* (see is_read_reply), in two
     queries for the whole chain instead of two lazy loads per node."""
