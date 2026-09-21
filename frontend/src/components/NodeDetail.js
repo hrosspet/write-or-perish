@@ -1032,10 +1032,10 @@ function NodeDetail({ nodeIdOverride }) {
           disabled={readLoading}
           style={{ ...topRightButtonStyle, justifyContent: 'space-between' }}
           title={inReadThread
-            ? "Another pass over the day's tweets, against everything in this thread so far"
-            : "Read the last day of Community Archive tweets against this thread"}
+            ? "Loore reads the last day of Community Archive tweets again, against everything in this thread so far, and shows you what else is relevant"
+            : "Loore reads the last day of Community Archive tweets and shows you the ones relevant to this thread"}
         >
-          <span>{readLoading ? 'Starting…' : (inReadThread ? 'Read further' : 'Read the day')}</span>
+          <span>{readLoading ? 'Starting…' : (inReadThread ? 'Read further' : 'Find relevant tweets')}</span>
           <span style={{
             width: '32px',
             display: 'inline-flex',

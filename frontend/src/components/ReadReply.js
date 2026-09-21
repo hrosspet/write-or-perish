@@ -43,10 +43,11 @@ export const ReadWindowLine = ({ window: w }) => {
   );
 };
 
-const READ_FURTHER_TITLE = 'Another pass over the day\'s tweets, against everything in this thread so far '
-  + '— your marks on these picks included.';
-const HINT = 'Read further asks for more from the same day, with everything in this thread so far in view '
-  + '— your marks included. A reply below is a Text-mode conversation instead.';
+const READ_FURTHER_TITLE = 'Loore reads the same day of tweets again, against everything in this thread so far '
+  + '— your marks on these picks included — and shows you what else is relevant.';
+const HINT = 'Read further: Loore reads the same day again with everything in this thread so far in view '
+  + '— your marks included — and shows you what else is relevant. '
+  + 'A reply below is a Text-mode conversation instead.';
 
 export const ReadReplyTail = ({
   nodeId, unread, total, loaded = true, onMarkedAll, onReadAgain, busy, modelPicker = null,
