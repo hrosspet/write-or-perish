@@ -175,17 +175,21 @@ def _deleted_match_response(keys, deleted_keys, on_deleted):
 
 
 def _restore_node(node_id, content, privacy_level, ai_usage,
-                  token_count=None, provenance=None):
+                  token_count=None, *, provenance):
     """Un-delete a soft-deleted imported node in place.
 
     Refills content from the archive — this also recovers tombstones
     whose content was already wiped by the cleanup task — and keeps the
     node id, so existing child links stay intact. Privacy/AI-usage are
     set to this import's choices, like any other (re)imported node, and
-    so is the provenance when the caller gives one: the restored text is
-    this import's copy (a re-upload after a CA pre-fill drops the public
-    vouch, which errs on the private side; the reverse regains it).
+    so is the provenance: the restored text is this import's copy (a
+    re-upload after a CA pre-fill drops the public vouch, which errs on
+    the private side; the reverse regains it). Required, as on
+    create_twitter_nodes, so no importer can bring back a row nobody
+    can classify.
     """
+    if provenance not in PROVENANCES:
+        raise ValueError(f"Unknown provenance {provenance!r}")
     node = Node.query.get(node_id)
     node.set_privacy_level(privacy_level)  # before set_content: decides encryption
     node.set_content(content)
@@ -194,8 +198,7 @@ def _restore_node(node_id, content, privacy_level, ai_usage,
         else approximate_token_count(content)
     )
     node.ai_usage = ai_usage
-    if provenance is not None:
-        node.provenance = provenance
+    node.provenance = provenance
     node.deleted_at = None
 
 
@@ -442,7 +445,8 @@ def confirm_import():
                     # partially-skipped imports don't orphan new nodes.
                     if source_key in deleted_keys and on_deleted == 'restore':
                         _restore_node(key_index[source_key], node_content,
-                                      privacy_level, ai_usage)
+                                      privacy_level, ai_usage,
+                                      provenance=PROVENANCE_ARCHIVE_UPLOAD)
                         deleted_keys.discard(source_key)
                         nodes_restored += 1
                     else:
@@ -501,7 +505,8 @@ def confirm_import():
                 if source_key in key_index:
                     if source_key in deleted_keys and on_deleted == 'restore':
                         _restore_node(key_index[source_key], node_content,
-                                      privacy_level, ai_usage)
+                                      privacy_level, ai_usage,
+                                      provenance=PROVENANCE_ARCHIVE_UPLOAD)
                         deleted_keys.discard(source_key)
                         nodes_restored += 1
                     else:
@@ -899,7 +904,8 @@ def confirm_claude_import():
                     if (source_key in deleted_keys
                             and on_deleted == 'restore'):
                         _restore_node(key_index[source_key], node_content,
-                                      privacy_level, ai_usage)
+                                      privacy_level, ai_usage,
+                                      provenance=PROVENANCE_ARCHIVE_UPLOAD)
                         deleted_keys.discard(source_key)
                         nodes_restored += 1
                     else:
@@ -1645,7 +1651,8 @@ def confirm_chatgpt_import():
                     if (source_key in deleted_keys
                             and on_deleted == 'restore'):
                         _restore_node(key_index[source_key], node_content,
-                                      privacy_level, ai_usage)
+                                      privacy_level, ai_usage,
+                                      provenance=PROVENANCE_ARCHIVE_UPLOAD)
                         deleted_keys.discard(source_key)
                         nodes_restored += 1
                     else:

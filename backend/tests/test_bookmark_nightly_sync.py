@@ -364,8 +364,9 @@ def _tweet_row(user_id, external_id, source="twitter_bookmark",
 def test_public_source_sweep_asks_x_once_per_tweet_and_stamps_every_copy(
         app, monkeypatch):
     """Unknown tweet rows are settled by X's oEmbed answer: one lookup per
-    distinct tweet id, the verdict on every user's copy; decided rows,
-    archive rows and pages are never asked (#295)."""
+    distinct tweet id, the verdict on every user's copy; decided rows and
+    pages are never asked, and an archive row from before the column is
+    vouched in one statement rather than asked (#295)."""
     uid = User.query.first().id
     other = User(username="other")
     _db.session.add(other)
@@ -381,18 +382,19 @@ def test_public_source_sweep_asks_x_once_per_tweet_and_stamps_every_copy(
     monkeypatch.setattr(_sync_mod, "x_tweet_public_status",
                         lambda tid: asked.append(tid) or verdicts[tid])
 
-    result = _sync_mod.verify_public_source_sweep(pause=0)
+    result = _sync_mod.run_public_source_sweep(pause=0)
 
     assert sorted(asked) == ["100", "200"]
     assert (result["lookups"], result["public"], result["refused"],
             result["stopped_on"]) == (2, 1, 1, None)
+    assert result["archive_vouched"] == 1
     for row in (a1, a2, b, decided, archive, page):
         _db.session.refresh(row)
     assert (a1.public_source, a2.public_source, b.public_source) == (
         True, True, False)
     assert all(r.public_source_checked_at for r in (a1, a2, b))
     assert decided.public_source_checked_at is None
-    assert archive.public_source is None and archive.public_source_checked_at is None
+    assert archive.public_source is True and archive.public_source_checked_at is None
     assert page.public_source is False and page.public_source_checked_at is None
 
 
@@ -412,7 +414,7 @@ def test_public_source_sweep_stops_on_a_throttle_and_queues_it_behind(
     monkeypatch.setattr(_sync_mod, "x_tweet_public_status",
                         lambda tid: asked.append(tid) or answers[tid])
 
-    result = _sync_mod.verify_public_source_sweep(pause=0)
+    result = _sync_mod.run_public_source_sweep(pause=0)
 
     assert asked == ["3", "2"]  # 1 was asked yesterday: last in line
     assert result["stopped_on"] == 429 and result["unanswered"] == 2
@@ -424,7 +426,7 @@ def test_public_source_sweep_stops_on_a_throttle_and_queues_it_behind(
 
     answers.update({"3": (True, 200), "2": (True, 200)})
     asked.clear()
-    _sync_mod.verify_public_source_sweep(pause=0)
+    _sync_mod.run_public_source_sweep(pause=0)
     assert asked == ["1", "3", "2"]
     for row in (old, fresh, newer):
         _db.session.refresh(row)
@@ -439,9 +441,86 @@ def test_public_source_sweep_respects_the_nightly_cap(app, monkeypatch):
     asked = []
     monkeypatch.setattr(_sync_mod, "x_tweet_public_status",
                         lambda tid: asked.append(tid) or (True, 200))
-    result = _sync_mod.verify_public_source_sweep(limit=2, pause=0)
+    result = _sync_mod.run_public_source_sweep(limit=2, pause=0)
     assert result["lookups"] == 2 and len(asked) == 2
     assert ExternalItem.query.filter_by(public_source=None).count() == 3
+
+
+def test_public_source_sweep_cap_counts_tweets_not_copies(app, monkeypatch):
+    """The nightly budget is lookups: three people saving the newest
+    tweet cost one of it, not three, so the older tweet is still
+    reached tonight."""
+    uid = User.query.first().id
+    other, third = User(username="other"), User(username="third")
+    _db.session.add_all([other, third])
+    _db.session.commit()
+    _tweet_row(uid, "older")
+    for user_id in (uid, other.id, third.id):
+        _tweet_row(user_id, "newest")  # three copies, all saved later
+    asked = []
+    monkeypatch.setattr(_sync_mod, "x_tweet_public_status",
+                        lambda tid: asked.append(tid) or (True, 200))
+
+    result = _sync_mod.run_public_source_sweep(limit=2, pause=0)
+
+    assert asked == ["newest", "older"] and result["lookups"] == 2
+    assert ExternalItem.query.filter_by(public_source=None).count() == 0
+
+
+def test_public_source_sweep_keeps_each_verdict_as_it_lands(app, monkeypatch):
+    """Verdicts are committed one by one: a run cut off mid-way (soft
+    time limit, a deploy's SIGTERM) keeps what X already answered."""
+    later = _tweet_row(uid := User.query.first().id, "1")  # saved first: asked second
+    first = _tweet_row(uid, "2")  # saved last: newest, asked first
+
+    def answer(tid):
+        if tid == "2":
+            return True, 200
+        raise RuntimeError("cut off")  # stands in for SoftTimeLimitExceeded
+    monkeypatch.setattr(_sync_mod, "x_tweet_public_status", answer)
+
+    with pytest.raises(RuntimeError):
+        _sync_mod.run_public_source_sweep(pause=0)
+    _db.session.rollback()
+    for row in (first, later):
+        _db.session.refresh(row)
+    assert first.public_source is True and first.public_source_checked_at
+    assert later.public_source is None and later.public_source_checked_at is None
+
+
+def test_public_source_sweep_gate_runs_once_in_its_utc_hour(app, monkeypatch):
+    """The beat entry is HOURLY (a daily interval starts over on every
+    deploy, which deletes the beat schedule): the task runs the sweep
+    only when the UTC clock is in PUBLIC_SOURCE_SWEEP_UTC_HOUR, and not
+    again within PUBLIC_SOURCE_SWEEP_MIN_GAP of the last run."""
+    from datetime import datetime, timedelta
+    uid = User.query.first().id
+    row = _tweet_row(uid, "1")
+    asked = []
+    monkeypatch.setattr(_sync_mod, "x_tweet_public_status",
+                        lambda tid: asked.append(tid) or (True, 200))
+    monkeypatch.setattr(_sync_mod.time, "sleep", lambda s: None)
+    now_hour = datetime.utcnow().hour
+
+    monkeypatch.setattr(_sync_mod, "PUBLIC_SOURCE_SWEEP_UTC_HOUR",
+                        (now_hour + 12) % 24)
+    assert _sync_mod.verify_public_source_sweep() == {"status": "not_due"}
+    assert asked == []
+
+    monkeypatch.setattr(_sync_mod, "PUBLIC_SOURCE_SWEEP_UTC_HOUR", now_hour)
+    result = _sync_mod.verify_public_source_sweep()
+    assert result["status"] == "ok" and asked == ["1"]
+
+    # A second tick in the same hour (beat restarted mid-hour): no-op.
+    _tweet_row(uid, "2")
+    assert _sync_mod.verify_public_source_sweep() == {"status": "ran_recently"}
+    assert asked == ["1"]
+
+    # Tomorrow: the newest attempt is a night old, so it runs again.
+    row.public_source_checked_at = datetime.utcnow() - timedelta(hours=23)
+    _db.session.commit()
+    assert _sync_mod.verify_public_source_sweep()["status"] == "ok"
+    assert asked == ["1", "2"]
 
 
 def test_nightly_fanout_dispatches_local_3am_connected_only(app, monkeypatch):

@@ -12,6 +12,7 @@ import time
 
 import requests
 from celery.utils.log import get_task_logger
+from sqlalchemy import func
 
 from backend.celery_app import celery, flask_app
 from backend.extensions import db
@@ -69,7 +70,7 @@ def fetch_community_archive(self, user_id, username, max_items=2000):
         if account_id is None:
             return {"status": "not_found", "username": username}
         created, skipped = _upsert_items(
-            user_id, "community_archive",
+            user_id, SOURCE_COMMUNITY_ARCHIVE,
             ca_fetch_tweets(account_id, username, max_items=max_items),
         )
         logger.info(
@@ -357,65 +358,126 @@ def sync_all_twitter_bookmarks():
 # never asked.
 PUBLIC_SOURCE_SWEEP_LIMIT = 300
 PUBLIC_SOURCE_SWEEP_PAUSE = 0.5
+# The sweep is global (one endpoint, one budget), so its night is a UTC
+# hour rather than each user's: the HOURLY beat gate runs it when the
+# UTC clock is in this hour. Hourly with a gate, not a daily interval:
+# every deploy deletes the beat schedule file (deploy.sh), which starts
+# a daily interval's 24 h countdown over, and prod deploys most days —
+# a plain 86400 s entry would fire rarely or never. INTRODUCED CONSTANT:
+# 05:00 UTC is a quiet hour on both sides of the Atlantic, and nothing
+# waits on the sweep.
+PUBLIC_SOURCE_SWEEP_UTC_HOUR = 5
+# Re-run guard, as for the bookmark sync: a beat restart shifts the
+# gate's phase within the hour, and a second run would double the
+# night's budget.
+PUBLIC_SOURCE_SWEEP_MIN_GAP = timedelta(hours=20)
 # Sources whose external_id is a tweet id.
 X_TWEET_SOURCES = ("twitter_bookmark", "twitter_like")
+SOURCE_COMMUNITY_ARCHIVE = "community_archive"
+
+
+def _vouch_archive_rows():
+    """Community Archive rows are public by construction (an opt-in
+    public corpus) and every write path stamps them so now; rows from
+    before the column carry NULL. Settle those in one statement.
+    Idempotent — once settled it matches nothing — so it costs the sweep
+    one cheap query a night rather than anyone a one-off script."""
+    vouched = (ExternalItem.query
+               .filter(ExternalItem.source == SOURCE_COMMUNITY_ARCHIVE,
+                       ExternalItem.public_source.is_(None))
+               .update({"public_source": True}, synchronize_session=False))
+    db.session.commit()
+    return vouched
 
 
 def _apply_public_verdict(external_id, verdict, now):
     """Stamp one tweet's verdict on every unknown copy of it, whoever
-    saved it. Answered or not, the attempt is recorded."""
+    saved it, and COMMIT: verdicts are kept one by one, so a run cut off
+    mid-way (the soft time limit, a deploy's SIGTERM to the worker)
+    keeps everything X already answered, and no row lock is held across
+    the pause between lookups, where a clip of the same tweet can land.
+    Answered or not, the attempt is recorded."""
     values = {"public_source_checked_at": now}
     if verdict is not None:
         values["public_source"] = verdict
-    return (ExternalItem.query
-            .filter(ExternalItem.source.in_(X_TWEET_SOURCES),
-                    ExternalItem.external_id == external_id,
-                    ExternalItem.public_source.is_(None))
-            .update(values, synchronize_session=False))
+    stamped = (ExternalItem.query
+               .filter(ExternalItem.source.in_(X_TWEET_SOURCES),
+                       ExternalItem.external_id == external_id,
+                       ExternalItem.public_source.is_(None))
+               .update(values, synchronize_session=False))
+    db.session.commit()
+    return stamped
+
+
+def _unknown_tweet_ids(limit):
+    """The next ``limit`` DISTINCT unknown tweet ids: never-asked tweets
+    first (newest save first, so tonight's clip is resolved tonight),
+    then the least recently asked. Grouped per tweet, not per row, so
+    the nightly cap counts lookups — a tweet ten people saved is one
+    lookup, not ten of the budget. Every copy is stamped together, so
+    max(checked_at) is when the tweet was last asked and NULL means it
+    never was."""
+    last_asked = func.max(ExternalItem.public_source_checked_at)
+    rows = (
+        db.session.query(ExternalItem.external_id)
+        .filter(ExternalItem.source.in_(X_TWEET_SOURCES),
+                ExternalItem.public_source.is_(None))
+        .group_by(ExternalItem.external_id)
+        .order_by(last_asked.asc().nullsfirst(),
+                  func.max(ExternalItem.id).desc())
+        .limit(limit).all()
+    )
+    return [external_id for (external_id,) in rows]
+
+
+def run_public_source_sweep(limit=PUBLIC_SOURCE_SWEEP_LIMIT,
+                            pause=PUBLIC_SOURCE_SWEEP_PAUSE):
+    """One night's sweep (a plain function: the beat gate below decides
+    when a night is). Needs an app context."""
+    archive_vouched = _vouch_archive_rows()
+    public = refused = unanswered = lookups = 0
+    stopped_on = None
+    for external_id in _unknown_tweet_ids(limit):
+        if lookups and pause:
+            time.sleep(pause)
+        verdict, status = x_tweet_public_status(external_id)
+        lookups += 1
+        _apply_public_verdict(external_id, verdict, datetime.utcnow())
+        if verdict is True:
+            public += 1
+        elif verdict is False:
+            refused += 1
+        else:
+            unanswered += 1
+            if status is None or status == 429 or status >= 500:
+                # X is throttling, failing or unreachable: tomorrow,
+                # rather than hammer it tonight.
+                stopped_on = status or "network"
+                break
+    logger.info(
+        "Public-source sweep: %d archive rows vouched, %d lookups, "
+        "%d public, %d refused, %d unanswered%s", archive_vouched,
+        lookups, public, refused, unanswered,
+        f", stopped on {stopped_on}" if stopped_on else "")
+    return {"status": "ok", "archive_vouched": archive_vouched,
+            "lookups": lookups, "public": public, "refused": refused,
+            "unanswered": unanswered, "stopped_on": stopped_on}
 
 
 @celery.task(name='backend.tasks.external_sync.verify_public_source_sweep')
-def verify_public_source_sweep(limit=PUBLIC_SOURCE_SWEEP_LIMIT,
-                               pause=PUBLIC_SOURCE_SWEEP_PAUSE):
+def verify_public_source_sweep():
+    """Hourly beat gate: run the night's sweep when the UTC clock is in
+    PUBLIC_SOURCE_SWEEP_UTC_HOUR and it has not run within
+    PUBLIC_SOURCE_SWEEP_MIN_GAP — the newest checked_at says when it
+    last did. Hourly with an internal gate like the bookmark sync and
+    the digest sweep; see PUBLIC_SOURCE_SWEEP_UTC_HOUR for why a daily
+    interval would not fire."""
     with flask_app.app_context():
-        # Never-asked rows first, then the least recently asked; newest
-        # saves first within a tier so tonight's clip is resolved tonight.
-        rows = (
-            db.session.query(ExternalItem.external_id)
-            .filter(ExternalItem.source.in_(X_TWEET_SOURCES),
-                    ExternalItem.public_source.is_(None))
-            .order_by(ExternalItem.public_source_checked_at.asc().nullsfirst(),
-                      ExternalItem.id.desc())
-            .limit(limit).all()
-        )
-        public = refused = unanswered = lookups = 0
-        stopped_on = None
-        seen = set()
-        for (external_id,) in rows:
-            if external_id in seen:
-                continue  # another user's copy: stamped with the first
-            seen.add(external_id)
-            if lookups and pause:
-                time.sleep(pause)
-            verdict, status = x_tweet_public_status(external_id)
-            lookups += 1
-            _apply_public_verdict(external_id, verdict, datetime.utcnow())
-            if verdict is True:
-                public += 1
-            elif verdict is False:
-                refused += 1
-            else:
-                unanswered += 1
-                if status is None or status == 429 or status >= 500:
-                    # X is throttling, failing or unreachable: tomorrow,
-                    # rather than hammer it tonight.
-                    stopped_on = status or "network"
-                    break
-        db.session.commit()
-        logger.info(
-            "Public-source sweep: %d lookups, %d public, %d refused, "
-            "%d unanswered%s", lookups, public, refused, unanswered,
-            f", stopped on {stopped_on}" if stopped_on else "")
-        return {"status": "ok", "lookups": lookups, "public": public,
-                "refused": refused, "unanswered": unanswered,
-                "stopped_on": stopped_on}
+        now = datetime.utcnow()
+        if now.hour != PUBLIC_SOURCE_SWEEP_UTC_HOUR:
+            return {"status": "not_due"}
+        last_run = db.session.query(
+            func.max(ExternalItem.public_source_checked_at)).scalar()
+        if last_run and now - last_run < PUBLIC_SOURCE_SWEEP_MIN_GAP:
+            return {"status": "ran_recently"}
+        return run_public_source_sweep()

@@ -130,7 +130,8 @@ def test_restore_re_encrypts(app):
     n.set_content("old")
     db.session.add(n)
     db.session.commit()
-    _restore_node(n.id, "restored text", "private", "none")
+    _restore_node(n.id, "restored text", "private", "none",
+                  provenance="archive_upload")
     db.session.commit()
     assert n.deleted_at is None
     _assert_encrypted(n, "restored text")

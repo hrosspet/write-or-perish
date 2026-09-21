@@ -386,6 +386,30 @@ class TestConfirmClaudeImportDedup:
         assert b2["thread_count"] == 0
         assert self._count_nodes(alice.id) == 2
 
+    def test_restore_of_deleted_nodes_stamps_this_imports_provenance(
+            self, app):
+        """A re-upload that restores soft-deleted nodes classifies them
+        as this import's copy, like the nodes it creates (#295 step 0)."""
+        from datetime import datetime
+        client = app.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        convs = [_analyzed_conv()]
+        assert _confirm_conversations(client, convs).get_json()["created"] == 2
+        for node in Node.query.filter_by(human_owner_id=alice.id).all():
+            node.deleted_at = datetime.utcnow()
+            node.provenance = None  # a row from before the column
+        _db.session.commit()
+
+        r = _confirm_conversations(client, convs, on_deleted="restore")
+        assert r.status_code == 201
+        assert r.get_json()["restored"] == 2
+        nodes = Node.query.filter_by(human_owner_id=alice.id).all()
+        assert all(n.deleted_at is None for n in nodes)
+        assert all(n.provenance == "archive_upload" for n in nodes)
+
     def test_overlapping_snapshot_chains_onto_existing_thread(self, app):
         client = app.test_client()
         alice = _make_user("alice")
