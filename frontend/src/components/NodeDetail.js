@@ -1220,6 +1220,13 @@ function NodeDetail({ nodeIdOverride }) {
             onMarkedAll={handlePicksMarkedAll}
             onReadAgain={handleReadFromNode}
             busy={readLoading || llmRequesting || !!llmTaskNodeId}
+            modelPicker={showCraftBar ? (
+              <ModelSelector
+                nodeId={node.id}
+                selectedModel={selectedModel}
+                onModelChange={setSelectedModel}
+              />
+            ) : null}
           />
         )}
         {(() => {
@@ -1345,26 +1352,25 @@ function NodeDetail({ nodeIdOverride }) {
           <SpeakerIcon nodeId={node.id} content={node.content} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} onTtsGenerated={() => setNode(prev => prev ? { ...prev, has_tts: true } : prev)} />
           <DownloadAudioIcon nodeId={node.id} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} />
         </NodeFooter>
-        {showCraftBar && (
+        {/* Under a finished read reply the response action is the tail's
+            "Read further", and the model picker sits beside it there; the
+            craft bar's generic LLM Response has no meaning of its own
+            under the picks. A failed read reply keeps the bar. */}
+        {showCraftBar && !(isReadReply && node.llm_task_status === 'completed') && (
           <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-            {/* Under a finished read reply the response action is the
-                tail's "Read further"; the model picker still applies. A
-                failed one keeps the generic button. */}
-            {!(isReadReply && node.llm_task_status === 'completed') && (
-              <button
-                onClick={handleLLMResponse}
-                disabled={llmRequesting || !!llmTaskNodeId}
-                style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}
-              >
-                {(llmRequesting || llmTaskNodeId) ? (
-                  <>
-                    <FaSpinner className="spin" aria-hidden="true" />
-                    {llmRequesting ? 'Requesting…'
-                      : llmStatus === 'pending' ? 'Waiting for AI…' : 'Generating…'}
-                  </>
-                ) : 'LLM Response'}
-              </button>
-            )}
+            <button
+              onClick={handleLLMResponse}
+              disabled={llmRequesting || !!llmTaskNodeId}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}
+            >
+              {(llmRequesting || llmTaskNodeId) ? (
+                <>
+                  <FaSpinner className="spin" aria-hidden="true" />
+                  {llmRequesting ? 'Requesting…'
+                    : llmStatus === 'pending' ? 'Waiting for AI…' : 'Generating…'}
+                </>
+              ) : 'LLM Response'}
+            </button>
             <ModelSelector
               nodeId={node.id}
               selectedModel={selectedModel}

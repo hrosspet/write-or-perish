@@ -22,7 +22,11 @@ import { formatDateTime } from '../utils/date';
  * below is a Text-mode conversation about the picks instead: the day
  * stays out, the assistant's tools are on. The tail makes that
  * difference plain and carries the list's read state so the reader can
- * clear it in one go.
+ * clear it in one go. In craft mode the model picker sits beside "Read
+ * further" (`modelPicker`): under a read reply the tail is the response
+ * action, so the craft bar's generic LLM Response and its picker stay
+ * out, and the picker lives next to the action it serves (it also sets
+ * the model for a reply typed below).
  */
 
 const count = (n) => Number(n || 0).toLocaleString('en-US');
@@ -45,7 +49,7 @@ const HINT = 'Read further asks for more from the same day, with everything in t
   + '— your marks included. A reply below is a Text-mode conversation instead.';
 
 export const ReadReplyTail = ({
-  nodeId, unread, total, loaded = true, onMarkedAll, onReadAgain, busy,
+  nodeId, unread, total, loaded = true, onMarkedAll, onReadAgain, busy, modelPicker = null,
 }) => {
   const { addToast } = useToast();
   const [marking, setMarking] = useState(false);
@@ -79,15 +83,18 @@ export const ReadReplyTail = ({
     <div className="read-tail">
       <div className="read-tail-row">
         <span className="read-tail-state">{state}</span>
-        <button
-          type="button"
-          className="read-again"
-          onClick={onReadAgain}
-          disabled={busy}
-          title={READ_FURTHER_TITLE}
-        >
-          {busy ? 'Reading…' : 'Read further'}
-        </button>
+        <span className="read-tail-actions">
+          {modelPicker}
+          <button
+            type="button"
+            className="read-again"
+            onClick={onReadAgain}
+            disabled={busy}
+            title={READ_FURTHER_TITLE}
+          >
+            {busy ? 'Reading…' : 'Read further'}
+          </button>
+        </span>
       </div>
       <p className="read-tail-hint">{HINT}</p>
     </div>

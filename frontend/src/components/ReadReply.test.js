@@ -62,3 +62,9 @@ test('the hint says what Read further does and what a reply does, and nothing ab
   expect(container.textContent).not.toMatch(/marked read|leaves the list/);
   expect(screen.getByRole('button', { name: 'Read further' }).title).not.toMatch(/marked read|leaves the list/);
 });
+
+test('the model picker, when given, sits beside Read further', () => {
+  render(<ReadReplyTail nodeId={77} unread={1} total={3} onReadAgain={() => {}} modelPicker={<select aria-label="Model"><option>gpt-5</option></select>} />);
+  const actions = screen.getByRole('button', { name: 'Read further' }).parentElement;
+  expect(actions.querySelector('select[aria-label="Model"]')).not.toBeNull();
+});

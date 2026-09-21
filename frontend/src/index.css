@@ -520,6 +520,12 @@ code {
   align-items: baseline;
   gap: 10px;
 }
+.read-tail-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 /* The one action that feeds the day back in: bordered like the thread's
    top-right controls, tinted like the live "Mark as read" invitation. */
 .read-again {
