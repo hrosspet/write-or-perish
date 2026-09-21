@@ -860,9 +860,13 @@ def _retrieval_injection_text(tr, with_labels=False, licence=None):
     Returns None if nothing is (still) available.
 
     Everything returned here enters the payload after the chain decided
-    the API key, so each pull reports to *licence* (a PayloadLicence,
-    #325): a row by its own ai_usage, a saved reference as other people's
-    writing. None skips the report (callers that only render the text).
+    the API key, so a pull reports to *licence* (a PayloadLicence, #325):
+    a node by its own ai_usage, a saved reference as other people's
+    writing. The user's own artifacts and todo list do not report: the
+    same rows reach the payload through the prompt's placeholders without
+    a vote, and every writer stamps an artifact 'chat' whatever the user's
+    default, so one decision has to cover both doors (#326). None skips
+    the report (callers that only render the text).
 
     *with_labels* renders each search match's short quote label ([A], [B])
     and tells the model to quote by label — only valid within the turn that
@@ -874,17 +878,12 @@ def _retrieval_injection_text(tr, with_labels=False, licence=None):
         artifact = UserArtifact.query.get(tr.get("artifact_id"))
         if artifact is None or artifact.ai_usage not in AI_ALLOWED:
             return None
-        if licence is not None:
-            licence.note_usage(
-                artifact.ai_usage, f"artifact {tr.get('kind', '?')!r}")
         return (f"[Contents of artifact '{tr.get('kind', '?')}' you "
                 f"requested:\n{artifact.get_content()}]")
     if name == "read_todo":
         todo = UserTodo.query.get(tr.get("todo_id"))
         if todo is None or todo.ai_usage not in AI_ALLOWED:
             return None
-        if licence is not None:
-            licence.note_usage(todo.ai_usage, "the todo list")
         return f"[Your current todo list:\n{todo.get_content()}]"
     if name == "read_full":
         # Re-resolve via the quote machinery (permission + ai_usage checks
@@ -1141,7 +1140,9 @@ def _reference_marks_note(item_ids, user_id):
     message. Assistant turns keep their raw {quote_ext:ID} markers (they
     are the model's own output and part of the cached prefix), so this is
     the only place a continued conversation learns whether the user read
-    the pick and how they rated it. Returns None when nothing is marked.
+    the pick and how they rated it. Handles and marks only — no reference
+    text, so nothing here bears on the API key (#325). Returns None when
+    nothing is marked.
     """
     if not item_ids:
         return None
@@ -2447,7 +2448,7 @@ def render_system_message(system_node, user_id):
     real generation share byte-identical prefixes: the result is stored
     in the #192 Redis cache, and generation prefers those cached bytes.
     Only valid for prompts without volatile placeholders ({user_export},
-    {quote:..}) — callers must check first.
+    {quote:..}, {quote_ext:..}) — callers must check first.
     """
     owner = User.query.get(user_id)
     user_tz = owner.timezone if owner and owner.timezone else "UTC"
@@ -2540,7 +2541,8 @@ def prewarm_anthropic_cache(system_node_id, user_id, model_id,
             sys_content = system_node.get_content() or ""
             if (USER_EXPORT_PATTERN.search(sys_content)
                     or CA_TWEETS_PATTERN.search(sys_content)
-                    or has_quotes(sys_content)):
+                    or has_quotes(sys_content)
+                    or has_ext_quotes(sys_content)):
                 return {"status": "skipped", "reason": "volatile_prompt"}
 
             model_config = flask_app.config["SUPPORTED_MODELS"].get(model_id)
@@ -2878,10 +2880,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             if system_node is not None:
                 _sys_text = system_node.get_content() or ""
                 # Exclude prompts carrying per-call volatile placeholders.
+                # A {quote_ext:ID} is volatile too: a cached render would
+                # replay the resolved reference on later turns without
+                # the licence hearing of it (#325 review).
                 system_render_cacheable = (
                     not USER_EXPORT_PATTERN.search(_sys_text)
                     and not CA_TWEETS_PATTERN.search(_sys_text)
                     and not has_quotes(_sys_text)
+                    and not has_ext_quotes(_sys_text)
                 )
                 if system_render_cacheable:
                     cached_system_render = get_cached_render(

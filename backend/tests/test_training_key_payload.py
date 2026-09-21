@@ -129,7 +129,9 @@ def test_licence_starts_from_the_chain_and_only_ever_drops(app):  # noqa: F811
 
 def test_every_retrieval_pull_reports_to_the_licence(app):  # noqa: F811
     """_retrieval_injection_text is the one place mid-turn pulls become
-    payload: each kind reports by its own setting, references always."""
+    payload: a node reports by its own setting, a reference always. The
+    user's own artifacts and todo list do not (#326 decides both doors:
+    this one and the prompt placeholders that pull the same rows)."""
     inject = _llm_task_mod._retrieval_injection_text
     alice = _mk_user("alice", approved=True, plan="alpha")
     chat_art = _mk_artifact(alice.id, "memory", "m", ai_usage="chat")
@@ -148,8 +150,8 @@ def test_every_retrieval_pull_reports_to_the_licence(app):  # noqa: F811
     assert after({"name": "read_artifact", "artifact_id": train_art.id,
                   "kind": "scratchpad"}) == "train"
     assert after({"name": "read_artifact", "artifact_id": chat_art.id,
-                  "kind": "memory"}) == "chat"
-    assert after({"name": "read_todo", "todo_id": todo.id}) == "chat"
+                  "kind": "memory"}) == "train"
+    assert after({"name": "read_todo", "todo_id": todo.id}) == "train"
     assert after({"name": "read_full", "kind": "node", "ref_id": licensed.id,
                   "user_id": alice.id, "ref": str(licensed.id)}) == "train"
     assert after({"name": "read_full", "kind": "node", "ref_id": withheld.id,
@@ -334,4 +336,77 @@ def test_a_pull_from_last_turn_is_re_injected_on_chat_keys(app, keys):  # noqa: 
 
     assert len(_ScriptedProvider.calls) == 1
     assert "LAST TURN'S TWEET" in _payload(0)
+    assert _keys_used() == ["sk-chat"]
+
+
+def test_a_drop_holds_for_every_later_round_of_the_turn(app, keys):  # noqa: F811
+    """Once dropped, a later round pulling only 'train' content does not
+    bring the train key back."""
+    alice, system, user_node, llm_node = _train_chain("textmode")
+    withheld = _entry(alice, "MY CHAT ENTRY", "chat")
+    licensed = _entry(alice, "MY TRAIN ENTRY", "train")
+    _db.session.commit()
+
+    _ScriptedProvider.reset([
+        _resp("Reading one.", tool_calls=[{
+            "id": "t1", "name": "read_full",
+            "input": {"ref": str(withheld.id)}}]),
+        _resp("And another.", tool_calls=[{
+            "id": "t2", "name": "read_full",
+            "input": {"ref": str(licensed.id)}}]),
+        _resp("Done."),
+    ])
+    generate_llm_response(_FakeSelf(), user_node.id, llm_node.id, "gpt-5",
+                          alice.id, source_mode="textmode")
+
+    assert "MY TRAIN ENTRY" in _payload(2)
+    assert _keys_used() == ["sk-train", "sk-chat", "sk-chat"]
+
+
+def test_a_prompt_quoting_a_reference_is_never_served_from_the_render_cache(app, keys, monkeypatch):  # noqa: F811
+    """The #192 cached system render replays the resolved text on later
+    turns, past the resolution that reports to the licence. {quote:ID}
+    already made a prompt uncacheable; {quote_ext:ID} must too, or turn
+    two goes out on the train key with the tweet in it (#325 review)."""
+    import backend.utils.prompt_cache as prompt_cache
+    store = {}
+    monkeypatch.setattr(prompt_cache, "get_cached_render",
+                        lambda config, node: store.get(node.id))
+    monkeypatch.setattr(prompt_cache, "store_render",
+                        lambda config, node, text: store.__setitem__(node.id, text))
+
+    alice, system, user_node, llm_node = _train_chain("voice")
+    ref = _reference(alice.id, "THE PROMPT'S TWEET")
+    # The system node renders its pinned prompt artifact, not its own text.
+    system.get_artifact("prompt").set_content(
+        "system prompt body; consider {quote_ext:%d}" % ref.id)
+    _db.session.commit()
+
+    _ScriptedProvider.reset([_resp("Turn one.")])
+    generate_llm_response(_FakeSelf(), user_node.id, llm_node.id, "gpt-5",
+                          alice.id, source_mode="voice")
+    assert "THE PROMPT'S TWEET" in _payload(0)
+    assert _keys_used() == ["sk-chat"]
+    assert store == {}                      # not cached: it is volatile
+
+    reply = _fresh(llm_node.id)
+    follow = Node(user_id=alice.id, human_owner_id=alice.id,
+                  parent_id=reply.id, node_type="user",
+                  privacy_level="private", ai_usage="train")
+    follow.set_content("and then?")
+    _db.session.add(follow)
+    _db.session.flush()
+    llm_user = _mk_user("gpt-5b", twitter_id="llm-gpt-5b")
+    reply2 = Node(user_id=llm_user.id, human_owner_id=alice.id,
+                  parent_id=follow.id, node_type="llm", llm_model="gpt-5",
+                  llm_task_status="pending", privacy_level="private",
+                  ai_usage="train")
+    reply2.set_content("[LLM response generation pending...]")
+    _db.session.add(reply2)
+    _db.session.commit()
+
+    _ScriptedProvider.reset([_resp("Turn two.")])
+    generate_llm_response(_FakeSelf(), follow.id, reply2.id, "gpt-5",
+                          alice.id, source_mode="voice")
+    assert "THE PROMPT'S TWEET" in _payload(0)
     assert _keys_used() == ["sk-chat"]
