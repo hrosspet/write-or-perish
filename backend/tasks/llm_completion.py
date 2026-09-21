@@ -3061,6 +3061,23 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             # Determine which API key to use based on ai_usage settings
             key_type = determine_api_key_type(node_chain, logger=logger)
+            if ca_turn is not None and key_type != 'chat':
+                # Every turn of a read thread carries other people's
+                # public tweets, which Loore has no licence to train on:
+                # a read renders the day, and a chat turn re-sends the
+                # earlier picks (the reply's {quote_ext:ID} markers
+                # resolve to the tweets). The read nodes' own 'chat'
+                # usage does not decide this — determine_api_key_type
+                # reads user nodes only, so the placeholder's
+                # FEED_AI_USAGE never reaches it and the prompt node's
+                # is one vote among the chain's. A thread whose user
+                # nodes are all 'train' (a read prompt from before #307,
+                # or a read further, which attaches no prompt of its
+                # own) would otherwise go out on the train key.
+                logger.info(
+                    "Node %s: read thread (turn %r); forcing chat keys "
+                    "over the chain's %r", llm_node_id, ca_turn, key_type)
+                key_type = 'chat'
             api_keys = get_api_keys_for_usage(flask_app.config, key_type)
 
             model_config = flask_app.config["SUPPORTED_MODELS"][model_id]

@@ -37,6 +37,13 @@ quotes other people's public tweets, which Loore has no licence to train
 on, so the user's 'train' default is lowered here and the node editor
 refuses to raise it (routes/nodes.py). 'none' is refused: a read is an
 AI call by definition.
+
+That stamp is a record, not the guard. determine_api_key_type reads user
+nodes only, so the placeholder's usage never reaches key selection and
+the prompt node's is only one vote among the chain's. What actually
+keeps the tweets off the training key is llm_completion forcing
+key_type='chat' on every turn of a read thread — the render on a read,
+the earlier picks' resolved quotes on a chat turn.
 """
 import json
 import uuid

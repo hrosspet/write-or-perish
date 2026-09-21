@@ -458,3 +458,96 @@ def test_second_read_prompt_under_a_read_reply_is_a_read(app, monkeypatch, tmp_p
     assert FeedRender.query.filter_by(node_id=again.id).one().tweet_ids == "111,222"
     assert [p.item.external_id
             for p in FeedPick.query.filter_by(node_id=again.id)] == ["111"]
+
+
+# ── the training key never carries other people's tweets ─────────────────
+
+def _watch_key_type(monkeypatch):
+    """Record the key_type llm_completion resolves for each call."""
+    seen = []
+    real = _llm_task_mod.get_api_keys_for_usage
+
+    def _spy(config, key_type):
+        seen.append(key_type)
+        return real(config, key_type)
+    monkeypatch.setattr(_llm_task_mod, "get_api_keys_for_usage", _spy)
+    return seen
+
+
+def _train(*nodes):
+    for n in nodes:
+        n.ai_usage = "train"
+    _db.session.commit()
+
+
+def test_a_read_in_a_train_thread_still_uses_chat_keys(app, monkeypatch, tmp_path):  # noqa: F811
+    """The day of tweets never goes out on the training key. A read
+    prompt from before #307 carries the user's 'train' default and a
+    read further attaches no prompt of its own, so the whole chain can
+    be 'train'; determine_api_key_type reads user nodes only, so the
+    placeholder's FEED_AI_USAGE never reaches key selection."""
+    _capture_render(monkeypatch, tmp_path)
+    alice = _mk_user("alice", approved=True, plan="alpha", is_admin=True)
+    llm_user = _mk_user("gpt-5", twitter_id="llm-gpt-5")
+    note = _user_node(alice, None, "where am I stuck?")
+    read = _prompt_node(alice, "read_thread", parent_id=note.id)
+    _train(note, read)
+    keys = _watch_key_type(monkeypatch)
+    reply = _placeholder(llm_user, alice, read.id)
+    _live(monkeypatch, alice, read, reply, _feed_json([
+        {"n": 1, "qt": "This one.", "relevance": 30, "recommend": True}]))
+
+    assert _fresh(reply.id).llm_task_status == "completed"
+    assert keys == ["chat"]
+
+
+def test_a_chat_turn_in_a_train_read_thread_still_uses_chat_keys(app, monkeypatch, tmp_path):  # noqa: F811
+    """A chat turn renders no day, but the read reply's {quote_ext:ID}
+    markers resolve to the picked tweets, so the payload still carries
+    them — the guard is on the thread, not on needs_ca."""
+    _, alice, llm_user, read, reply, _, _ = _first_read(monkeypatch, tmp_path)
+    question = _user_node(alice, reply.id, "why the second one?")
+    _train(read, reply, question)
+    keys = _watch_key_type(monkeypatch)
+    chat = _placeholder(llm_user, alice, question.id)
+    call, _ = _live(monkeypatch, alice, question, chat, "Because it fit.")
+
+    assistant = [m for m in call["messages"] if m["role"] == "assistant"]
+    assert "second tweet" in assistant[0]["text"]   # the tweets are in there
+    assert keys == ["chat"]
+
+
+def test_an_ordinary_train_thread_still_uses_train_keys(app, monkeypatch, tmp_path):  # noqa: F811
+    """The guard is scoped to read threads: a thread the user wrote
+    themselves and marked 'train' keeps its training key."""
+    alice = _mk_user("alice", approved=True, plan="alpha", is_admin=True)
+    llm_user = _mk_user("gpt-5", twitter_id="llm-gpt-5")
+    note = _user_node(alice, None, "a thought of my own")
+    _train(note)
+    keys = _watch_key_type(monkeypatch)
+    llm = _placeholder(llm_user, alice, note.id)
+    _live(monkeypatch, alice, note, llm, "Quite.")
+
+    assert _fresh(llm.id).llm_task_status == "completed"
+    assert keys == ["train"]
+
+
+def test_is_feed_node_knows_the_poc_shape(app, monkeypatch, tmp_path):  # noqa: F811
+    """The 2026-09-13 threads copied the prompt text into the node: no
+    key, no link, {ca_tweets} in the content. The editor and the cascade
+    must still refuse to raise them to 'train'."""
+    from backend.utils.ca_feed import is_feed_node
+    from backend.utils.node_settings import apply_settings_to_descendants
+    alice = _mk_user("alice", approved=True, plan="alpha", is_admin=True)
+    root = _user_node(alice, None, "the thread so far")
+    poc = _user_node(alice, root.id, "Read these.\n\n{ca_tweets?days=1}")
+    plain = _user_node(alice, root.id, "an ordinary note")
+    _db.session.commit()
+
+    assert is_feed_node(poc) is True
+    assert is_feed_node(plain) is False
+
+    apply_settings_to_descendants(root, alice.id, ai_usage="train")
+    _db.session.commit()
+    assert _fresh(poc.id).ai_usage == "chat"
+    assert _fresh(plain.id).ai_usage == "train"

@@ -141,12 +141,24 @@ class FeedReplyError(ValueError):
 
 
 def is_feed_node(node):
-    """A node that belongs to a read: one of the two read prompts, or a
-    reply that named picks. These never carry 'train' usage."""
+    """A node that belongs to a read: one of the two read prompts —
+    stamped or linked with a read key, or, for the PoC threads of
+    2026-09-13, carrying {ca_tweets} in its own text — or a reply that
+    named picks. These never carry 'train' usage: the read quotes other
+    people's public tweets. Same test as in_read_thread, so the editor
+    and the cascade recognise every shape the read routes do.
+
+    Decrypts the node once when the key test misses; callers apply it to
+    a single node or to one thread's descendants (utils/node_settings
+    prefetches their DEKs first), never to a list of many threads.
+    """
+    from backend.utils.placeholders import CA_TWEETS_PATTERN
     key = node.get_prompt_key() if hasattr(node, "get_prompt_key") else None
     if key in READ_PROMPT_KEYS:
         return True
-    return bool(getattr(node, "feed_picks", None))
+    if bool(getattr(node, "feed_picks", None)):
+        return True
+    return bool(CA_TWEETS_PATTERN.search(node.get_content() or ""))
 
 
 def is_read_reply(node):
