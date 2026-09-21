@@ -86,6 +86,7 @@ def test_shared_import_helper_encrypts(app):
     db.session.commit()
     assert created == 1
     _assert_encrypted(tip, "a private chat message")
+    assert tip.provenance == "archive_upload"  # the helper's one caller kind
 
 
 def test_shared_import_helper_encrypts_every_split_segment(app, monkeypatch):
@@ -114,6 +115,7 @@ def test_twitter_nodes_encrypt(app):
     create_twitter_nodes(
         user_id=u.id, rows=iter(rows), total=1, import_type="separate_nodes",
         include_replies=False, privacy_level="private", ai_usage="none", on_deleted=None,
+        provenance="archive_upload",
     )
     node = Node.query.filter_by(source_key="twitter:1").one()
     _assert_encrypted(node, "a tweet")
@@ -128,7 +130,8 @@ def test_restore_re_encrypts(app):
     n.set_content("old")
     db.session.add(n)
     db.session.commit()
-    _restore_node(n.id, "restored text", "private", "none")
+    _restore_node(n.id, "restored text", "private", "none",
+                  provenance="archive_upload")
     db.session.commit()
     assert n.deleted_at is None
     _assert_encrypted(n, "restored text")
@@ -149,6 +152,7 @@ def test_public_import_is_stored_plaintext(app):
     create_twitter_nodes(
         user_id=u.id, rows=iter(rows), total=1, import_type="separate_nodes",
         include_replies=False, privacy_level="public", ai_usage="chat", on_deleted=None,
+        provenance="archive_upload",
     )
     node = Node.query.filter_by(source_key="twitter:1").one()
     assert _raw(node) == "a public tweet"

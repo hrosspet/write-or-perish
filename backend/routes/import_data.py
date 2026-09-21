@@ -11,6 +11,17 @@ import json
 
 import_bp = Blueprint("import_bp", __name__)
 
+# Node.provenance values — HOW an imported node reached Loore (the column
+# comment in models.py says what each one vouches for). `origin` names the
+# platform; this names the path, which is what decides whether the text
+# is known to be public (#295).
+PROVENANCE_ARCHIVE_UPLOAD = "archive_upload"  # the user's own export
+PROVENANCE_PREFILL_CA = "prefill_ca"          # Loore fetched, Community Archive
+PROVENANCE_PREFILL_X = "prefill_x"            # Loore fetched, X API
+PROVENANCES = (PROVENANCE_ARCHIVE_UPLOAD, PROVENANCE_PREFILL_CA,
+               PROVENANCE_PREFILL_X)
+
+
 def approximate_token_count(text):
     """
     Approximate token count for a text string.
@@ -97,7 +108,8 @@ def _chatgpt_msg_key(msg):
 def _add_imported_message_nodes(user_id, human_owner_id, parent_id,
                                 node_type, llm_model, node_content,
                                 privacy_level, ai_usage, source_key,
-                                msg_created_at, origin):
+                                msg_created_at, origin,
+                                provenance=PROVENANCE_ARCHIVE_UPLOAD):
     """Create the node(s) for one imported message, splitting content
     above NODE_CHAR_CAP into a serial parent→child chain.
 
@@ -106,8 +118,13 @@ def _add_imported_message_nodes(user_id, human_owner_id, parent_id,
     on the tip means re-imports skip the whole message and follow-ups
     chain after the full content — identical to a fresh import.
 
+    Every caller today reads an export the user uploaded, hence the
+    default provenance; a future Loore-fetched path must say what it is.
+
     Returns (tip_node, nodes_created_count).
     """
+    if provenance not in PROVENANCES:
+        raise ValueError(f"Unknown provenance {provenance!r}")
     from backend.utils.node_split import split_text_at_cap
     segments = split_text_at_cap(node_content)
     tip = None
@@ -123,6 +140,7 @@ def _add_imported_message_nodes(user_id, human_owner_id, parent_id,
             ai_usage=ai_usage,
             source_key=source_key if j == len(segments) - 1 else None,
             origin=origin,
+            provenance=provenance,
         )
         # Never pass content= to Node(): that writes the raw column and
         # bypasses KMS envelope encryption (#256). set_content() is the
@@ -157,14 +175,21 @@ def _deleted_match_response(keys, deleted_keys, on_deleted):
 
 
 def _restore_node(node_id, content, privacy_level, ai_usage,
-                  token_count=None):
+                  token_count=None, *, provenance):
     """Un-delete a soft-deleted imported node in place.
 
     Refills content from the archive — this also recovers tombstones
     whose content was already wiped by the cleanup task — and keeps the
     node id, so existing child links stay intact. Privacy/AI-usage are
-    set to this import's choices, like any other (re)imported node.
+    set to this import's choices, like any other (re)imported node, and
+    so is the provenance: the restored text is this import's copy (a
+    re-upload after a CA pre-fill drops the public vouch, which errs on
+    the private side; the reverse regains it). Required, as on
+    create_twitter_nodes, so no importer can bring back a row nobody
+    can classify.
     """
+    if provenance not in PROVENANCES:
+        raise ValueError(f"Unknown provenance {provenance!r}")
     node = Node.query.get(node_id)
     node.set_privacy_level(privacy_level)  # before set_content: decides encryption
     node.set_content(content)
@@ -173,6 +198,7 @@ def _restore_node(node_id, content, privacy_level, ai_usage,
         else approximate_token_count(content)
     )
     node.ai_usage = ai_usage
+    node.provenance = provenance
     node.deleted_at = None
 
 
@@ -183,7 +209,8 @@ def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage):
     import settings, so dedup-skipped (alive) nodes adopt the values
     chosen for this import instead of being a pure no-op. Returns the
     number of nodes whose settings actually changed; callers report it
-    as ``updated`` and keep it disjoint from ``skipped``.
+    as ``updated`` and keep it disjoint from ``skipped``. Provenance is
+    NOT touched: how a node first arrived is a fact, not a setting.
     """
     from sqlalchemy import or_
     ids = [i for i in node_ids if i is not None]
@@ -418,7 +445,8 @@ def confirm_import():
                     # partially-skipped imports don't orphan new nodes.
                     if source_key in deleted_keys and on_deleted == 'restore':
                         _restore_node(key_index[source_key], node_content,
-                                      privacy_level, ai_usage)
+                                      privacy_level, ai_usage,
+                                      provenance=PROVENANCE_ARCHIVE_UPLOAD)
                         deleted_keys.discard(source_key)
                         nodes_restored += 1
                     else:
@@ -477,7 +505,8 @@ def confirm_import():
                 if source_key in key_index:
                     if source_key in deleted_keys and on_deleted == 'restore':
                         _restore_node(key_index[source_key], node_content,
-                                      privacy_level, ai_usage)
+                                      privacy_level, ai_usage,
+                                      provenance=PROVENANCE_ARCHIVE_UPLOAD)
                         deleted_keys.discard(source_key)
                         nodes_restored += 1
                     else:
@@ -875,7 +904,8 @@ def confirm_claude_import():
                     if (source_key in deleted_keys
                             and on_deleted == 'restore'):
                         _restore_node(key_index[source_key], node_content,
-                                      privacy_level, ai_usage)
+                                      privacy_level, ai_usage,
+                                      provenance=PROVENANCE_ARCHIVE_UPLOAD)
                         deleted_keys.discard(source_key)
                         nodes_restored += 1
                     else:
@@ -1003,11 +1033,16 @@ def _parse_tweet_ts(raw_ts):
 
 
 def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
-                         privacy_level, ai_usage, on_deleted,
+                         privacy_level, ai_usage, on_deleted, *, provenance,
                          batch_size=500, on_progress=None):
     """Create nodes for analyzed tweets. Runs inside the Celery import
     task (backend/tasks/imports.py); ``rows`` is any iterable of compact
     tweet rows sorted by created_at (the analyze step sorts the stash).
+
+    ``provenance`` (one of PROVENANCES) says how these tweets reached
+    Loore — the user's own upload, or a Loore-side fetch from the
+    Community Archive or the X API. Required, not defaulted: a caller
+    that forgets it would leave rows nobody can later classify.
 
     Commits every ``batch_size`` created nodes so a 60k-tweet archive
     never holds one giant transaction, and reports ``done`` rows through
@@ -1018,6 +1053,8 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
     """
     if import_type not in ('single_thread', 'separate_nodes'):
         raise ValueError("Invalid import_type")
+    if provenance not in PROVENANCES:
+        raise ValueError(f"Unknown provenance {provenance!r}")
 
     nodes_created = 0
     nodes_skipped = 0
@@ -1061,7 +1098,8 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
             if source_key in deleted_keys and on_deleted == 'restore':
                 _restore_node(
                     key_index[source_key], content,
-                    privacy_level, ai_usage, token_count
+                    privacy_level, ai_usage, token_count,
+                    provenance=provenance,
                 )
                 deleted_keys.discard(source_key)
                 nodes_restored += 1
@@ -1085,6 +1123,7 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
             ai_usage=ai_usage,
             source_key=source_key,
             origin="twitter",
+            provenance=provenance,
         )
         node.set_content(content)
         if tweet_created_at:
@@ -1612,7 +1651,8 @@ def confirm_chatgpt_import():
                     if (source_key in deleted_keys
                             and on_deleted == 'restore'):
                         _restore_node(key_index[source_key], node_content,
-                                      privacy_level, ai_usage)
+                                      privacy_level, ai_usage,
+                                      provenance=PROVENANCE_ARCHIVE_UPLOAD)
                         deleted_keys.discard(source_key)
                         nodes_restored += 1
                     else:

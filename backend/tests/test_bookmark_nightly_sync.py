@@ -350,6 +350,179 @@ def test_revoked_account_is_skipped(app):
     assert result["status"] == "revoked"
 
 
+def _tweet_row(user_id, external_id, source="twitter_bookmark",
+               public_source=None, checked_at=None):
+    row = ExternalItem(user_id=user_id, source=source, external_id=external_id,
+                       public_source=public_source,
+                       public_source_checked_at=checked_at)
+    row.set_content("t")
+    _db.session.add(row)
+    _db.session.commit()
+    return row
+
+
+def test_public_source_sweep_asks_x_once_per_tweet_and_stamps_every_copy(
+        app, monkeypatch):
+    """Unknown tweet rows are settled by X's oEmbed answer: one lookup per
+    distinct tweet id, the verdict on every user's copy; decided rows and
+    pages are never asked, and an archive row from before the column is
+    vouched in one statement rather than asked (#295)."""
+    uid = User.query.first().id
+    other = User(username="other")
+    _db.session.add(other)
+    _db.session.commit()
+    a1 = _tweet_row(uid, "100")
+    a2 = _tweet_row(other.id, "100")  # the same tweet, saved by two people
+    b = _tweet_row(uid, "200")
+    decided = _tweet_row(uid, "300", public_source=True)
+    archive = _tweet_row(uid, "400", source="community_archive")  # not an X source
+    page = _tweet_row(uid, "abc", source="web_clip", public_source=False)
+    asked = []
+    verdicts = {"100": (True, 200), "200": (False, 403)}
+    monkeypatch.setattr(_sync_mod, "x_tweet_public_status",
+                        lambda tid: asked.append(tid) or verdicts[tid])
+
+    result = _sync_mod.run_public_source_sweep(pause=0)
+
+    assert sorted(asked) == ["100", "200"]
+    assert (result["lookups"], result["public"], result["refused"],
+            result["stopped_on"]) == (2, 1, 1, None)
+    assert result["archive_vouched"] == 1
+    for row in (a1, a2, b, decided, archive, page):
+        _db.session.refresh(row)
+    assert (a1.public_source, a2.public_source, b.public_source) == (
+        True, True, False)
+    assert all(r.public_source_checked_at for r in (a1, a2, b))
+    assert decided.public_source_checked_at is None
+    assert archive.public_source is True and archive.public_source_checked_at is None
+    assert page.public_source is False and page.public_source_checked_at is None
+
+
+def test_public_source_sweep_stops_on_a_throttle_and_queues_it_behind(
+        app, monkeypatch):
+    """Never-asked rows go first (newest save first). A 400-class answer
+    other than 403/404 is skipped; a 429 (or 5xx, or no answer) ends the
+    run with the attempt recorded, so the next night starts with the rows
+    asked longest ago and the throttled one comes last."""
+    from datetime import datetime, timedelta
+    uid = User.query.first().id
+    old = _tweet_row(uid, "1", checked_at=datetime.utcnow() - timedelta(days=1))
+    fresh = _tweet_row(uid, "2")
+    newer = _tweet_row(uid, "3")
+    answers = {"3": (None, 400), "2": (None, 429), "1": (True, 200)}
+    asked = []
+    monkeypatch.setattr(_sync_mod, "x_tweet_public_status",
+                        lambda tid: asked.append(tid) or answers[tid])
+
+    result = _sync_mod.run_public_source_sweep(pause=0)
+
+    assert asked == ["3", "2"]  # 1 was asked yesterday: last in line
+    assert result["stopped_on"] == 429 and result["unanswered"] == 2
+    for row in (old, fresh, newer):
+        _db.session.refresh(row)
+    assert fresh.public_source is None and fresh.public_source_checked_at
+    assert newer.public_source is None and newer.public_source_checked_at
+    assert old.public_source is None  # not reached tonight
+
+    answers.update({"3": (True, 200), "2": (True, 200)})
+    asked.clear()
+    _sync_mod.run_public_source_sweep(pause=0)
+    assert asked == ["1", "3", "2"]
+    for row in (old, fresh, newer):
+        _db.session.refresh(row)
+    assert (old.public_source, fresh.public_source, newer.public_source) == (
+        True, True, True)
+
+
+def test_public_source_sweep_respects_the_nightly_cap(app, monkeypatch):
+    uid = User.query.first().id
+    for i in range(5):
+        _tweet_row(uid, str(i))
+    asked = []
+    monkeypatch.setattr(_sync_mod, "x_tweet_public_status",
+                        lambda tid: asked.append(tid) or (True, 200))
+    result = _sync_mod.run_public_source_sweep(limit=2, pause=0)
+    assert result["lookups"] == 2 and len(asked) == 2
+    assert ExternalItem.query.filter_by(public_source=None).count() == 3
+
+
+def test_public_source_sweep_cap_counts_tweets_not_copies(app, monkeypatch):
+    """The nightly budget is lookups: three people saving the newest
+    tweet cost one of it, not three, so the older tweet is still
+    reached tonight."""
+    uid = User.query.first().id
+    other, third = User(username="other"), User(username="third")
+    _db.session.add_all([other, third])
+    _db.session.commit()
+    _tweet_row(uid, "older")
+    for user_id in (uid, other.id, third.id):
+        _tweet_row(user_id, "newest")  # three copies, all saved later
+    asked = []
+    monkeypatch.setattr(_sync_mod, "x_tweet_public_status",
+                        lambda tid: asked.append(tid) or (True, 200))
+
+    result = _sync_mod.run_public_source_sweep(limit=2, pause=0)
+
+    assert asked == ["newest", "older"] and result["lookups"] == 2
+    assert ExternalItem.query.filter_by(public_source=None).count() == 0
+
+
+def test_public_source_sweep_keeps_each_verdict_as_it_lands(app, monkeypatch):
+    """Verdicts are committed one by one: a run cut off mid-way (soft
+    time limit, a deploy's SIGTERM) keeps what X already answered."""
+    later = _tweet_row(uid := User.query.first().id, "1")  # saved first: asked second
+    first = _tweet_row(uid, "2")  # saved last: newest, asked first
+
+    def answer(tid):
+        if tid == "2":
+            return True, 200
+        raise RuntimeError("cut off")  # stands in for SoftTimeLimitExceeded
+    monkeypatch.setattr(_sync_mod, "x_tweet_public_status", answer)
+
+    with pytest.raises(RuntimeError):
+        _sync_mod.run_public_source_sweep(pause=0)
+    _db.session.rollback()
+    for row in (first, later):
+        _db.session.refresh(row)
+    assert first.public_source is True and first.public_source_checked_at
+    assert later.public_source is None and later.public_source_checked_at is None
+
+
+def test_public_source_sweep_gate_runs_once_in_its_utc_hour(app, monkeypatch):
+    """The beat entry is HOURLY (a daily interval starts over on every
+    deploy, which deletes the beat schedule): the task runs the sweep
+    only when the UTC clock is in PUBLIC_SOURCE_SWEEP_UTC_HOUR, and not
+    again within PUBLIC_SOURCE_SWEEP_MIN_GAP of the last run."""
+    from datetime import datetime, timedelta
+    uid = User.query.first().id
+    row = _tweet_row(uid, "1")
+    asked = []
+    monkeypatch.setattr(_sync_mod, "x_tweet_public_status",
+                        lambda tid: asked.append(tid) or (True, 200))
+    monkeypatch.setattr(_sync_mod.time, "sleep", lambda s: None)
+    now_hour = datetime.utcnow().hour
+
+    monkeypatch.setattr(_sync_mod, "PUBLIC_SOURCE_SWEEP_UTC_HOUR",
+                        (now_hour + 12) % 24)
+    assert _sync_mod.verify_public_source_sweep() == {"status": "not_due"}
+    assert asked == []
+
+    monkeypatch.setattr(_sync_mod, "PUBLIC_SOURCE_SWEEP_UTC_HOUR", now_hour)
+    result = _sync_mod.verify_public_source_sweep()
+    assert result["status"] == "ok" and asked == ["1"]
+
+    # A second tick in the same hour (beat restarted mid-hour): no-op.
+    _tweet_row(uid, "2")
+    assert _sync_mod.verify_public_source_sweep() == {"status": "ran_recently"}
+    assert asked == ["1"]
+
+    # Tomorrow: the newest attempt is a night old, so it runs again.
+    row.public_source_checked_at = datetime.utcnow() - timedelta(hours=23)
+    _db.session.commit()
+    assert _sync_mod.verify_public_source_sweep()["status"] == "ok"
+    assert asked == ["1", "2"]
+
+
 def test_nightly_fanout_dispatches_local_3am_connected_only(app, monkeypatch):
     """Only connected, non-revoked accounts whose user's LOCAL clock is in
     the 3am hour get dispatched; recently-synced accounts are skipped."""

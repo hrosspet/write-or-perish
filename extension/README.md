@@ -17,7 +17,10 @@ and quotable in conversations, and it never enters your profile.
 - **Tweets** (`x.com/…/status/…`): text, author, timestamp, quoted tweet,
   link card, photo alt text, expanded links. They are stored as
   `twitter_bookmark` items keyed by tweet id, so a clipped tweet and the same
-  tweet arriving through the bookmark sync are one row.
+  tweet arriving through the bookmark sync are one row. When the author's
+  account is protected (the lock next to the name), the reference is marked
+  not public; when no lock is visible the server settles it overnight
+  through X's public embed endpoint rather than guessing.
 - **PDFs** opened in Chrome's viewer: the link only, titled from the file
   name (or the PDF's own title when Chrome shows one). The text is not
   extracted.

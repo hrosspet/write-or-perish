@@ -831,6 +831,11 @@ class TestConfirmImportDeletedContent:
         )
         # Wiped tombstones: content already cleared by the cleanup task.
         self._soft_delete_all(alice.id, wipe_content=True)
+        # Rows from before the provenance column: a restore classifies
+        # them as this import's copy, like the nodes it creates.
+        for node in Node.query.filter_by(human_owner_id=alice.id).all():
+            node.provenance = None
+        _db.session.commit()
 
         r = _confirm_conversations(client, convs, on_deleted="restore")
         assert r.status_code == 201
@@ -843,6 +848,7 @@ class TestConfirmImportDeletedContent:
         assert sorted(n.id for n in nodes) == original_ids
         assert all(n.deleted_at is None for n in nodes)
         assert all(n.content for n in nodes)
+        assert all(n.provenance == "archive_upload" for n in nodes)
 
     def test_overlap_snapshot_chains_onto_restored_node(self, app):
         client = app.test_client()
@@ -911,6 +917,7 @@ class TestConfirmImportDeletedContent:
             Node.content.contains("file a content"),
         ).one()
         node_a.deleted_at = datetime.utcnow()
+        node_a.provenance = None  # a row from before the column
         _db.session.commit()
 
         r1 = _confirm_files(client, files, import_type="separate_nodes")
@@ -924,7 +931,9 @@ class TestConfirmImportDeletedContent:
         assert body["created"] == 0
         assert body["restored"] == 1
         assert body["skipped"] == 1
-        assert Node.query.get(node_a.id).deleted_at is None
+        restored = Node.query.get(node_a.id)
+        assert restored.deleted_at is None
+        assert restored.provenance == "archive_upload"  # this import's copy
 
 
 # ── POST confirm endpoints: settings update on re-import ─────────────────

@@ -32,7 +32,8 @@ def import_twitter_archive(self, user_id, token, options):
     """options: import_type, include_replies, privacy_level, ai_usage,
     on_deleted (already resolved by the confirm request)."""
     from backend.extensions import db
-    from backend.routes.import_data import create_twitter_nodes
+    from backend.routes.import_data import (
+        PROVENANCE_ARCHIVE_UPLOAD, create_twitter_nodes)
     from backend.utils import twitter_archive as ta
 
     with flask_app.app_context():
@@ -58,6 +59,7 @@ def import_twitter_archive(self, user_id, token, options):
                 privacy_level=options.get("privacy_level", "private"),
                 ai_usage=options.get("ai_usage", "none"),
                 on_deleted=options.get("on_deleted"),
+                provenance=PROVENANCE_ARCHIVE_UPLOAD,
                 batch_size=BATCH_SIZE,
                 on_progress=progress,
             )
@@ -181,9 +183,11 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None,
             retweets += 1  # compact_row drops retweets, like the native import
         else:
             rows.append(row)
+    from backend.routes.import_data import PROVENANCE_PREFILL_CA
     result = _import_prefill_rows(user_id, account["username"], rows, options,
                                   state, seed_now, no_rows_error=ca.CommunityArchiveError,
-                                  x_id=account.get("account_id"))
+                                  x_id=account.get("account_id"),
+                                  provenance=PROVENANCE_PREFILL_CA)
     result.update({
         "source": "parquet" if use_parquet else "rest",
         # What the archive actually holds vs. the account's self-reported
@@ -305,13 +309,15 @@ def _stamp_x_id(user, x_id):
 
 
 def _import_prefill_rows(user_id, handle, rows, options, state, seed_now,
-                         no_rows_error=RuntimeError, x_id=None):
+                         no_rows_error=RuntimeError, x_id=None, *,
+                         provenance):
     """Shared tail of every admin pre-fill: sort the compact rows, pin the
     user to the BATCH profile pipeline, create private twitter-origin nodes,
     and kick the batch seeder. ``handle`` is the canonical username the
     tweets came from (stored as ``prefilled_handle``); ``x_id`` its numeric
     X id, stamped on a login-less account so its owner's X login finds it
-    (the result says whether it was, and why not)."""
+    (the result says whether it was, and why not). ``provenance`` names the
+    source the caller fetched from (Node.provenance: prefill_ca / prefill_x)."""
     from backend.extensions import db
     from backend.models import User
     from backend.routes.import_data import create_twitter_nodes
@@ -341,6 +347,7 @@ def _import_prefill_rows(user_id, handle, rows, options, state, seed_now,
             privacy_level="private",
             ai_usage=options.get("ai_usage", "chat"),
             on_deleted=None,
+            provenance=provenance,
             batch_size=BATCH_SIZE,
             on_progress=lambda done: state("importing", done, total),
         )
@@ -470,9 +477,11 @@ def prefill_x_api_impl(user_id, handle, options, update_state=None, seed_now=Tru
     db.session.commit()
     if fetch_error and not seen:
         raise x_api.XApiError(fetch_error)
+    from backend.routes.import_data import PROVENANCE_PREFILL_X
     result = _import_prefill_rows(user_id, account["username"], rows, options,
                                   state, seed_now, no_rows_error=x_api.XApiError,
-                                  x_id=account.get("id"))
+                                  x_id=account.get("id"),
+                                  provenance=PROVENANCE_PREFILL_X)
     result.update({
         "source": "x-api",
         "fetched": len(seen), "retweets_skipped": retweets,

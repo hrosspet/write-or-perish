@@ -32,7 +32,7 @@ from backend.utils.api_tokens import (
 )
 from backend.utils.magic_link import hash_token
 from backend.utils.timefmt import iso_utc
-from backend.utils.web_clip import classify_clip
+from backend.utils.web_clip import SOURCE_WEB_CLIP, classify_clip
 from backend.utils.spend import require_spend_headroom
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.audio_storage import clear_tts_artifacts
@@ -658,8 +658,8 @@ def _upgrade_clip(item, content, title, author, posted_at):
 def clip():
     """Save one web page (or tweet) as an external item.
 
-    Body: {url, content, title?, author?, posted_at?}. The URL decides
-    the source (see backend.utils.web_clip). Re-clipping a known URL is
+    Body: {url, content, title?, author?, posted_at?, author_protected?}.
+    The URL decides the source (see backend.utils.web_clip). Re-clipping a known URL is
     a 200 so the extension can be pressed twice safely: a no-op when the
     stored text is at least as long, otherwise the stored text is
     replaced. The X bookmark sync stores the API's truncated `text` for
@@ -682,6 +682,10 @@ def clip():
     title = (data.get("title") or "").strip()[:MAX_TITLE_CHARS] or None
     author = (data.get("author") or "").strip().lstrip("@")[:64] or None
     posted_at = _parse_posted_at(data.get("posted_at"))
+    # The extension reports a protected-account lock it SAW next to the
+    # tweet's author (`author_protected: true`) and nothing otherwise, so
+    # absence means unknown, never public; the nightly sweep asks X.
+    author_protected = data.get("author_protected") is True
 
     user = g.api_user
     source, external_id, canon = classify_clip(url)
@@ -689,7 +693,12 @@ def clip():
         user_id=user.id, source=source, external_id=external_id).first()
     if existing is not None:
         updated = _upgrade_clip(existing, content, title, author, posted_at)
-        if updated:
+        locked = author_protected and existing.public_source is not False
+        if locked:
+            # Learned late, or the account went protected since the sync
+            # vouched for it: private wins, whichever came first.
+            existing.public_source = False
+        if updated or locked:
             db.session.commit()
         return jsonify({
             "created": False, "updated": updated, "id": existing.id,
@@ -701,6 +710,11 @@ def clip():
         user_id=user.id, source=source, external_id=external_id,
         author_handle=author, title=title, url=canon,
         posted_at=posted_at,
+        # A page is whatever tab was open (private pages included):
+        # assessed, not vouched. A tweet is not public when its author
+        # wore a lock; otherwise unknown until the nightly sweep asks X.
+        public_source=(False if source == SOURCE_WEB_CLIP or author_protected
+                       else None),
     )
     item.set_content(content)
     db.session.add(item)

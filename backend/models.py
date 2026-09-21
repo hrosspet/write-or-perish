@@ -439,6 +439,20 @@ class Node(db.Model):
     # platform-only, NOT provenance (own export vs. Loore-fetched public
     # data): dedup runs on source_key and a re-import must match.
     origin = db.Column(db.String(16), nullable=True, index=True)
+    # HOW an imported node reached Loore — the provenance that `origin`
+    # deliberately leaves out. Recorded so the open decision on public-
+    # sourced content (#295: should a public tweet be public on Loore?)
+    # can be applied later without guessing which rows it covers:
+    #   "archive_upload" — the user uploaded their own export (Twitter zip,
+    #                      ChatGPT/Claude/markdown). May hold a protected
+    #                      account's tweets, so NOT vouched public.
+    #   "prefill_ca"     — Loore fetched it from the Community Archive:
+    #                      public by construction.
+    #   "prefill_x"      — Loore fetched it via the X API; the pre-fill
+    #                      refuses protected accounts, so public at fetch.
+    # NULL = written in Loore, or imported before this column existed.
+    # Never part of dedup: source_key alone decides a re-import match.
+    provenance = db.Column(db.String(16), nullable=True)
 
     # DB-level backstop against concurrent imports racing past the
     # application dedup check. NULL source_key rows are exempt (both
@@ -1201,6 +1215,24 @@ class ExternalItem(db.Model):
     # reference is the user's copy: a later re-clip or sync must not
     # replace its text, however much longer the fresh capture is.
     edited_at = db.Column(db.DateTime, nullable=True)
+    # Does the SOURCE itself vouch that this text is public? Recorded at
+    # write time because it cannot be recovered later (#295: a shared
+    # plaintext reference tier would admit rows by this flag).
+    #   True  — vouched public by source: a Community Archive tweet, an
+    #           X bookmark whose author is not protected.
+    #   False — assessed and not vouched: a web clip (the clipper saves
+    #           whatever tab is active, private pages included).
+    #   NULL  — unknown: rows from before this column, JSON-imported
+    #           bookmarks, a clipped tweet without a visible lock, an
+    #           author X did not return.
+    # False and NULL are both treated as private. Unknown TWEETS are
+    # resolved by the nightly verify_public_source_sweep against X's free
+    # oEmbed endpoint (served = public, refused = protected or gone);
+    # False says there is nothing to verify against.
+    public_source = db.Column(db.Boolean, nullable=True)
+    # When the sweep last asked X about this row — set on every attempt,
+    # answered or not, so unanswered rows queue behind never-asked ones.
+    public_source_checked_at = db.Column(db.DateTime, nullable=True)
     # Generated speech, the same shape as Node / UserProfile so the TTS
     # task, SSE stream and SpeakerIcon treat a reference as one more
     # entity. Nothing here is ever an original recording.

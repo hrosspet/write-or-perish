@@ -33,7 +33,8 @@
     var texts = article.querySelectorAll('[data-testid="tweetText"]');
     var textEl = texts[0] || null;
     var text = textEl ? textEl.innerText.trim() : '';
-    var handle = handleFrom(article.querySelector('[data-testid="User-Name"]'));
+    var nameBlock = article.querySelector('[data-testid="User-Name"]');
+    var handle = handleFrom(nameBlock);
     if (!handle) {
       var pm = location.pathname.match(/^\/([^/]+)\/status/);
       if (pm && pm[1] !== 'i') handle = pm[1];
@@ -83,12 +84,22 @@
     }
     if (links.length) parts.push('[Links: ' + links.join(' ') + ']');
 
+    // A protected account wears a lock next to the author's name. Only a
+    // lock SEEN is reported: a missing one is unknown, never "public" —
+    // X may rename the icon and its aria-label is localized — and the
+    // server resolves unknowns against X itself, overnight.
+    var locked = !!(nameBlock && (
+      nameBlock.querySelector('svg[data-testid="icon-lock"]') ||
+      nameBlock.querySelector('svg[aria-label*="rotected"]')));
+
     return {
       url: 'https://x.com/i/status/' + id,
       title: null,
       content: parts.join('\n'),
       author: handle,
       posted_at: posted,
+      // Absent unless true: JSON.stringify drops undefined.
+      author_protected: locked || undefined,
     };
   }
 

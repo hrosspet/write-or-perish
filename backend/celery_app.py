@@ -106,6 +106,19 @@ celery.conf.update(
             'task': 'backend.tasks.external_digest.collect_external_digest_batches',
             'schedule': 600.0,  # every 10 min
         },
+        # Nightly publicness check for saved tweets nobody has vouched
+        # for (#295 step 0): JSON-imported bookmarks, tweets clipped
+        # without a visible lock, bookmarks synced before the sync asked
+        # X about the author. An HOURLY gate like the two above — a
+        # daily interval starts its countdown over on every deploy,
+        # which deletes the beat schedule file (deploy.sh) — that runs
+        # the sweep at 05:00 UTC, bounded per run (see the task's
+        # constants). X's free oEmbed endpoint: no API credits, nothing
+        # waits on it.
+        'verify-public-source-nightly': {
+            'task': 'backend.tasks.external_sync.verify_public_source_sweep',
+            'schedule': 3600.0,  # hourly; the task itself gates on 05:00 UTC
+        },
     },
 )
 

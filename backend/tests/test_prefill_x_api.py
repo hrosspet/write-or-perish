@@ -129,6 +129,7 @@ def test_prefill_x_impl_imports_and_pins_batch(app, monkeypatch):  # noqa: F811
     nodes = Node.query.filter_by(human_owner_id=u.id).order_by(Node.created_at).all()
     assert [n.get_content() for n in nodes] == ["first", "third"]  # reply excluded, sorted
     assert all(n.origin == "twitter" and n.privacy_level == "private" for n in nodes)
+    assert all(n.provenance == "prefill_x" for n in nodes)  # Loore fetched it
     fresh = User.query.get(u.id)
     assert fresh.profile_force_batch is True and fresh.prefilled_handle == "Alice"
     assert sync.call_count == 0
