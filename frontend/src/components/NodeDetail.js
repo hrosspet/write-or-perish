@@ -978,6 +978,16 @@ function NodeDetail({ nodeIdOverride }) {
   // generic LLM Response is not offered at all: the row is the model
   // picker and "Read".
   const showLlmResponse = showCraftBar && !(inReadThread && !readReplyAbove);
+  const readButton = (
+    <button
+      onClick={handleReadFromNode}
+      disabled={readLoading || llmRequesting || !!llmTaskNodeId}
+      title={readTitle}
+      style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}
+    >
+      {readLoading ? 'Starting…' : readLabel}
+    </button>
+  );
   const llmResponseTitle = underReadReply
     ? "To chat about the recommendations, send your reply first. To read further, use the button on the right."
     : (inReadThread ? "Chat about the picks" : undefined);
@@ -1399,6 +1409,12 @@ function NodeDetail({ nodeIdOverride }) {
                 </button>
               </span>
             )}
+            {/* Before the first picks "Read" stands where LLM Response
+                usually is, left of the model picker: the response action
+                users know, under its own name. After them "Read further"
+                sits to the right, beside the (disabled or live) LLM
+                Response. */}
+            {readActions && !showLlmResponse && readButton}
             {showCraftBar && (
               <ModelSelector
                 nodeId={node.id}
@@ -1406,16 +1422,7 @@ function NodeDetail({ nodeIdOverride }) {
                 onModelChange={setSelectedModel}
               />
             )}
-            {readActions && (
-              <button
-                onClick={handleReadFromNode}
-                disabled={readLoading || llmRequesting || !!llmTaskNodeId}
-                title={readTitle}
-                style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}
-              >
-                {readLoading ? 'Starting…' : readLabel}
-              </button>
-            )}
+            {readActions && showLlmResponse && readButton}
           </div>
         )}
         {llmTaskNodeId && !showCraftBar && !isLlmPending && (
