@@ -57,7 +57,7 @@ test('while the read runs the button waits; before the quotes load the state is 
 
 test('the hint says what Read further does and what a reply does, and nothing about read items', () => {
   const { container } = render(<ReadReplyTail nodeId={77} unread={3} total={3} onReadAgain={() => {}} />);
-  expect(container.textContent).toMatch(/Read further: Loore reads the same day again/);
+  expect(container.textContent).toMatch(/Read further asks for more from the same day/);
   expect(container.textContent).toMatch(/Text-mode conversation/);
   expect(container.textContent).not.toMatch(/marked read|leaves the list/);
   expect(screen.getByRole('button', { name: 'Read further' }).title).not.toMatch(/marked read|leaves the list/);
