@@ -1255,16 +1255,28 @@ def get_node(node_id):
         ) if serialized is not None
     ]
     focal = _focal_own_fields(node)
+    in_read_thread = bool(
+        read_prompt_above
+        or focal.get("read_reply")
+        or node.get_prompt_key() in READ_PROMPT_KEYS
+        or CA_TWEETS_PATTERN.search(focal.get("content") or ""))
+    # Has this thread produced picks yet? Before the first read reply the
+    # thread page's read action is "Read" (and the generic LLM Response
+    # is not offered: a reply there would be that read); after it, "Read
+    # further". Two queries over the chain (ca_feed.read_reply_ids), only
+    # in a read thread.
+    read_reply_above = False
+    if in_read_thread:
+        from backend.utils.ca_feed import read_reply_ids
+        alive = [n for n in ancestor_nodes if n.deleted_at is None] + [node]
+        read_reply_above = bool(read_reply_ids(alive))
     node_data = {
         **focal,
         "child_count": len(serialized_children),
         "ancestors": ancestors,
         "children": serialized_children,
-        "in_read_thread": bool(
-            read_prompt_above
-            or focal.get("read_reply")
-            or node.get_prompt_key() in READ_PROMPT_KEYS
-            or CA_TWEETS_PATTERN.search(focal.get("content") or "")),
+        "in_read_thread": in_read_thread,
+        "read_reply_above": read_reply_above,
     }
     return jsonify(node_data), 200
 

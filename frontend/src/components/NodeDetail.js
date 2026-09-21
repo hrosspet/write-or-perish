@@ -29,6 +29,7 @@ import DeleteConfirmDialog from "./DeleteConfirmDialog";
 // read thread.
 const READ_FURTHER_TITLE = "Another pass over the day's tweets, against everything in this thread so far "
   + "— your marks on these picks included.";
+const READ_ENTRY_TITLE = "Loore reads the last day of Community Archive tweets and shows you the ones relevant to this thread";
 // Recursive component to render children nodes.
 function RenderChildTree({ nodes, onBubbleClick, buildActions }) {
   return (
@@ -924,6 +925,11 @@ function NodeDetail({ nodeIdOverride }) {
   // text), the same test the route applies; a read reply is one by
   // definition.
   const inReadThread = !!node.in_read_thread || isReadReply;
+  // Before the thread has any picks the read action is "Read"; once a
+  // read reply sits at or above this node it is "Read further".
+  const readReplyAbove = !!node.read_reply_above || isReadReply;
+  const readLabel = readReplyAbove ? 'Read further' : 'Read';
+  const readTitle = readReplyAbove ? READ_FURTHER_TITLE : READ_ENTRY_TITLE;
   const canRerunRead = !!currentUser?.is_admin && isOwner && isReadReply
     && (isLlmPending || node.llm_task_status === 'failed');
   const showProposal = !!node.content && !isLlmPending && (
@@ -967,6 +973,11 @@ function NodeDetail({ nodeIdOverride }) {
   const underReadReply = isReadReply && node.llm_task_status === 'completed';
   const readActions = isOwner && inReadThread && node.ai_usage !== 'none'
     && !isLlmPending;
+  // Before the first picks (the read prompt itself, or a note typed
+  // under it) a reply asked for here would be that first read, so the
+  // generic LLM Response is not offered at all: the row is the model
+  // picker and "Read".
+  const showLlmResponse = showCraftBar && !(inReadThread && !readReplyAbove);
   const llmResponseTitle = underReadReply
     ? "To chat about the recommendations, send your reply first. To read further, use the button on the right."
     : (inReadThread ? "Chat about the picks" : undefined);
@@ -1054,11 +1065,9 @@ function NodeDetail({ nodeIdOverride }) {
           onClick={handleReadFromNode}
           disabled={readLoading}
           style={{ ...topRightButtonStyle, justifyContent: 'space-between' }}
-          title={inReadThread
-            ? READ_FURTHER_TITLE
-            : "Loore reads the last day of Community Archive tweets and shows you the ones relevant to this thread"}
+          title={inReadThread ? readTitle : READ_ENTRY_TITLE}
         >
-          <span>{readLoading ? 'Starting…' : (inReadThread ? 'Read further' : 'Relevant tweets')}</span>
+          <span>{readLoading ? 'Starting…' : (inReadThread ? readLabel : 'Relevant tweets')}</span>
           <span style={{
             width: '32px',
             display: 'inline-flex',
@@ -1370,7 +1379,7 @@ function NodeDetail({ nodeIdOverride }) {
         </NodeFooter>
         {(showCraftBar || readActions) && (
           <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-            {showCraftBar && (
+            {showLlmResponse && (
               /* The span carries the tooltip: a disabled button gets no
                  hover events in some browsers. */
               <span title={llmResponseTitle} style={{ display: 'inline-flex' }}>
@@ -1401,10 +1410,10 @@ function NodeDetail({ nodeIdOverride }) {
               <button
                 onClick={handleReadFromNode}
                 disabled={readLoading || llmRequesting || !!llmTaskNodeId}
-                title={READ_FURTHER_TITLE}
+                title={readTitle}
                 style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}
               >
-                {readLoading ? 'Starting…' : 'Read further'}
+                {readLoading ? 'Starting…' : readLabel}
               </button>
             )}
           </div>

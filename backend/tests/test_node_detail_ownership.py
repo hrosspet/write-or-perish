@@ -246,3 +246,35 @@ def test_private_node_of_another_user_is_indistinguishable_from_missing(app, ali
     assert denied.status_code == 404
     assert missing.status_code == 404
     assert denied.get_json() == missing.get_json()
+
+
+def test_read_thread_flags_in_the_payload(app, alice, llm_user):
+    """in_read_thread: a read prompt at or above the node (here the PoC
+    shape, {ca_tweets} in the text). read_reply_above: a read reply (a
+    pinned FeedRender) at or above it — the thread page labels the read
+    action "Read" before that and "Read further" after."""
+    from backend.models import FeedRender
+    client = app.test_client()
+    _login(client, alice)
+
+    plain = _make_node(alice, content="a note", privacy_level="private")
+    prompt = _make_node(alice, content="Read these.\n\n{ca_tweets?days=1}",
+                        privacy_level="private")
+    reply = _make_node(llm_user, parent=prompt, content="verdict", node_type="llm",
+                       human_owner_id=alice.id, privacy_level="private")
+    render = FeedRender(node_id=reply.id, days=1, scope="all", tweet_count=0,
+                        account_count=0, excluded_count=0)
+    render.set_tweet_ids([])
+    _db.session.add(render)
+    comment = _make_node(alice, parent=reply, content="more please",
+                         privacy_level="private")
+    _db.session.commit()
+
+    def flags(n):
+        d = client.get(f"/nodes/{n.id}").get_json()
+        return d["in_read_thread"], d["read_reply_above"]
+
+    assert flags(plain) == (False, False)
+    assert flags(prompt) == (True, False)
+    assert flags(reply) == (True, True)
+    assert flags(comment) == (True, True)
