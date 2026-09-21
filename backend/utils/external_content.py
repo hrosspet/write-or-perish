@@ -230,9 +230,10 @@ def x_tweet_public_status(tweet_id, timeout=10):
     """Is this tweet public, according to X itself?
 
     Returns ``(verdict, http_status)``: verdict True when X serves the
-    embed (200 — a public tweet; probed live 2026-09-21), False when X
-    refuses it (403 = protected account, 404 = deleted, suspended or
-    never existed — nothing public to point at either way), None when
+    embed (200 — a public tweet), False when X refuses it (403 = protected
+    account, "Sorry, you are not authorized to see this status."; 404 =
+    deleted, suspended or never existed — nothing public to point at
+    either way; all three probed live 2026-09-21), None when
     there is no answer (throttled, server error, network) so the caller
     can leave the row unknown and stop for now. The request carries the
     tweet id and ``dnt=1``; nothing about the user who saved it.
