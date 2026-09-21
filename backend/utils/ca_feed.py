@@ -188,6 +188,7 @@ def save_feed_picks(user_id, node, picks, picked_by=None):
                 author_handle=ref["username"],
                 url=tweet_url(ref["username"], ref["tweet_id"]),
                 posted_at=ref.get("posted_at"),
+                public_source=True,  # rendered from the public archive
             )
             item.set_content(ref.get("text") or "")
             db.session.add(item)

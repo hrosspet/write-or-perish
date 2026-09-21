@@ -32,7 +32,7 @@ from backend.utils.api_tokens import (
 )
 from backend.utils.magic_link import hash_token
 from backend.utils.timefmt import iso_utc
-from backend.utils.web_clip import classify_clip
+from backend.utils.web_clip import SOURCE_WEB_CLIP, classify_clip
 from backend.utils.spend import require_spend_headroom
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.audio_storage import clear_tts_artifacts
@@ -695,6 +695,10 @@ def clip():
         user_id=user.id, source=source, external_id=external_id,
         author_handle=author, title=title, url=canon,
         posted_at=posted_at,
+        # A page is whatever tab was open (private pages included):
+        # assessed, not vouched. A clipped tweet is unknown until
+        # something asks X whether its author is protected.
+        public_source=False if source == SOURCE_WEB_CLIP else None,
     )
     item.set_content(content)
     db.session.add(item)

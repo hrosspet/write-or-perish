@@ -338,6 +338,7 @@ def test_create_nodes_separate_skips_replies_and_encrypts(app):
         user_id=u.id, rows=iter(_rows()), total=3,
         import_type="separate_nodes", include_replies=False,
         privacy_level="private", ai_usage="none", on_deleted=None,
+        provenance="archive_upload",
         batch_size=1, on_progress=progress.append,
     )
     assert result["created"] == 2 and result["thread_count"] == 2
@@ -345,6 +346,7 @@ def test_create_nodes_separate_skips_replies_and_encrypts(app):
     nodes = Node.query.filter_by(human_owner_id=u.id).order_by(Node.created_at).all()
     assert [n.get_content() for n in nodes] == ["first, oldest", "third, newest"]
     assert all(n.parent_id is None and n.origin == "twitter" for n in nodes)
+    assert all(n.provenance == "archive_upload" for n in nodes)
     assert nodes[0].created_at.year == 2026 and nodes[0].created_at.day == 24
     assert progress[-1] == 3 and len(progress) >= 2  # batched + final
 
@@ -354,7 +356,8 @@ def test_create_nodes_single_thread_chains_and_dedups(app):
     u = _make_user("alice")
     kwargs = dict(user_id=u.id, total=3, import_type="single_thread",
                   include_replies=True, privacy_level="private",
-                  ai_usage="none", on_deleted=None)
+                  ai_usage="none", on_deleted=None,
+                  provenance="archive_upload")
     first = create_twitter_nodes(rows=iter(_rows()), **kwargs)
     assert first["created"] == 3 and first["thread_count"] == 1
     chain = Node.query.filter_by(human_owner_id=u.id).order_by(Node.created_at).all()
@@ -371,7 +374,8 @@ def test_create_nodes_restores_deleted_when_asked(app):
     from datetime import datetime
     u = _make_user("alice")
     n = Node(user_id=u.id, human_owner_id=u.id, node_type="user",
-             source_key="twitter:1", deleted_at=datetime.utcnow())
+             source_key="twitter:1", deleted_at=datetime.utcnow(),
+             provenance="prefill_ca")
     n.set_content("stale")
     _db.session.add(n)
     _db.session.commit()
@@ -379,10 +383,30 @@ def test_create_nodes_restores_deleted_when_asked(app):
         user_id=u.id, rows=iter(_rows()), total=3,
         import_type="separate_nodes", include_replies=False,
         privacy_level="private", ai_usage="none", on_deleted="restore",
+        provenance="archive_upload",
     )
     assert result["restored"] == 1 and result["created"] == 1
     _db.session.refresh(n)
     assert n.deleted_at is None and n.get_content() == "first, oldest"
+    # The restored text is this import's copy, so its provenance is too.
+    assert n.provenance == "archive_upload"
+
+
+def test_create_nodes_requires_a_known_provenance(app):
+    """Provenance is what a later decision on public-sourced tweets will
+    be applied by (#295), so an importer can neither leave it out nor
+    invent a value."""
+    from backend.routes.import_data import create_twitter_nodes
+    u = _make_user("alice")
+    kwargs = dict(user_id=u.id, total=3, import_type="separate_nodes",
+                  include_replies=False, privacy_level="private",
+                  ai_usage="none", on_deleted=None)
+    with pytest.raises(TypeError):
+        create_twitter_nodes(rows=iter(_rows()), **kwargs)
+    with pytest.raises(ValueError):
+        create_twitter_nodes(rows=iter(_rows()), provenance="scraped",
+                             **kwargs)
+    assert Node.query.filter_by(human_owner_id=u.id).count() == 0
 
 
 # ── status endpoint ──────────────────────────────────────────────────────
@@ -759,6 +783,7 @@ def test_prefill_impl_imports_pins_batch_and_reports(app, monkeypatch):
     nodes = Node.query.filter_by(human_owner_id=u.id).order_by(Node.created_at).all()
     assert [n.get_content() for n in nodes] == ["first", "second"]
     assert all(n.origin == "twitter" and n.ai_usage == "chat" for n in nodes)
+    assert all(n.provenance == "prefill_ca" for n in nodes)
     assert User.query.get(u.id).profile_force_batch is True
     assert User.query.get(u.id).prefilled_handle == "TylerAlterman"
     assert sync.call_count == 0  # never the synchronous path
@@ -1072,6 +1097,7 @@ def test_create_nodes_skips_tweets_with_no_text(app):
         user_id=u.id, rows=iter(rows), total=3,
         import_type="separate_nodes", include_replies=False,
         privacy_level="private", ai_usage="none", on_deleted=None,
+        provenance="archive_upload",
     )
     assert result["created"] == 1 and result["empty"] == 2
     assert result["skipped"] == 0
@@ -1091,6 +1117,7 @@ def test_single_thread_chain_survives_an_empty_tweet(app):
         user_id=u.id, rows=iter(rows), total=3,
         import_type="single_thread", include_replies=True,
         privacy_level="private", ai_usage="none", on_deleted=None,
+        provenance="archive_upload",
     )
     assert result["created"] == 2 and result["empty"] == 1
     chain = Node.query.filter_by(human_owner_id=u.id).order_by(Node.id).all()

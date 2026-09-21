@@ -46,6 +46,8 @@ def _upsert_items(user_id, source, items):
             title=item.get("title"),
             url=item.get("url"),
             posted_at=item.get("posted_at"),
+            # Absent (the JSON bookmark import) = unknown, never a guess.
+            public_source=item.get("public_source"),
         )
         row.set_content(item["content"])
         db.session.add(row)

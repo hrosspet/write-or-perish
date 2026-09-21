@@ -105,6 +105,7 @@ def test_normalize_ca_tweet_field_tolerance():
     assert a["content"] == "hello"
     assert a["url"].endswith("/alice/status/123")
     assert a["posted_at"].year == 2024
+    assert a["public_source"] is True  # the archive is public by construction
 
     b = normalize_ca_tweet({"id": "9", "text": "alt names"}, "bob")
     assert b["external_id"] == "9"
@@ -120,9 +121,26 @@ def test_normalize_x_bookmark():
         {"7": {"username": "carol"}})
     assert item["author_handle"] == "carol"
     assert item["url"].endswith("/carol/status/55")
+    # No `protected` field on the author object: publicness unknown.
+    assert item["public_source"] is None
     # Unknown author still produces a working status URL
     anon = normalize_x_bookmark({"id": "56", "text": "x"}, {})
     assert "/i/status/56" in anon["url"]
+    assert anon["public_source"] is None
+
+
+def test_normalize_x_bookmark_reads_the_authors_protected_flag():
+    """A bookmark is vouched public only when X says its author is not
+    protected; a protected author's tweet is a private copy even though
+    the bookmarking user could read it (#295)."""
+    authors = {"1": {"username": "open", "protected": False},
+               "2": {"username": "locked", "protected": True}}
+    pub = normalize_x_bookmark(
+        {"id": "60", "text": "t", "author_id": "1"}, authors)
+    priv = normalize_x_bookmark(
+        {"id": "61", "text": "t", "author_id": "2"}, authors)
+    assert pub["public_source"] is True
+    assert priv["public_source"] is False
 
 
 # ── Upsert / dedupe ──────────────────────────────────────────────────────
@@ -144,6 +162,24 @@ def test_upsert_dedupes_per_user_and_source(app):
         created, _ = _upsert_items(uid, "twitter_bookmark", items[:1])
         assert created == 1
         assert ExternalItem.query.count() == 3
+
+
+def test_upsert_records_public_source_or_leaves_it_unknown(app):
+    """The flag travels with the normalized item; an item without it (the
+    JSON bookmark import) lands as NULL, never as a guess."""
+    with app.app_context():
+        uid = User.query.first().id
+        _upsert_items(uid, "twitter_bookmark", [
+            {"external_id": "1", "content": "a", "author_handle": "x",
+             "url": None, "posted_at": None, "public_source": True},
+            {"external_id": "2", "content": "b", "author_handle": "y",
+             "url": None, "posted_at": None, "public_source": False},
+            {"external_id": "3", "content": "c", "author_handle": "z",
+             "url": None, "posted_at": None},
+        ])
+        flags = {i.external_id: i.public_source
+                 for i in ExternalItem.query.all()}
+        assert flags == {"1": True, "2": False, "3": None}
 
 
 # ── Routes ───────────────────────────────────────────────────────────────
@@ -177,6 +213,9 @@ def test_bookmarks_json_import_shapes(app, client):
     with app.app_context():
         ids = {i.external_id for i in ExternalItem.query.all()}
         assert ids == {"10", "11"}
+        # A browser-script export says nothing about the authors'
+        # accounts: publicness stays unknown, not guessed.
+        assert {i.public_source for i in ExternalItem.query.all()} == {None}
 
 
 def test_twitter_connect_env_gated(app, client):
@@ -366,6 +405,7 @@ def test_clip_session_creates_then_dedupes(app, client):
         assert item.url == "https://example.com/post"
         assert item.author_handle == "writer"
         assert item.title == "A post"
+        assert item.public_source is False  # a page: assessed, not vouched
     listed = client.get("/api/external/items").get_json()
     assert listed["counts"] == {"web_clip": 1}
     assert listed["items"][0]["title"] == "A post"
@@ -429,6 +469,7 @@ def test_clip_tweet_url_lands_as_bookmark(app, client):
         item = ExternalItem.query.get(body["id"])
         assert item.external_id == "555"
         assert item.posted_at.year == 2025
+        assert item.public_source is None  # nobody asked X about the author
         # The nightly sync would now skip it: same (user, source, ext_id)
         uid = User.query.first().id
         created, skipped = _upsert_items(uid, "twitter_bookmark", [
@@ -895,3 +936,27 @@ def test_x_bookmark_pages_report_returned_count_incl_dropped(monkeypatch):
         content.x_fetch_bookmark_pages("tok", "42", max_items=800))
     assert returned == 10
     assert len(items) == 8
+
+
+def test_x_bookmark_pages_ask_for_and_apply_the_protected_flag(monkeypatch):
+    """The sync requests `protected` with the author expansion, and each
+    normalized bookmark carries the verdict (#295: an X bookmark is a
+    vouched-public reference only when its author is not protected)."""
+    from backend.utils import external_content as content
+    seen = {}
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        seen["user.fields"] = params["user.fields"]
+        return _FakeXResponse({
+            "data": [{"id": "1", "author_id": "a", "text": "open"},
+                     {"id": "2", "author_id": "b", "text": "locked"},
+                     {"id": "3", "author_id": "gone", "text": "orphan"}],
+            "includes": {"users": [
+                {"id": "a", "username": "u", "protected": False},
+                {"id": "b", "username": "v", "protected": True}]},
+            "meta": {}})
+    monkeypatch.setattr(content.requests, "get", fake_get)
+    (items, _returned), = list(
+        content.x_fetch_bookmark_pages("tok", "42", max_items=800))
+    assert "protected" in seen["user.fields"].split(",")
+    assert [i["public_source"] for i in items] == [True, False, None]

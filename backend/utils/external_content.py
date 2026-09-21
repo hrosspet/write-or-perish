@@ -96,6 +96,8 @@ def normalize_ca_tweet(row, username):
         "url": f"https://twitter.com/{username}/status/{tweet_id}",
         "posted_at": _parse_tweet_dt(
             row.get("created_at") or row.get("created at")),
+        # The archive is an opt-in public corpus: public by construction.
+        "public_source": True,
     }
 
 
@@ -143,6 +145,12 @@ def normalize_x_bookmark(tweet, authors_by_id):
         return None
     author = authors_by_id.get(tweet.get("author_id"), {})
     handle = author.get("username")
+    # A bookmark is public only if its author's account is not protected
+    # (a follower can bookmark a protected tweet). X says so per author
+    # in the `includes.users` expansion; an author X did not return, or a
+    # user object without the field, leaves the answer unknown.
+    protected = author.get("protected")
+    public_source = (not protected) if isinstance(protected, bool) else None
     return {
         "external_id": str(tweet_id),
         "author_handle": handle,
@@ -150,6 +158,7 @@ def normalize_x_bookmark(tweet, authors_by_id):
         "url": (f"https://twitter.com/{handle}/status/{tweet_id}"
                 if handle else f"https://twitter.com/i/status/{tweet_id}"),
         "posted_at": _parse_tweet_dt(tweet.get("created_at")),
+        "public_source": public_source,
     }
 
 
@@ -179,7 +188,7 @@ def x_fetch_bookmark_pages(access_token, x_user_id, max_items=800):
     params = {
         "tweet.fields": "created_at,author_id",
         "expansions": "author_id",
-        "user.fields": "username",
+        "user.fields": "username,protected",
     }
     fetched = 0
     next_token = None
