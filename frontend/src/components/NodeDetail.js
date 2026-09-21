@@ -1035,7 +1035,7 @@ function NodeDetail({ nodeIdOverride }) {
             ? "Loore reads the last day of Community Archive tweets again, against everything in this thread so far, and shows you what else is relevant"
             : "Loore reads the last day of Community Archive tweets and shows you the ones relevant to this thread"}
         >
-          <span>{readLoading ? 'Starting…' : (inReadThread ? 'Read further' : 'Find relevant tweets')}</span>
+          <span>{readLoading ? 'Starting…' : (inReadThread ? 'Read further' : 'Relevant tweets')}</span>
           <span style={{
             width: '32px',
             display: 'inline-flex',
