@@ -1435,7 +1435,10 @@ function NodeDetail({ nodeIdOverride }) {
       <div style={{
         display: "flex",
         justifyContent: "space-between",
-        alignItems: "center",
+        // The controls column is three rows tall; the heading sits at
+        // the row's foot, on the rule below, rather than floating at
+        // the column's middle.
+        alignItems: "flex-end",
         gap: "16px",
         marginBottom: "12px",
       }}>
