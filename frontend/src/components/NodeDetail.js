@@ -19,9 +19,16 @@ import Bubble from "./Bubble";
 import BubbleKebabMenu from "./BubbleKebabMenu";
 import QuotedContent from "./QuotedContent";
 import FeedPicks from "./FeedPicks";
-import { ReadWindowLine, ReadReplyTail, READ_FURTHER_TITLE } from "./ReadReply";
+import { ReadWindowLine, ReadReplyTail } from "./ReadReply";
+
 import DeleteConfirmDialog from "./DeleteConfirmDialog";
 
+
+// One tooltip for both "Read further" buttons on the thread page: the
+// top-right one and the one in the action row under each node of a
+// read thread.
+const READ_FURTHER_TITLE = "Another pass over the day's tweets, against everything in this thread so far "
+  + "— your marks on these picks included.";
 // Recursive component to render children nodes.
 function RenderChildTree({ nodes, onBubbleClick, buildActions }) {
   return (
@@ -947,6 +954,22 @@ function NodeDetail({ nodeIdOverride }) {
   const showInlineInput = !!currentUser;
   const showCraftBar = isOwner && (craftMode || isPublicThread)
     && !autoGenerateActive && node.ai_usage !== 'none' && !isLlmPending;
+  // In a read thread the action row under every node also carries
+  // "Read further" — the conversation under the picks can get long and
+  // nothing is pinned to the viewport (small screens), so the action
+  // travels with the node the user is on. It shows whenever the owner
+  // could act, not only in craft mode; LLM Response and the model
+  // picker keep the craft-bar rule, and the picker sets the model for
+  // both buttons. Directly under a finished read reply LLM Response is
+  // disabled: a reply asked for there is another read (the task's
+  // parent rule), and the way to talk about the picks is a comment
+  // first, whose own row then offers LLM Response again.
+  const underReadReply = isReadReply && node.llm_task_status === 'completed';
+  const readActions = isOwner && inReadThread && node.ai_usage !== 'none'
+    && !isLlmPending;
+  const llmResponseTitle = underReadReply
+    ? "A reply asked for right under the picks is another read. To talk about them, write a comment below first."
+    : (inReadThread ? "Chat about the picks" : undefined);
 
   // Shared shell for the top-right controls. Voice Mode + Auto-generate
   // share padding/border/typography; Auto-generate uses `space-between`
@@ -1218,15 +1241,6 @@ function NodeDetail({ nodeIdOverride }) {
             total={pickIds.length}
             loaded={picksLoaded}
             onMarkedAll={handlePicksMarkedAll}
-            onReadAgain={handleReadFromNode}
-            busy={readLoading || llmRequesting || !!llmTaskNodeId}
-            modelPicker={showCraftBar ? (
-              <ModelSelector
-                nodeId={node.id}
-                selectedModel={selectedModel}
-                onModelChange={setSelectedModel}
-              />
-            ) : null}
           />
         )}
         {(() => {
@@ -1352,30 +1366,45 @@ function NodeDetail({ nodeIdOverride }) {
           <SpeakerIcon nodeId={node.id} content={node.content} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} onTtsGenerated={() => setNode(prev => prev ? { ...prev, has_tts: true } : prev)} />
           <DownloadAudioIcon nodeId={node.id} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} />
         </NodeFooter>
-        {/* Under a finished read reply the response action is the tail's
-            "Read further", and the model picker sits beside it there; the
-            craft bar's generic LLM Response has no meaning of its own
-            under the picks. A failed read reply keeps the bar. */}
-        {showCraftBar && !(isReadReply && node.llm_task_status === 'completed') && (
+        {(showCraftBar || readActions) && (
           <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-            <button
-              onClick={handleLLMResponse}
-              disabled={llmRequesting || !!llmTaskNodeId}
-              style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}
-            >
-              {(llmRequesting || llmTaskNodeId) ? (
-                <>
-                  <FaSpinner className="spin" aria-hidden="true" />
-                  {llmRequesting ? 'Requesting…'
-                    : llmStatus === 'pending' ? 'Waiting for AI…' : 'Generating…'}
-                </>
-              ) : 'LLM Response'}
-            </button>
-            <ModelSelector
-              nodeId={node.id}
-              selectedModel={selectedModel}
-              onModelChange={setSelectedModel}
-            />
+            {showCraftBar && (
+              /* The span carries the tooltip: a disabled button gets no
+                 hover events in some browsers. */
+              <span title={llmResponseTitle} style={{ display: 'inline-flex' }}>
+                <button
+                  onClick={handleLLMResponse}
+                  disabled={llmRequesting || !!llmTaskNodeId || underReadReply}
+                  aria-disabled={underReadReply || undefined}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}
+                >
+                  {(llmRequesting || llmTaskNodeId) ? (
+                    <>
+                      <FaSpinner className="spin" aria-hidden="true" />
+                      {llmRequesting ? 'Requesting…'
+                        : llmStatus === 'pending' ? 'Waiting for AI…' : 'Generating…'}
+                    </>
+                  ) : 'LLM Response'}
+                </button>
+              </span>
+            )}
+            {showCraftBar && (
+              <ModelSelector
+                nodeId={node.id}
+                selectedModel={selectedModel}
+                onModelChange={setSelectedModel}
+              />
+            )}
+            {readActions && (
+              <button
+                onClick={handleReadFromNode}
+                disabled={readLoading || llmRequesting || !!llmTaskNodeId}
+                title={READ_FURTHER_TITLE}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}
+              >
+                {readLoading ? 'Starting…' : 'Read further'}
+              </button>
+            )}
           </div>
         )}
         {llmTaskNodeId && !showCraftBar && !isLlmPending && (

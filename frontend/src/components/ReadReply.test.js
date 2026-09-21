@@ -32,39 +32,20 @@ test('nothing left out, nothing said about it; no window, no line', () => {
 test('the tail marks the whole list read and reports back', async () => {
   api.post.mockResolvedValue({ data: { read_at: { 5: '2026-09-19T08:00:00Z', 6: '2026-09-19T08:00:00Z' } } });
   const onMarkedAll = jest.fn();
-  render(<ReadReplyTail nodeId={77} unread={2} total={6} onMarkedAll={onMarkedAll} onReadAgain={() => {}} />);
+  render(<ReadReplyTail nodeId={77} unread={2} total={6} onMarkedAll={onMarkedAll} />);
   expect(screen.getByText('2 of 6 unread')).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Mark all as read' }));
   expect(api.post).toHaveBeenCalledWith('/nodes/77/feed-picks/read');
   await waitFor(() => expect(onMarkedAll).toHaveBeenCalledWith({ 5: '2026-09-19T08:00:00Z', 6: '2026-09-19T08:00:00Z' }));
 });
 
-test('an all-read list says so and the read-again action is its own button', () => {
-  const onReadAgain = jest.fn();
-  render(<ReadReplyTail nodeId={77} unread={0} total={6} onReadAgain={onReadAgain} />);
+test('an all-read list says so; the tail carries no other action', () => {
+  render(<ReadReplyTail nodeId={77} unread={0} total={6} />);
   expect(screen.getByText('All read.')).toBeInTheDocument();
-  expect(screen.queryByRole('button', { name: 'Mark all as read' })).toBeNull();
-  fireEvent.click(screen.getByRole('button', { name: 'Read further' }));
-  expect(onReadAgain).toHaveBeenCalled();
+  expect(screen.queryByRole('button')).toBeNull();
 });
 
-test('while the read runs the button waits; before the quotes load the state is silent', () => {
-  const { rerender } = render(<ReadReplyTail nodeId={77} unread={3} total={3} busy onReadAgain={() => {}} />);
-  expect(screen.getByRole('button', { name: 'Reading…' })).toBeDisabled();
-  rerender(<ReadReplyTail nodeId={77} unread={0} total={3} loaded={false} onReadAgain={() => {}} />);
-  expect(screen.queryByText('All read.')).toBeNull();
-});
-
-test('the hint says what Read further does and what a reply does, and nothing about read items', () => {
-  const { container } = render(<ReadReplyTail nodeId={77} unread={3} total={3} onReadAgain={() => {}} />);
-  expect(container.textContent).toMatch(/Read further asks for more from the same day/);
-  expect(container.textContent).toMatch(/Text-mode conversation/);
-  expect(container.textContent).not.toMatch(/marked read|leaves the list/);
-  expect(screen.getByRole('button', { name: 'Read further' }).title).not.toMatch(/marked read|leaves the list/);
-});
-
-test('the model picker, when given, sits beside Read further', () => {
-  render(<ReadReplyTail nodeId={77} unread={1} total={3} onReadAgain={() => {}} modelPicker={<select aria-label="Model"><option>gpt-5</option></select>} />);
-  const actions = screen.getByRole('button', { name: 'Read further' }).parentElement;
-  expect(actions.querySelector('select[aria-label="Model"]')).not.toBeNull();
+test('before the quotes load the state is silent', () => {
+  const { container } = render(<ReadReplyTail nodeId={77} unread={0} total={3} loaded={false} />);
+  expect(container.textContent).toBe('');
 });

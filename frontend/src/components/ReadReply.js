@@ -12,21 +12,12 @@ import { formatDateTime } from '../utils/date';
  * local time, with the count of tweets they had already seen and so
  * never reached the model.
  *
- * ReadReplyTail sits under the picks. Two things can happen after a
- * read, and they differ in what the model gets. "Read further" asks for
- * more from the same day with everything in the thread so far in view:
- * the earlier picks, the reader's marks on them (they travel in the
- * closing note of the prompt, see _reference_marks_note) and whatever
- * was written since; what the reader has read never comes back, which
- * is the feed's obvious behaviour and goes unsaid here. A reply typed
- * below is a Text-mode conversation about the picks instead: the day
- * stays out, the assistant's tools are on. The tail makes that
- * difference plain and carries the list's read state so the reader can
- * clear it in one go. In craft mode the model picker sits beside "Read
- * further" (`modelPicker`): under a read reply the tail is the response
- * action, so the craft bar's generic LLM Response and its picker stay
- * out, and the picker lives next to the action it serves (it also sets
- * the model for a reply typed below).
+ * ReadReplyTail sits under the picks and carries the list's read
+ * state, so the reader can clear it in one go. The actions that follow
+ * a read — Read further, or a reply about the picks — live in the
+ * action row under the node (NodeDetail), not in the card: that row is
+ * under every node of the thread, so the actions stay at hand however
+ * long the conversation under the picks gets.
  */
 
 const count = (n) => Number(n || 0).toLocaleString('en-US');
@@ -43,16 +34,7 @@ export const ReadWindowLine = ({ window: w }) => {
   );
 };
 
-// One tooltip for both Read further buttons: the tail's and the thread
-// page's top-right one (NodeDetail imports it).
-export const READ_FURTHER_TITLE = 'Another pass over the day\'s tweets, against everything in this thread so far '
-  + '— your marks on these picks included.';
-const HINT = 'Read further asks for more from the same day, with everything in this thread so far in view '
-  + '— your marks included. A reply below is a Text-mode conversation instead.';
-
-export const ReadReplyTail = ({
-  nodeId, unread, total, loaded = true, onMarkedAll, onReadAgain, busy, modelPicker = null,
-}) => {
+export const ReadReplyTail = ({ nodeId, unread, total, loaded = true, onMarkedAll }) => {
   const { addToast } = useToast();
   const [marking, setMarking] = useState(false);
 
@@ -85,20 +67,7 @@ export const ReadReplyTail = ({
     <div className="read-tail">
       <div className="read-tail-row">
         <span className="read-tail-state">{state}</span>
-        <span className="read-tail-actions">
-          {modelPicker}
-          <button
-            type="button"
-            className="read-again"
-            onClick={onReadAgain}
-            disabled={busy}
-            title={READ_FURTHER_TITLE}
-          >
-            {busy ? 'Reading…' : 'Read further'}
-          </button>
-        </span>
       </div>
-      <p className="read-tail-hint">{HINT}</p>
     </div>
   );
 };
