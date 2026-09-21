@@ -69,6 +69,37 @@ def is_llm_node(node):
     return node.node_type == 'llm' or bool(node.llm_model)
 
 
+def attach_agentic_prompt_under(node, user_id, prompt_key, privacy_level,
+                                ai_usage):
+    """The agentic prompt node a Text / Voice session continuing under
+    *node* needs, or None when one already sits above it (any key in
+    AGENTIC_PROMPT_KEYS: a mode switch inside an agentic thread reuses
+    the prompt that is there). The node is created empty and linked to
+    the user's prompt record through attach_context_artifacts, which
+    also pins the artifact snapshots its placeholders name; the caller
+    hangs the message under it and commits."""
+    if ancestors_have_prompt(node, user_id, AGENTIC_PROMPT_KEYS):
+        return None
+    from backend.extensions import db
+    from backend.utils.prompts import get_user_prompt_record
+    from backend.utils.context_artifacts import attach_context_artifacts
+    prompt_record = get_user_prompt_record(user_id, prompt_key)
+    prompt_node = Node(
+        user_id=user_id,
+        human_owner_id=user_id,
+        parent_id=node.id,
+        node_type="user",
+        privacy_level=privacy_level,
+        ai_usage=ai_usage,
+    )
+    db.session.add(prompt_node)
+    db.session.flush()
+    attach_context_artifacts(
+        prompt_node.id, user_id, prompt_record=prompt_record,
+    )
+    return prompt_node
+
+
 def create_llm_placeholder_node(parent_node_id, model_id, requesting_user_id,
                                 ai_usage=None, source_mode=None):
     """Create an LLM placeholder node and enqueue the generation task."""

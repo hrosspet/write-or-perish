@@ -104,7 +104,9 @@ class TestRenderRecentTweets:
         assert stats == {
             "export_id": "2026-09-13T07-08-27Z",
             "window_start": "2026-09-12 06:00", "window_end": "2026-09-13 06:00",
-            "tweets": 4, "accounts": 3, "scope": "all",
+            "window_start_at": datetime(2026, 9, 12, 6, 0),
+            "window_end_at": datetime(2026, 9, 13, 6, 0),
+            "tweets": 4, "accounts": 3, "excluded": 0, "scope": "all",
         }
         assert text.startswith(
             "# Community Archive — tweets from 2026-09-12 06:00 to "
@@ -386,3 +388,64 @@ class TestParseFeedReply:
         assert FEED_SCHEMA["additionalProperties"] is False
         item = FEED_SCHEMA["properties"]["picks"]["items"]
         assert set(item["required"]) == {"n", "qt", "relevance", "recommend"}
+
+
+class TestSeenTweets:
+    def test_exclude_tweet_ids_drops_them_and_counts_them(self, snapshot):
+        from backend.utils import community_archive as ca
+        text, stats, refs = ca.render_recent_tweets(
+            snapshot, days=1, exclude_tweet_ids=["t2", "t9", ""])
+        assert stats["tweets"] == 3
+        assert stats["excluded"] == 1
+        assert "1 tweets the reader had already seen" in text
+        assert "bob says hi" not in text
+        assert {r["tweet_id"] for r in refs.values()} == {"t1", "t3", "t6"}
+        # The numbering stays dense.
+        assert sorted(refs) == [1, 2, 3]
+
+    def test_no_exclusions_no_note(self, snapshot):
+        from backend.utils import community_archive as ca
+        text, stats, _ = ca.render_recent_tweets(snapshot, days=1)
+        assert stats["excluded"] == 0
+        assert "already seen" not in text
+
+    def test_fetch_tweets_by_id(self, snapshot):
+        from backend.utils import community_archive as ca
+        found = ca.fetch_tweets_by_id(snapshot, ["t1", "t3", "t9", None])
+        assert set(found) == {"t1", "t3"}
+        assert found["t1"]["username"] == "alice"
+        assert found["t1"]["text"] == "newest by alice"
+        assert found["t1"]["posted_at"] == datetime(2026, 9, 13, 6, 0)
+        assert ca.fetch_tweets_by_id(snapshot, []) == {}
+
+
+class TestRefreshSnapshot:
+    def test_nothing_cached_is_a_noop(self, tmp_path, monkeypatch):
+        from backend.utils import community_archive as ca
+        monkeypatch.setattr(ca, "fetch_latest_manifest",
+                            lambda: (_ for _ in ()).throw(AssertionError()))
+        assert ca.refresh_snapshot(tmp_path) == (None, False)
+
+    def test_current_export_downloads_nothing(self, snapshot, monkeypatch):
+        from backend.utils import community_archive as ca
+        monkeypatch.setattr(ca, "fetch_latest_manifest",
+                            lambda: {"export_id": "2026-09-13T07-08-27Z"})
+        monkeypatch.setattr(ca, "_download_snapshot",
+                            lambda *a: (_ for _ in ()).throw(AssertionError()))
+        assert ca.refresh_snapshot(snapshot) == ("2026-09-13T07-08-27Z", False)
+
+    def test_newer_export_is_downloaded_under_the_lock(self, snapshot, monkeypatch):
+        from backend.utils import community_archive as ca
+        manifest = {"export_id": "2026-09-19T07-02-55Z", "package_paths": []}
+        monkeypatch.setattr(ca, "fetch_latest_manifest", lambda: manifest)
+        seen = []
+
+        def _download(d, m, on_progress):
+            assert (d / ".lock").exists()
+            seen.append(m["export_id"])
+            (d / "export_id").write_text(m["export_id"])
+            return m["export_id"]
+        monkeypatch.setattr(ca, "_download_snapshot", _download)
+        assert ca.refresh_snapshot(snapshot) == ("2026-09-19T07-02-55Z", True)
+        assert seen == ["2026-09-19T07-02-55Z"]
+        assert ca.snapshot_export_id(snapshot) == "2026-09-19T07-02-55Z"

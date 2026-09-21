@@ -25,7 +25,7 @@ const COMBINED_PATTERN = /(\{quote_ext:\d+\}|\{quote:\d+\}|\{user_(?:profile|tod
  *   contextArtifacts: Object with "profile" and/or "todo" keys containing artifact data
  *   onQuoteClick: Callback when a quote is clicked (receives quote ID)
  */
-const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQuoteClick, onCheckboxToggle, onAddTask }) => {
+const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQuoteClick, onCheckboxToggle, onAddTask, onExternalReadChange, onExternalFeedbackChange }) => {
   if (!content) {
     return null;
   }
@@ -119,11 +119,16 @@ const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQu
           );
         } else if (segment.type === 'external_quote') {
           const quoteData = externalQuotes ? externalQuotes[segment.quoteId] : null;
+          // The slot lets a page space quotes as units (a read reply's
+          // picks, .read-reply-body) without touching the bubble.
           return (
-            <ExternalQuoteBubble
-              key={index}
-              quote={quoteData}
-            />
+            <div key={index} className="ext-quote-slot">
+              <ExternalQuoteBubble
+                quote={quoteData}
+                onReadChange={onExternalReadChange}
+                onFeedbackChange={onExternalFeedbackChange}
+              />
+            </div>
           );
         } else if (segment.type === 'artifact') {
           const artifact = contextArtifacts

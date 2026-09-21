@@ -19,8 +19,17 @@ import Bubble from "./Bubble";
 import BubbleKebabMenu from "./BubbleKebabMenu";
 import QuotedContent from "./QuotedContent";
 import FeedPicks from "./FeedPicks";
+import { ReadWindowLine, ReadReplyTail } from "./ReadReply";
+
 import DeleteConfirmDialog from "./DeleteConfirmDialog";
 
+
+// One tooltip for both "Read further" buttons on the thread page: the
+// top-right one and the one in the action row under each node of a
+// read thread.
+const READ_FURTHER_TITLE = "Another pass over the day's tweets, against everything in this thread so far "
+  + "— your marks on these picks included.";
+const READ_ENTRY_TITLE = "Loore reads the last day of Community Archive tweets and shows you the ones relevant to this thread";
 // Recursive component to render children nodes.
 function RenderChildTree({ nodes, onBubbleClick, buildActions }) {
   return (
@@ -566,10 +575,10 @@ function NodeDetail({ nodeIdOverride }) {
       });
   };
 
-  const requestLlmFor = async (parentNodeId) => {
+  const requestLlmFor = async (parentNodeId, { sourceMode = 'textmode' } = {}) => {
     const response = await api.post(`/nodes/${parentNodeId}/llm`, {
       model: selectedModel,
-      source_mode: 'textmode',
+      source_mode: sourceMode,
     });
     const newNodeId = response.data.node_id;
     if (!newNodeId) throw new Error("Failed to get a task ID for the new LLM node.");
@@ -646,6 +655,34 @@ function NodeDetail({ nodeIdOverride }) {
       navigate(`/node/${newNodeId}`);
       handleLlmRequestError(err);
     }
+  };
+
+  // A reply typed or recorded under a read reply is a Text-mode message
+  // (#323): the backend attaches the textmode prompt under the read reply
+  // when no agentic prompt sits above it, so the conversation about the
+  // picks runs with the assistant's tools and what the user says there
+  // can move their intentions and memory. The read itself never runs
+  // under that prompt (the task strips it on read turns). Auto-generate
+  // is honoured like Text mode's own entry, and the reply fires
+  // server-side, so there is no /nodes/<id>/llm follow-up here.
+  const submitReadReplyMessage = async ({ content, streaming_session_id }) => {
+    if (streaming_session_id) {
+      const res = await api.post(
+        `/drafts/streaming/${streaming_session_id}/save-as-node`,
+        { content, agentic: true, auto_generate: autoGenerateActive, model: selectedModel },
+      );
+      return res.data;
+    }
+    const res = await api.post(`/textmode/from-node/${id}`, {
+      content, model: selectedModel, auto_generate: autoGenerateActive,
+    });
+    return res.data;
+  };
+  const handleReadReplySuccess = (data) => {
+    const userNodeId = data?.user_node_id || data?.id;
+    if (!userNodeId) return;
+    const suffix = data?.llm_node_id ? `?awaitLlm=${data.llm_node_id}` : '';
+    navigate(`/node/${userNodeId}${suffix}`);
   };
 
   // Called after NodeForm successfully PUTs /nodes/<id>. Updates local
@@ -740,6 +777,9 @@ function NodeDetail({ nodeIdOverride }) {
   // pending reply, which this page polls as "Processing…" until the
   // picks arrive. With it off, only the prompt is attached and we land
   // on it, where the model picker and LLM Response wait for the user.
+  // Inside a read thread the same call reads further (no prompt, a read
+  // turn under this node; the click is the request, so auto-generate
+  // does not apply) and we land on the pending reply.
   const handleReadFromNode = () => {
     setReadLoading(true);
     setError("");
@@ -849,10 +889,47 @@ function NodeDetail({ nodeIdOverride }) {
   // the reply is pending or after it failed.
   const parentAncestor = node.ancestors?.[node.ancestors.length - 1];
   const isReadReply = isLlmNode && (
-    (Array.isArray(node.tool_calls_meta)
-      && node.tool_calls_meta.some(tc => tc?.name === '_batch'))
+    !!node.read_reply
+    || (Array.isArray(node.tool_calls_meta)
+      && node.tool_calls_meta.some(tc => ['_batch', '_read'].includes(tc?.name)))
     || ['read', 'read_thread'].includes(parentAncestor?.prompt_key)
   );
+  // A read reply's picks are its {quote_ext:ID} markers. Their read state
+  // and good / bad verdicts live in externalQuotes, kept in step by the
+  // bubbles' own controls and the tail's "Mark all as read", so the
+  // tail's "n unread" is always the list as shown.
+  const pickIds = isReadReply
+    ? Array.from(new Set(((node.content || '').match(/\{quote_ext:(\d+)\}/g) || [])
+        .map(m => m.match(/\d+/)[0])))
+    : [];
+  const picksLoaded = pickIds.every(pid => pid in externalQuotes);
+  const picksUnread = pickIds.filter(pid => externalQuotes[pid] && !externalQuotes[pid].read_at).length;
+  const handleExternalReadChange = (itemId, readAt) => setExternalQuotes(prev => (
+    prev[itemId] ? { ...prev, [itemId]: { ...prev[itemId], read_at: readAt } } : prev
+  ));
+  const handleExternalFeedbackChange = (itemId, feedback) => setExternalQuotes(prev => (
+    prev[itemId] ? { ...prev, [itemId]: { ...prev[itemId], feedback } } : prev
+  ));
+  const handlePicksMarkedAll = (readAt) => setExternalQuotes(prev => {
+    const next = { ...prev };
+    Object.entries(readAt).forEach(([itemId, ts]) => {
+      if (next[itemId]) next[itemId] = { ...next[itemId], read_at: ts };
+    });
+    return next;
+  });
+  // Inside a read thread the Read button (top right, and the tail's
+  // "Read further") reads further: /read/from-node makes a read turn
+  // under this node with the whole thread in view, no second prompt.
+  // The backend says which it is (in_read_thread: a read prompt above,
+  // by key or by the {ca_tweets} placeholder in a PoC-era prompt's
+  // text), the same test the route applies; a read reply is one by
+  // definition.
+  const inReadThread = !!node.in_read_thread || isReadReply;
+  // Before the thread has any picks the read action is "Read"; once a
+  // read reply sits at or above this node it is "Read further".
+  const readReplyAbove = !!node.read_reply_above || isReadReply;
+  const readLabel = readReplyAbove ? 'Read further' : 'Read';
+  const readTitle = readReplyAbove ? READ_FURTHER_TITLE : READ_ENTRY_TITLE;
   const canRerunRead = !!currentUser?.is_admin && isOwner && isReadReply
     && (isLlmPending || node.llm_task_status === 'failed');
   const showProposal = !!node.content && !isLlmPending && (
@@ -883,6 +960,37 @@ function NodeDetail({ nodeIdOverride }) {
   const showInlineInput = !!currentUser;
   const showCraftBar = isOwner && (craftMode || isPublicThread)
     && !autoGenerateActive && node.ai_usage !== 'none' && !isLlmPending;
+  // In a read thread the action row under every node also carries
+  // "Read further" — the conversation under the picks can get long and
+  // nothing is pinned to the viewport (small screens), so the action
+  // travels with the node the user is on. It shows whenever the owner
+  // could act, not only in craft mode; LLM Response and the model
+  // picker keep the craft-bar rule, and the picker sets the model for
+  // both buttons. Directly under a finished read reply LLM Response is
+  // disabled: a reply asked for there is another read (the task's
+  // parent rule), and the way to talk about the picks is a comment
+  // first, whose own row then offers LLM Response again.
+  const underReadReply = isReadReply && node.llm_task_status === 'completed';
+  const readActions = isOwner && inReadThread && node.ai_usage !== 'none'
+    && !isLlmPending;
+  // Before the first picks (the read prompt itself, or a note typed
+  // under it) a reply asked for here would be that first read, so the
+  // generic LLM Response is not offered at all: the row is the model
+  // picker and "Read".
+  const showLlmResponse = showCraftBar && !(inReadThread && !readReplyAbove);
+  const readButton = (
+    <button
+      onClick={handleReadFromNode}
+      disabled={readLoading || llmRequesting || !!llmTaskNodeId}
+      title={readTitle}
+      style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}
+    >
+      {readLoading ? 'Starting…' : readLabel}
+    </button>
+  );
+  const llmResponseTitle = underReadReply
+    ? "To chat about the recommendations, send your reply first. To read further, use the button on the right."
+    : (inReadThread ? "Chat about the picks" : undefined);
 
   // Shared shell for the top-right controls. Voice Mode + Auto-generate
   // share padding/border/typography; Auto-generate uses `space-between`
@@ -967,9 +1075,9 @@ function NodeDetail({ nodeIdOverride }) {
           onClick={handleReadFromNode}
           disabled={readLoading}
           style={{ ...topRightButtonStyle, justifyContent: 'space-between' }}
-          title="Read the last day of the Community Archive against this thread"
+          title={inReadThread ? readTitle : READ_ENTRY_TITLE}
         >
-          <span>{readLoading ? 'Starting…' : 'Read the archive'}</span>
+          <span>{readLoading ? 'Starting…' : (inReadThread ? readLabel : 'Relevant tweets')}</span>
           <span style={{
             width: '32px',
             display: 'inline-flex',
@@ -1059,6 +1167,9 @@ function NodeDetail({ nodeIdOverride }) {
             )}
           </div>
         )}
+        {isReadReply && node.read_window && (
+          <ReadWindowLine window={node.read_window} />
+        )}
         {isLlmPending ? (
           <div style={{
             display: 'flex', alignItems: 'center', gap: '10px',
@@ -1087,15 +1198,19 @@ function NodeDetail({ nodeIdOverride }) {
           </div>
         ) : (
           (!showProposal || displayContent) && (
-            <QuotedContent
-              content={displayContent}
-              quotes={quotes}
-              externalQuotes={externalQuotes}
-              contextArtifacts={node.context_artifacts || null}
-              onQuoteClick={handleBubbleClick}
-              onCheckboxToggle={isOwner ? handleCheckboxToggle : undefined}
-              onAddTask={isOwner ? handleTaskInsert : undefined}
-            />
+            <div className={isReadReply ? 'read-reply-body' : undefined}>
+              <QuotedContent
+                content={displayContent}
+                quotes={quotes}
+                externalQuotes={externalQuotes}
+                onExternalReadChange={handleExternalReadChange}
+                onExternalFeedbackChange={handleExternalFeedbackChange}
+                contextArtifacts={node.context_artifacts || null}
+                onQuoteClick={handleBubbleClick}
+                onCheckboxToggle={isOwner ? handleCheckboxToggle : undefined}
+                onAddTask={isOwner ? handleTaskInsert : undefined}
+              />
+            </div>
           )
         )}
         {showProposal && (
@@ -1124,6 +1239,8 @@ function NodeDetail({ nodeIdOverride }) {
               content={proposalAfter}
               quotes={quotes}
               externalQuotes={externalQuotes}
+              onExternalReadChange={handleExternalReadChange}
+              onExternalFeedbackChange={handleExternalFeedbackChange}
               contextArtifacts={node.context_artifacts || null}
               onQuoteClick={handleBubbleClick}
             />
@@ -1136,6 +1253,16 @@ function NodeDetail({ nodeIdOverride }) {
         {!isLlmPending && isOwner && node.feed_picks_count > 0
           && !/\{quote_ext:\d+\}/.test(node.content || '') && (
           <FeedPicks nodeId={node.id} />
+        )}
+        {!isLlmPending && isOwner && isReadReply
+          && node.llm_task_status === 'completed' && (
+          <ReadReplyTail
+            nodeId={node.id}
+            unread={picksUnread}
+            total={pickIds.length}
+            loaded={picksLoaded}
+            onMarkedAll={handlePicksMarkedAll}
+          />
         )}
         {(() => {
           const visibleTools = (node.tool_calls_meta || [])
@@ -1260,26 +1387,42 @@ function NodeDetail({ nodeIdOverride }) {
           <SpeakerIcon nodeId={node.id} content={node.content} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} onTtsGenerated={() => setNode(prev => prev ? { ...prev, has_tts: true } : prev)} />
           <DownloadAudioIcon nodeId={node.id} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} />
         </NodeFooter>
-        {showCraftBar && (
+        {(showCraftBar || readActions) && (
           <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-            <button
-              onClick={handleLLMResponse}
-              disabled={llmRequesting || !!llmTaskNodeId}
-              style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}
-            >
-              {(llmRequesting || llmTaskNodeId) ? (
-                <>
-                  <FaSpinner className="spin" aria-hidden="true" />
-                  {llmRequesting ? 'Requesting…'
-                    : llmStatus === 'pending' ? 'Waiting for AI…' : 'Generating…'}
-                </>
-              ) : 'LLM Response'}
-            </button>
-            <ModelSelector
-              nodeId={node.id}
-              selectedModel={selectedModel}
-              onModelChange={setSelectedModel}
-            />
+            {showLlmResponse && (
+              /* The span carries the tooltip: a disabled button gets no
+                 hover events in some browsers. */
+              <span title={llmResponseTitle} style={{ display: 'inline-flex' }}>
+                <button
+                  onClick={handleLLMResponse}
+                  disabled={llmRequesting || !!llmTaskNodeId || underReadReply}
+                  aria-disabled={underReadReply || undefined}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}
+                >
+                  {(llmRequesting || llmTaskNodeId) ? (
+                    <>
+                      <FaSpinner className="spin" aria-hidden="true" />
+                      {llmRequesting ? 'Requesting…'
+                        : llmStatus === 'pending' ? 'Waiting for AI…' : 'Generating…'}
+                    </>
+                  ) : 'LLM Response'}
+                </button>
+              </span>
+            )}
+            {/* Before the first picks "Read" stands where LLM Response
+                usually is, left of the model picker: the response action
+                users know, under its own name. After them "Read further"
+                sits to the right, beside the (disabled or live) LLM
+                Response. */}
+            {readActions && !showLlmResponse && readButton}
+            {showCraftBar && (
+              <ModelSelector
+                nodeId={node.id}
+                selectedModel={selectedModel}
+                onModelChange={setSelectedModel}
+              />
+            )}
+            {readActions && showLlmResponse && readButton}
           </div>
         )}
         {llmTaskNodeId && !showCraftBar && !isLlmPending && (
@@ -1309,8 +1452,11 @@ function NodeDetail({ nodeIdOverride }) {
             hidePowerFeatures={!craftMode}
             hideAudioUpload={!craftMode}
             compact
-            placeholder="Type what's on your mind…"
-            onSuccess={handleInlineSuccess}
+            placeholder={isReadReply
+              ? "Ask about these picks, or say what you make of them…"
+              : "Type what's on your mind…"}
+            onSubmitOverride={isReadReply ? submitReadReplyMessage : undefined}
+            onSuccess={isReadReply ? handleReadReplySuccess : handleInlineSuccess}
           />
         </div>
       )}
@@ -1336,7 +1482,10 @@ function NodeDetail({ nodeIdOverride }) {
       <div style={{
         display: "flex",
         justifyContent: "space-between",
-        alignItems: "center",
+        // The controls column is three rows tall; the heading sits at
+        // the row's foot, on the rule below, rather than floating at
+        // the column's middle.
+        alignItems: "flex-end",
         gap: "16px",
         marginBottom: "12px",
       }}>

@@ -42,6 +42,11 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
         # fresh DEK per node — encrypt_content has no batch path.)
         prefetch_deks(
             n.content for n in editable if n.privacy_level != privacy_level)
+    if ai_usage == "train":
+        # is_feed_node falls back to the node's text for the PoC read
+        # shape, so the same batching applies to a cascade that raises
+        # usage: unwrap first, then the checks below are cache hits.
+        prefetch_deks(n.content for n in editable if n.ai_usage != ai_usage)
     changed = []
     for n in editable:
         touched = False

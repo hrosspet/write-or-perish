@@ -485,3 +485,48 @@ code {
   color: var(--text-muted);
 }
 .feed-pick-by { margin-left: auto; color: var(--text-muted); }
+
+/* ── Community Archive read reply (ReadReply.js) ─────────────────────── */
+/* The window line above the verdict: the same quiet meta voice as the
+   prompt line above a system-prompt node. */
+.read-window {
+  margin: 0 0 0.8rem;
+  font-family: var(--sans);
+  font-size: 0.8rem;
+  font-weight: 300;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+/* The tail under the picks: a hairline separates the model's reply from
+   what the reader can do next. */
+/* A read reply is a run of picks: the model's line on why, then the
+   tweet. Motivation-to-tweet stays tight (the bubble's own 10px);
+   tweet-to-next-motivation gets air, so each pick reads as one unit
+   instead of an essay with quotes in it. */
+.read-reply-body .ext-quote-slot {
+  margin-bottom: 28px;
+}
+.read-reply-body .ext-quote-slot:last-child {
+  margin-bottom: 0;
+}
+.read-tail {
+  margin-top: 16px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  font-family: var(--sans);
+  font-size: 0.8rem;
+  font-weight: 300;
+  color: var(--text-muted);
+}
+.read-tail-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+}
+.read-tail-state {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 10px;
+}

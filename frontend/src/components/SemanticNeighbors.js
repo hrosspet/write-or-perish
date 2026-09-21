@@ -57,10 +57,15 @@ export default function SemanticNeighbors({ nodeId }) {
   return (
     <div style={{
       position: 'fixed',
-      top: '120px',
+      // Below the thread page's top-right controls at scroll 0: three
+      // 32px rows (Voice Mode, Relevant tweets / Read further,
+      // Auto-generate) with 6px gaps under the 68px header end at 176px;
+      // 20px of air after that. The controls scroll away, the panel
+      // stays.
+      top: '196px',
       right: '24px',
       width: '260px',
-      maxHeight: 'calc(100vh - 140px)',
+      maxHeight: 'calc(100vh - 216px)',
       overflowY: 'auto',
       display: 'flex',
       flexDirection: 'column',

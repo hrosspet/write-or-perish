@@ -845,7 +845,8 @@ def test_ensure_snapshot_downloads_once_per_export(tmp_path, monkeypatch):
     snap = tmp_path / "snap"
     assert ca.ensure_snapshot(snap, on_progress=lambda *a: progress.append(a),
                               manifest=manifest) == "E1"
-    assert sorted(p.name for p in snap.iterdir()) == [
+    # (.lock is the downloader's lock file, see _snapshot_lock.)
+    assert sorted(p.name for p in snap.iterdir() if p.name != ".lock") == [
         "export_id", "profiles.parquet", "tweets.parquet"]
     assert (snap / "tweets.parquet").read_bytes() == b"abcdef"
     assert opened[0].endswith("/v1/E1/tweets.parquet")

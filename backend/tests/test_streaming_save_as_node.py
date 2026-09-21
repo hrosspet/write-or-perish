@@ -288,7 +288,11 @@ class TestSaveAsNodeAgentic:
 
 
 class TestSaveAsNodeValidation:
-    def test_agentic_rejected_for_reply_drafts(self, app):
+    def test_agentic_reply_draft_attaches_the_text_prompt_under_the_parent(self, app):
+        """A recorded reply in a thread with no agentic prompt (the reply
+        box under a read reply, #323): the textmode prompt goes under the
+        parent and the entry under it, as POST /textmode/from-node does
+        for a typed reply."""
         client = app.test_client()
         alice = _make_user("alice")
         root = _make_node(alice)
@@ -297,11 +301,38 @@ class TestSaveAsNodeValidation:
         _login(client, alice.id)
 
         resp = client.post(_url(draft), json={"agentic": True})
-        assert resp.status_code == 400
-        assert "agentic" in resp.get_json()["error"].lower()
-        # Nothing was saved; the draft is still there for a retry.
-        assert Node.query.count() == 1
-        assert Draft.query.filter_by(session_id=draft.session_id).first() is not None
+        assert resp.status_code == 201
+        data = resp.get_json()
+        system = Node.query.get(data["conversation_id"])
+        user_node = Node.query.get(data["user_node_id"])
+        assert system.parent_id == root.id
+        assert system.get_prompt_key() == "textmode"
+        assert NodeContextArtifact.query.filter_by(
+            node_id=system.id, artifact_type="prompt").count() == 1
+        assert user_node.parent_id == system.id
+        assert user_node.get_content() == "recorded words"
+        assert Draft.query.filter_by(session_id=draft.session_id).first() is None
+
+    def test_agentic_reply_draft_inside_an_agentic_thread_adds_nothing(self, app):
+        from backend.utils.context_artifacts import attach_context_artifacts
+        from backend.utils.prompts import get_user_prompt_record
+        client = app.test_client()
+        alice = _make_user("alice")
+        system = _make_node(alice, content="")
+        attach_context_artifacts(
+            system.id, alice.id,
+            prompt_record=get_user_prompt_record(alice.id, "textmode"))
+        entry = _make_node(alice, parent_id=system.id)
+        draft = _make_completed_draft(alice, parent_id=entry.id)
+        _db.session.commit()
+        _login(client, alice.id)
+
+        resp = client.post(_url(draft), json={"agentic": True})
+        assert resp.status_code == 201
+        data = resp.get_json()
+        assert "conversation_id" not in data
+        assert Node.query.get(data["user_node_id"]).parent_id == entry.id
+        assert Node.query.count() == 3
 
     def test_flags_rejected_when_ai_usage_none(self, app):
         client, alice, draft = _setup(app, ai_usage="none")

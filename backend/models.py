@@ -1604,6 +1604,52 @@ class FeedPick(db.Model):
         return decrypt_content(self.why) if self.why else ""
 
 
+class FeedRender(db.Model):
+    """What one Community Archive read actually sent the model (2026-09-19).
+
+    The archive render numbers tweets 1..n and the model cites numbers, so
+    a pick can only be resolved against the render it was made from. That
+    render is not reproducible later: the snapshot refreshes nightly and
+    the reader's seen set (read marks, bookmarks) grows between the submit
+    and the batch collect. So the submit pins the list of tweet ids in
+    render order here, and the collect looks the picked numbers up in it
+    and fetches those few tweets by id. The window and counts are the
+    reply page's record of what was read (the "which day was this?"
+    question). One row per reply node; a rerun replaces it."""
+    __tablename__ = "feed_render"
+    id = db.Column(db.Integer, primary_key=True)
+    node_id = db.Column(db.Integer, db.ForeignKey("node.id"),
+                        nullable=False, unique=True)
+    export_id = db.Column(db.String(64), nullable=True)
+    days = db.Column(db.Integer, nullable=False, default=1)
+    scope = db.Column(db.String(16), nullable=False, default="all")
+    # UTC bounds of the window the tweets were taken from.
+    window_start = db.Column(db.DateTime, nullable=True)
+    window_end = db.Column(db.DateTime, nullable=True)
+    tweet_count = db.Column(db.Integer, nullable=False, default=0)
+    account_count = db.Column(db.Integer, nullable=False, default=0)
+    # Tweets in the window the reader had already seen (read-marked
+    # references, bookmarks) and therefore never reached the model.
+    excluded_count = db.Column(db.Integer, nullable=False, default=0)
+    # Comma-joined tweet ids in render order: index i (0-based) is the
+    # tweet the model saw as #i+1. ~100 KB for a day of the archive.
+    tweet_ids = db.Column(db.Text, nullable=False, default="")
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    node = db.relationship("Node", backref=db.backref(
+        "feed_render", uselist=False, cascade="all, delete-orphan"))
+
+    def set_tweet_ids(self, ids):
+        self.tweet_ids = ",".join(str(i) for i in ids)
+
+    def tweet_id_for(self, n):
+        """The tweet id the model saw as #n, or None."""
+        ids = self.tweet_ids.split(",") if self.tweet_ids else []
+        if 1 <= n <= len(ids):
+            return ids[n - 1] or None
+        return None
+
+
 class ExternalDigestBatchJob(db.Model):
     """A submitted provider batch carrying nightly external-digest
     rebuilds — one request per user whose saved references changed.

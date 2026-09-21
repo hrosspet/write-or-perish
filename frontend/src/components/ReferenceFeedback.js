@@ -15,7 +15,9 @@ import { useToast } from '../contexts/ToastContext';
  *   itemId:   ExternalItem id
  *   feedback: 'good' | 'bad' | null (server value; local state follows it)
  *   size:     icon size in px (default 14)
- *   onChange: optional (feedback) => void after the server confirms
+ *   onChange: optional (feedback, response) => void after the server
+ *             confirms; `response.read_at` is set when the verdict
+ *             marked the reference read (a verdict counts as reading)
  */
 const ReferenceFeedback = ({ itemId, feedback, size = 14, onChange }) => {
   const { addToast } = useToast();
@@ -30,7 +32,7 @@ const ReferenceFeedback = ({ itemId, feedback, size = 14, onChange }) => {
     api.post(`/external/items/${itemId}/feedback`, { feedback: target })
       .then((res) => {
         setValue(res.data.feedback);
-        if (onChange) onChange(res.data.feedback);
+        if (onChange) onChange(res.data.feedback, res.data);
       })
       .catch(() => addToast('Could not save your feedback.', 4000))
       .finally(() => setSaving(false));

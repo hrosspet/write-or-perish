@@ -11,6 +11,8 @@ it without Loore's dependencies.
 Paging is keyset (``tweet_id > last``), not offset: the REST view 500s on
 deep offsets, which is what made large accounts impractical before.
 """
+import contextlib
+import fcntl
 import json
 import os
 import pathlib
@@ -173,6 +175,26 @@ def snapshot_export_id(snapshot_dir):
     return marker.read_text().strip() or None
 
 
+@contextlib.contextmanager
+def _snapshot_lock(snapshot_dir, shared=False):
+    """One downloader per snapshot dir on this host, and no swap under a
+    reader. The downloader takes the lock exclusively; a render or a
+    lookup takes it shared, so it never sees half a swap (the two
+    parquets and the export marker are replaced one after another) and
+    a read that starts during a download waits for it — minutes at
+    most, bounded by the transfer (a stalled one raises after TIMEOUT)
+    — and then reads the fresh export. An fcntl lock dies with its
+    process, so a crashed holder never leaves the dir locked."""
+    d = pathlib.Path(snapshot_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    with open(d / ".lock", "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
 def ensure_snapshot(snapshot_dir, on_progress=None, manifest=None):
     """Make ``snapshot_dir`` hold the latest nightly export; download only
     when the export_id changed. Files stream to ``<name>.part`` and are
@@ -185,7 +207,30 @@ def ensure_snapshot(snapshot_dir, on_progress=None, manifest=None):
     d = pathlib.Path(snapshot_dir)
     if snapshot_export_id(d) == export_id:
         return export_id
-    d.mkdir(parents=True, exist_ok=True)
+    with _snapshot_lock(d):
+        if snapshot_export_id(d) == export_id:
+            return export_id  # another caller downloaded it meanwhile
+        return _download_snapshot(d, manifest, on_progress)
+
+
+def refresh_snapshot(snapshot_dir):
+    """Bring an EXISTING snapshot up to the latest nightly export. Returns
+    (export_id, refreshed). (None, False) when nothing is cached: the
+    first copy is fetched by the pre-fill import or the CLI, never as a
+    side effect of a read (a gigabyte per deploy on staging otherwise)."""
+    current = snapshot_export_id(snapshot_dir)
+    if not current:
+        return None, False
+    manifest = fetch_latest_manifest()
+    latest = manifest["export_id"]
+    if latest == current:
+        return current, False
+    ensure_snapshot(snapshot_dir, manifest=manifest)
+    return latest, True
+
+
+def _download_snapshot(d, manifest, on_progress):
+    export_id = manifest["export_id"]
     by_name = {os.path.basename(p): p for p in manifest.get("package_paths", [])}
     for name in SNAPSHOT_FILES:
         if name not in by_name:
@@ -379,7 +424,7 @@ CA_CITATION_RE = re.compile(r"(?<![\w/#\[])#(\d{1,6})\b")
 
 
 def render_recent_tweets(snapshot_dir, days=1, exclude_usernames=(),
-                         include_usernames=None):
+                         include_usernames=None, exclude_tweet_ids=()):
     """The last ``days`` days of the whole Community Archive corpus as
     prompt text: one ``# Tweets by <user>`` section per account, one
     ``[#n] text`` line per tweet in time order, retweets dropped like
@@ -395,13 +440,19 @@ def render_recent_tweets(snapshot_dir, days=1, exclude_usernames=(),
     ``exclude_usernames`` drops those accounts (case-insensitive) — the
     reader's own handle, so the feed never recommends their own tweets.
     ``include_usernames`` (None = everyone) keeps only those accounts:
-    the follows scope.
+    the follows scope. ``exclude_tweet_ids`` drops those tweets: what the
+    reader has already seen (read-marked picks, bookmarks), which must
+    never reach the model as candidates again; how many fell in the
+    window is reported as ``excluded`` in stats and named in the header.
 
     Returns (text, stats, refs) — stats: {export_id, window_start,
-    window_end, tweets, accounts}; refs: {n: {username, tweet_id, text,
-    posted_at}} — everything a pick needs to become a saved reference. The
-    render is deterministic for a snapshot (ordered by username, time,
-    id), so refs regenerate identically on every poll of the batch.
+    window_end (UTC 'YYYY-MM-DD HH:MM'), window_start_at, window_end_at
+    (datetimes), tweets, accounts, excluded, scope}; refs: {n: {username,
+    tweet_id, text, posted_at}} — everything a pick needs to become a
+    saved reference. The render is deterministic for a snapshot and an
+    exclusion set (ordered by username, time, id); neither is stable over
+    a batch's lifetime, which is why the submit pins the numbering (see
+    FeedRender) instead of re-rendering on collect.
     Raises CommunityArchiveError when no snapshot is cached (this PoC
     never downloads one in the request path — a day's render must not
     wait on a 900 MB download)."""
@@ -416,15 +467,19 @@ def render_recent_tweets(snapshot_dir, days=1, exclude_usernames=(),
     if include_usernames is not None:
         included = sorted({(u or "").strip().lstrip("@").lower()
                            for u in include_usernames if u}) or ["\0"]
+    seen = {str(i) for i in exclude_tweet_ids if i}
+    with _snapshot_lock(snapshot_dir, shared=True):
+        return _render_recent_tweets(
+            snapshot_dir, export_id, newest, days, excluded, included, seen)
+
+
+def _render_recent_tweets(snapshot_dir, export_id, newest, days, excluded,
+                          included, seen):
     con, tweets, profiles = _duckdb(snapshot_dir)
     # Window bound computed in Python: duckdb can't correlate a subquery
     # through the outer join, and a naive-UTC comparison keeps the
     # TIMESTAMPTZ column out of the parameter path (no pytz needed).
-    cur = con.execute(
-        "select coalesce(p.username, t.account_id) as username, "
-        "t.tweet_id, t.full_text, "
-        "strftime(t.created_at at time zone 'UTC', '%Y-%m-%d %H:%M:%S') "
-        "as posted "
+    from_where = (
         "from read_parquet(?) t "
         "left join read_parquet(?) p on p.account_id = t.account_id "
         "where (t.created_at at time zone 'UTC') "
@@ -433,11 +488,21 @@ def render_recent_tweets(snapshot_dir, days=1, exclude_usernames=(),
         "and lower(coalesce(p.username, t.account_id)) not in "
         "(select unnest(?::VARCHAR[])) "
         + ("and lower(coalesce(p.username, t.account_id)) in "
-           "(select unnest(?::VARCHAR[])) " if included is not None else "")
+           "(select unnest(?::VARCHAR[])) " if included is not None else ""))
+    params = ([tweets, profiles, newest, int(days), excluded]
+              + ([included] if included is not None else []))
+    # Seen tweets are skipped (and counted) in the row loop below rather
+    # than in SQL: one scan of the parquet, not two.
+    excluded_tweets = 0
+    cur = con.execute(
+        "select coalesce(p.username, t.account_id) as username, "
+        "t.tweet_id, t.full_text, "
+        "strftime(t.created_at at time zone 'UTC', '%Y-%m-%d %H:%M:%S') "
+        "as posted "
+        + from_where
         + "order by lower(coalesce(p.username, t.account_id)), t.created_at, "
         "t.tweet_id",
-        [tweets, profiles, newest, int(days), excluded]
-        + ([included] if included is not None else []))
+        params)
     sections = []
     body = []
     current = None
@@ -460,6 +525,9 @@ def render_recent_tweets(snapshot_dir, days=1, exclude_usernames=(),
         if not rows:
             break
         for username, tweet_id, text, posted in rows:
+            if str(tweet_id) in seen:
+                excluded_tweets += 1
+                continue
             if username != current:
                 flush()
                 current, count, body = username, 0, []
@@ -477,21 +545,57 @@ def render_recent_tweets(snapshot_dir, days=1, exclude_usernames=(),
     flush()
     accounts = sum(1 for line in sections if line.startswith("# Tweets by "))
     end = datetime.strptime(newest, "%Y-%m-%d %H:%M:%S")
+    start = end - timedelta(days=int(days))
     newest = end.strftime("%Y-%m-%d %H:%M")
-    window_start = (end - timedelta(days=int(days))).strftime(
-        "%Y-%m-%d %H:%M")
+    window_start = start.strftime("%Y-%m-%d %H:%M")
     scope_note = (" Only accounts the reader follows." if included is not None
                   else "")
+    seen_note = (f" {excluded_tweets} tweets the reader had already seen "
+                 "(read earlier, or bookmarked) are left out."
+                 if excluded_tweets else "")
     header = (
         f"# Community Archive — tweets from {window_start} to {newest} UTC "
         f"(last {int(days)} day(s) of export {export_id}): {total} tweets "
-        f"by {accounts} accounts, retweets omitted.{scope_note} Each tweet "
-        f"is numbered; cite a tweet by its number, e.g. #123.")
+        f"by {accounts} accounts, retweets omitted.{scope_note}{seen_note} "
+        f"Each tweet is numbered; cite a tweet by its number, e.g. #123.")
     text = "\n".join([header, ""] + sections).rstrip() + "\n"
     stats = {"export_id": export_id, "window_start": window_start,
-             "window_end": newest, "tweets": total, "accounts": accounts,
+             "window_end": newest, "window_start_at": start,
+             "window_end_at": end, "tweets": total, "accounts": accounts,
+             "excluded": excluded_tweets,
              "scope": "follows" if included is not None else "all"}
     return text, stats, refs
+
+
+def fetch_tweets_by_id(snapshot_dir, tweet_ids):
+    """{tweet_id: {username, tweet_id, text, posted_at}} for the given
+    ids, from the cached snapshot — the same shape as a render's refs.
+    The collect of a pinned batch resolves its few picks this way instead
+    of re-rendering the day (which would number the tweets differently
+    once the snapshot or the reader's seen set changed). Ids the snapshot
+    no longer holds are simply absent."""
+    ids = sorted({str(i) for i in tweet_ids if i})
+    if not ids:
+        return {}
+    with _snapshot_lock(snapshot_dir, shared=True):
+        con, tweets, profiles = _duckdb(snapshot_dir)
+        rows = con.execute(
+            "select coalesce(p.username, t.account_id), t.tweet_id, "
+            "t.full_text, "
+            "strftime(t.created_at at time zone 'UTC', '%Y-%m-%d %H:%M:%S') "
+            "from read_parquet(?) t "
+            "left join read_parquet(?) p on p.account_id = t.account_id "
+            "where t.tweet_id in (select unnest(?::VARCHAR[]))",
+            [tweets, profiles, ids]).fetchall()
+    out = {}
+    for username, tweet_id, text, posted in rows:
+        out[str(tweet_id)] = {
+            "username": username, "tweet_id": str(tweet_id),
+            "text": (text or "").strip(),
+            "posted_at": datetime.strptime(posted, "%Y-%m-%d %H:%M:%S")
+            if posted else None,
+        }
+    return out
 
 
 def following_handles(snapshot_dir, username):

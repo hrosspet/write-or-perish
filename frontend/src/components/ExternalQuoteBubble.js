@@ -24,9 +24,18 @@ const SOURCE_LABELS = {
  * the state ("Mark as unread" = read). Only the user marks a
  * reference read — the AI quoting it is tracked separately as surfacing.
  * Beside it, the good/bad-quote verdict (ReferenceFeedback) — the
- * hit-or-miss half of the recommendation record.
+ * hit-or-miss half of the recommendation record. `onReadChange(id,
+ * readAt)` and `onFeedbackChange(id, feedback)` tell the page, which
+ * keeps the list's marks (a read reply's "n unread", "nothing marked
+ * yet") in step with the bubbles.
+ *
+ * Opening the post is reading it, and so is judging it: the owner's
+ * click marks the reference read as the tab opens, a good / bad verdict
+ * marks it read server-side, and "Mark as unread" stays for the ones to
+ * come back to (a long post opened for later). Only the default flipped;
+ * the toggle is the override.
  */
-const ExternalQuoteBubble = ({ quote }) => {
+const ExternalQuoteBubble = ({ quote, onReadChange, onFeedbackChange }) => {
   const userCtx = useUser();
   const currentUser = userCtx ? userCtx.user : null;
   const { addToast } = useToast();
@@ -51,20 +60,30 @@ const ExternalQuoteBubble = ({ quote }) => {
     : null;
   const mine = !!currentUser && quote.user_id === currentUser.id;
 
+  const setRead = (want) => {
+    setMarking(true);
+    const req = want
+      ? api.post(`/external/items/${quote.id}/read`)
+      : api.delete(`/external/items/${quote.id}/read`);
+    req
+      .then((res) => {
+        setReadAt(res.data.read_at);
+        if (onReadChange) onReadChange(quote.id, res.data.read_at);
+      })
+      .catch(() => addToast('Could not update the read mark.', 4000))
+      .finally(() => setMarking(false));
+  };
+
   const open = () => {
-    if (quote.url) window.open(quote.url, '_blank', 'noopener,noreferrer');
+    if (!quote.url) return;
+    // window.open first: the popup rules want the user gesture.
+    window.open(quote.url, '_blank', 'noopener,noreferrer');
+    if (mine && !readAt && !marking) setRead(true);
   };
 
   const toggleRead = (e) => {
     e.stopPropagation();
-    setMarking(true);
-    const req = readAt
-      ? api.delete(`/external/items/${quote.id}/read`)
-      : api.post(`/external/items/${quote.id}/read`);
-    req
-      .then((res) => setReadAt(res.data.read_at))
-      .catch(() => addToast('Could not update the read mark.', 4000))
-      .finally(() => setMarking(false));
+    setRead(!readAt);
   };
 
   return (
@@ -84,7 +103,17 @@ const ExternalQuoteBubble = ({ quote }) => {
         <span>{postedAt}</span>
         {mine && (
           <span style={ownerSlotStyle}>
-            <ReferenceFeedback itemId={quote.id} feedback={quote.feedback} />
+            <ReferenceFeedback
+              itemId={quote.id}
+              feedback={quote.feedback}
+              onChange={(fb, data) => {
+                if (onFeedbackChange) onFeedbackChange(quote.id, fb);
+                if (data && data.read_at && !readAt) {
+                  setReadAt(data.read_at);
+                  if (onReadChange) onReadChange(quote.id, data.read_at);
+                }
+              }}
+            />
             <button
               type="button"
               className="ext-quote-read-toggle"

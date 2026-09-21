@@ -1025,3 +1025,105 @@ class TestUserExportPlanGate:
         assert resp.status_code == 400
         assert "Pro" in resp.get_json()["error"]
         assert Node.query.filter_by(node_type="llm").count() == 0
+
+
+# ── POST /textmode/from-node/<id> ────────────────────────────────────────
+
+def _prompt_node(user, prompt_key, parent_id=None):
+    """A prompt node attached by reference, as the routes make them."""
+    from backend.utils.context_artifacts import attach_context_artifacts
+    from backend.utils.prompts import get_user_prompt_record
+    n = _make_node(user, parent_id=parent_id, content="")
+    attach_context_artifacts(
+        n.id, user.id, prompt_record=get_user_prompt_record(user.id, prompt_key))
+    return n
+
+
+class TestTextmodeContinueFromNode:
+    """POST /textmode/from-node: a Text-mode message under an existing node (the reply box under a
+    read reply, #323): the textmode prompt is attached under the node
+    when no agentic prompt sits above it, and the message hangs under
+    that; inside an agentic thread the message hangs under the node."""
+
+    def _read_reply(self, alice):
+        gpt = _make_user("gpt-5")
+        return _make_node(gpt, content="the read reply", node_type="llm",
+                          llm_model="gpt-5", human_owner=alice)
+
+    def test_attaches_the_text_prompt_under_a_node_without_one(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        reply = self._read_reply(alice)
+        _db.session.commit()
+        _login(client, alice.id)
+
+        resp = client.post(f"/api/textmode/from-node/{reply.id}",
+                           json={"content": "why that one?", "model": "gpt-5"})
+        assert resp.status_code == 202
+        data = resp.get_json()
+        prompt = Node.query.get(data["prompt_node_id"])
+        user_node = Node.query.get(data["user_node_id"])
+        llm_node = Node.query.get(data["llm_node_id"])
+        assert prompt.parent_id == reply.id
+        assert prompt.get_prompt_key() == "textmode"
+        assert user_node.parent_id == prompt.id
+        assert user_node.get_content() == "why that one?"
+        assert user_node.ai_usage == reply.ai_usage == "chat"
+        assert llm_node.parent_id == user_node.id
+        assert llm_node.node_type == "llm"
+        assert data["task_id"] == "fake-task-id"
+
+    def test_inside_an_agentic_thread_nothing_is_added(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        system = _prompt_node(alice, "textmode")
+        entry = _make_node(alice, parent_id=system.id, content="hello")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        resp = client.post(f"/api/textmode/from-node/{entry.id}",
+                           json={"content": "and then", "model": "gpt-5"})
+        assert resp.status_code == 202
+        data = resp.get_json()
+        assert data["prompt_node_id"] is None
+        assert Node.query.get(data["user_node_id"]).parent_id == entry.id
+        assert "llm_node_id" in data
+
+    def test_auto_generate_off_creates_no_reply(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        reply = self._read_reply(alice)
+        _db.session.commit()
+        _login(client, alice.id)
+
+        resp = client.post(f"/api/textmode/from-node/{reply.id}",
+                           json={"content": "later", "auto_generate": False})
+        assert resp.status_code == 202
+        data = resp.get_json()
+        assert "llm_node_id" not in data
+        assert Node.query.get(data["user_node_id"]).parent_id == data["prompt_node_id"]
+
+    def test_someone_elses_node_is_refused(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        bob = _make_user("bob")
+        theirs = _make_node(bob, content="bob's")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        resp = client.post(f"/api/textmode/from-node/{theirs.id}",
+                           json={"content": "hi"})
+        assert resp.status_code == 403
+        assert Node.query.filter_by(parent_id=theirs.id).count() == 0
+
+    def test_ai_usage_none_is_refused(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        plain = _make_node(alice, content="no ai here", ai_usage="none")
+        _db.session.commit()
+        _login(client, alice.id)
+
+        resp = client.post(f"/api/textmode/from-node/{plain.id}",
+                           json={"content": "hi"})
+        assert resp.status_code == 400
+        assert Node.query.filter_by(parent_id=plain.id).count() == 0

@@ -48,6 +48,14 @@ celery.conf.update(
             'task': 'backend.tasks.llm_completion.resume_stuck_feed_batches',
             'schedule': 600.0,  # every 10 minutes
         },
+        # Keep the cached Community Archive export current for reads (the
+        # archive exports nightly ~07:00 UTC). One manifest GET per run;
+        # the ~900 MB download only when the export changed, and only
+        # where a snapshot already exists.
+        'refresh-community-archive-snapshot': {
+            'task': 'backend.tasks.imports.refresh_community_archive_snapshot',
+            'schedule': 1800.0,  # every 30 minutes
+        },
         # Semantic-search embedding sweep (issue #155).
         'sweep-embeddings': {
             'task': 'backend.tasks.embeddings.sweep_embeddings',

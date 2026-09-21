@@ -270,6 +270,51 @@ class TestReadFromNode:
         assert prompt_node.prompt_key == "read_thread"
         assert Node.query.count() == 2
 
+    def test_inside_a_read_thread_it_reads_further_without_a_second_prompt(self, app):
+        """The thread has its read prompt: the button makes a read turn
+        under the current node, marked "_read", and attaches nothing —
+        the whole thread stays the context. auto_generate does not
+        apply: the click is the request."""
+        import json
+        client = app.test_client()
+        alice = _make_user("alice", is_admin=True)
+        prompt = _make_prompt_node(alice, "read")
+        comment = _make_node(alice, parent_id=prompt.id, content="more on tools")
+        _db.session.commit()
+        before = Node.query.count()
+
+        _login(client, alice.id)
+        resp = client.post(f"/api/read/from-node/{comment.id}",
+                           json={"model": "gpt-5", "auto_generate": False})
+        assert resp.status_code == 202, resp.get_json()
+        data = resp.get_json()
+        assert "prompt_node_id" not in data
+        llm_node = Node.query.get(data["llm_node_id"])
+        assert llm_node.parent_id == comment.id
+        assert llm_node.node_type == "llm"
+        assert json.loads(llm_node.tool_calls_meta) == [{"name": "_read"}]
+        assert Node.query.count() == before + 1
+        assert data["task_id"] == "fake-task-id"
+
+    def test_a_poc_thread_with_the_placeholder_in_the_text_reads_further_too(self, app):
+        """The 2026-09-13 PoC copied the prompt into the node: no key, no
+        link, {ca_tweets} in the content. Still a read thread."""
+        import json
+        client = app.test_client()
+        alice = _make_user("alice", is_admin=True)
+        legacy = _make_node(alice, content="Read these.\n\n{ca_tweets?days=1}")
+        reply = _make_node(alice, parent_id=legacy.id, content="verdict", node_type="llm")
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.post(f"/api/read/from-node/{reply.id}", json={"model": "gpt-5"})
+        assert resp.status_code == 202, resp.get_json()
+        data = resp.get_json()
+        assert "prompt_node_id" not in data
+        llm_node = Node.query.get(data["llm_node_id"])
+        assert llm_node.parent_id == reply.id
+        assert json.loads(llm_node.tool_calls_meta) == [{"name": "_read"}]
+
     def test_works_inside_an_agentic_thread(self, app):
         """A textmode thread keeps its own root prompt; the read prompt is
         appended under the current node, not swapped in for it."""

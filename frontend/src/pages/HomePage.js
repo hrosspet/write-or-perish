@@ -206,6 +206,16 @@ const readCard = {
   ),
 };
 
+// At most three cards to a row. Four or more split into two rows of the
+// same count; an odd count puts Voice and Text alone on the first row
+// and the rest below. (Seven or more would overflow the second row;
+// there are four cards today, five at most in sight.)
+function cardRows(list) {
+  if (list.length <= 3) return [list];
+  const first = list.length % 2 === 0 ? list.length / 2 : 2;
+  return [list.slice(0, first), list.slice(first)];
+}
+
 export default function HomePage() {
   const greetingRef = useRef(null);
   const questionRef = useRef(null);
@@ -286,18 +296,25 @@ export default function HomePage() {
         What's on your mind?
       </h1>
 
-      <div style={{
-        display: "flex",
-        gap: "1.5rem",
-        flexWrap: "wrap",
-        justifyContent: "center",
-        maxWidth: displayCards.length > 2 ? "880px" : "580px",
-        width: "100%",
-      }}>
-        {displayCards.map((card, i) => (
-          <WorkflowCard key={card.key} card={card} delay={400 + i * 120} />
-        ))}
-      </div>
+      {cardRows(displayCards).map((row, r) => (
+        <div key={r} style={{
+          display: "flex",
+          gap: "1.5rem",
+          flexWrap: "wrap",
+          justifyContent: "center",
+          maxWidth: row.length > 2 ? "880px" : "580px",
+          width: "100%",
+          marginTop: r > 0 ? "1.5rem" : 0,
+        }}>
+          {row.map((card) => (
+            <WorkflowCard
+              key={card.key}
+              card={card}
+              delay={400 + displayCards.indexOf(card) * 120}
+            />
+          ))}
+        </div>
+      ))}
     </div>
   );
 }

@@ -46,7 +46,12 @@ from backend.utils.timefmt import local_stamp, strip_edge_timestamps
 from backend.utils.api_keys import determine_api_key_type, get_api_keys_for_usage
 from backend.utils.cost import llm_cost_log_fields
 from backend.utils.llm_batch import BatchItemFailed, BatchItemCancelled
-from backend.utils.ca_feed import FeedReplyError
+from backend.utils.ca_feed import (
+    CA_CHAT_TURN_NOTE, CA_READ_AGAIN_TURN, CA_TWEETS_CHAT_STUB,
+    READ_FURTHER_MARKER,
+    FeedReplyError, read_reply_ids, record_feed_render,
+    refresh_snapshot_for_read, refs_from_render, seen_tweet_ids,
+)
 from backend.utils.tool_meta import update_tool_meta, parse_github_issue
 from backend.utils.privacy import AI_ALLOWED
 from backend.utils.placeholders import (
@@ -2009,6 +2014,58 @@ def get_user_recent_raw_content(user_id, created_before=None):
 CA_BATCH_POLL_SECONDS = 120
 CA_BATCH_MAX_POLLS = 800
 CA_TWEETS_STUB = "(see Community Archive tweets above)"
+# ca_refs of a collecting run whose picks resolve against the reply's
+# pinned render (FeedRender) instead of a fresh render of the day; see
+# _collect_feed_reply.
+CA_REFS_PINNED = "pinned"
+
+
+def _read_requested(node):
+    """True when the Read button created this placeholder inside a read
+    thread (READ_FURTHER_MARKER in its tool_calls_meta, routes/read.py)."""
+    meta, _ = _batch_meta(node)
+    return any(isinstance(m, dict) and m.get("name") == READ_FURTHER_MARKER
+               for m in meta)
+
+
+def _ca_turn(node_chain, ca_node, parent_node, reply_ids, requested=False):
+    """Which turn of a read thread this reply is (backend/utils/ca_feed.py);
+    *ca_node* is the newest read prompt in the chain, *reply_ids* the ids
+    of the chain's read replies (ca_feed.read_reply_ids), *requested*
+    whether the Read button asked for this reply (_read_requested):
+
+    "read"       no reply has answered the read prompt yet: the day is
+                 rendered and the model answers with a verdict and picks
+                 (also when the user typed something under the prompt
+                 before asking for the reply).
+    "read_again" the Read button asked for it from anywhere in the
+                 thread (*requested*), or the reply was asked for directly
+                 under a read reply: another read, further into the day.
+                 The day is rendered again (minus what the reader has seen
+                 since); the earlier picks, the reader's marks on them and
+                 whatever was written since are in the context, and
+                 whether to repeat an unread pick is the model's call.
+    "chat"       a user message came after a read reply: a conversation
+                 about the picks. The day is not rendered; the placeholder
+                 reads as a stub, the picks and marks stay in the context.
+                 Unlike a read it may run under the agentic prompt (a
+                 Text-mode session under the read reply, #323).
+    """
+    replies = []
+    after_prompt = False
+    for n in node_chain:
+        if n is ca_node:
+            after_prompt = True
+            continue
+        if after_prompt and n.deleted_at is None and n.id in reply_ids:
+            replies.append(n)
+    if not replies:
+        return "read"
+    if requested:
+        return "read_again"
+    if parent_node is not None and replies[-1].id == parent_node.id:
+        return "read_again"
+    return "chat"
 
 
 CA_BATCH_PROVIDERS = ("anthropic", "openai")
@@ -2181,7 +2238,7 @@ def _ca_batch_submit(task, llm_node, model_id, api_model, messages,
     from backend.utils.ca_feed import FEED_SCHEMA
     batch_id = submit_one(
         api_key, custom_id, api_model, messages, max_tokens,
-        output_schema=FEED_SCHEMA if ca_refs else None)
+        output_schema=FEED_SCHEMA if ca_refs is not None else None)
     meta, _ = _batch_meta(llm_node)
     meta.append({
         "name": "_batch", "batch_id": batch_id, "custom_id": custom_id,
@@ -2237,6 +2294,13 @@ def _collect_feed_reply(llm_node, resp, ca_refs):
     if resp.get("truncated"):
         raise FeedReplyError(
             "feed reply was cut off at the output limit (max_tokens)")
+    if ca_refs is CA_REFS_PINNED:
+        # Resolve the cited numbers against the render this reply was
+        # made from, fetching only the picked tweets by id.
+        from backend.tasks.imports import snapshot_dir_for
+        ca_refs = refs_from_render(
+            llm_node.feed_render, resp["content"],
+            snapshot_dir_for(flask_app.config))
     verdict, picks = parse_feed_reply(resp["content"], ca_refs)
     rows = save_feed_picks(llm_node.human_owner_id, llm_node, picks)
     resp["content"] = expand_ca_citations(
@@ -2650,7 +2714,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             # {ca_tweets?days=N} (PoC): the last N days of the Community
             # Archive corpus, rendered from the cached parquet snapshot.
-            # First alive node in chain order wins, like {user_export}.
+            # The NEWEST alive prompt carrying it is the read this turn
+            # may answer (a second read prompt attached under an earlier
+            # read reply is a new read; the older prompt's placeholder
+            # reads as a stub, its day was fed to the reply below it).
             # Rendered here, outside the retry loop — it never shrinks
             # (a day is ~250k tokens against a 1M window).
             ca_node = None
@@ -2662,8 +2729,40 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 if m:
                     ca_node = node
                     ca_placeholder_match = m.group(0)
-                    break
-            needs_ca = ca_node is not None
+            # Only a read feeds the day in (the first reply under the
+            # prompt, or one asked for directly under a read reply); a
+            # chat turn about the picks gets a stub where the day was.
+            ca_reply_ids = (read_reply_ids(node_chain)
+                            if ca_node is not None else frozenset())
+            ca_turn = (_ca_turn(node_chain, ca_node, parent_node, ca_reply_ids,
+                                requested=_read_requested(llm_node))
+                       if ca_node is not None else None)
+            needs_ca = ca_turn in ("read", "read_again")
+            if ca_turn is not None:
+                logger.info("Node %s: {ca_tweets} turn is %r",
+                            llm_node_id, ca_turn)
+            if needs_ca:
+                # A read runs against the user's own conversation, never
+                # under the agentic system prompt: it is a batch judgement
+                # against a schema, and a Voice / Text mode thread's
+                # tools, mode notes and persona have nothing to do with
+                # judging tweets. Drop every agentic prompt node wherever
+                # it sits (a root, or one attached mid-thread) and keep
+                # the messages around it, so the read still sees the
+                # sharing that came before an agentic session started
+                # under it. A chat turn keeps the chain as it is: a
+                # conversation about the picks is a Text-mode session
+                # that happens to hold the read (the reply box under a
+                # read reply attaches the textmode prompt when none sits
+                # above, POST /textmode/from-node), so what the user says
+                # there can move their intentions and memory (#323).
+                node_chain, dropped = strip_agentic_prompts(
+                    node_chain, keep=ca_node)
+                if dropped:
+                    logger.info(
+                        "Read thread for node %s: dropped agentic prompt "
+                        "node(s) %s from the context", llm_node_id,
+                        [n.id for n in dropped])
             ca_tweets_content = None
             ca_refs = None
             if needs_ca:
@@ -2692,34 +2791,39 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             "{ca_tweets} scope=follows needs a saved list "
                             "of the accounts you follow, and there is none "
                             "for your account yet.")
-                ca_tweets_content, ca_stats, ca_refs = ca.render_recent_tweets(
-                    ca_snapshot_dir, days=ca_days,
-                    exclude_usernames=[ca_owner.username,
-                                       ca_owner.prefilled_handle]
-                    if ca_owner else (),
-                    include_usernames=ca_follows)
-                logger.info(
-                    "Rendered %s for node %s: %s (~%d tokens)",
-                    ca_placeholder_match, ca_node.id, ca_stats,
-                    approximate_token_count(ca_tweets_content))
-                # A read runs against the user's own conversation, never
-                # under the agentic system prompt: a Voice / Text mode
-                # thread's tools, mode notes and persona have nothing to
-                # do with judging tweets, and the prompt is the one part
-                # of the thread the user did not write. Drop every
-                # agentic prompt node wherever it sits (a root, or one
-                # attached mid-thread) and keep the messages around it,
-                # so the read still sees the sharing that came before an
-                # agentic session started under it. With it gone the
-                # chain is not agentic: no tools, no notes, no mode
-                # indicator.
-                node_chain, dropped = strip_agentic_prompts(
-                    node_chain, keep=ca_node)
-                if dropped:
+                if batch_resp is not None and llm_node.feed_render is not None:
+                    # The collecting run of a pinned batch: its picks
+                    # resolve against the render the batch was made
+                    # from (_collect_feed_reply); nothing is rendered.
+                    ca_refs = CA_REFS_PINNED
+                    ca_tweets_content = CA_TWEETS_STUB
+                else:
+                    ca_seen = ()
+                    if batch_resp is None:
+                        # A read about to be sent: read today's export,
+                        # not the one cached whenever, and leave out
+                        # what the reader has already seen.
+                        refresh_snapshot_for_read(ca_snapshot_dir, log=logger)
+                        ca_seen = seen_tweet_ids(user_id)
+                    # else: a batch submitted before renders were pinned;
+                    # re-render the day as it was rendered then (no seen
+                    # filter) so its numbers still match.
+                    ca_tweets_content, ca_stats, ca_refs = ca.render_recent_tweets(
+                        ca_snapshot_dir, days=ca_days,
+                        exclude_usernames=[ca_owner.username,
+                                           ca_owner.prefilled_handle]
+                        if ca_owner else (),
+                        include_usernames=ca_follows,
+                        exclude_tweet_ids=ca_seen)
                     logger.info(
-                        "Read for node %s: dropped agentic prompt node(s) "
-                        "%s from the context", llm_node_id,
-                        [n.id for n in dropped])
+                        "Rendered %s for node %s: %s (~%d tokens)",
+                        ca_placeholder_match, ca_node.id, ca_stats,
+                        approximate_token_count(ca_tweets_content))
+                    if batch_resp is None:
+                        # Pin the numbering this reply's picks will cite;
+                        # lands in the next commit, before any submit.
+                        record_feed_render(llm_node, ca_stats, ca_refs,
+                                           days=ca_days, scope=ca_scope)
 
             # Every context artifact is pinned to a per-session snapshot.
             # The node carrying a placeholder also carries a
@@ -2957,6 +3061,23 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             # Determine which API key to use based on ai_usage settings
             key_type = determine_api_key_type(node_chain, logger=logger)
+            if ca_turn is not None and key_type != 'chat':
+                # Every turn of a read thread carries other people's
+                # public tweets, which Loore has no licence to train on:
+                # a read renders the day, and a chat turn re-sends the
+                # earlier picks (the reply's {quote_ext:ID} markers
+                # resolve to the tweets). The read nodes' own 'chat'
+                # usage does not decide this — determine_api_key_type
+                # reads user nodes only, so the placeholder's
+                # FEED_AI_USAGE never reaches it and the prompt node's
+                # is one vote among the chain's. A thread whose user
+                # nodes are all 'train' (a read prompt from before #307,
+                # or a read further, which attaches no prompt of its
+                # own) would otherwise go out on the train key.
+                logger.info(
+                    "Node %s: read thread (turn %r); forcing chat keys "
+                    "over the chain's %r", llm_node_id, ca_turn, key_type)
+                key_type = 'chat'
             api_keys = get_api_keys_for_usage(flask_app.config, key_type)
 
             model_config = flask_app.config["SUPPORTED_MODELS"][model_id]
@@ -3075,6 +3196,18 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         if has_ext_quotes(node_content):
                             quoted_ext_ids.extend(
                                 find_ext_quote_ids(node_content))
+                            if node.id in ca_reply_ids:
+                                # A read reply quotes tweets the model
+                                # never wrote out (it cited numbers; the
+                                # markers were filled in on collect), so
+                                # give it the tweets back. Marks stay out
+                                # of this rendering — it is re-sent on
+                                # every later turn and must not change
+                                # under the user's hand; they travel in
+                                # the note at the end of the prompt.
+                                message_text, _ = resolve_ext_quotes(
+                                    message_text, user_id, for_llm=True,
+                                    marks=False)
                         # Tag proposals with node ID for tracking
                         if is_agentic and node.tool_calls_meta:
                             try:
@@ -3137,18 +3270,25 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                     export_placeholder_match,
                                     "(see archive above)"
                                 )
-                        # Replace {ca_tweets} — first occurrence gets
-                        # the day's corpus, repeats get a stub.
-                        if needs_ca and ca_placeholder_match in message_text:
-                            if not replaced_ca:
-                                message_text = message_text.replace(
-                                    ca_placeholder_match,
-                                    ca_tweets_content or "", 1
-                                )
-                                replaced_ca = True
-                            message_text = message_text.replace(
-                                ca_placeholder_match, CA_TWEETS_STUB
-                            )
+                        # Replace {ca_tweets}: on a read, the newest
+                        # prompt's first occurrence gets the day's corpus
+                        # and its repeats a stub. Every other occurrence
+                        # — an older read prompt whose day went to the
+                        # reply below it, or any prompt on a chat turn
+                        # (see _ca_turn) — reads as the chat stub.
+                        if ca_node is not None and CA_TWEETS_PATTERN.search(message_text):
+                            if needs_ca and node is ca_node:
+                                if not replaced_ca:
+                                    message_text = message_text.replace(
+                                        ca_placeholder_match,
+                                        ca_tweets_content or "", 1
+                                    )
+                                    replaced_ca = True
+                                message_text = CA_TWEETS_PATTERN.sub(
+                                    CA_TWEETS_STUB, message_text)
+                            else:
+                                message_text = CA_TWEETS_PATTERN.sub(
+                                    CA_TWEETS_CHAT_STUB, message_text)
                         # Replace {user_profile} — first occurrence
                         # gets content, subsequent get emptied (dedup)
                         if USER_PROFILE_PLACEHOLDER in message_text:
@@ -3323,11 +3463,29 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # loop). Nothing to inject here.
 
                 # The user's read marks / verdicts on references quoted
-                # earlier in the thread (see _reference_marks_note).
+                # earlier in the thread (see _reference_marks_note), and
+                # the read thread's turn note: on a read-again the
+                # request itself, on a chat turn the reminder that the
+                # read prompt above still asks for a verdict and picks
+                # while this turn answers the user's message. A read turn
+                # is never agentic (its agentic prompts were stripped
+                # above), so these close the prompt in their own user
+                # turn; a chat turn may be (a Text-mode conversation under
+                # the read reply, #323), and then they ride with the
+                # agentic notes.
                 reference_marks = _reference_marks_note(
                     quoted_ext_ids, user_id)
+                ca_note = None
+                if ca_turn == "read_again":
+                    ca_note = CA_READ_AGAIN_TURN
+                elif ca_turn == "chat":
+                    ca_note = CA_CHAT_TURN_NOTE
+                plain_notes = []
+                notes = agentic_notes if is_agentic else plain_notes
                 if reference_marks:
-                    agentic_notes.append(reference_marks)
+                    notes.append(reference_marks)
+                if ca_note:
+                    notes.append(ca_note)
 
                 if is_agentic and agentic_notes:
                     # Synthetic system-side note injected after the latest real
@@ -3341,6 +3499,16 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     messages.append({
                         "role": "user",
                         "content": [{"type": "text", "text": injected_text}]
+                    })
+                elif plain_notes:
+                    now_prefix = local_stamp(
+                        datetime.now(timezone.utc), user_tz
+                    )
+                    messages.append({
+                        "role": "user",
+                        "content": [{"type": "text",
+                                     "text": f"{now_prefix} "
+                                             + "\n".join(plain_notes)}]
                     })
 
                 # #222: the chain ends on parent_node, so when the reply
@@ -3641,7 +3809,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # The collecting run: the poll above found the batch ended
                 # and holds its reply; the context was built for ca_refs.
                 response = batch_resp
-                if ca_refs:
+                if ca_refs is not None:
                     response = _collect_feed_reply(
                         llm_node, response, ca_refs)
                 return _finalize(llm_node, response)

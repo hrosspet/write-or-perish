@@ -643,14 +643,33 @@ def test_feedback_is_good_bad_or_cleared(app, client):
     url = f"/api/external/items/{item_id}/feedback"
     more = client.post(url, json={"feedback": "good"}).get_json()
     assert more["feedback"] == "good" and more["feedback_at"] is not None
+    # A verdict is a reading: the item is marked read as of the verdict.
+    assert more["read_at"] == more["feedback_at"]
     listed = client.get("/api/external/items").get_json()["items"][0]
-    assert listed["feedback"] == "good"
+    assert listed["feedback"] == "good" and listed["read_at"] == more["read_at"]
     less = client.post(url, json={"feedback": "bad"}).get_json()
     assert less["feedback"] == "bad"
+    # Changing the verdict keeps the first read time; clearing it keeps
+    # the read mark (the user still saw it).
+    assert less["read_at"] == more["read_at"]
     cleared = client.post(url, json={"feedback": None}).get_json()
     assert cleared["feedback"] is None and cleared["feedback_at"] is None
+    assert cleared["read_at"] == more["read_at"]
     assert client.post(url, json={"feedback": "meh"}).status_code == 400
     assert client.post("/api/external/items/999/feedback", json={"feedback": "good"}).status_code == 404
+
+
+def test_feedback_on_an_already_read_item_keeps_its_read_time(app, client):
+    with app.app_context():
+        uid = User.query.first().id
+        _upsert_items(uid, "web_clip", [
+            {"external_id": "g" * 64, "content": "read first", "title": "T",
+             "author_handle": None, "url": None, "posted_at": None}])
+        item_id = ExternalItem.query.one().id
+    read = client.post(f"/api/external/items/{item_id}/read").get_json()
+    rated = client.post(f"/api/external/items/{item_id}/feedback",
+                        json={"feedback": "bad"}).get_json()
+    assert rated["read_at"] == read["read_at"]
 
 
 def test_update_item_edits_title_and_text_and_drops_embedding(app, client):
