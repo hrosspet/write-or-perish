@@ -19,7 +19,7 @@ import Bubble from "./Bubble";
 import BubbleKebabMenu from "./BubbleKebabMenu";
 import QuotedContent from "./QuotedContent";
 import FeedPicks from "./FeedPicks";
-import { ReadWindowLine, ReadReplyTail } from "./ReadReply";
+import { ReadWindowLine, ReadReplyTail, READ_FURTHER_TITLE } from "./ReadReply";
 import DeleteConfirmDialog from "./DeleteConfirmDialog";
 
 // Recursive component to render children nodes.
@@ -1032,7 +1032,7 @@ function NodeDetail({ nodeIdOverride }) {
           disabled={readLoading}
           style={{ ...topRightButtonStyle, justifyContent: 'space-between' }}
           title={inReadThread
-            ? "Another pass over the day's tweets, against everything in this thread so far"
+            ? READ_FURTHER_TITLE
             : "Loore reads the last day of Community Archive tweets and shows you the ones relevant to this thread"}
         >
           <span>{readLoading ? 'Starting…' : (inReadThread ? 'Read further' : 'Relevant tweets')}</span>
