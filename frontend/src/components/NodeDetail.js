@@ -968,7 +968,7 @@ function NodeDetail({ nodeIdOverride }) {
   const readActions = isOwner && inReadThread && node.ai_usage !== 'none'
     && !isLlmPending;
   const llmResponseTitle = underReadReply
-    ? "A reply asked for right under the picks is another read. To talk about them, write a comment below first."
+    ? "To chat about the recommendations, send your reply first. To read further, use the button on the right."
     : (inReadThread ? "Chat about the picks" : undefined);
 
   // Shared shell for the top-right controls. Voice Mode + Auto-generate
