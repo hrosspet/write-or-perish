@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Loore Clipper",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Save the current tab into your Loore references with one key press, then close it.",
   "permissions": ["activeTab", "scripting", "storage"],
   "host_permissions": [

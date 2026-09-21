@@ -8,6 +8,7 @@ OAuth account (pay-per-use X API; env-gated by X_CLIENT_ID). Refreshes
 the access token when expired.
 """
 from datetime import datetime, timedelta
+import time
 
 import requests
 from celery.utils.log import get_task_logger
@@ -20,7 +21,7 @@ from backend.utils.notifications import notify_user
 from backend.utils.timefmt import user_local_hour
 from backend.utils.external_content import (
     ca_fetch_tweets, ca_lookup_account, x_fetch_bookmark_pages,
-    x_refresh_access_token,
+    x_refresh_access_token, x_tweet_public_status,
 )
 
 logger = get_task_logger(__name__)
@@ -341,3 +342,80 @@ def sync_all_twitter_bookmarks():
             logger.info("Nightly X bookmark sync dispatched for %d accounts",
                         dispatched)
         return {"status": "ok", "dispatched": dispatched}
+
+
+# Nightly publicness check for saved tweets nobody has vouched for yet
+# (#295 step 0): rows the JSON import created, tweets clipped without a
+# visible lock, bookmarks synced before the sync asked X about the
+# author. Each distinct tweet id is asked ONCE against X's free oEmbed
+# endpoint (no API credits; the request carries the tweet id and nothing
+# about the user) and the verdict lands on every user's copy.
+# INTRODUCED CONSTANTS, not tuned: at most 300 lookups a night, half a
+# second apart — the endpoint is meant for websites rendering embeds and
+# publishes no quota. A throttle (429), a server error or no answer ends
+# the night's run; those rows stay unknown and queue behind the ones
+# never asked.
+PUBLIC_SOURCE_SWEEP_LIMIT = 300
+PUBLIC_SOURCE_SWEEP_PAUSE = 0.5
+# Sources whose external_id is a tweet id.
+X_TWEET_SOURCES = ("twitter_bookmark", "twitter_like")
+
+
+def _apply_public_verdict(external_id, verdict, now):
+    """Stamp one tweet's verdict on every unknown copy of it, whoever
+    saved it. Answered or not, the attempt is recorded."""
+    values = {"public_source_checked_at": now}
+    if verdict is not None:
+        values["public_source"] = verdict
+    return (ExternalItem.query
+            .filter(ExternalItem.source.in_(X_TWEET_SOURCES),
+                    ExternalItem.external_id == external_id,
+                    ExternalItem.public_source.is_(None))
+            .update(values, synchronize_session=False))
+
+
+@celery.task(name='backend.tasks.external_sync.verify_public_source_sweep')
+def verify_public_source_sweep(limit=PUBLIC_SOURCE_SWEEP_LIMIT,
+                               pause=PUBLIC_SOURCE_SWEEP_PAUSE):
+    with flask_app.app_context():
+        # Never-asked rows first, then the least recently asked; newest
+        # saves first within a tier so tonight's clip is resolved tonight.
+        rows = (
+            db.session.query(ExternalItem.external_id)
+            .filter(ExternalItem.source.in_(X_TWEET_SOURCES),
+                    ExternalItem.public_source.is_(None))
+            .order_by(ExternalItem.public_source_checked_at.asc().nullsfirst(),
+                      ExternalItem.id.desc())
+            .limit(limit).all()
+        )
+        public = refused = unanswered = lookups = 0
+        stopped_on = None
+        seen = set()
+        for (external_id,) in rows:
+            if external_id in seen:
+                continue  # another user's copy: stamped with the first
+            seen.add(external_id)
+            if lookups and pause:
+                time.sleep(pause)
+            verdict, status = x_tweet_public_status(external_id)
+            lookups += 1
+            _apply_public_verdict(external_id, verdict, datetime.utcnow())
+            if verdict is True:
+                public += 1
+            elif verdict is False:
+                refused += 1
+            else:
+                unanswered += 1
+                if status is None or status == 429 or status >= 500:
+                    # X is throttling, failing or unreachable: tomorrow,
+                    # rather than hammer it tonight.
+                    stopped_on = status or "network"
+                    break
+        db.session.commit()
+        logger.info(
+            "Public-source sweep: %d lookups, %d public, %d refused, "
+            "%d unanswered%s", lookups, public, refused, unanswered,
+            f", stopped on {stopped_on}" if stopped_on else "")
+        return {"status": "ok", "lookups": lookups, "public": public,
+                "refused": refused, "unanswered": unanswered,
+                "stopped_on": stopped_on}

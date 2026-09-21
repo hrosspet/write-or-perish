@@ -1223,10 +1223,16 @@ class ExternalItem(db.Model):
     #   False — assessed and not vouched: a web clip (the clipper saves
     #           whatever tab is active, private pages included).
     #   NULL  — unknown: rows from before this column, JSON-imported
-    #           bookmarks, a clipped tweet, an author X did not return.
-    # False and NULL are both treated as private; NULL invites a later
-    # re-verification, False says there is nothing to verify against.
+    #           bookmarks, a clipped tweet without a visible lock, an
+    #           author X did not return.
+    # False and NULL are both treated as private. Unknown TWEETS are
+    # resolved by the nightly verify_public_source_sweep against X's free
+    # oEmbed endpoint (served = public, refused = protected or gone);
+    # False says there is nothing to verify against.
     public_source = db.Column(db.Boolean, nullable=True)
+    # When the sweep last asked X about this row — set on every attempt,
+    # answered or not, so unanswered rows queue behind never-asked ones.
+    public_source_checked_at = db.Column(db.DateTime, nullable=True)
     # Generated speech, the same shape as Node / UserProfile so the TTS
     # task, SSE stream and SpeakerIcon treat a reference as one more
     # entity. Nothing here is ever an original recording.

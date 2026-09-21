@@ -478,6 +478,41 @@ def test_clip_tweet_url_lands_as_bookmark(app, client):
         assert (created, skipped) == (0, 1)
 
 
+def test_clip_tweet_with_a_visible_lock_is_not_public(app, client):
+    """The extension reports only a lock it SAW; that word marks the
+    reference not public at once, and a later re-clip that sees the lock
+    turns an unknown copy private too. A missing flag never means public
+    (#295)."""
+    body = client.post("/api/external/clip", json={
+        "url": "https://x.com/locked/status/777", "content": "members only",
+        "author": "locked", "author_protected": True,
+    }).get_json()
+    with app.app_context():
+        assert ExternalItem.query.get(body["id"]).public_source is False
+    # Clipped without the flag: unknown, left to the nightly sweep...
+    body2 = client.post("/api/external/clip", json={
+        "url": "https://x.com/someone/status/778", "content": "short",
+        "author": "someone",
+    }).get_json()
+    with app.app_context():
+        assert ExternalItem.query.get(body2["id"]).public_source is None
+    # ...until a re-clip sees the lock (no text change, still recorded).
+    again = client.post("/api/external/clip", json={
+        "url": "https://x.com/someone/status/778", "content": "short",
+        "author": "someone", "author_protected": True,
+    })
+    assert again.status_code == 200 and again.get_json()["updated"] is False
+    with app.app_context():
+        assert ExternalItem.query.get(body2["id"]).public_source is False
+    # A page stays not-vouched whatever the flag says.
+    page = client.post("/api/external/clip", json={
+        "url": "https://example.org/a", "content": "page text",
+        "author_protected": False,
+    }).get_json()
+    with app.app_context():
+        assert ExternalItem.query.get(page["id"]).public_source is False
+
+
 def test_clip_validates_and_truncates(app, client):
     from backend.utils.node_split import NODE_CHAR_CAP
     assert client.post("/api/external/clip", json={
@@ -960,3 +995,34 @@ def test_x_bookmark_pages_ask_for_and_apply_the_protected_flag(monkeypatch):
         content.x_fetch_bookmark_pages("tok", "42", max_items=800))
     assert "protected" in seen["user.fields"].split(",")
     assert [i["public_source"] for i in items] == [True, False, None]
+
+
+def test_tweet_public_status_maps_x_answers(monkeypatch):
+    """X serves a public tweet's embed (200), refuses a protected (403)
+    or gone (404) one; anything else is no answer, and so is a network
+    failure. The request names the tweet and nothing else."""
+    from backend.utils import external_content as content
+    calls = []
+
+    class _Resp:
+        def __init__(self, code):
+            self.status_code = code
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append((url, params))
+        return _Resp(int(params["url"].rsplit("/", 1)[1]))
+    monkeypatch.setattr(content.requests, "get", fake_get)
+    assert content.x_tweet_public_status("200") == (True, 200)
+    assert content.x_tweet_public_status("403") == (False, 403)
+    assert content.x_tweet_public_status("404") == (False, 404)
+    assert content.x_tweet_public_status("429") == (None, 429)
+    assert content.x_tweet_public_status("503") == (None, 503)
+    url, params = calls[0]
+    assert url == content.X_OEMBED_URL
+    assert params["url"].endswith("/i/status/200") and params["dnt"] == "1"
+    assert set(params) == {"url", "omit_script", "dnt"}
+
+    def boom(url, params=None, timeout=None):
+        raise content.requests.ConnectionError("down")
+    monkeypatch.setattr(content.requests, "get", boom)
+    assert content.x_tweet_public_status("1") == (None, None)
