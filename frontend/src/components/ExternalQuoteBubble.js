@@ -28,6 +28,11 @@ const SOURCE_LABELS = {
  * readAt)` and `onFeedbackChange(id, feedback)` tell the page, which
  * keeps the list's marks (a read reply's "n unread", "nothing marked
  * yet") in step with the bubbles.
+ *
+ * Opening the post is reading it: the owner's click marks the reference
+ * read as the tab opens, and "Mark as unread" stays for the ones to come
+ * back to (a long post opened for later). Only the default flipped; the
+ * toggle is the override.
  */
 const ExternalQuoteBubble = ({ quote, onReadChange, onFeedbackChange }) => {
   const userCtx = useUser();
@@ -54,16 +59,11 @@ const ExternalQuoteBubble = ({ quote, onReadChange, onFeedbackChange }) => {
     : null;
   const mine = !!currentUser && quote.user_id === currentUser.id;
 
-  const open = () => {
-    if (quote.url) window.open(quote.url, '_blank', 'noopener,noreferrer');
-  };
-
-  const toggleRead = (e) => {
-    e.stopPropagation();
+  const setRead = (want) => {
     setMarking(true);
-    const req = readAt
-      ? api.delete(`/external/items/${quote.id}/read`)
-      : api.post(`/external/items/${quote.id}/read`);
+    const req = want
+      ? api.post(`/external/items/${quote.id}/read`)
+      : api.delete(`/external/items/${quote.id}/read`);
     req
       .then((res) => {
         setReadAt(res.data.read_at);
@@ -71,6 +71,18 @@ const ExternalQuoteBubble = ({ quote, onReadChange, onFeedbackChange }) => {
       })
       .catch(() => addToast('Could not update the read mark.', 4000))
       .finally(() => setMarking(false));
+  };
+
+  const open = () => {
+    if (!quote.url) return;
+    // window.open first: the popup rules want the user gesture.
+    window.open(quote.url, '_blank', 'noopener,noreferrer');
+    if (mine && !readAt && !marking) setRead(true);
+  };
+
+  const toggleRead = (e) => {
+    e.stopPropagation();
+    setRead(!readAt);
   };
 
   return (

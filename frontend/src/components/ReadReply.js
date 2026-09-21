@@ -44,7 +44,7 @@ const HINT_WITH_MARKS = 'The second read gets your marks: what you marked read l
   + 'and read, good and bad tell it how these picks landed. '
   + 'A reply below is a Text-mode conversation instead.';
 const HINT_NO_MARKS = 'Nothing marked yet, so a second read would see the same day and the same picks. '
-  + 'Mark what you read and rate the picks first. '
+  + 'Open or mark what you read and rate the picks first. '
   + 'A reply below is a Text-mode conversation instead.';
 
 export const ReadReplyTail = ({

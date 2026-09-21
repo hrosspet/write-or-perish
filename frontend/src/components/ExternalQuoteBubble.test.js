@@ -86,7 +86,32 @@ test('someone else viewing the node sees the quote without the toggle', () => {
 });
 
 test('clicking the quote body still opens the original post', () => {
+  api.post.mockResolvedValue({ data: { id: 42, read_at: '2026-09-21T13:00:00Z' } });
   render(<ExternalQuoteBubble quote={quote()} />);
   fireEvent.click(screen.getByText('Singing was the original psychedelic.'));
   expect(window.open).toHaveBeenCalledWith('https://x.com/TVachaW/status/1', '_blank', 'noopener,noreferrer');
+});
+
+test('opening the post marks it read for the owner and tells the page; Mark as unread stays', async () => {
+  api.post.mockResolvedValue({ data: { id: 42, read_at: '2026-09-21T13:00:00Z' } });
+  const onReadChange = jest.fn();
+  render(<ExternalQuoteBubble quote={quote()} onReadChange={onReadChange} />);
+
+  fireEvent.click(screen.getByText('Singing was the original psychedelic.'));
+  expect(window.open).toHaveBeenCalledWith('https://x.com/TVachaW/status/1', '_blank', 'noopener,noreferrer');
+  expect(api.post).toHaveBeenCalledWith('/external/items/42/read');
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Mark as unread' })).toBeInTheDocument());
+  expect(onReadChange).toHaveBeenCalledWith(42, '2026-09-21T13:00:00Z');
+});
+
+test('opening an already-read post, or someone else\'s, marks nothing', () => {
+  render(<ExternalQuoteBubble quote={quote({ read_at: '2026-09-12T20:00:00Z' })} />);
+  fireEvent.click(screen.getByText('Singing was the original psychedelic.'));
+  expect(api.post).not.toHaveBeenCalled();
+
+  useUser.mockReturnValue({ user: { id: 99 } });
+  render(<ExternalQuoteBubble quote={quote()} />);
+  fireEvent.click(screen.getAllByText('Singing was the original psychedelic.')[1]);
+  expect(api.post).not.toHaveBeenCalled();
+  expect(window.open).toHaveBeenCalledTimes(2);
 });

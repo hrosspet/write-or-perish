@@ -17,7 +17,8 @@ import { useToast } from '../contexts/ToastContext';
  * Every pick is a saved reference, so the footer is the reference's own
  * record: the good / bad verdict (was this the right thing to surface)
  * and the user's read mark. A read pick fades so the unread ones stand
- * out while working down the list.
+ * out while working down the list. Opening a tweet marks it read; the
+ * toggle stays to undo it (a long post opened for later).
  */
 const FeedPicks = ({ nodeId, enabled = true }) => {
   const { addToast } = useToast();
@@ -41,6 +42,13 @@ const FeedPicks = ({ nodeId, enabled = true }) => {
     i === idx ? { ...p, item: { ...p.item, ...updates } } : p
   )));
   const unread = picks.filter((p) => !p.item.read_at).length;
+
+  const markReadOnOpen = (idx, item) => {
+    if (item.read_at) return;
+    api.post(`/external/items/${item.id}/read`)
+      .then((res) => patch(idx, { read_at: res.data.read_at }))
+      .catch(() => addToast('Could not update the read mark.', 4000));
+  };
 
   const markAllRead = () => {
     setMarkingAll(true);
@@ -103,7 +111,13 @@ const FeedPicks = ({ nodeId, enabled = true }) => {
               <div className="feed-pick-foot">
                 {item.posted_at && <span>{formatDate(item.posted_at, { relative: false })}</span>}
                 {item.url && (
-                  <a href={item.url} target="_blank" rel="noopener noreferrer" title="Open the tweet in a new tab">
+                  <a
+                    href={item.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title="Open the tweet in a new tab (marks it read)"
+                    onClick={() => markReadOnOpen(idx, item)}
+                  >
                     Open on X
                   </a>
                 )}
