@@ -281,7 +281,9 @@ def semantic_search():
     from flask import current_app
     from backend.models import NodeEmbedding
     from backend.utils.api_keys import get_openai_chat_key
-    from backend.utils.embeddings import embed_texts, top_k_similar
+    from backend.utils.embeddings import (
+        EMBEDDING_SCAN_CHUNK, embed_texts, top_k_similar,
+    )
 
     q = request.args.get("q", "").strip()
     limit = min(request.args.get("limit", 20, type=int), 50)
@@ -327,7 +329,10 @@ def semantic_search():
                 emb_query = emb_query.filter(Node.created_at >= dt_from)
             if dt_to is not None:
                 emb_query = emb_query.filter(Node.created_at <= dt_to)
-        rows = emb_query.all()
+        # Streamed in chunks (server-side cursor on Postgres): this runs
+        # inside a gevent worker, so a buffered full-archive scan would
+        # block every request on the hub, not just this one.
+        rows = emb_query.yield_per(EMBEDDING_SCAN_CHUNK)
         ranked = top_k_similar(
             query_vector, rows, k=limit, min_score=min_score)
 
@@ -348,7 +353,7 @@ def semantic_search():
                 ext_query = ext_query.filter(_EXTERNAL_DATE >= dt_from)
             if dt_to is not None:
                 ext_query = ext_query.filter(_EXTERNAL_DATE <= dt_to)
-        ext_rows = ext_query.all()
+        ext_rows = ext_query.yield_per(EMBEDDING_SCAN_CHUNK)
         ext_ranked = top_k_similar(
             query_vector, ext_rows, k=limit, min_score=min_score)
         items_by_id = {
@@ -420,7 +425,9 @@ def semantic_neighbors():
     sweep hasn't reached it).
     """
     from backend.models import NodeEmbedding
-    from backend.utils.embeddings import top_k_similar, unpack_vector
+    from backend.utils.embeddings import (
+        EMBEDDING_SCAN_CHUNK, top_k_similar, unpack_vector,
+    )
 
     node_id = request.args.get("node_id", type=int)
     limit = min(request.args.get("limit", 5, type=int), 20)
@@ -445,7 +452,7 @@ def semantic_neighbors():
     ).filter(
         NodeEmbedding.user_id == current_user.id,
         NodeEmbedding.node_id != node_id,
-    ).all()
+    ).yield_per(EMBEDDING_SCAN_CHUNK)
 
     ranked = top_k_similar(query_vector, rows, k=limit, min_score=0.0)
     nodes_by_id = {

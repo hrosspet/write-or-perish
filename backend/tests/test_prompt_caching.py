@@ -218,15 +218,15 @@ def test_render_cache_roundtrip_and_key_busting(app, monkeypatch):
         _db.session.commit()
         assert prompt_cache.get_cached_render(app.config, node) is None
 
-        # The per-user render variant (share / external-references gates,
+        # The render variant (killswitch + share / external-references gates,
         # #329) is part of the key: a toggle flip mid-thread takes a fresh
         # key instead of serving the stale render for the rest of the TTL.
-        prompt_cache.store_render(app.config, node, "no refs", "s0e0")
-        prompt_cache.store_render(app.config, node, "with refs", "s0e1")
+        prompt_cache.store_render(app.config, node, "no refs", "a1s0e0")
+        prompt_cache.store_render(app.config, node, "with refs", "a1s0e1")
         assert prompt_cache.get_cached_render(
-            app.config, node, "s0e0") == "no refs"
+            app.config, node, "a1s0e0") == "no refs"
         assert prompt_cache.get_cached_render(
-            app.config, node, "s0e1") == "with refs"
+            app.config, node, "a1s0e1") == "with refs"
         assert prompt_cache.get_cached_render(app.config, node) is None
 
 

@@ -1683,3 +1683,27 @@ def test_agentic_prompt_already_ending_on_user_turn_is_untouched(app):
     assert msgs[-1]["role"] == "user"
     assert "[continue]" not in msgs[-1]["text"]
     assert sum(1 for m in msgs if m["text"] == "[continue]") == 0
+
+
+def test_render_variant_carries_the_killswitch(app):
+    """The #192 render-cache key must change when the env killswitch
+    flips, not only on the per-user toggles: with the toggle off, both
+    killswitch states read e0 while rendering different text (archive
+    guidance vs nothing), so without the `a` bit an emergency flip would
+    keep serving the cached archive-search guidance for the TTL."""
+    alice, *_ = _build_chain("textmode")
+    alice.external_content_enabled = False
+    _db.session.commit()
+    on = _llm_task_mod._render_variant(alice.id)
+    assert on.startswith("a1") and on.endswith("e0")
+    app.config["SEMANTIC_SEARCH_AGENTIC"] = False
+    try:
+        off = _llm_task_mod._render_variant(alice.id)
+    finally:
+        app.config["SEMANTIC_SEARCH_AGENTIC"] = True
+    assert off.startswith("a0") and off.endswith("e0")
+    assert on != off
+    # And the toggle itself still moves the key.
+    alice.external_content_enabled = True
+    _db.session.commit()
+    assert _llm_task_mod._render_variant(alice.id).endswith("e1")

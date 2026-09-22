@@ -100,8 +100,8 @@ from backend.utils.share_guidance import (  # noqa: E402
     SHARE_GUIDANCE_PLACEHOLDER, SHARE_GUIDANCE_TEXT, share_enabled_for_user,
 )
 from backend.utils.external_guidance import (
-    EXTERNAL_GUIDANCE_PLACEHOLDER, render_external_guidance,
-    external_references_enabled_for_user,
+    EXTERNAL_GUIDANCE_PLACEHOLDER, archive_search_enabled,
+    render_external_guidance, external_references_enabled_for_user,
 )
 
 
@@ -121,11 +121,17 @@ def _external_guidance_for_user(user_id):
 
 
 def _render_variant(user_id):
-    """Key suffix for the #192 render cache: every per-user gate that
-    changes the rendered system text without touching the node. A toggle
+    """Key suffix for the #192 render cache: every gate that changes the
+    rendered system text without touching the node — the env killswitch
+    (a) and the per-user share (s) / external-references (e) toggles. A
     flip mid-thread then takes a fresh key instead of serving the stale
-    render for up to the cache TTL (#329 caveat)."""
-    return (f"s{int(_share_enabled_for_user(user_id))}"
+    render for up to the cache TTL (#329 caveat). The `a` bit matters on
+    its own: "killswitch off" and "toggle off, killswitch on" both read
+    e0 while rendering different text, so without it an emergency flip
+    would keep serving the archive-search guidance for the TTL, telling
+    the model to use a tool that left the list on the same restart."""
+    return (f"a{int(archive_search_enabled(flask_app.config))}"
+            f"s{int(_share_enabled_for_user(user_id))}"
             f"e{int(_external_references_for_user(user_id))}")
 USER_ARTIFACTS_INDEX_PLACEHOLDER = "{user_artifacts_index}"
 
@@ -452,17 +458,18 @@ VOICE_TOOLS = [
             "lookup. When you quote, say "
             "in your own words why it's relevant to what the user is "
             "saying right now — the quote plus your reasoning is the "
-            "response, not a link dump. Reference previews show how often "
-            "each was already surfaced; weigh that yourself — re-quoting "
-            "something recently shown needs a good reason. Some previews "
-            "also carry 'marked read by the user': only the user can set "
-            "that mark, by hand, so it means they have actually read the "
-            "reference — build on it as shared ground rather than "
+            "response, not a link dump. When a preview carries surfacing "
+            "history (how often it was already shown), weigh it yourself — "
+            "re-quoting something recently shown needs a good reason. When "
+            "a preview carries 'marked read by the user': only the user "
+            "can set that mark, by hand, so it means they have actually "
+            "read it — build on it as shared ground rather than "
             "introducing it as new. You can refine "
             "and search again if the previews miss, and quoting nothing is "
             "always fine. Labels are your private triage handles: use them "
-            "only inside {quote:...} markers — in prose, refer to items by "
-            "author or content ('the @visa thread'), never by label. "
+            "only inside {quote:...} markers — in prose, refer to matches "
+            "by content or author ('that entry about the garden', 'the "
+            "@visa thread'), never by label. "
             "Tell the user you're checking their archive; "
             "don't search for things already in your context. Always "
             "produce a text response alongside the call."
@@ -1671,6 +1678,13 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                             previous.id if previous else None)
 
             elif name == "read_artifact":
+                # Any readable kind, including 'external_digest' — the
+                # saved-references topic map is NOT gated by the "External
+                # references" toggle, unlike semantic_search's reference
+                # matches and read_full on an external label. It is the
+                # user's own data, so nothing leaks; the guidance only
+                # points users with the toggle on at the digest. Known
+                # asymmetry (#330 review), left as is.
                 kind = (inp.get("kind") or "").strip().lower()
                 artifact = UserArtifact.latest_for(user_id, kind)
                 if artifact is None or artifact.ai_usage not in AI_ALLOWED:
