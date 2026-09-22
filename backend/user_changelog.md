@@ -20,6 +20,11 @@ Authoring rules:
   get their section in the commit that turns them ON, not at merge.
 -->
 
+<!-- id: archive-search-for-everyone -->
+## 2026-09-22 — Loore can now search your archive in every conversation
+
+Loore can now search your own archive by meaning in the middle of a conversation. Ask "have I written about this before?" or "what did we say about this in that earlier thread?" and it pulls the matching entries back in and quotes them — even from a fresh thread that never mentioned them.
+
 <!-- id: claude-opus-5-5 -->
 ## 2026-09-22 — A new model to talk to: Claude Opus 5.5
 

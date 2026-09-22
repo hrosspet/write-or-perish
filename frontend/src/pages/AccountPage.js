@@ -474,8 +474,8 @@ export default function AccountPage() {
       </div>
 
       {user.external_content_available && (
-        <div style={rowStyle}>
-          <div style={labelStyle}>External content</div>
+        <div id="references" style={{ ...rowStyle, scrollMarginTop: "72px" }}>
+          <div style={labelStyle}>External references</div>
           <select
             value={user.external_content_enabled ? "on" : "off"}
             disabled={externalContentSaving}
@@ -489,10 +489,11 @@ export default function AccountPage() {
             <option value="on">On (experimental)</option>
           </select>
           <div style={helperStyle}>
-            Let Loore search your archive and your saved external content
-            (imported tweets, bookmarks and clipped web pages) during
-            conversations, and quote what it finds. Import bookmarks or set
-            up the Chrome clipper on the{" "}
+            Let Loore also search your saved external references (imported
+            tweets, bookmarks and clipped web pages) during conversations,
+            and quote what it finds. Your own archive is always searchable;
+            this switch only adds references. Import bookmarks or set up
+            the Chrome clipper on the{" "}
             <Link to="/import" style={{ color: "var(--accent)" }}>
               Import page
             </Link>. Experimental.

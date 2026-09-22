@@ -371,3 +371,91 @@ def test_neighbors_other_users_node_forbidden(app, client):
         nid = _mk_node(other.id, "someone else's node").id
     res = client.get(f"/api/search/neighbors?node_id={nid}")
     assert res.status_code == 403
+
+
+# ── Chunked numpy scan (#330 review: bounded memory, same results) ──────
+
+def _rand_rows(n, dim, seed=0):
+    import random
+    rnd = random.Random(seed)
+    return [(i, pack_vector([rnd.uniform(-1, 1) for _ in range(dim)]))
+            for i in range(1, n + 1)]
+
+
+def test_top_k_similar_matches_reference_cosine_across_chunks(monkeypatch):
+    """Scores and ordering equal the pure-Python cosine_similarity (the
+    definition), and the running top-k across chunk boundaries equals a
+    global sort — the best rows must survive being spread over chunks."""
+    import backend.utils.embeddings as emb_module
+    monkeypatch.setattr(emb_module, "EMBEDDING_SCAN_CHUNK", 7)
+    rows = _rand_rows(50, 16)
+    query = [0.3 * (i % 5) - 0.6 for i in range(16)]
+    reference = sorted(
+        ((nid, cosine_similarity(query, unpack_vector(blob)))
+         for nid, blob in rows),
+        key=lambda pair: pair[1], reverse=True)
+    reference = [(nid, s) for nid, s in reference if s >= 0.1][:9]
+    got = top_k_similar(query, iter(rows), k=9, min_score=0.1)  # generator
+    assert [nid for nid, _ in got] == [nid for nid, _ in reference]
+    for (_, a), (_, b) in zip(got, reference):
+        assert a == pytest.approx(b, abs=1e-12)
+    assert all(isinstance(s, float) for _, s in got)
+
+
+def test_top_k_similar_ties_keep_row_order_and_k_zero():
+    rows = [(1, pack_vector([1.0, 0.0])), (2, pack_vector([2.0, 0.0])),
+            (3, pack_vector([0.5, 0.0]))]
+    ranked = top_k_similar([1.0, 0.0], rows, k=2)
+    assert [nid for nid, _ in ranked] == [1, 2]  # all tie at 1.0
+    assert top_k_similar([1.0, 0.0], rows, k=0) == []
+    assert top_k_similar([1.0, 0.0], [], k=3) == []
+
+
+def test_top_k_similar_zero_vectors_score_zero():
+    rows = [(1, pack_vector([0.0, 0.0])), (2, pack_vector([0.0, 1.0]))]
+    ranked = dict(top_k_similar([0.0, 1.0], rows, k=5, min_score=-1.0))
+    assert ranked[1] == 0.0
+    assert ranked[2] == pytest.approx(1.0)
+    # A zero query has no direction — nothing matches (old code: all 0.0).
+    assert top_k_similar([0.0, 0.0], rows, k=5, min_score=-1.0) == []
+
+
+def test_top_k_similar_skips_rows_of_another_dimension(caplog):
+    """A row embedded under a different model must be missing, not scored
+    as garbage against a truncated vector (old zip() behavior)."""
+    rows = [
+        (1, pack_vector([1.0, 0.0, 0.0])),   # wrong dim: 3 vs query's 2
+        (2, pack_vector([0.9, 0.1])),
+    ]
+    with caplog.at_level("WARNING", logger="backend.utils.embeddings"):
+        ranked = top_k_similar([1.0, 0.0], rows, k=5, min_score=0.0)
+    assert [nid for nid, _ in ranked] == [2]
+    assert "skipped 1 rows" in caplog.text
+
+
+def test_top_k_similar_accepts_memoryview_blobs():
+    # psycopg2 hands bytea back as memoryview, not bytes.
+    rows = [(1, memoryview(pack_vector([1.0, 0.0]))),
+            (2, memoryview(pack_vector([0.0, 1.0])))]
+    assert [nid for nid, _ in top_k_similar([1.0, 0.0], rows, k=1)] == [1]
+
+
+def test_retrieve_relevant_snippets_streams_more_rows_than_a_chunk(
+        app, monkeypatch):
+    """The DB path (yield_per) feeds the scan one chunk at a time and the
+    best match still wins when it sits in the last, partial chunk."""
+    import backend.utils.embeddings as emb_module
+    monkeypatch.setattr(emb_module, "EMBEDDING_SCAN_CHUNK", 2)
+    with app.app_context():
+        uid = User.query.first().id
+        nodes = []
+        for i in range(5):
+            n = _mk_node(uid, f"entry number {i}")
+            _mk_embedding(n, [1.0, 0.1 * (5 - i)])
+            nodes.append(n)
+        best = _mk_node(uid, "the best match, in the tail chunk")
+        _mk_embedding(best, [1.0, 0.0])
+        results = retrieve_relevant_snippets(
+            uid, "q", [], "fake-key", k=2, min_score=0.0,
+            query_vector=[1.0, 0.0])
+        assert [nid for nid, _, _, _ in results] == [best.id, nodes[4].id]

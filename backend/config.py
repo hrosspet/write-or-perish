@@ -69,18 +69,17 @@ class Config:
     PROFILE_UPDATES_PAUSED = os.environ.get(
         "PROFILE_UPDATES_PAUSED", "false").lower() in ("1", "true", "yes")
 
-    # --- Agentic semantic search (#155) ---
-    # Manual Cmd+K semantic search is always on. Exposing semantic_search as a
-    # within-turn LLM tool (and the {quote:ID} pull-in-full it drives) ships
-    # DARK: gated off by default so it can be enabled per-environment (on in
-    # staging) and validated before prod. Off → the tool is dropped from the
-    # agentic tool list and the model never sees it.
-    # Agentic archive search + external references (#155/#208). Deployed
-    # by default; the DARKNESS is per-user (User.external_content_enabled,
-    # default off — the Account toggle is the easter-egg opt-in). This env
-    # var is the emergency KILL SWITCH only: set SEMANTIC_SEARCH_AGENTIC
-    # =false to drop the semantic_search tool, quote pulls, and the
-    # conditional prompt guidance for everyone without a deploy.
+    # --- Agentic semantic search (#155/#208/#329) ---
+    # Manual Cmd+K semantic search is always on. Own-archive semantic_search
+    # as a within-turn LLM tool (and the read_full / {quote:ID} pull it
+    # drives) is on for EVERY user (#329); only the saved-references half
+    # of that search is per-user (User.external_content_enabled — the
+    # Account "External references" toggle, default off). This env var is
+    # the emergency KILL SWITCH only: set SEMANTIC_SEARCH_AGENTIC=false and
+    # restart (it is read at boot) to drop both search tools and the
+    # archive-search guidance for everyone. The #192 render-cache key
+    # carries it, so already-cached system renders do not keep the
+    # guidance for the rest of their TTL.
     SEMANTIC_SEARCH_AGENTIC = os.environ.get(
         "SEMANTIC_SEARCH_AGENTIC", "true").lower() in ("1", "true", "yes")
 

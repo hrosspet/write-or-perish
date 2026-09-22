@@ -790,40 +790,142 @@ def test_continuation_prompt_too_long_degrades_gracefully(app):
     assert "THE FULL ARCHIVE ENTRY" not in retry_msgs
 
 
-def test_semantic_search_gated_off_for_opted_out_user(app):
-    """Without the per-user opt-in (external_content_enabled, #208 — the
-    Account easter-egg toggle), the semantic_search tool is dropped from
-    the exposed tool list — the model never sees it — and a model-emitted
-    {quote:ID} for an out-of-chain node is NOT pulled mid-turn. The other
-    retrieval tools (read_artifact/read_todo) are unaffected, and manual
-    Cmd+K search is a separate endpoint, also unaffected."""
+def test_archive_search_on_without_references_opt_in(app, monkeypatch):
+    """Own-archive search is on for everyone (#329): with the "External
+    references" toggle off (the default), semantic_search and read_full are
+    still in the tool list, a search returns the user's own entries — and
+    NOT their saved references, even when one matches — so the model never
+    sees an external label it could not follow. (Manual Cmd+K search is a
+    separate endpoint, also unaffected.)"""
+    import backend.utils.embeddings as emb_mod
+    monkeypatch.setattr(
+        emb_mod, "embed_texts", lambda texts, key, **kw: [[1.0, 0.0]])
+
     alice, system, user_node, llm_node = _build_chain("textmode")
     alice.external_content_enabled = False  # default for every user
     archive = Node(user_id=alice.id, human_owner_id=alice.id,
                    node_type="text", privacy_level="private", ai_usage="chat")
-    archive.set_content("AN OUT-OF-CHAIN ENTRY.")
+    archive.set_content("AN OUT-OF-CHAIN ENTRY about zen.")
     _db.session.add(archive)
+    _db.session.flush()
+    _db.session.add(NodeEmbedding(
+        node_id=archive.id, user_id=alice.id, model="test",
+        content_hash="h", vector=pack_vector([1.0, 0.0])))
+    # A saved reference that would rank first if references were on.
+    item = _mk_external_item(
+        alice.id, "the perfect saved tweet about zen", [1.0, 0.0])
     _db.session.commit()
-    aid = archive.id
+    aid, item_id = archive.id, item.id
 
     _ScriptedProvider.reset([
-        _resp("Here's my take. {quote:%d}" % aid),
+        _resp("Checking your archive.",
+              tool_calls=[{"id": "t1", "name": "semantic_search",
+                           "input": {"query": "zen"}}]),
+        _resp("You wrote about this before: {quote:A}."),
     ])
     generate_llm_response(
         _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
         source_mode="textmode",
     )
 
-    # Tool list excludes semantic_search but keeps the other retrieval tools.
+    # The search tools are exposed regardless of the toggle.
     tool_names = [t["name"] for t in (_ScriptedProvider.calls[0]["tools"] or [])]
-    assert "semantic_search" not in tool_names
+    assert "semantic_search" in tool_names
+    assert "read_full" in tool_names
     assert "read_artifact" in tool_names
-    # The {quote:ID} did NOT trigger a within-turn pull: one call, no
-    # continuation node, the placeholder stays in the answer for the frontend
-    # to resolve at render time (matches main's behavior).
-    assert len(_ScriptedProvider.calls) == 1
-    node = _fresh(llm_node.id)
-    assert node.continuation_node_id is None
+    # Round 2 saw the archive entry as [A] and no reference at all.
+    assert len(_ScriptedProvider.calls) == 2
+    round2 = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[1]["messages"])
+    assert "[A]" in round2 and "AN OUT-OF-CHAIN ENTRY" in round2
+    assert "[B]" not in round2
+    assert "saved reference by" not in round2
+    # The quote canonicalized to the archive node; the reference was never
+    # surfaced.
+    _db.session.expire_all()
+    nodes = Node.query.filter(Node.human_owner_id == alice.id).all()
+    all_text = "\n".join(n.get_content() or "" for n in nodes)
+    assert ("{quote:%d}" % aid) in all_text
+    assert "{quote_ext:" not in all_text
+    assert ExternalItem.query.get(item_id).surfaced_count == 0
+
+
+def test_read_full_external_refused_without_references_opt_in(app):
+    """Defense in depth (#329): a search never hands an external label to a
+    user without the toggle, so read_full on one (stale or forged) is
+    refused instead of leaking the reference into the prompt."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    alice.external_content_enabled = False
+    item = _mk_external_item(alice.id, "a saved tweet", [1.0, 0.0])
+    _db.session.commit()
+    chain = [system, user_node, llm_node]
+
+    results = _llm_task_mod._execute_tool_calls(
+        [{"id": "t1", "name": "read_full", "input": {"ref": "A"}}],
+        llm_node, chain, alice.id, quote_labels={"A": ("external", item.id)})
+    assert results[0]["status"] == "error"
+    assert "not enabled" in results[0]["error"]
+
+    # Numeric archive-entry ids stay readable for everyone.
+    results = _llm_task_mod._execute_tool_calls(
+        [{"id": "t2", "name": "read_full",
+          "input": {"ref": str(user_node.id)}}],
+        llm_node, chain, alice.id, quote_labels={})
+    assert results[0]["status"] == "success"
+    assert results[0]["kind"] == "node"
+
+    # With the toggle on, the same label resolves.
+    alice.external_content_enabled = True
+    _db.session.commit()
+    results = _llm_task_mod._execute_tool_calls(
+        [{"id": "t3", "name": "read_full", "input": {"ref": "A"}}],
+        llm_node, chain, alice.id, quote_labels={"A": ("external", item.id)})
+    assert results[0]["status"] == "success"
+    assert results[0]["kind"] == "external"
+
+
+def test_external_guidance_splits_on_references_toggle(app):
+    """{external_content_guidance} renders the archive-search paragraph for
+    everyone and appends the saved-references paragraph only when the
+    owner's toggle is on (#329) — identically in render_system_message
+    (pre-warm) and the generation loop's substitution."""
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    # The system node renders its attached prompt artifact's text.
+    prompt = UserPrompt.query.filter_by(user_id=alice.id).one()
+    prompt.set_content("intro\n{external_content_guidance}\nend")
+    alice.external_content_enabled = False
+    _db.session.commit()
+
+    off = _llm_task_mod.render_system_message(system, alice.id)
+    assert "## Archive search" in off
+    assert "saved external references" not in off
+    assert "{external_content_guidance}" not in off
+
+    alice.external_content_enabled = True
+    _db.session.commit()
+    on = _llm_task_mod.render_system_message(system, alice.id)
+    assert "## Archive search" in on
+    assert "saved external references" in on
+    assert on.startswith(off.split("## Archive search")[0])
+
+    # The generation loop substitutes the same bytes: the system message
+    # of the first call equals the pre-warm render.
+    _ScriptedProvider.reset([_resp("hi")])
+    generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+    sys_msg = _ScriptedProvider.calls[0]["messages"][0]["text"]
+    assert sys_msg == on
+
+    # The env killswitch empties the section for everyone.
+    app.config["SEMANTIC_SEARCH_AGENTIC"] = False
+    try:
+        killed = _llm_task_mod.render_system_message(system, alice.id)
+        assert "Archive search" not in killed
+        assert "{external_content_guidance}" not in killed
+    finally:
+        app.config["SEMANTIC_SEARCH_AGENTIC"] = True
 
 
 def test_voice_mode_runs_loop(app):
@@ -1581,3 +1683,27 @@ def test_agentic_prompt_already_ending_on_user_turn_is_untouched(app):
     assert msgs[-1]["role"] == "user"
     assert "[continue]" not in msgs[-1]["text"]
     assert sum(1 for m in msgs if m["text"] == "[continue]") == 0
+
+
+def test_render_variant_carries_the_killswitch(app):
+    """The #192 render-cache key must change when the env killswitch
+    flips, not only on the per-user toggles: with the toggle off, both
+    killswitch states read e0 while rendering different text (archive
+    guidance vs nothing), so without the `a` bit an emergency flip would
+    keep serving the cached archive-search guidance for the TTL."""
+    alice, *_ = _build_chain("textmode")
+    alice.external_content_enabled = False
+    _db.session.commit()
+    on = _llm_task_mod._render_variant(alice.id)
+    assert on.startswith("a1") and on.endswith("e0")
+    app.config["SEMANTIC_SEARCH_AGENTIC"] = False
+    try:
+        off = _llm_task_mod._render_variant(alice.id)
+    finally:
+        app.config["SEMANTIC_SEARCH_AGENTIC"] = True
+    assert off.startswith("a0") and off.endswith("e0")
+    assert on != off
+    # And the toggle itself still moves the key.
+    alice.external_content_enabled = True
+    _db.session.commit()
+    assert _llm_task_mod._render_variant(alice.id).endswith("e1")

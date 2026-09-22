@@ -154,19 +154,23 @@ def test_gated_voice_tools_warm_matches_generation():
     # divergence here (warm keeping semantic_search while generation drops it)
     # silently busts the whole cache — that was the read=0 bug.
     names = lambda ts: [t["name"] for t in ts]  # noqa: E731
-    # search_enabled is the per-user opt-in (#208), resolved by the caller
-    # via _agentic_search_enabled — user toggle under the env killswitch.
-    off = gated_voice_tools({}, search_enabled=False)
-    on = gated_voice_tools({}, search_enabled=True)
-    assert "semantic_search" not in names(off)        # user opted out
-    assert "semantic_search" in names(on)             # user opted in
+    # Own-archive search is on for everyone (#329): the search tools are in
+    # the default list, gated only by the SEMANTIC_SEARCH_AGENTIC killswitch
+    # — never by the per-user "External references" toggle, which acts
+    # inside the handler so the tool prefix is identical across users.
+    default = gated_voice_tools({})
+    assert "semantic_search" in names(default)
+    assert "read_full" in names(default)
+    killed = gated_voice_tools({"SEMANTIC_SEARCH_AGENTIC": False})
+    assert "semantic_search" not in names(killed)
+    assert "read_full" not in names(killed)
+    assert "read_artifact" in names(killed)
     # With everything enabled, the full tool list is exposed.
-    all_on = gated_voice_tools({"SHARE_V1": True}, search_enabled=True)
+    all_on = gated_voice_tools({"SHARE_V1": True})
     assert names(all_on) == names(VOICE_TOOLS)
-    assert names(gated_voice_tools({})) == names(off)  # default == no search
     # Identical inputs -> identical list for both call sites (the invariant).
     cfg = {"SHARE_V1": False}
-    assert gated_voice_tools(cfg, True) == gated_voice_tools(cfg, True)
+    assert gated_voice_tools(cfg) == gated_voice_tools(cfg)
 
 
 def test_api_cost_log_persists_cache_breakdown(app):
@@ -233,6 +237,17 @@ def test_render_cache_roundtrip_and_key_busting(app, monkeypatch):
         from datetime import datetime
         node.updated_at = datetime(2030, 1, 1)
         _db.session.commit()
+        assert prompt_cache.get_cached_render(app.config, node) is None
+
+        # The render variant (killswitch + share / external-references gates,
+        # #329) is part of the key: a toggle flip mid-thread takes a fresh
+        # key instead of serving the stale render for the rest of the TTL.
+        prompt_cache.store_render(app.config, node, "no refs", "a1s0e0")
+        prompt_cache.store_render(app.config, node, "with refs", "a1s0e1")
+        assert prompt_cache.get_cached_render(
+            app.config, node, "a1s0e0") == "no refs"
+        assert prompt_cache.get_cached_render(
+            app.config, node, "a1s0e1") == "with refs"
         assert prompt_cache.get_cached_render(app.config, node) is None
 
 

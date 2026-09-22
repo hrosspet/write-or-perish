@@ -1,8 +1,15 @@
 """Embedding generation + similarity for semantic search (#155).
 
-Vectors are packed float32 blobs (stdlib struct/array — no numpy, no
-pgvector). Cosine similarity is brute-force in Python: at alpha scale
-(thousands of nodes x 1536 dims) a full scan is tens of milliseconds.
+Vectors are packed float32 blobs (stdlib array — no pgvector). Similarity
+is a brute-force cosine scan over the user's rows, done in numpy in
+fixed-size chunks with a running top-k, so the cost is bounded by the
+chunk, not the archive: a 62k-node archive scores in ~0.2 s with a
+~40 MB peak (12 MB of blobs plus the float64 working copy), where the
+previous pure-Python loop took ~8.6 s and held all 382 MB of blobs in
+the worker (#330 review; prod's largest archives are Twitter pre-fills
+of that size). Callers stream rows with
+.yield_per(EMBEDDING_SCAN_CHUNK) so the DB driver does not buffer the
+whole result set either. pgvector is the destination (#331).
 
 Embedding calls use the OpenAI chat key (retrieval is 'chat' usage) and
 log cost to APICostLog like every other provider call.
@@ -11,6 +18,8 @@ import hashlib
 import logging
 import math
 from array import array
+
+import numpy as np
 
 from backend.extensions import db
 from backend.models import APICostLog
@@ -46,6 +55,8 @@ def unpack_vector(blob):
 
 
 def cosine_similarity(a, b):
+    """Reference scalar cosine (pure Python). top_k_similar is the scan;
+    this stays as the definition it is tested against."""
     dot = 0.0
     norm_a = 0.0
     norm_b = 0.0
@@ -103,18 +114,75 @@ def embed_texts(texts, api_key, user_id=None, request_type="embedding"):
     return [item.embedding for item in response.data]
 
 
-def top_k_similar(query_vector, rows, k=10, min_score=0.0):
-    """Score (node_id, vector_blob) rows against *query_vector*.
+# Rows scored per numpy chunk. 2000 x 1536 float32 = 12 MB of blobs resident
+# at a time (plus a float64 copy for the dot product, ~24 MB). Callers pass
+# the same number to .yield_per() so the DB cursor streams in step with the
+# scoring instead of buffering the whole archive client-side first.
+EMBEDDING_SCAN_CHUNK = 2000
 
-    Returns [(node_id, score)] sorted desc, filtered by *min_score*.
+
+def top_k_similar(query_vector, rows, k=10, min_score=0.0):
+    """Score (id, vector_blob) rows against *query_vector*; return the top
+    *k* as [(id, score)] sorted desc, filtered by *min_score*.
+
+    *rows* is any iterable of (id, blob) pairs — a list, or a
+    `.yield_per(EMBEDDING_SCAN_CHUNK)` query — consumed one chunk at a
+    time with a running top-k, so memory is bounded by the chunk, not
+    the archive. Ties keep row order (stable), as the old global sort did.
+
+    Two deliberate choices (#330 review):
+    * Rows whose blob is not *query_vector*'s dimension are SKIPPED. The
+      old zip()-based loop silently truncated to the shorter vector and
+      produced a garbage score that could outrank real matches; a row
+      embedded under a different model is better missing than wrong, and
+      the sweep re-embeds it on its next pass.
+    * The dot product accumulates in float64, as the Python loop did, so
+      scores match the previous implementation to rounding and a match
+      sitting on the min_score boundary does not flip.
     """
-    scored = []
-    for node_id, blob in rows:
-        score = cosine_similarity(query_vector, unpack_vector(blob))
-        if score >= min_score:
-            scored.append((node_id, score))
-    scored.sort(key=lambda pair: pair[1], reverse=True)
-    return scored[:k]
+    query = np.asarray(query_vector, dtype=np.float64).ravel()
+    q_norm = float(np.linalg.norm(query))
+    if k <= 0 or query.size == 0 or q_norm == 0.0:
+        return []
+    dim = query.size
+    blob_len = dim * 4  # float32
+    best = []  # running top-k [(id, score)], sorted desc
+    ids, blobs = [], []
+    skipped = 0
+
+    def flush():
+        if not ids:
+            return
+        mat = np.frombuffer(b"".join(blobs), dtype=np.float32)
+        mat = mat.reshape(len(ids), dim).astype(np.float64)
+        norms = np.sqrt(np.einsum("ij,ij->i", mat, mat))
+        scores = np.zeros(len(ids))
+        # Zero-norm rows score 0.0, as cosine_similarity returns.
+        np.divide(mat @ query, norms * q_norm, out=scores, where=norms > 0)
+        keep = np.flatnonzero(scores >= min_score)
+        if keep.size > k:
+            keep = keep[np.argsort(-scores[keep], kind="stable")[:k]]
+            keep.sort()
+        best.extend((ids[i], float(scores[i])) for i in keep)
+        best.sort(key=lambda pair: pair[1], reverse=True)
+        del best[k:]
+        ids.clear()
+        blobs.clear()
+
+    for row_id, blob in rows:
+        if len(blob) != blob_len:
+            skipped += 1
+            continue
+        ids.append(row_id)
+        blobs.append(blob)
+        if len(ids) >= EMBEDDING_SCAN_CHUNK:
+            flush()
+    flush()
+    if skipped:
+        logger.warning(
+            "top_k_similar: skipped %d rows whose vector is not %d-dim "
+            "(embedded under another model?)", skipped, dim)
+    return best
 
 
 def retrieve_relevant_snippets(user_id, query_text, exclude_node_ids,
@@ -136,12 +204,14 @@ def retrieve_relevant_snippets(user_id, query_text, exclude_node_ids,
             request_type="embedding_query",
         )[0]
 
+    # Streamed, not .all(): with stream_results psycopg2 uses a server-side
+    # cursor, so neither the driver nor the scan holds the whole archive.
     rows = db.session.query(
         NodeEmbedding.node_id, NodeEmbedding.vector
     ).filter(
         NodeEmbedding.user_id == user_id,
         ~NodeEmbedding.node_id.in_(exclude_node_ids or [-1]),
-    ).all()
+    ).yield_per(EMBEDDING_SCAN_CHUNK)
 
     ranked = top_k_similar(query_vector, rows, k=k, min_score=min_score)
     if not ranked:
@@ -178,9 +248,9 @@ def retrieve_relevant_references(user_id, query_vector, k=4, min_score=0.35,
 
     rows = db.session.query(
         ExternalItemEmbedding.item_id, ExternalItemEmbedding.vector
-    ).filter(ExternalItemEmbedding.user_id == user_id).all()
-    if not rows:
-        return []
+    ).filter(
+        ExternalItemEmbedding.user_id == user_id,
+    ).yield_per(EMBEDDING_SCAN_CHUNK)
 
     ranked = top_k_similar(query_vector, rows, k=k, min_score=min_score)
     if not ranked:

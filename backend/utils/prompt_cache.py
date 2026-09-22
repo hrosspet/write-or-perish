@@ -8,9 +8,13 @@ reuse the exact bytes on subsequent turns. Reusing identical bytes also
 guarantees the byte-stable prefix that provider-side prompt caching
 (#187) requires — re-rendering each turn risks subtle nondeterminism.
 
-Write-once per (node_id, updated_at): one-off prompt edits change
-updated_at and so naturally take a fresh key. TTL bounds growth; an
-expired entry just means one re-render.
+Write-once per (node_id, updated_at, variant): one-off prompt edits
+change updated_at and so naturally take a fresh key. *variant* folds in
+the per-user gates that change the rendered text without touching the
+node (the share and external-references guidance toggles, #329), so a
+toggle flip mid-thread takes a fresh key instead of serving the stale
+render for the rest of the TTL. TTL bounds growth; an expired entry just
+means one re-render.
 """
 import logging
 
@@ -29,19 +33,20 @@ def _client(config):
         url, socket_connect_timeout=2, socket_timeout=2)
 
 
-def _key(node):
+def _key(node, variant=""):
     stamp = (node.updated_at or node.created_at)
-    return f"{_KEY_PREFIX}{node.id}:{stamp.isoformat() if stamp else '0'}"
+    return (f"{_KEY_PREFIX}{node.id}:"
+            f"{stamp.isoformat() if stamp else '0'}:{variant}")
 
 
-def get_cached_render(config, node):
-    """Return the cached rendered text for *node*, or None.
+def get_cached_render(config, node, variant=""):
+    """Return the cached rendered text for *node* under *variant*, or None.
 
     Any Redis/decrypt failure degrades to a cache miss — the caller
     re-renders as before #192.
     """
     try:
-        blob = _client(config).get(_key(node))
+        blob = _client(config).get(_key(node, variant))
         if blob is None:
             return None
         return decrypt_content(blob.decode("utf-8"))
@@ -51,11 +56,11 @@ def get_cached_render(config, node):
         return None
 
 
-def store_render(config, node, rendered_text):
+def store_render(config, node, rendered_text, variant=""):
     """Store the rendered text (encrypted). Failures are non-fatal."""
     try:
         _client(config).setex(
-            _key(node), CACHE_TTL_SECONDS,
+            _key(node, variant), CACHE_TTL_SECONDS,
             encrypt_content(rendered_text).encode("utf-8"),
         )
     except Exception:

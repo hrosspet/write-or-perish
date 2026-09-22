@@ -100,8 +100,8 @@ from backend.utils.share_guidance import (  # noqa: E402
     SHARE_GUIDANCE_PLACEHOLDER, SHARE_GUIDANCE_TEXT, share_enabled_for_user,
 )
 from backend.utils.external_guidance import (
-    EXTERNAL_GUIDANCE_PLACEHOLDER, EXTERNAL_GUIDANCE_TEXT,
-    external_content_enabled_for_user,
+    EXTERNAL_GUIDANCE_PLACEHOLDER, archive_search_enabled,
+    render_external_guidance, external_references_enabled_for_user,
 )
 
 
@@ -109,8 +109,30 @@ def _share_enabled_for_user(user_id):
     return share_enabled_for_user(flask_app.config, user_id)
 
 
-def _external_enabled_for_user(user_id):
-    return external_content_enabled_for_user(flask_app.config, user_id)
+def _external_references_for_user(user_id):
+    """Whether semantic_search also returns the user's saved external
+    references (Account "External references" toggle under the env
+    killswitch, #329). Own-archive search has no per-user gate."""
+    return external_references_enabled_for_user(flask_app.config, user_id)
+
+
+def _external_guidance_for_user(user_id):
+    return render_external_guidance(flask_app.config, user_id)
+
+
+def _render_variant(user_id):
+    """Key suffix for the #192 render cache: every gate that changes the
+    rendered system text without touching the node — the env killswitch
+    (a) and the per-user share (s) / external-references (e) toggles. A
+    flip mid-thread then takes a fresh key instead of serving the stale
+    render for up to the cache TTL (#329 caveat). The `a` bit matters on
+    its own: "killswitch off" and "toggle off, killswitch on" both read
+    e0 while rendering different text, so without it an emergency flip
+    would keep serving the archive-search guidance for the TTL, telling
+    the model to use a tool that left the list on the same restart."""
+    return (f"a{int(archive_search_enabled(flask_app.config))}"
+            f"s{int(_share_enabled_for_user(user_id))}"
+            f"e{int(_external_references_for_user(user_id))}")
 USER_ARTIFACTS_INDEX_PLACEHOLDER = "{user_artifacts_index}"
 
 # Within-turn retrieval loop (#158, text mode only). When the model calls one
@@ -417,9 +439,10 @@ VOICE_TOOLS = [
         "name": "semantic_search",
         "description": (
             "Search the user's own archive — all their past entries plus "
-            "your past replies — AND their saved external references "
-            "(imported tweets and bookmarks) by meaning, not keywords. Use "
-            "it when the conversation touches something they've likely "
+            "your past replies — by meaning, not keywords; when they have "
+            "saved external references (imported tweets, bookmarks, "
+            "clipped pages), the same search covers those too. Use it "
+            "when the conversation touches something they've likely "
             "written about before, or when they ask about something they "
             "saved ('I bookmarked something about this'), or when a saved "
             "reference would genuinely serve the current thread. Pass a "
@@ -435,17 +458,18 @@ VOICE_TOOLS = [
             "lookup. When you quote, say "
             "in your own words why it's relevant to what the user is "
             "saying right now — the quote plus your reasoning is the "
-            "response, not a link dump. Reference previews show how often "
-            "each was already surfaced; weigh that yourself — re-quoting "
-            "something recently shown needs a good reason. Some previews "
-            "also carry 'marked read by the user': only the user can set "
-            "that mark, by hand, so it means they have actually read the "
-            "reference — build on it as shared ground rather than "
+            "response, not a link dump. When a preview carries surfacing "
+            "history (how often it was already shown), weigh it yourself — "
+            "re-quoting something recently shown needs a good reason. When "
+            "a preview carries 'marked read by the user': only the user "
+            "can set that mark, by hand, so it means they have actually "
+            "read it — build on it as shared ground rather than "
             "introducing it as new. You can refine "
             "and search again if the previews miss, and quoting nothing is "
             "always fine. Labels are your private triage handles: use them "
-            "only inside {quote:...} markers — in prose, refer to items by "
-            "author or content ('the @visa thread'), never by label. "
+            "only inside {quote:...} markers — in prose, refer to matches "
+            "by content or author ('that entry about the garden', 'the "
+            "@visa thread'), never by label. "
             "Tell the user you're checking their archive; "
             "don't search for things already in your context. Always "
             "produce a text response alongside the call."
@@ -538,20 +562,22 @@ VOICE_TOOLS = [
 ]
 
 
-def gated_voice_tools(config, search_enabled=False):
+def gated_voice_tools(config):
     """The agentic voice tool list, with gated tools filtered out:
-    ``semantic_search`` unless *search_enabled* (per-user opt-in resolved
-    via _external_enabled_for_user) and ``apply_share`` behind ``SHARE_V1``
-    (Upload v1).
+    ``semantic_search`` + ``read_full`` behind the ``SEMANTIC_SEARCH_AGENTIC``
+    env killswitch (on for every user otherwise — own-archive search is
+    not a per-user opt-in, #329; the "External references" toggle only
+    decides whether the search ALSO returns saved references, inside the
+    handler) and ``apply_share`` behind ``SHARE_V1`` (Upload v1).
 
     Shared by BOTH generation and the #187 pre-warm so their tool prefix is
     byte-identical: tools sit at the front of the Anthropic cache prefix, so
     any divergence here silently busts the whole cache — the warm writes a
     tool set generation never reads (observed as read=0 with the warm
-    keeping semantic_search while generation dropped it). Both callers must
-    resolve *search_enabled* for the SAME user."""
+    keeping semantic_search while generation dropped it). The list depends
+    on config only, so the two callers cannot diverge."""
     dropped = set()
-    if not search_enabled:
+    if not config.get("SEMANTIC_SEARCH_AGENTIC", True):
         dropped.add("semantic_search")
         dropped.add("read_full")
     if not config.get("SHARE_V1", False):
@@ -1652,6 +1678,13 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                             previous.id if previous else None)
 
             elif name == "read_artifact":
+                # Any readable kind, including 'external_digest' — the
+                # saved-references topic map is NOT gated by the "External
+                # references" toggle, unlike semantic_search's reference
+                # matches and read_full on an external label. It is the
+                # user's own data, so nothing leaks; the guidance only
+                # points users with the toggle on at the digest. Known
+                # asymmetry (#330 review), left as is.
                 kind = (inp.get("kind") or "").strip().lower()
                 artifact = UserArtifact.latest_for(user_id, kind)
                 if artifact is None or artifact.ai_usage not in AI_ALLOWED:
@@ -1715,15 +1748,19 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                                 "RAG_MIN_SCORE", 0.35),
                             query_vector=query_vector,
                         )
-                        # Saved external references (tweets/bookmarks) rank
-                        # against the same query embedding — one embed call
-                        # covers both corpora.
-                        references = retrieve_relevant_references(
-                            user_id, query_vector,
-                            k=flask_app.config.get("RAG_TOP_K", 4),
-                            min_score=flask_app.config.get(
-                                "RAG_MIN_SCORE", 0.35),
-                        )
+                        # Saved external references (tweets/bookmarks/clips)
+                        # rank against the same query embedding — one embed
+                        # call covers both corpora — but only for users with
+                        # the "External references" toggle on (#329); for
+                        # everyone else the search is own-archive only.
+                        references = []
+                        if _external_references_for_user(user_id):
+                            references = retrieve_relevant_references(
+                                user_id, query_vector,
+                                k=flask_app.config.get("RAG_TOP_K", 4),
+                                min_score=flask_app.config.get(
+                                    "RAG_MIN_SCORE", 0.35),
+                            )
                         result["status"] = "success"
                         result["query"] = query
                         result["matches"] = [
@@ -1752,6 +1789,15 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                     result["error"] = (
                         f"Unknown reference {ref!r} — pass a label from "
                         "this turn's search results or a numeric entry id.")
+                elif (target[0] == "external"
+                        and not _external_references_for_user(user_id)):
+                    # Defense in depth (#329): a search never hands out an
+                    # external label to a user without the toggle, so this
+                    # only fires on a stale/forged label.
+                    result["status"] = "error"
+                    result["error"] = (
+                        "Saved external references are not enabled for "
+                        "this user.")
                 else:
                     result["status"] = "success"
                     result["kind"], result["ref_id"] = target
@@ -2506,8 +2552,7 @@ def render_system_message(system_node, user_id):
     if EXTERNAL_GUIDANCE_PLACEHOLDER in text:
         text = text.replace(
             EXTERNAL_GUIDANCE_PLACEHOLDER,
-            EXTERNAL_GUIDANCE_TEXT
-            if _external_enabled_for_user(user_id) else "")
+            _external_guidance_for_user(user_id))
     return text
 
 
@@ -2552,10 +2597,13 @@ def prewarm_anthropic_cache(system_node_id, user_id, model_id,
             from backend.utils.prompt_cache import (
                 get_cached_render, store_render,
             )
-            sys_text = get_cached_render(flask_app.config, system_node)
+            render_variant = _render_variant(user_id)
+            sys_text = get_cached_render(
+                flask_app.config, system_node, render_variant)
             if sys_text is None:
                 sys_text = render_system_message(system_node, user_id)
-                store_render(flask_app.config, system_node, sys_text)
+                store_render(flask_app.config, system_node, sys_text,
+                             render_variant)
 
             key_type = determine_api_key_type([system_node], logger=logger)
             api_keys = get_api_keys_for_usage(flask_app.config, key_type)
@@ -2590,11 +2638,8 @@ def prewarm_anthropic_cache(system_node_id, user_id, model_id,
                 api_keys["anthropic"],
                 max_tokens=1,
                 # SAME gated tool list generation uses, or the cached tool
-                # prefix won't match and generation can't read the warm (#187)
-                # — including the per-user search opt-in.
-                tools=gated_voice_tools(
-                    flask_app.config,
-                    search_enabled=_external_enabled_for_user(user_id)),
+                # prefix won't match and generation can't read the warm (#187).
+                tools=gated_voice_tools(flask_app.config),
             )
             cache_write = response.get("cache_creation_input_tokens", 0)
             db.session.add(APICostLog(
@@ -2889,9 +2934,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     and not has_quotes(_sys_text)
                     and not has_ext_quotes(_sys_text)
                 )
+                render_variant = _render_variant(user_id)
                 if system_render_cacheable:
                     cached_system_render = get_cached_render(
-                        flask_app.config, system_node)
+                        flask_app.config, system_node, render_variant)
 
             def _placeholder_node(placeholder):
                 for n in node_chain:
@@ -2990,16 +3036,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             # Detect if this is an agentic session (enables tools)
             is_agentic = _is_agentic_prompt(node_chain)
-            # semantic_search is per-user opt-in (#208): the Account toggle
-            # (external_content_enabled) under the env killswitch. (Manual
-            # Cmd+K search is unaffected — separate HTTP endpoint.) The
-            # pre-warm resolves the SAME per-user flag so the cached tool
-            # prefix matches (#187). agentic_search_on also gates the
-            # within-turn quote pull-in-full below.
-            agentic_search_on = _external_enabled_for_user(user_id)
+            # semantic_search / read_full are on for everyone under the env
+            # killswitch (#329); the "External references" Account toggle
+            # only decides, inside the handler, whether the search also
+            # returns saved references. The pre-warm builds the same
+            # config-only list so the cached tool prefix matches (#187).
             agentic_tools = (
-                gated_voice_tools(flask_app.config,
-                                  search_enabled=agentic_search_on)
+                gated_voice_tools(flask_app.config)
                 if is_agentic else None)
 
             # Check for pending drafts and inject context notes
@@ -3412,9 +3455,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         if EXTERNAL_GUIDANCE_PLACEHOLDER in message_text:
                             message_text = message_text.replace(
                                 EXTERNAL_GUIDANCE_PLACEHOLDER,
-                                EXTERNAL_GUIDANCE_TEXT
-                                if _external_enabled_for_user(user_id)
-                                else ""
+                                _external_guidance_for_user(user_id)
                             )
                         # Resolve {quote:ID} placeholders if present
                         if needs_quotes and has_quotes(message_text):
@@ -3460,7 +3501,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 and cached_system_render is None
                                 and attempt == 0):
                             store_render(
-                                flask_app.config, system_node, message_text)
+                                flask_app.config, system_node, message_text,
+                                render_variant)
                     if role == "assistant":
                         last_assistant_index = len(messages)
                     messages.append({
