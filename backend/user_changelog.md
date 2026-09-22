@@ -20,6 +20,15 @@ Authoring rules:
   get their section in the commit that turns them ON, not at merge.
 -->
 
+<!-- id: claude-opus-5-5 -->
+## 2026-09-22 — A new model to talk to: Claude Opus 5.5
+
+Claude Opus 5.5 is now available in Loore — pick it in the [Account page](/account#model)'s model selector.
+
+It's Anthropic's newest model and currently the best model for knowledge work, ahead of Claude Fable 5.1 and GPT-6 Astra. It should communicate more naturally than earlier models: its writing is clearer and easier to follow. On the side, it answers faster than Claude Opus 5 and costs less to run.
+
+Anthropic's announcement: [Introducing Claude Opus 5.5](https://www.anthropic.com/claude-opus-5-5).
+
 <!-- id: claude-opus-5 -->
 ## 2026-07-24 — A new model to talk to: Claude Opus 5
 
