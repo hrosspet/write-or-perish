@@ -11,8 +11,8 @@ from flask import current_app
 # cache reads bill at 0.1x, cache writes at 1.25x — the same write
 # premium on both providers (Anthropic 5-min TTL creation; OpenAI
 # GPT-5.6+ cache writes). A model entry may override either via
-# "cache_read_multiplier" (Fable 5.1 reads at 0.025x per the Anthropic
-# pricing page) / "cache_write_multiplier".
+# "cache_read_multiplier" (Fable 5.1 reads at 0.025x, Opus 5.5 at 0.05x,
+# per the Anthropic pricing page) / "cache_write_multiplier".
 CACHE_READ_MULTIPLIER = 0.1
 CACHE_WRITE_MULTIPLIER = 1.25
 
