@@ -51,9 +51,11 @@ class User(db.Model, UserMixin):
         db.Boolean, nullable=False, default=False,
         server_default=db.text("false"))
 
-    # Per-user opt-in to agentic archive search + external references
-    # (#208 quote-as-response): the semantic_search tool, quoting, and the
-    # saved-references digest. Ships as an Account easter-egg toggle,
+    # Per-user opt-in to SAVED EXTERNAL REFERENCES in agentic search
+    # (#208 quote-as-response): whether semantic_search also returns
+    # imported tweets / bookmarks / clipped pages, the references guidance
+    # paragraph, and the Chrome clipper. Own-archive search is on for
+    # everyone (#329) and is not gated here. Ships as an Account toggle,
     # default OFF (same activation pattern as public_sharing_enabled).
     # SEMANTIC_SEARCH_AGENTIC (env) remains only as an emergency
     # killswitch, defaulting true.

@@ -154,9 +154,10 @@ def get_dashboard():
                 current_app.config.get("SHARE_V1", False)),
             "public_sharing_enabled": bool(
                 current_user.public_sharing_enabled),
-            # Archive search + saved references (#208): available = the
-            # env killswitch is on (decides whether Account shows the
-            # toggle); enabled = the user's own easter-egg opt-in.
+            # Saved external references (#208/#329): available = the env
+            # killswitch is on (decides whether Account shows the toggle);
+            # enabled = the user's own opt-in. Own-archive search is on for
+            # everyone under the same killswitch and has no toggle.
             "external_content_available": bool(
                 current_app.config.get("SEMANTIC_SEARCH_AGENTIC", True)),
             "external_content_enabled": bool(

@@ -20,6 +20,15 @@ Authoring rules:
   get their section in the commit that turns them ON, not at merge.
 -->
 
+<!-- id: archive-search-for-everyone -->
+## 2026-09-22 — Loore can now search your archive in every conversation
+
+Loore can now search your own archive by meaning in the middle of a conversation. Ask "have I written about this before?" or "what did we say about this in that earlier thread?" and it pulls the matching entries back in and quotes them — even from a fresh thread that never mentioned them.
+
+This was previously hidden behind the "External content" setting, so anyone who had never imported a tweet or bookmark never saw it. It is now on for everyone, with no setting to flip.
+
+That switch has been renamed [External references](/account#references) and now does one thing only: it decides whether the same search also covers your saved external references — imported tweets, bookmarks and clipped web pages.
+
 <!-- id: claude-opus-5 -->
 ## 2026-07-24 — A new model to talk to: Claude Opus 5
 
