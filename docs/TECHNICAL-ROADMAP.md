@@ -252,7 +252,7 @@ Users have a `plan` column (string, max 16 chars) on the User model. The plan co
 
 ## Feature 2: Download (MemeOS Integration)
 
-> **✅ SHIPPED as quote-as-response (#208, 2026-07-03)** — reframed away from MemeOS + sidebar recommendations; see the Already Built entry and FOUR-FEATURE-ECOSYSTEM.md Feature 2 for the shipped shape. Item statuses below: embeddings/semantic search/RAG ✅ (via #155/#197/#208, brute-force scan not pgvector — fine at alpha scale); MemeOS client ❌ dropped; recommendation engine ✅ superseded by quote-as-response; theme extraction ✅ as the `external_digest` artifact; spaced-repetition ranking ❌ replaced by legible age/surfacing metadata + prompt instruction (no hidden 70/30 fudge).
+> **✅ SHIPPED as quote-as-response (#208, 2026-07-03)** — reframed away from MemeOS + sidebar recommendations; see the Already Built entry and FOUR-FEATURE-ECOSYSTEM.md Feature 2 for the shipped shape. Item statuses below: embeddings/semantic search/RAG ✅ (via #155/#197/#208; #329/#330 turned own-archive search on for everyone and bounded the scan to chunked numpy with streamed rows — 62k-node archive ≈0.2 s CPU / 37 MB peak; the remaining cost is pulling the vectors out of Postgres, which is #331 pgvector); MemeOS client ❌ dropped; recommendation engine ✅ superseded by quote-as-response; theme extraction ✅ as the `external_digest` artifact; spaced-repetition ranking ❌ replaced by legible age/surfacing metadata + prompt instruction (no hidden 70/30 fudge).
 
 **Vector database with pgvector extension** - Store and query embeddings for semantic search over nodes and bookmarks, enabling 10ms similarity searches at scale
 
