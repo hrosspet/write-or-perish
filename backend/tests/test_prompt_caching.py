@@ -127,6 +127,27 @@ def test_cost_cache_read_multiplier_override(app):
             "claude-fable-5", 0, 0, cache_read_tokens=1_000_000) == 1_000_000
 
 
+
+def test_cost_opus_5_5_from_real_config():
+    # Reads the real config entry (not a mirror) so a pricing edit there
+    # is checked against the pricing page figures verified 2026-09-22:
+    # $4 in / $20 out, cache hits $0.20 (0.05x), 5m writes $5 (1.25x),
+    # batch half price.
+    from backend.config import Config
+    app = Flask(__name__)
+    app.config["SUPPORTED_MODELS"] = {
+        "claude-opus-5.5": Config.SUPPORTED_MODELS["claude-opus-5.5"]}
+    with app.app_context():
+        cost = calculate_llm_cost_microdollars
+        assert cost("claude-opus-5.5", 1_000_000, 0) == 4_000_000
+        assert cost("claude-opus-5.5", 0, 1_000_000) == 20_000_000
+        assert cost("claude-opus-5.5", 0, 0,
+                    cache_read_tokens=1_000_000) == 200_000
+        assert cost("claude-opus-5.5", 0, 0,
+                    cache_write_tokens=1_000_000) == 5_000_000
+        assert cost("claude-opus-5.5", 1_000_000, 1_000_000,
+                    batch=True) == 12_000_000
+
 def test_gated_voice_tools_warm_matches_generation():
     # The pre-warm and generation BOTH build their tool list via
     # gated_voice_tools, so the cached tool prefix is byte-identical. A

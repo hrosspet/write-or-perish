@@ -118,15 +118,15 @@ class Config:
     # Sources:
     #   Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
     #   OpenAI:    https://developers.openai.com/api/docs/pricing
-    PRICING_VERSION = "5"
-    PRICING_UPDATED_AT = "2026-09-03"
+    PRICING_VERSION = "6"
+    PRICING_UPDATED_AT = "2026-09-22"
 
     # Supported models configuration (single source of truth for all model metadata)
     #
     # Profile-chunk sizing keys (docs/design/chunk-planner.md):
     #   tokenizer_family  — which BPE the model bills with: "claude_old"
     #                       (Opus ≤ 4.6, Sonnet 4.6, Haiku 4.5), "claude_new"
-    #                       (introduced with Opus 4.7: Opus 4.7/4.8/5, Sonnet 5,
+    #                       (introduced with Opus 4.7: Opus 4.7/4.8/5/5.5, Sonnet 5,
     #                       Fable 5/5.1; 1.0–1.35× the old family), "o200k"
     #                       (GPT-5.x; tiktoken o200k_base matches billing).
     #                       Chunk balance is in stored content units and does
@@ -270,6 +270,21 @@ class Config:
             "context_window": 1000000,
             "input_price_per_mtok": 3.00,
             "output_price_per_mtok": 15.00,
+        },
+        "claude-opus-5.5": {
+            "tokenizer_family": "claude_new",
+            "provider": "anthropic",
+            "api_model": "claude-opus-5-5",
+            "display_name": "Claude Opus 5.5",
+            "context_window": 1000000,
+            # Verified 2026-09-22 on the Anthropic pricing page: $4/$20,
+            # 5m cache writes $5 (the standard 1.25x), batch 50%, flat
+            # pricing across the 1M window.
+            "input_price_per_mtok": 4.00,
+            "output_price_per_mtok": 20.00,
+            # Cache hits on Opus 5.5 bill at 0.05x base input ($0.20/MTok),
+            # not the standard 0.1x.
+            "cache_read_multiplier": 0.05,
         },
         "claude-opus-5": {
             "tokenizer_family": "claude_new",
