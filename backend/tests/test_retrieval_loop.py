@@ -76,6 +76,9 @@ class _ScriptedProvider:
                 for m in messages
             ],
             "tools": tools,
+            # The keys this call went out on (#325: the training key
+            # never carries content the chain did not license).
+            "api_keys": api_keys,
         })
         nxt = cls.responses.pop(0)
         # A queued Exception is raised (e.g. to drive a PromptTooLong on the

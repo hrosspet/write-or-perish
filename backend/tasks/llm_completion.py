@@ -43,7 +43,9 @@ from backend.utils.session_helpers import (
     chain_has_agentic_prompt, strip_agentic_prompts,
 )
 from backend.utils.timefmt import local_stamp, strip_edge_timestamps
-from backend.utils.api_keys import determine_api_key_type, get_api_keys_for_usage
+from backend.utils.api_keys import (
+    determine_api_key_type, get_api_keys_for_usage, PayloadLicence,
+)
 from backend.utils.cost import llm_cost_log_fields
 from backend.utils.llm_batch import BatchItemFailed, BatchItemCancelled
 from backend.utils.ca_feed import (
@@ -850,12 +852,21 @@ def _detect_share_proposal(text):
     return any(h == 'share' for h in headings)
 
 
-def _retrieval_injection_text(tr, with_labels=False):
+def _retrieval_injection_text(tr, with_labels=False, licence=None):
     """Build the context-injection string for a successful retrieval tool
     result (read_artifact / read_todo / semantic_search), re-resolving the
     content fresh from the source row — content is never stored in
     tool_calls_meta. Re-checks ai_usage so a mid-session opt-out is honored.
     Returns None if nothing is (still) available.
+
+    Everything returned here enters the payload after the chain decided
+    the API key, so a pull reports to *licence* (a PayloadLicence, #325):
+    a node by its own ai_usage, a saved reference as other people's
+    writing. The user's own artifacts and todo list do not report: the
+    same rows reach the payload through the prompt's placeholders without
+    a vote, and every writer stamps an artifact 'chat' whatever the user's
+    default, so one decision has to cover both doors (#326). None skips
+    the report (callers that only render the text).
 
     *with_labels* renders each search match's short quote label ([A], [B])
     and tells the model to quote by label — only valid within the turn that
@@ -884,12 +895,16 @@ def _retrieval_injection_text(tr, with_labels=False):
         if kind == "external":
             q_text, resolved = resolve_ext_quotes(
                 "{quote_ext:%d}" % ref_id, reader_id, for_llm=True)
+            if licence is not None:
+                licence.note_external(resolved, what="read reference")
         else:
             reader = User.query.get(reader_id)
             q_text, resolved = resolve_quotes(
                 "{quote:%d}" % ref_id, reader_id, for_llm=True,
                 max_depth=QUOTE_PULL_DEPTH,
                 tz_name=reader.timezone if reader else None)
+            if licence is not None:
+                licence.note_nodes(resolved, what="read entry")
         if not resolved:
             return None
         if len(q_text) > MAX_QUOTE_PULL_CHARS:
@@ -921,6 +936,8 @@ def _retrieval_injection_text(tr, with_labels=False):
             pct = f" · {round(score * 100)}%" if score is not None else ""
             tag = (f"[{m['label']}] " if with_labels and m.get("label")
                    else "")
+            if licence is not None:
+                licence.note_usage(node.ai_usage, f"entry {node.id} preview")
             lines.append(
                 f"- {tag}entry {node.id} · {stamp}{pct}: {snippet}")
         # Saved external references (imported tweets/bookmarks), with their
@@ -958,6 +975,8 @@ def _retrieval_injection_text(tr, with_labels=False):
                    else f"reference {item.id} · ")
             author = (f"@{item.author_handle}" if item.author_handle
                       else item.source)
+            if licence is not None:
+                licence.note_external([item.id], what="reference preview")
             lines.append(
                 f"- {tag}saved reference by {author} · "
                 f"{stamp}{pct}{surfaced}: {snippet}")
@@ -1121,7 +1140,9 @@ def _reference_marks_note(item_ids, user_id):
     message. Assistant turns keep their raw {quote_ext:ID} markers (they
     are the model's own output and part of the cached prefix), so this is
     the only place a continued conversation learns whether the user read
-    the pick and how they rated it. Returns None when nothing is marked.
+    the pick and how they rated it. Handles and marks only — no reference
+    text, so nothing here bears on the API key (#325). Returns None when
+    nothing is marked.
     """
     if not item_ids:
         return None
@@ -1156,13 +1177,14 @@ def _reference_marks_note(item_ids, user_id):
     return note + "]"
 
 
-def _scan_proposal_statuses(node_chain):
+def _scan_proposal_statuses(node_chain, licence=None):
     """Walk all nodes and collect proposal/tool status notes to inject.
 
     Refreshes each node from the DB (the merge task may have updated
     tool_calls_meta asynchronously). Returns (notes_list, nodes_to_mark)
     where nodes_to_mark is a list of (node, tool_name) tuples whose
     status_reported flag should be set after a successful LLM call.
+    A retrieval delivered here reports its pull to *licence* (#325).
     """
     notes = []
     to_mark = []
@@ -1225,7 +1247,7 @@ def _scan_proposal_statuses(node_chain):
                 if entry.get("status") == "success":
                     # Re-resolved fresh from the encrypted row — content is
                     # never stored in tool_calls_meta.
-                    text = _retrieval_injection_text(entry)
+                    text = _retrieval_injection_text(entry, licence=licence)
                     if text is not None:
                         notes.append(text)
                 else:
@@ -2426,7 +2448,7 @@ def render_system_message(system_node, user_id):
     real generation share byte-identical prefixes: the result is stored
     in the #192 Redis cache, and generation prefers those cached bytes.
     Only valid for prompts without volatile placeholders ({user_export},
-    {quote:..}) — callers must check first.
+    {quote:..}, {quote_ext:..}) — callers must check first.
     """
     owner = User.query.get(user_id)
     user_tz = owner.timezone if owner and owner.timezone else "UTC"
@@ -2519,7 +2541,8 @@ def prewarm_anthropic_cache(system_node_id, user_id, model_id,
             sys_content = system_node.get_content() or ""
             if (USER_EXPORT_PATTERN.search(sys_content)
                     or CA_TWEETS_PATTERN.search(sys_content)
-                    or has_quotes(sys_content)):
+                    or has_quotes(sys_content)
+                    or has_ext_quotes(sys_content)):
                 return {"status": "skipped", "reason": "volatile_prompt"}
 
             model_config = flask_app.config["SUPPORTED_MODELS"].get(model_id)
@@ -2857,10 +2880,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             if system_node is not None:
                 _sys_text = system_node.get_content() or ""
                 # Exclude prompts carrying per-call volatile placeholders.
+                # A {quote_ext:ID} is volatile too: a cached render would
+                # replay the resolved reference on later turns without
+                # the licence hearing of it (#325 review).
                 system_render_cacheable = (
                     not USER_EXPORT_PATTERN.search(_sys_text)
                     and not CA_TWEETS_PATTERN.search(_sys_text)
                     and not has_quotes(_sys_text)
+                    and not has_ext_quotes(_sys_text)
                 )
                 if system_render_cacheable:
                     cached_system_render = get_cached_render(
@@ -3000,15 +3027,6 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     else:
                         pending_draft_note = issue_note
 
-            # Scan all proposals across the chain for status injection.
-            # Refreshes from DB to pick up async merge updates.
-            proposal_notes = []
-            proposal_to_mark = []
-            if is_agentic:
-                proposal_notes, proposal_to_mark = (
-                    _scan_proposal_statuses(node_chain)
-                )
-
             if needs_export:
                 # Defense-in-depth log only: validate_user_export_placeholders
                 # runs upstream in create_llm_placeholder and aborts the
@@ -3078,7 +3096,24 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     "Node %s: read thread (turn %r); forcing chat keys "
                     "over the chain's %r", llm_node_id, ca_turn, key_type)
                 key_type = 'chat'
+            # That verdict is the chain's. What the chain's text resolves
+            # to — quoted nodes, saved references, what a tool pulls in
+            # mid-turn — joins the payload below and reports here; the
+            # keys are re-read from it before every provider call (#325).
+            licence = PayloadLicence(
+                key_type, logger=logger, label=f"Node {llm_node_id}")
             api_keys = get_api_keys_for_usage(flask_app.config, key_type)
+
+            # Scan all proposals across the chain for status injection.
+            # Refreshes from DB to pick up async merge updates. A
+            # retrieval from last turn is re-resolved into the payload
+            # here, so this runs once the licence exists.
+            proposal_notes = []
+            proposal_to_mark = []
+            if is_agentic:
+                proposal_notes, proposal_to_mark = (
+                    _scan_proposal_statuses(node_chain, licence=licence)
+                )
 
             model_config = flask_app.config["SUPPORTED_MODELS"][model_id]
             provider = model_config["provider"]
@@ -3205,9 +3240,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 # every later turn and must not change
                                 # under the user's hand; they travel in
                                 # the note at the end of the prompt.
-                                message_text, _ = resolve_ext_quotes(
+                                message_text, picked = resolve_ext_quotes(
                                     message_text, user_id, for_llm=True,
                                     marks=False)
+                                licence.note_external(picked)
                         # Tag proposals with node ID for tracking
                         if is_agentic and node.tool_calls_meta:
                             try:
@@ -3386,11 +3422,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 message_text, user_id, for_llm=True, tz_name=user_tz)
                             if resolved_ids:
                                 logger.info(f"Resolved quotes for node IDs: {resolved_ids}")
+                                licence.note_nodes(resolved_ids)
                         # Resolve {quote_ext:ID} (saved references) inline —
                         # small, non-recursive, owner-only.
                         if has_ext_quotes(message_text):
-                            message_text, _ext_ids = resolve_ext_quotes(
+                            message_text, ext_ids = resolve_ext_quotes(
                                 message_text, user_id, for_llm=True)
+                            licence.note_external(ext_ids)
 
                     if (node.id == parent_node_id and not is_llm_node
                             and cache_split_offset
@@ -3547,6 +3585,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 self.update_state(state='PROGRESS', meta={'progress': 40, 'status': 'Generating response'})
                 llm_node.llm_task_progress = 40
                 db.session.commit()
+
+                # The assembled payload may hold what the chain's verdict
+                # never saw (a quoted 'chat' node, a saved reference); the
+                # licence has the last word on the key (#325).
+                if licence.key_type != key_type:
+                    key_type = licence.key_type
+                    api_keys = get_api_keys_for_usage(
+                        flask_app.config, key_type)
 
                 # Log total context being sent
                 total_content = "".join(m["content"][0]["text"] for m in messages if m.get("content"))
@@ -3932,7 +3978,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 injection_strings.append(echo)
                         elif tr.get("status") == "success":
                             text = _retrieval_injection_text(
-                                tr, with_labels=True)
+                                tr, with_labels=True, licence=licence)
                             if text is not None:
                                 injection_strings.append(text)
                                 a_type, a_id = _retrieval_pin(tr)
@@ -4025,6 +4071,15 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
                     current_node = continuation
                     rounds_done += 1
+
+                    # What this round pulled in is in the payload now; the
+                    # continuation goes out on the key the licence says.
+                    # The calls before it carried only what the chain
+                    # licensed and stay as sent (#325).
+                    if licence.key_type != key_type:
+                        key_type = licence.key_type
+                        api_keys = get_api_keys_for_usage(
+                            flask_app.config, key_type)
 
                     self.update_state(state='PROGRESS', meta={
                         'progress': 40,
