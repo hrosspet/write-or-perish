@@ -25,7 +25,7 @@ Authoring rules:
 
 Claude Opus 5.5 is now available in Loore — pick it in the [Account page](/account#model)'s model selector.
 
-It's Anthropic's newest model. On most work it performs at the level of Claude Fable 5.1, the strongest Claude model in Loore. According to Anthropic, it communicates more naturally than earlier models, its writing is clearer and easier to follow, and it answers more than 30% faster than Claude Opus 5. It is also cheaper to run.
+It's Anthropic's newest model and currently the best model for knowledge work, ahead of Claude Fable 5.1 and GPT-6 Astra on Anthropic's published benchmarks. According to Anthropic, it also communicates more naturally than earlier models: its writing is clearer and easier to follow. On the side, it answers faster than Claude Opus 5 and costs less to run.
 
 Anthropic's announcement: [Introducing Claude Opus 5.5](https://www.anthropic.com/claude-opus-5-5).
 
