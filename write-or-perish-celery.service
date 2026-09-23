@@ -16,6 +16,19 @@ ExecStart=/bin/bash -c 'source ~/miniconda3/etc/profile.d/conda.sh && conda acti
 ExecReload=/bin/kill -s HUP $MAINPID
 ExecStop=/bin/kill -s TERM $MAINPID
 
+# On stop/restart (every deploy), SIGTERM only the Celery main process, which
+# then does a warm shutdown: it stops consuming, waits for the pool processes
+# to finish their running tasks, and returns reserved/ETA messages to the
+# queue. The default KillMode=control-group also SIGTERMed the pool processes,
+# and billiard turns that into sys.exit() inside whatever task was running
+# (issue #312, a Read batch lost on 2026-09-17).
+# Whatever is still running after TimeoutStopSec gets SIGKILL, and then the
+# reserved messages come back only after the Redis visibility timeout (1 h).
+# 300 s covers LLM replies, transcription and TTS; imports and profile builds
+# can run longer and are still killed at the timeout.
+KillMode=mixed
+TimeoutStopSec=300
+
 Restart=on-failure
 RestartSec=10s
 
