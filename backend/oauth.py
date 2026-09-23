@@ -16,8 +16,11 @@ class _RequestLocalSessionBlueprint(OAuth1ConsumerBlueprint):
     person's X token. `g` belongs to a single request.
     """
 
+    def _session_key(self):
+        return "_oauth1_session_" + self.name
+
     def _get_session(self):
-        key = "_oauth1_session_" + self.name
+        key = self._session_key()
         session = g.get(key)
         if session is None:
             session = _make_session(self)
@@ -25,9 +28,10 @@ class _RequestLocalSessionBlueprint(OAuth1ConsumerBlueprint):
         return session
 
     def _drop_session(self):
-        # flask-dance's teardown does `del self.session`; `g` goes away with
-        # the request, so there is nothing to drop.
-        pass
+        # flask-dance's teardown (`del self.session`) runs after every
+        # request. `g` normally goes away with the request anyway; popping
+        # also covers an app context that outlives one request (tests).
+        g.pop(self._session_key(), None)
 
     session = property(_get_session, None, _drop_session)
 
