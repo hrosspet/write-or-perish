@@ -76,8 +76,14 @@ def test_overlapping_x_logins_do_not_share_a_token(app, b_has_token):
 def test_overlapping_oauth_callbacks_keep_their_own_verifier(app):
     """Two users return from X at the same moment: each access-token exchange
     must be signed with that browser's own request token and verifier."""
+    from backend.oauth import X_REQUEST_TOKEN_SESSION_KEY
     a = app.test_client()
     b = app.test_client()
+    # Each browser started its own authorization (the #335 callback guard
+    # only lets a session exchange the request token it was sent to X with).
+    for client, req in ((a, "REQ-A"), (b, "REQ-B")):
+        with client.session_transaction() as s:
+            s[X_REQUEST_TOKEN_SESSION_KEY] = req
     state = {"nested": False, "signed": []}
 
     def fake_send(self, prep, **kw):

@@ -107,3 +107,49 @@ test('Remove email calls the removal route', async () => {
   await screen.findByText(/Email removed/);
   expect(mockDelete).toHaveBeenCalledWith('/dashboard/email');
 });
+
+// Connect X (#311): the row links to the backend's OAuth start and shows
+// the outcome the round trip comes back with.
+const renderAt = (entry, user) => {
+  mockUserCtx = { user: { ...baseUser, ...user }, setUser: jest.fn() };
+  return render(<MemoryRouter initialEntries={[entry]}><AccountPage /></MemoryRouter>);
+};
+
+test('an account without X offers Connect X, a link to the OAuth start', () => {
+  renderPage();
+  const link = screen.getByRole('link', { name: 'Connect X' });
+  expect(link.getAttribute('href')).toBe('/auth/x/connect');
+  expect(screen.queryByRole('button', { name: 'Disconnect X' })).toBeNull();
+});
+
+test('a connected account shows the handle and offers Disconnect only with an email', () => {
+  renderPage({ twitter_login: true, twitter_handle: 'alice_on_x' });
+  expect(screen.getByText('Connected as @alice_on_x')).toBeTruthy();
+  expect(screen.queryByRole('link', { name: 'Connect X' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Disconnect X' })).toBeTruthy();
+});
+
+test('an X-only account cannot disconnect X', () => {
+  renderPage({ email: null, twitter_login: true, twitter_handle: null });
+  expect(screen.getByText('Connected')).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Disconnect X' })).toBeNull();
+});
+
+test('the outcome of the round trip is shown', () => {
+  Element.prototype.scrollIntoView = jest.fn(); // jsdom lacks it; #x scrolls
+  renderAt('/account?x_login=taken#x');
+  expect(screen.getByText(/already signs in to another Loore account/)).toBeTruthy();
+});
+
+test('an unknown outcome shows nothing', () => {
+  renderAt('/account?x_login=bogus');
+  expect(screen.queryByText(/X connected|not connected|another Loore account/)).toBeNull();
+});
+
+test('Disconnect X calls the removal route', async () => {
+  mockDelete.mockResolvedValue({ data: { twitter_login: false, twitter_handle: null } });
+  renderPage({ twitter_login: true, twitter_handle: 'alice_on_x' });
+  fireEvent.click(screen.getByRole('button', { name: 'Disconnect X' }));
+  await screen.findByText(/X disconnected/);
+  expect(mockDelete).toHaveBeenCalledWith('/dashboard/x');
+});
