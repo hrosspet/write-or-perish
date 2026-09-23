@@ -982,3 +982,34 @@ def test_revert_enforces_ownership_and_kind(app, client):
     # Right row, wrong kind in the URL.
     assert client.post(
         f"/api/artifacts/memory/revert/{mine_id}").status_code == 400
+
+
+# ── ai_usage follows the owner's default (#326) ─────────────────────────
+
+@pytest.mark.parametrize("default", ["train", "chat", "none"])
+def test_put_stamps_the_owners_default(app, client, default):
+    """Every artifact writer stamps the owner's default_ai_usage, like
+    the todo list and the profile — no longer a hardcoded 'chat'."""
+    user = User.query.first()
+    user.default_ai_usage = default
+    _db.session.commit()
+    r = client.put("/api/artifacts/memory", json={"content": "a fact"})
+    assert r.status_code == 200
+    assert r.get_json()["artifact"]["ai_usage"] == default
+    assert UserArtifact.latest_for(user.id, "memory").ai_usage == default
+    # A kind with no row yet shows what a first write would be stamped.
+    listed = {a["kind"]: a for a in
+              client.get("/api/artifacts/").get_json()["artifacts"]}
+    assert listed["scratchpad"]["ai_usage"] == default
+
+
+@pytest.mark.parametrize("default", ["train", "chat", "none"])
+def test_update_artifact_tool_stamps_the_owners_default(app, default):
+    with app.app_context():
+        user = User.query.first()
+        user.default_ai_usage = default
+        _db.session.commit()
+        r = _run_tool(app, "update_artifact",
+                      {"kind": "memory", "updated_content": "fact"}, user.id)
+        assert r["status"] == "success"
+        assert UserArtifact.latest_for(user.id, "memory").ai_usage == default

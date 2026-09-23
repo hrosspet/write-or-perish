@@ -6,7 +6,9 @@ from backend.models import (
 )
 from backend.extensions import db
 from backend.utils.tokens import approximate_token_count, get_model_context_window
-from backend.utils.privacy import AI_ALLOWED, accessible_nodes_filter, can_user_access_node
+from backend.utils.privacy import (
+    AI_ALLOWED, AIUsage, accessible_nodes_filter, can_user_access_node,
+)
 from backend.utils.quotes import (
     resolve_quotes, has_quotes, ExportQuoteResolver,
     resolve_quotes_for_export, resolve_ext_quotes, has_ext_quotes
@@ -213,17 +215,48 @@ def _filtered_children(node, filter_ai_usage, created_before, included_ids,
     return sorted(children, key=lambda c: c.created_at)
 
 
+def _note_entry(licence, node):
+    """Report an entry whose text the export renders to *licence* (a
+    PayloadLicence, #326): an export going to a model carries every
+    rendered entry, the user's own and other people's replies alike, and
+    each is licensed for training by its own ai_usage. None = no report
+    (the user's own data download)."""
+    if licence is not None and node.ai_usage != AIUsage.TRAIN.value:
+        licence.note_usage(node.ai_usage, f"archive entry {node.id}")
+
+
+def _note_resolver_preamble(licence, resolver):
+    """Report the rows a budgeted export's preamble renders in full: the
+    system prompts (by the node their text came from) and the pinned
+    profiles and todo lists (#326)."""
+    if licence is None:
+        return
+    licence.note_nodes(
+        [resolver.prompt_node_ids[pid]
+         for pid in resolver.referenced_prompt_ids
+         if pid in resolver.prompt_node_ids],
+        what="archive system prompt")
+    for kind, model in (("profile", UserProfile), ("todo", UserTodo)):
+        ids = resolver.referenced_artifacts.get(kind)
+        if not ids:
+            continue
+        for row_id, ai_usage in model.query.with_entities(
+                model.id, model.ai_usage).filter(model.id.in_(ids)):
+            licence.note_usage(ai_usage, f"archive {kind} {row_id}")
+
+
 class _CompactTweetRun:
     """Buffers consecutive flat imported-tweet entries and renders each run
     as one compact section (#276): a `# Tweets by <user> ...` header, then
     one `[YYYY-MM-DD HH:MM] text` entry per tweet. Shared by the
     incremental and legacy render loops. Tweets never carry pinned
     artifacts or {quote:ID} placeholders, so the compact line skips those
-    lookups."""
+    lookups. Each rendered tweet reports to *licence* (#326)."""
 
-    def __init__(self, export_lines, username):
+    def __init__(self, export_lines, username, licence=None):
         self.lines = export_lines
         self.username = username
+        self.licence = licence
         self.run = []
 
     def add(self, node):
@@ -238,6 +271,7 @@ class _CompactTweetRun:
         )
         self.lines.append("")
         for tweet in self.run:
+            _note_entry(self.licence, tweet)
             ts = tweet.created_at.strftime("%Y-%m-%d %H:%M")
             self.lines.append(f"[{ts}] {tweet.get_content()}")
             self.lines.append("")
@@ -309,11 +343,13 @@ def _artifact_ref_lines(node):
 
 
 def _format_node_text(node, index_path, user_id, embedded_quotes,
-                      ai_blocked_ids):
+                      ai_blocked_ids, licence=None):
     """The node's own text block: header, any pinned-artifact refs, then
     content. System-prompt nodes emit refs only (their content IS the
-    prompt, shown as a ref)."""
+    prompt, shown as a ref). The node, the entries its quotes embed and
+    the saved references it quotes report to *licence* (#326)."""
     result = _node_header_line(node, index_path)
+    _note_entry(licence, node)
 
     ref_lines = _artifact_ref_lines(node)
     is_prompt_node = node.get_artifact("prompt") is not None
@@ -335,17 +371,25 @@ def _format_node_text(node, index_path, user_id, embedded_quotes,
     if has_quotes(content):
         if embedded_quotes is not None:
             # Use smart resolution from ExportQuoteResolver
+            if licence is not None:
+                licence.note_nodes(list(embedded_quotes.get(node.id) or ()),
+                                   what="archive quoted entry")
             content = resolve_quotes_for_export(
                 content, node.id, embedded_quotes, user_id,
                 ai_blocked_ids=ai_blocked_ids
             )
         elif user_id:
             # Fallback to simple resolution (depth 1)
-            content, _ = resolve_quotes(content, user_id, for_llm=False, max_depth=1)
+            content, quoted_ids = resolve_quotes(
+                content, user_id, for_llm=False, max_depth=1)
+            if licence is not None:
+                licence.note_nodes(quoted_ids, what="archive quoted entry")
     # {quote_ext:ID} (saved references) resolve inline unconditionally —
     # they're small and never nest, so no dedup machinery is needed.
     if user_id and has_ext_quotes(content):
-        content, _ = resolve_ext_quotes(content, user_id, for_llm=False)
+        content, ext_ids = resolve_ext_quotes(content, user_id, for_llm=False)
+        if licence is not None:
+            licence.note_external(ext_ids, what="archive reference")
 
     result += content
     result += "\n\n"
@@ -361,7 +405,8 @@ def format_node_tree(
     created_before=None,
     embedded_quotes=None,
     included_ids=None,
-    ai_blocked_ids=None
+    ai_blocked_ids=None,
+    licence=None,
 ):
     """
     Format a node and its descendants into a human-readable tree structure
@@ -392,6 +437,8 @@ def format_node_tree(
                         quote resolution that embeds only when needed.
         included_ids: Optional set of node IDs included in the export. Used with
                      embedded_quotes for reference-based resolution.
+        licence: Optional PayloadLicence every rendered entry, quote and
+                 reference reports to (#326).
 
     Returns:
         str: Formatted text representation of the node tree
@@ -424,7 +471,8 @@ def format_node_tree(
         if kind == "node":
             processed_nodes.add(current.id)
             parts.append(_format_node_text(
-                current, path, user_id, embedded_quotes, ai_blocked_ids))
+                current, path, user_id, embedded_quotes, ai_blocked_ids,
+                licence=licence))
             children = _filtered_children(
                 current, filter_ai_usage, created_before, included_ids,
                 keep_tombstones=True)
@@ -867,6 +915,7 @@ def _format_preamble(top_started_at):
 def _build_user_export_incremental(
     user, max_tokens, filter_ai_usage, created_before, created_after,
     chronological_order, return_metadata, collapse_artifacts,
+    licence=None,
 ):
     """Incremental export path (created_after is set). See
     `build_user_export_content` docstring for behavior. The CTE row
@@ -1088,13 +1137,14 @@ def _build_user_export_incremental(
     elif resolver is not None:
         preamble = resolver.get_artifacts_preamble()
         if preamble:
+            _note_resolver_preamble(licence, resolver)
             export_lines.append(preamble)
             export_lines.append("---")
             export_lines.append("")
 
     prefetch_children(entry_nodes)
 
-    compact_run = _CompactTweetRun(export_lines, user.username)
+    compact_run = _CompactTweetRun(export_lines, user.username, licence)
     thread_num = 0
     for entry in iter_with_dek_prefetch(entry_nodes):
         if entry.id in compact_ids:
@@ -1124,6 +1174,7 @@ def _build_user_export_incremental(
             embedded_quotes=embedded_quotes,
             included_ids=render_included_ids,
             ai_blocked_ids=ai_blocked_ids,
+            licence=licence,
         )
         export_lines.append(thread_text)
         export_lines.append("---")
@@ -1175,6 +1226,7 @@ def build_user_export_content(
     chronological_order=False, return_metadata=False,
     collapse_artifacts=False,
     include_strategy="authored_threads",
+    licence=None,
 ):
     """
     Core export logic: Build a human-readable text export of threads for a user.
@@ -1240,6 +1292,12 @@ def build_user_export_content(
                          "authored_threads" (default) or "engaged_threads".
                          Any other value raises ValueError. See module
                          docstring above for details.
+        licence: Optional PayloadLicence (#326) for an export going to a
+                 model. Everything the export renders reports to it — each
+                 entry (the user's own and other people's replies) and
+                 each preamble row by its own ai_usage, quoted saved
+                 references as other people's writing — so one 'chat'
+                 entry keeps the payload off the training key.
 
     Returns:
         str or dict: Formatted export content (or None if no threads found).
@@ -1258,6 +1316,7 @@ def build_user_export_content(
             chronological_order=chronological_order,
             return_metadata=return_metadata,
             collapse_artifacts=collapse_artifacts,
+            licence=licence,
         )
 
     # Legacy path: top-level threads owned by the user.
@@ -1422,6 +1481,7 @@ def build_user_export_content(
     elif resolver is not None:
         preamble = resolver.get_artifacts_preamble()
         if preamble:
+            _note_resolver_preamble(licence, resolver)
             export_lines.append(preamble)
             export_lines.append("---")
             export_lines.append("")
@@ -1440,6 +1500,7 @@ def build_user_export_content(
                 # Prompt artifacts
                 prompt = n.get_artifact("prompt")
                 if prompt is not None and prompt.id not in prompt_versions:
+                    _note_entry(licence, n)
                     vnum = UserPrompt.query.filter(
                         UserPrompt.user_id == prompt.user_id,
                         UserPrompt.prompt_key == prompt.prompt_key,
@@ -1453,6 +1514,9 @@ def build_user_export_content(
                 # Profile artifacts
                 profile = n.get_artifact("profile")
                 if profile is not None and profile.id not in profile_versions:
+                    if licence is not None:
+                        licence.note_usage(profile.ai_usage,
+                                           f"archive profile {profile.id}")
                     pver = UserProfile.query.filter(
                         UserProfile.user_id == profile.user_id,
                         UserProfile.created_at <= profile.created_at,
@@ -1464,6 +1528,9 @@ def build_user_export_content(
                 # Todo artifacts
                 todo = n.get_artifact("todo")
                 if todo is not None and todo.id not in todo_versions:
+                    if licence is not None:
+                        licence.note_usage(todo.ai_usage,
+                                           f"archive todo list {todo.id}")
                     tver = UserTodo.query.filter(
                         UserTodo.user_id == todo.user_id,
                         UserTodo.created_at <= todo.created_at,
@@ -1478,6 +1545,10 @@ def build_user_export_content(
                 for kind, artifact in sorted(n.get_user_artifacts().items()):
                     if artifact.id in artifact_versions:
                         continue
+                    if licence is not None:
+                        licence.note_usage(
+                            artifact.ai_usage,
+                            f"archive {kind} artifact {artifact.id}")
                     art_ver = UserArtifact.query.filter(
                         UserArtifact.user_id == artifact.user_id,
                         UserArtifact.kind == kind,
@@ -1557,7 +1628,7 @@ def build_user_export_content(
     # (#276), same as the incremental path; threaded content keeps the
     # full per-thread rendering.
     prefetch_children(top_level_nodes)
-    compact_run = _CompactTweetRun(export_lines, user.username)
+    compact_run = _CompactTweetRun(export_lines, user.username, licence)
     thread_num = 0
     for node in iter_with_dek_prefetch(top_level_nodes):
         if _is_flat_tweet_root(node, filter_ai_usage, created_before):
@@ -1578,7 +1649,8 @@ def build_user_export_content(
             created_before=created_before,
             embedded_quotes=embedded_quotes,
             included_ids=included_ids,
-            ai_blocked_ids=ai_blocked_ids
+            ai_blocked_ids=ai_blocked_ids,
+            licence=licence,
         )
         export_lines.append(thread_text)
 

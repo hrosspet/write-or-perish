@@ -458,6 +458,9 @@ class ExportQuoteResolver:
         # System prompt tracking
         self._prompt_tokens: Dict[int, int] = {}  # user_prompt_id → token cost
         self._prompt_contents: Dict[int, str] = {}  # user_prompt_id → content
+        # user_prompt_id → the node whose content the preamble shows, so
+        # an export going to a model can report it (#326).
+        self.prompt_node_ids: Dict[int, int] = {}
         self.referenced_prompt_ids: Set[int] = set()  # final result
         # Generic artifact tracking: (artifact_type, artifact_id) → content
         self._artifact_contents: Dict[Tuple[str, int], str] = {}
@@ -502,6 +505,7 @@ class ExportQuoteResolver:
                     prompt_content
                 )
                 self._prompt_contents[user_prompt_id] = prompt_content
+                self.prompt_node_ids[user_prompt_id] = node_id
         else:
             if token_count is None:
                 token_count = approximate_token_count(content)

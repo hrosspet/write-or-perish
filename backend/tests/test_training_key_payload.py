@@ -129,9 +129,8 @@ def test_licence_starts_from_the_chain_and_only_ever_drops(app):  # noqa: F811
 
 def test_every_retrieval_pull_reports_to_the_licence(app):  # noqa: F811
     """_retrieval_injection_text is the one place mid-turn pulls become
-    payload: a node reports by its own setting, a reference always. The
-    user's own artifacts and todo list do not (#326 decides both doors:
-    this one and the prompt placeholders that pull the same rows)."""
+    payload: a node reports by its own setting, a reference always, the
+    user's own artifact and todo list by their rows (#326)."""
     inject = _llm_task_mod._retrieval_injection_text
     alice = _mk_user("alice", approved=True, plan="alpha")
     chat_art = _mk_artifact(alice.id, "memory", "m", ai_usage="chat")
@@ -150,8 +149,8 @@ def test_every_retrieval_pull_reports_to_the_licence(app):  # noqa: F811
     assert after({"name": "read_artifact", "artifact_id": train_art.id,
                   "kind": "scratchpad"}) == "train"
     assert after({"name": "read_artifact", "artifact_id": chat_art.id,
-                  "kind": "memory"}) == "train"
-    assert after({"name": "read_todo", "todo_id": todo.id}) == "train"
+                  "kind": "memory"}) == "chat"
+    assert after({"name": "read_todo", "todo_id": todo.id}) == "chat"
     assert after({"name": "read_full", "kind": "node", "ref_id": licensed.id,
                   "user_id": alice.id, "ref": str(licensed.id)}) == "train"
     assert after({"name": "read_full", "kind": "node", "ref_id": withheld.id,

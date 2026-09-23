@@ -115,6 +115,9 @@ class PayloadLicence:
         self._key_type = key_type
         self._logger = logger
         self._label = label
+        # Why it dropped, when it did: a licence used as a collector (one
+        # placeholder's rows, one cached render) hands this on.
+        self.reason = None
 
     @property
     def key_type(self) -> str:
@@ -124,6 +127,7 @@ class PayloadLicence:
         """Drop to the chat key for the rest of the turn."""
         if self._key_type == AIUsage.CHAT.value:
             return
+        self.reason = reason
         if self._logger:
             self._logger.info(
                 "%s: %s; chat keys from here on (the chain said %r)",
@@ -156,3 +160,43 @@ class PayloadLicence:
         ids = list(item_ids or ())
         if ids:
             self.to_chat(f"{what} {ids[0]} is other people's writing")
+
+
+class ContextUsage:
+    """The user's own rows each prompt placeholder resolved to (#326):
+    the profile, recent context, the todo list, the artifacts, the recent
+    raw archive — each row judged by its own ai_usage, as the chain's
+    nodes are.
+
+    Kept per placeholder rather than on the turn's licence directly. A
+    placeholder resolves once per turn, for the first node carrying it,
+    and the #192 cache replays the system prompt's render on later turns
+    without resolving anything. So the turn's licence hears every
+    placeholder that resolved (``reason()``), and a cached render stores
+    the verdict of the placeholders in its own text (``reason(text)``).
+    """
+
+    def __init__(self):
+        self._licences = {}
+
+    def licence(self, placeholder: str) -> PayloadLicence:
+        """The collector *placeholder*'s rows report to."""
+        lic = self._licences.get(placeholder)
+        if lic is None:
+            lic = PayloadLicence(AIUsage.TRAIN.value)
+            self._licences[placeholder] = lic
+        return lic
+
+    def note_usage(self, placeholder: str, ai_usage, what: str) -> None:
+        self.licence(placeholder).note_usage(ai_usage, what)
+
+    def reason(self, text=None):
+        """Why the rows keep the payload off the training key — of every
+        placeholder that resolved, or of those appearing in *text* — or
+        None when all of them are licensed."""
+        for placeholder, lic in self._licences.items():
+            if text is not None and placeholder not in text:
+                continue
+            if lic.reason:
+                return lic.reason
+        return None
