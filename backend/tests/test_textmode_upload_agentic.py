@@ -114,7 +114,11 @@ def app(stub_tasks, monkeypatch):
 
     app = _make_app()
     import backend.routes.nodes as nodes_routes
+    import backend.utils.privacy as privacy
     monkeypatch.setattr(nodes_routes, "get_openai_chat_key", lambda cfg: "key")
+    # test_privacy_utils leaves a mocked current_user in the privacy
+    # module; run after it, the status endpoint would answer 403.
+    monkeypatch.setattr(privacy, "current_user", _real_flask_login.current_user)
     with app.app_context():
         _db.create_all()
         yield app
@@ -300,6 +304,23 @@ class TestStatusReportsTheReply:
 
         assert "llm_node_id" not in data
 
+    def test_reply_and_warnings_are_owner_only(self, app, alice):
+        bob = User(username="bob", twitter_id="bob-twitter-id")
+        _db.session.add(bob)
+        entry = self._entry(alice)
+        entry.privacy_level = "public"
+        entry.llm_task_warnings = json.dumps(["reply skipped"])
+        _db.session.commit()
+        other = app.test_client()
+        with other.session_transaction() as session:
+            session["_user_id"] = str(bob.id)
+
+        data = other.get(
+            f"/nodes/{entry.id}/transcription-status").get_json()
+
+        assert data["status"] == "completed"
+        assert "warnings" not in data
+
     def test_warnings_reported(self, client, alice):
         entry = self._entry(alice)
         entry.llm_task_warnings = json.dumps(["reply skipped"])
@@ -394,6 +415,16 @@ class TestTranscribeAudioReply:
         tr._t["llm"].generate_llm_response.delay.assert_called_once()
         assert (tr._t["llm"].generate_llm_response.delay.call_args.kwargs
                 ["source_mode"] == "textmode")
+
+    def test_no_reply_to_an_empty_transcript(self, tr):
+        entry = tr._t["entry"]
+        tr.OpenAI.return_value.audio.transcriptions.create.return_value = (
+            type("R", (), {"text": "  "})())
+
+        tr.transcribe_audio(MagicMock(), entry.id, tr._t["audio"],
+                            "talk.m4a", auto_reply_model="gpt-5")
+
+        assert Node.query.filter_by(node_type="llm").count() == 0
 
     def test_no_reply_without_the_flag(self, tr):
         entry = tr._t["entry"]

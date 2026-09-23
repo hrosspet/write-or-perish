@@ -2048,9 +2048,11 @@ def get_transcription_status(node_id):
         "content": node.get_content() if node.transcription_status == 'completed' else None,
         "task_info": task_info  # Real-time progress from Celery
     }
-    if node.transcription_status == 'completed':
+    if (node.transcription_status == 'completed'
+            and node.user_id == current_user.id):
         # A Text-mode upload's reply (#342) and why one was skipped, so
         # the form can land on the entry with ?awaitLlm or say why not.
+        # Owner only: a warning can say the owner hit the spend cap.
         from backend.utils.task_warnings import load_task_warnings
         reply = _reply_below_transcript(node)
         if reply is not None:

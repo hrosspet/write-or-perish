@@ -297,7 +297,9 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
             _split_parts = split_node_into_chain(node)
             node.transcription_progress = 100
             node.transcription_error = None
-            if auto_reply_model:
+            # No reply to an empty transcript: the entry would still hold
+            # its "[Voice note – transcription pending]" placeholder.
+            if auto_reply_model and (transcript or "").strip():
                 # Commit the transcript before the reply is attempted, and
                 # flip the status only after it: the frontend's first
                 # 'completed' poll then finds the reply (#342).
