@@ -1328,6 +1328,39 @@ class TestPreambleRespectsArtifactAiUsage:
             assert "[AI usage not permitted by author]" not in content
 
 
+class TestUnbudgetedFilteredExportBlocksNoneQuotes:
+    """#344 review: the unbudgeted AI-filtered export (recent-context first
+    attempt, uncapped {user_export}) resolved {quote:ID} with for_llm=False,
+    which skipped the ai_usage check, so a quoted node marked 'none'
+    reached the model."""
+
+    def _quoting_thread(self):
+        alice = _make_user("alice")
+        _db.session.commit()
+        hidden = _make_node(alice, content="SECRET QUOTED BODY",
+                            ai_usage="none", token_count=10)
+        _make_node(alice, content=f"see {{quote:{hidden.id}}} here",
+                   ai_usage="chat", token_count=10)
+        _db.session.commit()
+        return alice, hidden
+
+    def test_filtered_full_export_blocks_none_quote(self, app):
+        alice, hidden = self._quoting_thread()
+
+        content = _build(alice, filter_ai_usage=True)
+
+        assert "SECRET QUOTED BODY" not in content
+        assert (f"[Quote #{hidden.id}: AI usage not permitted by author]"
+                in content)
+
+    def test_unfiltered_full_export_keeps_quote(self, app):
+        alice, _ = self._quoting_thread()
+
+        content = _build(alice, filter_ai_usage=False)
+
+        assert "SECRET QUOTED BODY" in content
+
+
 # ── origin: imported nodes are marked, Loore-native ones are not ────────
 
 class TestOrigin:

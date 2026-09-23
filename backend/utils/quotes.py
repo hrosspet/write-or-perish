@@ -263,6 +263,7 @@ def resolve_quotes(
     max_depth: int = DEFAULT_MAX_DEPTH,
     _seen_ids: Optional[Set[int]] = None,
     tz_name: Optional[str] = None,
+    block_ai_none: Optional[bool] = None,
 ) -> Tuple[str, List[int]]:
     """
     Replace {quote:ID} placeholders with quoted node content, recursively.
@@ -277,6 +278,9 @@ def resolve_quotes(
         tz_name: IANA timezone the quoted node's creation time is rendered
                  in (UTC when unset) — pass the conversation owner's so it
                  matches the thread's message stamps
+        block_ai_none: Replace quotes of nodes marked ai_usage='none' with a
+                 placeholder. Defaults to *for_llm*; the AI-filtered export
+                 sets it with the human-readable format (#340 review).
 
     Returns:
         Tuple of (resolved_content, list_of_quoted_node_ids)
@@ -289,6 +293,8 @@ def resolve_quotes(
 
     if _seen_ids is None:
         _seen_ids = set()
+    if block_ai_none is None:
+        block_ai_none = for_llm
 
     quote_ids = find_quote_ids(content)
     if not quote_ids:
@@ -321,7 +327,7 @@ def resolve_quotes(
                 return f"[Quoted node deleted: node {node_id}]"
 
         # AI usage check: block content from nodes that don't permit AI usage
-        if for_llm and data.get("ai_usage") == "none":
+        if block_ai_none and data.get("ai_usage") == "none":
             return f"[Quote #{node_id}: AI usage not permitted by author]"
 
         # Cycle detection
@@ -345,6 +351,7 @@ def resolve_quotes(
                 max_depth=max_depth - 1,
                 _seen_ids=new_seen,
                 tz_name=tz_name,
+                block_ai_none=block_ai_none,
             )
             resolved_ids.extend(nested_ids)
 

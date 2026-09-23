@@ -319,7 +319,7 @@ def _artifact_ref_lines(node):
 
 
 def _format_node_text(node, index_path, user_id, embedded_quotes,
-                      ai_blocked_ids):
+                      ai_blocked_ids, filter_ai_usage=False):
     """The node's own text block: header, any pinned-artifact refs, then
     content. System-prompt nodes emit refs only (their content IS the
     prompt, shown as a ref)."""
@@ -350,8 +350,13 @@ def _format_node_text(node, index_path, user_id, embedded_quotes,
                 ai_blocked_ids=ai_blocked_ids
             )
         elif user_id:
-            # Fallback to simple resolution (depth 1)
-            content, _ = resolve_quotes(content, user_id, for_llm=False, max_depth=1)
+            # Fallback to simple resolution (depth 1). The unbudgeted
+            # AI-filtered export reaches models too (recent-context first
+            # attempt, uncapped {user_export}), so it blocks quotes of
+            # nodes marked 'none' like the resolver path does.
+            content, _ = resolve_quotes(
+                content, user_id, for_llm=False, max_depth=1,
+                block_ai_none=filter_ai_usage)
     # {quote_ext:ID} (saved references) resolve inline unconditionally —
     # they're small and never nest, so no dedup machinery is needed.
     if user_id and has_ext_quotes(content):
@@ -434,7 +439,8 @@ def format_node_tree(
         if kind == "node":
             processed_nodes.add(current.id)
             parts.append(_format_node_text(
-                current, path, user_id, embedded_quotes, ai_blocked_ids))
+                current, path, user_id, embedded_quotes, ai_blocked_ids,
+                filter_ai_usage=filter_ai_usage))
             children = _filtered_children(
                 current, filter_ai_usage, created_before, included_ids,
                 keep_tombstones=True)
