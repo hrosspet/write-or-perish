@@ -108,8 +108,12 @@ def get_draft():
 
     # Exclude drafts already processed by server-side LLM chain
     # (Reflect/Orient workflows create nodes automatically but leave
-    # the draft alive for the SSE all_complete event)
-    query = query.filter(Draft.llm_node_id.is_(None))
+    # the draft alive for the SSE all_complete event). A draft with a
+    # streaming_warning was saved as a node too, only without a reply
+    # (spend cap, #341, or a refused placeholder): restoring it would
+    # save the same transcript a second time.
+    query = query.filter(Draft.llm_node_id.is_(None),
+                         Draft.streaming_warning.is_(None))
 
     if node_id:
         # Editing an existing node
@@ -441,7 +445,9 @@ def _cleanup_stale_drafts(user_id):
     stale_drafts = Draft.query.filter(
         Draft.user_id == user_id,
         Draft.session_id.isnot(None),
-        Draft.llm_node_id.isnot(None),
+        # streaming_warning: saved as a node with the reply skipped (#341)
+        db.or_(Draft.llm_node_id.isnot(None),
+               Draft.streaming_warning.isnot(None)),
     ).all()
 
     deleted = 0
@@ -449,9 +455,9 @@ def _cleanup_stale_drafts(user_id):
         audio_dir = AUDIO_STORAGE_ROOT / f"drafts/{user_id}/{draft.session_id}"
         if audio_dir.exists():
             current_app.logger.warning(
-                f"Draft {draft.id} (session {draft.session_id}) has "
-                f"llm_node_id={draft.llm_node_id} but audio files were "
-                f"not moved: {list(audio_dir.iterdir())}"
+                f"Draft {draft.id} (session {draft.session_id}) was "
+                f"saved as a node (llm_node_id={draft.llm_node_id}) but "
+                f"audio files were not moved: {list(audio_dir.iterdir())}"
             )
             continue
         db.session.delete(draft)

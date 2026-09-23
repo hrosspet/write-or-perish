@@ -221,6 +221,34 @@ class TestResumeIsAllowedWhenCapped:
         assert data["warning"] == "reply skipped"
 
 
+class TestSavedWithoutReplyDraftIsNotRestored:
+    """#345 review: a Voice finalize that skipped the reply (cap) keeps
+    the draft only for the all_complete event. It must never come back as
+    a restorable draft, which would save the transcript a second time."""
+
+    def _warning_draft(self, alice):
+        draft = Draft(user_id=alice.id, session_id="sess-saved",
+                      parent_id=None, streaming_status="completed",
+                      streaming_warning="reply skipped")
+        draft.set_content("the whole transcript")
+        _db.session.add(draft)
+        _db.session.commit()
+        return draft
+
+    def test_get_draft_skips_it(self, client, alice):
+        self._warning_draft(alice)
+
+        assert client.get("/drafts/").status_code == 404
+
+    def test_stale_cleanup_deletes_it(self, client, alice):
+        self._warning_draft(alice)
+
+        # Any new session start runs the stale-draft cleanup.
+        assert client.post("/drafts/streaming/init", json={}).status_code == 201
+
+        assert Draft.query.filter_by(session_id="sess-saved").count() == 0
+
+
 # ── Task bodies ──────────────────────────────────────────────────────────
 
 @pytest.fixture
