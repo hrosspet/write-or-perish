@@ -726,18 +726,22 @@ def test_401_mid_sync_logs_cost_then_revokes(app, monkeypatch):
     assert ExternalAccount.query.get(account.id).revoked_at is not None
 
 
-def _fake_x_bookmarks(monkeypatch, ids):
+def _fake_x_bookmarks(monkeypatch, ids, fail_on_request=None):
     """Serve *ids* (newest-bookmarked first) from a fake X endpoint that
     honors max_results and paginates by token; return the list of
-    max_results asked per request. Drives the REAL fetcher."""
+    max_results asked per request. Drives the REAL fetcher.
+    *fail_on_request* (0-based index into the calls) answers that request
+    with a 429 instead of a page."""
     from backend.utils import external_content as content
 
     class _Resp:
-        def __init__(self, payload):
+        def __init__(self, payload, error=None):
             self._payload = payload
+            self._error = error
 
         def raise_for_status(self):
-            pass
+            if self._error is not None:
+                raise self._error
 
         def json(self):
             return self._payload
@@ -747,6 +751,8 @@ def _fake_x_bookmarks(monkeypatch, ids):
     def fake_get(url, params=None, headers=None, timeout=None):
         size = params["max_results"]
         calls.append(size)
+        if len(calls) - 1 == fail_on_request:
+            return _Resp({}, error=_http_error(429))
         start = int(params.get("pagination_token") or 0)
         chunk = ids[start:start + size]
         nxt = start + len(chunk)
@@ -772,9 +778,13 @@ def test_sync_freezes_page_growth_once_known_bookmarks_appear(
     """The ceiling in external_content.py: N new bookmarks on top of an
     imported set cost at most N + 2·min(N + 10, 100) posts, because the
     sync stops doubling the page once a page reached known bookmarks
-    (1 new = 20 posts, not 30; 11 new = 50, not 70)."""
+    (1 new = 20 posts, not 30; 11 new = 50, not 70). The account has
+    finished a sync before: the early stop only applies then (#310)."""
+    from datetime import datetime, timedelta
     uid = User.query.first().id
-    _mk_account(uid, expired=False)
+    account = _mk_account(uid, expired=False)
+    account.last_synced_at = datetime.utcnow() - timedelta(days=1)
+    _db.session.commit()
     known = [f"k{i}" for i in range(200)]
     _sync_mod._upsert_items(uid, "twitter_bookmark", [
         {"external_id": k, "content": "t", "author_handle": "u",
@@ -788,6 +798,70 @@ def test_sync_freezes_page_growth_once_known_bookmarks_appear(
     assert result["posts_read"] == expected_posts
     assert ExternalItem.query.filter_by(
         user_id=uid, source="twitter_bookmark").count() == 200 + n_new
+
+
+def test_interrupted_first_import_resumes_to_the_end(app, monkeypatch):
+    """#310: a first import that 429s after two pages keeps those pages
+    and is not marked done. The next sync must not stop at the imported
+    head (the early stop assumes everything below a known page came in
+    earlier, which is false here): it reads on, growing the page size as
+    usual, until X has nothing more — and only then sets last_synced_at.
+    After that, the ordinary early stop is back: a quiet night costs one
+    small page."""
+    uid = User.query.first().id
+    account = _mk_account(uid, expired=False)
+    ids = [f"b{i}" for i in range(250)]
+
+    calls = _fake_x_bookmarks(monkeypatch, ids, fail_on_request=2)
+    with pytest.raises(requests.HTTPError):
+        _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    assert calls == [10, 20, 40]  # the third request is the 429
+    assert ExternalItem.query.filter_by(
+        user_id=uid, source="twitter_bookmark").count() == 30
+    _db.session.expire_all()
+    assert ExternalAccount.query.get(account.id).last_synced_at is None
+
+    calls = _fake_x_bookmarks(monkeypatch, ids)
+    result = _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    # Re-reads the 30 known ones once, pages still double, reaches the end.
+    assert calls == [10, 20, 40, 80, 100]
+    assert result["created"] == 220 and result["skipped"] == 30
+    assert result["posts_read"] == 250
+    assert ExternalItem.query.filter_by(
+        user_id=uid, source="twitter_bookmark").count() == 250
+    _db.session.expire_all()
+    assert ExternalAccount.query.get(account.id).last_synced_at is not None
+    rows = APICostLog.query.filter_by(
+        user_id=uid, request_type="x_bookmark_sync").order_by(
+        APICostLog.id).all()
+    # One row per attempt, each counting what X returned in it.
+    assert [r.request_ref for r in rows] == [
+        "posts:30/pages:2", "posts:250/pages:5"]
+
+    calls = _fake_x_bookmarks(monkeypatch, ids)
+    result = _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    assert calls == [10] and result["created"] == 0
+
+
+def test_first_import_reads_past_bookmarks_saved_another_way(
+        app, monkeypatch):
+    """Tweets clipped with the extension or imported from JSON share the
+    twitter_bookmark source. Before any sync has finished they say
+    nothing about what the sync already covered, so they must not end a
+    first import either."""
+    uid = User.query.first().id
+    _mk_account(uid, expired=False)
+    ids = [f"b{i}" for i in range(40)]
+    _sync_mod._upsert_items(uid, "twitter_bookmark", [
+        {"external_id": i, "content": "t", "author_handle": "u",
+         "url": None, "posted_at": None} for i in ids[:10]])
+    calls = _fake_x_bookmarks(monkeypatch, ids)
+
+    result = _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    assert calls == [10, 20, 40]
+    assert result["created"] == 30 and result["skipped"] == 10
+    assert ExternalItem.query.filter_by(
+        user_id=uid, source="twitter_bookmark").count() == 40
 
 
 def test_failed_sync_whose_cost_row_cannot_be_written_raises_the_original(

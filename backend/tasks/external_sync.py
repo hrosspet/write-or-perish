@@ -224,6 +224,19 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
         # the page that ends a night is a cheap one.
         # X bills pay-per-use per RETURNED POST (#271), not per request:
         # a page of N bookmarks costs N post reads, an empty page nothing.
+        #
+        # Except on a FIRST import that has not finished yet (#310). The
+        # early stop assumes everything below a known page was imported
+        # by an earlier sync, which only holds once a sync has run to the
+        # end. A first import cut off by a 429 or 5xx leaves its head
+        # imported and the rest missing; stopping at that head would
+        # skip the rest for good. So until last_synced_at is set, a known
+        # page does not end the sync and does not freeze the page size:
+        # it reads on to the end or to max_items (X's own cap), re-reading
+        # the imported head once — at most max_items posts, the cost the
+        # interrupted attempt would have had if it had finished. A page
+        # on which X returned nothing still ends it.
+        first_import = account.last_synced_at is None
         created = skipped = requests_made = posts_read = 0
 
         def _log_cost():
@@ -261,9 +274,9 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
                     user_id, "twitter_bookmark", page)
                 created += page_created
                 skipped += page_skipped
-                if page_created == 0:
+                if page_created == 0 and (not first_import or returned == 0):
                     break
-                grow = page_skipped == 0
+                grow = page_skipped == 0 or first_import
         except Exception as exc:
             # Pages already upserted are committed (_upsert_items commits
             # per page); this only discards a half-applied page from a DB
@@ -290,6 +303,8 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
             if code == 401:
                 return _mark_revoked(account, "bookmarks fetch HTTP 401")
             raise
+        # Only a sync that ran to its end gets here, so this is what
+        # ends a first import's read-to-the-end mode above.
         account.last_synced_at = datetime.utcnow()
         account.last_sync_created = created
         _log_cost()
