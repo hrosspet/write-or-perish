@@ -15,7 +15,6 @@ from backend.utils.email import (
     send_magic_link_email, send_x_connected_notice, is_valid_email)
 from backend.utils.reserved_usernames import derive_available_username
 import logging
-import time
 from urllib.parse import urlparse, quote
 
 logger = logging.getLogger(__name__)
@@ -108,10 +107,6 @@ def _create_x_user(twitter_id, screen_name):
 # /auth/login, so this is how that route tells "attach X to the signed-in
 # account" from "sign in with X".
 X_CONNECT_SESSION_KEY = "x_connect"
-# How long a started Connect X stays good for. Authorizing at X takes a
-# minute; an intent left behind by an abandoned attempt must not make some
-# later X callback in this browser a connect. A guess, not a measurement.
-X_CONNECT_MAX_AGE_SECONDS = 10 * 60
 
 
 def _account_redirect(outcome):
@@ -178,14 +173,18 @@ def _pop_connect_intent():
     It counts only for the account that started it and is still signed
     in. Any other intent is stale (abandoned at X, then signed out, or
     another account signed in since): it is dropped here, once, and the
-    request is an ordinary X sign-in."""
+    request is an ordinary X sign-in.
+
+    No time limit. For the account that started it, a connect must never
+    turn into a sign-in: that makes the duplicate account #311 is about,
+    or moves the browser into whichever account holds the X id. And a
+    limit would protect nothing: the callback must come from this
+    session's own authorization at X (backend/oauth.py), so only the
+    person in this browser can complete it, however long they take."""
     intent = session.pop(X_CONNECT_SESSION_KEY, None)
     if intent is None:
         return False
-    age = time.time() - (intent.get("at") or 0)
-    if (current_user.is_authenticated
-            and intent.get("user_id") == current_user.id
-            and age <= X_CONNECT_MAX_AGE_SECONDS):
+    if current_user.is_authenticated and intent.get("user_id") == current_user.id:
         return True
     logger.info("Dropped a stale Connect X intent")
     return False
@@ -213,9 +212,7 @@ def x_connect():
         frontend_url = current_app.config.get("FRONTEND_URL", "")
         return redirect(f"{frontend_url}/login?returnUrl="
                         f"{quote('/account', safe='')}")
-    session[X_CONNECT_SESSION_KEY] = {
-        "user_id": current_user.id,
-        "at": time.time()}
+    session[X_CONNECT_SESSION_KEY] = {"user_id": current_user.id}
     # A token left from an earlier X sign-in in this browser would skip X
     # and connect whichever X account that was; ask X which one instead.
     _drop_x_token()

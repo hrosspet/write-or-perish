@@ -1,5 +1,5 @@
 import logging
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlparse
 
 from flask import request, session
 from flask_dance.consumer import oauth_before_login
@@ -29,12 +29,20 @@ def _refuse_foreign_callback():
     """Before flask-dance's callback view: a callback that would exchange a
     request token must present the one this session started with (used
     once). A callback without one (X's Cancel sends ``denied=``) stores
-    nothing and goes through, so a cancel still reaches /auth/login."""
+    nothing and goes through, so a cancel still reaches /auth/login.
+
+    The token is read the way oauthlib will read it for the exchange:
+    parse_qsl over request.url's query. Parsed any other way (werkzeug's
+    args, or an older parse_qsl that also split on ";"), a crafted query
+    could show this check one token and the exchange another; a repeated
+    oauth_token is refused for the same reason."""
     if request.endpoint != "twitter.authorized":
         return None
     expected = session.pop(X_REQUEST_TOKEN_SESSION_KEY, None)
-    presented = request.args.get("oauth_token")
-    if presented is None or (expected is not None and presented == expected):
+    presented = [value for key, value in
+                 parse_qsl(urlparse(request.url).query, keep_blank_values=True)
+                 if key == "oauth_token"]
+    if not presented or (expected is not None and presented == [expected]):
         return None
     logger.warning("Refused an X callback this session did not start")
     from backend.routes.auth import refuse_x_callback

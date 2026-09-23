@@ -20,7 +20,6 @@ Follows the real-app + sqlite pattern from test_admin_access.py.
 import json
 import os
 import sys
-import time
 from unittest.mock import MagicMock, patch
 
 # ── Environment ──────────────────────────────────────────────────────────
@@ -1214,8 +1213,7 @@ class TestConnectX:
 
         sess = _session(client)
         assert "twitter_oauth_token" not in sess
-        assert sess["x_connect"]["user_id"] == alice.id
-        assert abs(sess["x_connect"]["at"] - time.time()) < 60
+        assert sess["x_connect"] == {"user_id": alice.id}
 
     def test_cancelling_at_x_returns_to_the_account_page(self, app):
         """X sends the browser back without a token: back to Account, not
@@ -1255,7 +1253,7 @@ class TestConnectX:
         alice = _add(username="alice", email="alice@example.com", approved=True)
         client = app.test_client()
         with client.session_transaction() as sess:
-            sess["x_connect"] = {"user_id": alice.id, "at": time.time()}
+            sess["x_connect"] = {"user_id": alice.id}
 
         resp = _x_callback(client, x_id=123, screen_name="alice")
 
@@ -1274,7 +1272,7 @@ class TestConnectX:
         bob = _add(username="bob", email="bob@example.com", approved=True)
         client = _signed_in(app, bob)
         with client.session_transaction() as sess:
-            sess["x_connect"] = {"user_id": alice.id, "at": time.time()}
+            sess["x_connect"] = {"user_id": alice.id}
 
         _x_callback(client, x_id=123, screen_name="bob_x")
 
@@ -1289,7 +1287,7 @@ class TestConnectX:
         alice = _add(username="alice", email="alice@example.com", approved=True)
         client = app.test_client()
         with client.session_transaction() as sess:
-            sess["x_connect"] = {"user_id": alice.id, "at": time.time()}
+            sess["x_connect"] = {"user_id": alice.id}
         x = MagicMock()
         x.authorized = False
         with patch("backend.routes.auth.twitter", x):
@@ -1349,23 +1347,6 @@ class TestDisconnectX:
 
 
 class TestConnectXExtras:
-    def test_an_intent_older_than_ten_minutes_is_not_a_connect(self, app, monkeypatch):
-        """Abandoned at X and left in the session: a later X callback in this
-        browser is an ordinary sign-in, not a connect."""
-        import backend.routes.auth as auth_mod
-        alice = _add(username="alice", email="alice@example.com", approved=True)
-        client = _signed_in(app, alice)
-        client.get("/auth/x/connect")
-        started = _session(client)["x_connect"]["at"]
-        monkeypatch.setattr(auth_mod, "time", MagicMock(
-            time=lambda: started + auth_mod.X_CONNECT_MAX_AGE_SECONDS + 1))
-
-        _x_callback(client, x_id=123, screen_name="alice_x")
-
-        _db.session.refresh(alice)
-        assert alice.twitter_id is None
-        assert User.query.filter_by(twitter_id="123").one().id != alice.id
-
     def test_a_new_link_is_recorded_and_the_address_told(self, app, monkeypatch):
         import backend.routes.auth as auth_mod
         sent = []
@@ -1526,6 +1507,75 @@ class TestXCallbackBoundToSession:
         assert _outcome(resp) == "cancelled"
         assert calls["exchanged"] == []
 
+
+    @pytest.mark.parametrize("path", ["authorize", "cancel", "x_refuses_exchange"])
+    def test_a_connect_never_becomes_a_sign_in(self, app, monkeypatch, path):
+        """Whatever X does and however long it takes, a Connect X started by
+        the signed-in account ends on its Account page: never a new account
+        for the X id (the duplicate #311 is about), never a switch into
+        another account. There is no time limit on the intent."""
+        import backend.routes.auth as auth_mod
+        from requests_oauthlib.oauth1_session import TokenRequestDenied
+        monkeypatch.setattr(auth_mod, "send_x_connected_notice", lambda *a: None)
+        _add(username="holder", twitter_id="777", approved=True)
+        alice = _add(username="alice", email="alice@example.com", approved=True)
+        client = _signed_in(app, alice)
+        calls, fake = _fake_x_exchange()
+        real_fetch = fake.new
+
+        def refusing_fetch(self, url, **kw):
+            if "access_token" in url:
+                raise TokenRequestDenied("Token request failed with code 401", MagicMock(status_code=401))
+            return real_fetch(self, url, **kw)
+
+        with patch("requests_oauthlib.OAuth1Session._fetch_token",
+                   refusing_fetch if path == "x_refuses_exchange" else real_fetch):
+            client.get("/auth/x/connect")
+            client.get("/auth/twitter")
+            query = "denied=REQ-1" if path == "cancel" else "oauth_token=REQ-1&oauth_verifier=V"
+            back = client.get(f"/auth/twitter/authorized?{query}")
+            assert back.headers["Location"].endswith("/auth/login")
+            if path == "authorize":
+                resp = _x_callback(client, x_id=555, screen_name="alice_x")
+            else:
+                resp = client.get("/auth/login")  # the real proxy: no token stored
+
+        expected = {"authorize": "linked", "cancel": "cancelled",
+                    "x_refuses_exchange": "cancelled"}[path]
+        assert _outcome(resp) == expected
+        assert _session(client).get("_user_id") == str(alice.id)
+        assert User.query.count() == 2  # alice and the holder, nothing new
+
+    def test_a_repeated_oauth_token_is_refused(self, app):
+        """The check reads the query the way oauthlib does; two tokens (the
+        pending one and another) are refused rather than guessed at."""
+        alice = _add(username="alice", email="alice@example.com", approved=True)
+        client = _signed_in(app, alice)
+        calls, fake = _fake_x_exchange()
+        with fake:
+            client.get("/auth/x/connect")
+            client.get("/auth/twitter")
+            resp = client.get("/auth/twitter/authorized"
+                              "?oauth_token=REQ-1&oauth_token=ATTACKER_REQ&oauth_verifier=V")
+
+        assert _outcome(resp) == "failed"
+        assert calls["exchanged"] == []
+        assert "twitter_oauth_token" not in _session(client)
+
+    def test_a_token_hidden_behind_an_encoded_separator_is_not_exchanged(self, app):
+        """%3B decodes to ";": however the query is split, the guard and the
+        exchange see the same thing (here: no oauth_token), and nothing is
+        stored."""
+        client = app.test_client()
+        calls, fake = _fake_x_exchange()
+        with fake:
+            resp = client.get("/auth/twitter/authorized"
+                              "?oauth_verifier=V%3Boauth_token=ATTACKER_REQ")
+
+        assert resp.headers["Location"].endswith("/auth/login")
+        assert calls["exchanged"] == []
+        sess = _session(client)
+        assert "twitter_oauth_token" not in sess and "_user_id" not in sess
 
 class TestSignInMethodWrites:
     """Remove email and Disconnect X each keep the other way in. Both
