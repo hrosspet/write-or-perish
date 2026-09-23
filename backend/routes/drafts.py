@@ -312,6 +312,10 @@ def save_draft():
     # those share parent_id with the composing draft under a proposal node).
     query = Draft.query.filter_by(user_id=current_user.id)
     query = _exclude_proposal_drafts(query)
+    # Nor a session some tab is recording (#320): a second tab's autosave
+    # would overwrite its transcript. Typing next to a live recording goes
+    # to a plain draft of its own.
+    query = query.filter(not_live_clause())
 
     if node_id:
         query = query.filter_by(node_id=node_id)
@@ -382,6 +386,14 @@ def delete_draft():
     # the pending proposal with it.
     query = Draft.query.filter_by(user_id=current_user.id)
     query = _exclude_proposal_drafts(query)
+    # Never a session still in 'recording', live or left behind (#320):
+    # sending or discarding a text entry in another tab would delete the
+    # recording's row and orphan its audio. Those rows end through
+    # save-as-node or /streaming/<id>/discard.
+    query = query.filter(db.or_(
+        Draft.streaming_status.is_(None),
+        Draft.streaming_status != 'recording',
+    ))
 
     if node_id:
         query = query.filter_by(node_id=node_id)
@@ -580,8 +592,10 @@ def upload_streaming_chunk(session_id):
             "code": "session_not_active",
         }), 400
 
-    # A chunk is the recording tab's sign of life (#320).
-    stamp_session_alive(session_id)
+    # A chunk is the recording tab's sign of life (#320) — unless the tab
+    # already released the session: an upload still in flight when the
+    # tab left must not make it live again.
+    stamp_session_alive(session_id, only_if_unreleased=True)
     db.session.commit()
 
     # Get form data

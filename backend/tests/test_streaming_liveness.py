@@ -408,3 +408,94 @@ class TestStampHelper:
         _db.session.commit()
         _db.session.expire_all()
         assert Draft.query.get(d.id).streaming_heartbeat_at == before
+
+
+def _post_chunk(client, draft, index):
+    import io
+    return client.post(
+        f"/api/drafts/streaming/{draft.session_id}/audio-chunk",
+        data={
+            "chunk": (io.BytesIO(b"\x00" * 64), f"chunk_{index}.webm"),
+            "chunk_index": str(index),
+            "mime_type": "audio/webm",
+        },
+        content_type="multipart/form-data",
+    )
+
+
+def _chunk_dir(user, draft):
+    from backend.routes import drafts as drafts_module
+    path = (drafts_module.AUDIO_STORAGE_ROOT
+            / f"drafts/{user.id}/{draft.session_id}")
+    path.mkdir(parents=True, exist_ok=True)
+
+
+class TestSecondTabTextDraft:
+    """The issue's two-tab setup, one step further (PR #338 review):
+    tab A records at top level in voice mode, tab B opens /textmode,
+    whose NodeForm autosaves and, on send or discard, deletes "the"
+    draft for the same context."""
+
+    def test_typing_and_sending_in_tab_b_leaves_the_recording_alone(self, app):
+        client, alice = _setup(app)
+        live = _make_session(alice, heartbeat_age=LIVE)
+        _chunk_dir(alice, live)
+        assert client.get("/api/drafts/").status_code == 404
+
+        # Tab B autosaves what the user types: a plain draft of its own.
+        saved = client.post("/api/drafts/", json={"content": "typed in tab B"})
+        assert saved.status_code == 200
+        assert saved.get_json()["id"] != live.id
+        _db.session.expire_all()
+        assert Draft.query.get(live.id).get_content() == "words so far"
+
+        # Tab B sends (NodeForm → deleteDraft): its own draft goes.
+        assert client.delete("/api/drafts/").status_code == 200
+        _db.session.expire_all()
+        assert Draft.query.get(saved.get_json()["id"]) is None
+        assert Draft.query.get(live.id) is not None
+
+        # Tab A records on; once it leaves, the session is recoverable.
+        assert _post_chunk(client, live, 1).status_code == 202
+        client.post(f"/api/drafts/streaming/{live.session_id}/release")
+        ids = [e["session_id"] for e in
+               client.get("/api/drafts/interrupted").get_json()]
+        assert ids == [live.session_id]
+
+    def test_delete_never_removes_a_left_behind_recording(self, app):
+        # Stale, not live: still only save-as-node or discard end it.
+        client, alice = _setup(app)
+        stale = _make_session(alice, heartbeat_age=STALE)
+
+        assert client.delete("/api/drafts/").status_code == 404
+        _db.session.expire_all()
+        assert Draft.query.get(stale.id) is not None
+
+    def test_recovered_session_is_still_saved_and_deleted_as_before(self, app):
+        # NodeForm recovery: once /status completed the session, the form
+        # saves the transcript into that row and deletes it on send.
+        client, alice = _setup(app)
+        done = _make_session(alice, heartbeat_age=STALE, status="completed")
+
+        saved = client.post("/api/drafts/", json={"content": "edited"})
+        assert saved.get_json()["id"] == done.id
+        assert client.delete("/api/drafts/").status_code == 200
+        _db.session.expire_all()
+        assert Draft.query.get(done.id) is None
+
+
+class TestChunkAfterRelease:
+    def test_chunk_in_flight_at_release_does_not_revive_the_session(self, app):
+        client, alice = _setup(app)
+        d = _make_session(alice, heartbeat_age=LIVE)
+        _chunk_dir(alice, d)
+        client.post(f"/api/drafts/streaming/{d.session_id}/release")
+
+        assert _post_chunk(client, d, 1).status_code == 202
+
+        _db.session.expire_all()
+        assert Draft.query.get(d.id).streaming_heartbeat_at is None
+        ids = [e["session_id"] for e in
+               client.get("/api/drafts/interrupted").get_json()]
+        assert ids == [d.session_id]
+        assert client.get("/api/drafts/").get_json()["session_id"] == d.session_id

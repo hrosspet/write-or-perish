@@ -12,13 +12,21 @@ The recording tab proves it is still there in two ways, both stamping
 ``Draft.streaming_heartbeat_at``:
 
 - every accepted audio chunk (every 15 s while recording), and
-- the transcription SSE stream's heartbeat (every ~15 s while the stream
-  is open). The stream stays open while the recording is paused, so a
-  paused recording stays live as long as its tab is open.
+- the transcription SSE stream: on connect, and on each heartbeat (every
+  ~15 s while the stream is open). The stream stays open while the
+  recording is paused, so a paused recording stays live as long as its
+  tab is open.
 
 The tab clears the stamp when it abandons the session (pagehide beacon,
-or unmounting mid-recording), which makes a reload offer recovery at
+unmount or cancel mid-recording), which makes a reload offer recovery at
 once instead of after the window below.
+
+A client that vanishes without closing its socket (laptop lid closed,
+network dropped) is different: the server's heartbeat writes keep
+succeeding into the socket buffer until TCP gives up on the connection,
+roughly 15 minutes with Linux defaults, and the session stays live until
+then. Nothing is lost; the session is recoverable after that. A tab
+crash or a killed app closes the socket and falls back to the window.
 """
 from datetime import datetime, timedelta
 
@@ -65,9 +73,11 @@ def stamp_session_alive(session_id, only_if_unreleased=False, now=None):
     column's onupdate does not fire: several routes pick "the most
     recent draft" by ``updated_at``, and a heartbeat is not an edit.
 
-    ``only_if_unreleased`` is for the SSE stream: after the tab released
-    the session (stamp cleared), a stream that has not yet noticed its
-    client is gone must not make the session live again.
+    ``only_if_unreleased`` is for the SSE heartbeat and chunk uploads:
+    after the tab released the session (stamp cleared), a stream that has
+    not noticed its client left, or an upload still in flight, must not
+    make the session live again. Only init and a new SSE connection (the
+    tab that resumes the session) stamp unconditionally.
     """
     query = Draft.query.filter(
         Draft.session_id == session_id,
