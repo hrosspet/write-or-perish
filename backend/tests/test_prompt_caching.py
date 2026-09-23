@@ -148,6 +148,40 @@ def test_cost_opus_5_5_from_real_config():
         assert cost("claude-opus-5.5", 1_000_000, 1_000_000,
                     batch=True) == 12_000_000
 
+
+@pytest.mark.parametrize("model_id, page", [
+    # $/MTok (input, cached input, cache writes, output) from the OpenAI
+    # pricing page, verified 2026-09-23: short context, then >272k input.
+    ("gpt-6-sol", {"short": (2.00, 0.20, 2.50, 10.00),
+                   "long": (4.00, 0.40, 5.00, 15.00)}),
+    ("gpt-6-luna", {"short": (0.10, 0.01, 0.125, 0.50),
+                    "long": (0.20, 0.02, 0.25, 0.75)}),
+])
+def test_cost_gpt_6_from_real_config(model_id, page):
+    # Reads the real config entry, like the Opus 5.5 test above. A price
+    # of $X/MTok is X microdollars per token, so N tokens cost X * N.
+    from backend.config import Config
+    app = Flask(__name__)
+    app.config["SUPPORTED_MODELS"] = {
+        model_id: Config.SUPPORTED_MODELS[model_id]}
+    with app.app_context():
+        def cost(n_in, n_out, **kw):
+            return calculate_llm_cost_microdollars(model_id, n_in, n_out, **kw)
+        n = 100_000  # under the 272k tier
+        inp, cached, write, out = page["short"]
+        assert cost(n, 0) == round(inp * n)
+        assert cost(n, 0, cached_input_tokens=n) == round(cached * n)
+        assert cost(n, 0, cache_write_subset_tokens=n) == round(write * n)
+        assert cost(0, 1_000_000) == round(out * 1_000_000)
+        n = 1_000_000  # over the 272k tier: the whole request reprices
+        inp, cached, write, out = page["long"]
+        assert cost(n, 0) == round(inp * n)
+        assert cost(n, 0, cached_input_tokens=n) == round(cached * n)
+        assert cost(n, 0, cache_write_subset_tokens=n) == round(write * n)
+        assert cost(n, n) == round((inp + out) * n)
+        assert cost(n, n, batch=True) == round((inp + out) * n / 2)
+
+
 def test_gated_voice_tools_warm_matches_generation():
     # The pre-warm and generation BOTH build their tool list via
     # gated_voice_tools, so the cached tool prefix is byte-identical. A

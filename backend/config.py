@@ -117,8 +117,8 @@ class Config:
     # Sources:
     #   Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
     #   OpenAI:    https://developers.openai.com/api/docs/pricing
-    PRICING_VERSION = "6"
-    PRICING_UPDATED_AT = "2026-09-22"
+    PRICING_VERSION = "7"
+    PRICING_UPDATED_AT = "2026-09-23"
 
     # Supported models configuration (single source of truth for all model metadata)
     #
@@ -158,6 +158,46 @@ class Config:
             # after the first chunk, so a wrong guess costs at most one
             # mis-sized chunk.
             "token_multiplier": 2.0,
+        },
+        "gpt-6-sol": {
+            # ASSUMED o200k like GPT-5.x (also the provider default); not
+            # measured on GPT-6. Only selects the cap-check prior until the
+            # user's first chunk is measured.
+            "tokenizer_family": "o200k",
+            "provider": "openai",
+            "api_model": "gpt-6-sol",
+            "max_input_tokens": 922000,
+            "display_name": "GPT-6 Sol",
+            "context_window": 1050000,
+            # Verified 2026-09-23 on the OpenAI pricing + model pages:
+            # $2.00 / $10.00, cached input $0.20 (0.1x), cache writes $2.50
+            # (the default 1.25x); >272k input: $4.00 / $15.00, cached $0.40,
+            # writes $5.00 (2x input and cache, 1.5x output); batch half.
+            "input_price_per_mtok": 2.00,
+            "output_price_per_mtok": 10.00,
+            "cached_input_multiplier": 0.10,
+            "long_context_threshold": 272000,
+            "long_context_input_multiplier": 2.0,
+            "long_context_output_multiplier": 1.5,
+        },
+        "gpt-6-luna": {
+            # ASSUMED o200k, as for gpt-6-sol.
+            "tokenizer_family": "o200k",
+            "provider": "openai",
+            "api_model": "gpt-6-luna",
+            "max_input_tokens": 922000,
+            "display_name": "GPT-6 Luna",
+            "context_window": 1050000,
+            # Verified 2026-09-23 on the OpenAI pricing + model pages:
+            # $0.10 / $0.50, cached input $0.01 (0.1x), cache writes $0.125
+            # (the default 1.25x); >272k input: $0.20 / $0.75, cached $0.02,
+            # writes $0.25 (2x input and cache, 1.5x output); batch half.
+            "input_price_per_mtok": 0.10,
+            "output_price_per_mtok": 0.50,
+            "cached_input_multiplier": 0.10,
+            "long_context_threshold": 272000,
+            "long_context_input_multiplier": 2.0,
+            "long_context_output_multiplier": 1.5,
         },
         "gpt-5.6-sol": {
             "tokenizer_family": "o200k",
