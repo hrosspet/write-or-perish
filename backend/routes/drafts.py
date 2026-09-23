@@ -10,6 +10,7 @@ import shutil
 from backend.utils.audio_storage import move_draft_audio_to_node_dir
 from backend.utils.encryption import encrypt_file
 from backend.utils.llm_nodes import pick_model_for_generation
+from backend.utils.spend import require_spend_headroom
 from backend.utils.webm_utils import (
     chunk_is_init_bearing, persist_init_segment,
 )
@@ -465,12 +466,17 @@ def _cleanup_stale_drafts(user_id):
 
 @drafts_bp.route("/streaming/init", methods=["POST"])
 @login_required
+@require_spend_headroom
 def init_streaming():
     """
     Initialize a streaming transcription session.
 
     Creates a Draft record to store the streaming session and transcript.
     NO node is created until the user explicitly saves.
+
+    A capped user gets 402 here, before the frontend opens the mic (#341).
+    Resuming an interrupted session never calls init, and its chunks
+    (audio-chunk, transcribe-remaining, finalize) are not cap-checked.
 
     Request body:
     {
@@ -952,6 +958,11 @@ def get_streaming_status(session_id):
     }
     if draft.llm_node_id:
         status_data["llm_node_id"] = draft.llm_node_id
+    # Same field the SSE all_complete event carries: the frontend's polling
+    # fallback (iOS drops SSE when backgrounded) needs it too, or it treats
+    # a skipped reply as "no server-side chain" and saves the entry again.
+    if draft.streaming_warning:
+        status_data["warning"] = draft.streaming_warning
     return jsonify(status_data)
 
 

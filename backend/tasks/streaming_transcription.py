@@ -4,6 +4,12 @@ Celery tasks for streaming audio transcription.
 These tasks handle real-time transcription of audio chunks as they're
 recorded, enabling the user to see transcript text appear in their
 draft while still recording.
+
+No task here checks the monthly spend cap (#341). A recording that has
+started is transcribed to the end, even when the cap flips mid-recording
+(the block flag is set out of band, ENFORCE_CAP_DELAY_SECONDS after any
+cost row, including this module's own transcription rows). The cap blocks
+starting a recording (the streaming init endpoints) and the LLM reply.
 """
 from celery import Task
 from celery.utils.log import get_task_logger
@@ -30,6 +36,13 @@ logger = get_task_logger(__name__)
 # while recording), so the prefix is cold at generation — warm it. Tied to
 # the provider TTL; tune together.
 PREWARM_ONGOING_MIN_SECONDS = 300
+
+# Toast text when a Voice recording finishes after the user hit the monthly
+# spend cap (#341): the entry is saved, the reply is skipped.
+VOICE_REPLY_SKIPPED_SPEND_CAP = (
+    "Your recording is saved. Loore didn't reply because you've reached "
+    "your monthly usage limit, which resets at the start of next month."
+)
 
 
 def _find_thread_system_node(parent_id):
@@ -84,14 +97,6 @@ def transcribe_chunk(self, node_id: int, chunk_index: int, chunk_path: str):
     logger.info(f"Starting chunk transcription for node {node_id}, chunk {chunk_index}")
 
     with flask_app.app_context():
-        from backend.utils.spend import user_is_capped
-        _node = Node.query.get(node_id)
-        if _node and user_is_capped(_node.user_id):
-            logger.warning(
-                "User %s is spend-capped; skipping chunk transcription",
-                _node.user_id)
-            return
-
         # Get the transcript chunk record
         chunk_record = NodeTranscriptChunk.query.filter_by(
             node_id=node_id,
@@ -403,14 +408,6 @@ def transcribe_draft_chunk(self, session_id: str, chunk_index: int, chunk_path: 
     logger.info(f"Starting draft chunk transcription for session {session_id}, chunk {chunk_index}")
 
     with flask_app.app_context():
-        from backend.utils.spend import user_is_capped
-        _draft = Draft.query.filter_by(session_id=session_id).first()
-        if _draft and user_is_capped(_draft.user_id):
-            logger.warning(
-                "User %s is spend-capped; skipping draft chunk transcription",
-                _draft.user_id)
-            return
-
         # Get the transcript chunk record
         chunk_record = NodeTranscriptChunk.query.filter_by(
             session_id=session_id,
@@ -611,13 +608,6 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                 'chunk_indices': chunk_indices,
                 'status': 'draft_deleted',
             }
-
-        from backend.utils.spend import user_is_capped
-        if user_is_capped(draft.user_id):
-            logger.warning(
-                "User %s is spend-capped; skipping batch transcription",
-                draft.user_id)
-            return
 
         # Family-only mime drives the on-disk extension. Defensive None
         # handling in case a row was inserted before the default backfill;
@@ -1347,27 +1337,36 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     # ParentDeletedError handled the same way: if user_node got
     # soft-deleted between voice-record finalization and now, abort
     # cleanly without an orphan LLM placeholder.
+    # SpendCapExceeded the same way (#341): the recording is transcribed
+    # in full even when the monthly cap flipped during it; only the reply
+    # is skipped. Without this the generic handler in the caller committed
+    # the nodes with no warning, and the voice frontend's fallback POST
+    # then tried to save the same transcript again.
     from backend.utils.placeholders import UserExportValidationError
     from backend.utils.node_deletion import ParentDeletedError
+    from backend.utils.spend import SpendCapExceeded
     from backend.utils.task_warnings import record_task_warning
     try:
         llm_node, _ = create_llm_placeholder(
             tip_node.id, model, user_id, enqueue=False,
             ai_usage=ai_usage,
         )
-    except (UserExportValidationError, ParentDeletedError) as e:
+    except (UserExportValidationError, ParentDeletedError,
+            SpendCapExceeded) as e:
+        message = (VOICE_REPLY_SKIPPED_SPEND_CAP
+                   if isinstance(e, SpendCapExceeded) else str(e))
         logger.warning(
             "Voice transcription aborted LLM dispatch: %s "
             "(session_id=%s user_id=%s)",
-            e, session_id, user_id,
+            message, session_id, user_id,
         )
-        record_task_warning(user_node, str(e))
+        record_task_warning(user_node, message)
         # Mark draft as completed (audio + transcript are real and
         # belong to the user) but with no llm_node_id. The
         # streaming_warning travels through SSE all_complete to the
         # voice frontend, which surfaces it as a toast.
         draft.streaming_status = 'completed'
-        draft.streaming_warning = str(e)
+        draft.streaming_warning = message
         db.session.commit()
         return
 
