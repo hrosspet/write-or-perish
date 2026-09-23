@@ -204,6 +204,14 @@ const NodeForm = forwardRef(
 
     // Recovery: when a draft has stored (untranscribed) audio chunks,
     // trigger server-side transcription and poll for completion.
+    //
+    // This still fires on its own, but only for a session nobody is
+    // recording: GET /drafts/ no longer returns a live session (#320), so
+    // what arrives here was left behind (reload, crash, navigating away
+    // mid-recording) and the transcript should come back into this box
+    // without a click. If the session turns out to be live after all (its
+    // tab resumed it), the server refuses (409) or reports `live`, and
+    // this view lets go of it instead of completing it.
     useEffect(() => {
       if (!isDraftLoaded || !draft) return;
       if (!draft.session_id || !draft.has_stored_chunks) return;
@@ -211,15 +219,35 @@ const NodeForm = forwardRef(
       setIsRecoveringAudio(true);
       setStreamingSessionId(draft.session_id);
 
+      const letGo = () => {
+        setIsRecoveringAudio(false);
+        setStreamingSessionId(null);
+      };
+
       const triggerRecovery = async () => {
         try {
-          await api.post(`/drafts/streaming/${draft.session_id}/transcribe-remaining`);
+          try {
+            await api.post(`/drafts/streaming/${draft.session_id}/transcribe-remaining`);
+          } catch (err) {
+            if (err.response?.status === 409) {
+              console.warn('[NodeForm] Recording is live in another tab; not recovering it here');
+              letGo();
+              return;
+            }
+            throw err;
+          }
 
           // Poll for completion
           const pollInterval = setInterval(async () => {
             try {
               const res = await api.get(`/drafts/streaming/${draft.session_id}/status`);
-              const { streaming_status, content } = res.data;
+              const { streaming_status, content, live } = res.data;
+
+              if (live) {
+                clearInterval(pollInterval);
+                letGo();
+                return;
+              }
 
               if (content) {
                 setContent(content);
