@@ -1,8 +1,8 @@
 import logging
 from urllib.parse import parse_qs, parse_qsl, urlparse
 
-from flask import request, session
-from flask_dance.consumer import oauth_before_login
+from flask import g, request, session
+from flask_dance.consumer import OAuth1ConsumerBlueprint, oauth_before_login
 from flask_dance.contrib.twitter import make_twitter_blueprint
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,40 @@ def _refuse_foreign_callback():
     return refuse_x_callback()
 
 
+_make_session = OAuth1ConsumerBlueprint.__dict__["session"].fget
+
+
+class _RequestLocalSessionBlueprint(OAuth1ConsumerBlueprint):
+    """An OAuth1 blueprint whose provider session lives on `g`.
+
+    flask-dance caches one OAuth1Session on the blueprint (a werkzeug
+    cached_property, deleted in every request's teardown). The blueprint is
+    process-global, so under `gunicorn -k gevent` requests that overlap in
+    one worker would share that session, and with it the token it loaded
+    first: one person's /auth/login could verify, and sign in with, another
+    person's X token. `g` belongs to a single request.
+    """
+
+    def _session_key(self):
+        return "_oauth1_session_" + self.name
+
+    def _get_session(self):
+        key = self._session_key()
+        oauth_session = g.get(key)
+        if oauth_session is None:
+            oauth_session = _make_session(self)
+            setattr(g, key, oauth_session)
+        return oauth_session
+
+    def _drop_session(self):
+        # flask-dance's teardown (`del self.session`) runs after every
+        # request. `g` normally goes away with the request anyway; popping
+        # also covers an app context that outlives one request (tests).
+        g.pop(self._session_key(), None)
+
+    session = property(_get_session, None, _drop_session)
+
+
 def init_twitter_blueprint(app):
     # After Twitter OAuth completes, redirect back to /auth/login
     # which handles the next_url session variable for proper redirect
@@ -59,6 +93,9 @@ def init_twitter_blueprint(app):
         api_secret=app.config["TWITTER_API_SECRET"],
         redirect_url = redirect_url
     )
+    # make_twitter_blueprint always builds a plain OAuth1ConsumerBlueprint;
+    # the subclass only replaces how `session` is stored.
+    twitter_bp.__class__ = _RequestLocalSessionBlueprint
     oauth_before_login.connect(_remember_request_token, sender=twitter_bp)
     twitter_bp.before_request(_refuse_foreign_callback)
     # Register this blueprint on the app
