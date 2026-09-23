@@ -150,6 +150,27 @@ export function useStreamingTranscription(options = {}) {
   // The session already stopped as ended elsewhere (dedups the several
   // in-flight chunk uploads that all come back rejected).
   const endedSessionRef = useRef(null);
+  // The session this tab already released (pagehide, unmount and cancel
+  // can all fire for the same departure).
+  const releasedSessionRef = useRef(null);
+  // Filled in once the recorder and SSE hooks below have returned, like
+  // resetMediaRecorderRef.
+  const stopMediaRecorderRef = useRef(null);
+  const resetSSERef = useRef(null);
+
+  // #320: this tab stops recording a session it never finalized (reload,
+  // close, navigating away, cancel): tell the server, so the session can
+  // be recovered at once rather than after the server's liveness window.
+  const releaseIfAbandoned = useCallback(() => {
+    const current = sessionIdRef.current;
+    if (!current || finalizeRequestedRef.current
+        || endedSessionRef.current === current
+        || releasedSessionRef.current === current) {
+      return;
+    }
+    releasedSessionRef.current = current;
+    releaseSession(current);
+  }, []);
 
   // Indirection ref: uploadChunk (defined below) needs to stop the recorder
   // on a fatal upload error, but the recorder's reset fn isn't in scope yet
@@ -184,12 +205,22 @@ export function useStreamingTranscription(options = {}) {
   // session, and report it as a fatal error rather than a completed
   // recording: the transcript is unfinished, and in voice mode onComplete
   // would send it to the LLM.
+  //
+  // Stop, not reset: stopping keeps the recorded audio in memory, so text
+  // mode's "Save audio" can still download it — after a discard elsewhere
+  // it is the only complete copy. The final chunk's upload is rejected
+  // and deduplicated here. The SSE state is reset because it marked
+  // itself complete, which would switch off its reconnect and stale
+  // checks for this tab's next recording.
   const stopEndedSession = useCallback((endedSessionId) => {
     if (!endedSessionId || endedSessionRef.current === endedSessionId) return;
     endedSessionRef.current = endedSessionId;
     console.warn(`[StreamingTranscription] Session ${endedSessionId} was ended elsewhere — stopping the recorder`);
-    if (resetMediaRecorderRef.current) {
-      resetMediaRecorderRef.current();
+    if (stopMediaRecorderRef.current) {
+      stopMediaRecorderRef.current();
+    }
+    if (resetSSERef.current) {
+      resetSSERef.current();
     }
     failedChunksRef.current = failedChunksRef.current.filter(
       (c) => c.sessionId !== endedSessionId);
@@ -416,6 +447,7 @@ export function useStreamingTranscription(options = {}) {
   // on a fatal upload error (declared above, resetMediaRecorder not yet
   // in scope there).
   resetMediaRecorderRef.current = resetMediaRecorder;
+  stopMediaRecorderRef.current = stopMediaRecorder;
 
   // SSE subscription for transcription updates (draft-based)
   const {
@@ -469,6 +501,8 @@ export function useStreamingTranscription(options = {}) {
     },
   });
 
+  resetSSERef.current = resetSSE;
+
   // Update internal transcript when draft content changes from SSE
   // Note: Don't call onTranscriptUpdate here - it's already called in onContentUpdate callback.
   // Calling it here too causes duplicate updates, and the effect can run AFTER onComplete
@@ -481,6 +515,9 @@ export function useStreamingTranscription(options = {}) {
 
   // Handle transcription completion
   useEffect(() => {
+    // An all_complete this tab did not ask for was handled as "ended
+    // elsewhere" in onAllComplete (#320); it must not turn into complete.
+    if (!finalizeRequestedRef.current) return;
     if (transcriptionComplete && finalContent) {
       setSessionState('complete');
       setTranscript(finalContent);
@@ -596,17 +633,15 @@ export function useStreamingTranscription(options = {}) {
   // off the site) releases its session, so the reloaded page offers
   // recovery at once. Without this the server keeps treating the session
   // as live — and hides it from recovery — for its liveness window.
+  // The same when the component recording goes away in-app (text mode's
+  // StreamingMicButton on SPA navigation has no cleanup of its own).
   useEffect(() => {
-    const onPageHide = () => {
-      const current = sessionIdRef.current;
-      if (current && !finalizeRequestedRef.current
-          && endedSessionRef.current !== current) {
-        releaseSession(current);
-      }
+    window.addEventListener('pagehide', releaseIfAbandoned);
+    return () => {
+      window.removeEventListener('pagehide', releaseIfAbandoned);
+      releaseIfAbandoned();
     };
-    window.addEventListener('pagehide', onPageHide);
-    return () => window.removeEventListener('pagehide', onPageHide);
-  }, []);
+  }, [releaseIfAbandoned]);
 
   // NOTE: Emergency chunk upload on page unload was attempted using both
   // sendBeacon and fetch+keepalive, but Chrome fires ondataavailable from
@@ -656,6 +691,10 @@ export function useStreamingTranscription(options = {}) {
   const startStreaming = useCallback(async (overrideParentId) => {
     let initSucceeded = false;
     finalizeRequestedRef.current = false;
+    releasedSessionRef.current = null;
+    // A new session starts from fresh SSE state even when the previous
+    // one ended without cancelStreaming (e.g. voice mode back to ready).
+    resetSSE();
     try {
       await initSession(overrideParentId);
       initSucceeded = true;
@@ -703,7 +742,7 @@ export function useStreamingTranscription(options = {}) {
         onError(err);
       }
     }
-  }, [initSession, startMediaRecorder, onError]);
+  }, [initSession, startMediaRecorder, onError, resetSSE]);
 
   // Resume an existing interrupted session (continue recording).
   // New chunks start after existingChunkCount, duration continues from estimated offset.
@@ -715,6 +754,7 @@ export function useStreamingTranscription(options = {}) {
   const resumeStreaming = useCallback(async (existingSessionId, existingDraftId, existingChunkCount, existingMimeType) => {
     let initSucceeded = false;
     finalizeRequestedRef.current = false;
+    releasedSessionRef.current = null;
     try {
       setSessionState('initializing');
       setErrorMessage(null);
@@ -820,11 +860,7 @@ export function useStreamingTranscription(options = {}) {
     // Abandoning a recording this tab never finalized (e.g. the voice page
     // unmounts mid-recording): release it so it is recoverable right away
     // (#320). The server ignores this for a session no longer recording.
-    const current = sessionIdRef.current;
-    if (current && !finalizeRequestedRef.current
-        && endedSessionRef.current !== current) {
-      releaseSession(current);
-    }
+    releaseIfAbandoned();
     finalizeRequestedRef.current = false;
     disconnectSSE();
     resetMediaRecorder();
@@ -843,7 +879,7 @@ export function useStreamingTranscription(options = {}) {
     totalChunksRef.current = 0;
     pendingUploadsRef.current = [];
     failedChunksRef.current = [];
-  }, [disconnectSSE, resetMediaRecorder, resetSSE]);
+  }, [disconnectSSE, resetMediaRecorder, resetSSE, releaseIfAbandoned]);
 
   return {
     // State
