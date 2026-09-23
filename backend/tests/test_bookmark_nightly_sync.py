@@ -843,6 +843,96 @@ def test_interrupted_first_import_resumes_to_the_end(app, monkeypatch):
     assert calls == [10] and result["created"] == 0
 
 
+def test_interrupted_catch_up_sync_fills_the_gap(app, monkeypatch):
+    """#310 review: an account that HAS synced before (reconnected, or
+    unparked after #313) comes back with 300 new bookmarks above the 200
+    it has. The catch-up sync 429s after storing 30 of them. last_synced_at
+    keeps its old value, so without a marker the next sync would read one
+    known page and stop, and the 270 between would never be imported.
+    The marker makes it read to the end, then clears with last_synced_at."""
+    from datetime import datetime, timedelta
+    uid = User.query.first().id
+    account = _mk_account(uid, expired=False)
+    synced_before = datetime.utcnow() - timedelta(days=60)
+    account.last_synced_at = synced_before
+    _db.session.commit()
+    known = [f"k{i}" for i in range(200)]
+    _sync_mod._upsert_items(uid, "twitter_bookmark", [
+        {"external_id": k, "content": "t", "author_handle": "u",
+         "url": None, "posted_at": None} for k in known])
+    ids = [f"n{i}" for i in range(300)] + known
+
+    calls = _fake_x_bookmarks(monkeypatch, ids, fail_on_request=2)
+    with pytest.raises(requests.HTTPError):
+        _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    _db.session.expire_all()
+    account = ExternalAccount.query.get(account.id)
+    assert account.sync_incomplete is True
+    assert account.last_synced_at == synced_before
+    assert ExternalItem.query.filter_by(
+        user_id=uid, source="twitter_bookmark").count() == 230
+
+    calls = _fake_x_bookmarks(monkeypatch, ids)
+    result = _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    assert calls == [10, 20, 40, 80, 100, 100, 100, 100]  # to the end
+    assert result["posts_read"] == 500
+    assert result["created"] == 270
+    assert ExternalItem.query.filter_by(
+        user_id=uid, source="twitter_bookmark").count() == 500
+    _db.session.expire_all()
+    account = ExternalAccount.query.get(account.id)
+    assert account.sync_incomplete is None
+    assert account.last_synced_at > synced_before
+
+    # Finished: the next quiet night is one small page again.
+    calls = _fake_x_bookmarks(monkeypatch, ids)
+    _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    assert calls == [10]
+
+
+def test_killed_worker_leaves_the_marker_set(app, monkeypatch):
+    """A deploy that kills the worker mid-sync raises SystemExit in the
+    pool process (#312): no except block runs. The marker was committed
+    with the first stored page, so the next sync still reads to the end."""
+    from datetime import datetime, timedelta
+    uid = User.query.first().id
+    account = _mk_account(uid, expired=False)
+    account.last_synced_at = datetime.utcnow() - timedelta(days=1)
+    _db.session.commit()
+
+    def page_then_killed(token, x_user_id, max_items=800):
+        yield [{"external_id": "n1", "content": "t", "author_handle": "x",
+                "url": None, "posted_at": None}], 1
+        raise SystemExit(0)
+    monkeypatch.setattr(_sync_mod, "x_fetch_bookmark_pages", page_then_killed)
+
+    with pytest.raises(SystemExit):
+        _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    _db.session.rollback()
+    _db.session.expire_all()
+    assert ExternalAccount.query.get(account.id).sync_incomplete is True
+
+
+def test_quiet_night_leaves_no_marker(app, monkeypatch):
+    """A sync that reads one known page and stops has finished: the
+    marker it set with that page is cleared with last_synced_at."""
+    from datetime import datetime, timedelta
+    uid = User.query.first().id
+    account = _mk_account(uid, expired=False)
+    account.last_synced_at = datetime.utcnow() - timedelta(days=1)
+    _db.session.commit()
+    known = [f"k{i}" for i in range(50)]
+    _sync_mod._upsert_items(uid, "twitter_bookmark", [
+        {"external_id": k, "content": "t", "author_handle": "u",
+         "url": None, "posted_at": None} for k in known])
+    calls = _fake_x_bookmarks(monkeypatch, known)
+
+    _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
+    assert calls == [10]
+    _db.session.expire_all()
+    assert ExternalAccount.query.get(account.id).sync_incomplete is None
+
+
 def test_first_import_reads_past_bookmarks_saved_another_way(
         app, monkeypatch):
     """Tweets clipped with the extension or imported from JSON share the

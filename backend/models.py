@@ -1282,6 +1282,13 @@ class ExternalAccount(db.Model):
     # reports THIS after a manual sync — diffing item counts around a
     # background task raced its per-page commits and under-reported.
     last_sync_created = db.Column(db.Integer, nullable=True)
+    # True while a sync that has stored bookmarks has not run to its end
+    # (a 429, a 5xx, a worker killed by a deploy); NULL otherwise. The
+    # next sync then reads to the end instead of stopping at the first
+    # known page, which would leave the unread part missing for good
+    # (#310). Committed together with the first stored page, so a killed
+    # worker leaves it set too.
+    sync_incomplete = db.Column(db.Boolean, nullable=True)
 
     user = db.relationship("User", backref="external_accounts")
 

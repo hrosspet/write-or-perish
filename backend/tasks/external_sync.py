@@ -225,18 +225,23 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
         # X bills pay-per-use per RETURNED POST (#271), not per request:
         # a page of N bookmarks costs N post reads, an empty page nothing.
         #
-        # Except on a FIRST import that has not finished yet (#310). The
-        # early stop assumes everything below a known page was imported
-        # by an earlier sync, which only holds once a sync has run to the
-        # end. A first import cut off by a 429 or 5xx leaves its head
-        # imported and the rest missing; stopping at that head would
-        # skip the rest for good. So until last_synced_at is set, a known
-        # page does not end the sync and does not freeze the page size:
-        # it reads on to the end or to max_items (X's own cap), re-reading
+        # Except after a sync that did not finish (#310). The early stop
+        # assumes everything below a known page was imported by a sync
+        # that ran to its end. A sync cut off by a 429, a 5xx or a deploy
+        # killing the worker, while it was still storing new bookmarks,
+        # leaves its head imported and the rest missing; stopping at that
+        # head would skip the rest for good. That holds for a first
+        # import (no last_synced_at yet) and for a catch-up sync on an
+        # account that has synced before (after a reconnect or an
+        # unpark, hundreds of bookmarks can be waiting), which the
+        # sync_incomplete marker records. In either case a known page
+        # does not end the sync and does not freeze the page size: it
+        # reads on to the end or to max_items (X's own cap), re-reading
         # the imported head once — at most max_items posts, the cost the
         # interrupted attempt would have had if it had finished. A page
         # on which X returned nothing still ends it.
-        first_import = account.last_synced_at is None
+        read_to_end = (account.last_synced_at is None
+                       or bool(account.sync_incomplete))
         created = skipped = requests_made = posts_read = 0
 
         def _log_cost():
@@ -270,13 +275,19 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
                     break
                 requests_made += 1
                 posts_read += returned
+                if page:
+                    # Rides _upsert_items' commit, so it is stored with
+                    # the page's rows: an exception or a killed worker
+                    # after this point leaves it set for the next sync.
+                    # Cleared below only when the sync reaches its end.
+                    account.sync_incomplete = True
                 page_created, page_skipped = _upsert_items(
                     user_id, "twitter_bookmark", page)
                 created += page_created
                 skipped += page_skipped
-                if page_created == 0 and (not first_import or returned == 0):
+                if page_created == 0 and (not read_to_end or returned == 0):
                     break
-                grow = page_skipped == 0 or first_import
+                grow = page_skipped == 0 or read_to_end
         except Exception as exc:
             # Pages already upserted are committed (_upsert_items commits
             # per page); this only discards a half-applied page from a DB
@@ -304,8 +315,9 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
                 return _mark_revoked(account, "bookmarks fetch HTTP 401")
             raise
         # Only a sync that ran to its end gets here, so this is what
-        # ends a first import's read-to-the-end mode above.
+        # ends the read-to-the-end mode above.
         account.last_synced_at = datetime.utcnow()
+        account.sync_incomplete = None
         account.last_sync_created = created
         _log_cost()
         db.session.commit()
