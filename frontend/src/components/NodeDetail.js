@@ -223,13 +223,13 @@ function NodeDetail({ nodeIdOverride }) {
     if (node) document.title = tabTitleFor(node);
   }, [node]);
 
-  // Fetch quote data when node loads (if content contains {quote:ID} placeholders)
+  // Fetch quote data when node loads (if content contains {quote:ID} /
+  // {quote_ext:ID} placeholders). Keyed on the markers themselves, not the
+  // node object: a checklist toggle or an in-place patch replaces the
+  // object without changing which quotes the content holds (#321).
+  const quoteMarkers = (node?.content?.match(/\{quote(?:_ext)?:\d+\}/g) || []).join(',');
   useEffect(() => {
-    if (!node || !node.content) return;
-
-    // Check if content contains {quote:ID} / {quote_ext:ID} patterns
-    const quotePattern = /\{quote(?:_ext)?:(\d+)\}/;
-    if (!quotePattern.test(node.content)) return;
+    if (!quoteMarkers) return;
 
     // Fetch quotes for this node
     api
@@ -246,14 +246,20 @@ function NodeDetail({ nodeIdOverride }) {
         console.error("Error fetching quotes:", err);
         // Don't show error to user - quotes will just not render
       });
-  }, [id, node]);
+  }, [id, quoteMarkers]);
 
-  // Scroll to the highlighted node after loading
+  // Scroll to the focal node once, after its thread loads. Keyed on the
+  // id: checklist toggles, the "+" insert, edits and in-place LLM patches
+  // all replace the node object, and each of those used to scroll the page
+  // back to the top of the focal node (#321).
+  const focalId = node?.id;
+  const scrolledToIdRef = useRef(null);
   useEffect(() => {
-    if (!loading && node && highlightedNodeRef.current) {
-      highlightedNodeRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-  }, [loading, node]);
+    if (loading || focalId == null || !highlightedNodeRef.current) return;
+    if (scrolledToIdRef.current === focalId) return;
+    scrolledToIdRef.current = focalId;
+    highlightedNodeRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [loading, focalId]);
 
   // If we arrived with ?awaitLlm=NID (e.g. from WritePage), pick up the
   // pending LLM task and let the polling navigate to it on completion.
