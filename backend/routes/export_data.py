@@ -9,7 +9,8 @@ from backend.utils.tokens import approximate_token_count, get_model_context_wind
 from backend.utils.privacy import AI_ALLOWED, accessible_nodes_filter, can_user_access_node
 from backend.utils.quotes import (
     resolve_quotes, has_quotes, ExportQuoteResolver,
-    resolve_quotes_for_export, resolve_ext_quotes, has_ext_quotes
+    resolve_quotes_for_export, resolve_ext_quotes, has_ext_quotes,
+    ai_blocked_artifact, AI_BLOCKED_ARTIFACT_TEXT,
 )
 from backend.utils.timefmt import iso_utc
 from backend.utils.encryption import prefetch_deks
@@ -257,6 +258,15 @@ def _is_flat_tweet_root(node, filter_ai_usage, created_before):
             and node.deleted_at is None
             and not _filtered_children(node, filter_ai_usage, created_before,
                                        None, keep_tombstones=True))
+
+
+def _preamble_content(row, filter_ai_usage):
+    """A pinned artifact version's preamble body. With *filter_ai_usage*,
+    a row marked outside AI_ALLOWED renders as a placeholder, never its
+    content (#340)."""
+    if filter_ai_usage and ai_blocked_artifact(row):
+        return AI_BLOCKED_ARTIFACT_TEXT
+    return row.get_content()
 
 
 def _artifact_ref_lines(node):
@@ -1459,7 +1469,8 @@ def build_user_export_content(
                     ).count()
                     profile_versions[profile.id] = {
                         "version": pver,
-                        "content": profile.get_content(),
+                        "content": _preamble_content(
+                            profile, filter_ai_usage),
                     }
                 # Todo artifacts
                 todo = n.get_artifact("todo")
@@ -1470,7 +1481,7 @@ def build_user_export_content(
                     ).count()
                     todo_versions[todo.id] = {
                         "version": tver,
-                        "content": todo.get_content(),
+                        "content": _preamble_content(todo, filter_ai_usage),
                     }
                 # User artifacts (memory, scratchpad, predictions,
                 # ai_preferences, custom):
@@ -1487,7 +1498,8 @@ def build_user_export_content(
                         "kind": kind,
                         "title": artifact.title,
                         "version": art_ver,
-                        "content": artifact.get_content(),
+                        "content": _preamble_content(
+                            artifact, filter_ai_usage),
                     }
 
         has_any_preamble = (

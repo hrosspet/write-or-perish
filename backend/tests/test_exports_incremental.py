@@ -1226,6 +1226,108 @@ class TestFullExportArtifactContent:
         assert "## Artifacts Referenced" not in content
 
 
+class TestPreambleRespectsArtifactAiUsage:
+    """#340: a pinned profile/todo/artifact version marked ai_usage='none'
+    never reaches the model through the export preamble. Its ref line
+    stays; the preamble shows a placeholder instead of the content."""
+
+    def _pinned_thread(self, ai_usage_by_kind):
+        from backend.models import (
+            UserProfile, UserTodo, UserArtifact, NodeContextArtifact,
+        )
+        alice = _make_user("alice")
+        _db.session.commit()
+        profile = UserProfile(
+            user_id=alice.id, generated_by="user",
+            ai_usage=ai_usage_by_kind["profile"],
+        )
+        profile.set_content("SECRET PROFILE BODY")
+        todo = UserTodo(
+            user_id=alice.id, generated_by="user",
+            ai_usage=ai_usage_by_kind["todo"],
+        )
+        todo.set_content("SECRET TODO BODY")
+        art = UserArtifact(
+            user_id=alice.id, kind="memory", title="Memory",
+            generated_by="user", ai_usage=ai_usage_by_kind["artifact"],
+        )
+        art.set_content("SECRET MEMORY BODY")
+        _db.session.add_all([profile, todo, art])
+        _db.session.flush()
+        node = _make_node(
+            alice, content="thread body", ai_usage="chat",
+            token_count=100, created_at=APR_18,
+        )
+        for atype, aid in (("profile", profile.id), ("todo", todo.id),
+                           ("user_artifact", art.id)):
+            _db.session.add(NodeContextArtifact(
+                node_id=node.id, artifact_type=atype, artifact_id=aid))
+        _db.session.commit()
+        return alice, profile, todo, art
+
+    def test_budgeted_export_blocks_none_profile(self, app):
+        alice, profile, todo, _ = self._pinned_thread(
+            {"profile": "none", "todo": "chat", "artifact": "chat"})
+
+        content = _build(alice, filter_ai_usage=True, max_tokens=5000)
+
+        assert "thread body" in content
+        assert "SECRET PROFILE BODY" not in content
+        assert f"### User Profile (ref #{profile.id})" in content
+        assert "[AI usage not permitted by author]" in content
+        # A permitted row next to it still renders.
+        assert "SECRET TODO BODY" in content
+
+    def test_budgeted_export_blocks_none_todo(self, app):
+        alice, _, todo, _ = self._pinned_thread(
+            {"profile": "chat", "todo": "none", "artifact": "chat"})
+
+        content = _build(alice, filter_ai_usage=True, max_tokens=5000)
+
+        assert "SECRET TODO BODY" not in content
+        assert f"### User TODO (ref #{todo.id})" in content
+        assert "SECRET PROFILE BODY" in content
+
+    def test_incremental_budgeted_export_blocks_none_rows(self, app):
+        # The {user_recent_raw} path: created_after + max_tokens.
+        alice, _, _, _ = self._pinned_thread(
+            {"profile": "none", "todo": "none", "artifact": "chat"})
+
+        result = _build(
+            alice, filter_ai_usage=True, created_after=APR_07,
+            max_tokens=5000, return_metadata=True,
+        )
+
+        content = result["content"]
+        assert "thread body" in content
+        assert "SECRET PROFILE BODY" not in content
+        assert "SECRET TODO BODY" not in content
+
+    def test_full_export_blocks_none_rows(self, app):
+        alice, _, _, art = self._pinned_thread(
+            {"profile": "none", "todo": "none", "artifact": "none"})
+
+        content = _build(alice, filter_ai_usage=True)
+
+        assert "thread body" in content
+        for body in ("SECRET PROFILE BODY", "SECRET TODO BODY",
+                     "SECRET MEMORY BODY"):
+            assert body not in content
+        assert f"[Artifact 'memory' v1 (ref #{art.id})]" in content
+        assert content.count("[AI usage not permitted by author]") == 3
+
+    def test_unfiltered_export_keeps_content(self, app):
+        # The user's own download (no AI filter) shows everything.
+        alice, _, _, _ = self._pinned_thread(
+            {"profile": "none", "todo": "none", "artifact": "none"})
+
+        for kwargs in ({}, {"max_tokens": 5000}):
+            content = _build(alice, filter_ai_usage=False, **kwargs)
+            assert "SECRET PROFILE BODY" in content
+            assert "SECRET TODO BODY" in content
+            assert "[AI usage not permitted by author]" not in content
+
+
 # ── origin: imported nodes are marked, Loore-native ones are not ────────
 
 class TestOrigin:
