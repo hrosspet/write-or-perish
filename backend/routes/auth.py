@@ -11,9 +11,11 @@ from backend.utils.magic_link import (
     generate_magic_link_token, verify_magic_link_token,
     hash_token, generate_unique_username,
 )
-from backend.utils.email import send_magic_link_email, is_valid_email
+from backend.utils.email import (
+    send_magic_link_email, send_x_connected_notice, is_valid_email)
 from backend.utils.reserved_usernames import derive_available_username
 import logging
+import time
 from urllib.parse import urlparse, quote
 
 logger = logging.getLogger(__name__)
@@ -106,6 +108,10 @@ def _create_x_user(twitter_id, screen_name):
 # /auth/login, so this is how that route tells "attach X to the signed-in
 # account" from "sign in with X".
 X_CONNECT_SESSION_KEY = "x_connect"
+# How long a started Connect X stays good for. Authorizing at X takes a
+# minute; an intent left behind by an abandoned attempt must not make some
+# later X callback in this browser a connect. A guess, not a measurement.
+X_CONNECT_MAX_AGE_SECONDS = 10 * 60
 
 
 def _account_redirect(outcome):
@@ -145,7 +151,8 @@ def _connect_x(user, twitter_id, screen_name):
         written = (User.query
                    .filter(User.id == user.id, User.twitter_id.is_(None))
                    .update({"twitter_id": twitter_id,
-                            "twitter_handle": screen_name},
+                            "twitter_handle": screen_name,
+                            "x_connected_at": datetime.utcnow()},
                            synchronize_session=False))
         db.session.commit()
     except IntegrityError:
@@ -158,6 +165,10 @@ def _connect_x(user, twitter_id, screen_name):
         _drop_x_token()
         return _account_redirect("other_x")
     logger.info("Connected X id %s to user %s", twitter_id, user.id)
+    if written and user.email:
+        # A new way into the account: tell its address, as an email change
+        # tells the old one, in case the session was not the owner's.
+        send_x_connected_notice(user.email, screen_name)
     return _account_redirect("linked")
 
 
@@ -171,10 +182,23 @@ def _pop_connect_intent():
     intent = session.pop(X_CONNECT_SESSION_KEY, None)
     if intent is None:
         return False
-    if current_user.is_authenticated and intent.get("user_id") == current_user.id:
+    age = time.time() - (intent.get("at") or 0)
+    if (current_user.is_authenticated
+            and intent.get("user_id") == current_user.id
+            and age <= X_CONNECT_MAX_AGE_SECONDS):
         return True
     logger.info("Dropped a stale Connect X intent")
     return False
+
+
+def refuse_x_callback():
+    """Response for an X callback this browser session did not start
+    (backend/oauth.py checks the request token before flask-dance
+    exchanges it). Nothing is stored and a pending Connect X is dropped."""
+    if _pop_connect_intent():
+        return _account_redirect("failed")
+    frontend_url = current_app.config.get("FRONTEND_URL", "")
+    return redirect(f"{frontend_url}/login?error=x_try_again")
 
 
 @auth_bp.route("/x/connect")
@@ -189,7 +213,9 @@ def x_connect():
         frontend_url = current_app.config.get("FRONTEND_URL", "")
         return redirect(f"{frontend_url}/login?returnUrl="
                         f"{quote('/account', safe='')}")
-    session[X_CONNECT_SESSION_KEY] = {"user_id": current_user.id}
+    session[X_CONNECT_SESSION_KEY] = {
+        "user_id": current_user.id,
+        "at": time.time()}
     # A token left from an earlier X sign-in in this browser would skip X
     # and connect whichever X account that was; ask X which one instead.
     _drop_x_token()

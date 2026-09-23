@@ -10,6 +10,8 @@ const ERROR_MESSAGES = {
   link_already_used: "This sign-in link has already been used. Please request a new one.",
   // Signing in on the way to /confirm-email never creates an account (#260).
   confirm_needs_account: "No Loore account signs in that way yet. Sign in to the account you asked from, not with the address you are confirming.",
+  // An X callback this browser did not start (backend/oauth.py): refused.
+  x_try_again: "Sign in with X did not finish in this browser. Please try again.",
 };
 
 const loginStyles = `

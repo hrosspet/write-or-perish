@@ -209,6 +209,24 @@ def send_email_changed_notice(old_email, new_email):
           best_effort=True)
 
 
+def send_x_connected_notice(to_email, handle):
+    """Tell the account's address that an X account can now sign in to it
+    (Connect X, #311). Best-effort, like the email-changed notice."""
+    text_body = (
+        "X is now connected to your Loore account\n\n"
+        f"The X account @{handle} can now sign in to your Loore account.\n\n"
+        "If you did not do this, reply to this email right away."
+    )
+    html_body = _card(
+        "X is now connected to your account",
+        [f"The X account <strong style=\"color: #ede8dd;\">@{escape(handle)}</strong> "
+         "can now sign in to your Loore account."],
+        footnotes=("If you did not do this, reply to this email right away.",))
+    _send(to_email, "X is now connected to your Loore account", text_body,
+          html_body, "X-connected notice sent", "Failed to send X-connected notice",
+          best_effort=True)
+
+
 def send_welcome_email(to_email, magic_link_url):
     text_body = (
         "Welcome to Loore\n\n"

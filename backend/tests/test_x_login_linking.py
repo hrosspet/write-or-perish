@@ -20,6 +20,7 @@ Follows the real-app + sqlite pattern from test_admin_access.py.
 import json
 import os
 import sys
+import time
 from unittest.mock import MagicMock, patch
 
 # ── Environment ──────────────────────────────────────────────────────────
@@ -1213,7 +1214,8 @@ class TestConnectX:
 
         sess = _session(client)
         assert "twitter_oauth_token" not in sess
-        assert sess["x_connect"] == {"user_id": alice.id}
+        assert sess["x_connect"]["user_id"] == alice.id
+        assert abs(sess["x_connect"]["at"] - time.time()) < 60
 
     def test_cancelling_at_x_returns_to_the_account_page(self, app):
         """X sends the browser back without a token: back to Account, not
@@ -1253,7 +1255,7 @@ class TestConnectX:
         alice = _add(username="alice", email="alice@example.com", approved=True)
         client = app.test_client()
         with client.session_transaction() as sess:
-            sess["x_connect"] = {"user_id": alice.id}
+            sess["x_connect"] = {"user_id": alice.id, "at": time.time()}
 
         resp = _x_callback(client, x_id=123, screen_name="alice")
 
@@ -1272,7 +1274,7 @@ class TestConnectX:
         bob = _add(username="bob", email="bob@example.com", approved=True)
         client = _signed_in(app, bob)
         with client.session_transaction() as sess:
-            sess["x_connect"] = {"user_id": alice.id}
+            sess["x_connect"] = {"user_id": alice.id, "at": time.time()}
 
         _x_callback(client, x_id=123, screen_name="bob_x")
 
@@ -1287,7 +1289,7 @@ class TestConnectX:
         alice = _add(username="alice", email="alice@example.com", approved=True)
         client = app.test_client()
         with client.session_transaction() as sess:
-            sess["x_connect"] = {"user_id": alice.id}
+            sess["x_connect"] = {"user_id": alice.id, "at": time.time()}
         x = MagicMock()
         x.authorized = False
         with patch("backend.routes.auth.twitter", x):
@@ -1344,3 +1346,216 @@ class TestDisconnectX:
         assert r.status_code == 400
         _db.session.refresh(alice)
         assert alice.twitter_id == "123"
+
+
+class TestConnectXExtras:
+    def test_an_intent_older_than_ten_minutes_is_not_a_connect(self, app, monkeypatch):
+        """Abandoned at X and left in the session: a later X callback in this
+        browser is an ordinary sign-in, not a connect."""
+        import backend.routes.auth as auth_mod
+        alice = _add(username="alice", email="alice@example.com", approved=True)
+        client = _signed_in(app, alice)
+        client.get("/auth/x/connect")
+        started = _session(client)["x_connect"]["at"]
+        monkeypatch.setattr(auth_mod, "time", MagicMock(
+            time=lambda: started + auth_mod.X_CONNECT_MAX_AGE_SECONDS + 1))
+
+        _x_callback(client, x_id=123, screen_name="alice_x")
+
+        _db.session.refresh(alice)
+        assert alice.twitter_id is None
+        assert User.query.filter_by(twitter_id="123").one().id != alice.id
+
+    def test_a_new_link_is_recorded_and_the_address_told(self, app, monkeypatch):
+        import backend.routes.auth as auth_mod
+        sent = []
+        monkeypatch.setattr(auth_mod, "send_x_connected_notice",
+                            lambda to, handle: sent.append((to, handle)))
+        alice = _add(username="alice", email="alice@example.com", approved=True)
+
+        _connect(app, alice, x_id=123, screen_name="AliceOnX")
+
+        _db.session.refresh(alice)
+        assert alice.x_connected_at is not None
+        assert sent == [("alice@example.com", "AliceOnX")]
+
+    def test_no_notice_without_a_new_link(self, app, monkeypatch):
+        import backend.routes.auth as auth_mod
+        sent = []
+        monkeypatch.setattr(auth_mod, "send_x_connected_notice",
+                            lambda to, handle: sent.append((to, handle)))
+        # X sign-up account reconnecting its own X: nothing new, and it stays
+        # an X sign-up (x_connected_at stays null)
+        signup = _add(username="bob", email="bob@example.com",
+                      twitter_id="456", approved=True)
+        _connect(app, signup, x_id=456, screen_name="bob")
+        # refused: the id is held elsewhere
+        alice = _add(username="alice", email="alice@example.com", approved=True)
+        _connect(app, alice, x_id=456, screen_name="bob")
+
+        assert sent == []
+        _db.session.refresh(signup)
+        assert signup.x_connected_at is None
+
+    def test_the_notice_mail(self, monkeypatch):
+        from backend.utils import email as m
+        seen = {}
+        monkeypatch.setattr(m, "_deliver", lambda to, subj, text, html: seen.update(
+            to=to, subj=subj, text=text, html=html))
+        m.send_x_connected_notice("a@example.com", "<b>x</b>")
+        assert seen["to"] == "a@example.com"
+        assert "@<b>x</b>" in seen["text"] and "&lt;b&gt;" in seen["html"]
+        # best-effort: a failed send does not fail the connect
+        monkeypatch.setattr(m, "_deliver", MagicMock(side_effect=OSError("smtp down")))
+        m.send_x_connected_notice("a@example.com", "x")
+
+
+def _fake_x_exchange(access_x_id=666):
+    """Stand-in for the HTTP calls requests_oauthlib makes to X. Request
+    tokens come out numbered; the access exchange records what it was
+    asked to exchange."""
+    calls = {"request_tokens": 0, "exchanged": []}
+
+    def fake_fetch_token(self, url, **kw):
+        if "request_token" in url:
+            calls["request_tokens"] += 1
+            token = {"oauth_token": f"REQ-{calls['request_tokens']}",
+                     "oauth_token_secret": "rs", "oauth_callback_confirmed": "true"}
+        else:
+            calls["exchanged"].append(self._client.client.resource_owner_key)
+            token = {"oauth_token": "ACCESS", "oauth_token_secret": "as",
+                     "user_id": str(access_x_id), "screen_name": "someone"}
+        self._populate_attributes(token)
+        return token
+
+    return calls, patch("requests_oauthlib.OAuth1Session._fetch_token", fake_fetch_token)
+
+
+class TestXCallbackBoundToSession:
+    """flask-dance's OAuth 1 callback rebuilt the exchange from the URL alone,
+    so a callback URL completed in one browser worked in any other: a login
+    CSRF on Sign in with X, and with Connect X an attacker's X login on the
+    victim's account. These go through flask-dance's real views; only the
+    HTTP calls to X are faked."""
+
+    def test_connect_round_trip_still_works(self, app, monkeypatch):
+        import backend.routes.auth as auth_mod
+        monkeypatch.setattr(auth_mod, "send_x_connected_notice", lambda *a: None)
+        alice = _add(username="alice", email="alice@example.com", approved=True)
+        client = _signed_in(app, alice)
+        calls, fake = _fake_x_exchange()
+        with fake:
+            assert client.get("/auth/x/connect").headers["Location"].endswith("/auth/twitter")
+            to_x = client.get("/auth/twitter")
+            assert "oauth_token=REQ-1" in to_x.headers["Location"]
+            assert _session(client)["x_oauth_request_token"] == "REQ-1"
+            back = client.get("/auth/twitter/authorized?oauth_token=REQ-1&oauth_verifier=V")
+        assert back.headers["Location"].endswith("/auth/login")
+        assert calls["exchanged"] == ["REQ-1"]
+        sess = _session(client)
+        assert sess["twitter_oauth_token"]["oauth_token"] == "ACCESS"
+        assert "x_oauth_request_token" not in sess  # used once
+
+        resp = _x_callback(client, x_id=666, screen_name="alice_x")
+
+        assert _outcome(resp) == "linked"
+        _db.session.refresh(alice)
+        assert alice.twitter_id == "666"
+
+    @pytest.mark.parametrize("victim_went_to_x", [False, True])
+    def test_attackers_callback_links_nothing(self, app, victim_went_to_x):
+        victim = _add(username="victim", email="v@example.com", approved=True)
+        client = _signed_in(app, victim)
+        calls, fake = _fake_x_exchange()
+        with fake:
+            client.get("/auth/x/connect")
+            if victim_went_to_x:
+                client.get("/auth/twitter")  # the session now waits for REQ-1
+            resp = client.get("/auth/twitter/authorized"
+                              "?oauth_token=ATTACKER_REQ&oauth_verifier=ATTACKER_V")
+
+        assert _outcome(resp) == "failed"
+        assert calls["exchanged"] == []  # never sent to X
+        sess = _session(client)
+        assert "twitter_oauth_token" not in sess
+        assert "x_connect" not in sess
+        assert sess.get("_user_id") == str(victim.id)
+        _db.session.refresh(victim)
+        assert victim.twitter_id is None
+
+    def test_forged_sign_in_callback_signs_nobody_in(self, app):
+        _add(username="attacker", twitter_id="666", approved=True)
+        client = app.test_client()
+        calls, fake = _fake_x_exchange()
+        with fake:
+            resp = client.get("/auth/twitter/authorized"
+                              "?oauth_token=ATTACKER_REQ&oauth_verifier=ATTACKER_V")
+
+        assert resp.headers["Location"] == f"{FRONTEND_URL}/login?error=x_try_again"
+        assert calls["exchanged"] == []
+        sess = _session(client)
+        assert "twitter_oauth_token" not in sess and "_user_id" not in sess
+
+    def test_sign_in_round_trip_works_once(self, app):
+        client = app.test_client()
+        calls, fake = _fake_x_exchange()
+        callback = "/auth/twitter/authorized?oauth_token=REQ-1&oauth_verifier=V"
+        with fake:
+            client.get("/auth/twitter")
+            assert client.get(callback).headers["Location"].endswith("/auth/login")
+            with client.session_transaction() as sess:
+                del sess["twitter_oauth_token"]
+            replay = client.get(callback)
+
+        assert calls["exchanged"] == ["REQ-1"]
+        assert replay.headers["Location"] == f"{FRONTEND_URL}/login?error=x_try_again"
+
+    def test_cancel_at_x_still_comes_back_to_account(self, app):
+        """X's Cancel returns with denied= and no token: nothing to exchange,
+        so it passes the check and Connect X reports the cancel."""
+        alice = _add(username="alice", email="alice@example.com", approved=True)
+        client = _signed_in(app, alice)
+        calls, fake = _fake_x_exchange()
+        with fake:
+            client.get("/auth/x/connect")
+            client.get("/auth/twitter")
+            back = client.get("/auth/twitter/authorized?denied=REQ-1")
+            assert back.headers["Location"].endswith("/auth/login")
+            resp = client.get("/auth/login")
+
+        assert _outcome(resp) == "cancelled"
+        assert calls["exchanged"] == []
+
+
+class TestSignInMethodWrites:
+    """Remove email and Disconnect X each keep the other way in. Both
+    decide on the row their request loaded; the write itself re-checks, so
+    two tabs removing one each cannot leave an account with neither."""
+
+    @pytest.mark.parametrize("route, other", [
+        ("/api/dashboard/x", "email"),
+        ("/api/dashboard/email", "twitter_id"),
+    ])
+    def test_the_write_rechecks_the_other_method(self, real_app, route, other):
+        from sqlalchemy import text
+        from flask_login import current_user
+        alice = _add(username="alice", email="alice@example.com",
+                     twitter_id="123", approved=True)
+
+        @real_app.before_request
+        def other_tab_removed_it_meanwhile():
+            # This request has loaded the account with both methods; the
+            # other request's write lands before this one's.
+            _ = current_user.email
+            _db.session.execute(text(f'UPDATE "user" SET {other} = NULL WHERE id = :id'),
+                                {"id": alice.id})
+
+        r = _signed_in(real_app, alice).delete(route)
+
+        assert r.status_code == 400
+        _db.session.rollback()
+        row = _db.session.execute(text('SELECT email, twitter_id FROM "user" WHERE id = :id'),
+                                  {"id": alice.id}).one()
+        # only the other request's removal happened
+        assert (row.email is None) == (other == "email")
+        assert (row.twitter_id is None) == (other == "twitter_id")

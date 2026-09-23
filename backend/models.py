@@ -16,6 +16,11 @@ class User(db.Model, UserMixin):
     # Display only: handles are re-registrable, so nothing may look an
     # account up by it. Null for X accounts that have not signed in since.
     twitter_handle = db.Column(db.String(64), nullable=True)
+    # Set when the X login was attached by Connect X (#311), null when the
+    # account came from X sign-up (or has no X). Public pages name the X
+    # account (JSON-LD sameAs) only for X sign-ups, whose username came
+    # from the handle anyway; connecting X to sign in publishes nothing.
+    x_connected_at = db.Column(db.DateTime, nullable=True)
     username = db.Column(db.String(64), unique=True, nullable=False)
     # A short description that the user may set (max 128 characters)
     description = db.Column(db.String(128), nullable=True, default="")

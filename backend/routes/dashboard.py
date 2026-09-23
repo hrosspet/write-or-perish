@@ -402,12 +402,22 @@ def remove_email():
     """Drop the account's email (#260). Only allowed when the account keeps
     another way in (Sign in with X) — otherwise it would lock the user
     out."""
+    only_way_in = jsonify({"error": "This email is your only way to sign in. "
+                                    "Add another address first."}), 400
     if not current_user.twitter_id:
-        return jsonify({"error": "This email is your only way to sign in. "
-                                 "Add another address first."}), 400
-    current_user.email = None
-    _clear_pending_email(current_user)
+        return only_way_in
+    # Conditional on the X login still being there: a Disconnect X running
+    # at the same time (another tab) must not leave neither.
+    written = (User.query
+               .filter(User.id == current_user.id, User.twitter_id.isnot(None))
+               .update({"email": None, "pending_email": None,
+                        "email_change_token_hash": None,
+                        "email_change_expires_at": None},
+                       synchronize_session=False))
     db.session.commit()
+    db.session.refresh(current_user)
+    if not written:
+        return only_way_in
     return jsonify({"message": "Email removed.",
                     **_email_state(current_user)}), 200
 
@@ -420,12 +430,20 @@ def disconnect_x():
     (its email), as remove_email above is the other way round. Nothing
     imported from X is touched; the X account can then be connected here
     again, or signed in with on its own, which makes a new account."""
+    only_way_in = jsonify({"error": "X is your only way to sign in. "
+                                    "Add an email first."}), 400
     if not current_user.email:
-        return jsonify({"error": "X is your only way to sign in. "
-                                 "Add an email first."}), 400
-    current_user.twitter_id = None
-    current_user.twitter_handle = None
+        return only_way_in
+    # Conditional on the email still being there (see remove_email).
+    written = (User.query
+               .filter(User.id == current_user.id, User.email.isnot(None))
+               .update({"twitter_id": None, "twitter_handle": None,
+                        "x_connected_at": None},
+                       synchronize_session=False))
     db.session.commit()
+    db.session.refresh(current_user)
+    if not written:
+        return only_way_in
     # The session's X token belongs to the account just disconnected.
     from backend.routes.auth import _drop_x_token
     _drop_x_token()
