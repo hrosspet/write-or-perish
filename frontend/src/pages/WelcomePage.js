@@ -72,13 +72,23 @@ export default function WelcomePage() {
             fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.9rem",
             lineHeight: 1.5, color: "var(--text-secondary)",
           }}>
-            <span>Already have a journal, notes or tweets?</span>
+            <span>Already have journals, notes, AI chats or tweets?</span>
             <ImportData
               buttonLabel={<><span>Import them</span><span aria-hidden="true">&rarr;</span></>}
               buttonStyle={importButtonStyle}
               buttonHoverStyle={importButtonHoverStyle}
             />
           </div>
+        </Fade>
+      </div>
+
+      {/* Second touch for the tweets opt-in — only for X-login users who
+          never answered on /alpha-thank-you. Renders null otherwise. Above
+          Reflect for the same reason as the import strip: this is the last
+          place the app asks. */}
+      <div style={{ maxWidth: 580, margin: "0 auto" }}>
+        <Fade>
+          <PrefillConsentCard delayHint="Already on X?" style={{ maxWidth: "none", padding: "2.2rem 2rem", textAlign: "center", marginBottom: "1.2rem" }} />
         </Fade>
       </div>
 
@@ -120,17 +130,10 @@ export default function WelcomePage() {
               fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.78rem",
               color: "var(--text-muted)", marginTop: "1rem", position: "relative",
             }}>
-              You can type or record a voice note — whatever feels natural.
+              Take the question with you, or start with whatever is on your
+              mind. Type or record a voice note, whichever feels natural.
             </p>
           </div>
-        </Fade>
-      </div>
-
-      {/* Second touch for the tweets opt-in — only for X-login users who
-          never answered on /alpha-thank-you. Renders null otherwise. */}
-      <div style={{ maxWidth: 580, margin: "0 auto", padding: "0 0 2.5rem" }}>
-        <Fade>
-          <PrefillConsentCard delayHint="Already on X?" style={{ maxWidth: "none", padding: "2.2rem 2rem", textAlign: "center" }} />
         </Fade>
       </div>
 
