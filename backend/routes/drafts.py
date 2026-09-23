@@ -7,11 +7,15 @@ import uuid
 import pathlib
 import os
 import shutil
+from datetime import datetime
 from backend.utils.audio_storage import move_draft_audio_to_node_dir
 from backend.utils.encryption import encrypt_file
 from backend.utils.llm_nodes import pick_model_for_generation
 from backend.utils.webm_utils import (
     chunk_is_init_bearing, persist_init_segment,
+)
+from backend.utils.streaming_session import (
+    not_live_clause, release_session, session_is_live, stamp_session_alive,
 )
 
 drafts_bp = Blueprint("drafts_bp", __name__)
@@ -110,6 +114,11 @@ def get_draft():
     # the draft alive for the SSE all_complete event)
     query = query.filter(Draft.llm_node_id.is_(None))
 
+    # A session another tab is recording right now is not a draft to
+    # load here: this view would auto-recover it, which completes it
+    # under the recording tab (#320).
+    query = query.filter(not_live_clause())
+
     if node_id:
         # Editing an existing node
         query = query.filter_by(node_id=node_id)
@@ -169,6 +178,9 @@ def get_interrupted_drafts():
     - session_id is set
     - llm_node_id is NULL (not already processed)
     - Has at least one stored or completed chunk
+    - is not live: no tab has shown a sign of life within the liveness
+      window (#320) — a recording still running elsewhere is not
+      interrupted, and recovering or resuming it here would end it there
 
     Returns the most recent interrupted draft regardless of parent context,
     so recovery works from any entry point (Reflect, Orient, Log resume).
@@ -178,6 +190,7 @@ def get_interrupted_drafts():
         Draft.session_id.isnot(None),
         Draft.streaming_status == 'recording',
         Draft.llm_node_id.is_(None),
+        not_live_clause(),
     )
 
     drafts = query.order_by(Draft.updated_at.desc()).all()
@@ -505,7 +518,8 @@ def init_streaming():
         streaming_completed_chunks=0,
         label=label,
         privacy_level=privacy_level,
-        ai_usage=ai_usage
+        ai_usage=ai_usage,
+        streaming_heartbeat_at=datetime.utcnow(),
     )
     draft.set_content("")  # Will be populated as chunks are transcribed
     db.session.add(draft)
@@ -552,10 +566,23 @@ def upload_streaming_chunk(session_id):
     ).first()
 
     if not draft:
-        return jsonify({"error": "Streaming session not found"}), 404
+        # The codes tell the recorder the session is gone for good (e.g.
+        # ended or discarded from another tab), so it stops recording
+        # instead of retrying into it (#320).
+        return jsonify({
+            "error": "Streaming session not found",
+            "code": "session_not_found",
+        }), 404
 
     if draft.streaming_status not in ["recording", "finalizing"]:
-        return jsonify({"error": "Streaming session is not active"}), 400
+        return jsonify({
+            "error": "Streaming session is not active",
+            "code": "session_not_active",
+        }), 400
+
+    # A chunk is the recording tab's sign of life (#320).
+    stamp_session_alive(session_id)
+    db.session.commit()
 
     # Get form data
     if "chunk" not in request.files:
@@ -858,6 +885,14 @@ def transcribe_remaining(session_id):
     if not draft:
         return jsonify({"error": "Streaming session not found"}), 404
 
+    # A live session belongs to the tab recording it: its own batching
+    # and finalize transcribe these chunks (#320).
+    if session_is_live(draft):
+        return jsonify({
+            "error": "This recording is still in progress in another tab",
+            "code": "session_live",
+        }), 409
+
     # Find all stored (untranscribed) chunks
     stored_chunks = NodeTranscriptChunk.query.filter_by(
         session_id=session_id,
@@ -932,8 +967,13 @@ def get_streaming_status(session_id):
     # Auto-complete interrupted recordings: if all chunks are done
     # (no pending/stored/processing) and the draft is still in 'recording'
     # state, the user refreshed mid-recording. Mark as completed so the
-    # frontend recovery polling can finish.
+    # frontend recovery polling can finish. Never a live session: "no
+    # chunk pending" is also true for a moment after every batch of a
+    # recording that is still going, and completing it there ends the
+    # recording in the tab that owns it (#320).
+    live = session_is_live(draft)
     if (draft.streaming_status == 'recording'
+            and not live
             and chunks and pending_count == 0):
         draft.streaming_status = 'completed'
         draft.streaming_completed_chunks = completed_count
@@ -949,10 +989,25 @@ def get_streaming_status(session_id):
         "failed_chunks": failed_count,
         "chunks": chunk_statuses,
         "content": draft.get_content(),
+        "live": live,
     }
     if draft.llm_node_id:
         status_data["llm_node_id"] = draft.llm_node_id
     return jsonify(status_data)
+
+
+@drafts_bp.route("/streaming/<session_id>/release", methods=["POST"])
+@login_required
+def release_streaming(session_id):
+    """
+    The recording tab is leaving (pagehide beacon, or its recorder
+    unmounted mid-recording): the session stops being live now, so a
+    reload offers recovery at once instead of after the liveness window
+    (#320). A no-op unless the session is still 'recording'.
+    """
+    released = release_session(session_id, current_user.id)
+    db.session.commit()
+    return jsonify({"released": bool(released)}), 200
 
 
 @drafts_bp.route("/streaming/<session_id>/save-as-node", methods=["POST"])
