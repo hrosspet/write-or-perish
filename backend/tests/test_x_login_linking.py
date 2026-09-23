@@ -1036,3 +1036,311 @@ class TestLogout:
         assert resp.status_code == 302
         with client.session_transaction() as sess:
             assert "_user_id" not in sess
+
+
+# ── Connect X (#311) ─────────────────────────────────────────────────────
+
+def _signed_in(app, user):
+    client = app.test_client()
+    with client.session_transaction() as sess:
+        sess["_user_id"] = str(user.id)
+    return client
+
+
+def _x_callback(client, x_id, screen_name, ok=True):
+    """X sends the browser back: flask-dance stored a token and redirects
+    to /auth/login, which reads the X account from verify_credentials."""
+    x = MagicMock()
+    x.authorized = True
+    x.get.return_value = MagicMock(
+        ok=ok, status_code=200 if ok else 401,
+        json=lambda: {"id": x_id, "screen_name": screen_name})
+    with patch("backend.routes.auth.twitter", x):
+        return client.get("/auth/login")
+
+
+def _session(client):
+    with client.session_transaction() as sess:
+        return dict(sess)
+
+
+def _connect(app, user, x_id, screen_name, token_at_x=False):
+    """Connect X from the Account page: start, then X's callback. With
+    token_at_x the session holds a flask-dance token when the callback
+    lands (what X's authorization leaves behind)."""
+    client = _signed_in(app, user)
+    start = client.get("/auth/x/connect")
+    assert start.status_code == 302
+    assert start.headers["Location"].endswith("/auth/twitter")
+    if token_at_x:
+        with client.session_transaction() as sess:
+            sess["twitter_oauth_token"] = {"oauth_token": "t", "oauth_token_secret": "s"}
+    return client, _x_callback(client, x_id, screen_name)
+
+
+def _outcome(resp):
+    assert resp.status_code == 302
+    prefix = f"{FRONTEND_URL}/account?x_login="
+    assert resp.headers["Location"].startswith(prefix), resp.headers["Location"]
+    assert resp.headers["Location"].endswith("#x")
+    return resp.headers["Location"][len(prefix):-len("#x")]
+
+
+class TestConnectX:
+    def test_connect_attaches_the_x_id_to_the_signed_in_account(self, app):
+        alice = _add(username="alice", email="alice@example.com", approved=True)
+
+        client, resp = _connect(app, alice, x_id=123, screen_name="AliceOnX")
+
+        assert _outcome(resp) == "linked"
+        _db.session.refresh(alice)
+        assert alice.twitter_id == "123"
+        assert alice.twitter_handle == "AliceOnX"
+        assert alice.username == "alice"  # the handle renames nothing
+        assert User.query.count() == 1
+        sess = _session(client)
+        assert sess.get("_user_id") == str(alice.id)
+        assert "x_connect" not in sess
+
+    def test_sign_in_with_x_then_opens_the_same_account(self, app):
+        """The point of #311: after connecting, X sign-in on another device
+        lands in the magic-link account instead of creating a second one."""
+        alice = _add(username="alice", email="alice@example.com", approved=True)
+        _connect(app, alice, x_id=123, screen_name="alice")
+
+        _, logged_in_id = _x_login(app, x_id=123, screen_name="alice")
+
+        assert logged_in_id == alice.id
+        assert User.query.count() == 1
+
+    @pytest.mark.parametrize("holder_kw, outcome", [
+        # someone signs in to it (e.g. the duplicate an earlier "Sign in
+        # with X" made for this very person)
+        ({"last_seen_at": "now"}, "taken"),
+        # set up ahead of its owner (whitelist / pre-fill), never signed in
+        ({}, "taken_placeholder"),
+        # predates the last-seen record: may be an early X signup
+        ({"created_at": "2026-08-01"}, "taken"),
+    ])
+    def test_x_id_held_by_another_account_is_refused(self, app, holder_kw, outcome):
+        from datetime import datetime
+        kw = {k: (datetime.utcnow() if v == "now" else datetime.fromisoformat(v))
+              for k, v in holder_kw.items()}
+        holder = _add(username="alice_x", twitter_id="123", approved=False, **kw)
+        alice = _add(username="alice", email="alice@example.com", approved=True)
+
+        client, resp = _connect(app, alice, x_id=123, screen_name="alice_x",
+                                token_at_x=True)
+
+        assert _outcome(resp) == outcome
+        _db.session.refresh(alice)
+        _db.session.refresh(holder)
+        assert alice.twitter_id is None and alice.twitter_handle is None
+        assert holder.twitter_id == "123"
+        sess = _session(client)
+        assert sess.get("_user_id") == str(alice.id)
+        # the next try asks X again, maybe for another X account
+        assert "twitter_oauth_token" not in sess
+
+    def test_an_account_keeps_the_x_id_it_has(self, app):
+        alice = _add(username="alice", email="alice@example.com",
+                     twitter_id="999", approved=True)
+
+        client, resp = _connect(app, alice, x_id=123, screen_name="other",
+                                token_at_x=True)
+
+        assert _outcome(resp) == "other_x"
+        _db.session.refresh(alice)
+        assert alice.twitter_id == "999"
+        assert User.query.filter_by(twitter_id="123").first() is None
+        assert "twitter_oauth_token" not in _session(client)
+
+    def test_connecting_the_same_x_account_again_is_fine(self, app):
+        alice = _add(username="alice", twitter_id="123",
+                     twitter_handle="old_name", approved=True)
+
+        _, resp = _connect(app, alice, x_id=123, screen_name="new_name")
+
+        assert _outcome(resp) == "linked"
+        _db.session.refresh(alice)
+        assert alice.twitter_id == "123" and alice.twitter_handle == "new_name"
+
+    def test_x_id_taken_between_the_check_and_the_write(self, app, monkeypatch):
+        """Another account (a first X sign-in elsewhere) takes the id while
+        this connect runs: the unique X id refuses the write."""
+        alice = _add(username="alice", email="alice@example.com", approved=True)
+        client = _signed_in(app, alice)
+        client.get("/auth/x/connect")
+        real_commit = _db.session.commit
+        raced = {"done": False}
+
+        def racing_commit():
+            if raced["done"]:
+                return real_commit()
+            raced["done"] = True
+            _db.session.rollback()
+            _db.session.add(User(username="alice_x", twitter_id="123"))
+            real_commit()
+            raise IntegrityError("UPDATE user", {}, Exception(
+                "UNIQUE constraint failed: user.twitter_id"))
+
+        monkeypatch.setattr(_db.session, "commit", racing_commit)
+        resp = _x_callback(client, x_id=123, screen_name="alice_x")
+
+        assert _outcome(resp) == "taken"
+        _db.session.refresh(alice)
+        assert alice.twitter_id is None
+        assert User.query.filter_by(twitter_id="123").one().username == "alice_x"
+
+    def test_connect_needs_a_signed_in_account(self, app):
+        """Signed out, the start must not fall through to /auth/login: that
+        is an X sign-in, and it would make a new account."""
+        client = app.test_client()
+
+        resp = client.get("/auth/x/connect")
+
+        assert resp.status_code == 302
+        assert resp.headers["Location"] == f"{FRONTEND_URL}/login?returnUrl=%2Faccount"
+        assert "x_connect" not in _session(client)
+
+    def test_start_forgets_an_x_token_from_an_earlier_sign_in(self, app):
+        alice = _add(username="alice", email="alice@example.com", approved=True)
+        client = _signed_in(app, alice)
+        with client.session_transaction() as sess:
+            sess["twitter_oauth_token"] = {"oauth_token": "t", "oauth_token_secret": "s"}
+
+        client.get("/auth/x/connect")
+
+        sess = _session(client)
+        assert "twitter_oauth_token" not in sess
+        assert sess["x_connect"] == {"user_id": alice.id}
+
+    def test_cancelling_at_x_returns_to_the_account_page(self, app):
+        """X sends the browser back without a token: back to Account, not
+        round again to X's page."""
+        alice = _add(username="alice", email="alice@example.com", approved=True)
+        client = _signed_in(app, alice)
+        client.get("/auth/x/connect")
+        x = MagicMock()
+        x.authorized = False
+        with patch("backend.routes.auth.twitter", x):
+            resp = client.get("/auth/login")
+
+        assert _outcome(resp) == "cancelled"
+        assert "x_connect" not in _session(client)
+        _db.session.refresh(alice)
+        assert alice.twitter_id is None
+
+    def test_failed_credentials_check_returns_to_the_account_page(self, app):
+        bob = _add(username="bob", email="bob@example.com", approved=True)
+        client = _signed_in(app, bob)
+        client.get("/auth/x/connect")
+        with client.session_transaction() as sess:
+            sess["twitter_oauth_token"] = {"oauth_token": "t", "oauth_token_secret": "s"}
+
+        resp = _x_callback(client, x_id=456, screen_name="bob", ok=False)
+
+        assert _outcome(resp) == "failed"
+        sess = _session(client)
+        assert "twitter_oauth_token" not in sess
+        assert sess.get("_user_id") == str(bob.id)
+        _db.session.refresh(bob)
+        assert bob.twitter_id is None
+
+    def test_intent_without_a_session_is_an_ordinary_sign_in(self, app):
+        """Signed out since (session expired): the intent is dropped and
+        the X login behaves as "Sign in with X" always has."""
+        alice = _add(username="alice", email="alice@example.com", approved=True)
+        client = app.test_client()
+        with client.session_transaction() as sess:
+            sess["x_connect"] = {"user_id": alice.id}
+
+        resp = _x_callback(client, x_id=123, screen_name="alice")
+
+        assert resp.headers["Location"] == f"{FRONTEND_URL}/dashboard"
+        sess = _session(client)
+        assert "x_connect" not in sess
+        created = User.query.filter_by(twitter_id="123").one()
+        assert sess["_user_id"] == str(created.id) != str(alice.id)
+        _db.session.refresh(alice)
+        assert alice.twitter_id is None
+
+    def test_intent_of_another_account_is_dropped(self, app):
+        """Started by one account, another signed in since: nothing is
+        attached to either."""
+        alice = _add(username="alice", email="alice@example.com", approved=True)
+        bob = _add(username="bob", email="bob@example.com", approved=True)
+        client = _signed_in(app, bob)
+        with client.session_transaction() as sess:
+            sess["x_connect"] = {"user_id": alice.id}
+
+        _x_callback(client, x_id=123, screen_name="bob_x")
+
+        assert "x_connect" not in _session(client)
+        _db.session.refresh(alice)
+        _db.session.refresh(bob)
+        assert alice.twitter_id is None and bob.twitter_id is None
+
+    def test_stale_intent_is_dropped_on_the_way_to_x(self, app):
+        """Abandoned at X, then signed out: the next "Sign in with X" goes to
+        X as usual and the intent is gone before it comes back."""
+        alice = _add(username="alice", email="alice@example.com", approved=True)
+        client = app.test_client()
+        with client.session_transaction() as sess:
+            sess["x_connect"] = {"user_id": alice.id}
+        x = MagicMock()
+        x.authorized = False
+        with patch("backend.routes.auth.twitter", x):
+            resp = client.get("/auth/login")
+
+        assert resp.headers["Location"].endswith("/auth/twitter")
+        assert "x_connect" not in _session(client)
+
+    def test_logout_drops_the_intent(self, app):
+        alice = _add(username="alice", email="alice@example.com", approved=True)
+        client = _signed_in(app, alice)
+        client.get("/auth/x/connect")
+
+        client.get("/auth/logout")
+
+        assert "x_connect" not in _session(client)
+
+    def test_x_sign_in_keeps_the_shown_handle_current(self, app):
+        existing = _add(username="alice", twitter_id="123",
+                        twitter_handle="old_name", approved=True)
+        _x_login(app, x_id=123, screen_name="new_name")
+        _db.session.refresh(existing)
+        assert existing.twitter_handle == "new_name"
+
+        _, new_id = _x_login(app, x_id=456, screen_name="bob")
+        assert User.query.get(new_id).twitter_handle == "bob"
+
+
+class TestDisconnectX:
+    def test_disconnect_keeps_the_email_login(self, real_app):
+        alice = _add(username="alice", email="alice@example.com",
+                     twitter_id="123", twitter_handle="alice", approved=True)
+        client = _signed_in(real_app, alice)
+        with client.session_transaction() as sess:
+            sess["twitter_oauth_token"] = {"oauth_token": "t", "oauth_token_secret": "s"}
+
+        r = client.delete("/api/dashboard/x")
+
+        assert r.status_code == 200, r.get_data(as_text=True)[:200]
+        assert r.get_json()["twitter_login"] is False
+        _db.session.refresh(alice)
+        assert alice.twitter_id is None and alice.twitter_handle is None
+        assert "twitter_oauth_token" not in _session(client)
+        # the dashboard now says so
+        user = client.get("/api/dashboard/").get_json()["user"]
+        assert user["twitter_login"] is False and user["twitter_handle"] is None
+
+    def test_x_only_account_cannot_disconnect(self, real_app):
+        alice = _add(username="alice", twitter_id="123", approved=True)
+        client = _signed_in(real_app, alice)
+
+        r = client.delete("/api/dashboard/x")
+
+        assert r.status_code == 400
+        _db.session.refresh(alice)
+        assert alice.twitter_id == "123"

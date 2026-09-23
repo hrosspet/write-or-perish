@@ -324,6 +324,23 @@ function LoginPage() {
             Sign in with X
           </button>
 
+          {/* #311: an X sign-in with an X account no Loore account knows
+              makes a new one. On the way to /confirm-email it makes none
+              (the subtitle covers that case). */}
+          {!confirmingEmail && (
+            <p style={{
+              color: "var(--text-muted)",
+              fontSize: "0.78rem",
+              fontFamily: "var(--sans)",
+              fontWeight: 300,
+              lineHeight: 1.5,
+              margin: "0 0 4px",
+            }}>
+              Sign in with X makes a new account unless your X is already connected to one.
+              To add X to an email account, sign in with email, then use Connect X under Account.
+            </p>
+          )}
+
           {!showEmailForm && !emailSent && (
             <>
               <div className="loore-login-divider">

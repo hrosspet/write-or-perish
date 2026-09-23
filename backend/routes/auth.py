@@ -79,14 +79,14 @@ def _create_x_user(twitter_id, screen_name):
     someone else's account. Accounts created ahead of their owner's first
     login (admin whitelist, pre-fill) carry the X id from creation and are
     found by it. Attaching an X id to an account that signs in another way
-    needs that account's owner signed in (a Connect-X flow, not built).
+    needs that account's owner signed in: Connect X (_connect_x below).
 
     The handle only seeds the username; a taken or reserved handle gets a
     derived one. Two callbacks for the same X id can race here: the loser's
     insert fails on the unique X id, so re-read and use the winner's row.
     """
     for _attempt in range(2):
-        user = User(twitter_id=twitter_id,
+        user = User(twitter_id=twitter_id, twitter_handle=screen_name,
                     username=derive_available_username(screen_name))
         db.session.add(user)
         try:
@@ -101,6 +101,101 @@ def _create_x_user(twitter_id, screen_name):
     raise RuntimeError(f"could not create an account for X id {twitter_id}")
 
 
+# Session key for a Connect X round trip in progress (#311): the id of the
+# account that asked. flask-dance sends every X authorization back to
+# /auth/login, so this is how that route tells "attach X to the signed-in
+# account" from "sign in with X".
+X_CONNECT_SESSION_KEY = "x_connect"
+
+
+def _account_redirect(outcome):
+    """Back to the Account page's X row with the outcome of Connect X."""
+    frontend_url = current_app.config.get("FRONTEND_URL", "")
+    return redirect(f"{frontend_url}/account?x_login={outcome}#x")
+
+
+def _connect_x(user, twitter_id, screen_name):
+    """Attach the X account that just authorized to ``user`` (#311).
+
+    The same rules as a sign-in: the X id is the identity, the handle
+    identifies nothing. An account keeps the X id it has, and an X id
+    stays with the account that holds it. Pointing an X id at a second
+    account would move that account's X sign-in away from its owner.
+    A refused connect forgets the X token, so the next try asks X again
+    (possibly for a different X account)."""
+    if user.twitter_id == twitter_id:
+        user.twitter_handle = screen_name
+        db.session.commit()
+        return _account_redirect("linked")
+    if user.twitter_id is not None:
+        _drop_x_token()
+        return _account_redirect("other_x")
+    holder = User.query.filter_by(twitter_id=twitter_id).first()
+    if holder is not None:
+        _drop_x_token()
+        # An account set up ahead of its owner (admin whitelist, pre-fill)
+        # that nobody has signed in to: the owner is the person in front of
+        # us, and joining the two is a job for an admin, not an error.
+        from backend.utils.activity import sign_in_status
+        placeholder = sign_in_status(holder) == "never"
+        return _account_redirect("taken_placeholder" if placeholder else "taken")
+    # Conditional write: a second connect for this account (another tab)
+    # may have attached an X id since the read above.
+    try:
+        written = (User.query
+                   .filter(User.id == user.id, User.twitter_id.is_(None))
+                   .update({"twitter_id": twitter_id,
+                            "twitter_handle": screen_name},
+                           synchronize_session=False))
+        db.session.commit()
+    except IntegrityError:
+        # Another account took this X id between the check and the write.
+        db.session.rollback()
+        _drop_x_token()
+        return _account_redirect("taken")
+    db.session.refresh(user)
+    if not written and user.twitter_id != twitter_id:
+        _drop_x_token()
+        return _account_redirect("other_x")
+    logger.info("Connected X id %s to user %s", twitter_id, user.id)
+    return _account_redirect("linked")
+
+
+def _pop_connect_intent():
+    """Whether this return from X is a Connect X round trip.
+
+    It counts only for the account that started it and is still signed
+    in. Any other intent is stale (abandoned at X, then signed out, or
+    another account signed in since): it is dropped here, once, and the
+    request is an ordinary X sign-in."""
+    intent = session.pop(X_CONNECT_SESSION_KEY, None)
+    if intent is None:
+        return False
+    if current_user.is_authenticated and intent.get("user_id") == current_user.id:
+        return True
+    logger.info("Dropped a stale Connect X intent")
+    return False
+
+
+@auth_bp.route("/x/connect")
+def x_connect():
+    """Start Connect X for the signed-in account (#311): the X login for
+    someone who already has an account (magic-link signup). "Sign in with
+    X" cannot do it: signed out, an unknown X id gets a new account.
+
+    Not @login_required: the unauthorized handler sends a signed-out
+    browser to /auth/login, which is an X sign-in and would create one."""
+    if not current_user.is_authenticated:
+        frontend_url = current_app.config.get("FRONTEND_URL", "")
+        return redirect(f"{frontend_url}/login?returnUrl="
+                        f"{quote('/account', safe='')}")
+    session[X_CONNECT_SESSION_KEY] = {"user_id": current_user.id}
+    # A token left from an earlier X sign-in in this browser would skip X
+    # and connect whichever X account that was; ask X which one instead.
+    _drop_x_token()
+    return redirect(url_for("twitter.login"))
+
+
 @auth_bp.route("/login")
 def login():
     # Capture the 'next' parameter for post-login redirect
@@ -108,7 +203,14 @@ def login():
     if next_url and is_safe_redirect_url(next_url):
         session['next_url'] = next_url
 
+    connecting = _pop_connect_intent()
+
     if not twitter.authorized:
+        if connecting:
+            # Connect X goes straight to X, never through here; arriving
+            # here without a token means X sent the person back without one
+            # (they cancelled). Starting over would open X's page again.
+            return _account_redirect("cancelled")
         # If not authorized, start the OAuth flow.
         return redirect(url_for("twitter.login"))
 
@@ -120,12 +222,16 @@ def login():
         # it and every retry in this browser fails the same way until the
         # cookies are cleared, since twitter.authorized stays true.
         _drop_x_token()
+        if connecting:
+            return _account_redirect("failed")
         flash("Failed to fetch user info from Twitter.", "error")
         # Redirect to frontend instead of non-existent 'index' route
         return redirect(current_app.config.get('FRONTEND_URL', '/'))
     tw_info = resp.json()
     twitter_id = str(tw_info["id"])
     username = tw_info["screen_name"]
+    if connecting:
+        return _connect_x(current_user._get_current_object(), twitter_id, username)
     user = User.query.filter_by(twitter_id=twitter_id).first()
     if not user:
         refused = _confirm_email_flow_redirect(session.get('next_url'))
@@ -136,6 +242,10 @@ def login():
             _drop_x_token()
             return refused
         user = _create_x_user(twitter_id, username)
+    # Handles change on X; keep the one the Account page shows current
+    # (an unchanged value writes nothing).
+    user.twitter_handle = username
+    db.session.commit()
 
     login_user(user, remember=True)
     # Record the sign-in itself, not only the app requests that follow:
@@ -249,6 +359,7 @@ def logout():
     # next "Sign in with X" in this browser skipped X and went straight
     # back into the account that just signed out (shared devices).
     _drop_x_token()
+    session.pop(X_CONNECT_SESSION_KEY, None)
     flash("Logged out successfully", "success")
     frontend_url = current_app.config.get("FRONTEND_URL")
     # "Sign out and use the other account" on /confirm-email comes back to

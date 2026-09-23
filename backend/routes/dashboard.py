@@ -136,6 +136,7 @@ def get_dashboard():
             "default_privacy_level": current_user.default_privacy_level,
             "default_ai_usage": current_user.default_ai_usage,
             "twitter_login": bool(current_user.twitter_id),
+            "twitter_handle": current_user.twitter_handle,
             "pending_email": current_user.pending_email,
             "pending_email_expired": _pending_email_expired(current_user),
             "prefill_consent": current_user.prefill_consent,
@@ -411,6 +412,27 @@ def remove_email():
                     **_email_state(current_user)}), 200
 
 
+@dashboard_bp.route("/x", methods=["DELETE"])
+@login_required
+def disconnect_x():
+    """Drop the account's X login (#311), the counterpart of Connect X
+    (/auth/x/connect). Only allowed when the account keeps another way in
+    (its email), as remove_email above is the other way round. Nothing
+    imported from X is touched; the X account can then be connected here
+    again, or signed in with on its own, which makes a new account."""
+    if not current_user.email:
+        return jsonify({"error": "X is your only way to sign in. "
+                                 "Add an email first."}), 400
+    current_user.twitter_id = None
+    current_user.twitter_handle = None
+    db.session.commit()
+    # The session's X token belongs to the account just disconnected.
+    from backend.routes.auth import _drop_x_token
+    _drop_x_token()
+    return jsonify({"message": "X disconnected.", "twitter_login": False,
+                    "twitter_handle": None}), 200
+
+
 # New endpoint to update the user’s display handle and description.
 @dashboard_bp.route("/user", methods=["PUT"])
 @login_required
@@ -523,6 +545,7 @@ def update_user():
                 "default_privacy_level": current_user.default_privacy_level,
                 "default_ai_usage": current_user.default_ai_usage,
                 "twitter_login": bool(current_user.twitter_id),
+                "twitter_handle": current_user.twitter_handle,
                 "pending_email": current_user.pending_email,
                 "pending_email_expired": _pending_email_expired(current_user),
                 "prefill_consent": current_user.prefill_consent,

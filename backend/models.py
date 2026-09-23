@@ -11,6 +11,11 @@ logger = logging.getLogger(__name__)
 class User(db.Model, UserMixin):
     id = db.Column(db.Integer, primary_key=True)
     twitter_id = db.Column(db.String(64), unique=True, nullable=True)
+    # The X handle seen at the last X sign-in or Connect X (#311), shown on
+    # the Account page so the user can tell which X account is connected.
+    # Display only: handles are re-registrable, so nothing may look an
+    # account up by it. Null for X accounts that have not signed in since.
+    twitter_handle = db.Column(db.String(64), nullable=True)
     username = db.Column(db.String(64), unique=True, nullable=False)
     # A short description that the user may set (max 128 characters)
     description = db.Column(db.String(128), nullable=True, default="")
