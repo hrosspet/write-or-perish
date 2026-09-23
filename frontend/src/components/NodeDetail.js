@@ -100,6 +100,10 @@ function NodeDetail({ nodeIdOverride }) {
   const [llmRequesting, setLlmRequesting] = useState(false);
   const [quotes, setQuotes] = useState({});
   const [externalQuotes, setExternalQuotes] = useState({});
+  // Bumped when another bubble in the thread is edited or deleted: the
+  // focal content (and so its quote markers) is unchanged, but a quoted
+  // node may be that bubble, so the resolved quotes must be refetched.
+  const [quotesVersion, setQuotesVersion] = useState(0);
   const [pinLoading, setPinLoading] = useState(false);
   const [voiceLoading, setVoiceLoading] = useState(false);
   const [readLoading, setReadLoading] = useState(false);
@@ -246,7 +250,7 @@ function NodeDetail({ nodeIdOverride }) {
         console.error("Error fetching quotes:", err);
         // Don't show error to user - quotes will just not render
       });
-  }, [id, quoteMarkers]);
+  }, [id, quoteMarkers, quotesVersion]);
 
   // Scroll to the focal node once, after its thread loads. Keyed on the
   // id: checklist toggles, the "+" insert, edits and in-place LLM patches
@@ -553,7 +557,10 @@ function NodeDetail({ nodeIdOverride }) {
         if (!wasFocal && !focalCascaded) {
           // Non-focal target: refetch the focal node so the just-deleted
           // ancestor/child surfaces as a tombstone preview in place.
-          return api.get(`/nodes/${id}`).then((r) => setNode(r.data));
+          return api.get(`/nodes/${id}`).then((r) => {
+            setNode(r.data);
+            setQuotesVersion((v) => v + 1);
+          });
         }
         // Walk up to the closest alive ancestor. For the focal-target
         // case, that's everything in node.ancestors; for the cascade
@@ -718,6 +725,7 @@ function NodeDetail({ nodeIdOverride }) {
       try {
         const refreshed = await api.get(`/nodes/${id}`).then((r) => r.data);
         setNode(refreshed);
+        setQuotesVersion((v) => v + 1);
       } catch (err) {
         console.error(err);
       }
