@@ -59,6 +59,23 @@ export default function WritePage() {
     return res.data;
   };
 
+  // An uploaded audio file skips handleSubmit (NodeForm uploads it and
+  // polls the transcription), so the form asks for the same two decisions
+  // here and sends them with the upload (#342). Same fallback as above
+  // when AI usage is off.
+  const uploadReplyOptions = ({ ai_usage }) => {
+    if (!isAiAllowed(ai_usage)) {
+      addToast(
+        'Turning off auto-generate. AI usage on some nodes is turned off.',
+        8000,
+      );
+      return {};
+    }
+    const stored = localStorage.getItem('loore_auto_generate');
+    const autoGenerate = stored === null ? true : stored === 'true';
+    return { agentic: true, ...(autoGenerate && { auto_generate: true }) };
+  };
+
   const handleSuccess = (data) => {
     const llmNodeId = data?.llm_node_id;
     if (llmNodeId && data?.user_node_id) {
@@ -108,6 +125,7 @@ export default function WritePage() {
           aiUsageFromGlobalDefault
           placeholder="Type what's on your mind…"
           onSubmitOverride={handleSubmit}
+          uploadReplyOptions={uploadReplyOptions}
           onSuccess={handleSuccess}
         />
       </div>

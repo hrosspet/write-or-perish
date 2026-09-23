@@ -17,7 +17,7 @@ import useSubmitShortcut from "../hooks/useSubmitShortcut";
 
 const NodeForm = forwardRef(
   (
-    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false, aiUsageFromGlobalDefault = false, hasChildren = false },
+    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, uploadReplyOptions, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false, aiUsageFromGlobalDefault = false, hasChildren = false },
     ref
   ) => {
     const { user } = useUser();
@@ -276,7 +276,16 @@ const NodeForm = forwardRef(
         // Delete draft after successful transcription
         deleteDraft();
         setHasDraft(false);
-        const normalizedData = { ...transcriptionData, id: transcriptionData.node_id };
+        // A Text-mode upload's reply (#342): land on the entry with
+        // ?awaitLlm like a typed or recorded one, or say why it was skipped.
+        (transcriptionData.warnings || []).forEach((w) => addToast(w, 10000));
+        const normalizedData = {
+          ...transcriptionData,
+          id: transcriptionData.node_id,
+          user_node_id: transcriptionData.node_id,
+          ...(transcriptionData.llm_node_id
+            && { awaitLlm: transcriptionData.llm_node_id }),
+        };
         onSuccess(normalizedData);
         setUploadedNodeId(null);
       } else if (transcriptionStatus === 'failed') {
@@ -284,7 +293,7 @@ const NodeForm = forwardRef(
         setError(transcriptionError || 'Transcription failed');
         setUploadedNodeId(null);
       }
-    }, [transcriptionStatus, transcriptionData, transcriptionError, onSuccess, deleteDraft]);
+    }, [transcriptionStatus, transcriptionData, transcriptionError, onSuccess, deleteDraft, addToast]);
 
     const handleFileSelect = (event) => {
       const file = event.target.files[0];
@@ -519,6 +528,21 @@ const NodeForm = forwardRef(
           // Upload audio file
           const fileToUpload = uploadedFile;
 
+          // The same two decisions a typed or recorded entry makes (#342):
+          // Agentic Reply → textmode system node, Auto-generate → an LLM
+          // reply once the transcript exists (the transcription task
+          // creates it). A page with its own submit policy (Text mode)
+          // supplies them; otherwise the form's toggles do, for top-level
+          // entries only, as in the recorded branch above.
+          const topLevelWithAi = !parentId && aiUsage !== 'none';
+          const replyOptions = uploadReplyOptions
+            ? (uploadReplyOptions({ ai_usage: aiUsage }) || {})
+            : {
+              ...(topLevelWithAi && useAgenticPrompt && { agentic: true }),
+              ...(topLevelWithAi && useAutoGenerate && allowAgenticPrompt
+                && { auto_generate: true }),
+            };
+
           // Check file size - use chunked upload for files larger than 10MB
           const useChunkedUpload = fileToUpload.size > 10 * 1024 * 1024;
 
@@ -534,7 +558,8 @@ const NodeForm = forwardRef(
                   parent_id: parentId,
                   node_type: 'user',
                   privacy_level: privacyLevel,
-                  ai_usage: aiUsage
+                  ai_usage: aiUsage,
+                  ...replyOptions,
                 },
                 (progress) => {
                   setUploadProgress(progress);
@@ -562,6 +587,8 @@ const NodeForm = forwardRef(
             if (parentId) formData.append('parent_id', parentId);
             formData.append('privacy_level', privacyLevel);
             formData.append('ai_usage', aiUsage);
+            if (replyOptions.agentic) formData.append('agentic', 'true');
+            if (replyOptions.auto_generate) formData.append('auto_generate', 'true');
 
             response = await api.post("/nodes/", formData, {
               headers: { 'Content-Type': 'multipart/form-data' }

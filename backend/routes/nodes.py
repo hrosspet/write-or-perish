@@ -88,6 +88,45 @@ def _allowed_file(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
+def _upload_reply_options(values, parent_id, ai_usage):
+    """Parse an audio upload's Text-mode decisions (#342): `agentic` (the
+    new thread gets a system node with the textmode prompt, as a typed or
+    recorded entry does) and `auto_generate` (an LLM reply once the
+    transcript exists; `model` optional). *values* is the multipart form or
+    the chunked-upload init JSON.
+
+    Returns (agentic, auto_reply_model, error_response). The reply model is
+    None when no reply was asked for. Both decisions start a new thread, so
+    they are refused under a parent; and like /textmode/start they need an
+    AI-readable ai_usage.
+    """
+    def _flag(key):
+        v = values.get(key)
+        return v is True or str(v).strip().lower() in ("1", "true", "yes")
+
+    agentic, auto_generate = _flag("agentic"), _flag("auto_generate")
+    if not (agentic or auto_generate):
+        return False, None, None
+    if parent_id:
+        return False, None, (jsonify({
+            "error": "agentic / auto_generate uploads start a new thread",
+        }), 400)
+    from backend.utils.privacy import AI_ALLOWED
+    if ai_usage not in AI_ALLOWED:
+        return False, None, (jsonify({
+            "error": "agentic / auto_generate require ai_usage of 'chat' or 'train'",
+        }), 400)
+    model_id = None
+    if auto_generate:
+        model_id = values.get("model") or pick_model_for_generation(
+            None, current_user)
+        if model_id not in current_app.config["SUPPORTED_MODELS"]:
+            return False, None, (jsonify({
+                "error": f"Unsupported model: {model_id}",
+            }), 400)
+    return agentic, model_id, None
+
+
 def _save_audio_file(file_storage, user_id: int, node_id: int, variant: str) -> str:
     """Save an uploaded (or generated) audio file and return its relative URL
     (under /media) so that the front‑end can stream it.
@@ -632,6 +671,16 @@ def create_node():
                     "code": "public_reply_required",
                 }), 400
 
+        agentic, auto_reply_model, err = _upload_reply_options(
+            request.form, parent_id, ai_usage)
+        if err is not None:
+            return err
+        system_node = None
+        if agentic:
+            from backend.utils.session_helpers import create_agentic_root
+            system_node = create_agentic_root(
+                current_user.id, "textmode", privacy_level, ai_usage)
+
         # Placeholder content until transcription is ready.
         placeholder_text = "[Voice note – transcription pending]"
         from backend.utils.tokens import approximate_token_count as _atc2
@@ -639,7 +688,7 @@ def create_node():
         node = Node(
             user_id=current_user.id,
             human_owner_id=current_user.id,
-            parent_id=parent_id,
+            parent_id=system_node.id if system_node else parent_id,
             node_type=node_type,
             transcription_status='pending',  # Set initial status
             privacy_level=privacy_level,
@@ -666,8 +715,13 @@ def create_node():
             rel_path = node.audio_original_url.replace("/media/", "")
             local_path = str(AUDIO_STORAGE_ROOT / rel_path)
 
-            # Enqueue task
-            task = transcribe_audio.delay(node.id, local_path, file.filename)
+            # Enqueue task. The reply model rides along only when a reply
+            # was asked for, so a worker still on the old signature during
+            # a deploy never sees an unknown kwarg.
+            task = transcribe_audio.delay(
+                node.id, local_path, file.filename,
+                **({"auto_reply_model": auto_reply_model}
+                   if auto_reply_model else {}))
 
             # Store task ID
             node.transcription_task_id = task.id
@@ -675,7 +729,7 @@ def create_node():
 
             current_app.logger.info(f"Enqueued transcription task {task.id} for node {node.id}")
 
-        return jsonify({
+        response = {
             "id": node.id,
             "audio_original_url": node.audio_original_url,
             "content": node.content,
@@ -683,7 +737,10 @@ def create_node():
             "created_at": iso_utc(node.created_at),
             "transcription_status": node.transcription_status,
             "transcription_task_id": node.transcription_task_id
-        }), 201
+        }
+        if system_node is not None:
+            response["conversation_id"] = system_node.id
+        return jsonify(response), 201
 
     # ------------------------------------------------------------------
     # Text upload path (original behaviour)
@@ -1981,7 +2038,7 @@ def get_transcription_status(node_id):
             current_app.logger.warning(f"Failed to check Celery task status: {e}")
             # Don't fail the request - just return DB status without real-time info
 
-    response = jsonify({
+    payload = {
         "node_id": node.id,
         "status": node.transcription_status,
         "progress": node.transcription_progress or 0,
@@ -1990,9 +2047,45 @@ def get_transcription_status(node_id):
         "completed_at": iso_utc(node.transcription_completed_at),
         "content": node.get_content() if node.transcription_status == 'completed' else None,
         "task_info": task_info  # Real-time progress from Celery
-    })
+    }
+    if node.transcription_status == 'completed':
+        # A Text-mode upload's reply (#342) and why one was skipped, so
+        # the form can land on the entry with ?awaitLlm or say why not.
+        from backend.utils.task_warnings import load_task_warnings
+        reply = _reply_below_transcript(node)
+        if reply is not None:
+            payload["llm_node_id"] = reply.id
+        warnings = load_task_warnings(node)
+        if warnings:
+            payload["warnings"] = warnings
+    response = jsonify(payload)
     response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
     return response
+
+
+def _reply_below_transcript(node, max_parts=50):
+    """The LLM reply under an uploaded transcript, or None. A long
+    transcript is split into a serial chain (node_split: each part the
+    only child of the previous, created_at +1 ms), and the reply hangs
+    under the chain's tip. Only split parts are walked, never a later
+    reply the user wrote."""
+    from datetime import timedelta
+    parts_end = (node.created_at or datetime.utcnow()) + timedelta(seconds=1)
+    current = node
+    for _ in range(max_parts):
+        children = Node.query.filter(
+            Node.parent_id == current.id, Node.deleted_at.is_(None)).all()
+        llm = [c for c in children if c.node_type == "llm"]
+        if llm:
+            return llm[0]
+        if len(children) != 1:
+            return None
+        part = children[0]
+        if (part.user_id != node.user_id or part.created_at is None
+                or part.created_at > parts_end):
+            return None
+        current = part
+    return None
 
 
 @nodes_bp.route("/<int:node_id>/llm-status", methods=["GET"])
@@ -2212,13 +2305,23 @@ def init_chunked_upload():
     if err is not None:
         return err
 
+    agentic, auto_reply_model, err = _upload_reply_options(
+        data, parent_id, ai_usage)
+    if err is not None:
+        return err
+    system_node = None
+    if agentic:
+        from backend.utils.session_helpers import create_agentic_root
+        system_node = create_agentic_root(
+            current_user.id, "textmode", privacy_level, ai_usage)
+
     # Create placeholder node
     placeholder_text = "[Voice note – upload in progress]"
     from backend.utils.tokens import approximate_token_count as _atc3
     node = Node(
         user_id=current_user.id,
         human_owner_id=current_user.id,
-        parent_id=parent_id,
+        parent_id=system_node.id if system_node else parent_id,
         node_type=node_type,
         transcription_status='pending',
         privacy_level=privacy_level,
@@ -2239,7 +2342,9 @@ def init_chunked_upload():
         "filename": filename,
         "filesize": filesize,
         "total_chunks": total_chunks,
-        "uploaded_chunks": []
+        "uploaded_chunks": [],
+        # Read back at finalize, which enqueues the transcription (#342).
+        "auto_reply_model": auto_reply_model,
     }
 
     import json
@@ -2252,10 +2357,13 @@ def init_chunked_upload():
         f"{filename} ({filesize / (1024 * 1024):.1f} MB, {total_chunks} chunks)"
     )
 
-    return jsonify({
+    response = {
         "node_id": node.id,
         "upload_id": upload_id
-    }), 201
+    }
+    if system_node is not None:
+        response["conversation_id"] = system_node.id
+    return jsonify(response), 201
 
 
 @nodes_bp.route("/upload/chunk", methods=["POST"])
@@ -2423,7 +2531,11 @@ def finalize_chunked_upload():
     if api_key:
         from backend.tasks.transcription import transcribe_audio
 
-        task = transcribe_audio.delay(node.id, str(target_path), metadata["filename"])
+        auto_reply_model = metadata.get("auto_reply_model")
+        task = transcribe_audio.delay(
+            node.id, str(target_path), metadata["filename"],
+            **({"auto_reply_model": auto_reply_model}
+               if auto_reply_model else {}))
         node.transcription_task_id = task.id
         db.session.commit()
 

@@ -42,8 +42,43 @@ class TranscriptionTask(Task):
                     logger.error(f"Transcription failed for node {node_id}: {exc}")
 
 
+# Warning recorded on an uploaded entry whose reply the cap skipped (#342).
+UPLOAD_REPLY_SKIPPED_SPEND_CAP = (
+    "Your entry is saved. Loore didn't reply because you've reached your "
+    "monthly usage limit, which resets at the start of next month."
+)
+
+
+def _start_upload_reply(node, tip, model_id):
+    """The LLM reply a Text-mode upload asked for (#342), under the tip of
+    the (possibly split) transcript. Returns the placeholder, or None when
+    the reply was skipped: a spend-capped user, a refused placeholder, or
+    any other failure. The reason is recorded on the entry, which is
+    already committed and always kept."""
+    from backend.utils.spend import user_is_capped
+    from backend.utils.task_warnings import record_task_warning
+    if user_is_capped(node.user_id):
+        record_task_warning(node, UPLOAD_REPLY_SKIPPED_SPEND_CAP)
+        return None
+    from backend.utils.llm_nodes import create_llm_placeholder
+    try:
+        llm_node, _ = create_llm_placeholder(
+            tip.id, model_id, node.user_id,
+            privacy_level=node.privacy_level, ai_usage=node.ai_usage,
+            source_mode="textmode",
+        )
+        return llm_node
+    except Exception as e:  # never fail the transcript over its reply
+        db.session.rollback()
+        logger.warning(
+            "Upload reply skipped for node %s: %s", node.id, e)
+        record_task_warning(node, str(e) or "Loore couldn't start a reply.")
+        return None
+
+
 @celery.task(base=TranscriptionTask, bind=True)
-def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = None):
+def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = None,
+                     auto_reply_model: str = None):
     """
     Asynchronously transcribe an audio file.
 
@@ -51,6 +86,8 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
         node_id: Database ID of the node
         audio_file_path: Absolute path to the audio file
         filename: Original filename of the audio file
+        auto_reply_model: When set (a Text-mode upload with auto-generate
+            on, #342), create the LLM reply once the transcript is written.
     """
     logger.info(f"Starting transcription task for node {node_id}")
 
@@ -257,11 +294,18 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
             # exceed it; split into a serial chain. Audio stays on this
             # head node; the transcript continues across the chain.
             from backend.utils.node_split import split_node_into_chain
-            split_node_into_chain(node)
-            node.transcription_status = 'completed'
+            _split_parts = split_node_into_chain(node)
             node.transcription_progress = 100
-            node.transcription_completed_at = datetime.utcnow()
             node.transcription_error = None
+            if auto_reply_model:
+                # Commit the transcript before the reply is attempted, and
+                # flip the status only after it: the frontend's first
+                # 'completed' poll then finds the reply (#342).
+                db.session.commit()
+                tip = _split_parts[-1] if _split_parts else node
+                _start_upload_reply(node, tip, auto_reply_model)
+            node.transcription_status = 'completed'
+            node.transcription_completed_at = datetime.utcnow()
             db.session.commit()
 
             logger.info(f"Transcription successful for node {node_id}: {len(transcript)} characters")
