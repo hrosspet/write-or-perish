@@ -4,30 +4,32 @@ it (#326).
 Until #326 two artifact writers stamped ai_usage='chat' whatever the
 owner's default: the agentic update_artifact tool (memory, scratchpad,
 intentions and custom kinds the model writes) and the Artifacts page
-(PUT /api/artifacts/<kind>). Now every writer stamps the owner's
-default_ai_usage, and the training key reads each artifact row that
-reaches a payload. Left alone, a 'train' user's older memory — still
-'chat' — would take every one of their agentic threads off the training
-key until the model rewrote it. This sets those rows to the owner's
-current default.
+(PUT /api/artifacts/<kind>). Now the page and the background tasks
+stamp the owner's default_ai_usage, the tool stamps 'train' only in a
+'train' thread of a 'train' owner (else 'chat'), and the training key
+reads each artifact row that reaches a payload. Left alone, a 'train'
+user's older memory — still 'chat' — would take every one of their
+agentic threads off the training key until the model rewrote it. This
+sets those rows to the owner's current default.
 
 What it changes: UserArtifact rows with ai_usage='chat' whose owner's
 default_ai_usage is 'train' → 'train'. With --include-none, also rows
 whose owner's default is 'none' → 'none'; that hides those artifacts
 from the owner's own agentic threads (a 'none' artifact never reaches a
-prompt), which is what a 'none' default means for every new write, but
-it is a visible change for anyone who runs threads with a per-thread
-'chat' override, so it is opt-in. Owners whose default is 'chat' have
-nothing to change. Every version of an artifact is restamped, not just
-the latest: sessions pin older versions (#191) and the export
-references them.
+prompt), a visible change for anyone who runs threads with a per-thread
+'chat' override, so it is opt-in (the tool itself stamps such a user's
+writes 'chat'). Owners whose default is 'chat' have nothing to change.
+Every version of an artifact is restamped, not just the latest:
+sessions pin older versions (#191) and the export references them.
 
 What it cannot tell apart: no page or API sets an artifact's ai_usage
-by hand, so no 'chat' row records a per-artifact choice. But the
-intentions and digest tasks already followed the owner's default, so a
-'chat' row written by them while the owner's default WAS 'chat' is
-restamped to the owner's current default too. The owner's current
-default is the setting this applies.
+by hand, so no 'chat' row records a per-artifact choice. But three
+kinds of 'chat' rows are restamped to the owner's current default
+along with the rest: rows the intentions and digest tasks wrote while
+the owner's default WAS 'chat', and rows the model wrote in a thread
+the owner had set to Chat (the rule the tool follows from #326 on
+would have kept those 'chat'; nothing on the row records the thread).
+The owner's current default is the setting this applies.
 
 Metadata only: selects ids and issues UPDATEs in batches of --batch-size
 (default 500). Never loads or decrypts content (no KMS calls) and holds

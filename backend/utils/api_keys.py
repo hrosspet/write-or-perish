@@ -111,13 +111,23 @@ class PayloadLicence:
     piece that is not drops the turn to 'chat', and it never goes back.
     """
 
-    def __init__(self, key_type: str, logger=None, label: str = "payload"):
+    def __init__(self, key_type: str, logger=None, label: str = "payload",
+                 track_rows: bool = False):
         self._key_type = key_type
         self._logger = logger
         self._label = label
         # Why it dropped, when it did: a licence used as a collector (one
         # placeholder's rows, one cached render) hands this on.
         self.reason = None
+        # With *track_rows*, every row reported, licensed or not, by table
+        # ({table: {ids}}): what a cached render's verdict rests on, to be
+        # re-checked when the render is served again (#326).
+        self.rows = {} if track_rows else None
+
+    def track_row(self, table: str, row_ids) -> None:
+        """Record rows the payload carries (a no-op unless tracking)."""
+        if self.rows is not None and row_ids:
+            self.rows.setdefault(table, set()).update(row_ids)
 
     @property
     def key_type(self) -> str:
@@ -134,9 +144,12 @@ class PayloadLicence:
                 self._label, reason, self._key_type)
         self._key_type = AIUsage.CHAT.value
 
-    def note_usage(self, ai_usage, what: str) -> None:
+    def note_usage(self, ai_usage, what: str, row=None) -> None:
         """One row resolved into the payload, judged by its own setting:
-        an artifact, the todo list, a search preview's node."""
+        an artifact, the todo list, a search preview's node. *row* (the
+        model instance) is recorded when tracking."""
+        if row is not None:
+            self.track_row(row.__tablename__, (row.id,))
         if ai_usage != AIUsage.TRAIN.value:
             self.to_chat(f"{what} is {ai_usage!r}")
 
@@ -144,6 +157,7 @@ class PayloadLicence:
         """Nodes resolved into the payload by id — a ``{quote:ID}``, a
         read_full — whoever wrote them. Each node's own ai_usage decides,
         the same rule the chain's nodes are held to."""
+        self.track_row("node", node_ids)
         if self._key_type == AIUsage.CHAT.value or not node_ids:
             return
         from backend.models import Node
@@ -173,7 +187,9 @@ class ContextUsage:
     and the #192 cache replays the system prompt's render on later turns
     without resolving anything. So the turn's licence hears every
     placeholder that resolved (``reason()``), and a cached render stores
-    the verdict of the placeholders in its own text (``reason(text)``).
+    the verdict of the placeholders in its own text (``reason(text)``)
+    together with the rows that verdict covers (``rows(text)``), which a
+    later hit re-checks (``rows_lost_licence``).
     """
 
     def __init__(self):
@@ -183,12 +199,25 @@ class ContextUsage:
         """The collector *placeholder*'s rows report to."""
         lic = self._licences.get(placeholder)
         if lic is None:
-            lic = PayloadLicence(AIUsage.TRAIN.value)
+            lic = PayloadLicence(AIUsage.TRAIN.value, track_rows=True)
             self._licences[placeholder] = lic
         return lic
 
-    def note_usage(self, placeholder: str, ai_usage, what: str) -> None:
-        self.licence(placeholder).note_usage(ai_usage, what)
+    def note_row(self, placeholder: str, row, what: str) -> None:
+        """A row (a model instance with ``ai_usage``) *placeholder*
+        rendered."""
+        self.licence(placeholder).note_usage(row.ai_usage, what, row=row)
+
+    def rows(self, text=None):
+        """{table: sorted ids} of the rows behind every resolved
+        placeholder, or those appearing in *text*."""
+        merged = {}
+        for placeholder, lic in self._licences.items():
+            if text is not None and placeholder not in text:
+                continue
+            for table, ids in (lic.rows or {}).items():
+                merged.setdefault(table, set()).update(ids)
+        return {table: sorted(ids) for table, ids in merged.items()}
 
     def reason(self, text=None):
         """Why the rows keep the payload off the training key — of every
@@ -200,3 +229,32 @@ class ContextUsage:
             if lic.reason:
                 return lic.reason
         return None
+
+
+def rows_lost_licence(rows):
+    """Why rows a cached render was licensed on no longer are, or None.
+
+    *rows* is ``ContextUsage.rows``. An entry, a reply in the user's
+    threads, or the profile can be switched off 'train' after the render
+    was cached, and nothing about the switch changes the cache key (#326
+    review). Metadata only: one query per table, nothing decrypted. A
+    table this does not know counts as lost, so the render is rebuilt.
+    """
+    from backend.models import (
+        Node, UserArtifact, UserProfile, UserRecentContext, UserTodo,
+    )
+    models = {m.__tablename__: m for m in (
+        Node, UserArtifact, UserProfile, UserRecentContext, UserTodo)}
+    for table, ids in (rows or {}).items():
+        if not ids:
+            continue
+        model = models.get(table)
+        if model is None:
+            return f"unknown table {table!r} in the cached verdict"
+        hit = model.query.with_entities(model.id, model.ai_usage).filter(
+            model.id.in_(list(ids)),
+            model.ai_usage != AIUsage.TRAIN.value,
+        ).first()
+        if hit is not None:
+            return f"{table} {hit[0]} is now {hit[1]!r}"
+    return None

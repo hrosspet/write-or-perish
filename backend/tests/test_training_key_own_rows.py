@@ -380,3 +380,198 @@ def test_the_pre_warm_goes_out_on_the_key_its_render_allows(app, monkeypatch, us
 
     assert sent == [expected, expected]
     assert len(fake.store) == 1
+
+
+# ── #326 review round 1 ──────────────────────────────────────────────────
+
+def _cached_voice_thread(monkeypatch, prompt, seed):
+    """A train user's voice thread whose system render is cached on turn
+    one; returns what turn two needs."""
+    import backend.utils.prompt_cache as prompt_cache
+    fake = _FakeRedis()
+    monkeypatch.setattr(prompt_cache, "_client", lambda config: fake)
+    alice, system, user_node, llm_node = _train_chain("voice")
+    _train_user(alice)
+    _set_prompt(system, prompt)
+    rows = seed(alice)
+    _ScriptedProvider.reset([_resp("Turn one.")])
+    generate_llm_response(_FakeSelf(), user_node.id, llm_node.id, "gpt-5",
+                          alice.id, source_mode="voice")
+    assert _keys_used() == ["sk-train"]
+    assert len(fake.store) == 1                 # cached, verdict: train
+    return alice, llm_node, rows, fake
+
+
+def _turn_two(alice, llm_node):
+    follow, reply2 = _next_turn(alice, llm_node.id)
+    _ScriptedProvider.reset([_resp("Turn two.")])
+    generate_llm_response(_FakeSelf(), follow.id, reply2.id, "gpt-5",
+                          alice.id, source_mode="voice")
+    assert _fresh(reply2.id).llm_task_status == "completed"
+
+
+def test_an_entry_switched_to_chat_after_caching_takes_turn_two_to_chat(app, keys, monkeypatch):  # noqa: F811
+    """Finding 1: the cache key does not change when an entry inside the
+    {user_recent_raw} window loses its licence, so a hit re-checks the
+    rows its 'train' verdict rests on and rebuilds the render."""
+    alice, llm_node, entry, fake = _cached_voice_thread(
+        monkeypatch, "system prompt body\n{user_recent_raw}",
+        lambda alice: _archive(alice, "RAW ENTRY", "train"))
+
+    entry.ai_usage = "chat"                     # the node editor's switch
+    _db.session.commit()
+    _turn_two(alice, llm_node)
+
+    assert "RAW ENTRY" in _payload(0)
+    assert _keys_used() == ["sk-chat"]
+
+
+def test_an_entry_switched_to_none_after_caching_is_no_longer_sent(app, keys, monkeypatch):  # noqa: F811
+    """The re-render also honors an opt-out: a 'none' entry leaves the
+    window instead of riding along in the cached text."""
+    alice, llm_node, entry, fake = _cached_voice_thread(
+        monkeypatch, "system prompt body\n{user_recent_raw}",
+        lambda alice: _archive(alice, "RAW ENTRY", "train"))
+
+    entry.ai_usage = "none"
+    _db.session.commit()
+    _turn_two(alice, llm_node)
+
+    assert "RAW ENTRY" not in _payload(0)
+    assert _keys_used() == ["sk-train"]
+
+
+def test_a_profile_switched_to_chat_after_caching_takes_turn_two_to_chat(app, keys, monkeypatch):  # noqa: F811
+    def seed(alice):
+        _seed_row(alice, "{user_profile}", "train")
+        return UserProfile.query.filter_by(user_id=alice.id).one()
+    alice, llm_node, profile, fake = _cached_voice_thread(
+        monkeypatch, "system prompt body\n{user_profile}", seed)
+
+    profile.ai_usage = "chat"                   # PUT /api/profile/<id>
+    _db.session.commit()
+    _turn_two(alice, llm_node)
+
+    assert OWN in _payload(0)
+    assert _keys_used() == ["sk-chat"]
+
+
+def test_an_unchanged_train_cache_hit_is_still_served_from_the_cache(app, keys, monkeypatch):  # noqa: F811
+    alice, llm_node, entry, fake = _cached_voice_thread(
+        monkeypatch, "system prompt body\n{user_recent_raw}",
+        lambda alice: _archive(alice, "RAW ENTRY", "train"))
+
+    def _no_render(*a, **kw):
+        raise AssertionError("turn two re-rendered the recent raw window")
+    monkeypatch.setattr(_llm_task_mod, "get_user_recent_raw_content",
+                        _no_render)
+    _turn_two(alice, llm_node)
+
+    assert "RAW ENTRY" in _payload(0)
+    assert _keys_used() == ["sk-train"]
+
+
+def test_a_train_owners_memory_written_in_a_chat_thread_stays_chat(app, keys):  # noqa: F811
+    """Finding 3: memory the model writes in a thread the user set to
+    Chat must not reach another thread on the training key."""
+    from backend.tests.test_training_key_payload import _plain_thread
+    alice, system, user_node, llm_node = _train_chain("textmode")
+    _train_user(alice)
+    user_node.ai_usage = "chat"                 # this thread: Chat
+    _db.session.commit()
+    _ScriptedProvider.reset([
+        _resp("Noting that.", tool_calls=[{
+            "id": "t1", "name": "update_artifact",
+            "input": {"kind": "memory",
+                      "updated_content": "FROM THE CHAT THREAD"}}]),
+        _resp("Noted."),
+    ])
+    generate_llm_response(_FakeSelf(), user_node.id, llm_node.id, "gpt-5",
+                          alice.id, source_mode="textmode")
+    assert UserArtifact.latest_for(alice.id, "memory").ai_usage == "chat"
+
+    llm_user = User.query.filter_by(username="gpt-5").first()
+    note, llm = _plain_thread(alice, llm_user,
+                              "What do you remember? {user_memory}")
+    _ScriptedProvider.reset([_resp("That.")])
+    generate_llm_response(_FakeSelf(), note.id, llm.id, "gpt-5", alice.id,
+                          source_mode=None)
+
+    assert "FROM THE CHAT THREAD" in _payload(0)
+    assert _keys_used() == ["sk-chat"]
+
+
+def test_a_none_default_user_in_a_chat_thread_can_read_their_memory_next_turn(app, keys):  # noqa: F811
+    """Finding 3: a 'none' default must not make the memory written in a
+    thread the user set to Chat unreadable on the next turn."""
+    alice, system, user_node, llm_node = _train_chain("textmode")
+    alice.default_ai_usage = "none"
+    user_node.ai_usage = "chat"
+    system.ai_usage = "chat"
+    _db.session.commit()
+    _set_prompt(system, "system prompt body\n{user_memory}")
+    _ScriptedProvider.reset([
+        _resp("Noting that.", tool_calls=[{
+            "id": "t1", "name": "update_artifact",
+            "input": {"kind": "memory",
+                      "updated_content": "REMEMBER THIS"}}]),
+        _resp("Noted."),
+    ])
+    generate_llm_response(_FakeSelf(), user_node.id, llm_node.id, "gpt-5",
+                          alice.id, source_mode="textmode")
+    memory = UserArtifact.latest_for(alice.id, "memory")
+    assert memory.ai_usage == "chat"
+
+    continuation = _fresh(_fresh(llm_node.id).continuation_node_id)
+    follow, reply2 = _next_turn(alice, continuation.id)
+    follow.ai_usage = "chat"
+    _db.session.commit()
+    _ScriptedProvider.reset([_resp("I remember.")])
+    generate_llm_response(_FakeSelf(), follow.id, reply2.id, "gpt-5",
+                          alice.id, source_mode="textmode")
+
+    assert "REMEMBER THIS" in _payload(0)
+    assert _keys_used() == ["sk-chat"]
+
+
+def test_an_artifact_whose_placeholder_is_absent_does_not_report(app, keys, monkeypatch):  # noqa: F811
+    """Finding 4: a prompt carrying only {user_intentions} never sends
+    the memory, so a 'chat' memory does not move it — not on turn one,
+    not from the cache on turn two."""
+    def seed(alice):
+        _mk_artifact(alice.id, "memory", "THE MEMORY", ai_usage="chat")
+        _mk_artifact(alice.id, "intentions", OWN, ai_usage="train")
+        _db.session.commit()
+    alice, llm_node, _, fake = _cached_voice_thread(
+        monkeypatch, "system prompt body\n{user_intentions}", seed)
+    _turn_two(alice, llm_node)
+
+    assert OWN in _payload(0)
+    assert "THE MEMORY" not in _payload(0)
+    assert _keys_used() == ["sk-train"]
+
+
+def test_the_pre_warm_stores_the_same_filtered_verdict(app, monkeypatch):  # noqa: F811
+    """Finding 4, pre-warm side: it must not cache an unfiltered 'chat'
+    verdict that would keep every later turn off the training key."""
+    import backend.utils.prompt_cache as prompt_cache
+    fake = _FakeRedis()
+    monkeypatch.setattr(prompt_cache, "_client", lambda config: fake)
+    alice, system, user_node, llm_node = _train_chain("voice")
+    _train_user(alice)
+    _set_prompt(system, "system prompt body\n{user_intentions}")
+    _mk_artifact(alice.id, "memory", "THE MEMORY", ai_usage="chat")
+    _mk_artifact(alice.id, "intentions", OWN, ai_usage="train")
+    _db.session.commit()
+    monkeypatch.setitem(app.config, "SUPPORTED_MODELS", {
+        **app.config["SUPPORTED_MODELS"],
+        "claude-test": {"provider": "anthropic", "api_model": "claude-x"},
+    })
+    monkeypatch.setattr(_ScriptedProvider, "_call_anthropic",
+                        staticmethod(lambda *a, **k: (_ for _ in ()).throw(
+                            RuntimeError("stop"))), raising=False)
+
+    _llm_task_mod.prewarm_anthropic_cache(system.id, alice.id, "claude-test")
+    cached = prompt_cache.get_cached_render(
+        app.config, system, _llm_task_mod._render_variant(alice.id))
+    assert cached is not None and cached.unlicensed is None

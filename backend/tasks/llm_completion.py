@@ -135,6 +135,11 @@ def _render_variant(user_id):
             f"s{int(_share_enabled_for_user(user_id))}"
             f"e{int(_external_references_for_user(user_id))}")
 USER_ARTIFACTS_INDEX_PLACEHOLDER = "{user_artifacts_index}"
+# The four resolved together by get_user_artifacts_context.
+_ARTIFACT_PLACEHOLDERS = (
+    USER_MEMORY_PLACEHOLDER, USER_SCRATCHPAD_PLACEHOLDER,
+    USER_INTENTIONS_PLACEHOLDER, USER_ARTIFACTS_INDEX_PLACEHOLDER,
+)
 
 # Within-turn retrieval loop (#158, text mode only). When the model calls one
 # of these tools, the retrieved content is injected back into the message
@@ -643,7 +648,8 @@ def _todo_index_line(user_id, pinned_node=None):
             f"read_todo {suffix}")
 
 
-def get_user_artifacts_context(user_id, pinned_node=None, usage=None):
+def get_user_artifacts_context(user_id, pinned_node=None, usage=None,
+                               rendered=None):
     """Resolve user artifacts for the agentic prompt (#158).
 
     Returns (memory_content, scratchpad_content, index_text). Pinned to the
@@ -656,6 +662,10 @@ def get_user_artifacts_context(user_id, pinned_node=None, usage=None):
     #326) under its placeholder: memory, scratchpad and intentions by
     their content, the index's rows by their title and description. The
     todo line carries a token count only, so it does not report.
+    *rendered* is the set of the four placeholders the text being
+    rendered actually carries (None = all of them): a row whose
+    placeholder is absent never reaches the payload, so it does not
+    report.
     """
     artifacts = pinned_node.get_user_artifacts() if pinned_node else {}
     if not artifacts:
@@ -671,13 +681,16 @@ def get_user_artifacts_context(user_id, pinned_node=None, usage=None):
     memory_content = memory.get_content() if memory else ""
     scratchpad_content = scratchpad.get_content() if scratchpad else ""
     intentions_content = intentions.get_content() if intentions else ""
-    if usage is not None:
-        for placeholder, row in ((USER_MEMORY_PLACEHOLDER, memory),
-                                 (USER_SCRATCHPAD_PLACEHOLDER, scratchpad),
-                                 (USER_INTENTIONS_PLACEHOLDER, intentions)):
-            if row is not None:
-                usage.note_usage(placeholder, row.ai_usage,
-                                 f"the {row.kind} artifact")
+
+    def _reports(placeholder):
+        return usage is not None and (rendered is None
+                                      or placeholder in rendered)
+
+    for placeholder, row in ((USER_MEMORY_PLACEHOLDER, memory),
+                             (USER_SCRATCHPAD_PLACEHOLDER, scratchpad),
+                             (USER_INTENTIONS_PLACEHOLDER, intentions)):
+        if row is not None and _reports(placeholder):
+            usage.note_row(placeholder, row, f"the {row.kind} artifact")
 
     index_lines = []
     # Todo first — it's a curated logistics surface, not a freeform artifact.
@@ -689,10 +702,9 @@ def get_user_artifacts_context(user_id, pinned_node=None, usage=None):
         if kind in ALWAYS_INLINE_KINDS:
             continue
         present.add(kind)
-        if usage is not None:
-            usage.note_usage(USER_ARTIFACTS_INDEX_PLACEHOLDER,
-                             artifact.ai_usage,
-                             f"the {kind} artifact's index entry")
+        if _reports(USER_ARTIFACTS_INDEX_PLACEHOLDER):
+            usage.note_row(USER_ARTIFACTS_INDEX_PLACEHOLDER, artifact,
+                           f"the {kind} artifact's index entry")
         tokens = approximate_token_count(artifact.get_content() or "")
         desc = (artifact.description or "").strip()
         desc_part = f": {desc}" if desc else ""
@@ -730,8 +742,8 @@ def get_user_ai_preferences_content(user_id, pinned_node=None, usage=None):
         art = UserArtifact.latest_for(user_id, "ai_preferences")
     if art is not None and art.ai_usage in AI_ALLOWED:
         if usage is not None:
-            usage.note_usage(USER_AI_PREFERENCES_PLACEHOLDER, art.ai_usage,
-                             "the ai_preferences artifact")
+            usage.note_row(USER_AI_PREFERENCES_PLACEHOLDER, art,
+                           "the ai_preferences artifact")
         return art.get_content()
     return None
 
@@ -1701,7 +1713,24 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                                 else UserArtifact.DEFAULT_DESCRIPTIONS.get(
                                     kind)
                             )
+                        # The row's ai_usage is what the training key
+                        # reads wherever the artifact goes next (#326).
+                        # The model writes it from THIS conversation, so
+                        # it is 'train' only when the owner's default and
+                        # the thread's own setting both are: a Chat
+                        # thread's content must not come back as a
+                        # 'train' row in another thread, and a 'none'
+                        # default in a thread the user set to Chat still
+                        # gets memory the next turn can read. The chain's
+                        # verdict, not the licence — once a 'chat' memory
+                        # was in a payload the licence would keep every
+                        # later write 'chat' for good.
                         owner = User.query.get(user_id)
+                        writes_train = (
+                            owner is not None
+                            and owner.default_ai_usage == "train"
+                            and determine_api_key_type(node_chain)
+                            == "train")
                         artifact = UserArtifact(
                             user_id=user_id,
                             kind=kind,
@@ -1710,11 +1739,7 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                             generated_by=(llm_node.llm_model
                                           or "agentic_session"),
                             tokens_used=0,
-                            # The owner's global default, like the todo
-                            # list and the profile (#326): the row's
-                            # ai_usage is what the training key reads.
-                            ai_usage=(owner.default_ai_usage if owner
-                                      else "chat"),
+                            ai_usage="train" if writes_train else "chat",
                         )
                         artifact.set_content(new_text)
                         db.session.add(artifact)
@@ -2012,8 +2037,7 @@ def get_user_profile_content(user_id, pinned_node=None, usage=None):
 
     if profile and profile.ai_usage in AI_ALLOWED:
         if usage is not None:
-            usage.note_usage(USER_PROFILE_PLACEHOLDER, profile.ai_usage,
-                             "the profile")
+            usage.note_row(USER_PROFILE_PLACEHOLDER, profile, "the profile")
         return profile
     return None
 
@@ -2036,8 +2060,7 @@ def get_user_todo_content(user_id, pinned_node=None, usage=None):
 
     if todo and todo.ai_usage in AI_ALLOWED:
         if usage is not None:
-            usage.note_usage(USER_TODO_PLACEHOLDER, todo.ai_usage,
-                             "the todo list")
+            usage.note_row(USER_TODO_PLACEHOLDER, todo, "the todo list")
         return todo.get_content()
     return None
 
@@ -2068,8 +2091,8 @@ def get_user_recent_content(user_id, pinned_node=None, usage=None):
 
     if rc and rc.ai_usage in AI_ALLOWED:
         if usage is not None:
-            usage.note_usage(USER_RECENT_PLACEHOLDER, rc.ai_usage,
-                             "the recent context summary")
+            usage.note_row(USER_RECENT_PLACEHOLDER, rc,
+                           "the recent context summary")
         return rc
     return None
 
@@ -2608,7 +2631,8 @@ def render_system_message(system_node, user_id, usage=None):
             or USER_INTENTIONS_PLACEHOLDER in text
             or USER_ARTIFACTS_INDEX_PLACEHOLDER in text):
         memory, scratchpad, intentions, index = get_user_artifacts_context(
-            user_id, pinned_node=system_node, usage=usage)
+            user_id, pinned_node=system_node, usage=usage,
+            rendered={p for p in _ARTIFACT_PLACEHOLDERS if p in text})
         text = text.replace(USER_MEMORY_PLACEHOLDER, memory or "")
         text = text.replace(USER_SCRATCHPAD_PLACEHOLDER, scratchpad or "")
         text = text.replace(USER_INTENTIONS_PLACEHOLDER, intentions or "")
@@ -2676,9 +2700,13 @@ def prewarm_anthropic_cache(system_node_id, user_id, model_id,
                 usage = ContextUsage()
                 sys_text = render_system_message(
                     system_node, user_id, usage=usage)
-                unlicensed = usage.reason()
+                # The render resolves only the placeholders in its own
+                # text, so this is the same filtered verdict generation
+                # stores.
+                unlicensed = usage.reason(sys_content)
                 store_render(flask_app.config, system_node, sys_text,
-                             render_variant, unlicensed=unlicensed)
+                             render_variant, unlicensed=unlicensed,
+                             rows=usage.rows(sys_content))
 
             key_type = determine_api_key_type([system_node], logger=logger)
             # The render carries the user's own rows, each licensed by
@@ -3123,7 +3151,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 (user_memory_content, user_scratchpad_content,
                  user_intentions_content,
                  user_artifacts_index) = get_user_artifacts_context(
-                    user_id, pinned_node=artifacts_node, usage=context_usage
+                    user_id, pinned_node=artifacts_node, usage=context_usage,
+                    rendered={p for p in _ARTIFACT_PLACEHOLDERS
+                              if _placeholder_node(p) is not None},
                 )
 
             # Detect if this is an agentic session (enables tools)
@@ -3608,7 +3638,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             store_render(
                                 flask_app.config, system_node, message_text,
                                 render_variant,
-                                unlicensed=context_usage.reason(_sys_text))
+                                unlicensed=context_usage.reason(_sys_text),
+                                rows=context_usage.rows(_sys_text))
                     if role == "assistant":
                         last_assistant_index = len(messages)
                     messages.append({

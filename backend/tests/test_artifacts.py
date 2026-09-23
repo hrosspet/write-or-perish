@@ -1003,13 +1003,32 @@ def test_put_stamps_the_owners_default(app, client, default):
     assert listed["scratchpad"]["ai_usage"] == default
 
 
-@pytest.mark.parametrize("default", ["train", "chat", "none"])
-def test_update_artifact_tool_stamps_the_owners_default(app, default):
+@pytest.mark.parametrize("default, thread, expected", [
+    ("train", "train", "train"),
+    ("train", "chat", "chat"),    # a Chat thread's content stays chat
+    ("chat", "train", "chat"),
+    ("chat", "chat", "chat"),
+    # A 'none' default in a thread set to Chat: the memory must stay
+    # readable next turn, so not 'none'.
+    ("none", "chat", "chat"),
+])
+def test_update_artifact_tool_stamps_train_only_in_a_train_thread_of_a_train_owner(
+        app, default, thread, expected):
+    """The model writes the artifact from this conversation: 'train' only
+    when the owner's default and the thread's own setting both are (#326
+    review)."""
     with app.app_context():
         user = User.query.first()
         user.default_ai_usage = default
+        node = Node(user_id=user.id, node_type="user", ai_usage=thread)
+        node.set_content("tell me something")
+        _db.session.add(node)
         _db.session.commit()
-        r = _run_tool(app, "update_artifact",
-                      {"kind": "memory", "updated_content": "fact"}, user.id)
+        llm_node = MagicMock()
+        llm_node.llm_model = "test-model"
+        r = _execute_tool_calls(
+            [{"name": "update_artifact",
+              "input": {"kind": "memory", "updated_content": "fact"}}],
+            llm_node, [node], user.id)[0]
         assert r["status"] == "success"
-        assert UserArtifact.latest_for(user.id, "memory").ai_usage == default
+        assert UserArtifact.latest_for(user.id, "memory").ai_usage == expected

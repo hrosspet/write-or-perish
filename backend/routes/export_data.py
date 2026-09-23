@@ -220,9 +220,15 @@ def _note_entry(licence, node):
     PayloadLicence, #326): an export going to a model carries every
     rendered entry, the user's own and other people's replies alike, and
     each is licensed for training by its own ai_usage. None = no report
-    (the user's own data download)."""
-    if licence is not None and node.ai_usage != AIUsage.TRAIN.value:
-        licence.note_usage(node.ai_usage, f"archive entry {node.id}")
+    (the user's own data download). A licensed entry is only recorded, in
+    case the licence tracks rows for a cached render."""
+    if licence is None:
+        return
+    if node.ai_usage == AIUsage.TRAIN.value:
+        licence.track_row(node.__tablename__, (node.id,))
+    else:
+        licence.note_usage(node.ai_usage, f"archive entry {node.id}",
+                           row=node)
 
 
 def _note_resolver_preamble(licence, resolver):
@@ -242,6 +248,7 @@ def _note_resolver_preamble(licence, resolver):
             continue
         for row_id, ai_usage in model.query.with_entities(
                 model.id, model.ai_usage).filter(model.id.in_(ids)):
+            licence.track_row(model.__tablename__, (row_id,))
             licence.note_usage(ai_usage, f"archive {kind} {row_id}")
 
 
@@ -1516,7 +1523,8 @@ def build_user_export_content(
                 if profile is not None and profile.id not in profile_versions:
                     if licence is not None:
                         licence.note_usage(profile.ai_usage,
-                                           f"archive profile {profile.id}")
+                                           f"archive profile {profile.id}",
+                                           row=profile)
                     pver = UserProfile.query.filter(
                         UserProfile.user_id == profile.user_id,
                         UserProfile.created_at <= profile.created_at,
@@ -1530,7 +1538,8 @@ def build_user_export_content(
                 if todo is not None and todo.id not in todo_versions:
                     if licence is not None:
                         licence.note_usage(todo.ai_usage,
-                                           f"archive todo list {todo.id}")
+                                           f"archive todo list {todo.id}",
+                                           row=todo)
                     tver = UserTodo.query.filter(
                         UserTodo.user_id == todo.user_id,
                         UserTodo.created_at <= todo.created_at,
@@ -1548,7 +1557,8 @@ def build_user_export_content(
                     if licence is not None:
                         licence.note_usage(
                             artifact.ai_usage,
-                            f"archive {kind} artifact {artifact.id}")
+                            f"archive {kind} artifact {artifact.id}",
+                            row=artifact)
                     art_ver = UserArtifact.query.filter(
                         UserArtifact.user_id == artifact.user_id,
                         UserArtifact.kind == kind,
