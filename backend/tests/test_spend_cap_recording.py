@@ -384,6 +384,36 @@ class TestCappedRecordingIsTranscribed:
         assert entry.get_content() == "the whole transcript"
         assert Node.query.filter_by(node_type="llm").count() == 0
 
+    @pytest.mark.parametrize("capped", [True, False])
+    def test_voice_finalize_prewarms_only_when_not_capped(self, st, capped):
+        # A capped finalize skips the reply, so it must not pay for a cache
+        # warm either (nor create the early system node the warm needs).
+        # The uncapped case is the control: same setup, the warm fires.
+        user = st._test_user
+        if not capped:
+            user.spend_blocked_month = None
+        draft = _recording(user, "sess-4", [], st._test_root)
+        draft.set_content("x" * 600)
+        _db.session.commit()
+        st.flask_app.config["SUPPORTED_MODELS"] = {
+            "claude-test": {"provider": "anthropic"}}
+        fake_llm = MagicMock()
+        saved_llm = sys.modules.get("backend.tasks.llm_completion")
+        sys.modules["backend.tasks.llm_completion"] = fake_llm
+        try:
+            st.finalize_draft_streaming(
+                MagicMock(), "sess-4", 0, label="Voice", user_id=user.id,
+                parent_id=None, model="claude-test")
+        finally:
+            if saved_llm is None:
+                sys.modules.pop("backend.tasks.llm_completion", None)
+            else:
+                sys.modules["backend.tasks.llm_completion"] = saved_llm
+
+        warmed = fake_llm.prewarm_anthropic_cache.delay.called
+        assert warmed is (not capped)
+        assert (Node.query.count() > 0) is (not capped)
+
     def test_accepted_upload_is_transcribed(self, st, monkeypatch):
         # An upload the server accepted before the cap flipped finishes.
         import backend.tasks.transcription as tr

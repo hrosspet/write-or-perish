@@ -989,8 +989,12 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         # system node is created early — here instead of in the chain
         # start — so the warm renders against real pinned artifacts and
         # the cached bytes (#192) are exactly what generation reuses.
+        # A capped user gets no reply (_start_server_side_llm_chain skips
+        # it), so warming the cache for it would be a paid write for nothing.
+        from backend.utils.spend import user_is_capped
         cache_split_offset = None
-        if user_id and model and label == 'Voice':
+        if (user_id and model and label == 'Voice'
+                and not user_is_capped(user_id)):
             try:
                 model_cfg = flask_app.config["SUPPORTED_MODELS"].get(model)
                 is_anthropic = bool(

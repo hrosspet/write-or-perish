@@ -2580,6 +2580,11 @@ def prewarm_anthropic_cache(system_node_id, user_id, model_id,
     """
     with flask_app.app_context():
         try:
+            # The cap can flip between the dispatch in finalize and this
+            # task; a capped user gets no reply, so the warm would be wasted.
+            from backend.utils.spend import user_is_capped
+            if user_is_capped(user_id):
+                return {"status": "skipped", "reason": "spend_capped"}
             system_node = Node.query.get(system_node_id)
             if system_node is None:
                 return {"status": "skipped", "reason": "no_system_node"}
