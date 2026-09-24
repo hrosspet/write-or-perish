@@ -16,9 +16,9 @@ import { useToast } from '../contexts/ToastContext';
  *   feedback: 'good' | 'bad' | null (server value; local state follows it)
  *   size:     icon size in px (default 16: the glyph's circle is then
  *             about 13 px across, the em of the 0.8em footer text it
- *             sits in). The button around it is at least 40×40 px
- *             whatever the size, so the pair is easy to hit on a phone
- *             (#351).
+ *             sits in). The button around it is 40 px tall and as
+ *             wide as the icon plus the gap between the icons, so the
+ *             pair is easy to hit on a phone (#351).
  *   onChange: optional (feedback, response) => void after the server
  *             confirms; `response.read_at` is set when the verdict
  *             marked the reference read (a verdict counts as reading)

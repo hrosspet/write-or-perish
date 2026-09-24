@@ -5,10 +5,9 @@ import React from 'react';
 import { render, screen } from '@testing-library/react';
 import ReferenceFeedback from './ReferenceFeedback';
 
-// The 40×40 tap target itself is CSS (index.css, .ref-feedback-glyph),
-// which jsdom does not apply. What the CSS depends on is checked here:
-// the icon size reaches --ref-feedback-icon, which sets the pair's
-// negative side margins.
+// The tap target itself is CSS (index.css, .ref-feedback-glyph), which
+// jsdom does not apply. What the CSS depends on is checked here: the
+// icon size reaches --ref-feedback-icon, which sets the target's width.
 test('icons default to 16 px and hand their size to the CSS', () => {
   render(<ReferenceFeedback itemId={5} feedback={null} />);
   const good = screen.getByRole('button', { name: 'Good quote' });
