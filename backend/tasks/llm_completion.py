@@ -47,6 +47,9 @@ from backend.utils.api_keys import (
     determine_api_key_type, get_api_keys_for_usage, PayloadLicence,
 )
 from backend.utils.cost import llm_cost_log_fields
+from backend.utils.cache_diagnostics import (
+    ConversationCacheDiagnostics, system_prefix_hash,
+)
 from backend.utils.llm_batch import BatchItemFailed, BatchItemCancelled
 from backend.utils.ca_feed import (
     CA_CHAT_TURN_NOTE, CA_READ_AGAIN_TURN, CA_TWEETS_CHAT_STUB,
@@ -3167,6 +3170,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             elif provider == "openai" and not api_keys["openai"]:
                 raise ValueError("OpenAI API key is not configured.")
 
+            # #348: OpenAI Prompt Cache Diagnostics. The first call compares
+            # itself to the last OpenAI call on this node's ancestor path,
+            # each tool round to the round before.
+            cache_diag = ConversationCacheDiagnostics(
+                enabled=(provider == "openai"
+                         and bool(model_config.get("cache_diagnostics"))),
+                user_id=user_id, node_chain=node_chain)
+
             MAX_RETRIES = 3
             for attempt in range(MAX_RETRIES + 1):
                 if needs_export:
@@ -3666,13 +3677,17 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 if needs_ca:
                     from backend.utils.ca_feed import FEED_SCHEMA
                     feed_schema = FEED_SCHEMA
+                cache_diag.system_hash = system_prefix_hash(
+                    messages, system_msg_index)
                 try:
-                    response = LLMProvider.get_completion(
-                        model_id, messages, api_keys,
-                        tools=agentic_tools,
-                        prompt_cache_key=f"loore-t{thread_root_id}",
-                        output_schema=feed_schema,
-                    )
+                    response = cache_diag.call(
+                        lambda baseline_id: LLMProvider.get_completion(
+                            model_id, messages, api_keys,
+                            tools=agentic_tools,
+                            prompt_cache_key=f"loore-t{thread_root_id}",
+                            output_schema=feed_schema,
+                            cache_comparison_response_id=baseline_id,
+                        ))
                     if needs_ca:
                         response = _collect_feed_reply(
                             llm_node, response, ca_refs)
@@ -3691,9 +3706,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     )
             # ── Helpers shared by the single-shot and retrieval paths ──────
 
-            def _log_api_cost(resp):
+            def _log_api_cost(resp, node):
                 """Log an APICostLog row for one model call. Every model call
                 costs money — the retrieval loop logs once per round.
+                *node* is the LLM node the call's text was written to; the
+                row points at it (request_ref) so the next turn can find its
+                cache-diagnostics baseline (#348).
 
                 Pricing and the unified column semantics (full-prompt
                 input_tokens, cache read/write columns across providers,
@@ -3715,11 +3733,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         "OpenAI prompt cache: %d/%d input tokens cached, "
                         "%d written",
                         cached_input_toks, in_toks, cache_write_subset_toks)
+                diag_fields = cache_diag.log_fields(resp, node.id)
                 db.session.add(APICostLog(
                     user_id=user_id,
                     model_id=model_id,
                     request_type="conversation",
                     **llm_cost_log_fields(model_id, resp),
+                    **diag_fields,
                 ))
 
             # Turn-scoped relative-quote state. quote_labels maps a short
@@ -3767,7 +3787,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     'progress': 90, 'status': 'Logging cost'})
                 target_node.llm_task_progress = 90
                 db.session.commit()
-                _log_api_cost(resp)
+                _log_api_cost(resp, target_node)
 
                 # Step 5: Update the placeholder LLM node with the response
                 self.update_state(state='PROGRESS', meta={
@@ -3971,7 +3991,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         interim_text, user_id, bumped_ext_ids)
 
                     # Cost for THIS model call (every call costs).
-                    _log_api_cost(response)
+                    _log_api_cost(response, current_node)
 
                     # Execute ALL tool calls on the interim node.
                     tool_results = _execute_tool_calls(
@@ -4136,14 +4156,16 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
                     def _call_continuation():
                         try:
-                            return LLMProvider.get_completion(
-                                model_id, messages, api_keys,
-                                tools=agentic_tools,
-                                # #189: same per-thread key as the first call
-                                # so loop continuations route to the same
-                                # OpenAI cache.
-                                prompt_cache_key=f"loore-t{thread_root_id}",
-                            )
+                            return cache_diag.call(
+                                lambda baseline_id: LLMProvider.get_completion(
+                                    model_id, messages, api_keys,
+                                    tools=agentic_tools,
+                                    # #189: same per-thread key as the first
+                                    # call so loop continuations route to
+                                    # the same OpenAI cache.
+                                    prompt_cache_key=f"loore-t{thread_root_id}",
+                                    cache_comparison_response_id=baseline_id,
+                                ))
                         except PromptTooLongError:
                             logger.warning(
                                 "Continuation prompt too long after tool "
@@ -4162,14 +4184,16 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                         "the entries you referenced.]"),
                                 }],
                             }
-                            return LLMProvider.get_completion(
-                                model_id, messages, api_keys,
-                                tools=agentic_tools,
-                                # #189: same per-thread key as the first call
-                                # so loop continuations route to the same
-                                # OpenAI cache.
-                                prompt_cache_key=f"loore-t{thread_root_id}",
-                            )
+                            return cache_diag.call(
+                                lambda baseline_id: LLMProvider.get_completion(
+                                    model_id, messages, api_keys,
+                                    tools=agentic_tools,
+                                    # #189: same per-thread key as the first
+                                    # call so loop continuations route to
+                                    # the same OpenAI cache.
+                                    prompt_cache_key=f"loore-t{thread_root_id}",
+                                    cache_comparison_response_id=baseline_id,
+                                ))
 
                     # Transient provider errors (overload, timeout) used to
                     # propagate here and kill the turn, stranding this

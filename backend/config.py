@@ -138,10 +138,16 @@ class Config:
     #                       requested, so a 1.05M window takes 922k of input.
     #   long_context_threshold — the pricing tier; the profile pipeline never
     #                       plans a prompt across it (#259).
+    #
+    #   cache_diagnostics — OpenAI Prompt Cache Diagnostics (GPT-5.6 and later,
+    #                       #348): conversation calls pass the previous call's
+    #                       response id and record why the cache missed. Older
+    #                       models must not get the option.
     SUPPORTED_MODELS = {
         "gpt-6-astra": {
             "provider": "openai",
             "api_model": "gpt-6-astra",
+            "cache_diagnostics": True,
             "display_name": "GPT-6 Astra",
             "context_window": 1050000,
             # Verified 2026-09-03 on the OpenAI pricing page.
@@ -166,6 +172,7 @@ class Config:
             "tokenizer_family": "o200k",
             "provider": "openai",
             "api_model": "gpt-6-sol",
+            "cache_diagnostics": True,
             "max_input_tokens": 922000,
             "display_name": "GPT-6 Sol",
             "context_window": 1050000,
@@ -185,6 +192,7 @@ class Config:
             "tokenizer_family": "o200k",
             "provider": "openai",
             "api_model": "gpt-6-luna",
+            "cache_diagnostics": True,
             "max_input_tokens": 922000,
             "display_name": "GPT-6 Luna",
             "context_window": 1050000,
@@ -203,6 +211,7 @@ class Config:
             "tokenizer_family": "o200k",
             "provider": "openai",
             "api_model": "gpt-5.6-sol",
+            "cache_diagnostics": True,
             "max_input_tokens": 922000,
             "display_name": "GPT-5.6 Sol",
             "context_window": 1050000,
@@ -220,6 +229,7 @@ class Config:
             "tokenizer_family": "o200k",
             "provider": "openai",
             "api_model": "gpt-5.6-luna",
+            "cache_diagnostics": True,
             "max_input_tokens": 922000,
             "display_name": "GPT-5.6 Luna",
             "context_window": 1050000,

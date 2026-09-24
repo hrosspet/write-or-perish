@@ -41,6 +41,31 @@ def model_input_cap(model_cfg, max_output_tokens=None):
     return cap
 
 
+def _cache_diagnostics(response):
+    """OpenAI's prompt_cache_diagnostics off a Responses API response, as a
+    plain dict with the four documented keys, or None when the response
+    has none (#348). The SDK keeps the untyped field as a dict; a later
+    SDK that types it gives an object, so both are read."""
+    raw = getattr(response, "prompt_cache_diagnostics", None)
+    if raw is None:
+        return None
+
+    def get(key):
+        if isinstance(raw, dict):
+            return raw.get(key)
+        return getattr(raw, key, None)
+
+    diag_type = get("type")
+    if not diag_type:
+        return None
+    return {
+        "type": diag_type,
+        "reason": get("reason"),
+        "comparison_reusable_tokens": get("comparison_reusable_tokens"),
+        "cache_missed_tokens": get("cache_missed_tokens"),
+    }
+
+
 class PromptTooLongError(Exception):
     """Raised when the prompt exceeds the model's context window."""
 
@@ -60,7 +85,8 @@ class LLMProvider:
     def get_completion(model_id: str, messages: list, api_keys: dict,
                        max_tokens: int = None, tools: list = None,
                        prompt_cache_key: str = None,
-                       output_schema: dict = None) -> dict:
+                       output_schema: dict = None,
+                       cache_comparison_response_id: str = None) -> dict:
         """
         Generate a completion using the specified model.
 
@@ -72,12 +98,19 @@ class LLMProvider:
             tools: Optional list of tool definitions (Anthropic format)
             output_schema: Optional JSON schema the reply must match
                 (structured output; the same shape the batch path takes)
+            cache_comparison_response_id: Optional id of an earlier OpenAI
+                response to compare the prompt cache against (#348). Sent
+                only to models with "cache_diagnostics" in their config;
+                ignored for every other model.
 
         Returns:
             Dict with:
                 - content (str): The generated text
                 - total_tokens (int): Total tokens used
                 - tool_calls (list): Tool call results [{id, name, input}]
+                - response_id (str): OpenAI only, the response's id
+                - cache_diagnostics (dict): OpenAI only, when a comparison
+                  id was sent and the response carried a verdict
 
         Raises:
             ValueError: If model is unsupported or provider is unknown
@@ -96,11 +129,14 @@ class LLMProvider:
             max_tokens = min(max_tokens, model_max, DEFAULT_MAX_OUTPUT_TOKENS)
 
         if provider == "openai":
+            if not config.get("cache_diagnostics"):
+                cache_comparison_response_id = None
             return LLMProvider._call_openai(
                 api_model, messages, api_keys["openai"], max_tokens,
                 tools=tools, prompt_cache_key=prompt_cache_key,
                 context_window=config.get("context_window"),
-                output_schema=output_schema)
+                output_schema=output_schema,
+                cache_comparison_response_id=cache_comparison_response_id)
         elif provider == "anthropic":
             return LLMProvider._call_anthropic(
                 api_model, messages, api_keys["anthropic"], max_tokens,
@@ -113,7 +149,8 @@ class LLMProvider:
                      max_tokens: int = None, tools: list = None,
                      prompt_cache_key: str = None,
                      context_window: int = None,
-                     output_schema: dict = None) -> dict:
+                     output_schema: dict = None,
+                     cache_comparison_response_id: str = None) -> dict:
         """
         Call OpenAI via the Responses API (/v1/responses).
 
@@ -129,6 +166,9 @@ class LLMProvider:
             tools: Optional tool definitions (Anthropic format, converted here)
             context_window: Model context window, used to report a context
                 overflow when the API error carries no token counts
+            cache_comparison_response_id: baseline response id for Prompt
+                Cache Diagnostics (#348); the caller has checked the model
+                supports it
 
         Returns:
             Dict with content, total_tokens, and tool_calls
@@ -185,8 +225,27 @@ class LLMProvider:
                 "type": "json_schema", "name": "feed_reply",
                 "schema": output_schema, "strict": True}}
 
+        # #348: Prompt Cache Diagnostics. The SDK pin (<3) has no typed
+        # parameter, so it goes in the request body as is; the verdict
+        # comes back as an untyped field on the response.
+        if cache_comparison_response_id:
+            kwargs["extra_body"] = {"prompt_cache_options": {
+                "comparison_response_id": cache_comparison_response_id}}
+
         try:
-            response = client.responses.create(**kwargs)
+            try:
+                response = client.responses.create(**kwargs)
+            except openai.BadRequestError as e:
+                # Analytics must never cost a turn: if OpenAI rejects the
+                # option itself, send the call again without it.
+                if ("extra_body" not in kwargs
+                        or "prompt_cache" not in str(e)):
+                    raise
+                logger.warning(
+                    "OpenAI rejected prompt_cache_options (model=%s); "
+                    "retrying without cache diagnostics: %s", model, e)
+                kwargs.pop("extra_body")
+                response = client.responses.create(**kwargs)
         except openai.BadRequestError as e:
             mapped = LLMProvider._openai_overflow_error(
                 e, input_items, context_window)
@@ -235,7 +294,7 @@ class LLMProvider:
                 f"written={cache_write_tokens} of "
                 f"{response.usage.input_tokens} input tokens")
 
-        return {
+        result = {
             "content": content,
             "total_tokens": response.usage.total_tokens,
             "input_tokens": response.usage.input_tokens,
@@ -244,7 +303,13 @@ class LLMProvider:
             "cache_write_subset_tokens": cache_write_tokens,
             "tool_calls": tool_calls,
             "truncated": truncated,
+            "response_id": getattr(response, "id", None),
         }
+        if "extra_body" in kwargs:
+            diagnostics = _cache_diagnostics(response)
+            if diagnostics:
+                result["cache_diagnostics"] = diagnostics
+        return result
 
     @staticmethod
     def _openai_overflow_error(e, input_items, context_window):
