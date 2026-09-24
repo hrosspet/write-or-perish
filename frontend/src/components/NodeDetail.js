@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate, useSearchParams, Link } from "react-router-dom";
 import { FaThumbtack, FaMicrophone, FaSpinner, FaBookOpen } from "react-icons/fa";
 import NodeFooter from "./NodeFooter";
@@ -384,6 +384,48 @@ function NodeDetail({ nodeIdOverride }) {
   const saveNodeContent = useCallback((newContent) => api.put(`/nodes/${id}`, { content: newContent }), [id]);
   const handleCheckboxToggle = useCheckboxToggle(getNodeContent, setNodeContent, saveNodeContent);
   const handleTaskInsert = useTaskInsert(getNodeContent, setNodeContent, saveNodeContent);
+
+  // The action row: [LLM Response | model] [Read further | model]. When
+  // the second group wraps onto a line of its own (a phone), the row
+  // becomes a two-column grid, buttons in one column and pickers in the
+  // other, so the two button/picker divides line up. Back to one line when
+  // there is room again (the width both groups took side by side is kept
+  // from when the wrap was seen).
+  const [actionsStacked, setActionsStacked] = useState(false);
+  const actionRowEl = useRef(null);
+  const actionRowObserver = useRef(null);
+  const actionsFlatWidth = useRef(0);
+  const checkActionsStacked = useCallback(() => {
+    const row = actionRowEl.current;
+    if (!row) return;
+    const groups = row.querySelectorAll('[data-action-group]');
+    if (groups.length < 2) {
+      setActionsStacked(false);
+      return;
+    }
+    const style = window.getComputedStyle(row);
+    if (style.display === 'grid') {
+      if (row.clientWidth >= actionsFlatWidth.current) setActionsStacked(false);
+      return;
+    }
+    const [first, second] = groups;
+    if (second.offsetTop > first.offsetTop) {
+      actionsFlatWidth.current = first.offsetWidth + second.offsetWidth
+        + (parseFloat(style.columnGap) || 0);
+      setActionsStacked(true);
+    }
+  }, []);
+  const actionRowRef = useCallback((el) => {
+    actionRowObserver.current?.disconnect();
+    actionRowObserver.current = null;
+    actionRowEl.current = el;
+    if (el && typeof ResizeObserver !== 'undefined') {
+      actionRowObserver.current = new ResizeObserver(() => checkActionsStacked());
+      actionRowObserver.current.observe(el);
+    }
+  }, [checkActionsStacked]);
+  // After every render: a new model label can change the widths.
+  useLayoutEffect(() => { checkActionsStacked(); });
 
   if (loading) return <div style={{ color: "var(--text-muted)", padding: "20px" }}>Loading node...</div>;
   if (error) return <div style={{ color: "var(--accent)", padding: "20px" }}>{error}</div>;
@@ -984,14 +1026,23 @@ function NodeDetail({ nodeIdOverride }) {
   const showLlmResponse = showCraftBar && !(inReadThread && !readReplyAbove);
   // Each action carries its own model picker, joined to its right edge:
   // [LLM Response | Opus 4.6 v]  [Read further | GPT-6 Luna v] (#355).
-  const actionGroupStyle = { display: 'inline-flex', alignItems: 'stretch' };
+  // Stacked (see actionsStacked), a group lends its button and picker to
+  // the row's grid; each then fills its column, label centred, chevron at
+  // the right edge.
+  const actionGroupStyle = actionsStacked
+    ? { display: 'contents' }
+    : { display: 'inline-flex', alignItems: 'stretch' };
   const joinedButtonStyle = {
     borderTopRightRadius: 0, borderBottomRightRadius: 0, borderRight: 'none',
+    justifyContent: 'center',
   };
-  const joinedPickerStyle = { borderTopLeftRadius: 0, borderBottomLeftRadius: 0 };
+  const joinedPickerStyle = {
+    borderTopLeftRadius: 0, borderBottomLeftRadius: 0,
+    flex: 1, justifyContent: 'space-between',
+  };
   const readBusy = readLoading || llmRequesting || !!llmTaskNodeId;
   const readButton = (
-    <span style={actionGroupStyle}>
+    <span data-action-group style={actionGroupStyle}>
       <button
         onClick={handleReadFromNode}
         disabled={readBusy}
@@ -1410,13 +1461,21 @@ function NodeDetail({ nodeIdOverride }) {
           <DownloadAudioIcon nodeId={node.id} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} />
         </NodeFooter>
         {(showCraftBar || readActions) && (
-          <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+          <div
+            ref={actionRowRef}
+            style={actionsStacked
+              ? {
+                marginTop: "8px", display: 'grid', rowGap: '8px',
+                gridTemplateColumns: 'max-content max-content', justifyContent: 'start',
+              }
+              : { marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}
+          >
             {showLlmResponse && (
               /* The group span carries the tooltip, for the button and its
                  model picker alike (they are one control, disabled
                  together): a disabled button or select gets no hover
                  events in some browsers. */
-              <span title={llmResponseTitle} style={actionGroupStyle}>
+              <span data-action-group title={llmResponseTitle} style={actionGroupStyle}>
                 <button
                   onClick={handleLLMResponse}
                   disabled={llmRequesting || !!llmTaskNodeId || underReadReply}
