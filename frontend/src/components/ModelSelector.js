@@ -310,14 +310,26 @@ const ModelSelector = ({
           }}
         >
           {options.kind === 'grouped'
-            ? options.groups.map((g) => (
-              <div key={g.id} role="group" aria-labelledby={`${listId}-g-${g.id}`}>
+            ? options.groups.map((g, i) => (
+              <div
+                key={g.id}
+                role="group"
+                aria-labelledby={`${listId}-g-${g.id}`}
+                style={i > 0 ? {
+                  marginTop: '4px', paddingTop: '2px', borderTop: '1px solid var(--border)',
+                } : undefined}
+              >
+                {/* Group names are headings, not rows: the serif display
+                    face in the accent colour, unlike the sans model names. */}
                 <div
                   id={`${listId}-g-${g.id}`}
                   style={{
-                    padding: '8px 12px 4px',
-                    fontSize: '12px',
-                    color: 'var(--text-muted)',
+                    padding: '8px 12px 2px',
+                    fontFamily: 'var(--serif)',
+                    fontSize: '16px',
+                    fontWeight: 500,
+                    color: 'var(--accent)',
+                    cursor: 'default',
                   }}
                 >
                   {g.label}
