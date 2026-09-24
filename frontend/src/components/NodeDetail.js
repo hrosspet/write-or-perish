@@ -1412,10 +1412,11 @@ function NodeDetail({ nodeIdOverride }) {
         {(showCraftBar || readActions) && (
           <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
             {showLlmResponse && (
-              <span style={actionGroupStyle}>
-              {/* The span carries the tooltip: a disabled button gets no
-                  hover events in some browsers. */}
-              <span title={llmResponseTitle} style={{ display: 'inline-flex' }}>
+              /* The group span carries the tooltip, for the button and its
+                 model picker alike (they are one control, disabled
+                 together): a disabled button or select gets no hover
+                 events in some browsers. */
+              <span title={llmResponseTitle} style={actionGroupStyle}>
                 <button
                   onClick={handleLLMResponse}
                   disabled={llmRequesting || !!llmTaskNodeId || underReadReply}
@@ -1430,14 +1431,13 @@ function NodeDetail({ nodeIdOverride }) {
                     </>
                   ) : 'LLM Response'}
                 </button>
-              </span>
-              <ModelSelector
-                nodeId={node.id}
-                selectedModel={selectedModel}
-                onModelChange={setSelectedModel}
-                disabled={llmRequesting || !!llmTaskNodeId || underReadReply}
-                style={joinedPickerStyle}
-              />
+                <ModelSelector
+                  nodeId={node.id}
+                  selectedModel={selectedModel}
+                  onModelChange={setSelectedModel}
+                  disabled={llmRequesting || !!llmTaskNodeId || underReadReply}
+                  style={joinedPickerStyle}
+                />
               </span>
             )}
             {/* Before the first picks "Read" stands alone, where LLM
