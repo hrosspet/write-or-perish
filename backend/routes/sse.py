@@ -10,6 +10,7 @@ from flask import Blueprint, Response, request, jsonify, current_app
 from flask_login import login_required, current_user
 from backend.models import Node, UserProfile, NodeTranscriptChunk, TTSChunk, Draft
 from backend.extensions import db
+from backend.utils.streaming_session import stamp_session_alive
 import json
 import time
 
@@ -347,6 +348,13 @@ def draft_transcription_stream(session_id):
     # Get the last chunk index the client has seen
     last_chunk = request.args.get('last_chunk', -1, type=int)
 
+    # Only the tab recording the session opens this stream, so a
+    # (re)connect is a sign of life — also for a resumed session whose
+    # previous tab released it (#320).
+    if draft.streaming_status == 'recording':
+        stamp_session_alive(session_id)
+        db.session.commit()
+
     # Capture app reference for use in generator (needed for app context)
     app = current_app._get_current_object()
 
@@ -442,6 +450,15 @@ def draft_transcription_stream(session_id):
                         "status": current_draft.streaming_status
                     }, event="heartbeat")
                     last_heartbeat = time.time()
+                    # The open stream is the recording tab's sign of
+                    # life, paused recordings included (#320). Stamped
+                    # after the yield, so a failed write ends the stream
+                    # before it stamps; and only while the stamp is set,
+                    # so a stream that has not yet noticed its tab left
+                    # cannot revive a session the tab released.
+                    if current_draft.streaming_status == 'recording':
+                        stamp_session_alive(session_id, only_if_unreleased=True)
+                        db.session.commit()
 
             # Sleep briefly before checking again (outside app context)
             time.sleep(1)

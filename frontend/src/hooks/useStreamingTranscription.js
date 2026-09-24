@@ -72,6 +72,27 @@ function playInterruptionAlert() {
   }
 }
 
+// #320: shown when the session this tab records was ended somewhere else
+// (another tab recovered or discarded it). Nothing more can go into it.
+const SESSION_ENDED_MESSAGE =
+  'This recording was ended from another tab or window, so recording stopped here.';
+
+/**
+ * Tell the server this tab no longer records the session, so another view
+ * may recover it at once instead of after the server's liveness window
+ * (#320). sendBeacon survives page unload; the POST is the fallback.
+ */
+function releaseSession(sessionId) {
+  try {
+    if (navigator.sendBeacon && navigator.sendBeacon(
+      `${process.env.REACT_APP_BACKEND_URL || ''}/api/drafts/streaming/${sessionId}/release`
+    )) {
+      return;
+    }
+  } catch (_) { /* fall through to the POST */ }
+  api.post(`/drafts/streaming/${sessionId}/release`).catch(() => {});
+}
+
 /**
  * useStreamingTranscription - Complete streaming transcription workflow (Draft-based).
  *
@@ -123,6 +144,33 @@ export function useStreamingTranscription(options = {}) {
   const failedChunksRef = useRef([]); // Track chunks that failed all retries
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
+  // #320: true once this tab asked the server to finalize the session.
+  // all_complete before that means the session was ended elsewhere.
+  const finalizeRequestedRef = useRef(false);
+  // The session already stopped as ended elsewhere (dedups the several
+  // in-flight chunk uploads that all come back rejected).
+  const endedSessionRef = useRef(null);
+  // The session this tab already released (pagehide, unmount and cancel
+  // can all fire for the same departure).
+  const releasedSessionRef = useRef(null);
+  // Filled in once the recorder and SSE hooks below have returned, like
+  // resetMediaRecorderRef.
+  const stopMediaRecorderRef = useRef(null);
+  const resetSSERef = useRef(null);
+
+  // #320: this tab stops recording a session it never finalized (reload,
+  // close, navigating away, cancel): tell the server, so the session can
+  // be recovered at once rather than after the server's liveness window.
+  const releaseIfAbandoned = useCallback(() => {
+    const current = sessionIdRef.current;
+    if (!current || finalizeRequestedRef.current
+        || endedSessionRef.current === current
+        || releasedSessionRef.current === current) {
+      return;
+    }
+    releasedSessionRef.current = current;
+    releaseSession(current);
+  }, []);
 
   // Indirection ref: uploadChunk (defined below) needs to stop the recorder
   // on a fatal upload error, but the recorder's reset fn isn't in scope yet
@@ -149,6 +197,45 @@ export function useStreamingTranscription(options = {}) {
       24 * 60 * 60 * 1000
     );
   }, [addToast, removeToast]);
+
+  // #320: the session was ended elsewhere — another tab recovered it
+  // (all_complete arrived before this tab finalized) or discarded it
+  // (uploads come back session_not_found / session_not_active). Stop the
+  // recorder so the mic turns off and no chunk is sent into a dead
+  // session, and report it as a fatal error rather than a completed
+  // recording: the transcript is unfinished, and in voice mode onComplete
+  // would send it to the LLM.
+  //
+  // Stop, not reset: stopping keeps the recorded audio in memory, so text
+  // mode's "Save audio" can still download it — after a discard elsewhere
+  // it is the only complete copy. The final chunk's upload is rejected
+  // and deduplicated here. The SSE state is reset because it marked
+  // itself complete, which would switch off its reconnect and stale
+  // checks for this tab's next recording.
+  const stopEndedSession = useCallback((endedSessionId) => {
+    if (!endedSessionId || endedSessionRef.current === endedSessionId) return;
+    endedSessionRef.current = endedSessionId;
+    console.warn(`[StreamingTranscription] Session ${endedSessionId} was ended elsewhere — stopping the recorder`);
+    if (stopMediaRecorderRef.current) {
+      stopMediaRecorderRef.current();
+    }
+    if (resetSSERef.current) {
+      resetSSERef.current();
+    }
+    failedChunksRef.current = failedChunksRef.current.filter(
+      (c) => c.sessionId !== endedSessionId);
+    setSessionState('error');
+    setErrorMessage(SESSION_ENDED_MESSAGE);
+    playErrorSound();
+    if (onError) {
+      const endedErr = new Error(SESSION_ENDED_MESSAGE);
+      try {
+        endedErr.fatal = true;
+        endedErr.sessionEnded = true;
+      } catch (_) { /* sealed */ }
+      onError(endedErr);
+    }
+  }, [onError]);
 
   /**
    * Upload a single chunk with exponential backoff retry.
@@ -206,6 +293,14 @@ export function useStreamingTranscription(options = {}) {
         console.log(`[StreamingTranscription] Upload complete: chunk=${chunkIndex} mime=${blobType}` + (attempt > 0 ? ` (after ${attempt} retries)` : ''));
         return { success: true };
       } catch (err) {
+        // #320: the session no longer takes chunks — it was completed or
+        // discarded from another tab. Retrying cannot help.
+        const code = err.response?.data?.code;
+        if (code === 'session_not_active' || code === 'session_not_found') {
+          console.warn(`[StreamingTranscription] Session rejected chunk ${chunkIndex} (${code}); not retrying`);
+          return { success: false, fatalError: SESSION_ENDED_MESSAGE, sessionEnded: true };
+        }
+
         // Server rejected chunk 0 because it couldn't parse the format's
         // init segment. Retrying will yield the exact same bytes, so
         // short-circuit with a fatal-error message the caller can surface
@@ -251,6 +346,13 @@ export function useStreamingTranscription(options = {}) {
       if (result.success) {
         setUploadedChunks(prev => prev + 1);
         totalChunksRef.current = Math.max(totalChunksRef.current, chunkIndex + 1);
+      } else if (result.fatalError && sessionIdRef.current !== sessionId) {
+        // A late fatal answer for a session this tab no longer records
+        // (a retry that outlived cancelStreaming) must not stop the
+        // recording that replaced it.
+        console.warn(`[StreamingTranscription] Ignoring fatal upload result for old session ${sessionId}`);
+      } else if (result.sessionEnded) {
+        stopEndedSession(sessionId);
       } else {
         // Queue for reconnect retry only if the failure wasn't fatal —
         // retrying a parse-failed chunk will produce the same bytes and
@@ -287,7 +389,7 @@ export function useStreamingTranscription(options = {}) {
     })();
 
     pendingUploadsRef.current.push(uploadPromise);
-  }, [onError, uploadChunkWithRetry]);
+  }, [onError, uploadChunkWithRetry, stopEndedSession]);
 
   // Streaming media recorder
   const {
@@ -345,6 +447,7 @@ export function useStreamingTranscription(options = {}) {
   // on a fatal upload error (declared above, resetMediaRecorder not yet
   // in scope there).
   resetMediaRecorderRef.current = resetMediaRecorder;
+  stopMediaRecorderRef.current = stopMediaRecorder;
 
   // SSE subscription for transcription updates (draft-based)
   const {
@@ -367,6 +470,13 @@ export function useStreamingTranscription(options = {}) {
       }
     },
     onAllComplete: (data) => {
+      // #320: this tab never asked to finalize, so another view ended the
+      // session (it recovered it as "interrupted") while this tab was still
+      // recording. Not a finished recording: stop, and send nothing on.
+      if (!finalizeRequestedRef.current) {
+        stopEndedSession(sessionIdRef.current);
+        return;
+      }
       setSessionState('complete');
       setTranscript(data.content);
       if (onComplete) {
@@ -391,6 +501,8 @@ export function useStreamingTranscription(options = {}) {
     },
   });
 
+  resetSSERef.current = resetSSE;
+
   // Update internal transcript when draft content changes from SSE
   // Note: Don't call onTranscriptUpdate here - it's already called in onContentUpdate callback.
   // Calling it here too causes duplicate updates, and the effect can run AFTER onComplete
@@ -403,6 +515,9 @@ export function useStreamingTranscription(options = {}) {
 
   // Handle transcription completion
   useEffect(() => {
+    // An all_complete this tab did not ask for was handled as "ended
+    // elsewhere" in onAllComplete (#320); it must not turn into complete.
+    if (!finalizeRequestedRef.current) return;
     if (transcriptionComplete && finalContent) {
       setSessionState('complete');
       setTranscript(finalContent);
@@ -514,6 +629,20 @@ export function useStreamingTranscription(options = {}) {
     };
   }, [uploadChunkWithRetry]);
 
+  // #320: a tab that goes away mid-recording (reload, close, navigating
+  // off the site) releases its session, so the reloaded page offers
+  // recovery at once. Without this the server keeps treating the session
+  // as live — and hides it from recovery — for its liveness window.
+  // The same when the component recording goes away in-app (text mode's
+  // StreamingMicButton on SPA navigation has no cleanup of its own).
+  useEffect(() => {
+    window.addEventListener('pagehide', releaseIfAbandoned);
+    return () => {
+      window.removeEventListener('pagehide', releaseIfAbandoned);
+      releaseIfAbandoned();
+    };
+  }, [releaseIfAbandoned]);
+
   // NOTE: Emergency chunk upload on page unload was attempted using both
   // sendBeacon and fetch+keepalive, but Chrome fires ondataavailable from
   // requestData() asynchronously, so there's no synchronous way to extract
@@ -561,6 +690,11 @@ export function useStreamingTranscription(options = {}) {
   // overrideParentId: optional parent ID to use instead of the hook's parentId
   const startStreaming = useCallback(async (overrideParentId) => {
     let initSucceeded = false;
+    finalizeRequestedRef.current = false;
+    releasedSessionRef.current = null;
+    // A new session starts from fresh SSE state even when the previous
+    // one ended without cancelStreaming (e.g. voice mode back to ready).
+    resetSSE();
     try {
       await initSession(overrideParentId);
       initSucceeded = true;
@@ -608,7 +742,7 @@ export function useStreamingTranscription(options = {}) {
         onError(err);
       }
     }
-  }, [initSession, startMediaRecorder, onError]);
+  }, [initSession, startMediaRecorder, onError, resetSSE]);
 
   // Resume an existing interrupted session (continue recording).
   // New chunks start after existingChunkCount, duration continues from estimated offset.
@@ -619,6 +753,8 @@ export function useStreamingTranscription(options = {}) {
   //   recorder hook throws NotSupportedError and we surface that via onError.
   const resumeStreaming = useCallback(async (existingSessionId, existingDraftId, existingChunkCount, existingMimeType) => {
     let initSucceeded = false;
+    finalizeRequestedRef.current = false;
+    releasedSessionRef.current = null;
     try {
       setSessionState('initializing');
       setErrorMessage(null);
@@ -655,6 +791,7 @@ export function useStreamingTranscription(options = {}) {
   const stopStreaming = useCallback(async (extraParams) => {
     console.log(`[StreamingTranscription] stopStreaming called: session=${sessionIdRef.current}, pendingUploads=${pendingUploadsRef.current.length}`);
 
+    finalizeRequestedRef.current = true;
     setSessionState('finalizing');
 
     // Stop recording and wait for the final ondataavailable handler to complete.
@@ -720,6 +857,11 @@ export function useStreamingTranscription(options = {}) {
 
   // Cancel/reset everything
   const cancelStreaming = useCallback(() => {
+    // Abandoning a recording this tab never finalized (e.g. the voice page
+    // unmounts mid-recording): release it so it is recoverable right away
+    // (#320). The server ignores this for a session no longer recording.
+    releaseIfAbandoned();
+    finalizeRequestedRef.current = false;
     disconnectSSE();
     resetMediaRecorder();
     resetSSE();
@@ -737,7 +879,7 @@ export function useStreamingTranscription(options = {}) {
     totalChunksRef.current = 0;
     pendingUploadsRef.current = [];
     failedChunksRef.current = [];
-  }, [disconnectSSE, resetMediaRecorder, resetSSE]);
+  }, [disconnectSSE, resetMediaRecorder, resetSSE, releaseIfAbandoned]);
 
   return {
     // State
