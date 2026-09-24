@@ -14,12 +14,20 @@ import { useToast } from '../contexts/ToastContext';
  * Props:
  *   itemId:   ExternalItem id
  *   feedback: 'good' | 'bad' | null (server value; local state follows it)
- *   size:     icon size in px (default 14)
+ *   size:     icon size in px (default 16: the glyph's circle is then
+ *             about 13 px across, the em of the 0.8em footer text it
+ *             sits in). The button around it is 40 px tall and as
+ *             wide as the icon plus the gap between the icons, so the
+ *             pair is easy to hit on a phone (#351).
+ *
+ * The pair carries its own outer margins (index.css, .ref-feedback): half
+ * the gap between the icons on each side, so the control after it sits
+ * one gap away. The parent adds no gap after it.
  *   onChange: optional (feedback, response) => void after the server
  *             confirms; `response.read_at` is set when the verdict
  *             marked the reference read (a verdict counts as reading)
  */
-const ReferenceFeedback = ({ itemId, feedback, size = 14, onChange }) => {
+const ReferenceFeedback = ({ itemId, feedback, size = 16, onChange }) => {
   const { addToast } = useToast();
   const [value, setValue] = useState(feedback || null);
   const [saving, setSaving] = useState(false);
@@ -54,7 +62,7 @@ const ReferenceFeedback = ({ itemId, feedback, size = 14, onChange }) => {
   );
 
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+    <span className="ref-feedback" style={{ '--ref-feedback-icon': `${size}px` }}>
       {glyph('good', 'Good quote', FiPlusCircle)}
       {glyph('bad', 'Bad quote', FiMinusCircle)}
     </span>

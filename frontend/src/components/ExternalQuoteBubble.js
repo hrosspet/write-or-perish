@@ -167,10 +167,10 @@ const footerStyle = {
   color: 'var(--text-muted)',
 };
 
+// No gap: ReferenceFeedback spaces itself from the read toggle.
 const ownerSlotStyle = {
   display: 'inline-flex',
   alignItems: 'center',
-  gap: '14px',
   marginLeft: 'auto',
 };
 
