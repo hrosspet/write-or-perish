@@ -540,12 +540,17 @@ def test_migration_relabels_merges_and_carries_marks(app):
     assert script._saved_copy_pairs(None) == ([], 0)
 
 
-def test_report_counts_per_model_with_shared_verdicts(app):
+def _report_script():
     path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
                         "scripts", "recommendation_report.py")
     spec = importlib.util.spec_from_file_location("_rec_report", path)
     script = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(script)
+    return script
+
+
+def test_report_counts_per_model_with_shared_verdicts(app):
+    script = _report_script()
 
     item, other = _item("111"), _item("222")
     luna, sol = _read_reply(at=T0), _read_reply(at=T0)
@@ -561,12 +566,54 @@ def test_report_counts_per_model_with_shared_verdicts(app):
     _db.session.commit()
 
     rows = script.report()
-    luna_row = rows[(KIND_READ, "luna", "-")]
-    sol_row = rows[(KIND_READ, "sol", "-")]
+    # _read_reply's root carries no prompt key: variant unknown.
+    luna_row = rows[(KIND_READ, "luna", "?", "first")]
+    sol_row = rows[(KIND_READ, "sol", "?", "first")]
     assert (luna_row["shown"], luna_row["good"], luna_row["good_shared"]) == (1, 1, 0)
     assert (sol_row["shown"], sol_row["good"], sol_row["good_shared"],
             sol_row["untouched"]) == (2, 1, 1, 1)
-    assert rows[(KIND_QUOTE, "gpt-5", "voice")]["untouched"] == 1
+    assert rows[(KIND_QUOTE, "gpt-5", "voice", "-")]["untouched"] == 1
+
+
+def test_report_splits_reads_by_prompt_and_turn(app):
+    """Home-page Read (uncond) vs a Read from a node (cond), and the first
+    read vs a read further in the same thread. An earlier read deleted
+    before a reply was made does not make that reply a further turn; one
+    deleted after it still does."""
+    script = _report_script()
+
+    def read(parent, at):
+        reply = _node(parent=parent, llm=True, at=at)
+        _db.session.add(FeedRender(node_id=reply.id, created_at=at))
+        _db.session.commit()
+        return reply
+
+    home = _node()
+    home.prompt_key = "read"
+    first = read(home, T0)
+    typed = _node(parent=first, at=T0 + timedelta(minutes=5))
+    further = read(typed, T0 + timedelta(minutes=10))
+
+    convo = _node()
+    thread_prompt = _node(parent=_node(parent=convo, llm=True))
+    thread_prompt.prompt_key = "read_thread"
+    gone_before = read(thread_prompt, T0)
+    gone_before.deleted_at = T0 + timedelta(minutes=1)
+    after_delete = read(gone_before, T0 + timedelta(minutes=2))
+    gone_after = read(_node(parent=thread_prompt), T0)
+    kept_further = read(gone_after, T0 + timedelta(minutes=2))
+    gone_after.deleted_at = T0 + timedelta(hours=1)
+    _db.session.commit()
+
+    for reply, ext in ((first, "1"), (further, "2"), (after_delete, "3"),
+                       (kept_further, "4")):
+        _pick(reply, _item(ext), model="luna")
+
+    rows = script.report()
+    assert rows[(KIND_READ, "luna", "uncond", "first")]["shown"] == 1
+    assert rows[(KIND_READ, "luna", "uncond", "further")]["shown"] == 1
+    assert rows[(KIND_READ, "luna", "cond", "first")]["shown"] == 1
+    assert rows[(KIND_READ, "luna", "cond", "further")]["shown"] == 1
 
 
 def test_marks_from_before_the_log_count_until_carried_over(app):
