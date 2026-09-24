@@ -14,12 +14,14 @@ import { useToast } from '../contexts/ToastContext';
  * Props:
  *   itemId:   ExternalItem id
  *   feedback: 'good' | 'bad' | null (server value; local state follows it)
- *   size:     icon size in px (default 14)
+ *   size:     icon size in px (default 20). The button around it is at
+ *             least 40×40 px whatever the size, so the pair is easy to
+ *             hit on a phone (#351).
  *   onChange: optional (feedback, response) => void after the server
  *             confirms; `response.read_at` is set when the verdict
  *             marked the reference read (a verdict counts as reading)
  */
-const ReferenceFeedback = ({ itemId, feedback, size = 14, onChange }) => {
+const ReferenceFeedback = ({ itemId, feedback, size = 20, onChange }) => {
   const { addToast } = useToast();
   const [value, setValue] = useState(feedback || null);
   const [saving, setSaving] = useState(false);
@@ -54,7 +56,7 @@ const ReferenceFeedback = ({ itemId, feedback, size = 14, onChange }) => {
   );
 
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+    <span className="ref-feedback" style={{ '--ref-feedback-icon': `${size}px` }}>
       {glyph('good', 'Good quote', FiPlusCircle)}
       {glyph('bad', 'Bad quote', FiMinusCircle)}
     </span>

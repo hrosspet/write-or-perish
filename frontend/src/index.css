@@ -322,13 +322,29 @@ code {
 
 /* Good / bad quote (ReferenceFeedback): bare contour glyphs, muted
    until chosen. The chosen one takes the accent; hover only lifts the
-   other to secondary so the pair never turns colorful. */
+   other to secondary so the pair never turns colorful.
+   Each glyph sits in a 40×40 tap target (#351). The two targets touch,
+   so no tap between them lands on nothing. The targets are square: a
+   browser hit-tests a round button only inside its circle, which would
+   leave the corners dead. The pair's negative side margins cancel the
+   space around the icon inside the target (--ref-feedback-icon is the
+   icon size, set by the component), so the icons keep their spacing to
+   the text beside them. */
+.ref-feedback {
+  display: inline-flex;
+  align-items: center;
+  margin: 0 min(0px, calc((var(--ref-feedback-icon, 20px) - 40px) / 2));
+}
 .ref-feedback-glyph {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-width: 40px;
+  min-height: 40px;
   padding: 0;
   border: 0;
-  border-radius: 50%;
+  border-radius: 0;
   background: none;
   color: var(--text-muted);
   opacity: 0.75;
