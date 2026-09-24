@@ -104,6 +104,10 @@ function NodeDetail({ nodeIdOverride }) {
   const [llmRequesting, setLlmRequesting] = useState(false);
   const [quotes, setQuotes] = useState({});
   const [externalQuotes, setExternalQuotes] = useState({});
+  // Bumped when another bubble in the thread is edited or deleted: the
+  // focal content (and so its quote markers) is unchanged, but a quoted
+  // node may be that bubble, so the resolved quotes must be refetched.
+  const [quotesVersion, setQuotesVersion] = useState(0);
   const [pinLoading, setPinLoading] = useState(false);
   const [voiceLoading, setVoiceLoading] = useState(false);
   const [readLoading, setReadLoading] = useState(false);
@@ -227,13 +231,13 @@ function NodeDetail({ nodeIdOverride }) {
     if (node) document.title = tabTitleFor(node);
   }, [node]);
 
-  // Fetch quote data when node loads (if content contains {quote:ID} placeholders)
+  // Fetch quote data when node loads (if content contains {quote:ID} /
+  // {quote_ext:ID} placeholders). Keyed on the markers themselves, not the
+  // node object: a checklist toggle or an in-place patch replaces the
+  // object without changing which quotes the content holds (#321).
+  const quoteMarkers = (node?.content?.match(/\{quote(?:_ext)?:\d+\}/g) || []).join(',');
   useEffect(() => {
-    if (!node || !node.content) return;
-
-    // Check if content contains {quote:ID} / {quote_ext:ID} patterns
-    const quotePattern = /\{quote(?:_ext)?:(\d+)\}/;
-    if (!quotePattern.test(node.content)) return;
+    if (!quoteMarkers) return;
 
     // Fetch quotes for this node
     api
@@ -250,14 +254,20 @@ function NodeDetail({ nodeIdOverride }) {
         console.error("Error fetching quotes:", err);
         // Don't show error to user - quotes will just not render
       });
-  }, [id, node]);
+  }, [id, quoteMarkers, quotesVersion]);
 
-  // Scroll to the highlighted node after loading
+  // Scroll to the focal node once, after its thread loads. Keyed on the
+  // id: checklist toggles, the "+" insert, edits and in-place LLM patches
+  // all replace the node object, and each of those used to scroll the page
+  // back to the top of the focal node (#321).
+  const focalId = node?.id;
+  const scrolledToIdRef = useRef(null);
   useEffect(() => {
-    if (!loading && node && highlightedNodeRef.current) {
-      highlightedNodeRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-  }, [loading, node]);
+    if (loading || focalId == null || !highlightedNodeRef.current) return;
+    if (scrolledToIdRef.current === focalId) return;
+    scrolledToIdRef.current = focalId;
+    highlightedNodeRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [loading, focalId]);
 
   // If we arrived with ?awaitLlm=NID (e.g. from WritePage), pick up the
   // pending LLM task and let the polling navigate to it on completion.
@@ -593,7 +603,10 @@ function NodeDetail({ nodeIdOverride }) {
         if (!wasFocal && !focalCascaded) {
           // Non-focal target: refetch the focal node so the just-deleted
           // ancestor/child surfaces as a tombstone preview in place.
-          return api.get(`/nodes/${id}`).then((r) => setNode(r.data));
+          return api.get(`/nodes/${id}`).then((r) => {
+            setNode(r.data);
+            setQuotesVersion((v) => v + 1);
+          });
         }
         // Walk up to the closest alive ancestor. For the focal-target
         // case, that's everything in node.ancestors; for the cascade
@@ -758,6 +771,7 @@ function NodeDetail({ nodeIdOverride }) {
       try {
         const refreshed = await api.get(`/nodes/${id}`).then((r) => r.data);
         setNode(refreshed);
+        setQuotesVersion((v) => v + 1);
       } catch (err) {
         console.error(err);
       }

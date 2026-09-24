@@ -190,6 +190,180 @@ function AddTaskInput({ onSubmit, onCancel }) {
   );
 }
 
+// The per-render values the `li` and `a` renderers need. They travel through
+// context rather than closures so the `components` map handed to
+// ReactMarkdown can keep the same function identities across renders (#321):
+// a new identity is a new component type, and React then unmounts and
+// remounts every list item and link on every render. A remount took the
+// checkbox the user had just clicked (and so focused) out of the DOM
+// mid-commit, the browser laid out the half-removed page while moving focus,
+// and the page jumped to the top. It also wiped a half-typed "+" item on any
+// unrelated parent re-render.
+const MarkdownContext = React.createContext({});
+
+const toggleBaseStyle = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  width: '18px',
+  height: '18px',
+  borderRadius: '50%',
+  flexShrink: 0,
+  marginRight: '8px',
+  fontSize: '0.6rem',
+  color: 'var(--bg-deep)',
+  fontWeight: 600,
+  transition: 'all 0.3s',
+  verticalAlign: 'middle',
+};
+
+function MarkdownListItem({ node, children: liChildren, ...props }) {
+  const { onCheckboxToggle, onAddTask, addingAfter, setAddingAfter } = React.useContext(MarkdownContext);
+  const isTask = props.className === 'task-list-item';
+
+  if (!isTask) {
+    return (
+      <li
+        style={{
+          whiteSpace: 'normal',
+          overflowWrap: 'break-word',
+          marginBottom: '2px',
+        }}
+        {...props}
+      >
+        {liChildren}
+      </li>
+    );
+  }
+
+  const itemText = (onCheckboxToggle || onAddTask) ? extractText(liChildren).trim() : null;
+  const { children: filteredChildren } = replaceCheckboxes(
+    liChildren,
+    (isChecked) => {
+      const interactive = !!onCheckboxToggle;
+      const handlers = interactive ? {
+        onClick: (e) => {
+          e.preventDefault();
+          onCheckboxToggle(itemText, isChecked);
+        },
+        role: 'checkbox',
+        'aria-checked': isChecked,
+        tabIndex: 0,
+        onKeyDown: (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onCheckboxToggle(itemText, isChecked);
+          }
+        },
+      } : {};
+      return (
+        <span
+          {...handlers}
+          style={{
+            ...toggleBaseStyle,
+            border: `1.5px solid ${isChecked ? 'var(--accent-dim)' : 'var(--border-hover)'}`,
+            background: isChecked ? 'var(--accent-dim)' : 'none',
+            cursor: interactive ? 'pointer' : 'inherit',
+          }}
+        >
+          {isChecked && '✓'}
+        </span>
+      );
+    },
+  );
+
+  const childArr = React.Children.toArray(filteredChildren);
+  const ownContent = childArr.filter((c) => !isListElement(c));
+  const nestedLists = childArr.filter((c) => isListElement(c));
+  const addable = !!onAddTask;
+
+  return (
+    <li
+      style={{
+        whiteSpace: 'normal',
+        overflowWrap: 'break-word',
+        marginBottom: '2px',
+        listStyleType: 'none',
+      }}
+      {...props}
+    >
+      <span className="loore-task-row" style={{ display: 'block' }}>
+        {ownContent}
+        {addable && (
+          <button
+            type="button"
+            className="loore-add-task"
+            title="Add an item below"
+            aria-label="Add an item below"
+            onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); setAddingAfter(itemText); }}
+            onClick={(e) => { e.preventDefault(); e.stopPropagation(); setAddingAfter(itemText); }}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--accent)',
+              cursor: 'pointer',
+              fontSize: '1.1em',
+              lineHeight: 1,
+              padding: '0 2px',
+              marginLeft: '4px',
+              verticalAlign: 'middle',
+            }}
+          >+</button>
+        )}
+      </span>
+      {nestedLists}
+      {addable && addingAfter === itemText && (
+        <AddTaskInput
+          onSubmit={(t) => { onAddTask(itemText, t); setAddingAfter(null); }}
+          onCancel={() => setAddingAfter(null)}
+        />
+      )}
+    </li>
+  );
+}
+
+function MarkdownLink({ node, children, href, ...props }) {
+  const { onInternalLinkClick, inRouter } = React.useContext(MarkdownContext);
+  const nodeId = href ? parseNodeLink(href) : null;
+  if (nodeId !== null && isBareUrlLink(children, href)) {
+    // Keyed on the target: the link component now survives re-renders, so an
+    // edit that points this position at another node must reset its title.
+    if (onInternalLinkClick) {
+      return <NodeLink key={nodeId} nodeId={nodeId} href={href} onNavigate={onInternalLinkClick} {...props}>{children}</NodeLink>;
+    }
+    if (inRouter) {
+      return <RoutedNodeLink key={nodeId} nodeId={nodeId} href={href} {...props}>{children}</RoutedNodeLink>;
+    }
+    return <NodeLink key={nodeId} nodeId={nodeId} href={href} onNavigate={(to) => { window.location.assign(to); }} {...props}>{children}</NodeLink>;
+  }
+  if (onInternalLinkClick && href && href.startsWith('/')) {
+    return (
+      <a
+        href={href}
+        style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onInternalLinkClick(href);
+        }}
+        {...props}
+      >{children}</a>
+    );
+  }
+  return (
+    <a
+      href={href}
+      style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+      target="_blank"
+      rel="noopener noreferrer"
+      onClick={(e) => e.stopPropagation()}
+      {...props}
+    >{children}</a>
+  );
+}
+
+const REMARK_PLUGINS = [remarkGfm, remarkHtmlAsCode];
+
 /**
  * MarkdownBody — shared ReactMarkdown wrapper with consistent styling.
  *
@@ -220,7 +394,13 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText =
   // MarkdownBody renders inside the app's BrowserRouter, but unit tests and
   // any future router-less host must not crash on useNavigate.
   const inRouter = useInRouterContext();
-  const components = {
+  const context = React.useMemo(
+    () => ({ onCheckboxToggle, onAddTask, onInternalLinkClick, inRouter, addingAfter, setAddingAfter }),
+    [onCheckboxToggle, onAddTask, onInternalLinkClick, inRouter, addingAfter],
+  );
+  // Memoized on the layout props only: everything that changes from render
+  // to render reaches `li` and `a` through MarkdownContext (see above).
+  const components = React.useMemo(() => ({
     h1: ({ node, children, ...props }) => (
       <h1 style={{ fontFamily: 'var(--serif)', fontSize: '2.2em', fontWeight: 700, lineHeight: 1.2, margin: '1.2em 0 0.4em', color: 'var(--text-primary)' }} {...props}>{children}</h1>
     ),
@@ -281,121 +461,7 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText =
     ol: ({ node, ...props }) => (
       <ol style={{ margin: '4px 0', paddingLeft: '24px' }} {...props} />
     ),
-    li: ({ node, children: liChildren, ...props }) => {
-      const isTask = props.className === 'task-list-item';
-
-      if (isTask) {
-        const itemText = (onCheckboxToggle || onAddTask) ? extractText(liChildren).trim() : null;
-        const { children: filteredChildren } = replaceCheckboxes(
-          liChildren,
-          (isChecked) => {
-            const interactive = !!onCheckboxToggle;
-            const handlers = interactive ? {
-              onClick: (e) => {
-                e.preventDefault();
-                onCheckboxToggle(itemText, isChecked);
-              },
-              role: 'checkbox',
-              'aria-checked': isChecked,
-              tabIndex: 0,
-              onKeyDown: (e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  onCheckboxToggle(itemText, isChecked);
-                }
-              },
-            } : {};
-            return (
-              <span
-                {...handlers}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  width: '18px',
-                  height: '18px',
-                  borderRadius: '50%',
-                  border: `1.5px solid ${isChecked ? 'var(--accent-dim)' : 'var(--border-hover)'}`,
-                  background: isChecked ? 'var(--accent-dim)' : 'none',
-                  flexShrink: 0,
-                  marginRight: '8px',
-                  fontSize: '0.6rem',
-                  color: 'var(--bg-deep)',
-                  fontWeight: 600,
-                  transition: 'all 0.3s',
-                  cursor: interactive ? 'pointer' : 'inherit',
-                  verticalAlign: 'middle',
-                }}
-              >
-                {isChecked && '✓'}
-              </span>
-            );
-          },
-        );
-
-        const childArr = React.Children.toArray(filteredChildren);
-        const ownContent = childArr.filter((c) => !isListElement(c));
-        const nestedLists = childArr.filter((c) => isListElement(c));
-        const addable = !!onAddTask;
-
-        return (
-          <li
-            style={{
-              whiteSpace: 'normal',
-              overflowWrap: 'break-word',
-              marginBottom: '2px',
-              listStyleType: 'none',
-            }}
-            {...props}
-          >
-            <span className="loore-task-row" style={{ display: 'block' }}>
-              {ownContent}
-              {addable && (
-                <button
-                  type="button"
-                  className="loore-add-task"
-                  title="Add an item below"
-                  aria-label="Add an item below"
-                  onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); setAddingAfter(itemText); }}
-                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); setAddingAfter(itemText); }}
-                  style={{
-                    background: 'none',
-                    border: 'none',
-                    color: 'var(--accent)',
-                    cursor: 'pointer',
-                    fontSize: '1.1em',
-                    lineHeight: 1,
-                    padding: '0 2px',
-                    marginLeft: '4px',
-                    verticalAlign: 'middle',
-                  }}
-                >+</button>
-              )}
-            </span>
-            {nestedLists}
-            {addable && addingAfter === itemText && (
-              <AddTaskInput
-                onSubmit={(t) => { onAddTask(itemText, t); setAddingAfter(null); }}
-                onCancel={() => setAddingAfter(null)}
-              />
-            )}
-          </li>
-        );
-      }
-
-      return (
-        <li
-          style={{
-            whiteSpace: 'normal',
-            overflowWrap: 'break-word',
-            marginBottom: '2px',
-          }}
-          {...props}
-        >
-          {liChildren}
-        </li>
-      );
-    },
+    li: MarkdownListItem,
     hr: ({ node, ...props }) => (
       <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '20px 0' }} {...props} />
     ),
@@ -421,42 +487,7 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText =
       ) : (
         <code className={className} {...props}>{children}</code>
       ),
-    a: ({ node, children, href, ...props }) => {
-      const nodeId = href ? parseNodeLink(href) : null;
-      if (nodeId !== null && isBareUrlLink(children, href)) {
-        if (onInternalLinkClick) {
-          return <NodeLink nodeId={nodeId} href={href} onNavigate={onInternalLinkClick} {...props}>{children}</NodeLink>;
-        }
-        if (inRouter) {
-          return <RoutedNodeLink nodeId={nodeId} href={href} {...props}>{children}</RoutedNodeLink>;
-        }
-        return <NodeLink nodeId={nodeId} href={href} onNavigate={(to) => { window.location.assign(to); }} {...props}>{children}</NodeLink>;
-      }
-      if (onInternalLinkClick && href && href.startsWith('/')) {
-        return (
-          <a
-            href={href}
-            style={{ color: 'var(--accent)', textDecoration: 'underline' }}
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              onInternalLinkClick(href);
-            }}
-            {...props}
-          >{children}</a>
-        );
-      }
-      return (
-        <a
-          href={href}
-          style={{ color: 'var(--accent)', textDecoration: 'underline' }}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={(e) => e.stopPropagation()}
-          {...props}
-        >{children}</a>
-      );
-    },
+    a: MarkdownLink,
     table: ({ node, ...props }) => (
       <div style={{ overflowX: 'auto', margin: '8px 0' }}>
         <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: '0.9em' }} {...props} />
@@ -471,15 +502,17 @@ const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText =
     td: ({ node, ...props }) => (
       <td style={{ padding: '6px 10px', borderTop: '1px solid var(--border)' }} {...props} />
     ),
-  };
+  }), [inline, flowText, paragraphMargin]);
 
   const Wrapper = inline ? 'span' : 'div';
   return (
-    <Wrapper className="loore-md" style={style}>
-      <ReactMarkdown remarkPlugins={[remarkGfm, remarkHtmlAsCode]} components={components}>
-        {children}
-      </ReactMarkdown>
-    </Wrapper>
+    <MarkdownContext.Provider value={context}>
+      <Wrapper className="loore-md" style={style}>
+        <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={components}>
+          {children}
+        </ReactMarkdown>
+      </Wrapper>
+    </MarkdownContext.Provider>
   );
 };
 
