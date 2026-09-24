@@ -19,6 +19,10 @@ import { useToast } from '../contexts/ToastContext';
  *             sits in). The button around it is 40 px tall and as
  *             wide as the icon plus the gap between the icons, so the
  *             pair is easy to hit on a phone (#351).
+ *
+ * The pair carries its own outer margins (index.css, .ref-feedback): half
+ * the gap between the icons on each side, so the control after it sits
+ * one gap away. The parent adds no gap after it.
  *   onChange: optional (feedback, response) => void after the server
  *             confirms; `response.read_at` is set when the verdict
  *             marked the reference read (a verdict counts as reading)

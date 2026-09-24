@@ -356,6 +356,12 @@ code {
   opacity: 0.75;
   transition: color 0.15s ease, opacity 0.15s ease;
 }
+/* Every tap lands on the button itself, never on the icon inside it: a
+   click on a disabled button's child could bubble past it and, in a quote
+   bubble, open the tweet while a verdict is saving. */
+.ref-feedback-glyph svg {
+  pointer-events: none;
+}
 .ref-feedback-glyph:hover,
 .ref-feedback-glyph:focus-visible {
   background: none;
