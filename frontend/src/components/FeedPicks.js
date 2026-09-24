@@ -131,6 +131,8 @@ const FeedPicks = ({ nodeId, enabled = true }) => {
                     shared={!!item.feedback_shared}
                     onChange={(feedback, data) => patch(idx, {
                       feedback,
+                      // Given here now: no longer another reply's.
+                      feedback_shared: false,
                       ...(data && data.read_at ? { read_at: data.read_at } : {}),
                     })}
                   />

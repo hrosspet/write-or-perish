@@ -183,8 +183,9 @@ def stamp_prior(pick, item, decided_at):
 
 
 def log_quotes(node, text, user_id, decided_at, picked_by, already):
-    """One FeedPick (kind 'quote') per saved reference *text* quotes
-    ({quote_ext:ID}) on *node*, in the order quoted, once per item per
+    """One FeedPick (kind 'quote') per reference *text* quotes
+    ({quote_ext:ID}) on *node* — a saved one, or a Read pick a chat under
+    the read quotes again — in the order quoted, once per item per
     turn (*already*, the caller's set). Skips references this reply
     already has a row for — a Read reply's picks are quoted in its own
     text. Adds to the session; the caller commits."""
@@ -219,6 +220,30 @@ def log_quotes(node, text, user_id, decided_at, picked_by, already):
         db.session.add(row)
         rows.append(row)
     return rows
+
+
+def _turn_nodes(node_ids):
+    """{node_id: the nodes of its turn from it on}: an agentic turn that
+    searched is a chain of interim nodes joined by continuation_node_id,
+    and a quote is logged on the first node that quoted it, while the
+    reader may rate it on a later one. A few queries, one per hop."""
+    from backend.models import Node
+    turns = {n: {n} for n in node_ids}
+    frontier = {n: n for n in node_ids}  # node on the chain -> start
+    for _ in range(12):
+        if not frontier:
+            break
+        rows = (db.session.query(Node.id, Node.continuation_node_id)
+                .filter(Node.id.in_(list(frontier)),
+                        Node.continuation_node_id.isnot(None)).all())
+        nxt = {}
+        for node_id, cont in rows:
+            start = frontier[node_id]
+            if cont not in turns[start]:
+                turns[start].add(cont)
+                nxt[cont] = start
+        frontier = nxt
+    return turns
 
 
 @dataclass
@@ -264,6 +289,7 @@ def outcomes(recs):
             actions[rec.external_item_id] = _carried_marks(rec.item)
     quote_nodes = {m.node_id for m in mates if m.kind == KIND_QUOTE}
     roots = thread_root_of(quote_nodes) if quote_nodes else {}
+    turns = _turn_nodes(quote_nodes)
 
     result = {}
     for rec in recs:
@@ -273,24 +299,27 @@ def outcomes(recs):
                      if m.prior_verdict is None and m.kind == rec.kind
                      and (rec.kind != KIND_QUOTE
                           or roots.get(m.node_id) == roots.get(rec.node_id))]
-            nodes = {m.node_id for m in group} | {rec.node_id}
+            nodes = set()
+            for m in group + [rec]:
+                nodes |= turns.get(m.node_id, {m.node_id})
             outside = rec.kind == KIND_READ
         else:
-            nodes = {rec.node_id}
+            nodes = set(turns.get(rec.node_id, {rec.node_id}))
             outside = False
+        own_nodes = turns.get(rec.node_id, {rec.node_id})
         counted = [a for a in actions[rec.external_item_id]
                    if (a.node_id in nodes
                        or (outside and a.node_id is None))
                    and (rec.decided_at is None
                         or a.created_at >= rec.decided_at)]
         read, verdict, verdict_action = _replay(counted)
-        own = [a for a in counted if a.node_id == rec.node_id]
+        own = [a for a in counted if a.node_id in own_nodes]
         opened = any(a.kind == ACTION_OPEN for a in counted)
         own_read, _, _ = _replay(own)
         result[rec.id] = Outcome(
             verdict=verdict,
             verdict_shared=bool(verdict and verdict_action.node_id
-                                != rec.node_id),
+                                not in own_nodes),
             verdict_at=verdict_action.created_at if verdict else None,
             opened=opened,
             opened_shared=opened and not any(

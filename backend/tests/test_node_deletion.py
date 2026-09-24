@@ -812,6 +812,33 @@ def test_cleanup_purge_clears_continuation_references(app, alice):
     assert Node.query.get(interim.id).continuation_node_id is None
 
 
+def test_full_purge_deletes_the_replys_reference_actions(app, alice):
+    """What the reader did with a reply's recommendations (#352) points at
+    the reply: the purge deletes those rows (not NULL — that would read as
+    done outside any reply), or the FK blocks the DELETE every night."""
+    from backend.models import ExternalItem, ReferenceAction
+    reply = _make_node(alice, content="a reply that quoted a reference")
+    reply.deleted_at = datetime.utcnow() - timedelta(days=31)
+    item = ExternalItem(user_id=alice.id, source="twitter_bookmark",
+                        external_id="111")
+    item.set_content("a tweet")
+    _db.session.add(item)
+    _db.session.flush()
+    _db.session.add(ReferenceAction(user_id=alice.id, item_id=item.id,
+                                    node_id=reply.id, kind="verdict",
+                                    value="good"))
+    _db.session.add(ReferenceAction(user_id=alice.id, item_id=item.id,
+                                    node_id=None, kind="read"))
+    _db.session.commit()
+    rid = reply.id
+    from backend.tasks.node_cleanup import _full_purge
+    _full_purge(Node.query.get(rid))
+    _db.session.commit()
+    assert Node.query.get(rid) is None
+    assert [(a.kind, a.node_id) for a in ReferenceAction.query.all()] == [
+        ("read", None)]
+
+
 # ── Render-set prefetch + slim PUT (perf, 2026-09-02) ───────────────────
 
 def test_get_node_prefetches_deks_for_ancestors_and_subtree(app, alice, monkeypatch):

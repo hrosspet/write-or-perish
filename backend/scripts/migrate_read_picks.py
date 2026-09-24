@@ -107,56 +107,102 @@ def carry_over_marks(user_id, apply):
           f"recorded as actions outside any reply")
 
 
+# The source a merged row keeps, strongest save first: an X bookmark or
+# like is what the sync dedupes against, so the row must stay one, or
+# the next sync inserts the tweet again.
+SOURCE_PRIORITY = ("twitter_bookmark", "twitter_like", "community_archive",
+                   READ_PICK_SOURCE)
+
+
 def _saved_copy_pairs(user_id):
-    """[(pick_row, [saved copies])] for tweets that have both."""
-    rows = _scoped(ExternalItem.query.filter(
-        ExternalItem.source.in_(TWEET_SOURCES)), ExternalItem,
-        user_id).all()
+    """([(pick_row, [saved copies])] for tweets that have both, number
+    of duplicated tweets skipped). Duplicates are found by a GROUP BY
+    first, so only those rows are loaded (the tweet rows carry their
+    encrypted text). A pick is a Read pick: a quote row on a saved copy
+    (an agentic reply quoted it) does not make the copy a pick."""
+    dup = (db.session.query(ExternalItem.user_id, ExternalItem.external_id)
+           .filter(ExternalItem.source.in_(TWEET_SOURCES)))
+    if user_id:
+        dup = dup.filter(ExternalItem.user_id == user_id)
+    dup = (dup.group_by(ExternalItem.user_id, ExternalItem.external_id)
+           .having(db.func.count(ExternalItem.id) > 1).all())
+    if not dup:
+        return [], 0
+    rows = ExternalItem.query.filter(
+        ExternalItem.source.in_(TWEET_SOURCES),
+        db.tuple_(ExternalItem.user_id, ExternalItem.external_id).in_(
+            [tuple(d) for d in dup])).all()
     by_tweet = defaultdict(list)
     for r in rows:
         by_tweet[(r.user_id, r.external_id)].append(r)
-    picked = {r[0] for r in db.session.query(
-        FeedPick.external_item_id).distinct().all()}
-    pairs = []
+    picked = {r[0] for r in db.session.query(FeedPick.external_item_id)
+              .filter(FeedPick.kind == reference_log.KIND_READ,
+                      FeedPick.external_item_id.in_([r.id for r in rows]))
+              .distinct().all()}
+    pairs, skipped = [], 0
     for group in by_tweet.values():
-        if len(group) < 2:
-            continue
         pick_rows = [r for r in group if r.id in picked]
-        if len(pick_rows) != 1:
-            continue  # no pick (an older import duplicate) or ambiguous
-        keep = pick_rows[0]
-        copies = [r for r in group if r.id != keep.id and r.is_saved]
-        if copies:
-            pairs.append((keep, copies))
-    return pairs
+        copies = [r for r in group
+                  if pick_rows and r.id != pick_rows[0].id and r.is_saved]
+        if len(pick_rows) != 1 or not copies:
+            skipped += 1  # no pick (an older import duplicate), or two
+            continue
+        pairs.append((pick_rows[0], copies))
+    return pairs, skipped
 
 
-def _quoting_nodes(copy):
-    """LLM replies of the copy's owner that may quote it: written while
-    it was being quoted. None of them when it never was."""
+def _quoting_nodes(copy, since):
+    """LLM replies of the copy's owner that may quote it: written from
+    *since* (a day before the copy or its tweet's first pick, whichever
+    came first: a re-clip moves fetched_at forward) until the copy was
+    last quoted. None of them when it never was."""
     if not copy.surfaced_count:
         return []
     q = Node.query.filter(
         Node.human_owner_id == copy.user_id,
         Node.node_type == "llm",
         Node.content.isnot(None))
-    if copy.fetched_at is not None:
-        q = q.filter(Node.created_at >= copy.fetched_at - timedelta(days=1))
+    if since is not None:
+        q = q.filter(Node.created_at >= since - timedelta(days=1))
     if copy.last_surfaced_at is not None:
         q = q.filter(Node.created_at <= copy.last_surfaced_at)
     return q.all()
 
 
+def _repoint_picks(copy, keep):
+    """Move the copy's FeedPick rows to the kept row; where a reply has
+    a row for both (it quoted the two copies), drop the copy's."""
+    kept_nodes = {r[0] for r in db.session.query(FeedPick.node_id)
+                  .filter_by(external_item_id=keep.id).all()}
+    for row in FeedPick.query.filter_by(external_item_id=copy.id).all():
+        if row.node_id in kept_nodes:
+            db.session.delete(row)
+        else:
+            row.external_item_id = keep.id
+            kept_nodes.add(row.node_id)
+    db.session.flush()
+
+
 def merge_copies(user_id, apply):
-    """Step 3: fold each saved copy into the pick's row."""
-    pairs = _saved_copy_pairs(user_id)
+    """Step 3: fold each saved copy into the pick's row. Returns the ids
+    of the rows it made saved references again."""
+    pairs, skipped = _saved_copy_pairs(user_id)
     candidates = rewritten = 0
+    first_pick = dict(db.session.query(
+        FeedPick.external_item_id, db.func.min(FeedPick.created_at))
+        .filter(FeedPick.kind == reference_log.KIND_READ,
+                FeedPick.external_item_id.in_(
+                    [k.id for k, _ in pairs] or [0]))
+        .group_by(FeedPick.external_item_id).all())
     for keep, copies in pairs:
-        # An X bookmark's source wins when a tweet was also imported:
-        # the last copy folded in decides the kept row's source.
-        for copy in sorted(copies,
-                           key=lambda c: c.source == "twitter_bookmark"):
-            nodes = _quoting_nodes(copy)
+        sources = [keep.source] + [c.source for c in copies]
+        final_source = min(sources, key=lambda src: (
+            SOURCE_PRIORITY.index(src) if src in SOURCE_PRIORITY
+            else len(SOURCE_PRIORITY)))
+        for copy in copies:
+            starts = [t for t in (copy.fetched_at, first_pick.get(keep.id))
+                      if t]
+            nodes = _quoting_nodes(copy, min(starts) if starts else None)
             candidates += len(nodes)
             if not apply:
                 continue
@@ -167,6 +213,7 @@ def merge_copies(user_id, apply):
                     node.set_content(
                         marker.sub("{quote_ext:%d}" % keep.id, text))
                     rewritten += 1
+                    print(f"   reply {node.id}: quote of {copy.id} → {keep.id}")
             # The fuller text, unless one of the two was edited by hand.
             keep_text = keep.get_content() or ""
             copy_text = copy.get_content() or ""
@@ -193,7 +240,10 @@ def merge_copies(user_id, apply):
             keep.last_surfaced_at = max(lasts) if lasts else None
             if copy.public_source is False:
                 keep.public_source = False
-            if not keep.audio_tts_url and copy.audio_tts_url:
+            keep_has_speech = db.session.query(TTSChunk.id).filter_by(
+                item_id=keep.id).first() is not None
+            if not keep_has_speech and not keep.audio_tts_url \
+                    and copy.audio_tts_url:
                 keep.audio_tts_url = copy.audio_tts_url
                 TTSChunk.query.filter_by(item_id=copy.id).update(
                     {"item_id": keep.id}, synchronize_session=False)
@@ -201,17 +251,21 @@ def merge_copies(user_id, apply):
                 TTSChunk.query.filter_by(item_id=copy.id).delete()
             ReferenceAction.query.filter_by(item_id=copy.id).update(
                 {"item_id": keep.id}, synchronize_session=False)
-            FeedPick.query.filter_by(external_item_id=copy.id).update(
-                {"external_item_id": keep.id}, synchronize_session=False)
-            new_source = copy.source
+            _repoint_picks(copy, keep)
             db.session.expire(copy)
             db.session.delete(copy)
             db.session.flush()
-            keep.source = new_source
+        if apply:
+            keep.source = final_source
+            db.session.flush()
+        print(f"   tweet {keep.external_id} (user {keep.user_id}): "
+              f"{len(copies)} copies into {keep.id}, source {final_source}")
     n_copies = sum(len(c) for _, c in pairs)
     print(f"3. merge: {n_copies} saved copies of picked tweets folded into "
-          f"{len(pairs)} pick rows; {candidates} replies to check for their "
+          f"{len(pairs)} pick rows; {skipped} duplicated tweets skipped (no "
+          f"Read pick, or two); {candidates} replies to check for their "
           f"quotes" + (f", {rewritten} rewritten" if apply else ""))
+    return {k.id for k, _ in pairs}
 
 
 def stamp_old_picks(user_id, apply):
@@ -232,14 +286,15 @@ def stamp_old_picks(user_id, apply):
           f"and what it could know")
 
 
-def drop_pick_embeddings(user_id, apply, relabeled=()):
+def drop_pick_embeddings(user_id, apply, relabeled=(), merged=()):
     """Step 5: READ_PICK_SOURCE rows are not searched. *relabeled* are
-    step 1's rows, which a dry run has not relabeled."""
+    step 1's rows, which a dry run has not relabeled; *merged* are the
+    rows step 3 made saved references again, which keep theirs."""
     ids = [r[0] for r in _scoped(
         db.session.query(ExternalItem.id).filter(
             ExternalItem.source == READ_PICK_SOURCE), ExternalItem,
         user_id).all()]
-    ids = sorted(set(ids) | {r.id for r in relabeled})
+    ids = sorted((set(ids) | {r.id for r in relabeled}) - set(merged))
     n = ExternalItemEmbedding.query.filter(
         ExternalItemEmbedding.item_id.in_(ids or [0])).count()
     if apply and n:
@@ -262,11 +317,11 @@ def main(argv=None):
         db.session.flush()
         carry_over_marks(args.user_id, args.apply)
         db.session.flush()
-        merge_copies(args.user_id, args.apply)
+        merged = merge_copies(args.user_id, args.apply)
         db.session.flush()
         stamp_old_picks(args.user_id, args.apply)
         db.session.flush()
-        drop_pick_embeddings(args.user_id, args.apply, relabeled)
+        drop_pick_embeddings(args.user_id, args.apply, relabeled, merged)
         if args.apply:
             db.session.commit()
             print("committed")

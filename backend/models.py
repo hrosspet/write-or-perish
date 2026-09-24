@@ -1711,7 +1711,10 @@ class ReferenceAction(db.Model):
     item_id = db.Column(
         db.Integer, db.ForeignKey("external_item.id", ondelete="CASCADE"),
         nullable=False, index=True)
-    node_id = db.Column(db.Integer, db.ForeignKey("node.id"),
+    # Deleted with the reply (node_cleanup._full_purge): NULL would mean
+    # "outside any reply", which counts for other recommendations.
+    node_id = db.Column(db.Integer,
+                        db.ForeignKey("node.id", ondelete="CASCADE"),
                         nullable=True, index=True)
     # 'open' | 'read' | 'unread' | 'verdict'
     kind = db.Column(db.String(8), nullable=False)

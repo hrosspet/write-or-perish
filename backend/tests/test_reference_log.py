@@ -537,7 +537,7 @@ def test_migration_relabels_merges_and_carries_marks(app):
         item_id=kept.id, kind="verdict").count() == 1
     assert all(p.decided_at == T0 for p in FeedPick.query.all())
     # A second run finds nothing to do.
-    assert script._saved_copy_pairs(None) == []
+    assert script._saved_copy_pairs(None) == ([], 0)
 
 
 def test_report_counts_per_model_with_shared_verdicts(app):
@@ -597,3 +597,72 @@ def test_a_reply_that_quoted_references_is_no_read_reply(app):
     _pick(reply, item)
     reply = Node.query.get(reply.id)
     assert is_read_reply(reply) and read_reply_ids([reply]) == {reply.id}
+
+
+def test_a_verdict_on_the_turns_final_node_counts_for_its_interim_quote(app):
+    item = _item("111", source="twitter_bookmark")
+    interim = _node(parent=_node(), llm=True)
+    final = _node(parent=interim, llm=True)
+    interim.continuation_node_id = final.id
+    _db.session.commit()
+    q = _pick(interim, item, kind=KIND_QUOTE)
+    record_action(item, "verdict", "good", node_id=final.id,
+                  at=T0 + timedelta(hours=1))
+    _db.session.commit()
+    out = outcomes([q])[q.id]
+    assert (out.verdict, out.verdict_shared) == ("good", False)
+
+
+def test_migration_ignores_quote_rows_and_keeps_the_bookmark_source(app):
+    """A quote row on the saved copy (an agentic reply quoted it after the
+    deploy) must not make the copy look picked, and when one reply has
+    rows for both copies the copy's is dropped, not re-pointed into a
+    unique-constraint clash. The merged row stays an X bookmark."""
+    script = _load_script()
+    reply = _read_reply(at=T0)
+    pick_row = _item("333", source="community_archive")
+    pick_row.fetched_at = T0
+    copy = _item("333", source="twitter_bookmark")
+    p = _pick(reply, pick_row, decided_at=None)
+    p.created_at = T0
+    chat = _node(parent=_node(), llm=True)
+    _pick(chat, copy, kind=KIND_QUOTE)
+    _pick(chat, pick_row, kind=KIND_QUOTE)
+    _db.session.commit()
+
+    pairs, skipped = script._saved_copy_pairs(None)
+    assert [(k.id, [c.id for c in cs]) for k, cs in pairs] == [
+        (pick_row.id, [copy.id])]
+    script.relabel_pick_rows(None, apply=True)
+    _db.session.flush()
+    script.merge_copies(None, apply=True)
+    _db.session.commit()
+    kept = ExternalItem.query.get(pick_row.id)
+    assert kept.source == "twitter_bookmark"
+    assert ExternalItem.query.get(copy.id) is None
+    assert sorted((r.node_id, r.kind) for r in FeedPick.query.all()) == sorted(
+        [(reply.id, KIND_READ), (chat.id, KIND_QUOTE)])
+
+
+def test_migration_finds_a_quote_made_before_a_reclip_moved_fetched_at(app):
+    script = _load_script()
+    reply = _read_reply(at=T0)
+    pick_row = _item("333", source="community_archive")
+    pick_row.fetched_at = T0
+    p = _pick(reply, pick_row, decided_at=None)
+    p.created_at = T0
+    copy = _item("333", source="twitter_bookmark")
+    quoting = _node(parent=_node(), llm=True, at=T0 + timedelta(days=2))
+    quoting.set_content(f"see {{quote_ext:{copy.id}}}")
+    # Re-clipped with longer text a week later: fetched_at moved past
+    # the quote.
+    copy.fetched_at = T0 + timedelta(days=9)
+    copy.surfaced_count = 1
+    copy.last_surfaced_at = T0 + timedelta(days=2, minutes=1)
+    _db.session.commit()
+    script.relabel_pick_rows(None, apply=True)
+    _db.session.flush()
+    script.merge_copies(None, apply=True)
+    _db.session.commit()
+    assert Node.query.get(quoting.id).get_content() == (
+        f"see {{quote_ext:{pick_row.id}}}")

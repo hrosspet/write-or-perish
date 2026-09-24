@@ -54,3 +54,15 @@ test('rating a pick marks it read too', async () => {
   await waitFor(() => expect(screen.getByRole('button', { name: 'Mark as unread' })).toBeInTheDocument());
   expect(screen.getByText('All read.')).toBeInTheDocument();
 });
+
+test('a verdict given here is no longer labelled as another reply\'s', async () => {
+  api.get.mockResolvedValue({ data: { picks: [pick({ feedback: 'good', feedback_shared: true, read_at: '2026-09-21T13:00:00Z' })] } });
+  api.post.mockResolvedValue({ data: { id: 5, feedback: 'bad', read_at: '2026-09-21T13:00:00Z' } });
+  render(<FeedPicks nodeId={9} />);
+
+  const good = await screen.findByRole('button', { name: 'Good quote' });
+  expect(good).toHaveAttribute('title', 'Good quote (your rating from another reply)');
+  fireEvent.click(screen.getByRole('button', { name: 'Bad quote' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Bad quote' })).toHaveAttribute('aria-pressed', 'true'));
+  expect(screen.getByRole('button', { name: 'Bad quote' })).toHaveAttribute('title', 'Bad quote');
+});
