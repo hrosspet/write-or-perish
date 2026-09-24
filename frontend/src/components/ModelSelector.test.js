@@ -47,6 +47,8 @@ describe('ModelSelector', () => {
       data: url === '/nodes/models' ? { models: MODELS } : suggestion,
     }));
   };
+  const trigger = (name = /^Model:/) => screen.getByRole('button', { name });
+  const optionNames = () => screen.getAllByRole('option').map((o) => o.textContent);
 
   afterEach(() => jest.clearAllMocks());
 
@@ -70,23 +72,65 @@ describe('ModelSelector', () => {
     mockApi({ suggested_model: 'claude-opus-4.6', source: 'user_preference' });
     const onChange = jest.fn();
     render(<ModelSelector nodeId={3} selectedModel="gpt-6-astra" onModelChange={onChange} />);
-    await screen.findByRole('option', { name: 'GPT-6 Astra' });
-    await waitFor(() => expect(screen.getByLabelText('Model')).not.toBeDisabled());
+    await waitFor(() => expect(trigger(/GPT-6 Astra/)).not.toBeDisabled());
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it('More models swaps in the full list without changing the model', async () => {
+  it('More models grows the open list in place, and a pick closes it', async () => {
     mockApi({ suggested_model: 'claude-opus-4.6', source: 'default' });
     const onChange = jest.fn();
     render(<ModelSelector nodeId={3} selectedModel="claude-opus-4.6" onModelChange={onChange} />);
-    const select = await screen.findByLabelText('Model');
-    await screen.findByRole('option', { name: 'More models…' });
-    expect(screen.queryByRole('option', { name: 'Fable 5.1' })).toBeNull();
-    fireEvent.change(select, { target: { value: '__more__' } });
-    expect(await screen.findByRole('option', { name: 'Fable 5.1' })).toBeInTheDocument();
-    expect(screen.queryByRole('option', { name: 'More models…' })).toBeNull();
+    await waitFor(() => expect(trigger(/Opus 4.6/)).not.toBeDisabled());
+    fireEvent.click(trigger(/Opus 4.6/));
+    expect(optionNames()).toEqual(['Opus 5.5', 'Opus 4.6', 'GPT-6 Astra', 'More models…']);
+
+    fireEvent.click(screen.getByRole('option', { name: 'More models…' }));
+    // Still open, now the whole grouped list, and nothing was chosen.
+    expect(screen.getByRole('listbox')).toBeInTheDocument();
+    expect(screen.getAllByRole('group')).toHaveLength(2);
+    expect(optionNames()).toContain('Fable 5.1');
+    expect(optionNames()).not.toContain('More models…');
     expect(onChange).not.toHaveBeenCalled();
-    fireEvent.change(select, { target: { value: 'claude-fable-5.1' } });
+
+    fireEvent.click(screen.getByRole('option', { name: 'Fable 5.1' }));
     expect(onChange).toHaveBeenCalledWith('claude-fable-5.1');
+    expect(screen.queryByRole('listbox')).toBeNull();
+  });
+
+  it('works from the keyboard: open, End, Enter expands, Enter chooses', async () => {
+    mockApi({ suggested_model: 'claude-opus-4.6', source: 'default' });
+    const onChange = jest.fn();
+    render(<ModelSelector nodeId={3} selectedModel="claude-opus-4.6" onModelChange={onChange} />);
+    await waitFor(() => expect(trigger(/Opus 4.6/)).not.toBeDisabled());
+    fireEvent.keyDown(trigger(/Opus 4.6/), { key: 'ArrowDown' });
+    const list = screen.getByRole('listbox');
+    fireEvent.keyDown(list, { key: 'End' });
+    fireEvent.keyDown(list, { key: 'Enter' });
+    expect(screen.getAllByRole('group')).toHaveLength(2);
+    // The keyboard lands on the first model the expansion added.
+    expect(list.getAttribute('aria-activedescendant')).toMatch(/claude-fable-5\.1$/);
+    fireEvent.keyDown(list, { key: 'Enter' });
+    expect(onChange).toHaveBeenCalledWith('claude-fable-5.1');
+    expect(screen.queryByRole('listbox')).toBeNull();
+  });
+
+  it('closes on a click outside without choosing', async () => {
+    mockApi({ suggested_model: 'claude-opus-4.6', source: 'default' });
+    const onChange = jest.fn();
+    render(<ModelSelector nodeId={3} selectedModel="claude-opus-4.6" onModelChange={onChange} />);
+    await waitFor(() => expect(trigger(/Opus 4.6/)).not.toBeDisabled());
+    fireEvent.click(trigger(/Opus 4.6/));
+    fireEvent.mouseDown(document.body);
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('stays shut while disabled', async () => {
+    mockApi({ suggested_model: 'claude-opus-4.6', source: 'default' });
+    render(<ModelSelector nodeId={3} selectedModel="claude-opus-4.6" onModelChange={jest.fn()}
+      disabled />);
+    await waitFor(() => expect(api.get).toHaveBeenCalledTimes(2));
+    fireEvent.click(trigger(/Opus 4.6|loading/));
+    expect(screen.queryByRole('listbox')).toBeNull();
   });
 });
