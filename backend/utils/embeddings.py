@@ -260,6 +260,7 @@ def retrieve_relevant_references(user_id, query_vector, k=4, min_score=0.35,
         i.id: i for i in ExternalItem.query.filter(
             ExternalItem.id.in_([iid for iid, _ in ranked]),
             ExternalItem.user_id == user_id,
+            ExternalItem.saved(),  # never a Read pick (#352)
         ).all()
     }
     results = []

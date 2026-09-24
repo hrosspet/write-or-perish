@@ -116,6 +116,7 @@ def recommend_external_items(user_id, node, api_key, k=3, min_score=0.2):
         item.id: item for item in ExternalItem.query.filter(
             ExternalItem.id.in_([iid for iid, _ in ranked]),
             ExternalItem.user_id == user_id,
+            ExternalItem.saved(),  # never a Read pick (#352)
         ).all()
     }
     results = []

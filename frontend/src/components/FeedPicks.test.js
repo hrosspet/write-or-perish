@@ -29,17 +29,19 @@ test('Open on X marks the pick read; Mark as unread stays to undo it', async () 
   render(<FeedPicks nodeId={9} />);
 
   fireEvent.click(await screen.findByRole('link', { name: 'Open on X' }));
-  expect(api.post).toHaveBeenCalledWith('/external/items/5/read');
+  expect(api.post).toHaveBeenCalledWith('/external/items/5/read', { node_id: 9, via: 'open' });
   await waitFor(() => expect(screen.getByRole('button', { name: 'Mark as unread' })).toBeInTheDocument());
   expect(screen.getByText('All read.')).toBeInTheDocument();
 });
 
-test('opening an already-read pick marks nothing', async () => {
+test('opening an already-read pick logs the open and keeps the mark', async () => {
   api.get.mockResolvedValue({ data: { picks: [pick({ read_at: '2026-09-12T20:00:00Z' })] } });
+  api.post.mockResolvedValue({ data: { id: 5, read_at: '2026-09-12T20:00:00Z' } });
   render(<FeedPicks nodeId={9} />);
 
   fireEvent.click(await screen.findByRole('link', { name: 'Open on X' }));
-  expect(api.post).not.toHaveBeenCalled();
+  expect(api.post).toHaveBeenCalledWith('/external/items/5/read', { node_id: 9, via: 'open' });
+  await waitFor(() => expect(screen.getByText('All read.')).toBeInTheDocument());
 });
 
 test('rating a pick marks it read too', async () => {
@@ -48,7 +50,7 @@ test('rating a pick marks it read too', async () => {
   render(<FeedPicks nodeId={9} />);
 
   fireEvent.click(await screen.findByRole('button', { name: 'Good quote' }));
-  expect(api.post).toHaveBeenCalledWith('/external/items/5/feedback', { feedback: 'good' });
+  expect(api.post).toHaveBeenCalledWith('/external/items/5/feedback', { feedback: 'good', node_id: 9 });
   await waitFor(() => expect(screen.getByRole('button', { name: 'Mark as unread' })).toBeInTheDocument());
   expect(screen.getByText('All read.')).toBeInTheDocument();
 });

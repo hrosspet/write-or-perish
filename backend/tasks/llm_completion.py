@@ -224,11 +224,23 @@ def _canonicalize_quote_labels(text, quote_labels):
     return _LABEL_QUOTE_RE.sub(repl, text)
 
 
-def _bump_surfaced_references(text, user_id, already_bumped):
+def _bump_surfaced_references(text, user_id, already_bumped, node=None,
+                              decided_at=None, picked_by=None,
+                              already_logged=None):
     """Eagerly record surfacing history for every {quote_ext:ID} in *text*
     (content is encrypted at rest, so this can't be derived later). Bumps
     each item at most once per turn via *already_bumped*. Committed by the
-    caller's surrounding commit."""
+    caller's surrounding commit.
+
+    With *node* (the node *text* is stored on), each quoted reference is
+    also logged as a recommendation of this reply (FeedPick kind 'quote',
+    #352) — the model that chose it, when the turn started, what it could
+    know of the user's marks — once per reference per turn
+    (*already_logged*). A Read reply's picks already have their rows."""
+    if node is not None and already_logged is not None:
+        from backend.utils.reference_log import log_quotes
+        log_quotes(node, text, user_id, decided_at, picked_by,
+                   already_logged)
     ids = [i for i in find_ext_quote_ids(text) if i not in already_bumped]
     if not ids:
         return
@@ -3692,6 +3704,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # single-shot path that never enters the loop.
             quote_labels = {}
             bumped_ext_ids = set()
+            # References this turn's replies quote, logged as
+            # recommendations once each (#352). The model chose them
+            # during this turn: its placeholder's creation is the moment
+            # its view of the user's marks was fixed.
+            logged_ext_ids = set()
+            quotes_decided_at = llm_node.created_at
 
             def _finalize(target_node, resp):
                 """Write *resp* as the final answer on *target_node* using the
@@ -3759,7 +3777,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # past its first commit and is run again, as a batch collect
                 # is, bumps once).
                 _bump_surfaced_references(
-                    f_llm_text, user_id, bumped_ext_ids)
+                    f_llm_text, user_id, bumped_ext_ids, node=target_node,
+                    decided_at=quotes_decided_at, picked_by=model_id,
+                    already_logged=logged_ext_ids)
 
                 target_node.set_content(f_llm_text)
                 # chars/4, NOT the provider's output_tokens: Node.token_count
@@ -3929,7 +3949,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     # Interim text is stored (and rendered) — record any
                     # references it already quotes.
                     _bump_surfaced_references(
-                        interim_text, user_id, bumped_ext_ids)
+                        interim_text, user_id, bumped_ext_ids,
+                        node=current_node, decided_at=quotes_decided_at,
+                        picked_by=model_id, already_logged=logged_ext_ids)
 
                     # Cost for THIS model call (every call costs).
                     _log_api_cost(response)

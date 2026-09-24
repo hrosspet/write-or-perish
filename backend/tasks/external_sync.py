@@ -30,15 +30,33 @@ logger = get_task_logger(__name__)
 
 def _upsert_items(user_id, source, items):
     """Insert normalized items, skipping per-user duplicates. Returns
-    (created, skipped)."""
+    (created, skipped).
+
+    A tweet a Read picked and the user had not saved already has a row
+    (READ_PICK_SOURCE): saving it turns that row into this source's
+    reference in place, so its read mark and verdict carry over (#352).
+    That counts as created — it is new to the references, and the
+    bookmark sync's early stop must not read it as a known bookmark."""
+    from backend.models import TWEET_SOURCES
+    from backend.utils.reference_rows import pick_rows_by_tweet, save_pick_row
     existing = {
         row[0] for row in db.session.query(ExternalItem.external_id).filter_by(
             user_id=user_id, source=source).all()
     }
+    picked = pick_rows_by_tweet(user_id) if source in TWEET_SOURCES else {}
     created = skipped = 0
     for item in items:
         if item["external_id"] in existing:
             skipped += 1
+            continue
+        pick_row = picked.pop(item["external_id"], None)
+        if pick_row is not None:
+            save_pick_row(pick_row, source)
+            if item.get("public_source") is False:
+                # A protected author seen by the sync: private wins.
+                pick_row.public_source = False
+            existing.add(item["external_id"])
+            created += 1
             continue
         row = ExternalItem(
             user_id=user_id,

@@ -109,7 +109,9 @@ def _external_keyword_search(q, dt_from, dt_to, page, per_page):
     title is often the only place its subject is named), paginate.
     Ordered newest-saved first, as the References page is.
     """
-    query = ExternalItem.query.filter(ExternalItem.user_id == current_user.id)
+    query = ExternalItem.query.filter(
+        ExternalItem.user_id == current_user.id,
+        ExternalItem.saved())  # a Read pick is not a reference (#352)
     if dt_from is not None:
         query = query.filter(_EXTERNAL_DATE >= dt_from)
     if dt_to is not None:
@@ -360,6 +362,7 @@ def semantic_search():
             i.id: i for i in ExternalItem.query.filter(
                 ExternalItem.id.in_([iid for iid, _ in ext_ranked]),
                 ExternalItem.user_id == current_user.id,
+                ExternalItem.saved(),  # never a Read pick (#352)
             ).all()
         } if ext_ranked else {}
         for item_id, score in ext_ranked:
