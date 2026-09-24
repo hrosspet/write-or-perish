@@ -157,6 +157,57 @@ def test_rejected_option_retries_without_it(app, monkeypatch):
     assert len(calls) == 2
     assert "extra_body" in calls[0] and "extra_body" not in calls[1]
     assert result["content"] == "" and "cache_diagnostics" not in result
+    # The row must not claim a baseline that did not go out.
+    assert result["cache_comparison_sent"] is False
+
+
+def test_rejected_baseline_id_named_only_by_param_retries(app, monkeypatch):
+    """A 400 naming only the id (say, from another OpenAI project after a
+    key switch) still falls back to a call without the option."""
+    providers, calls = _fake_openai(monkeypatch)
+    real_create = None
+
+    class Rejecting:
+        def __init__(self, api_key=None):
+            self.responses = self
+
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            if "extra_body" in kwargs:
+                err = openai.BadRequestError(
+                    "Invalid value.",
+                    response=httpx.Response(400, request=httpx.Request(
+                        "POST", "https://api.openai.com/v1/responses")),
+                    body={"param": "comparison_response_id"})
+                raise err
+            return real_create(**kwargs)
+
+    real_create = providers.OpenAI().responses.create
+    monkeypatch.setattr(providers, "OpenAI", Rejecting)
+    result = _complete(providers, "gpt-6-astra", "resp_other_project")
+    assert len(calls) == 3  # the probe above, then the rejected + retry
+    assert result["response_id"] == "resp_new"
+
+
+def test_other_bad_requests_are_not_retried(app, monkeypatch):
+    providers, calls = _fake_openai(monkeypatch)
+
+    class Broken:
+        def __init__(self, api_key=None):
+            self.responses = self
+
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            raise openai.BadRequestError(
+                "Invalid schema for function 'x'.",
+                response=httpx.Response(400, request=httpx.Request(
+                    "POST", "https://api.openai.com/v1/responses")),
+                body=None)
+
+    monkeypatch.setattr(providers, "OpenAI", Broken)
+    with pytest.raises(openai.BadRequestError):
+        _complete(providers, "gpt-6-astra", "resp_old")
+    assert len(calls) == 1
 
 
 def test_typed_diagnostics_object_is_read_too(app, monkeypatch):
@@ -237,7 +288,8 @@ def test_call_annotates_and_advances_the_baseline(app):
     def completion(resp_id):
         def fn(baseline_id):
             sent.append(baseline_id)
-            return {"response_id": resp_id}
+            return {"response_id": resp_id,
+                    "cache_comparison_sent": baseline_id is not None}
         return fn
 
     first = diag.call(completion("resp_1"))
@@ -296,3 +348,66 @@ def test_system_prefix_hash():
     assert h != system_prefix_hash(
         [{"role": "system", "content": [{"type": "text", "text": "abd"}]}], 0)
     assert system_prefix_hash(msgs, None) is None
+
+
+def test_log_fields_drop_what_would_not_fit(app):
+    """An unexpected verdict never fails the commit that completes the
+    node: over-long or non-string text and non-integer counts become
+    None."""
+    diag = ConversationCacheDiagnostics(False, None, [])
+    fields = diag.log_fields({"response_id": "r" * 300, "cache_diagnostics": {
+        "type": "cache_miss", "reason": "x" * 90,
+        "comparison_reusable_tokens": {"n": 1},
+        "cache_missed_tokens": "12"}}, 7)
+    assert len(fields["provider_response_id"]) == 128
+    assert fields["cache_diag_reason"] == "x" * 40
+    assert fields["cache_diag_reusable_tokens"] is None
+    assert fields["cache_diag_missed_tokens"] == 12
+    fields = diag.log_fields({"cache_diagnostics": {
+        "type": {"nested": True}, "cache_missed_tokens": 2**40}}, 7)
+    assert fields["cache_diag_type"] is None
+    assert fields["cache_diag_missed_tokens"] is None
+
+
+def test_failed_lookup_leaves_the_session_usable(app, monkeypatch):
+    import backend.utils.cache_diagnostics as cd
+    from sqlalchemy import text
+
+    def broken(user_id, node_chain):
+        _db.session.execute(text("SELECT no_such_column FROM api_cost_log"))
+
+    monkeypatch.setattr(cd, "find_prev_turn_baseline", broken)
+    alice = User(username="alice")
+    _db.session.add(alice)
+    _db.session.flush()
+    diag = ConversationCacheDiagnostics(True, alice.id, [])
+    assert diag.call(lambda b: {"response_id": "r"})["response_id"] == "r"
+    # The task's transaction goes on: the user row is still there to commit.
+    _db.session.commit()
+    assert User.query.filter_by(username="alice").count() == 1
+
+
+def test_gap_is_measured_to_the_request_not_the_reply(app, monkeypatch):
+    import backend.utils.cache_diagnostics as cd
+    t0 = datetime(2026, 9, 24, 12, 0, 0)
+    clock = iter([t0 + timedelta(seconds=10),   # request of call 1
+                  t0 + timedelta(seconds=100),  # reply of call 1
+                  t0 + timedelta(seconds=110),  # request of call 2
+                  t0 + timedelta(seconds=500)])  # reply of call 2
+
+    class FakeDatetime:
+        @staticmethod
+        def utcnow():
+            return next(clock)
+
+    monkeypatch.setattr(cd, "datetime", FakeDatetime)
+    diag = ConversationCacheDiagnostics(False, None, [])
+    diag.enabled = True
+    diag._baseline = cd.Baseline("resp_prev", "prev_turn", t0)
+    first = diag.call(lambda b: {"response_id": "r1",
+                                 "cache_comparison_sent": True})
+    second = diag.call(lambda b: {"response_id": "r2",
+                                  "cache_comparison_sent": True})
+    assert first["cache_diag_gap_s"] == 10
+    # From call 1's reply to call 2's request, not to call 2's reply.
+    assert second["cache_diag_gap_s"] == 10

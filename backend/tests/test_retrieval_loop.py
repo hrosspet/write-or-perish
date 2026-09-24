@@ -88,6 +88,9 @@ class _ScriptedProvider:
         # continuation call); a dict is returned as a normal response.
         if isinstance(nxt, Exception):
             raise nxt
+        # Like the real provider: whether a cache comparison went out (#348).
+        nxt["cache_comparison_sent"] = bool(
+            kwargs.get("cache_comparison_response_id"))
         return nxt
 
 

@@ -238,8 +238,10 @@ class LLMProvider:
             except openai.BadRequestError as e:
                 # Analytics must never cost a turn: if OpenAI rejects the
                 # option itself, send the call again without it.
+                about = f"{getattr(e, 'param', None) or ''} {e}"
                 if ("extra_body" not in kwargs
-                        or "prompt_cache" not in str(e)):
+                        or not ("prompt_cache" in about
+                                or "comparison_response" in about)):
                     raise
                 logger.warning(
                     "OpenAI rejected prompt_cache_options (model=%s); "
@@ -305,6 +307,9 @@ class LLMProvider:
             "truncated": truncated,
             "response_id": getattr(response, "id", None),
         }
+        # Whether the comparison actually went out (it is dropped on the
+        # retry above), so a row never claims a baseline it did not send.
+        result["cache_comparison_sent"] = "extra_body" in kwargs
         if "extra_body" in kwargs:
             diagnostics = _cache_diagnostics(response)
             if diagnostics:

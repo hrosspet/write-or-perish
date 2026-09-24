@@ -22,6 +22,7 @@ import logging
 from collections import namedtuple
 from datetime import datetime
 
+from backend.extensions import db
 from backend.models import APICostLog
 
 logger = logging.getLogger(__name__)
@@ -82,10 +83,15 @@ class ConversationCacheDiagnostics:
         self.system_hash = system_hash
         self._baseline = None
         if enabled:
+            # Analytics never cost a turn. A failed SELECT would abort the
+            # whole Postgres transaction the task goes on to use, so the
+            # lookup runs in a savepoint that is rolled back on failure.
             try:
-                self._baseline = find_prev_turn_baseline(user_id, node_chain)
+                with db.session.no_autoflush:
+                    with db.session.begin_nested():
+                        self._baseline = find_prev_turn_baseline(
+                            user_id, node_chain)
             except Exception:
-                # Analytics never cost a turn.
                 logger.warning("Cache diagnostics baseline lookup failed",
                                exc_info=True)
 
@@ -94,15 +100,18 @@ class ConversationCacheDiagnostics:
         makes it; the response dict comes back annotated with the baseline
         that was sent, and becomes the baseline for the next round."""
         sent = self._baseline if self.enabled else None
+        # The gap is measured to when the request went out, so a slow
+        # reply does not look like cache expiry.
+        sent_at = datetime.utcnow()
         resp = completion_fn(sent.response_id if sent else None)
-        now = datetime.utcnow()
-        if sent is not None:
+        if sent is not None and resp.get("cache_comparison_sent"):
             resp["cache_diag_baseline"] = sent.kind
             if sent.at is not None:
                 resp["cache_diag_gap_s"] = max(
-                    0, int((now - sent.at).total_seconds()))
+                    0, int((sent_at - sent.at).total_seconds()))
         if self.enabled and resp.get("response_id"):
-            self._baseline = Baseline(resp["response_id"], "tool_round", now)
+            self._baseline = Baseline(
+                resp["response_id"], "tool_round", datetime.utcnow())
         return resp
 
     def log_fields(self, resp, node_id):
@@ -110,19 +119,23 @@ class ConversationCacheDiagnostics:
         wrote, the response id, the verdict, and the system prompt hash."""
         fields = {
             "request_ref": f"node:{node_id}" if node_id else None,
-            "provider_response_id": resp.get("response_id"),
+            "provider_response_id": _text(resp.get("response_id"), 128),
             "system_prefix_hash": self.system_hash,
             "cache_diag_baseline": resp.get("cache_diag_baseline"),
             "cache_diag_gap_s": resp.get("cache_diag_gap_s"),
         }
         diag = resp.get("cache_diagnostics") or {}
         if diag:
+            # The verdict is an untyped field from OpenAI: anything that
+            # would not fit its column is dropped rather than failing the
+            # commit that also completes the node.
             fields.update(
-                cache_diag_type=diag.get("type"),
-                cache_diag_reason=diag.get("reason"),
-                cache_diag_reusable_tokens=diag.get(
-                    "comparison_reusable_tokens"),
-                cache_diag_missed_tokens=diag.get("cache_missed_tokens"),
+                cache_diag_type=_text(diag.get("type"), 40),
+                cache_diag_reason=_text(diag.get("reason"), 40),
+                cache_diag_reusable_tokens=_count(
+                    diag.get("comparison_reusable_tokens")),
+                cache_diag_missed_tokens=_count(
+                    diag.get("cache_missed_tokens")),
             )
             if diag.get("reason") in UNEXPECTED_MISS_REASONS:
                 logger.warning(
@@ -130,3 +143,19 @@ class ConversationCacheDiagnostics:
                     "cause: %s (node %s, baseline %s)", diag.get("reason"),
                     node_id, resp.get("cache_diag_baseline"))
         return fields
+
+
+def _text(value, width):
+    """*value* if it is a string, cut to the column width; else None."""
+    return value[:width] if isinstance(value, str) else None
+
+
+def _count(value):
+    """*value* as an int that fits a Postgres integer column, else None."""
+    if isinstance(value, bool):
+        return None
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    return n if -2**31 <= n < 2**31 else None
