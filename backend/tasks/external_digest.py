@@ -128,7 +128,7 @@ def digest_is_stale(user_id):
 
 def _digest_model_id(user):
     default_model = flask_app.config.get(
-        "DEFAULT_LLM_MODEL", "claude-opus-5")
+        "DEFAULT_LLM_MODEL", "claude-opus-4.6")
     model_id = user.preferred_model or default_model
     if model_id not in flask_app.config.get("SUPPORTED_MODELS", {}):
         model_id = default_model

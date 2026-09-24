@@ -61,7 +61,7 @@ services:
       - X_CLIENT_SECRET=${X_CLIENT_SECRET:-}
       - X_REDIRECT_URI=${X_REDIRECT_URI:-}
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
-      - LLM_NAME=${LLM_NAME:-claude-opus-5}
+      - LLM_NAME=${LLM_NAME:-claude-opus-4.6}
       - FLASK_ENV=${FLASK_ENV:-production}
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - GITHUB_REPO=${GITHUB_REPO}
@@ -112,7 +112,7 @@ services:
       - X_CLIENT_ID=${X_CLIENT_ID:-}
       - X_CLIENT_SECRET=${X_CLIENT_SECRET:-}
       - X_REDIRECT_URI=${X_REDIRECT_URI:-}
-      - LLM_NAME=${LLM_NAME:-claude-opus-5}
+      - LLM_NAME=${LLM_NAME:-claude-opus-4.6}
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - GITHUB_REPO=${GITHUB_REPO}
       - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-}
@@ -147,7 +147,7 @@ services:
       - COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS=${COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS:-}
       - COMMUNITY_ARCHIVE_SNAPSHOT_DIR=${COMMUNITY_ARCHIVE_SNAPSHOT_DIR:-}
       - PROFILE_UPDATES_PAUSED=${PROFILE_UPDATES_PAUSED:-false}
-      - LLM_NAME=${LLM_NAME:-claude-opus-5}
+      - LLM_NAME=${LLM_NAME:-claude-opus-4.6}
     depends_on:
       db:
         condition: service_healthy

@@ -59,8 +59,9 @@ def _make_app():
     app.config["SECRET_KEY"] = "test-secret"
     app.config["TESTING"] = True
     app.config["DEFAULT_LLM_MODEL"] = "gpt-5"
+    app.config["READ_DEFAULT_MODEL"] = "gpt-5"
     app.config["SUPPORTED_MODELS"] = {
-        "gpt-5": {"provider": "openai", "api_model": "gpt-5"},
+        "gpt-5": {"provider": "openai", "api_model": "gpt-5", "read": True},
     }
 
     _db.init_app(app)
@@ -697,3 +698,102 @@ class TestStripAgenticPrompts:
         _db.session.commit()
         chain, dropped = strip_agentic_prompts([voice], keep=voice)
         assert dropped == [] and chain == [voice]
+
+
+# ── Model choice (#355) ───────────────────────────────────────────────
+
+MODELS_355 = {
+    "claude-opus-4.6": {"provider": "anthropic", "display_name": "Opus 4.6",
+                        "featured": True},
+    "claude-opus-5": {"provider": "anthropic", "display_name": "Opus 5",
+                      "deprecated": True},
+    "gpt-6-luna": {"provider": "openai", "display_name": "GPT-6 Luna",
+                   "read": True},
+    "gpt-6-sol": {"provider": "openai", "display_name": "GPT-6 Sol",
+                  "read": True},
+}
+
+
+@pytest.fixture
+def app355(app):
+    app.config["SUPPORTED_MODELS"] = MODELS_355
+    app.config["DEFAULT_LLM_MODEL"] = "claude-opus-4.6"
+    app.config["READ_DEFAULT_MODEL"] = "gpt-6-luna"
+    return app
+
+
+def _read_thread(alice, read_model="gpt-6-sol", chat_model="claude-opus-4.6"):
+    """root → read prompt → read reply (read_model) → note → chat reply
+    (chat_model) → note. Returns the nodes by name."""
+    root = _make_node(alice, content="a thought")
+    prompt = _make_prompt_node(alice, "read_thread", parent_id=root.id)
+    read = _make_node(alice, parent_id=prompt.id, node_type="llm",
+                      llm_model=read_model, content="picks")
+    note = _make_node(alice, parent_id=read.id, content="about #2")
+    chat = _make_node(alice, parent_id=note.id, node_type="llm",
+                      llm_model=chat_model, content="sure")
+    note2 = _make_node(alice, parent_id=chat.id, content="and #3?")
+    _db.session.commit()
+    return dict(root=root, prompt=prompt, read=read, note=note, chat=chat,
+                note2=note2)
+
+
+class TestModelChoice:
+    def test_chat_default_skips_the_read_reply(self, app355):
+        from backend.utils.llm_nodes import resolve_chat_model
+        alice = _make_user("alice", is_admin=True)
+        t = _read_thread(alice)
+        # Under the read reply's note the nearest reply is the Sol read:
+        # the chat default must not inherit it.
+        assert resolve_chat_model(t["note"], alice) == ("claude-opus-4.6", "default")
+        alice.preferred_model = "claude-opus-4.6"
+        assert resolve_chat_model(t["note"], alice)[1] == "user_preference"
+        assert resolve_chat_model(t["note2"], alice) == ("claude-opus-4.6", "predecessor")
+
+    def test_read_default_skips_the_chat_reply(self, app355):
+        from backend.utils.llm_nodes import resolve_read_model
+        alice = _make_user("alice", is_admin=True)
+        t = _read_thread(alice)
+        assert resolve_read_model(t["note2"]) == ("gpt-6-sol", "predecessor")
+        assert resolve_read_model(t["root"]) == ("gpt-6-luna", "default")
+        assert resolve_read_model(None) == ("gpt-6-luna", "default")
+
+    def test_read_default_ignores_a_read_on_a_non_read_model(self, app355):
+        from backend.utils.llm_nodes import resolve_read_model
+        alice = _make_user("alice", is_admin=True)
+        t = _read_thread(alice, read_model="claude-opus-4.6")
+        assert resolve_read_model(t["note2"]) == ("gpt-6-luna", "default")
+
+    def test_read_route_refuses_a_chat_model(self, app355):
+        client = app355.test_client()
+        alice = _make_user("alice", is_admin=True)
+        _db.session.commit()
+        _login(client, alice.id)
+        resp = client.post("/api/read/start", json={"model": "claude-opus-4.6"})
+        assert resp.status_code == 400
+        assert "GPT-6 Luna" in resp.get_json()["error"]
+
+    def test_read_further_without_a_model_takes_the_threads_read_model(self, app355):
+        client = app355.test_client()
+        alice = _make_user("alice", is_admin=True)
+        t = _read_thread(alice)
+        _login(client, alice.id)
+        resp = client.post(f"/api/read/from-node/{t['note2'].id}", json={})
+        assert resp.status_code == 202, resp.get_json()
+        assert Node.query.get(resp.get_json()["llm_node_id"]).llm_model == "gpt-6-sol"
+
+    def test_placeholder_under_a_read_reply_runs_on_a_read_model(self, app355):
+        from backend.utils.llm_nodes import create_llm_placeholder
+        alice = _make_user("alice", is_admin=True)
+        t = _read_thread(alice)
+        # Directly under the read reply a reply is another read.
+        node, _ = create_llm_placeholder(t["read"].id, "claude-opus-4.6", alice.id)
+        assert node.llm_model == "gpt-6-sol"
+        # Under the prompt (below a typed note) it is the first read.
+        pnote = _make_node(alice, parent_id=t["prompt"].id, content="first")
+        _db.session.commit()
+        node, _ = create_llm_placeholder(pnote.id, "claude-opus-4.6", alice.id)
+        assert node.llm_model == "gpt-6-luna"
+        # A note after the read reply makes it a chat: the model stays.
+        node, _ = create_llm_placeholder(t["note"].id, "claude-opus-4.6", alice.id)
+        assert node.llm_model == "claude-opus-4.6"

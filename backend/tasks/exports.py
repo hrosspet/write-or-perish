@@ -1352,7 +1352,7 @@ def maybe_trigger_profile_update(user_id, model_id=None,
     if model_id is None:
         model_id = (
             user.preferred_model
-            or flask_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-5")
+            or flask_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.6")
         )
 
     # Find latest non-integration profile

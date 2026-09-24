@@ -26,8 +26,15 @@ class Config:
     # (local dev sets only the base key and hit "not configured").
     ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
-    # Default model (for backward compatibility and fallback)
-    DEFAULT_LLM_MODEL = os.environ.get("LLM_NAME", "claude-opus-5")
+    # Default model (for backward compatibility and fallback). Must be an
+    # active (non-deprecated) SUPPORTED_MODELS key: the app refuses to boot
+    # otherwise (validate_default_model). Prod sets LLM_NAME explicitly.
+    DEFAULT_LLM_MODEL = os.environ.get("LLM_NAME") or "claude-opus-4.6"
+
+    # The model a read (routes/read.py) runs on when neither the request
+    # nor an earlier read reply in the thread names one. Reads run only on
+    # models flagged "read" in SUPPORTED_MODELS (#355).
+    READ_DEFAULT_MODEL = "gpt-6-luna"
 
     # --- API spend monitoring (issue #85) ---
     # Monthly Anthropic spend cap in USD. 0 (default) disables the check.
@@ -138,11 +145,24 @@ class Config:
     #                       requested, so a 1.05M window takes 922k of input.
     #   long_context_threshold — the pricing tier; the profile pipeline never
     #                       plans a prompt across it (#259).
+    #
+    # Model picker keys (#355):
+    #   deprecated — hidden from every picker and never inherited from a
+    #                thread; old replies keep their label, and a thread
+    #                whose last reply used it falls back to the user's
+    #                preference / LLM_NAME.
+    #   featured   — in the picker's short list (with the selected model);
+    #                the rest sit behind "More models…". Set by hand.
+    #   read       — a read (Community Archive picks) may run on it; the
+    #                Read button's picker lists only these.
+    # The picker's full list follows this dict's order: newest first
+    # within each provider.
     SUPPORTED_MODELS = {
         "gpt-6-astra": {
             "provider": "openai",
             "api_model": "gpt-6-astra",
             "display_name": "GPT-6 Astra",
+            "featured": True,
             "context_window": 1050000,
             # Verified 2026-09-03 on the OpenAI pricing page.
             "input_price_per_mtok": 10.00,
@@ -168,6 +188,7 @@ class Config:
             "api_model": "gpt-6-sol",
             "max_input_tokens": 922000,
             "display_name": "GPT-6 Sol",
+            "read": True,
             "context_window": 1050000,
             # Verified 2026-09-23 on the OpenAI pricing + model pages:
             # $2.00 / $10.00, cached input $0.20 (0.1x), cache writes $2.50
@@ -187,6 +208,7 @@ class Config:
             "api_model": "gpt-6-luna",
             "max_input_tokens": 922000,
             "display_name": "GPT-6 Luna",
+            "read": True,
             "context_window": 1050000,
             # Verified 2026-09-23 on the OpenAI pricing + model pages:
             # $0.10 / $0.50, cached input $0.01 (0.1x), cache writes $0.125
@@ -205,6 +227,7 @@ class Config:
             "api_model": "gpt-5.6-sol",
             "max_input_tokens": 922000,
             "display_name": "GPT-5.6 Sol",
+            "read": True,
             "context_window": 1050000,
             # Lowered 2026-08-25 (was 5.00 / 30.00); promotional pricing
             # runs at least through 2026-11-21.
@@ -222,6 +245,7 @@ class Config:
             "api_model": "gpt-5.6-luna",
             "max_input_tokens": 922000,
             "display_name": "GPT-5.6 Luna",
+            "read": True,
             "context_window": 1050000,
             # Verified 2026-09-13 on the OpenAI pricing page: $0.20 / $1.20,
             # cached input $0.02, long context (>272k) $0.40 / $1.80, batch
@@ -247,6 +271,7 @@ class Config:
             "long_context_threshold": 272000,
             "long_context_input_multiplier": 2.0,
             "long_context_output_multiplier": 1.5,
+            "deprecated": True,
         },
         "gpt-5.4": {
             "tokenizer_family": "o200k",
@@ -260,6 +285,7 @@ class Config:
             "long_context_threshold": 272000,
             "long_context_input_multiplier": 2.0,
             "long_context_output_multiplier": 1.5,
+            "deprecated": True,
         },
         "gpt-5": {
             "tokenizer_family": "o200k",
@@ -295,7 +321,7 @@ class Config:
             "tokenizer_family": "claude_old",
             "provider": "anthropic",
             "api_model": "claude-sonnet-4-5-20250929",
-            "display_name": "Claude 4.5 Sonnet",
+            "display_name": "Sonnet 4.5",
             "context_window": 200000,
             "input_price_per_mtok": 3.00,
             "output_price_per_mtok": 15.00,
@@ -305,16 +331,18 @@ class Config:
             "tokenizer_family": "claude_old",
             "provider": "anthropic",
             "api_model": "claude-sonnet-4-6",
-            "display_name": "Claude 4.6 Sonnet",
+            "display_name": "Sonnet 4.6",
             "context_window": 1000000,
             "input_price_per_mtok": 3.00,
             "output_price_per_mtok": 15.00,
+            "deprecated": True,
         },
         "claude-opus-5.5": {
             "tokenizer_family": "claude_new",
             "provider": "anthropic",
             "api_model": "claude-opus-5-5",
-            "display_name": "Claude Opus 5.5",
+            "display_name": "Opus 5.5",
+            "featured": True,
             "context_window": 1000000,
             # Verified 2026-09-22 on the Anthropic pricing page: $4/$20,
             # 5m cache writes $5 (the standard 1.25x), batch 50%, flat
@@ -325,20 +353,34 @@ class Config:
             # not the standard 0.1x.
             "cache_read_multiplier": 0.05,
         },
+        "claude-fable-5.1": {
+            "tokenizer_family": "claude_new",
+            "provider": "anthropic",
+            "api_model": "claude-fable-5-1",
+            "display_name": "Fable 5.1",
+            "context_window": 1000000,
+            # Verified 2026-09-02 on the Anthropic pricing page.
+            "input_price_per_mtok": 10.00,
+            "output_price_per_mtok": 50.00,
+            # Cache hits on Fable 5.1 bill at 0.025x base input ($0.25/MTok),
+            # not the 0.1x every other Anthropic model uses.
+            "cache_read_multiplier": 0.025,
+        },
         "claude-opus-5": {
             "tokenizer_family": "claude_new",
             "provider": "anthropic",
             "api_model": "claude-opus-5",
-            "display_name": "Claude Opus 5",
+            "display_name": "Opus 5",
             "context_window": 1000000,
             "input_price_per_mtok": 5.00,
             "output_price_per_mtok": 25.00,
+            "deprecated": True,
         },
         "claude-opus-4.5": {
             "tokenizer_family": "claude_old",
             "provider": "anthropic",
             "api_model": "claude-opus-4-5-20251101",
-            "display_name": "Claude 4.5 Opus",
+            "display_name": "Opus 4.5",
             "context_window": 200000,
             "input_price_per_mtok": 5.00,
             "output_price_per_mtok": 25.00,
@@ -348,7 +390,8 @@ class Config:
             "tokenizer_family": "claude_old",
             "provider": "anthropic",
             "api_model": "claude-opus-4-6",
-            "display_name": "Claude 4.6 Opus",
+            "display_name": "Opus 4.6",
+            "featured": True,
             "context_window": 1000000,
             "input_price_per_mtok": 5.00,
             "output_price_per_mtok": 25.00,
@@ -357,47 +400,37 @@ class Config:
             "tokenizer_family": "claude_new",
             "provider": "anthropic",
             "api_model": "claude-opus-4-8",
-            "display_name": "Claude 4.8 Opus",
+            "display_name": "Opus 4.8",
             "context_window": 1000000,
             "input_price_per_mtok": 5.00,
             "output_price_per_mtok": 25.00,
+            "deprecated": True,
         },
         "claude-opus-4.7": {
             "tokenizer_family": "claude_new",
             "provider": "anthropic",
             "api_model": "claude-opus-4-7",
-            "display_name": "Claude 4.7 Opus",
+            "display_name": "Opus 4.7",
             "context_window": 1000000,
             "input_price_per_mtok": 5.00,
             "output_price_per_mtok": 25.00,
-        },
-        "claude-fable-5.1": {
-            "tokenizer_family": "claude_new",
-            "provider": "anthropic",
-            "api_model": "claude-fable-5-1",
-            "display_name": "Claude Fable 5.1",
-            "context_window": 1000000,
-            # Verified 2026-09-02 on the Anthropic pricing page.
-            "input_price_per_mtok": 10.00,
-            "output_price_per_mtok": 50.00,
-            # Cache hits on Fable 5.1 bill at 0.025x base input ($0.25/MTok),
-            # not the 0.1x every other Anthropic model uses.
-            "cache_read_multiplier": 0.025,
+            "deprecated": True,
         },
         "claude-fable-5": {
             "tokenizer_family": "claude_new",
             "provider": "anthropic",
             "api_model": "claude-fable-5",
-            "display_name": "Claude Fable 5",
+            "display_name": "Fable 5",
             "context_window": 1000000,
             "input_price_per_mtok": 10.00,
             "output_price_per_mtok": 50.00,
+            "deprecated": True,
         },
         "claude-opus-3": {
             "tokenizer_family": "claude_old",
             "provider": "anthropic",
             "api_model": "claude-3-opus-20240229",
-            "display_name": "Claude 3 Opus",
+            "display_name": "Opus 3",
             "context_window": 200000,
             "max_output_tokens": 4096,
             "input_price_per_mtok": 15.00,
