@@ -972,6 +972,10 @@ class UserArtifact(db.Model):
     # silently desync one side (which once left {user_intentions} unrendered).
     INLINE_KINDS = ("memory", "scratchpad", "ai_preferences", "intentions")
 
+    # The saved-references digest (tasks/external_digest.py): a topic map
+    # of other people's writing, so never on the training key (#326).
+    EXTERNAL_DIGEST_KIND = "external_digest"
+
     def set_content(self, plaintext):
         self.content = encrypt_content(plaintext)
 

@@ -982,3 +982,53 @@ def test_revert_enforces_ownership_and_kind(app, client):
     # Right row, wrong kind in the URL.
     assert client.post(
         f"/api/artifacts/memory/revert/{mine_id}").status_code == 400
+
+
+# ── ai_usage follows the owner's default (#326) ─────────────────────────
+
+@pytest.mark.parametrize("default", ["train", "chat", "none"])
+def test_put_stamps_the_owners_default(app, client, default):
+    """Every artifact writer stamps the owner's default_ai_usage, like
+    the todo list and the profile — no longer a hardcoded 'chat'."""
+    user = User.query.first()
+    user.default_ai_usage = default
+    _db.session.commit()
+    r = client.put("/api/artifacts/memory", json={"content": "a fact"})
+    assert r.status_code == 200
+    assert r.get_json()["artifact"]["ai_usage"] == default
+    assert UserArtifact.latest_for(user.id, "memory").ai_usage == default
+    # A kind with no row yet shows what a first write would be stamped.
+    listed = {a["kind"]: a for a in
+              client.get("/api/artifacts/").get_json()["artifacts"]}
+    assert listed["scratchpad"]["ai_usage"] == default
+
+
+@pytest.mark.parametrize("default, thread, expected", [
+    ("train", "train", "train"),
+    ("train", "chat", "chat"),    # a Chat thread's content stays chat
+    ("chat", "train", "chat"),
+    ("chat", "chat", "chat"),
+    # A 'none' default in a thread set to Chat: the memory must stay
+    # readable next turn, so not 'none'.
+    ("none", "chat", "chat"),
+])
+def test_update_artifact_tool_stamps_train_only_in_a_train_thread_of_a_train_owner(
+        app, default, thread, expected):
+    """The model writes the artifact from this conversation: 'train' only
+    when the owner's default and the thread's own setting both are (#326
+    review)."""
+    with app.app_context():
+        user = User.query.first()
+        user.default_ai_usage = default
+        node = Node(user_id=user.id, node_type="user", ai_usage=thread)
+        node.set_content("tell me something")
+        _db.session.add(node)
+        _db.session.commit()
+        llm_node = MagicMock()
+        llm_node.llm_model = "test-model"
+        r = _execute_tool_calls(
+            [{"name": "update_artifact",
+              "input": {"kind": "memory", "updated_content": "fact"}}],
+            llm_node, [node], user.id)[0]
+        assert r["status"] == "success"
+        assert UserArtifact.latest_for(user.id, "memory").ai_usage == expected

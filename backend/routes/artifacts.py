@@ -65,7 +65,8 @@ def list_artifacts():
             "description": _render_desc(
                 UserArtifact.DEFAULT_DESCRIPTIONS.get(kind)),
             "generated_by": None, "created_at": None,
-            "privacy_level": "private", "ai_usage": "chat",
+            "privacy_level": "private",
+            "ai_usage": current_user.default_ai_usage,
         })
     for kind in sorted(latest):
         items.append(_serialize(latest[kind]))
@@ -84,7 +85,8 @@ def get_artifact(kind):
                 "description": _render_desc(
                     UserArtifact.DEFAULT_DESCRIPTIONS.get(kind)),
                 "content": "", "generated_by": None, "created_at": None,
-                "privacy_level": "private", "ai_usage": "chat",
+                "privacy_level": "private",
+                "ai_usage": current_user.default_ai_usage,
             }}), 200
         return jsonify({"error": "Artifact not found"}), 404
 
@@ -151,6 +153,9 @@ def update_artifact(kind):
         description=(description[:255] if description else None),
         generated_by=data.get("generated_by", "user"),
         tokens_used=0,
+        # The user's global default, like the todo list and the profile
+        # (#326): the row's ai_usage is what the training key reads.
+        ai_usage=current_user.default_ai_usage,
     )
     artifact.set_content(content)
     db.session.add(artifact)

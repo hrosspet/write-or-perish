@@ -44,7 +44,8 @@ from backend.utils.session_helpers import (
 )
 from backend.utils.timefmt import local_stamp, strip_edge_timestamps
 from backend.utils.api_keys import (
-    determine_api_key_type, get_api_keys_for_usage, PayloadLicence,
+    determine_api_key_type, get_api_keys_for_usage, ContextUsage,
+    PayloadLicence,
 )
 from backend.utils.cost import llm_cost_log_fields
 from backend.utils.llm_batch import BatchItemFailed, BatchItemCancelled
@@ -134,6 +135,11 @@ def _render_variant(user_id):
             f"s{int(_share_enabled_for_user(user_id))}"
             f"e{int(_external_references_for_user(user_id))}")
 USER_ARTIFACTS_INDEX_PLACEHOLDER = "{user_artifacts_index}"
+# The four resolved together by get_user_artifacts_context.
+_ARTIFACT_PLACEHOLDERS = (
+    USER_MEMORY_PLACEHOLDER, USER_SCRATCHPAD_PLACEHOLDER,
+    USER_INTENTIONS_PLACEHOLDER, USER_ARTIFACTS_INDEX_PLACEHOLDER,
+)
 
 # Within-turn retrieval loop (#158, text mode only). When the model calls one
 # of these tools, the retrieved content is injected back into the message
@@ -642,7 +648,8 @@ def _todo_index_line(user_id, pinned_node=None):
             f"read_todo {suffix}")
 
 
-def get_user_artifacts_context(user_id, pinned_node=None):
+def get_user_artifacts_context(user_id, pinned_node=None, usage=None,
+                               rendered=None):
     """Resolve user artifacts for the agentic prompt (#158).
 
     Returns (memory_content, scratchpad_content, index_text). Pinned to the
@@ -650,6 +657,15 @@ def get_user_artifacts_context(user_id, pinned_node=None):
     back to latest for legacy nodes. ai_usage is re-checked on resolved rows.
     The todo list (its own model) is listed in the index too, pulled via
     read_todo (#158 Slice 3).
+
+    Each row that reaches the text reports to *usage* (a ContextUsage,
+    #326) under its placeholder: memory, scratchpad and intentions by
+    their content, the index's rows by their title and description. The
+    todo line carries a token count only, so it does not report.
+    *rendered* is the set of the four placeholders the text being
+    rendered actually carries (None = all of them): a row whose
+    placeholder is absent never reaches the payload, so it does not
+    report.
     """
     artifacts = pinned_node.get_user_artifacts() if pinned_node else {}
     if not artifacts:
@@ -666,6 +682,16 @@ def get_user_artifacts_context(user_id, pinned_node=None):
     scratchpad_content = scratchpad.get_content() if scratchpad else ""
     intentions_content = intentions.get_content() if intentions else ""
 
+    def _reports(placeholder):
+        return usage is not None and (rendered is None
+                                      or placeholder in rendered)
+
+    for placeholder, row in ((USER_MEMORY_PLACEHOLDER, memory),
+                             (USER_SCRATCHPAD_PLACEHOLDER, scratchpad),
+                             (USER_INTENTIONS_PLACEHOLDER, intentions)):
+        if row is not None and _reports(placeholder):
+            usage.note_row(placeholder, row, f"the {row.kind} artifact")
+
     index_lines = []
     # Todo first — it's a curated logistics surface, not a freeform artifact.
     todo_line = _todo_index_line(user_id, pinned_node=pinned_node)
@@ -676,6 +702,9 @@ def get_user_artifacts_context(user_id, pinned_node=None):
         if kind in ALWAYS_INLINE_KINDS:
             continue
         present.add(kind)
+        if _reports(USER_ARTIFACTS_INDEX_PLACEHOLDER):
+            usage.note_row(USER_ARTIFACTS_INDEX_PLACEHOLDER, artifact,
+                           f"the {kind} artifact's index entry")
         tokens = approximate_token_count(artifact.get_content() or "")
         desc = (artifact.description or "").strip()
         desc_part = f": {desc}" if desc else ""
@@ -694,7 +723,7 @@ def get_user_artifacts_context(user_id, pinned_node=None):
     return memory_content, scratchpad_content, intentions_content, index_text
 
 
-def get_user_ai_preferences_content(user_id, pinned_node=None):
+def get_user_ai_preferences_content(user_id, pinned_node=None, usage=None):
     """Resolve the AI preferences for an LLM prompt.
 
     Since #158 Slice 5, AI preferences are a ``UserArtifact`` kind
@@ -702,14 +731,19 @@ def get_user_ai_preferences_content(user_id, pinned_node=None):
     latest. ai_usage is re-checked on the resolved row so a mid-session
     opt-out is honored. (The pre-fold UserAIPreferences fallback was removed
     once the backfill migrates rows + node pins; the table is dropped in
-    #219.)
+    #219.) The row reports to *usage* (#326).
     """
+    art = None
     if pinned_node is not None:
         art = pinned_node.get_user_artifacts().get("ai_preferences")
-        if art is not None and art.ai_usage in AI_ALLOWED:
-            return art.get_content()
-    art = UserArtifact.latest_for(user_id, "ai_preferences")
+        if art is not None and art.ai_usage not in AI_ALLOWED:
+            art = None
+    if art is None:
+        art = UserArtifact.latest_for(user_id, "ai_preferences")
     if art is not None and art.ai_usage in AI_ALLOWED:
+        if usage is not None:
+            usage.note_row(USER_AI_PREFERENCES_PLACEHOLDER, art,
+                           "the ai_preferences artifact")
         return art.get_content()
     return None
 
@@ -878,6 +912,19 @@ def _detect_share_proposal(text):
     return any(h == 'share' for h in headings)
 
 
+def _note_artifact_content(licence, artifact):
+    """Report an artifact whose content joins the payload (#326): by its
+    row, except the saved-references digest, which summarizes other
+    people's writing — saved references never go out on the training key
+    (#325), and neither does a digest of them, whatever its row says."""
+    if artifact.kind == UserArtifact.EXTERNAL_DIGEST_KIND:
+        licence.to_chat(f"the {artifact.kind} artifact summarizes "
+                        "other people's writing")
+    else:
+        licence.note_usage(artifact.ai_usage,
+                           f"the {artifact.kind} artifact")
+
+
 def _retrieval_injection_text(tr, with_labels=False, licence=None):
     """Build the context-injection string for a successful retrieval tool
     result (read_artifact / read_todo / semantic_search), re-resolving the
@@ -888,11 +935,9 @@ def _retrieval_injection_text(tr, with_labels=False, licence=None):
     Everything returned here enters the payload after the chain decided
     the API key, so a pull reports to *licence* (a PayloadLicence, #325):
     a node by its own ai_usage, a saved reference as other people's
-    writing. The user's own artifacts and todo list do not report: the
-    same rows reach the payload through the prompt's placeholders without
-    a vote, and every writer stamps an artifact 'chat' whatever the user's
-    default, so one decision has to cover both doors (#326). None skips
-    the report (callers that only render the text).
+    writing, the user's own artifact or todo list by its row (#326; the
+    placeholders report the same rows, see ContextUsage). None skips the
+    report (callers that only render the text).
 
     *with_labels* renders each search match's short quote label ([A], [B])
     and tells the model to quote by label — only valid within the turn that
@@ -904,12 +949,16 @@ def _retrieval_injection_text(tr, with_labels=False, licence=None):
         artifact = UserArtifact.query.get(tr.get("artifact_id"))
         if artifact is None or artifact.ai_usage not in AI_ALLOWED:
             return None
+        if licence is not None:
+            _note_artifact_content(licence, artifact)
         return (f"[Contents of artifact '{tr.get('kind', '?')}' you "
                 f"requested:\n{artifact.get_content()}]")
     if name == "read_todo":
         todo = UserTodo.query.get(tr.get("todo_id"))
         if todo is None or todo.ai_usage not in AI_ALLOWED:
             return None
+        if licence is not None:
+            licence.note_usage(todo.ai_usage, "the todo list")
         return f"[Your current todo list:\n{todo.get_content()}]"
     if name == "read_full":
         # Re-resolve via the quote machinery (permission + ai_usage checks
@@ -1093,7 +1142,7 @@ def _interim_fallback_text(tool_calls):
     return "(" + ", ".join(parts) + "…)"
 
 
-def _artifact_update_echo(tr):
+def _artifact_update_echo(tr, licence=None):
     """Within-turn echo of what an update_artifact call actually WROTE,
     injected into the continuation call: a unified diff against the
     previous version (full text for creations). Without it the model has
@@ -1104,7 +1153,9 @@ def _artifact_update_echo(tr):
 
     Content is re-resolved from the encrypted rows via the stored ids and
     NEVER persisted to plaintext tool_calls_meta. Returns None for
-    non-update or failed entries and for no-op writes."""
+    non-update or failed entries and for no-op writes. The rows the echo
+    shows — the new version, and the previous one a diff takes its
+    context lines from — report to *licence* (#326)."""
     if tr.get("name") != "update_artifact" or tr.get("status") != "success":
         return None
     artifact = UserArtifact.query.get(tr.get("artifact_id"))
@@ -1114,6 +1165,8 @@ def _artifact_update_echo(tr):
     kind = tr.get("kind")
     prev_id = tr.get("previous_artifact_id")
     if prev_id is None:
+        if licence is not None:
+            _note_artifact_content(licence, artifact)
         return f"[You created '{kind}' with this content:\n{new_text}]"
     previous = UserArtifact.query.get(prev_id)
     old_text = (previous.get_content() or "") if previous else ""
@@ -1123,10 +1176,15 @@ def _artifact_update_echo(tr):
     diff = "\n".join(diff_lines)
     if not diff:
         return None
+    if licence is not None:
+        _note_artifact_content(licence, artifact)
     if len(diff) > ARTIFACT_ECHO_DIFF_THRESHOLD_CHARS:
         # A rewrite this heavy reads clearer (and usually shorter) in full.
         return (f"[Your rewrite of '{kind}' was substantial — its full "
                 f"new content:\n{new_text}]")
+    if licence is not None and previous is not None:
+        # The diff's context and removed lines are the previous version.
+        _note_artifact_content(licence, previous)
     return (f"[Your changes to '{kind}' — the copy shown in your context "
             f"predates this update:\n{diff}]")
 
@@ -1655,6 +1713,24 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                                 else UserArtifact.DEFAULT_DESCRIPTIONS.get(
                                     kind)
                             )
+                        # The row's ai_usage is what the training key
+                        # reads wherever the artifact goes next (#326).
+                        # The model writes it from THIS conversation, so
+                        # it is 'train' only when the owner's default and
+                        # the thread's own setting both are: a Chat
+                        # thread's content must not come back as a
+                        # 'train' row in another thread, and a 'none'
+                        # default in a thread the user set to Chat still
+                        # gets memory the next turn can read. The chain's
+                        # verdict, not the licence — once a 'chat' memory
+                        # was in a payload the licence would keep every
+                        # later write 'chat' for good.
+                        owner = User.query.get(user_id)
+                        writes_train = (
+                            owner is not None
+                            and owner.default_ai_usage == "train"
+                            and determine_api_key_type(node_chain)
+                            == "train")
                         artifact = UserArtifact(
                             user_id=user_id,
                             kind=kind,
@@ -1663,6 +1739,7 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                             generated_by=(llm_node.llm_model
                                           or "agentic_session"),
                             tokens_used=0,
+                            ai_usage="train" if writes_train else "chat",
                         )
                         artifact.set_content(new_text)
                         db.session.add(artifact)
@@ -1938,7 +2015,7 @@ def build_user_export_content(user, max_tokens=None, filter_ai_usage=False,
     return _build(user, max_tokens, filter_ai_usage, **kwargs)
 
 
-def get_user_profile_content(user_id, pinned_node=None):
+def get_user_profile_content(user_id, pinned_node=None, usage=None):
     """
     Resolve the user profile for an LLM prompt.
 
@@ -1950,6 +2027,7 @@ def get_user_profile_content(user_id, pinned_node=None):
     snapshot instead of re-fetching "latest now" each turn. Falls back to
     the latest when the node has no binding (e.g. legacy nodes). ai_usage is
     re-checked on the resolved row so a mid-session opt-out is honored.
+    The row reports to *usage* (#326).
     """
     profile = pinned_node.get_artifact("profile") if pinned_node else None
     if profile is None:
@@ -1958,18 +2036,21 @@ def get_user_profile_content(user_id, pinned_node=None):
         ).first()
 
     if profile and profile.ai_usage in AI_ALLOWED:
+        if usage is not None:
+            usage.note_row(USER_PROFILE_PLACEHOLDER, profile, "the profile")
         return profile
     return None
 
 
-def get_user_todo_content(user_id, pinned_node=None):
+def get_user_todo_content(user_id, pinned_node=None, usage=None):
     """
     Resolve the user todo content for an LLM prompt.
 
     Returns the todo content if ai_usage permits AI access, otherwise None.
     Prefers the version recorded on *pinned_node* (see #191), falling back to
     the latest when the node has no binding. ai_usage is re-checked on the
-    resolved row so a mid-session opt-out is honored.
+    resolved row so a mid-session opt-out is honored. The row reports to
+    *usage* (#326).
     """
     todo = pinned_node.get_artifact("todo") if pinned_node else None
     if todo is None:
@@ -1978,11 +2059,13 @@ def get_user_todo_content(user_id, pinned_node=None):
         ).first()
 
     if todo and todo.ai_usage in AI_ALLOWED:
+        if usage is not None:
+            usage.note_row(USER_TODO_PLACEHOLDER, todo, "the todo list")
         return todo.get_content()
     return None
 
 
-def get_user_recent_content(user_id, pinned_node=None):
+def get_user_recent_content(user_id, pinned_node=None, usage=None):
     """Resolve the recent context summary for an LLM prompt.
 
     Prefers the version recorded on *pinned_node* (see #191) — the same one
@@ -1990,7 +2073,7 @@ def get_user_recent_content(user_id, pinned_node=None):
     Falls back (legacy nodes) to the latest summary for the *current*
     profile, so summaries from before a profile update are not returned.
     ai_usage is re-checked on the resolved row so a mid-session opt-out is
-    honored.
+    honored. The row reports to *usage* (#326).
     """
     rc = pinned_node.get_artifact("recent_context") if pinned_node else None
     if rc is None:
@@ -2007,11 +2090,14 @@ def get_user_recent_content(user_id, pinned_node=None):
         rc = q.order_by(UserRecentContext.created_at.desc()).first()
 
     if rc and rc.ai_usage in AI_ALLOWED:
+        if usage is not None:
+            usage.note_row(USER_RECENT_PLACEHOLDER, rc,
+                           "the recent context summary")
         return rc
     return None
 
 
-def get_user_recent_raw_content(user_id, created_before=None):
+def get_user_recent_raw_content(user_id, created_before=None, usage=None):
     """Get the most recent ~10K tokens of raw user writing.
 
     Always returns a fixed window of the last ~10K tokens regardless of
@@ -2021,6 +2107,8 @@ def get_user_recent_raw_content(user_id, created_before=None):
     Args:
         created_before: Upper bound timestamp. Nodes created at/after this
             time are excluded to avoid duplicating current session context.
+        usage: A ContextUsage; every entry, quote and reference the window
+            renders reports to it (#326).
 
     Returns:
         dict with keys (content, earliest, latest) or None if no data.
@@ -2039,6 +2127,8 @@ def get_user_recent_raw_content(user_id, created_before=None):
         created_before=created_before,
         chronological_order=False,
         return_metadata=True,
+        licence=(usage.licence(USER_RECENT_RAW_PLACEHOLDER)
+                 if usage is not None else None),
     )
     if not result:
         return None
@@ -2486,7 +2576,7 @@ class LLMCompletionTask(Task):
                     logger.error(f"LLM completion failed for node {llm_node_id}: {exc}")
 
 
-def render_system_message(system_node, user_id):
+def render_system_message(system_node, user_id, usage=None):
     """Render the system node's full message text exactly as the
     generation loop would (#192/#187).
 
@@ -2494,7 +2584,8 @@ def render_system_message(system_node, user_id):
     real generation share byte-identical prefixes: the result is stored
     in the #192 Redis cache, and generation prefers those cached bytes.
     Only valid for prompts without volatile placeholders ({user_export},
-    {quote:..}, {quote_ext:..}) — callers must check first.
+    {quote:..}, {quote_ext:..}) — callers must check first. The rows the
+    placeholders resolve to report to *usage* (a ContextUsage, #326).
     """
     owner = User.query.get(user_id)
     user_tz = owner.timezone if owner and owner.timezone else "UTC"
@@ -2505,21 +2596,23 @@ def render_system_message(system_node, user_id):
 
     if USER_PROFILE_PLACEHOLDER in text:
         profile_obj = get_user_profile_content(
-            user_id, pinned_node=system_node)
+            user_id, pinned_node=system_node, usage=usage)
         text = text.replace(
             USER_PROFILE_PLACEHOLDER,
             profile_obj.get_content() if profile_obj else "")
     if USER_TODO_PLACEHOLDER in text:
         text = text.replace(
             USER_TODO_PLACEHOLDER,
-            get_user_todo_content(user_id, pinned_node=system_node) or "")
+            get_user_todo_content(
+                user_id, pinned_node=system_node, usage=usage) or "")
     if USER_RECENT_PLACEHOLDER in text:
-        rc = get_user_recent_content(user_id, pinned_node=system_node)
+        rc = get_user_recent_content(
+            user_id, pinned_node=system_node, usage=usage)
         text = text.replace(
             USER_RECENT_PLACEHOLDER, rc.get_content() if rc else "")
     if USER_RECENT_RAW_PLACEHOLDER in text:
         raw_result = get_user_recent_raw_content(
-            user_id, created_before=system_node.created_at)
+            user_id, created_before=system_node.created_at, usage=usage)
         raw_text = ""
         if raw_result:
             raw_text = format_date_metadata(
@@ -2532,13 +2625,14 @@ def render_system_message(system_node, user_id):
         text = text.replace(
             USER_AI_PREFERENCES_PLACEHOLDER,
             get_user_ai_preferences_content(
-                user_id, pinned_node=system_node) or "")
+                user_id, pinned_node=system_node, usage=usage) or "")
     if (USER_MEMORY_PLACEHOLDER in text
             or USER_SCRATCHPAD_PLACEHOLDER in text
             or USER_INTENTIONS_PLACEHOLDER in text
             or USER_ARTIFACTS_INDEX_PLACEHOLDER in text):
         memory, scratchpad, intentions, index = get_user_artifacts_context(
-            user_id, pinned_node=system_node)
+            user_id, pinned_node=system_node, usage=usage,
+            rendered={p for p in _ARTIFACT_PLACEHOLDERS if p in text})
         text = text.replace(USER_MEMORY_PLACEHOLDER, memory or "")
         text = text.replace(USER_SCRATCHPAD_PLACEHOLDER, scratchpad or "")
         text = text.replace(USER_INTENTIONS_PLACEHOLDER, intentions or "")
@@ -2598,14 +2692,30 @@ def prewarm_anthropic_cache(system_node_id, user_id, model_id,
                 get_cached_render, store_render,
             )
             render_variant = _render_variant(user_id)
-            sys_text = get_cached_render(
+            cached = get_cached_render(
                 flask_app.config, system_node, render_variant)
-            if sys_text is None:
-                sys_text = render_system_message(system_node, user_id)
+            if cached is not None:
+                sys_text, unlicensed = cached
+            else:
+                usage = ContextUsage()
+                sys_text = render_system_message(
+                    system_node, user_id, usage=usage)
+                # The render resolves only the placeholders in its own
+                # text, so this is the same filtered verdict generation
+                # stores.
+                unlicensed = usage.reason(sys_content)
                 store_render(flask_app.config, system_node, sys_text,
-                             render_variant)
+                             render_variant, unlicensed=unlicensed,
+                             rows=usage.rows(sys_content))
 
             key_type = determine_api_key_type([system_node], logger=logger)
+            # The render carries the user's own rows, each licensed by
+            # its own ai_usage (#326).
+            licence = PayloadLicence(
+                key_type, logger=logger, label=f"Pre-warm {system_node_id}")
+            if unlicensed:
+                licence.to_chat(unlicensed)
+            key_type = licence.key_type
             api_keys = get_api_keys_for_usage(flask_app.config, key_type)
             if not api_keys.get("anthropic"):
                 return {"status": "skipped", "reason": "no_key"}
@@ -2922,6 +3032,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 None)
             system_render_cacheable = False
             cached_system_render = None
+            # Why the cached render's own rows are not licensed for
+            # training, or None (#326) — replayed into the licence below.
+            cached_system_unlicensed = None
             if system_node is not None:
                 _sys_text = system_node.get_content() or ""
                 # Exclude prompts carrying per-call volatile placeholders.
@@ -2936,8 +3049,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 )
                 render_variant = _render_variant(user_id)
                 if system_render_cacheable:
-                    cached_system_render = get_cached_render(
+                    _cached = get_cached_render(
                         flask_app.config, system_node, render_variant)
+                    if _cached is not None:
+                        cached_system_render, cached_system_unlicensed = (
+                            _cached)
 
             def _placeholder_node(placeholder):
                 for n in node_chain:
@@ -2988,9 +3104,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             if needs_quotes:
                 logger.info("Detected {quote:ID} placeholders in conversation chain")
 
+            # The user's own rows each placeholder resolves to, by their
+            # own ai_usage; the licence hears them once it exists (#326).
+            context_usage = ContextUsage()
+
             if needs_profile:
                 profile_obj = get_user_profile_content(
-                    user_id, pinned_node=profile_node
+                    user_id, pinned_node=profile_node, usage=context_usage
                 )
                 if profile_obj:
                     # Metadata already baked into stored content
@@ -2998,12 +3118,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             if needs_todo:
                 user_todo_content = get_user_todo_content(
-                    user_id, pinned_node=todo_node
+                    user_id, pinned_node=todo_node, usage=context_usage
                 )
 
             if needs_recent:
                 rc = get_user_recent_content(
-                    user_id, pinned_node=recent_node
+                    user_id, pinned_node=recent_node, usage=context_usage
                 )
                 if rc:
                     # Metadata already baked into stored content
@@ -3012,7 +3132,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             if needs_recent_raw:
                 raw_cutoff = recent_raw_node.created_at if recent_raw_node else None
                 raw_result = get_user_recent_raw_content(
-                    user_id, created_before=raw_cutoff
+                    user_id, created_before=raw_cutoff, usage=context_usage
                 )
                 if raw_result:
                     # Raw data is dynamic — add metadata on the fly
@@ -3024,14 +3144,16 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             if needs_ai_prefs:
                 user_ai_preferences_content = get_user_ai_preferences_content(
-                    user_id, pinned_node=ai_prefs_node
+                    user_id, pinned_node=ai_prefs_node, usage=context_usage
                 )
 
             if needs_artifacts:
                 (user_memory_content, user_scratchpad_content,
                  user_intentions_content,
                  user_artifacts_index) = get_user_artifacts_context(
-                    user_id, pinned_node=artifacts_node
+                    user_id, pinned_node=artifacts_node, usage=context_usage,
+                    rendered={p for p in _ARTIFACT_PLACEHOLDERS
+                              if _placeholder_node(p) is not None},
                 )
 
             # Detect if this is an agentic session (enables tools)
@@ -3145,6 +3267,15 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # keys are re-read from it before every provider call (#325).
             licence = PayloadLicence(
                 key_type, logger=logger, label=f"Node {llm_node_id}")
+            # The user's own rows the placeholders resolved to, and those
+            # a cached system render carries (#326). Each resolved
+            # placeholder is in the payload: it was fetched because an
+            # alive node carries it.
+            for _unlicensed in (context_usage.reason(),
+                                cached_system_unlicensed):
+                if _unlicensed:
+                    licence.to_chat(_unlicensed)
+            key_type = licence.key_type
             api_keys = get_api_keys_for_usage(flask_app.config, key_type)
 
             # Scan all proposals across the chain for status injection.
@@ -3184,6 +3315,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             window_end = created_before or datetime.utcnow()
                             created_after = window_end - timedelta(days=export_days)
                         chronological = export_params.get('keep') == 'oldest'
+                        # Every entry, quote and reference the archive
+                        # renders reports to the licence: one 'chat'
+                        # entry takes the turn to chat keys (#326).
                         user_export_content = build_user_export_content(
                             user,
                             max_tokens=max_export_tokens,
@@ -3192,6 +3326,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             created_after=created_after,
                             chronological_order=chronological,
                             include_strategy="engaged_threads",
+                            licence=licence,
                         )
                         requested_max = export_params.get('max_export_tokens')
                         logger.info(
@@ -3502,7 +3637,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 and attempt == 0):
                             store_render(
                                 flask_app.config, system_node, message_text,
-                                render_variant)
+                                render_variant,
+                                unlicensed=context_usage.reason(_sys_text),
+                                rows=context_usage.rows(_sys_text))
                     if role == "assistant":
                         last_assistant_index = len(messages)
                     messages.append({
@@ -4015,7 +4152,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             # Echo what an artifact write actually changed
                             # (diff vs. the previous version) so the model
                             # can build on its own edit in the answer.
-                            echo = _artifact_update_echo(tr)
+                            echo = _artifact_update_echo(tr, licence=licence)
                             if echo:
                                 injection_strings.append(echo)
                         elif tr.get("status") == "success":

@@ -427,3 +427,24 @@ def test_collector_keeps_a_young_unreadable_batch_pending(app, monkeypatch):
     assert _digest._collect_digest_batches() == {"collected": 0,
                                                  "abandoned": 0}
     assert ExternalDigestBatchJob.query.get(job.id).status == "pending"
+
+
+def test_a_rebuild_stamps_the_owners_default_not_the_last_version(
+        app, monkeypatch):
+    """Every artifact writer stamps the owner's default (#326). The
+    digest used to copy the previous version's ai_usage, so a digest
+    first written under a 'chat' default kept 'chat' after the owner
+    moved to 'train'."""
+    user = User.query.first()
+    _mk_item(user.id, "a", fetched_at=datetime.utcnow() - timedelta(hours=2))
+    old = _mk_digest(user.id,
+                     created_at=datetime.utcnow() - timedelta(hours=3))
+    assert old.ai_usage == "chat"
+    user.default_ai_usage = "train"
+    _db.session.commit()
+    _stub_llm(monkeypatch)
+
+    assert _digest.rebuild_external_digest(
+        _FakeSelf(), user.id)["status"] == "ok"
+    assert UserArtifact.latest_for(
+        user.id, _digest.DIGEST_KIND).ai_usage == "train"

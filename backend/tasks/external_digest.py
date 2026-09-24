@@ -40,7 +40,7 @@ from backend.utils.timefmt import user_local_hour
 
 logger = get_task_logger(__name__)
 
-DIGEST_KIND = "external_digest"
+DIGEST_KIND = UserArtifact.EXTERNAL_DIGEST_KIND
 DIGEST_TITLE = "Saved References Digest"
 DIGEST_DESCRIPTION = (
     "Topic map of the tweets, bookmarks and web pages {name} saved "
@@ -212,10 +212,11 @@ def _save_digest(user, model_id, digest_text, response, corpus_at, batch):
                 "{name}", user.username or "the user")),
         generated_by=model_id,
         tokens_used=fields["input_tokens"] + fields["output_tokens"],
-        # Respect a manual opt-out on the previous version; otherwise
-        # mirror the user's global default (recent_context precedent).
-        ai_usage=(previous.ai_usage if previous
-                  else user.default_ai_usage),
+        # The user's global default, like every artifact writer (#326;
+        # nothing sets an artifact's ai_usage by hand). Its content never
+        # goes out on the training key whatever this says: it summarizes
+        # other people's writing (see _note_artifact_content).
+        ai_usage=user.default_ai_usage,
     )
     artifact.set_content(digest_text)
     db.session.add(artifact)

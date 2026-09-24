@@ -265,7 +265,16 @@ def test_render_cache_roundtrip_and_key_busting(app, monkeypatch):
         assert prompt_cache.get_cached_render(app.config, node) is None
         prompt_cache.store_render(app.config, node, "rendered bytes")
         assert prompt_cache.get_cached_render(
-            app.config, node) == "rendered bytes"
+            app.config, node) == ("rendered bytes", None)
+        # The training-key verdict travels with the text (#326).
+        prompt_cache.store_render(app.config, node, "rendered bytes",
+                                  unlicensed="the memory artifact is 'chat'")
+        assert prompt_cache.get_cached_render(app.config, node) == (
+            "rendered bytes", "the memory artifact is 'chat'")
+        # An entry that is not a text + verdict pair is a miss, never a
+        # verdict-less hit.
+        fake.store[prompt_cache._key(node)] = b"a plain render"
+        assert prompt_cache.get_cached_render(app.config, node) is None
 
         # Editing the node (updated_at changes) busts the key naturally
         from datetime import datetime
@@ -279,9 +288,9 @@ def test_render_cache_roundtrip_and_key_busting(app, monkeypatch):
         prompt_cache.store_render(app.config, node, "no refs", "a1s0e0")
         prompt_cache.store_render(app.config, node, "with refs", "a1s0e1")
         assert prompt_cache.get_cached_render(
-            app.config, node, "a1s0e0") == "no refs"
+            app.config, node, "a1s0e0").text == "no refs"
         assert prompt_cache.get_cached_render(
-            app.config, node, "a1s0e1") == "with refs"
+            app.config, node, "a1s0e1").text == "with refs"
         assert prompt_cache.get_cached_render(app.config, node) is None
 
 
