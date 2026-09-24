@@ -20,6 +20,7 @@ from backend.utils.privacy import (
 from backend.routes.terms import CURRENT_TERMS_VERSION
 from backend.utils.reserved_usernames import validate_username
 from backend.utils.spend import user_is_capped
+from backend.utils.llm_nodes import effective_preferred_model, is_active_model
 
 logger = logging.getLogger(__name__)
 dashboard_bp = Blueprint("dashboard_bp", __name__)
@@ -128,7 +129,7 @@ def get_dashboard():
             "plan": current_user.plan,
             "voice_mode_enabled": voice_mode_enabled,
             "craft_mode": current_user.craft_mode,
-            "preferred_model": current_user.preferred_model,
+            "preferred_model": effective_preferred_model(current_user),
             "profile_generation_task_id": current_user.profile_generation_task_id,
             # Batch-pipeline builds set no task id (#258); the watcher starts
             # polling /export/profile-progress on either flag.
@@ -501,7 +502,10 @@ def update_user():
             data["external_content_enabled"])
 
     if "preferred_model" in data:
-        current_user.preferred_model = data["preferred_model"]
+        model_id = data["preferred_model"]
+        if model_id and not is_active_model(model_id):
+            return jsonify({"error": f"Model not offered: {model_id}"}), 400
+        current_user.preferred_model = model_id
 
     if "default_privacy_level" in data:
         val = data["default_privacy_level"]
@@ -557,7 +561,7 @@ def update_user():
                 "plan": current_user.plan,
                 "voice_mode_enabled": voice_mode_enabled,
                 "craft_mode": current_user.craft_mode,
-                "preferred_model": current_user.preferred_model,
+                "preferred_model": effective_preferred_model(current_user),
                 "profile_generation_task_id": current_user.profile_generation_task_id,
                 "profile_batch_pending": bool(current_user.profile_batch_pending),
                 "default_privacy_level": current_user.default_privacy_level,

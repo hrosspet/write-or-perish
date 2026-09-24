@@ -52,6 +52,7 @@ from backend.utils.ca_feed import (
     CA_CHAT_TURN_NOTE, CA_READ_AGAIN_TURN, CA_TWEETS_CHAT_STUB,
     READ_FURTHER_MARKER,
     FeedReplyError, read_reply_ids, record_feed_render,
+    ca_turn as _ca_turn,
     refresh_snapshot_for_read, refs_from_render, seen_tweet_ids,
 )
 from backend.utils.tool_meta import update_tool_meta, parse_github_issue
@@ -2094,46 +2095,6 @@ def _read_requested(node):
     meta, _ = _batch_meta(node)
     return any(isinstance(m, dict) and m.get("name") == READ_FURTHER_MARKER
                for m in meta)
-
-
-def _ca_turn(node_chain, ca_node, parent_node, reply_ids, requested=False):
-    """Which turn of a read thread this reply is (backend/utils/ca_feed.py);
-    *ca_node* is the newest read prompt in the chain, *reply_ids* the ids
-    of the chain's read replies (ca_feed.read_reply_ids), *requested*
-    whether the Read button asked for this reply (_read_requested):
-
-    "read"       no reply has answered the read prompt yet: the day is
-                 rendered and the model answers with a verdict and picks
-                 (also when the user typed something under the prompt
-                 before asking for the reply).
-    "read_again" the Read button asked for it from anywhere in the
-                 thread (*requested*), or the reply was asked for directly
-                 under a read reply: another read, further into the day.
-                 The day is rendered again (minus what the reader has seen
-                 since); the earlier picks, the reader's marks on them and
-                 whatever was written since are in the context, and
-                 whether to repeat an unread pick is the model's call.
-    "chat"       a user message came after a read reply: a conversation
-                 about the picks. The day is not rendered; the placeholder
-                 reads as a stub, the picks and marks stay in the context.
-                 Unlike a read it may run under the agentic prompt (a
-                 Text-mode session under the read reply, #323).
-    """
-    replies = []
-    after_prompt = False
-    for n in node_chain:
-        if n is ca_node:
-            after_prompt = True
-            continue
-        if after_prompt and n.deleted_at is None and n.id in reply_ids:
-            replies.append(n)
-    if not replies:
-        return "read"
-    if requested:
-        return "read_again"
-    if parent_node is not None and replies[-1].id == parent_node.id:
-        return "read_again"
-    return "chat"
 
 
 CA_BATCH_PROVIDERS = ("anthropic", "openai")

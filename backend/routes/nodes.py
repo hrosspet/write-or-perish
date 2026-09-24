@@ -45,6 +45,7 @@ from backend.utils.encryption import encrypt_file, decrypt_file_to_temp
 from backend.utils.audio_storage import list_streaming_audio_files
 from backend.utils.llm_nodes import (
     create_llm_placeholder, pick_model_for_generation,
+    resolve_chat_model, resolve_read_model,
 )
 from backend.utils.placeholders import UserExportValidationError
 
@@ -1425,91 +1426,62 @@ def get_node_titles():
 @nodes_bp.route("/models", methods=["GET"])
 @login_required
 def get_models():
-    """Return the list of available (non-deprecated) models for the frontend."""
+    """The active (non-deprecated) models for the pickers, newest first
+    within each provider. ``featured`` models make the short list;
+    ``read`` models are the only ones the Read button offers (#355)."""
     supported = current_app.config["SUPPORTED_MODELS"]
     models = [
-        {"id": model_id, "name": cfg["display_name"], "provider": cfg["provider"]}
+        {"id": model_id, "name": cfg["display_name"],
+         "provider": cfg["provider"],
+         "featured": bool(cfg.get("featured")),
+         "read": bool(cfg.get("read"))}
         for model_id, cfg in supported.items()
-        if not cfg.get("deprecated")
+        if "provider" in cfg and not cfg.get("deprecated")
     ]
     return jsonify({"models": models}), 200
+
+
+def _model_purpose():
+    """``?purpose=`` of the default-model endpoints: "chat" (a reply,
+    the default) or "read" (the Read button); None when invalid."""
+    purpose = request.args.get("purpose") or "chat"
+    return purpose if purpose in ("chat", "read") else None
 
 
 # Get the default model from server config
 @nodes_bp.route("/default-model", methods=["GET"])
 @login_required
 def get_default_model():
-    """Return the LLM model that would be used for a fresh thread.
-
-    Falls through user.preferred_model → server config DEFAULT_LLM_MODEL,
-    matching the backend's actual selection logic when no parent context
-    exists (see ``pick_model_for_generation``).
-    """
-    supported = current_app.config["SUPPORTED_MODELS"]
-    pref = getattr(current_user, "preferred_model", None)
-    if pref:
-        cfg = supported.get(pref)
-        if cfg and not cfg.get("deprecated"):
-            return jsonify({
-                "suggested_model": pref,
-                "source": "user_preference",
-            }), 200
-    default_model = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-5")
-    return jsonify({
-        "suggested_model": default_model,
-        "source": "default"
-    }), 200
+    """Return the LLM model that would be used for a fresh thread:
+    user.preferred_model → DEFAULT_LLM_MODEL, or READ_DEFAULT_MODEL for
+    ``?purpose=read`` (see resolve_chat_model / resolve_read_model)."""
+    purpose = _model_purpose()
+    if purpose is None:
+        return jsonify({"error": "purpose must be 'chat' or 'read'"}), 400
+    if purpose == "read":
+        model_id, source = resolve_read_model(None)
+    else:
+        model_id, source = resolve_chat_model(None, current_user)
+    return jsonify({"suggested_model": model_id, "source": source}), 200
 
 
 # Get the suggested model for a new LLM response based on the thread's context
 @nodes_bp.route("/<int:node_id>/suggested-model", methods=["GET"])
 @login_required
 def get_suggested_model(node_id):
-    """
-    Return the suggested model for a new LLM response based on the thread's context.
-
-    Logic:
-    1. Walk up the thread ancestry from the given node
-    2. Find the most recent node with node_type='llm' AND llm_model IS NOT NULL
-    3. If found AND the model is active (not deprecated), return that model
-    4. If the model is deprecated or legacy, fall through to default
-    5. If no predecessor found, return system default
-    """
+    """The model a new reply under *node_id* defaults to: the same walk
+    the reply routes apply when no model is sent. ``?purpose=read`` asks
+    for the Read button's default instead. ``source`` is "predecessor"
+    when an earlier reply in the thread decided it."""
     node = Node.query.get_or_404(node_id)
-    supported = current_app.config["SUPPORTED_MODELS"]
-
-    # Walk up the ancestry to find the most recent LLM node
-    current = node
-    while current:
-        if current.node_type == "llm" and current.llm_model:
-            cfg = supported.get(current.llm_model)
-            # Check if the model is supported and not deprecated
-            if cfg and not cfg.get("deprecated"):
-                return jsonify({
-                    "suggested_model": current.llm_model,
-                    "source": "predecessor"
-                }), 200
-            # Deprecated or legacy model — fall through
-            elif cfg or current.llm_model == "gpt-4.5-preview":
-                break
-        current = current.parent
-
-    # No usable predecessor — try the user's account preference
-    pref = getattr(current_user, "preferred_model", None)
-    if pref:
-        cfg = supported.get(pref)
-        if cfg and not cfg.get("deprecated"):
-            return jsonify({
-                "suggested_model": pref,
-                "source": "user_preference",
-            }), 200
-
-    # Fall back to server default
-    default_model = current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-5")
-    return jsonify({
-        "suggested_model": default_model,
-        "source": "default"
-    }), 200
+    purpose = _model_purpose()
+    if purpose is None:
+        return jsonify({"error": "purpose must be 'chat' or 'read'"}), 400
+    if purpose == "read":
+        model_id, source = resolve_read_model(node)
+    else:
+        model_id, source = resolve_chat_model(node, current_user)
+    return jsonify({"suggested_model": model_id, "source": source}), 200
 
 # Request an LLM response based on the thread (the ancestors' texts are joined as a prompt).
 @nodes_bp.route("/<int:node_id>/llm", methods=["POST"])

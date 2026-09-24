@@ -59,8 +59,9 @@ def _make_app():
     app.config["SECRET_KEY"] = "test-secret"
     app.config["TESTING"] = True
     app.config["DEFAULT_LLM_MODEL"] = "gpt-5"
+    app.config["READ_DEFAULT_MODEL"] = "gpt-5"
     app.config["SUPPORTED_MODELS"] = {
-        "gpt-5": {"provider": "openai", "api_model": "gpt-5"},
+        "gpt-5": {"provider": "openai", "api_model": "gpt-5", "read": True},
     }
 
     _db.init_app(app)
@@ -73,6 +74,8 @@ def _make_app():
 
     from backend.routes.read import read_bp
     app.register_blueprint(read_bp, url_prefix="/api/read")
+    from backend.routes.nodes import nodes_bp
+    app.register_blueprint(nodes_bp, url_prefix="/api/nodes")
 
     return app
 
@@ -697,3 +700,220 @@ class TestStripAgenticPrompts:
         _db.session.commit()
         chain, dropped = strip_agentic_prompts([voice], keep=voice)
         assert dropped == [] and chain == [voice]
+
+
+# ── Model choice (#355) ───────────────────────────────────────────────
+
+MODELS_355 = {
+    "claude-opus-4.6": {"provider": "anthropic", "display_name": "Opus 4.6",
+                        "featured": True},
+    "claude-opus-5": {"provider": "anthropic", "display_name": "Opus 5",
+                      "deprecated": True},
+    "gpt-6-luna": {"provider": "openai", "display_name": "GPT-6 Luna",
+                   "read": True},
+    "gpt-6-sol": {"provider": "openai", "display_name": "GPT-6 Sol",
+                  "read": True},
+}
+
+
+@pytest.fixture
+def app355(app):
+    app.config["SUPPORTED_MODELS"] = MODELS_355
+    app.config["DEFAULT_LLM_MODEL"] = "claude-opus-4.6"
+    app.config["READ_DEFAULT_MODEL"] = "gpt-6-luna"
+    return app
+
+
+def _read_thread(alice, read_model="gpt-6-sol", chat_model="claude-opus-4.6"):
+    """root → read prompt → read reply (read_model) → note → chat reply
+    (chat_model) → note. Returns the nodes by name."""
+    root = _make_node(alice, content="a thought")
+    prompt = _make_prompt_node(alice, "read_thread", parent_id=root.id)
+    read = _make_node(alice, parent_id=prompt.id, node_type="llm",
+                      llm_model=read_model, content="picks")
+    note = _make_node(alice, parent_id=read.id, content="about #2")
+    chat = _make_node(alice, parent_id=note.id, node_type="llm",
+                      llm_model=chat_model, content="sure")
+    note2 = _make_node(alice, parent_id=chat.id, content="and #3?")
+    _db.session.commit()
+    return dict(root=root, prompt=prompt, read=read, note=note, chat=chat,
+                note2=note2)
+
+
+class TestModelChoice:
+    def test_chat_default_skips_the_read_reply(self, app355):
+        from backend.utils.llm_nodes import resolve_chat_model
+        alice = _make_user("alice", is_admin=True)
+        t = _read_thread(alice)
+        # Under the read reply's note the nearest reply is the Sol read:
+        # the chat default must not inherit it.
+        assert resolve_chat_model(t["note"], alice) == ("claude-opus-4.6", "default")
+        alice.preferred_model = "claude-opus-4.6"
+        assert resolve_chat_model(t["note"], alice)[1] == "user_preference"
+        assert resolve_chat_model(t["note2"], alice) == ("claude-opus-4.6", "predecessor")
+
+    def test_read_default_skips_the_chat_reply(self, app355):
+        from backend.utils.llm_nodes import resolve_read_model
+        alice = _make_user("alice", is_admin=True)
+        t = _read_thread(alice)
+        assert resolve_read_model(t["note2"]) == ("gpt-6-sol", "predecessor")
+        assert resolve_read_model(t["root"]) == ("gpt-6-luna", "default")
+        assert resolve_read_model(None) == ("gpt-6-luna", "default")
+
+    def test_read_default_ignores_a_read_on_a_non_read_model(self, app355):
+        from backend.utils.llm_nodes import resolve_read_model
+        alice = _make_user("alice", is_admin=True)
+        t = _read_thread(alice, read_model="claude-opus-4.6")
+        assert resolve_read_model(t["note2"]) == ("gpt-6-luna", "default")
+
+    def test_read_route_refuses_a_chat_model(self, app355):
+        client = app355.test_client()
+        alice = _make_user("alice", is_admin=True)
+        _db.session.commit()
+        _login(client, alice.id)
+        resp = client.post("/api/read/start", json={"model": "claude-opus-4.6"})
+        assert resp.status_code == 400
+        assert "GPT-6 Luna" in resp.get_json()["error"]
+
+    def test_read_further_without_a_model_takes_the_threads_read_model(self, app355):
+        client = app355.test_client()
+        alice = _make_user("alice", is_admin=True)
+        t = _read_thread(alice)
+        _login(client, alice.id)
+        resp = client.post(f"/api/read/from-node/{t['note2'].id}", json={})
+        assert resp.status_code == 202, resp.get_json()
+        assert Node.query.get(resp.get_json()["llm_node_id"]).llm_model == "gpt-6-sol"
+
+    def test_placeholder_under_a_read_reply_runs_on_a_read_model(self, app355):
+        from backend.utils.llm_nodes import create_llm_placeholder
+        alice = _make_user("alice", is_admin=True)
+        t = _read_thread(alice)
+        _render(t["read"])  # a finished read has its render pinned
+        # Directly under the read reply a reply is another read.
+        node, _ = create_llm_placeholder(t["read"].id, "claude-opus-4.6", alice.id)
+        assert node.llm_model == "gpt-6-sol"
+        # Under the prompt (below a typed note) it is the first read.
+        pnote = _make_node(alice, parent_id=t["prompt"].id, content="first")
+        _db.session.commit()
+        node, _ = create_llm_placeholder(pnote.id, "claude-opus-4.6", alice.id)
+        assert node.llm_model == "gpt-6-luna"
+        # A note after the read reply makes it a chat: the model stays.
+        node, _ = create_llm_placeholder(t["note"].id, "claude-opus-4.6", alice.id)
+        assert node.llm_model == "claude-opus-4.6"
+
+
+def _mark(node, *entries):
+    import json as _json
+    node.tool_calls_meta = _json.dumps([{"name": e} for e in entries])
+    _db.session.commit()
+
+
+def _render(node):
+    """Give *node* a pinned render: a read reply the task counts."""
+    from backend.models import FeedRender
+    _db.session.add(FeedRender(node_id=node.id))
+    _db.session.commit()
+
+
+class TestPlaceholderAgreesWithTheTask:
+    """The placeholder guard applies the task's own rule (ca_feed.ca_turn),
+    so failed or unrendered reads count the same on both sides (#356
+    review, finding 2)."""
+
+    def test_after_a_failed_first_read_the_next_reply_is_still_the_read(self, app355):
+        from backend.utils.llm_nodes import create_llm_placeholder, reply_read_turn
+        alice = _make_user("alice", is_admin=True)
+        root = _make_node(alice, content="a thought")
+        prompt = _make_prompt_node(alice, "read_thread", parent_id=root.id)
+        failed = _make_node(alice, parent_id=prompt.id, node_type="llm",
+                            llm_model="gpt-6-luna", content="failed")
+        failed.llm_task_status = "failed"
+        note = _make_node(alice, parent_id=failed.id, content="try again")
+        _db.session.commit()
+        assert reply_read_turn(note) == "read"
+        node, _ = create_llm_placeholder(note.id, "claude-opus-4.6", alice.id)
+        assert node.llm_model == "gpt-6-luna"
+
+    def test_a_reply_on_a_failed_read_further_is_a_chat(self, app355):
+        from backend.utils.llm_nodes import create_llm_placeholder, reply_read_turn
+        alice = _make_user("alice", is_admin=True)
+        t = _read_thread(alice)
+        _render(t["read"])
+        further = _make_node(alice, parent_id=t["note2"].id, node_type="llm",
+                             llm_model="gpt-6-sol", content="failed")
+        _mark(further, "_read")
+        assert reply_read_turn(further) == "chat"
+        node, _ = create_llm_placeholder(further.id, "claude-opus-4.6", alice.id)
+        assert node.llm_model == "claude-opus-4.6"
+
+    def test_directly_under_a_rendered_read_it_is_another_read(self, app355):
+        from backend.utils.llm_nodes import reply_read_turn
+        alice = _make_user("alice", is_admin=True)
+        t = _read_thread(alice)
+        _render(t["read"])
+        assert reply_read_turn(t["read"]) == "read_again"
+        assert reply_read_turn(t["note"]) == "chat"
+        assert reply_read_turn(t["root"]) is None
+
+    def test_a_deprecated_model_sent_explicitly_is_replaced(self, app355):
+        from backend.utils.llm_nodes import create_llm_placeholder
+        alice = _make_user("alice", is_admin=True, preferred_model="claude-opus-5")
+        root = _make_node(alice, content="a thought")
+        _db.session.commit()
+        node, _ = create_llm_placeholder(root.id, "claude-opus-5", alice.id)
+        # The saved preference is deprecated too: LLM_NAME decides.
+        assert node.llm_model == "claude-opus-4.6"
+
+
+class TestModelEndpoints:
+    def test_models_carry_the_flags_and_skip_deprecated(self, app355):
+        client = app355.test_client()
+        alice = _make_user("alice")
+        _db.session.commit()
+        _login(client, alice.id)
+        models = {m["id"]: m for m in client.get("/api/nodes/models").get_json()["models"]}
+        assert "claude-opus-5" not in models
+        assert models["claude-opus-4.6"]["featured"] is True
+        assert models["gpt-6-luna"]["read"] is True
+
+    def test_purpose_read_and_a_deprecated_preference(self, app355):
+        client = app355.test_client()
+        alice = _make_user("alice", is_admin=True, preferred_model="claude-opus-5")
+        t = _read_thread(alice)
+        _login(client, alice.id)
+        read = client.get(f"/api/nodes/{t['note2'].id}/suggested-model?purpose=read").get_json()
+        assert read == {"suggested_model": "gpt-6-sol", "source": "predecessor"}
+        fresh = client.get("/api/nodes/default-model?purpose=read").get_json()
+        assert fresh["suggested_model"] == "gpt-6-luna"
+        chat = client.get("/api/nodes/default-model").get_json()
+        assert chat == {"suggested_model": "claude-opus-4.6", "source": "default"}
+        assert client.get("/api/nodes/default-model?purpose=x").status_code == 400
+
+
+class TestModelWalkQueryCount:
+    def test_walks_are_constant_in_thread_depth(self, app355):
+        from sqlalchemy import event
+        from backend.utils.llm_nodes import (
+            reply_read_turn, resolve_chat_model, resolve_read_model)
+        alice = _make_user("alice", is_admin=True)
+        parent = _make_node(alice, content="start")
+        for i in range(200):
+            reply = _make_node(alice, parent_id=parent.id, node_type="llm",
+                               llm_model="claude-opus-5", content="r")
+            parent = _make_node(alice, parent_id=reply.id, content="u")
+        _db.session.commit()
+        _db.session.expire_all()
+        tip = Node.query.get(parent.id)
+        statements = []
+        listener = lambda *a, **k: statements.append(1)  # noqa: E731
+        event.listen(_db.engine, "before_cursor_execute", listener)
+        try:
+            resolve_read_model(tip)
+            resolve_chat_model(tip, alice)
+            reply_read_turn(tip)
+        finally:
+            event.remove(_db.engine, "before_cursor_execute", listener)
+        # Each call: chain (2) + linked prompt keys (1) + read replies
+        # (2), about 5 whatever the depth; a per-level walk made ~1,000
+        # on a 400-node thread.
+        assert len(statements) <= 20, len(statements)

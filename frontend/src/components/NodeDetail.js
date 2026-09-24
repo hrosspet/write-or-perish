@@ -93,6 +93,10 @@ function NodeDetail({ nodeIdOverride }) {
   const [error, setError] = useState("");
   const [showEditOverlay, setShowEditOverlay] = useState(false);
   const [selectedModel, setSelectedModel] = useState(currentUser?.preferred_model || null);
+  // The Read button's own model: reads run only on the read models
+  // (#355), so it never shares the LLM Response picker's choice. Null
+  // until its picker loads; the backend then picks (resolve_read_model).
+  const [readModel, setReadModel] = useState(null);
   const [llmTaskNodeId, setLlmTaskNodeId] = useState(null);
   // True from the click until POST /nodes/:id/llm answers: the spinner is
   // otherwise driven by the returned node id, so the round trip (a cold
@@ -776,7 +780,7 @@ function NodeDetail({ nodeIdOverride }) {
   // auto-generate on, the batch reply parks under it and we land on the
   // pending reply, which this page polls as "Processing…" until the
   // picks arrive. With it off, only the prompt is attached and we land
-  // on it, where the model picker and LLM Response wait for the user.
+  // on it, where Read and its model picker wait for the user.
   // Inside a read thread the same call reads further (no prompt, a read
   // turn under this node; the click is the request, so auto-generate
   // does not apply) and we land on the pending reply.
@@ -785,7 +789,7 @@ function NodeDetail({ nodeIdOverride }) {
     setError("");
     api
       .post(`/read/from-node/${id}`, {
-        model: selectedModel,
+        model: readModel || undefined,
         auto_generate: autoGenerateActive,
       })
       .then((response) => {
@@ -964,9 +968,9 @@ function NodeDetail({ nodeIdOverride }) {
   // "Read further" — the conversation under the picks can get long and
   // nothing is pinned to the viewport (small screens), so the action
   // travels with the node the user is on. It shows whenever the owner
-  // could act, not only in craft mode; LLM Response and the model
-  // picker keep the craft-bar rule, and the picker sets the model for
-  // both buttons. Directly under a finished read reply LLM Response is
+  // could act, not only in craft mode; LLM Response keeps the craft-bar
+  // rule. Each carries its own model picker: reads run only on the read
+  // models (#355). Directly under a finished read reply LLM Response is
   // disabled: a reply asked for there is another read (the task's
   // parent rule), and the way to talk about the picks is a comment
   // first, whose own row then offers LLM Response again.
@@ -975,18 +979,36 @@ function NodeDetail({ nodeIdOverride }) {
     && !isLlmPending;
   // Before the first picks (the read prompt itself, or a note typed
   // under it) a reply asked for here would be that first read, so the
-  // generic LLM Response is not offered at all: the row is the model
-  // picker and "Read".
+  // generic LLM Response is not offered at all: the row is "Read" and
+  // its model picker.
   const showLlmResponse = showCraftBar && !(inReadThread && !readReplyAbove);
+  // Each action carries its own model picker, joined to its right edge:
+  // [LLM Response | Opus 4.6 v]  [Read further | GPT-6 Luna v] (#355).
+  const actionGroupStyle = { display: 'inline-flex', alignItems: 'stretch' };
+  const joinedButtonStyle = {
+    borderTopRightRadius: 0, borderBottomRightRadius: 0, borderRight: 'none',
+  };
+  const joinedPickerStyle = { borderTopLeftRadius: 0, borderBottomLeftRadius: 0 };
+  const readBusy = readLoading || llmRequesting || !!llmTaskNodeId;
   const readButton = (
-    <button
-      onClick={handleReadFromNode}
-      disabled={readLoading || llmRequesting || !!llmTaskNodeId}
-      title={readTitle}
-      style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}
-    >
-      {readLoading ? 'Starting…' : readLabel}
-    </button>
+    <span style={actionGroupStyle}>
+      <button
+        onClick={handleReadFromNode}
+        disabled={readBusy}
+        title={readTitle}
+        style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', ...joinedButtonStyle }}
+      >
+        {readLoading ? 'Starting…' : readLabel}
+      </button>
+      <ModelSelector
+        nodeId={node.id}
+        purpose="read"
+        selectedModel={readModel}
+        onModelChange={setReadModel}
+        disabled={readBusy}
+        style={joinedPickerStyle}
+      />
+    </span>
   );
   const llmResponseTitle = underReadReply
     ? "To chat about the recommendations, send your reply first. To read further, use the button on the right."
@@ -1390,14 +1412,16 @@ function NodeDetail({ nodeIdOverride }) {
         {(showCraftBar || readActions) && (
           <div style={{ marginTop: "8px", display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
             {showLlmResponse && (
-              /* The span carries the tooltip: a disabled button gets no
-                 hover events in some browsers. */
-              <span title={llmResponseTitle} style={{ display: 'inline-flex' }}>
+              /* The group span carries the tooltip, for the button and its
+                 model picker alike (they are one control, disabled
+                 together): a disabled button or select gets no hover
+                 events in some browsers. */
+              <span title={llmResponseTitle} style={actionGroupStyle}>
                 <button
                   onClick={handleLLMResponse}
                   disabled={llmRequesting || !!llmTaskNodeId || underReadReply}
                   aria-disabled={underReadReply || undefined}
-                  style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', ...joinedButtonStyle }}
                 >
                   {(llmRequesting || llmTaskNodeId) ? (
                     <>
@@ -1407,22 +1431,20 @@ function NodeDetail({ nodeIdOverride }) {
                     </>
                   ) : 'LLM Response'}
                 </button>
+                <ModelSelector
+                  nodeId={node.id}
+                  selectedModel={selectedModel}
+                  onModelChange={setSelectedModel}
+                  disabled={llmRequesting || !!llmTaskNodeId || underReadReply}
+                  style={joinedPickerStyle}
+                />
               </span>
             )}
-            {/* Before the first picks "Read" stands where LLM Response
-                usually is, left of the model picker: the response action
-                users know, under its own name. After them "Read further"
-                sits to the right, beside the (disabled or live) LLM
-                Response. */}
-            {readActions && !showLlmResponse && readButton}
-            {showCraftBar && (
-              <ModelSelector
-                nodeId={node.id}
-                selectedModel={selectedModel}
-                onModelChange={setSelectedModel}
-              />
-            )}
-            {readActions && showLlmResponse && readButton}
+            {/* Before the first picks "Read" stands alone, where LLM
+                Response usually is: the response action users know, under
+                its own name. After them "Read further" sits to the right
+                of the (disabled or live) LLM Response. */}
+            {readActions && readButton}
           </div>
         )}
         {llmTaskNodeId && !showCraftBar && !isLlmPending && (
