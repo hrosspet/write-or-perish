@@ -8,7 +8,7 @@ import RecoveryBanner from '../components/RecoveryBanner';
 import OfflineBanner from '../components/OfflineBanner';
 import ProposalInline from '../components/ProposalInline';
 import { useToast } from '../contexts/ToastContext';
-import { isSpendBlocked, notifySpendBlocked } from '../utils/spendCap';
+import { isSpendBlocked, notifySpendBlocked, spendCapToastMessage } from '../utils/spendCap';
 import api from '../api';
 
 // Chain-chapter numerals — turns cap at a handful of nodes (tool-round
@@ -346,7 +346,8 @@ export default function VoicePage() {
         <RecoveryBanner
           draft={interruptedDraft}
           onContinue={() => {
-            if (isSpendBlocked()) { notifySpendBlocked(); return; }
+            // No spend-cap check: resuming finishes a recording that has
+            // already started, which is always allowed (#341).
             const { session_id, id, chunk_count, parent_id, streaming_mime_type } = interruptedDraft;
             clearInterrupted();
             handleResumeSession({
@@ -439,7 +440,11 @@ export default function VoicePage() {
             onClick={() => {
               // Block before any recording starts — a long recording stopped
               // only at the end would be lost work (issue #85).
-              if (isSpendBlocked()) { notifySpendBlocked(); return; }
+              if (isSpendBlocked()) {
+                notifySpendBlocked();
+                addToast(spendCapToastMessage('record'), 8000);
+                return;
+              }
               handleStart();
             }}
             disabled={!isOnline}
@@ -736,7 +741,11 @@ export default function VoicePage() {
       {/* Record button to continue */}
       <button
         onClick={() => {
-          if (isSpendBlocked()) { notifySpendBlocked(); return; }
+          if (isSpendBlocked()) {
+            notifySpendBlocked();
+            addToast(spendCapToastMessage('record'), 8000);
+            return;
+          }
           handleContinue(voiceReset);
         }}
         disabled={!isOnline}

@@ -413,16 +413,21 @@ def draft_transcription_stream(session_id):
                         "content": current_draft.get_content(),
                         "draft_id": current_draft.id,
                     }
-                    if current_draft.llm_node_id:
-                        complete_data["llm_node_id"] = current_draft.llm_node_id
-                        # Node already exists — draft only lingered for this event.
-                        db.session.delete(current_draft)
-                        db.session.commit()
                     if current_draft.streaming_warning:
                         # Carry user-facing warning to the frontend so it
                         # can render a toast even when no LLM follow-up
-                        # was dispatched (e.g. misconfigured placeholder).
+                        # was dispatched (e.g. misconfigured placeholder,
+                        # spend cap). The transcript was saved as a node.
                         complete_data["warning"] = current_draft.streaming_warning
+                    if current_draft.llm_node_id:
+                        complete_data["llm_node_id"] = current_draft.llm_node_id
+                    if (current_draft.llm_node_id
+                            or current_draft.streaming_warning):
+                        # Node already exists — draft only lingered for this
+                        # event. Left behind, a warning draft would come
+                        # back as a restorable draft and save twice (#341).
+                        db.session.delete(current_draft)
+                        db.session.commit()
                     yield format_sse_message(complete_data, event="all_complete")
                     break
 

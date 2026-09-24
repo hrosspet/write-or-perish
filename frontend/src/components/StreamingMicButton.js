@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useStreamingTranscription } from '../hooks/useStreamingTranscription';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
-import { isSpendBlocked, notifySpendBlocked } from '../utils/spendCap';
+import { isSpendBlocked, notifySpendBlocked, spendCapToastMessage } from '../utils/spendCap';
 import { useToast } from '../contexts/ToastContext';
 
 /**
@@ -185,7 +185,11 @@ export default function StreamingMicButton({
     if (sessionState === 'idle') {
       // Block before any recording starts — a long recording stopped only at
       // the end would be lost work (issue #85).
-      if (isSpendBlocked()) { notifySpendBlocked(); return; }
+      if (isSpendBlocked()) {
+        notifySpendBlocked();
+        addToast(spendCapToastMessage('record'), 8000);
+        return;
+      }
       // Create the alert context HERE, inside the user gesture — that
       // activation is what lets the 59-min chime start while backgrounded.
       try {
@@ -207,7 +211,7 @@ export default function StreamingMicButton({
     } else if (sessionState === 'error') {
       cancelStreaming();
     }
-  }, [sessionState, isInterrupted, startStreaming, stopStreaming, resumeRecording, cancelStreaming, onRecordingStart]);
+  }, [sessionState, isInterrupted, startStreaming, stopStreaming, resumeRecording, cancelStreaming, onRecordingStart, addToast]);
 
   // Format duration as MM:SS
   const formatDuration = (seconds) => {

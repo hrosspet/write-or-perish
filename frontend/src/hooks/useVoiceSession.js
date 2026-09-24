@@ -213,6 +213,15 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       // retry-queue behavior so they don't interrupt an in-progress recording.
       if (!err?.startup && !err?.fatal) return;
 
+      // Refused by the monthly spend cap before the mic opened (#341). The
+      // recorder already showed a toast; return to ready, not an error.
+      if (err?.spendCapped) {
+        stopSilentAudio();
+        setIsStopping(false);
+        setPhase('ready');
+        return;
+      }
+
       const name = err?.name || err?.error?.name;
       let message;
       if (err?.fatal) {

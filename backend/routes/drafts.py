@@ -10,6 +10,7 @@ import shutil
 from backend.utils.audio_storage import move_draft_audio_to_node_dir
 from backend.utils.encryption import encrypt_file
 from backend.utils.llm_nodes import pick_model_for_generation
+from backend.utils.spend import require_spend_headroom
 from backend.utils.webm_utils import (
     chunk_is_init_bearing, persist_init_segment,
 )
@@ -107,8 +108,12 @@ def get_draft():
 
     # Exclude drafts already processed by server-side LLM chain
     # (Reflect/Orient workflows create nodes automatically but leave
-    # the draft alive for the SSE all_complete event)
-    query = query.filter(Draft.llm_node_id.is_(None))
+    # the draft alive for the SSE all_complete event). A draft with a
+    # streaming_warning was saved as a node too, only without a reply
+    # (spend cap, #341, or a refused placeholder): restoring it would
+    # save the same transcript a second time.
+    query = query.filter(Draft.llm_node_id.is_(None),
+                         Draft.streaming_warning.is_(None))
 
     if node_id:
         # Editing an existing node
@@ -440,7 +445,9 @@ def _cleanup_stale_drafts(user_id):
     stale_drafts = Draft.query.filter(
         Draft.user_id == user_id,
         Draft.session_id.isnot(None),
-        Draft.llm_node_id.isnot(None),
+        # streaming_warning: saved as a node with the reply skipped (#341)
+        db.or_(Draft.llm_node_id.isnot(None),
+               Draft.streaming_warning.isnot(None)),
     ).all()
 
     deleted = 0
@@ -448,9 +455,9 @@ def _cleanup_stale_drafts(user_id):
         audio_dir = AUDIO_STORAGE_ROOT / f"drafts/{user_id}/{draft.session_id}"
         if audio_dir.exists():
             current_app.logger.warning(
-                f"Draft {draft.id} (session {draft.session_id}) has "
-                f"llm_node_id={draft.llm_node_id} but audio files were "
-                f"not moved: {list(audio_dir.iterdir())}"
+                f"Draft {draft.id} (session {draft.session_id}) was "
+                f"saved as a node (llm_node_id={draft.llm_node_id}) but "
+                f"audio files were not moved: {list(audio_dir.iterdir())}"
             )
             continue
         db.session.delete(draft)
@@ -465,12 +472,17 @@ def _cleanup_stale_drafts(user_id):
 
 @drafts_bp.route("/streaming/init", methods=["POST"])
 @login_required
+@require_spend_headroom
 def init_streaming():
     """
     Initialize a streaming transcription session.
 
     Creates a Draft record to store the streaming session and transcript.
     NO node is created until the user explicitly saves.
+
+    A capped user gets 402 here, before the frontend opens the mic (#341).
+    Resuming an interrupted session never calls init, and its chunks
+    (audio-chunk, transcribe-remaining, finalize) are not cap-checked.
 
     Request body:
     {
@@ -952,6 +964,11 @@ def get_streaming_status(session_id):
     }
     if draft.llm_node_id:
         status_data["llm_node_id"] = draft.llm_node_id
+    # Same field the SSE all_complete event carries: the frontend's polling
+    # fallback (iOS drops SSE when backgrounded) needs it too, or it treats
+    # a skipped reply as "no server-side chain" and saves the entry again.
+    if draft.streaming_warning:
+        status_data["warning"] = draft.streaming_warning
     return jsonify(status_data)
 
 

@@ -276,23 +276,29 @@ def enforce_user_spend_cap(user_id, config, now=None, send_email=None):
     }
 
 
+def spend_cap_response():
+    """The standard 402 for a capped user (the frontend's api.js interceptor
+    keys the spend-cap banner on the error code)."""
+    from flask import jsonify
+    return jsonify({
+        "error": "monthly_spend_limit_reached",
+        "message": (
+            "You've reached your monthly usage limit for the free "
+            "alpha. It resets at the start of next month."
+        ),
+    }), 402
+
+
 def require_spend_headroom(fn):
     """Route decorator: reject cost-incurring requests from a capped user with
     402 + a clear message. Place below @login_required so current_user is set.
     """
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        from flask import jsonify
         from flask_login import current_user
         if getattr(current_user, "is_authenticated", False) and \
                 user_is_capped(current_user):
-            return jsonify({
-                "error": "monthly_spend_limit_reached",
-                "message": (
-                    "You've reached your monthly usage limit for the free "
-                    "alpha. It resets at the start of next month."
-                ),
-            }), 402
+            return spend_cap_response()
         return fn(*args, **kwargs)
     return wrapper
 

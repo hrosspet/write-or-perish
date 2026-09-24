@@ -588,6 +588,13 @@ def create_node():
         # ------------------------------------------------------------------
         # Voice‑Mode upload path
         # ------------------------------------------------------------------
+        # A capped user cannot start an upload (#341); the text path
+        # below stays open. The frontend checks before the file picker
+        # opens, but its flag can be stale within a session.
+        from backend.utils.spend import spend_cap_response, user_is_capped
+        if user_is_capped(current_user):
+            return spend_cap_response()
+
         if "audio_file" not in request.files:
             return jsonify({"error": "Field 'audio_file' is required"}), 400
 
@@ -2170,10 +2177,13 @@ def get_tts_status(node_id):
 
 @nodes_bp.route("/upload/init", methods=["POST"])
 @login_required
+@require_spend_headroom
 def init_chunked_upload():
     """Initialize a chunked upload session.
 
-    Creates a placeholder node and prepares for chunk reception.
+    Creates a placeholder node and prepares for chunk reception. A capped
+    user gets 402 before the node exists (#341); the chunks and finalize of
+    an upload accepted here are not cap-checked.
 
     Request body:
     {
@@ -2514,6 +2524,7 @@ def serve_audio_file(filename):
 
 @nodes_bp.route("/streaming/init", methods=["POST"])
 @login_required
+@require_spend_headroom
 def init_streaming_transcription():
     """Initialize a streaming transcription session.
 
