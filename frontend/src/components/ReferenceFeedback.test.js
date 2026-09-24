@@ -9,17 +9,17 @@ import ReferenceFeedback from './ReferenceFeedback';
 // which jsdom does not apply. What the CSS depends on is checked here:
 // the icon size reaches --ref-feedback-icon, which sets the pair's
 // negative side margins.
-test('icons default to 20 px and hand their size to the CSS', () => {
+test('icons default to 16 px and hand their size to the CSS', () => {
   render(<ReferenceFeedback itemId={5} feedback={null} />);
   const good = screen.getByRole('button', { name: 'Good quote' });
-  expect(good.querySelector('svg').getAttribute('width')).toBe('20');
-  expect(good.parentElement.style.getPropertyValue('--ref-feedback-icon')).toBe('20px');
+  expect(good.querySelector('svg').getAttribute('width')).toBe('16');
+  expect(good.parentElement.style.getPropertyValue('--ref-feedback-icon')).toBe('16px');
 });
 
 test('a caller-set size reaches both the icon and the CSS', () => {
-  render(<ReferenceFeedback itemId={5} feedback="bad" size={24} />);
+  render(<ReferenceFeedback itemId={5} feedback="bad" size={18} />);
   const bad = screen.getByRole('button', { name: 'Bad quote' });
-  expect(bad.querySelector('svg').getAttribute('width')).toBe('24');
-  expect(bad.parentElement.style.getPropertyValue('--ref-feedback-icon')).toBe('24px');
+  expect(bad.querySelector('svg').getAttribute('width')).toBe('18');
+  expect(bad.parentElement.style.getPropertyValue('--ref-feedback-icon')).toBe('18px');
   expect(bad).toHaveAttribute('aria-pressed', 'true');
 });

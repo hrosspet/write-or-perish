@@ -269,6 +269,7 @@ function ReferenceDetailPage() {
             <ReferenceFeedback
               itemId={item.id}
               feedback={item.feedback}
+              size={18}
               onChange={(fb, data) => setItem((prev) => ({
                 ...prev, feedback: fb, read_at: (data && data.read_at) || prev.read_at,
               }))}

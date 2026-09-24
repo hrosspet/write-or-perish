@@ -333,7 +333,7 @@ code {
 .ref-feedback {
   display: inline-flex;
   align-items: center;
-  margin: 0 min(0px, calc((var(--ref-feedback-icon, 20px) - 40px) / 2));
+  margin: 0 min(0px, calc((var(--ref-feedback-icon, 16px) - 40px) / 2));
 }
 .ref-feedback-glyph {
   display: inline-flex;
