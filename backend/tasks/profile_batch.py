@@ -104,8 +104,8 @@ def batch_pipeline_lock():
                 pass
 
 def _model_for(user):
-    return (user.preferred_model
-            or current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-5"))
+    from backend.utils.llm_nodes import default_model_for
+    return default_model_for(user)
 
 
 def _provider_and_model(model_id):

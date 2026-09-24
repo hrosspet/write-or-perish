@@ -151,7 +151,7 @@ def test_reply_text_is_the_whole_feed(app, monkeypatch, tmp_path):  # noqa: F811
     node = _fresh(llm_node.id)
     assert node.llm_task_status == "completed"
     item = ExternalItem.query.filter_by(
-        user_id=alice.id, source="community_archive", external_id="222").one()
+        user_id=alice.id, source="read_pick", external_id="222").one()
     assert item.get_content() == "second tweet"
     assert item.url == "https://x.com/bob_b/status/222"
     assert node.get_content() == (

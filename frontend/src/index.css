@@ -322,17 +322,45 @@ code {
 
 /* Good / bad quote (ReferenceFeedback): bare contour glyphs, muted
    until chosen. The chosen one takes the accent; hover only lifts the
-   other to secondary so the pair never turns colorful. */
+   other to secondary so the pair never turns colorful.
+   Each glyph sits in a tap target 40 px tall and as wide as the icon
+   plus the gap between the icons (34 px at the default sizes; #351).
+   The two targets touch, so a tap between ⊕ and ⊖ always lands on one.
+   The targets are square: a browser hit-tests a round button only
+   inside its circle, which would leave the corners dead.
+   The pair also sets its own spacing to the control after it (the read
+   toggle), so callers add no gap of their own there. Half the gap sits
+   inside ⊖'s target and the right margin adds the other half, so ⊕, ⊖
+   and the toggle are evenly spaced. The negative left margin lines the
+   ⊕ icon, not its target, up with the edge of a wrapped row.
+   --ref-feedback-icon is the icon size, set by the component. */
+.ref-feedback {
+  --ref-feedback-gap: 18px;
+  display: inline-flex;
+  align-items: center;
+  margin-left: calc(var(--ref-feedback-gap) / -2);
+  margin-right: calc(var(--ref-feedback-gap) / 2);
+}
 .ref-feedback-glyph {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-width: calc(var(--ref-feedback-icon, 16px) + var(--ref-feedback-gap, 18px));
+  min-height: 40px;
   padding: 0;
   border: 0;
-  border-radius: 50%;
+  border-radius: 0;
   background: none;
   color: var(--text-muted);
   opacity: 0.75;
   transition: color 0.15s ease, opacity 0.15s ease;
+}
+/* Every tap lands on the button itself, never on the icon inside it: a
+   click on a disabled button's child could bubble past it and, in a quote
+   bubble, open the tweet while a verdict is saving. */
+.ref-feedback-glyph svg {
+  pointer-events: none;
 }
 .ref-feedback-glyph:hover,
 .ref-feedback-glyph:focus-visible {
@@ -433,10 +461,10 @@ code {
 }
 .feed-pick-foot a { color: inherit; text-decoration: none; }
 .feed-pick-foot a:hover { color: var(--accent); }
+/* No gap: ReferenceFeedback spaces itself from the read toggle. */
 .feed-pick-owner {
   display: inline-flex;
   align-items: center;
-  gap: 14px;
   margin-left: auto;
 }
 .feed-picks-error {

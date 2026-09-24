@@ -8,6 +8,7 @@ import ReferenceFeedback from './ReferenceFeedback';
 
 const SOURCE_LABELS = {
   community_archive: 'Community Archive',
+  read_pick: 'Community Archive',
   twitter_bookmark: 'X bookmark',
   twitter_like: 'X like',
 };
@@ -34,8 +35,14 @@ const SOURCE_LABELS = {
  * marks it read server-side, and "Mark as unread" stays for the ones to
  * come back to (a long post opened for later). Only the default flipped;
  * the toggle is the override.
+ *
+ * `nodeId` is the reply the bubble is in. Opens, marks and verdicts are
+ * logged against it (#352), and for a recommendation the server sends
+ * the verdict that counts for it (`feedback`, `feedback_shared` when it
+ * was given in a parallel Read) and, when the model already knew the
+ * reader's verdict, `rated_before` for the line under an empty control.
  */
-const ExternalQuoteBubble = ({ quote, onReadChange, onFeedbackChange }) => {
+const ExternalQuoteBubble = ({ quote, nodeId, onReadChange, onFeedbackChange }) => {
   const userCtx = useUser();
   const currentUser = userCtx ? userCtx.user : null;
   const { addToast } = useToast();
@@ -60,11 +67,14 @@ const ExternalQuoteBubble = ({ quote, onReadChange, onFeedbackChange }) => {
     : null;
   const mine = !!currentUser && quote.user_id === currentUser.id;
 
-  const setRead = (want) => {
+  const setRead = (want, via) => {
     setMarking(true);
+    const body = {};
+    if (nodeId) body.node_id = nodeId;
+    if (via) body.via = via;
     const req = want
-      ? api.post(`/external/items/${quote.id}/read`)
-      : api.delete(`/external/items/${quote.id}/read`);
+      ? api.post(`/external/items/${quote.id}/read`, body)
+      : api.delete(`/external/items/${quote.id}/read`, { data: body });
     req
       .then((res) => {
         setReadAt(res.data.read_at);
@@ -78,7 +88,9 @@ const ExternalQuoteBubble = ({ quote, onReadChange, onFeedbackChange }) => {
     if (!quote.url) return;
     // window.open first: the popup rules want the user gesture.
     window.open(quote.url, '_blank', 'noopener,noreferrer');
-    if (mine && !readAt && !marking) setRead(true);
+    // Every open is logged (the record's "opened"); it marks the
+    // reference read when it was not.
+    if (mine && !marking) setRead(true, 'open');
   };
 
   const toggleRead = (e) => {
@@ -103,9 +115,16 @@ const ExternalQuoteBubble = ({ quote, onReadChange, onFeedbackChange }) => {
         <span>{postedAt}</span>
         {mine && (
           <span style={ownerSlotStyle}>
+            {quote.rated_before && !quote.feedback && (
+              <span style={ratedBeforeStyle}>
+                {`You rated this ${quote.rated_before.feedback} on ${formatDate(quote.rated_before.at, { relative: false })}`}
+              </span>
+            )}
             <ReferenceFeedback
               itemId={quote.id}
               feedback={quote.feedback}
+              nodeId={nodeId}
+              shared={!!quote.feedback_shared}
               onChange={(fb, data) => {
                 if (onFeedbackChange) onFeedbackChange(quote.id, fb);
                 if (data && data.read_at && !readAt) {
@@ -167,10 +186,17 @@ const footerStyle = {
   color: 'var(--text-muted)',
 };
 
+// Beside an empty control: the verdict the model already knew when it
+// quoted this again. Quiet, and it wraps under the date on a phone.
+const ratedBeforeStyle = {
+  fontStyle: 'italic',
+  marginRight: '6px',
+};
+
+// No gap: ReferenceFeedback spaces itself from the read toggle.
 const ownerSlotStyle = {
   display: 'inline-flex',
   alignItems: 'center',
-  gap: '14px',
   marginLeft: 'auto',
 };
 

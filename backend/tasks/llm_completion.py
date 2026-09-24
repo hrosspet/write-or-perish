@@ -55,6 +55,7 @@ from backend.utils.ca_feed import (
     CA_CHAT_TURN_NOTE, CA_READ_AGAIN_TURN, CA_TWEETS_CHAT_STUB,
     READ_FURTHER_MARKER,
     FeedReplyError, read_reply_ids, record_feed_render,
+    ca_turn as _ca_turn,
     refresh_snapshot_for_read, refs_from_render, seen_tweet_ids,
 )
 from backend.utils.tool_meta import update_tool_meta, parse_github_issue
@@ -226,11 +227,23 @@ def _canonicalize_quote_labels(text, quote_labels):
     return _LABEL_QUOTE_RE.sub(repl, text)
 
 
-def _bump_surfaced_references(text, user_id, already_bumped):
+def _bump_surfaced_references(text, user_id, already_bumped, node=None,
+                              decided_at=None, picked_by=None,
+                              already_logged=None):
     """Eagerly record surfacing history for every {quote_ext:ID} in *text*
     (content is encrypted at rest, so this can't be derived later). Bumps
     each item at most once per turn via *already_bumped*. Committed by the
-    caller's surrounding commit."""
+    caller's surrounding commit.
+
+    With *node* (the node *text* is stored on), each quoted reference is
+    also logged as a recommendation of this reply (FeedPick kind 'quote',
+    #352) — the model that chose it, when the turn started, what it could
+    know of the user's marks — once per reference per turn
+    (*already_logged*). A Read reply's picks already have their rows."""
+    if node is not None and already_logged is not None:
+        from backend.utils.reference_log import log_quotes
+        log_quotes(node, text, user_id, decided_at, picked_by,
+                   already_logged)
     ids = [i for i in find_ext_quote_ids(text) if i not in already_bumped]
     if not ids:
         return
@@ -2099,46 +2112,6 @@ def _read_requested(node):
                for m in meta)
 
 
-def _ca_turn(node_chain, ca_node, parent_node, reply_ids, requested=False):
-    """Which turn of a read thread this reply is (backend/utils/ca_feed.py);
-    *ca_node* is the newest read prompt in the chain, *reply_ids* the ids
-    of the chain's read replies (ca_feed.read_reply_ids), *requested*
-    whether the Read button asked for this reply (_read_requested):
-
-    "read"       no reply has answered the read prompt yet: the day is
-                 rendered and the model answers with a verdict and picks
-                 (also when the user typed something under the prompt
-                 before asking for the reply).
-    "read_again" the Read button asked for it from anywhere in the
-                 thread (*requested*), or the reply was asked for directly
-                 under a read reply: another read, further into the day.
-                 The day is rendered again (minus what the reader has seen
-                 since); the earlier picks, the reader's marks on them and
-                 whatever was written since are in the context, and
-                 whether to repeat an unread pick is the model's call.
-    "chat"       a user message came after a read reply: a conversation
-                 about the picks. The day is not rendered; the placeholder
-                 reads as a stub, the picks and marks stay in the context.
-                 Unlike a read it may run under the agentic prompt (a
-                 Text-mode session under the read reply, #323).
-    """
-    replies = []
-    after_prompt = False
-    for n in node_chain:
-        if n is ca_node:
-            after_prompt = True
-            continue
-        if after_prompt and n.deleted_at is None and n.id in reply_ids:
-            replies.append(n)
-    if not replies:
-        return "read"
-    if requested:
-        return "read_again"
-    if parent_node is not None and replies[-1].id == parent_node.id:
-        return "read_again"
-    return "chat"
-
-
 CA_BATCH_PROVIDERS = ("anthropic", "openai")
 CA_BATCH_LIVE_STATUSES = ("submitted", "cancelling")
 # What a read withdrawn at the provider says in place of its reply.
@@ -3751,6 +3724,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # single-shot path that never enters the loop.
             quote_labels = {}
             bumped_ext_ids = set()
+            # References this turn's replies quote, logged as
+            # recommendations once each (#352). The model chose them
+            # during this turn: its placeholder's creation is the moment
+            # its view of the user's marks was fixed.
+            logged_ext_ids = set()
+            quotes_decided_at = llm_node.created_at
 
             def _finalize(target_node, resp):
                 """Write *resp* as the final answer on *target_node* using the
@@ -3818,7 +3797,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # past its first commit and is run again, as a batch collect
                 # is, bumps once).
                 _bump_surfaced_references(
-                    f_llm_text, user_id, bumped_ext_ids)
+                    f_llm_text, user_id, bumped_ext_ids, node=target_node,
+                    decided_at=quotes_decided_at, picked_by=model_id,
+                    already_logged=logged_ext_ids)
 
                 target_node.set_content(f_llm_text)
                 # chars/4, NOT the provider's output_tokens: Node.token_count
@@ -3988,7 +3969,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     # Interim text is stored (and rendered) — record any
                     # references it already quotes.
                     _bump_surfaced_references(
-                        interim_text, user_id, bumped_ext_ids)
+                        interim_text, user_id, bumped_ext_ids,
+                        node=current_node, decided_at=quotes_decided_at,
+                        picked_by=model_id, already_logged=logged_ext_ids)
 
                     # Cost for THIS model call (every call costs).
                     _log_api_cost(response, current_node)

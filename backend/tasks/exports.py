@@ -1350,10 +1350,8 @@ def maybe_trigger_profile_update(user_id, model_id=None,
         db.session.commit()
 
     if model_id is None:
-        model_id = (
-            user.preferred_model
-            or flask_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-5")
-        )
+        from backend.utils.llm_nodes import default_model_for
+        model_id = default_model_for(user)
 
     # Find latest non-integration profile
     latest_profile = UserProfile.query.filter(

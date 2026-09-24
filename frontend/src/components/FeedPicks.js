@@ -44,9 +44,10 @@ const FeedPicks = ({ nodeId, enabled = true }) => {
   )));
   const unread = picks.filter((p) => !p.item.read_at).length;
 
+  // Every open is logged against this reply (#352); it also marks the
+  // tweet read when it was not.
   const markReadOnOpen = (idx, item) => {
-    if (item.read_at) return;
-    api.post(`/external/items/${item.id}/read`)
+    api.post(`/external/items/${item.id}/read`, { node_id: nodeId, via: 'open' })
       .then((res) => patch(idx, { read_at: res.data.read_at }))
       .catch(() => addToast('Could not update the read mark.', 4000));
   };
@@ -126,13 +127,18 @@ const FeedPicks = ({ nodeId, enabled = true }) => {
                   <ReferenceFeedback
                     itemId={item.id}
                     feedback={item.feedback}
+                    nodeId={nodeId}
+                    shared={!!item.feedback_shared}
                     onChange={(feedback, data) => patch(idx, {
                       feedback,
+                      // Given here now: no longer another reply's.
+                      feedback_shared: false,
                       ...(data && data.read_at ? { read_at: data.read_at } : {}),
                     })}
                   />
                   <ReferenceReadToggle
                     itemId={item.id}
+                    nodeId={nodeId}
                     readAt={item.read_at}
                     onChange={(read_at) => patch(idx, { read_at })}
                   />

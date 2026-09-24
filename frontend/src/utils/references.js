@@ -7,6 +7,7 @@ export const SOURCE_LABEL = {
   web_clip: 'Page',
   twitter_bookmark: 'Tweet',
   community_archive: 'Archive tweet',
+  read_pick: 'Archive tweet',
 };
 
 export function sourceLabel(item) {
@@ -48,9 +49,9 @@ export function bodyWithoutTitle(item) {
   return content;
 }
 
-// Both tweet sources key items by tweet id.
+// The tweet sources key items by tweet id.
 export function tweetId(item) {
-  if (item.source !== 'twitter_bookmark' && item.source !== 'community_archive') return null;
+  if (!['twitter_bookmark', 'community_archive', 'read_pick'].includes(item.source)) return null;
   return item.external_id || null;
 }
 

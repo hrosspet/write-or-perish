@@ -9,9 +9,11 @@ import { formatDate } from '../utils/date';
  * label alone carries the state. Only the user marks a reference read;
  * the AI surfacing it is tracked separately (surfaced_count).
  *
- * Props: itemId, readAt (server value), onChange(readAt) optional.
+ * Props: itemId, readAt (server value), onChange(readAt) optional,
+ * nodeId optional: the reply the reference is shown in, logged with the
+ * mark for the recommendation record (#352).
  */
-const ReferenceReadToggle = ({ itemId, readAt: serverReadAt, onChange }) => {
+const ReferenceReadToggle = ({ itemId, readAt: serverReadAt, onChange, nodeId }) => {
   const { addToast } = useToast();
   const [readAt, setReadAt] = useState(serverReadAt || null);
   const [marking, setMarking] = useState(false);
@@ -20,9 +22,10 @@ const ReferenceReadToggle = ({ itemId, readAt: serverReadAt, onChange }) => {
   const toggle = (e) => {
     e.stopPropagation();
     setMarking(true);
+    const body = nodeId ? { node_id: nodeId } : undefined;
     const req = readAt
-      ? api.delete(`/external/items/${itemId}/read`)
-      : api.post(`/external/items/${itemId}/read`);
+      ? api.delete(`/external/items/${itemId}/read`, body ? { data: body } : undefined)
+      : api.post(`/external/items/${itemId}/read`, body);
     req
       .then((res) => {
         setReadAt(res.data.read_at);

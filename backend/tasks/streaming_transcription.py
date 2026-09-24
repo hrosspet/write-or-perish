@@ -1385,8 +1385,10 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
 
     # LLM generation; TTS is dispatched inside the task at each node's own
     # finalization (source_mode='voice'), interim steps included.
+    # The placeholder may have switched the model (a read runs on a read
+    # model, a deprecated one is replaced): run what the node says.
     generate_llm_response.si(
-        tip_node.id, llm_node.id, model, user_id,
+        tip_node.id, llm_node.id, llm_node.llm_model, user_id,
         source_mode='voice',
         cache_split_offset=cache_split_offset,
     ).apply_async()

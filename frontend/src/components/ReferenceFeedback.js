@@ -14,24 +14,44 @@ import { useToast } from '../contexts/ToastContext';
  * Props:
  *   itemId:   ExternalItem id
  *   feedback: 'good' | 'bad' | null (server value; local state follows it)
- *   size:     icon size in px (default 14)
+ *   size:     icon size in px (default 16: the glyph's circle is then
+ *             about 13 px across, the em of the 0.8em footer text it
+ *             sits in). The button around it is 40 px tall and as
+ *             wide as the icon plus the gap between the icons, so the
+ *             pair is easy to hit on a phone (#351).
+ *
+ * The pair carries its own outer margins (index.css, .ref-feedback): half
+ * the gap between the icons on each side, so the control after it sits
+ * one gap away. The parent adds no gap after it.
  *   onChange: optional (feedback, response) => void after the server
  *             confirms; `response.read_at` is set when the verdict
  *             marked the reference read (a verdict counts as reading)
+ *   nodeId:   the reply the reference is shown in, when it is a
+ *             recommendation: the verdict is logged against that reply,
+ *             which decides which recommendations it counts for (#352)
+ *   shared:   the shown verdict was given in another reply (a parallel
+ *             Read); the glyphs say so on hover
  */
-const ReferenceFeedback = ({ itemId, feedback, size = 14, onChange }) => {
+const ReferenceFeedback = ({ itemId, feedback, size = 16, onChange, nodeId, shared = false }) => {
   const { addToast } = useToast();
   const [value, setValue] = useState(feedback || null);
   const [saving, setSaving] = useState(false);
   useEffect(() => { setValue(feedback || null); }, [feedback]);
+  // Only until the reader clicks here: then the verdict is their own
+  // in this reply too.
+  const [sharedShown, setSharedShown] = useState(shared);
+  useEffect(() => { setSharedShown(shared); }, [shared, feedback]);
 
   const choose = (e, next) => {
     e.stopPropagation();
     const target = value === next ? null : next;
     setSaving(true);
-    api.post(`/external/items/${itemId}/feedback`, { feedback: target })
+    const body = { feedback: target };
+    if (nodeId) body.node_id = nodeId;
+    api.post(`/external/items/${itemId}/feedback`, body)
       .then((res) => {
         setValue(res.data.feedback);
+        setSharedShown(false);
         if (onChange) onChange(res.data.feedback, res.data);
       })
       .catch(() => addToast('Could not save your feedback.', 4000))
@@ -45,7 +65,9 @@ const ReferenceFeedback = ({ itemId, feedback, size = 14, onChange }) => {
       data-selected={value === kind ? 'true' : 'false'}
       aria-pressed={value === kind}
       aria-label={label}
-      title={label}
+      title={sharedShown && value === kind
+        ? `${label} (your rating from another reply)`
+        : label}
       disabled={saving}
       onClick={(e) => choose(e, kind)}
     >
@@ -54,7 +76,7 @@ const ReferenceFeedback = ({ itemId, feedback, size = 14, onChange }) => {
   );
 
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+    <span className="ref-feedback" style={{ '--ref-feedback-icon': `${size}px` }}>
       {glyph('good', 'Good quote', FiPlusCircle)}
       {glyph('bad', 'Bad quote', FiMinusCircle)}
     </span>
