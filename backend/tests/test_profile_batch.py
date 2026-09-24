@@ -1290,8 +1290,12 @@ def test_seed_build_failure_is_recorded_on_the_user_and_cleared_on_success(app, 
                         MagicMock(return_value=_chunk("DATA")))
     monkeypatch.setattr(pb._exports, "_load_prompt", lambda *a, **k: "G {user_export}")
     monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: {k: f"b-{k}" for k in reqs})
-    u.preferred_model = "claude-opus-4-6"  # the API id, not a config key
+    # The incident's shape: LLM_NAME set to the API id, not a config key.
+    # (An unknown preferred_model no longer fails: it is ignored in favour
+    # of LLM_NAME, llm_nodes.default_model_for.)
+    u.preferred_model = None
     db.session.commit()
+    monkeypatch.setitem(app.config, "DEFAULT_LLM_MODEL", "claude-opus-4-6")
 
     assert pb._seed_profile_batches(users=[u]) == 0
     fresh = User.query.get(u.id)
@@ -1300,8 +1304,7 @@ def test_seed_build_failure_is_recorded_on_the_user_and_cleared_on_success(app, 
     assert fresh.profile_batch_attempts == 0  # not a provider failure
     assert fresh.profile_needs_full_regen is True  # the request stands
 
-    fresh.preferred_model = "test-model"
-    db.session.commit()
+    monkeypatch.setitem(app.config, "DEFAULT_LLM_MODEL", "test-model")
     assert pb._seed_profile_batches(users=[fresh]) == 1
     fresh = User.query.get(u.id)
     assert fresh.profile_seed_error is None

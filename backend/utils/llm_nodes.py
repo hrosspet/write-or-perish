@@ -10,7 +10,7 @@ from backend.utils.placeholders import (
     validate_ca_tweets_placeholders, validate_user_export_placeholders,
 )
 from backend.utils.ca_feed import (
-    READ_FURTHER_MARKER, READ_PROMPT_KEYS, is_read_reply,
+    READ_FURTHER_MARKER, READ_PROMPT_KEYS, ca_turn, read_reply_ids,
 )
 
 
@@ -29,6 +29,26 @@ def is_read_model(model_id):
     return cfg is not None and not cfg.get("deprecated") and bool(cfg.get("read"))
 
 
+def effective_preferred_model(user):
+    """The user's saved model while it is still offered, else None. A
+    preference for a model deprecated since has no effect anywhere: the
+    reply routes, the background tasks and the Account page all fall back
+    to DEFAULT_LLM_MODEL (#355)."""
+    pref = getattr(user, "preferred_model", None) if user is not None else None
+    return pref if pref and is_active_model(pref) else None
+
+
+def default_model_for(user):
+    """The model a user's background work (profile, digest, recent
+    context) runs on: their active preference, else DEFAULT_LLM_MODEL."""
+    return (effective_preferred_model(user)
+            or current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.6"))
+
+
+def _is_llm(node):
+    return node.node_type == "llm" or bool(node.llm_model)
+
+
 def _has_read_marker(node):
     try:
         meta = json.loads(node.tool_calls_meta or "[]") or []
@@ -38,44 +58,59 @@ def _has_read_marker(node):
                for m in meta)
 
 
-def is_read_llm_node(node):
-    """An LLM node that is (or is about to be) a read: a finished read
-    reply (ca_feed.is_read_reply), a pending "Read further" turn (its
-    marker), or any reply directly under a read prompt (the first reply
-    under the prompt is always the read, _ca_turn). Uses columns and
-    relationships only, never the content: it runs on every hop of the
-    model walks below."""
-    if node is None or not (node.node_type == "llm" or node.llm_model):
-        return False
-    if _has_read_marker(node):
-        return True
-    parent = node.parent
-    if parent is not None and parent.get_prompt_key() in READ_PROMPT_KEYS:
-        return True
-    return is_read_reply(node)
+class _Chain:
+    """*node*'s ancestor chain, nearest first, with what the model rules
+    read loaded in bulk: two queries for the chain
+    (thread_tree.ancestor_chain), at most one for prompt keys held only
+    by a linked prompt, two for the read replies (ca_feed.read_reply_ids)
+    — the same count on a 400-node thread as on a 4-node one. A per-level
+    walk lazy-loaded the parent, its prompt link and each reply's render
+    and picks (~1,000 queries on a 400-node thread, #356 review).
+
+    ``rendered`` are the read replies the completion task counts (a
+    render, picks or a batch). ``reads`` adds the reads it has not
+    rendered yet — a pending or failed "Read further" (its marker) and
+    any reply directly under a read prompt — for the default-model walks,
+    where a failed read on Luna must not become the chat default either.
+    """
+
+    def __init__(self, node):
+        from backend.models import NodeContextArtifact, UserPrompt
+        from backend.utils.thread_tree import ancestor_chain
+        self.nodes = [] if node is None else ancestor_chain(
+            node.id, Node.id, Node.parent_id, Node.node_type, Node.llm_model,
+            Node.deleted_at, Node.prompt_key, Node.tool_calls_meta,
+            max_depth=_MAX_ANCESTRY_HOPS)
+        self.keys = {n.id: n.prompt_key for n in self.nodes if n.prompt_key}
+        linked = [n.id for n in self.nodes if not n.prompt_key]
+        if linked:
+            self.keys.update(
+                db.session.query(NodeContextArtifact.node_id,
+                                 UserPrompt.prompt_key)
+                .join(UserPrompt, UserPrompt.id == NodeContextArtifact.artifact_id)
+                .filter(NodeContextArtifact.node_id.in_(linked),
+                        NodeContextArtifact.artifact_type == "prompt")
+                .all())
+        self.rendered = read_reply_ids(self.nodes)
+        self.reads = set()
+        for i, n in enumerate(self.nodes):
+            if not _is_llm(n):
+                continue
+            parent = self.nodes[i + 1] if i + 1 < len(self.nodes) else None
+            if (n.id in self.rendered or _has_read_marker(n)
+                    or (parent is not None and parent.deleted_at is None
+                        and self.keys.get(parent.id) in READ_PROMPT_KEYS)):
+                self.reads.add(n.id)
+
+    def llm_replies(self):
+        """Alive LLM replies, nearest first. Tombstones are skipped: a
+        soft-deleted reply's ``llm_model`` is still set (only ``content``
+        gets wiped at +30d) but the node is meant to be invisible."""
+        return [n for n in self.nodes
+                if n.deleted_at is None and n.node_type == "llm" and n.llm_model]
 
 
-def _walk_llm_ancestors(node):
-    """Yield the alive LLM nodes from *node* up, nearest first.
-    Cycle-safe, at most ``_MAX_ANCESTRY_HOPS`` parents. Skips tombstones:
-    a soft-deleted ancestor's ``llm_model`` is still set (only ``content``
-    gets wiped at +30d) but the node is meant to be invisible."""
-    current = node
-    visited = set()
-    for _ in range(_MAX_ANCESTRY_HOPS):
-        if current is None or current.id in visited:
-            return
-        visited.add(current.id)
-        if (current.deleted_at is None and current.node_type == "llm"
-                and current.llm_model):
-            yield current
-        current = (
-            Node.query.get(current.parent_id)
-            if current.parent_id else None
-        )
-
-
-def resolve_chat_model(parent_node, user):
+def resolve_chat_model(parent_node, user, chain=None):
     """The model for a (non-read) reply under *parent_node* when the
     caller supplied none, and where it came from:
 
@@ -94,32 +129,32 @@ def resolve_chat_model(parent_node, user):
     migrations.
     """
     supported = current_app.config.get("SUPPORTED_MODELS", {})
-    for node in _walk_llm_ancestors(parent_node):
-        if is_read_llm_node(node):
+    chain = chain or _Chain(parent_node)
+    for node in chain.llm_replies():
+        if node.id in chain.reads:
             continue
         if is_active_model(node.llm_model):
             return node.llm_model, "predecessor"
         if node.llm_model in supported or node.llm_model == "gpt-4.5-preview":
             break
 
-    if user is not None:
-        pref = getattr(user, "preferred_model", None)
-        if pref and is_active_model(pref):
-            return pref, "user_preference"
-
+    pref = effective_preferred_model(user)
+    if pref:
+        return pref, "user_preference"
     return (current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.6"),
             "default")
 
 
-def resolve_read_model(anchor_node):
+def resolve_read_model(anchor_node, chain=None):
     """The model for a read under *anchor_node* (None for a fresh thread)
     when the request named none: the closest earlier read's model while it
     is still a read model ("predecessor"), else READ_DEFAULT_MODEL
     ("default"). Chat replies in between are skipped, so a conversation
     held on Opus never carries into the next read. There is no per-user
     read preference yet (#355)."""
-    for node in _walk_llm_ancestors(anchor_node):
-        if not is_read_llm_node(node):
+    chain = chain or _Chain(anchor_node)
+    for node in chain.llm_replies():
+        if node.id not in chain.reads:
             continue
         if is_read_model(node.llm_model):
             return node.llm_model, "predecessor"
@@ -133,36 +168,30 @@ def pick_model_for_generation(parent_node, user):
     return resolve_chat_model(parent_node, user)[0]
 
 
-def reply_is_read(parent, meta=None):
-    """Whether a reply created under *parent* will be a read turn in the
-    completion task (_ca_turn): a "Read further" request (its marker in
-    *meta*), a reply directly under a read reply, or the first reply
-    under a read prompt — possibly below notes the user typed under the
-    prompt first. The walk passes only user nodes, by prompt key (no
-    decryption), and stops at the first LLM node: past a read reply a
-    user message makes the turn a chat. A PoC-era prompt (2026-09-13)
-    that carries {ca_tweets} in its text is recognised only as the
-    direct parent (the caller has its content decrypted already)."""
-    if any(isinstance(m, dict) and m.get("name") == READ_FURTHER_MARKER
-           for m in (meta or ())):
-        return True
+def reply_read_turn(parent, meta=None, parent_content=None, chain=None):
+    """The turn a reply under *parent* will be in the completion task —
+    "read", "read_again" or "chat" (ca_feed.ca_turn, the rule the task
+    applies) — or None outside a read thread. *meta* is the new reply's
+    tool_calls_meta ("Read further" marks its request there). The read
+    prompt is found by key; a PoC-era prompt that carries {ca_tweets} in
+    its own text (2026-09-13) only as the direct parent, whose
+    *parent_content* the caller has decrypted anyway."""
     if parent is None:
-        return False
-    if parent.node_type == "llm" or parent.llm_model:
-        return is_read_llm_node(parent)
-    current = parent
-    visited = set()
-    for _ in range(_MAX_ANCESTRY_HOPS):
-        if current is None or current.id in visited:
-            return False
-        visited.add(current.id)
-        if current.deleted_at is None:
-            if current.node_type == "llm" or current.llm_model:
-                return False
-            if current.get_prompt_key() in READ_PROMPT_KEYS:
-                return True
-        current = current.parent
-    return False
+        return None
+    chain = chain or _Chain(parent)
+    if not chain.nodes:
+        return None
+    ca_node = next((n for n in chain.nodes
+                    if n.deleted_at is None
+                    and chain.keys.get(n.id) in READ_PROMPT_KEYS), None)
+    if ca_node is None and CA_TWEETS_PATTERN.search(parent_content or ""):
+        ca_node = chain.nodes[0]
+    if ca_node is None:
+        return None
+    requested = any(isinstance(m, dict) and m.get("name") == READ_FURTHER_MARKER
+                    for m in (meta or ()))
+    return ca_turn(list(reversed(chain.nodes)), ca_node, chain.nodes[0],
+                   chain.rendered, requested=requested)
 
 
 def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
@@ -225,19 +254,29 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     )
     check_ca_tweets_access(parent_content, owner)
 
-    # Reads run only on read models (#355). The read routes validate the
-    # model they are given; this catches a read reached another way — a
-    # reply asked for under a read prompt or read reply from a picker that
-    # offers every model, or an auto-generated reply under a note typed
-    # below the prompt — and gives it the model the Read button would.
-    if not is_read_model(model_id) and (
-            reply_is_read(parent, meta)
-            or CA_TWEETS_PATTERN.search(parent_content or "")):
-        read_model_id = resolve_read_model(parent)[0]
+    # The model the reply will actually run on (#355). A read runs only on
+    # a read model: the read routes validate the one they are given, and
+    # this catches a read reached another way (a reply asked for under a
+    # read prompt or read reply from a picker that offers every model, an
+    # auto-generated reply under a note typed below the prompt) by the
+    # task's own rule (ca_feed.ca_turn). Any other reply never runs on a
+    # deprecated model: one sent explicitly (a preference saved before the
+    # deprecation, an old tab) is replaced by the chat default.
+    chain = _Chain(parent)
+    turn = reply_read_turn(parent, meta, parent_content, chain=chain)
+    if turn in ("read", "read_again"):
+        if not is_read_model(model_id):
+            new_model_id = resolve_read_model(parent, chain=chain)[0]
+            current_app.logger.info(
+                "Reply under node %s is a read: model %s -> %s",
+                parent.id, model_id, new_model_id)
+            model_id = new_model_id
+    elif not is_active_model(model_id):
+        new_model_id = resolve_chat_model(parent, owner, chain=chain)[0]
         current_app.logger.info(
-            "Reply under node %s is a read: model %s -> %s",
-            parent.id, model_id, read_model_id)
-        model_id = read_model_id
+            "Reply under node %s: model %s is not offered -> %s",
+            parent.id, model_id, new_model_id)
+        model_id = new_model_id
 
     llm_user = User.query.filter_by(username=model_id).first()
     if not llm_user:

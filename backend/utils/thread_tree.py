@@ -143,3 +143,34 @@ def alive_child_counts(parent_ids):
         .filter(Node.parent_id.in_(ids), Node.deleted_at.is_(None))
         .group_by(Node.parent_id).all()
     )
+
+
+def ancestor_chain(node_id, *columns, max_depth=MAX_THREAD_DEPTH):
+    """`node_id`'s node and its ancestors, nearest first, in two queries
+    (one recursive id walk up the parent chain, one row load) instead of
+    one lazy `parent` load per level. `columns` (Node attributes) limits
+    the row load to what the caller reads; rows already in the session
+    come back whole. A chain longer than `max_depth` is cut there."""
+    up = db.session.query(
+        Node.id.label("id"),
+        Node.parent_id.label("parent_id"),
+        db.literal(0).label("depth"),
+    ).filter(Node.id == node_id).cte(name="ancestor_walk", recursive=True)
+    parent = db.aliased(Node, flat=True)
+    up = up.union_all(
+        db.session.query(
+            parent.id, parent.parent_id, (up.c.depth + 1).label("depth"),
+        )
+        .join(up, parent.id == up.c.parent_id)
+        .filter(up.c.depth < max_depth)
+    )
+    depth_of = {}
+    for row_id, depth in db.session.query(up.c.id, up.c.depth).all():
+        depth_of[row_id] = min(depth, depth_of.get(row_id, depth))
+    if not depth_of:
+        return []
+    query = Node.query.filter(Node.id.in_(list(depth_of)))
+    if columns:
+        from sqlalchemy.orm import load_only
+        query = query.options(load_only(*columns))
+    return sorted(query.all(), key=lambda n: depth_of[n.id])
