@@ -154,7 +154,9 @@ def sweep_embeddings(limit=SWEEP_BATCH_SIZE):
             db.session.query(ExternalItem, ExternalItemEmbedding)
             .outerjoin(ExternalItemEmbedding,
                        ExternalItemEmbedding.item_id == ExternalItem.id)
-            .filter(ExternalItemEmbedding.id.is_(None))
+            .filter(ExternalItemEmbedding.id.is_(None),
+                    # A Read pick nobody saved is not a reference (#352).
+                    ExternalItem.saved())
             .order_by(ExternalItem.id.desc())
             .limit(limit)
             .all()

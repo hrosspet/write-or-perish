@@ -26,20 +26,32 @@ import { useToast } from '../contexts/ToastContext';
  *   onChange: optional (feedback, response) => void after the server
  *             confirms; `response.read_at` is set when the verdict
  *             marked the reference read (a verdict counts as reading)
+ *   nodeId:   the reply the reference is shown in, when it is a
+ *             recommendation: the verdict is logged against that reply,
+ *             which decides which recommendations it counts for (#352)
+ *   shared:   the shown verdict was given in another reply (a parallel
+ *             Read); the glyphs say so on hover
  */
-const ReferenceFeedback = ({ itemId, feedback, size = 16, onChange }) => {
+const ReferenceFeedback = ({ itemId, feedback, size = 16, onChange, nodeId, shared = false }) => {
   const { addToast } = useToast();
   const [value, setValue] = useState(feedback || null);
   const [saving, setSaving] = useState(false);
   useEffect(() => { setValue(feedback || null); }, [feedback]);
+  // Only until the reader clicks here: then the verdict is their own
+  // in this reply too.
+  const [sharedShown, setSharedShown] = useState(shared);
+  useEffect(() => { setSharedShown(shared); }, [shared, feedback]);
 
   const choose = (e, next) => {
     e.stopPropagation();
     const target = value === next ? null : next;
     setSaving(true);
-    api.post(`/external/items/${itemId}/feedback`, { feedback: target })
+    const body = { feedback: target };
+    if (nodeId) body.node_id = nodeId;
+    api.post(`/external/items/${itemId}/feedback`, body)
       .then((res) => {
         setValue(res.data.feedback);
+        setSharedShown(false);
         if (onChange) onChange(res.data.feedback, res.data);
       })
       .catch(() => addToast('Could not save your feedback.', 4000))
@@ -53,7 +65,9 @@ const ReferenceFeedback = ({ itemId, feedback, size = 16, onChange }) => {
       data-selected={value === kind ? 'true' : 'false'}
       aria-pressed={value === kind}
       aria-label={label}
-      title={label}
+      title={sharedShown && value === kind
+        ? `${label} (your rating from another reply)`
+        : label}
       disabled={saving}
       onClick={(e) => choose(e, kind)}
     >

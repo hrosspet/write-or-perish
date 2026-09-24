@@ -397,7 +397,7 @@ class TestSeenTweets:
             snapshot, days=1, exclude_tweet_ids=["t2", "t9", ""])
         assert stats["tweets"] == 3
         assert stats["excluded"] == 1
-        assert "1 tweets the reader had already seen" in text
+        assert "1 tweets the reader had already read are left out" in text
         assert "bob says hi" not in text
         assert {r["tweet_id"] for r in refs.values()} == {"t1", "t3", "t6"}
         # The numbering stays dense.

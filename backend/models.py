@@ -1177,6 +1177,19 @@ class SpendAlert(db.Model):
     )
 
 
+# ExternalItem.source of a tweet a Read picked that the user has not
+# saved (#352). The row exists so the pick has somewhere to keep the
+# user's read mark and verdict; it is not a reference, so the references
+# list, the digest, the embedding sweep and reference search skip it.
+# Saving the tweet (clip, bookmark sync, import) turns this row into a
+# saved reference in place, so a tweet has one row and one set of marks.
+READ_PICK_SOURCE = "read_pick"
+# Sources whose external_id is a tweet id: the rows of one tweet are
+# found across these.
+TWEET_SOURCES = ("twitter_bookmark", "twitter_like", "community_archive",
+                 READ_PICK_SOURCE)
+
+
 class ExternalItem(db.Model):
     """External content imported into Loore (#155 component 2 / Download).
 
@@ -1189,7 +1202,8 @@ class ExternalItem(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
                         nullable=False, index=True)
-    # 'community_archive' | 'twitter_bookmark' | 'web_clip'
+    # 'community_archive' | 'twitter_bookmark' | 'web_clip' | 'read_pick'
+    # (READ_PICK_SOURCE: picked by a Read, not saved by the user)
     source = db.Column(db.String(32), nullable=False)
     # Stable per-source identifier for dedupe: tweet id, or for web clips
     # the sha256 hex of the canonical URL (exactly 64 chars).
@@ -1265,6 +1279,17 @@ class ExternalItem(db.Model):
 
     def get_content(self):
         return decrypt_content(self.content)
+
+    @property
+    def is_saved(self):
+        """A reference the user saved, as opposed to a Read pick they
+        have not (READ_PICK_SOURCE)."""
+        return self.source != READ_PICK_SOURCE
+
+    @classmethod
+    def saved(cls):
+        """Filter clause for the user's saved references (#352)."""
+        return cls.source != READ_PICK_SOURCE
 
 
 class ExternalAccount(db.Model):
@@ -1598,14 +1623,17 @@ class PollDraftBatchJob(db.Model):
 
 
 class FeedPick(db.Model):
-    """One tweet the Community Archive feed named in a reply (PoC,
-    2026-09-13). The tweet itself is an ExternalItem (source
-    'community_archive'), which carries the user's read mark and
-    good/bad verdict like any other reference; this row records what the
-    MODEL said about it in that reply — its rank, its relevance estimate
-    and whether it recommended the tweet — so the picks can be judged
-    against the verdicts later (was a 6% pick good? was a starred one
-    bad?). One row per (reply node, item)."""
+    """One reference Loore put in front of the user in a reply: a tweet
+    a Community Archive read named (kind 'read', PoC 2026-09-13), or a
+    saved reference an agentic reply quoted (kind 'quote', #352). The
+    reference itself is an ExternalItem, which carries the user's current
+    read mark and verdict; this row records what the MODEL did — which
+    model, its rank, for a read its relevance estimate and whether it
+    recommended the tweet, and what it could know about the tweet when it
+    chose — so recommendations can be judged against what the user did
+    (ReferenceAction; see backend/utils/reference_log.py). Written for
+    every pick and quote, whatever the user does with it afterwards. One
+    row per (reply node, item)."""
     __tablename__ = "feed_pick"
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
@@ -1614,7 +1642,11 @@ class FeedPick(db.Model):
                         nullable=False, index=True)
     external_item_id = db.Column(db.Integer, db.ForeignKey("external_item.id"),
                                  nullable=False, index=True)
-    # 1 = best, in the model's order.
+    # 'read' (a Read pick) | 'quote' (quoted by an agentic reply).
+    kind = db.Column(db.String(8), nullable=False, default="read",
+                     server_default="read")
+    # 1 = best, in the model's order. For a quote, its position among
+    # the references the reply quotes.
     rank = db.Column(db.Integer, nullable=False)
     # The model's estimate, 0-100: probability that reading it changes
     # what the user does this week. Null for rows no model scored (a
@@ -1629,6 +1661,16 @@ class FeedPick(db.Model):
     # The model's one-line reason, encrypted like a reply (it paraphrases
     # the user's intentions).
     why = db.Column(db.Text, nullable=True)
+    # When the model chose: the read's submit (FeedRender.created_at) or
+    # the start of the turn that quoted. A batch collects hours after its
+    # submit, so the row's created_at is not when the choice was made.
+    decided_at = db.Column(db.DateTime, nullable=True)
+    # What the model could know about the reference at decided_at: had
+    # the user marked it read, and their verdict on it then. A row with
+    # no prior verdict is "blind": verdicts the user gives later count
+    # for it (reference_log). Null on rows from before these columns.
+    prior_read = db.Column(db.Boolean, nullable=True)
+    prior_verdict = db.Column(db.String(8), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     node = db.relationship("Node", backref=db.backref(
@@ -1646,6 +1688,43 @@ class FeedPick(db.Model):
 
     def get_why(self):
         return decrypt_content(self.why) if self.why else ""
+
+
+class ReferenceAction(db.Model):
+    """One thing the user did with a reference (#352): opened it (clicked
+    through to the post), marked it read or unread, or gave a good/bad
+    verdict (value; None = cleared). node_id is the reply it was done in
+    (a Read reply, or an agentic reply quoting it), None when done
+    outside any reply — the reference page, or a mark carried over from
+    before this log existed.
+
+    Facts only. Which actions count for which recommendation (a verdict
+    given on one Read's pick counts for a parallel Read's pick of the
+    same tweet) is decided when the log is read, in reference_log, so
+    that rule can change without repairing stored data. The current
+    state stays on ExternalItem (read_at, feedback) for the pages and the
+    model."""
+    __tablename__ = "reference_action"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    item_id = db.Column(
+        db.Integer, db.ForeignKey("external_item.id", ondelete="CASCADE"),
+        nullable=False, index=True)
+    # Deleted with the reply (node_cleanup._full_purge): NULL would mean
+    # "outside any reply", which counts for other recommendations.
+    node_id = db.Column(db.Integer,
+                        db.ForeignKey("node.id", ondelete="CASCADE"),
+                        nullable=True, index=True)
+    # 'open' | 'read' | 'unread' | 'verdict'
+    kind = db.Column(db.String(8), nullable=False)
+    # A verdict's value: 'good' | 'bad' | None (cleared).
+    value = db.Column(db.String(8), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           nullable=False)
+
+    item = db.relationship("ExternalItem", backref=db.backref(
+        "actions", cascade="all, delete-orphan"))
 
 
 class FeedRender(db.Model):
@@ -1672,8 +1751,8 @@ class FeedRender(db.Model):
     window_end = db.Column(db.DateTime, nullable=True)
     tweet_count = db.Column(db.Integer, nullable=False, default=0)
     account_count = db.Column(db.Integer, nullable=False, default=0)
-    # Tweets in the window the reader had already seen (read-marked
-    # references, bookmarks) and therefore never reached the model.
+    # Tweets in the window the reader had already marked read (any row
+    # of the tweet, #352) and that therefore never reached the model.
     excluded_count = db.Column(db.Integer, nullable=False, default=0)
     # Comma-joined tweet ids in render order: index i (0-based) is the
     # tweet the model saw as #i+1. ~100 KB for a day of the archive.

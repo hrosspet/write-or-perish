@@ -954,7 +954,9 @@ function NodeDetail({ nodeIdOverride }) {
     prev[itemId] ? { ...prev, [itemId]: { ...prev[itemId], read_at: readAt } } : prev
   ));
   const handleExternalFeedbackChange = (itemId, feedback) => setExternalQuotes(prev => (
-    prev[itemId] ? { ...prev, [itemId]: { ...prev[itemId], feedback } } : prev
+    prev[itemId]
+      ? { ...prev, [itemId]: { ...prev[itemId], feedback, feedback_shared: false } }
+      : prev
   ));
   const handlePicksMarkedAll = (readAt) => setExternalQuotes(prev => {
     const next = { ...prev };
@@ -1276,6 +1278,7 @@ function NodeDetail({ nodeIdOverride }) {
                 content={displayContent}
                 quotes={quotes}
                 externalQuotes={externalQuotes}
+                nodeId={node.id}
                 onExternalReadChange={handleExternalReadChange}
                 onExternalFeedbackChange={handleExternalFeedbackChange}
                 contextArtifacts={node.context_artifacts || null}
@@ -1312,6 +1315,7 @@ function NodeDetail({ nodeIdOverride }) {
               content={proposalAfter}
               quotes={quotes}
               externalQuotes={externalQuotes}
+              nodeId={node.id}
               onExternalReadChange={handleExternalReadChange}
               onExternalFeedbackChange={handleExternalFeedbackChange}
               contextArtifacts={node.context_artifacts || null}

@@ -1046,7 +1046,7 @@ def _focal_own_fields(node):
                for m in data.get("tool_calls_meta") or []):
             from backend.models import FeedPick
             data["feed_picks_count"] = FeedPick.query.filter_by(
-                node_id=node.id).count()
+                node_id=node.id, kind="read").count()
     data.update(_system_prompt_fields(node))
     # A Community Archive read reply: the thread page shows what the read
     # covered (the window, from the pinned render) and offers to read
@@ -1057,6 +1057,25 @@ def _focal_own_fields(node):
             data["read_reply"] = True
             data["read_window"] = read_window_fields(node.feed_render)
     return data
+
+
+def _recommendation_fields(rec, item, counted):
+    """The per-recommendation marks a quote bubble or pick shows (#352):
+    `feedback` becomes the verdict that counts for this recommendation
+    (see utils/reference_log), `feedback_shared` says it was given
+    elsewhere (a parallel read), and `rated_before` carries the verdict
+    the model could already see when it chose, for the "You rated this …"
+    line beside an empty control."""
+    from backend.utils.reference_log import rated_before
+    out = counted.get(rec.id)
+    before = rated_before(rec, item)
+    return {
+        "feedback": out.verdict if out else item.feedback,
+        "feedback_shared": bool(out and out.verdict_shared),
+        "rated_before": ({"feedback": before["verdict"],
+                          "at": iso_utc(before["at"])} if before else None),
+        "recommendation_id": rec.id,
+    }
 
 
 @nodes_bp.route("/<int:node_id>/feed-picks", methods=["GET"])
@@ -1071,12 +1090,18 @@ def get_feed_picks(node_id):
     owner_id = node.human_owner_id or node.user_id
     if owner_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
-    rows = (FeedPick.query.filter_by(node_id=node.id)
+    from backend.utils.reference_log import outcomes
+    rows = (FeedPick.query.filter_by(node_id=node.id, kind="read")
             .order_by(FeedPick.rank.asc()).all())
+    counted = outcomes(rows)
     picks = []
     for row in rows:
         item = _serialize_item(row.item)
         item["content"] = row.item.get_content() or ""
+        # The verdict that counts for THIS pick (#352): its own, or one
+        # given on the same tweet in a parallel read — not merely the
+        # tweet's latest, which a later quote may have set.
+        item.update(_recommendation_fields(row, row.item, counted))
         picks.append({
             "rank": row.rank,
             "relevance": row.relevance,
@@ -1099,10 +1124,12 @@ def mark_feed_picks_read(node_id):
     owner_id = node.human_owner_id or node.user_id
     if owner_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
+    from backend.utils.reference_log import ACTION_READ, record_action
     now = datetime.utcnow()
     read_at = {}
-    for row in FeedPick.query.filter_by(node_id=node.id).all():
+    for row in FeedPick.query.filter_by(node_id=node.id, kind="read").all():
         if row.item.read_at is None:
+            record_action(row.item, ACTION_READ, node_id=node.id, at=now)
             row.item.read_at = now
         read_at[row.item.id] = iso_utc(row.item.read_at)
     db.session.commit()
@@ -1323,6 +1350,19 @@ def resolve_node_quotes(node_id):
     ext_owner_id = node.human_owner_id or node.user_id
     ext_quote_data = get_ext_quote_data(ext_quote_ids, ext_owner_id) \
         if ext_quote_ids else {}
+    if ext_quote_ids and ext_owner_id == current_user.id:
+        # The owner's controls show the verdict that counts for the
+        # recommendation this reply made (#352), where it has one.
+        from backend.models import FeedPick
+        from backend.utils.reference_log import outcomes
+        recs = FeedPick.query.filter(
+            FeedPick.node_id == node.id,
+            FeedPick.external_item_id.in_(ext_quote_ids)).all()
+        counted = outcomes(recs)
+        for rec in recs:
+            data = ext_quote_data.get(rec.external_item_id)
+            if data is not None:
+                data.update(_recommendation_fields(rec, rec.item, counted))
 
     return jsonify({
         "quotes": quote_data,
@@ -2049,7 +2089,7 @@ def get_llm_status(node_id):
     if batch and node.llm_task_status == "completed":
         from backend.models import FeedPick
         response_data["feed_picks_count"] = FeedPick.query.filter_by(
-            node_id=node.id).count()
+            node_id=node.id, kind="read").count()
 
     # Include user-facing task warnings (rendered as toasts by
     # frontend useLlmTaskWarnings hook). Always include the key so the

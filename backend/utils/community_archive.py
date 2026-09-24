@@ -441,8 +441,8 @@ def render_recent_tweets(snapshot_dir, days=1, exclude_usernames=(),
     reader's own handle, so the feed never recommends their own tweets.
     ``include_usernames`` (None = everyone) keeps only those accounts:
     the follows scope. ``exclude_tweet_ids`` drops those tweets: what the
-    reader has already seen (read-marked picks, bookmarks), which must
-    never reach the model as candidates again; how many fell in the
+    reader has already read (any tweet they marked read, #352), which
+    must never reach the model as candidates again; how many fell in the
     window is reported as ``excluded`` in stats and named in the header.
 
     Returns (text, stats, refs) — stats: {export_id, window_start,
@@ -550,8 +550,8 @@ def _render_recent_tweets(snapshot_dir, export_id, newest, days, excluded,
     window_start = start.strftime("%Y-%m-%d %H:%M")
     scope_note = (" Only accounts the reader follows." if included is not None
                   else "")
-    seen_note = (f" {excluded_tweets} tweets the reader had already seen "
-                 "(read earlier, or bookmarked) are left out."
+    seen_note = (f" {excluded_tweets} tweets the reader had already read "
+                 "are left out."
                  if excluded_tweets else "")
     header = (
         f"# Community Archive — tweets from {window_start} to {newest} UTC "

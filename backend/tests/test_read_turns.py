@@ -114,13 +114,17 @@ def test_seen_tweets_never_reach_the_model(app, monkeypatch, tmp_path):  # noqa:
     renders = _capture_render(monkeypatch, tmp_path)
     alice = _mk_user("alice", approved=True, plan="alpha", is_admin=True)
     llm_user = _mk_user("gpt-5", twitter_id="llm-gpt-5")
-    # A bookmark, a clipped tweet (stored as a bookmark), a read-marked
-    # pick, an unread pick, and a web clip (not a tweet).
+    # Only what the reader marked read is seen (#352), from any tweet
+    # row: a bookmark not marked read stays in (111, in the day), a read
+    # clipped tweet (stored as a bookmark) goes; so do a read-marked pick
+    # (222, in the day) and a read-marked archive import. An unread pick
+    # and a web clip (not a tweet) don't count.
     for source, ext_id, read_at in [
         ("twitter_bookmark", "111", None),
-        ("twitter_bookmark", "555", None),
-        ("community_archive", "333", datetime(2026, 9, 18, 8, 0)),
-        ("community_archive", "444", None),
+        ("twitter_bookmark", "555", datetime(2026, 9, 18, 9, 0)),
+        ("read_pick", "222", datetime(2026, 9, 18, 8, 0)),
+        ("read_pick", "444", None),
+        ("community_archive", "666", datetime(2026, 9, 18, 8, 0)),
         ("web_clip", "a" * 64, datetime(2026, 9, 18, 8, 0)),
     ]:
         item = ExternalItem(user_id=alice.id, source=source, external_id=ext_id,
@@ -130,19 +134,19 @@ def test_seen_tweets_never_reach_the_model(app, monkeypatch, tmp_path):  # noqa:
     # Someone else's marks are not the reader's.
     bob = _mk_user("bob", approved=True, plan="alpha")
     other = ExternalItem(user_id=bob.id, source="twitter_bookmark",
-                         external_id="222")
+                         external_id="111", read_at=datetime(2026, 9, 18, 8, 0))
     other.set_content("y")
     _db.session.add(other)
     _db.session.commit()
 
-    assert seen_tweet_ids(alice.id) == {"111", "555", "333"}
+    assert seen_tweet_ids(alice.id) == {"555", "222", "666"}
 
     read = _prompt_node(alice, "read")
     reply = _placeholder(llm_user, alice, read.id)
     _live(monkeypatch, alice, read, reply, _feed_json([]))
-    assert set(renders[0]["exclude_tweet_ids"]) == {"111", "555", "333"}
+    assert set(renders[0]["exclude_tweet_ids"]) == {"555", "222", "666"}
     row = FeedRender.query.filter_by(node_id=reply.id).one()
-    assert row.tweet_ids == "222"
+    assert row.tweet_ids == "111"
     assert row.excluded_count == 1
 
 

@@ -16,7 +16,7 @@ test('the window line says which day was read and what was left out', () => {
     tweets: 4812, accounts: 410, excluded: 37,
   }} />);
   const line = screen.getByText(/Tweets from/);
-  expect(line.textContent).toMatch(/^Tweets from 2026\/09\/1[89] \d\d:\d\d to 2026\/09\/(19|20) \d\d:\d\d \(your time\): 4,812 by 410 accounts\. 37 you had already seen were left out\.$/);
+  expect(line.textContent).toMatch(/^Tweets from 2026\/09\/1[89] \d\d:\d\d to 2026\/09\/(19|20) \d\d:\d\d \(your time\): 4,812 by 410 accounts\. 37 you had already read were left out\.$/);
 });
 
 test('nothing left out, nothing said about it; no window, no line', () => {
