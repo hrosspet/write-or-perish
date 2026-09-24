@@ -79,12 +79,18 @@ class _ScriptedProvider:
             # The keys this call went out on (#325: the training key
             # never carries content the chain did not license).
             "api_keys": api_keys,
+            # #348: the baseline response id sent for cache diagnostics.
+            "cache_comparison_response_id": kwargs.get(
+                "cache_comparison_response_id"),
         })
         nxt = cls.responses.pop(0)
         # A queued Exception is raised (e.g. to drive a PromptTooLong on the
         # continuation call); a dict is returned as a normal response.
         if isinstance(nxt, Exception):
             raise nxt
+        # Like the real provider: whether a cache comparison went out (#348).
+        nxt["cache_comparison_sent"] = bool(
+            kwargs.get("cache_comparison_response_id"))
         return nxt
 
 
@@ -1707,3 +1713,113 @@ def test_render_variant_carries_the_killswitch(app):
     alice.external_content_enabled = True
     _db.session.commit()
     assert _llm_task_mod._render_variant(alice.id).endswith("e1")
+
+
+# ── OpenAI Prompt Cache Diagnostics (#348) ───────────────────────────────
+
+@pytest.fixture
+def diag_model(app):
+    """gpt-5 as a model with cache_diagnostics, restored afterwards."""
+    cfg = _app.config["SUPPORTED_MODELS"]["gpt-5"]
+    cfg["cache_diagnostics"] = True
+    yield
+    cfg.pop("cache_diagnostics", None)
+
+
+def _llm_reply_under(parent, alice, text="next question"):
+    """A user message under *parent* and a pending LLM placeholder under
+    it, as a follow-up turn would create."""
+    llm_user = User.query.filter_by(username="gpt-5").first()
+    user_node = Node(user_id=alice.id, human_owner_id=alice.id,
+                     parent_id=parent.id, node_type="user",
+                     privacy_level="private", ai_usage="chat")
+    user_node.set_content(text)
+    _db.session.add(user_node)
+    _db.session.flush()
+    llm_node = Node(user_id=llm_user.id, human_owner_id=alice.id,
+                    parent_id=user_node.id, node_type="llm",
+                    llm_model="gpt-5", llm_task_status="pending",
+                    privacy_level="private", ai_usage="chat")
+    llm_node.set_content("[LLM response generation pending...]")
+    _db.session.add(llm_node)
+    _db.session.commit()
+    return user_node, llm_node
+
+
+def test_cache_diagnostics_tool_round_then_next_turn(app, diag_model):
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _mk_artifact(alice.id, "reading-list", "1. Dune", title="Reading List")
+    miss = {"type": "cache_miss", "reason": "input_changed",
+            "comparison_reusable_tokens": 800, "cache_missed_tokens": 120}
+    _ScriptedProvider.reset([
+        dict(_resp("Let me look.", tool_calls=[{
+            "id": "t1", "name": "read_artifact",
+            "input": {"kind": "reading-list"}}]), response_id="resp_1"),
+        dict(_resp("Start with Dune."), response_id="resp_2",
+             cache_diagnostics=miss),
+    ])
+    generate_llm_response(_FakeSelf(), user_node.id, llm_node.id, "gpt-5",
+                          alice.id, source_mode="textmode")
+
+    # The thread's first call has no baseline; the continuation compares
+    # itself to the tool round before it.
+    sent = [c["cache_comparison_response_id"]
+            for c in _ScriptedProvider.calls]
+    assert sent == [None, "resp_1"]
+
+    interim = _fresh(llm_node.id)
+    final_id = interim.continuation_node_id
+    rows = APICostLog.query.order_by(APICostLog.id).all()
+    assert [r.request_ref for r in rows] == [
+        f"node:{interim.id}", f"node:{final_id}"]
+    assert [r.provider_response_id for r in rows] == ["resp_1", "resp_2"]
+    assert rows[0].cache_diag_baseline is None
+    assert rows[0].cache_diag_type is None
+    assert rows[1].cache_diag_baseline == "tool_round"
+    assert rows[1].cache_diag_type == "cache_miss"
+    assert rows[1].cache_diag_reason == "input_changed"
+    assert rows[1].cache_diag_reusable_tokens == 800
+    assert rows[1].cache_diag_missed_tokens == 120
+    assert rows[1].cache_diag_gap_s is not None
+    # Same system prompt on both calls of the turn.
+    assert rows[0].system_prefix_hash
+    assert rows[0].system_prefix_hash == rows[1].system_prefix_hash
+
+    # Next turn, under the final answer: compares to the last call on the
+    # path, which is the continuation's.
+    final = Node.query.get(final_id)
+    _u2, llm2 = _llm_reply_under(final, alice)
+    _ScriptedProvider.reset([dict(_resp("Sure."), response_id="resp_3")])
+    generate_llm_response(_FakeSelf(), _u2.id, llm2.id, "gpt-5", alice.id,
+                          source_mode="textmode")
+    assert _ScriptedProvider.calls[0]["cache_comparison_response_id"] == (
+        "resp_2")
+    row = APICostLog.query.order_by(APICostLog.id.desc()).first()
+    assert row.cache_diag_baseline == "prev_turn"
+    assert row.request_ref == f"node:{llm2.id}"
+
+    # A branch off the first user message sees none of those calls: its
+    # ancestor path holds no LLM node.
+    _u3, llm3 = _llm_reply_under(system, alice, text="another branch")
+    _ScriptedProvider.reset([dict(_resp("Hi."), response_id="resp_4")])
+    generate_llm_response(_FakeSelf(), _u3.id, llm3.id, "gpt-5", alice.id,
+                          source_mode="textmode")
+    assert _ScriptedProvider.calls[0]["cache_comparison_response_id"] is None
+
+
+def test_cache_diagnostics_off_for_models_without_the_flag(app):
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _ScriptedProvider.reset([dict(_resp("Hello."), response_id="resp_1")])
+    generate_llm_response(_FakeSelf(), user_node.id, llm_node.id, "gpt-5",
+                          alice.id, source_mode="textmode")
+    _u2, llm2 = _llm_reply_under(_fresh(llm_node.id), alice)
+    _ScriptedProvider.reset([dict(_resp("Again."), response_id="resp_2")])
+    generate_llm_response(_FakeSelf(), _u2.id, llm2.id, "gpt-5", alice.id,
+                          source_mode="textmode")
+    assert _ScriptedProvider.calls[0]["cache_comparison_response_id"] is None
+    rows = APICostLog.query.order_by(APICostLog.id).all()
+    # The id and the node are still recorded, so enabling the flag later
+    # has a baseline from the first turn on.
+    assert [r.provider_response_id for r in rows] == ["resp_1", "resp_2"]
+    assert rows[1].request_ref == f"node:{llm2.id}"
+    assert all(r.cache_diag_baseline is None for r in rows)

@@ -146,6 +146,11 @@ class Config:
     #   long_context_threshold — the pricing tier; the profile pipeline never
     #                       plans a prompt across it (#259).
     #
+    #   cache_diagnostics — OpenAI Prompt Cache Diagnostics (GPT-5.6 and later,
+    #                       #348): conversation calls pass the previous call's
+    #                       response id and record why the cache missed. Older
+    #                       models must not get the option.
+    #
     # Model picker keys (#355):
     #   deprecated — hidden from every picker and never inherited from a
     #                thread; old replies keep their label, and a thread
@@ -161,6 +166,7 @@ class Config:
         "gpt-6-astra": {
             "provider": "openai",
             "api_model": "gpt-6-astra",
+            "cache_diagnostics": True,
             "display_name": "GPT-6 Astra",
             "featured": True,
             "context_window": 1050000,
@@ -186,6 +192,7 @@ class Config:
             "tokenizer_family": "o200k",
             "provider": "openai",
             "api_model": "gpt-6-sol",
+            "cache_diagnostics": True,
             "max_input_tokens": 922000,
             "display_name": "GPT-6 Sol",
             "read": True,
@@ -206,6 +213,7 @@ class Config:
             "tokenizer_family": "o200k",
             "provider": "openai",
             "api_model": "gpt-6-luna",
+            "cache_diagnostics": True,
             "max_input_tokens": 922000,
             "display_name": "GPT-6 Luna",
             "read": True,
@@ -225,6 +233,7 @@ class Config:
             "tokenizer_family": "o200k",
             "provider": "openai",
             "api_model": "gpt-5.6-sol",
+            "cache_diagnostics": True,
             "max_input_tokens": 922000,
             "display_name": "GPT-5.6 Sol",
             "read": True,
@@ -243,6 +252,7 @@ class Config:
             "tokenizer_family": "o200k",
             "provider": "openai",
             "api_model": "gpt-5.6-luna",
+            "cache_diagnostics": True,
             "max_input_tokens": 922000,
             "display_name": "GPT-5.6 Luna",
             "read": True,

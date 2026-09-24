@@ -1148,9 +1148,38 @@ class APICostLog(db.Model):
     cache_write_tokens = db.Column(db.Integer, nullable=True, default=0)
     # What specifically caused this cost, when request_type alone is too
     # coarse — e.g. "poll:3" for a poll-draft (#207). Null for legacy rows.
-    request_ref = db.Column(db.String(64), nullable=True)
+    # Conversation rows carry "node:<id>" of the LLM node the call wrote
+    # (#348); the cache-diagnostics baseline is looked up by it.
+    request_ref = db.Column(db.String(64), nullable=True, index=True)
     audio_duration_seconds = db.Column(db.Float, nullable=True)
     cost_microdollars = db.Column(db.Integer, nullable=False)
+    # OpenAI Prompt Cache Diagnostics (#348), conversation calls only; all
+    # NULL on Anthropic rows and on rows from before the feature.
+    # provider_response_id: OpenAI's response id, the baseline the next
+    #   call on this thread compares itself to.
+    # cache_diag_type: cache_hit / cache_miss / comparison_response_not_found
+    #   / unavailable; NULL = no baseline was sent.
+    # cache_diag_reason: the first miss cause OpenAI classified (tools_changed,
+    #   input_changed, ...), only on cache_miss.
+    # cache_diag_reusable_tokens / cache_diag_missed_tokens: OpenAI's
+    #   estimates of the baseline's reusable prefix and how much of it this
+    #   call did not reuse. Billing stays on cache_read/write_tokens.
+    # cache_diag_baseline: which call was the baseline — "tool_round" (the
+    #   previous round of the same turn) or "prev_turn" (the last OpenAI
+    #   call on this node's ancestor path).
+    # cache_diag_gap_s: seconds since the baseline call; a miss after the
+    #   30-min cache lifetime is expiry, not a prefix change.
+    # system_prefix_hash: short sha256 of the system prompt text, on every
+    #   conversation row. Two consecutive calls with different hashes mean
+    #   the system prompt drifted; equal hashes point at the messages.
+    provider_response_id = db.Column(db.String(128), nullable=True)
+    cache_diag_type = db.Column(db.String(40), nullable=True)
+    cache_diag_reason = db.Column(db.String(40), nullable=True)
+    cache_diag_reusable_tokens = db.Column(db.Integer, nullable=True)
+    cache_diag_missed_tokens = db.Column(db.Integer, nullable=True)
+    cache_diag_baseline = db.Column(db.String(16), nullable=True)
+    cache_diag_gap_s = db.Column(db.Integer, nullable=True)
+    system_prefix_hash = db.Column(db.String(16), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
 
     user = db.relationship("User", backref="api_cost_logs")
