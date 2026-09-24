@@ -480,8 +480,8 @@ def test_resolve_quotes_carries_the_verdict_that_counts(app, client):
 
 def _load_script():
     path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                        "scripts", "migrate_read_picks.py")
-    spec = importlib.util.spec_from_file_location("_migrate_read_picks", path)
+                        "scripts", "backfill_read_picks.py")
+    spec = importlib.util.spec_from_file_location("_backfill_read_picks", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

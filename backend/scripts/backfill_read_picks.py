@@ -1,5 +1,9 @@
 """Bring existing Read picks into the #352 shape. One-off, after deploy.
 
+A data backfill, not a schema migration: the new columns and the
+reference_action table come from the migration deploy.sh generates
+(`flask db migrate`), so run this only once that deploy has finished.
+
 Before #352 every tweet a Read picked became a saved reference
 (ExternalItem, source 'community_archive'), and saving that tweet again
 (the clipper, the X bookmark sync) made a second row with its own marks.
@@ -31,9 +35,9 @@ This script, in order:
    searched; the sweep no longer embeds them).
 
     cd /path/to/write-or-perish
-    python backend/scripts/migrate_read_picks.py            # dry run
-    python backend/scripts/migrate_read_picks.py --apply
-    python backend/scripts/migrate_read_picks.py --user-id 6 --apply
+    python backend/scripts/backfill_read_picks.py            # dry run
+    python backend/scripts/backfill_read_picks.py --apply
+    python backend/scripts/backfill_read_picks.py --user-id 6 --apply
 
 Idempotent: a second run finds nothing to do. Prints metadata only.
 """
